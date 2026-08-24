@@ -1,15 +1,14 @@
-//! Görev hafızası - tamamlanan görevlerin karar, komut ve hata
-//! geçmişini JSONL'de saklar ve yeni bir görev için ilgili geçmişi
-//! skorlayarak seçer.
+//! Task memory - stores the decision, command and failure history of completed
+//! tasks in JSONL and selects the relevant history for a new task by scoring it.
 //!
-//! Skor bileşenleri: sorgu kelime eşleşmesi (özne/yol/özet), kaynak
-//! güncelliği (son değişen dosyalar) ve güven. Kapalı-devre: kayıtlar
-//! yalnız yerel dosyada tutulur.
+//! Score components: query word matches (subject/path/summary), source recency
+//! (recently changed files) and confidence. Closed circuit: the records are kept
+//! in a local file only.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Bir görev çalıştırmasının özet kaydı.
+/// The summary record of one task run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRun {
     pub task_id: String,
@@ -20,7 +19,7 @@ pub struct TaskRun {
     pub created_at: String,
 }
 
-/// Görev kararı.
+/// A task decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskDecision {
     pub task_id: String,
@@ -29,7 +28,7 @@ pub struct TaskDecision {
     pub created_at: String,
 }
 
-/// Görev komutu.
+/// A task command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCommand {
     pub task_id: String,
@@ -38,7 +37,7 @@ pub struct TaskCommand {
     pub status: String,
 }
 
-/// Görev hatası.
+/// A task failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskFailure {
     pub task_id: String,
@@ -46,7 +45,7 @@ pub struct TaskFailure {
     pub resolution: Option<String>,
 }
 
-/// JSONL satırı: tür etiketli kayıt.
+/// A JSONL line: a type-tagged record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemoryRecord {
@@ -56,7 +55,7 @@ pub enum MemoryRecord {
     Failure(TaskFailure),
 }
 
-/// Görev hafızası: JSONL dosyasına ekle-oku.
+/// Task memory: append to and read from a JSONL file.
 #[derive(Debug, Clone)]
 pub struct TaskMemory {
     path: std::path::PathBuf,
@@ -67,15 +66,16 @@ pub struct TaskMemory {
 }
 
 impl TaskMemory {
-    /// Hafızayı açar (dosya yoksa boş başlar; yazma dizini oluşturulur).
+    /// Opens the memory (starts empty if the file does not exist; the write
+    /// directory is created).
     ///
     /// # Errors
     ///
-    /// Dizin oluşturulamazsa veya dosya okunamazsa.
+    /// If the directory cannot be created or the file cannot be read.
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("hafıza dizini kurulamadı: {e}"))?;
+                .map_err(|e| format!("could not create the memory directory: {e}"))?;
         }
         let mut mem = Self {
             path: path.to_path_buf(),
@@ -85,8 +85,8 @@ impl TaskMemory {
             failures: Vec::new(),
         };
         if path.exists() {
-            let text =
-                std::fs::read_to_string(path).map_err(|e| format!("hafıza okunamadı: {e}"))?;
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("could not read the memory: {e}"))?;
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
@@ -108,20 +108,21 @@ impl TaskMemory {
         }
     }
 
-    /// Bir kaydı dosyaya ekler (append-only).
+    /// Appends a record to the file (append only).
     ///
     /// # Errors
     ///
-    /// Serileştirme veya yazma hatasında.
+    /// On a serialization or write error.
     pub fn append(&mut self, rec: MemoryRecord) -> Result<(), String> {
-        let line = serde_json::to_string(&rec).map_err(|e| format!("kayıt kodlanamadı: {e}"))?;
+        let line =
+            serde_json::to_string(&rec).map_err(|e| format!("could not encode the record: {e}"))?;
         let mut text = std::fs::read_to_string(&self.path).unwrap_or_default();
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
         text.push_str(&line);
         text.push('\n');
-        std::fs::write(&self.path, text).map_err(|e| format!("hafıza yazılamadı: {e}"))?;
+        std::fs::write(&self.path, text).map_err(|e| format!("could not write the memory: {e}"))?;
         self.push_record(rec);
         Ok(())
     }
@@ -147,10 +148,10 @@ impl TaskMemory {
             .collect()
     }
 
-    /// Sorguyla en alakalı `k` görev kaydını skorlayarak döndürür.
+    /// Returns the `k` task runs most relevant to the query, by score.
     ///
-    /// Skor: sorgu kelimelerinin `request`/`summary` içinde geçmesi
-    /// (+2), karar sayısı (+1, en çok 3) ve hata çözülmüşse (+1).
+    /// Score: query words appearing in `request`/`summary` (+2), the decision
+    /// count (+1, at most 3) and whether a failure was resolved (+1).
     #[must_use]
     pub fn relevant_runs(&self, query: &str, k: usize) -> Vec<&TaskRun> {
         let words: Vec<String> = query
@@ -210,25 +211,25 @@ mod tests {
     fn sample_records(mem: &mut TaskMemory) {
         mem.append(MemoryRecord::Run(TaskRun {
             task_id: "t1".into(),
-            request: "erasure kod duzelt".into(),
-            summary: "GF alani siniri asildi".into(),
-            status: "tamam".into(),
+            request: "fix the erasure code".into(),
+            summary: "the GF field bound was exceeded".into(),
+            status: "done".into(),
             commit_hash: None,
             created_at: "2026-08-15".into(),
         }))
         .unwrap();
         mem.append(MemoryRecord::Decision(TaskDecision {
             task_id: "t1".into(),
-            decision: "GF(2^8) icinde kal".into(),
+            decision: "stay inside GF(2^8)".into(),
             rationale: None,
             created_at: "2026-08-15".into(),
         }))
         .unwrap();
         mem.append(MemoryRecord::Run(TaskRun {
             task_id: "t2".into(),
-            request: "bns kayit duzelt".into(),
-            summary: "uzunluk kurali".into(),
-            status: "tamam".into(),
+            request: "fix the bns record".into(),
+            summary: "the length rule".into(),
+            status: "done".into(),
             commit_hash: None,
             created_at: "2026-08-14".into(),
         }))
@@ -256,7 +257,7 @@ mod tests {
         let path = dir.join("memory.jsonl");
         let mut mem = TaskMemory::open(&path).unwrap();
         sample_records(&mut mem);
-        let rel = mem.relevant_runs("erasure kod", 5);
+        let rel = mem.relevant_runs("erasure code", 5);
         assert!(!rel.is_empty());
         assert_eq!(rel[0].task_id, "t1");
         let _ = std::fs::remove_dir_all(&dir);
@@ -269,7 +270,7 @@ mod tests {
         let path = dir.join("memory.jsonl");
         let mut mem = TaskMemory::open(&path).unwrap();
         sample_records(&mut mem);
-        assert!(mem.relevant_runs("tamamen ilgisiz konu", 5).is_empty());
+        assert!(mem.relevant_runs("a totally unrelated topic", 5).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

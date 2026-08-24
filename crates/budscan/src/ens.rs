@@ -1,23 +1,23 @@
-//! ENS: namehash (EIP-137) ve `contenthash` (EIP-1577) cozumleme.
+//! ENS: namehash (EIP-137) and `contenthash` (EIP-1577) resolution.
 //!
-//! # Tarayicinin ENS'ten ne istedigi
+//! # What the browser wants from ENS
 //!
-//! Bir ENS sunucusuna sorup cevabini kabul etmek, bu tarayicinin butun
-//! dogrulama iddiasini o sunucunun durustluguna indirger. Istenen sey bir
-//! **kanit**: `namehash(name)` anahtariyla resolver sozlesmesinin depolama
-//! slotuna baglanan bir Merkle-Patricia kaniti, ve o kanitin bagli oldugu
-//! state root'un dogrulanmis bir Ethereum basliginda olmasi.
+//! Asking an ENS server and accepting its answer reduces this browser's entire
+//! verification claim to that server's honesty. What is wanted is a **proof**: a
+//! Merkle-Patricia proof binding the `namehash(name)` key to the storage slot of
+//! the resolver contract, with the state root that proof is bound to living in a
+//! verified Ethereum header.
 //!
-//! Budlum'un `src/cross_domain/evm/` katmani bu isin yarisini zaten yapiyor:
-//! `header.rs`, `mpt.rs`, `sync_committee.rs`, `verify.rs`. Budscan o katmanin
-//! **tuketicisidir**, kopyasi degil: burada namehash ve contenthash cozumu
-//! var, MPT dogrulamasi yok. Bu modul `MptProofRequest` uretir ve bir
-//! `EvmProofVerifier` uygulamasi onu dogrular; kanit dogrulanamiyorsa cevap
-//! [`crate::evidence::Strength::RpcClaimOnly`] olarak etiketlenir ve
-//! `dogrulandi` denmez.
+//! Budlum's `src/cross_domain/evm/` layer already does half of this work:
+//! `header.rs`, `mpt.rs`, `sync_committee.rs`, `verify.rs`. Budscan is a
+//! **consumer** of that layer, not a copy of it: namehash and contenthash
+//! resolution live here, MPT verification does not. This module produces an
+//! `MptProofRequest` and an `EvmProofVerifier` implementation verifies it; if the
+//! proof cannot be verified the answer is labelled
+//! [`crate::evidence::Strength::RpcClaimOnly`] and is not called verified.
 //!
-//! Bu ayrimin silinmesi, "kanitli" ile "birinin soyledigi"ni ayni rozetin
-//! altina koymak olurdu.
+//! Erasing that distinction would put "proven" and "somebody said so" under the
+//! same badge.
 
 use sha3::{Digest, Keccak256};
 
@@ -49,23 +49,23 @@ pub fn labelhash(label: &str) -> [u8; 32] {
     Keccak256::digest(label.as_bytes()).into()
 }
 
-/// EIP-1577 `contenthash` alanindan cikan hedef.
+/// The target that comes out of an EIP-1577 `contenthash` field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentHash {
-    /// `ipfs-ns` (0xe3): govde bir CID.
+    /// `ipfs-ns` (0xe3): the body is a CID.
     Ipfs(Vec<u8>),
-    /// `ipns-ns` (0xe5): govde bir IPNS anahtari. Cozumu bir imza zinciri
-    /// gerektirir ve bu surum onu dogrulamiyor.
+    /// `ipns-ns` (0xe5): the body is an IPNS key. Resolving it requires a
+    /// signature chain and this version does not verify one.
     Ipns(Vec<u8>),
     /// `swarm-ns` (0xe4).
     Swarm(Vec<u8>),
-    /// `arweave-ns` (0xb29910): govde bir islem kimligi.
+    /// `arweave-ns` (0xb29910): the body is a transaction id.
     Arweave(Vec<u8>),
-    /// `onion3` (0xbd): govde bir onion adresi.
+    /// `onion3` (0xbd): the body is an onion address.
     Onion3(String),
 }
 
-/// unsigned-varint oku.
+/// Read an unsigned-varint.
 fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
     let mut shift = 0;
@@ -82,24 +82,27 @@ fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
-/// Bir `contenthash` bayt dizisini coz.
+/// Decode a `contenthash` byte string.
 ///
 /// # Errors
 ///
-/// Bos alan, bozuk varint ya da bu tarayicinin bir getiricisi olmayan bir
-/// protokol. Taninmayan bir protokol icin **tahmin edilmez**: hangi agdan
-/// getirilecegi bilinmeyen bir hedef, HTTPS'e dusurulurse kullanici
-/// dogrulanmamis bir sayfayi dogrulanmis sanir.
+/// An empty field, a corrupt varint, or a protocol this browser has no fetcher
+/// for. For an unrecognized protocol nothing is **guessed**: a target whose
+/// network is unknown, if downgraded to HTTPS, would make the user believe an
+/// unverified page was verified.
 pub fn decode_contenthash(bytes: &[u8]) -> Result<ContentHash, String> {
     if bytes.is_empty() {
         return Err(String::from(
-            "contenthash bos: isim bir icerige baglanmamis",
+            "the contenthash is empty: the name is not bound to any content",
         ));
     }
-    let (proto, n) = read_varint(bytes).ok_or_else(|| String::from("protokol varint'i bozuk"))?;
+    let (proto, n) =
+        read_varint(bytes).ok_or_else(|| String::from("the protocol varint is corrupt"))?;
     let body = &bytes[n..];
     if body.is_empty() {
-        return Err(format!("protokol {proto:#x} bildirildi ama govde bos"));
+        return Err(format!(
+            "protocol {proto:#x} was declared but the body is empty"
+        ));
     }
     match proto {
         0xe3 => Ok(ContentHash::Ipfs(body.to_vec())),
@@ -108,25 +111,25 @@ pub fn decode_contenthash(bytes: &[u8]) -> Result<ContentHash, String> {
         0xb2_9910 => Ok(ContentHash::Arweave(body.to_vec())),
         0xbd => String::from_utf8(body.to_vec())
             .map(ContentHash::Onion3)
-            .map_err(|_| String::from("onion3 govdesi UTF-8 degil")),
+            .map_err(|_| String::from("the onion3 body is not UTF-8")),
         other => Err(format!(
-            "contenthash protokolu {other:#x} icin bir getirici yok; tarayici hangi agdan \
-             getirecegini bilmiyor ve tahmin etmiyor"
+            "there is no fetcher for contenthash protocol {other:#x}; the browser does not know \
+             which network to fetch it from and does not guess"
         )),
     }
 }
 
-/// Bir ENS resolver depolama slotu icin istenen MPT kaniti.
+/// The MPT proof requested for an ENS resolver storage slot.
 ///
-/// Bu yapi bir **istek**tir, bir cevap degil. Dogrulamayi Budlum'un
-/// `cross_domain/evm/mpt.rs` katmani yapar; Budscan sonucu etiketler.
+/// This struct is a **request**, not an answer. Verification is done by Budlum's
+/// `cross_domain/evm/mpt.rs` layer; Budscan labels the result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MptProofRequest {
-    /// `namehash(name)`: resolver'in anahtar olarak kullandigi dugum.
+    /// `namehash(name)`: the node the resolver uses as its key.
     pub node: [u8; 32],
-    /// Sorulan resolver sozlesmesinin adresi (20 bayt).
+    /// The address of the resolver contract being asked (20 bytes).
     pub resolver: [u8; 20],
-    /// Kanitin baglanacagi Ethereum state root'u.
+    /// The Ethereum state root the proof is bound to.
     pub state_root: [u8; 32],
 }
 
@@ -168,17 +171,17 @@ mod tests {
 
     #[test]
     fn contenthash_ipfs_decodes_to_a_cid_body() {
-        // ensdomains/content-hash README ornegi.
+        // The example from the ensdomains/content-hash README.
         let raw = hex::decode(
             "e3010170122029f2d17be6139079dc48696d1f582a8530eb9805b561eda517e22a892c7e3f1f",
         )
         .unwrap();
         match decode_contenthash(&raw).unwrap() {
             ContentHash::Ipfs(body) => {
-                // Govde CIDv1 dag-pb sha2-256: 0x01 0x70 0x12 0x20 ...
+                // The body is CIDv1 dag-pb sha2-256: 0x01 0x70 0x12 0x20 ...
                 assert_eq!(&body[..4], &[0x01, 0x70, 0x12, 0x20]);
             }
-            other => panic!("ipfs beklendi, {other:?} geldi"),
+            other => panic!("expected ipfs, got {other:?}"),
         }
     }
 
@@ -198,7 +201,7 @@ mod tests {
     fn an_unknown_protocol_is_refused_not_downgraded() {
         let raw = vec![0x7f, 0x01, 0x02];
         let err = decode_contenthash(&raw).unwrap_err();
-        assert!(err.contains("getirici yok"), "{err}");
+        assert!(err.contains("no fetcher"), "{err}");
     }
 
     #[test]
