@@ -1,25 +1,25 @@
-# Grype - zafiyet taraması + EPSS önceliklendirme, bulgular Security sekmesine
+# Grype - vulnerability scanning + EPSS prioritization, findings to the Security tab
 #
-# NEDEN MEVCUT TARAYICILARIN ÜSTÜNE: repoda zaten cargo-audit (RustSec),
-# Cargo-deny (RustSec) ve OSV-Scanner (OSV.dev toplayıcısı) var. Grype iki şey
+# WHY ON TOP OF THE EXISTING SCANNERS: the repo already has cargo-audit (RustSec),
+# cargo-deny (RustSec) and OSV-Scanner (the OSV.dev aggregator). Grype adds two
 # Ekliyor:
 #
-#   1) EPSS skoru. "Bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir
-#      Cevabı; ne RustSec'te ne OSV.dev'de var. Önceliklendirme farkı yaratır:
-#      Ilk koşuda yamux CVE-2026-32314 CVSS 8.7 ama EPSS %0.5 (36. persentil)
-#      Olarak raporlandı, yüksek şiddet, düşük sömürülme olasılığı. Bu ayrım
-#      Olmadan bütün "high" bulgular aynı aciliyette görünür.
+#   1) The EPSS score. A measurable answer to "is this vulnerability exploited in
+#      the wild"; present neither in RustSec nor OSV.dev. It changes priority:
+#      on the first run yamux CVE-2026-32314 was reported as CVSS 8.7 but EPSS
+#      0.5% (36th percentile): high severity, low exploitation likelihood. Without
+#      that distinction every "high" finding looks equally urgent.
 #
-#   2) SARIF çıktısı. Şu an Security sekmesine yalnız CodeQL, Semgrep ve zizmor
-#      Yazıyor; repodaki Trivy fs taraması SARIF üretmiyor (yalnız exit-code ile
-#      Job'ı kırıyor), yani bağımlılık bulgularını tek bir yerden izlemek mümkün
-#      Değil. Grype bu boşluğu kapatıyor.
+#   2) SARIF output. Today only CodeQL, Semgrep and zizmor write to the Security
+#      tab; the Trivy fs scan in the repo produces no SARIF (it only breaks the
+#      job via exit code), so dependency findings cannot be tracked from one
+#      place. Grype closes that gap.
 #
-# Kapı politikası: high ve üzeri FAIL (`continue-on-error` YOK). İstisnalar
-# .quality/grype.yaml içinde ve .quality/osv-scanner.toml'daki gerekçelerin birebir aynısı -
-# Iki tarayıcının aynı bulguda çelişmesi kapının güvenilirliğini aşındırır.
+# Gate policy: high and above = FAIL (NO `continue-on-error`). Exceptions live in
+# .quality/grype.yaml and are identical to the justifications in .quality/osv-scanner.toml -
+# two scanners contradicting each other on the same finding erodes gate trust.
 #
-# Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
+# The tool is version + sha256 pinned (the gitleaks/hadolint/actionlint/typos pattern).
 
 name: Grype
 
@@ -29,7 +29,7 @@ on:
   push:
     branches: [main]
   schedule:
-    # Haftalık: yeni advisory kod değişmeden de yayınlanır.
+    # Weekly: a new advisory can be published without the code changing.
     - cron: "0 6 * * 3"
   workflow_dispatch:
 
@@ -53,7 +53,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: grype v0.116.0 kur (sürüm + sha256 pinli)
+      - name: Install grype v0.116.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/grype.tar.gz \
@@ -64,14 +64,14 @@ jobs:
           sudo install -m 0755 /tmp/grype-bin/grype /usr/local/bin/grype
           grype version
 
-      # Vacuous-gate koruması: "No vulnerabilities found" hem temiz bir ağacı
-      # Hem de veritabanını indirememiş / hiç çalışmamış bir taramayı
-      # Gösterebilir. Kanarya, bilinen savunmasız bir sürüm içeren sentetik bir
-      # Lockfile üretip tarayıcının onu YAKALADIĞINI kanıtlar. Repo config'i
-      # Bilinçli olarak devre dışı (--config ile boş dosya), aksi halde
-      # .quality/grype.yaml'daki yamux istisnası kanaryayı da susturur ve kapı kendi
-      # Kendini kandırır.
-      - name: Kanarya - Grype alarmının çalıştığının kanıtı
+      # Vacuous-gate protection: "No vulnerabilities found" can mean a clean tree
+      # or a scan that could not download the database / never ran at all. The
+      # canary produces a synthetic lockfile containing a known vulnerable version
+      # and proves the scanner CATCHES it. The repo config is deliberately disabled
+      # (an empty file via --config), otherwise the yamux exception in
+      # .quality/grype.yaml would silence the canary too and the gate would fool
+      # itself.
+      - name: Canary - evidence that the Grype alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/grype-canary
@@ -90,22 +90,22 @@ jobs:
           source = "registry+https://github.com/rust-lang/crates.io-index"
           CANARY
           if grype dir:/tmp/grype-canary --fail-on high --config /tmp/grype-canary/empty.yaml -o table; then
-            echo "HATA: Grype kanaryayı (yamux 0.12.1 / GHSA-vxx9-2994-q338) yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            echo "ERROR: Grype failed to catch the canary (yamux 0.12.1 / GHSA-vxx9-2994-q338) -> the scan is untrustworthy (vacuous gate)!"
             exit 1
           fi
-          echo "Kanarya yakalandı → Grype alarmı çalışıyor."
+          echo "Canary caught -> the Grype alarm works."
 
-      - name: Tarama - SARIF üret
+      - name: Scan - produce SARIF
         run: grype dir:. --config .quality/grype.yaml -o sarif --file grype.sarif
 
-      - name: SARIF yükle (Security sekmesi)
+      - name: Upload SARIF (Security tab)
         if: always()
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: grype.sarif
           category: grype
 
-      # SARIF yüklendikten SONRA kapı: yükleme adımı atlanmadan bulgular
-      # Security sekmesine düşsün, ardından job kırmızıya dönsün.
-      - name: Kapı - high ve üzeri bulgu = fail
+      # The gate comes AFTER the SARIF upload: the findings land in the Security tab
+      # without the upload step being skipped, and then the job turns red.
+      - name: Gate - a high or above finding = fail
         run: grype dir:. --config .quality/grype.yaml --fail-on high -o table
