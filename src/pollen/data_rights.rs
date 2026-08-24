@@ -1,11 +1,11 @@
 //! Pollen Data Rights - AccessGrant v2 primitives.
 //!
-//! Kullanıcı metaforu: veri tomurcuğu kullanıcıya aittir; satılan şey tomurcuğun
-//! Kendisi değil, o tomurcuğun polenidir. Bu modül bu nedenle `DataAsset` +
-//! `AccessGrant` + AI input-ref gate üçlüsünü tanımlar.
+//! The metaphor for the user: the data bud belongs to the user; what is sold
+//! is not the bud itself but its pollen. That is why this module defines the
+//! triple of `DataAsset` + `AccessGrant` + the AI input-ref gate.
 //!
-//! Güvenlik kuralı: Pollen/B.U.D. verisine işaret eden AI input_ref, geçerli
-//! AccessGrant olmadan kabul edilemez. DAO/admin override yoktur.
+//! The security rule: an AI input_ref pointing at Pollen/B.U.D. data cannot be
+//! admitted without a valid AccessGrant. There is no DAO or admin override.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use super::{AssetId, GrantId, Signature64};
 
-/// AI input_ref prefix'i. Bu prefix ile başlayan payload'lar Pollen data-ref
-/// Sayılır ve strict AccessGrant kontrolünden geçmek zorundadır.
+/// The AI input_ref prefix. A payload starting with it counts as a Pollen
+/// data-ref and has to pass the strict AccessGrant check.
 pub const POLLEN_AI_INPUT_REF_PREFIX: &[u8] = b"BDLM_POLLEN_AI_INPUT_REF_V1";
 
 /// DAO-managed encryption policy. DAO can tune protocol parameters, but it
@@ -52,18 +52,19 @@ impl EncryptionPolicy {
         Ok(())
     }
 
-    /// Bir grant suresinin bu politikaya uyup uymadigi.
+    /// Whether a grant duration conforms to this policy.
     ///
-    /// `max_grant_duration_blocks` bugune kadar yalnizca saklanan bir sayiydi:
-    /// politika kaydediliyor, dogrulaniyor, Merkle yaprağina giriyordu, ama
-    /// hicbir grant ona karsi olculmuyordu. DAO'nun "en fazla N blok" karari
-    /// bu yuzden bir temenniydi - istenen sureyi asan bir grant kabul
-    /// ediliyordu.
+    /// Until now `max_grant_duration_blocks` was only a stored number: the
+    /// policy was recorded, validated and folded into the Merkle leaf, but no
+    /// grant was ever measured against it. The DAO's "at most N blocks"
+    /// decision was therefore a wish - a grant exceeding the requested
+    /// duration was admitted.
     ///
     /// # Errors
     ///
-    /// Politika pasifse, bu blokta artik gecerli degilse
-    /// (`deprecated_after_block`), ya da istenen sure tavani asiyorsa reddeder.
+    /// Refuses when the policy is inactive, when it is no longer valid at this
+    /// block (`deprecated_after_block`), or when the requested duration
+    /// exceeds the ceiling.
     pub fn check_grant_duration(
         &self,
         issued_at_block: u64,
@@ -83,9 +84,9 @@ impl EncryptionPolicy {
                 ));
             }
         }
-        // Ters araligi burada reddetmiyoruz: `validate_shape` zaten
-        // `expires > issued` diyor. Buranin sordugu tek soru tavanin asilip
-        // asilmadigi, ve tasma durumunda cevap "asildi".
+        // We do not refuse an inverted range here: `validate_shape` already
+        // says `expires > issued`. The only question this asks is whether the
+        // ceiling was exceeded, and on underflow the answer is "it was".
         let requested = expires_at_block.saturating_sub(issued_at_block);
         if requested > self.max_grant_duration_blocks {
             return Err(format!(
@@ -114,12 +115,12 @@ impl EncryptionPolicy {
     }
 }
 
-/// SaleAuthorization kimliği = canonical seller authorization hash.
+/// The SaleAuthorization identity = the canonical seller authorization hash.
 pub type SaleAuthorizationId = AssetId;
 
 /// Owner/seller signed authorization to sell pollen for a DataAsset.
 ///
-/// This is the bridge between "tomurcuk benim" and "polenimi satıyorum":
+/// This is the bridge between "the bud is mine" and "I am selling my pollen":
 /// The DataAsset remains owned by `seller`, while grants may be issued under
 /// This bounded authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,8 +288,8 @@ pub enum DataAssetStatus {
     Revoked,
 }
 
-/// Kullanıcının satılabilir veri varlığı. Varlık satılmaz; erişim poleni
-/// AccessGrant ile satılır.
+/// The user's sellable data asset. The asset itself is not sold; the access
+/// pollen is sold through an AccessGrant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataAsset {
     pub asset_id: AssetId,
@@ -373,8 +374,9 @@ pub enum AccessGrantStatus {
     Revoked,
 }
 
-/// Owner-imzalı veri erişim izni. `grantee`, veri polenini satın alan AI ajanı
-/// Veya kullanıcıdır. `max_reads` on-chain okuma tüketim sınırıdır.
+/// An owner-signed data access permission. The `grantee` is the AI agent or
+/// the user who bought the data pollen. `max_reads` is the on-chain read
+/// consumption limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessGrant {
     pub grant_id: GrantId,
@@ -695,22 +697,22 @@ mod tests {
         }
     }
 
-    /// Tavan yalnizca birinin ona carpmasiyla tavandir. Politika 100 blok
-    /// diyorsa 101 bloklu bir grant reddedilmeli.
+    /// A ceiling is only a ceiling when something hits it. If the policy says
+    /// 100 blocks, a grant of 101 blocks has to be refused.
     #[test]
     fn a_grant_longer_than_the_policy_maximum_is_refused() {
         let policy = policy_with_max(100);
         assert!(
             policy.check_grant_duration(10, 110).is_ok(),
-            "tam tavan gecmeli"
+            "exactly the ceiling has to pass"
         );
         let err = policy
             .check_grant_duration(10, 111)
-            .expect_err("tavani asan sure reddedilmeli");
+            .expect_err("a duration above the ceiling has to be refused");
         assert!(err.contains("exceeds EncryptionPolicy"), "{err}");
     }
 
-    /// Pasif bir politika bir grant'a dayanak olamaz.
+    /// An inactive policy cannot back a grant.
     #[test]
     fn an_inactive_policy_cannot_back_a_grant() {
         let mut policy = policy_with_max(100);
@@ -718,7 +720,7 @@ mod tests {
         assert!(policy.check_grant_duration(10, 20).is_err());
     }
 
-    /// Kullanimdan kaldirilma bloguna ulasildiginda politika artik gecmez.
+    /// Once the deprecation block is reached the policy no longer passes.
     #[test]
     fn a_deprecated_policy_stops_backing_grants_at_its_block() {
         let mut policy = policy_with_max(100);
