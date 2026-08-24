@@ -111,19 +111,19 @@ pub struct Blockchain {
     /// This bounds entries, not only distinct checkpoint-height buckets.
     pub max_pending_certs: usize,
     pub domain_registry: ConsensusDomainRegistry,
-    /// Egemen alan sablonlari (CBDC, kamu, kurumsal PoA, konsorsiyum).
+    /// Sovereign domain templates (CBDC, public, corporate PoA, consortium).
     ///
-    /// `domain_registry`'den ayri durur cunku ayri seyi anlatir: orasi bir
-    /// alanin uzlasma kurallarini, burasi o alanin uyum/denetim belgesini
-    /// tutar. Bagi `register_sovereign_template` kurar - bir sablon ancak
-    /// adlandirdigi alan kayitliysa ve ayni turu/operatoru gosteriyorsa
-    /// kabul edilir.
+    /// It sits apart from `domain_registry` because it says something else:
+    /// that one holds a domain's consensus rules, this one holds that domain's
+    /// compliance/audit document. `register_sovereign_template` establishes the
+    /// link - a template is accepted only if the domain it names is registered
+    /// and it shows the same kind and operator.
     pub sovereign_registry: crate::domain::SovereignDomainRegistry,
-    /// PoA alanlarinin uyum defteri: dondurma kayitlari ve denetim izi.
+    /// The compliance ledger of PoA domains: freeze records and the audit trail.
     ///
-    /// Yalniz `ConsensusKind::PoA` alanlari icin anlamlidir; izinsiz alanlarda
-    /// dondurma cagrisi reddedilir (`ensure_poa`). Defter kayit tutmakla
-    /// kalmaz, `ensure_not_frozen` uzerinden gercek bir kapi kurar.
+    /// It is meaningful only for `ConsensusKind::PoA` domains; a freeze call on a
+    /// permissionless domain is rejected (`ensure_poa`). The ledger does not only
+    /// keep records, it establishes a real gate through `ensure_not_frozen`.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
@@ -310,7 +310,7 @@ impl Blockchain {
             }
             chain_vec.push(genesis);
         } else {
-            // VERIFICATION CHAIN (Doğrulama Zinciri):
+            // VERIFICATION CHAIN:
             // Check that the existing genesis block in DB matches resolved_genesis_config / network config!
             let db_genesis = &chain_vec[0];
             let expected_genesis = resolved_genesis_config.build_genesis_block();
@@ -359,9 +359,9 @@ impl Blockchain {
         let mut restored_finalized_hash = chain_vec[0].hash.clone();
 
         if let Some(ref pm) = pruning_manager {
-            // Onarımı (2026-07-19,): yükleme hatası artık yutulmuyor -
-            // Fail-loud error! log (karantina detaylı). Loader kendi içinde eski
-            // Adaylara düşer; Err ancak TÜM adaylar bozuksa gelir.
+            // Repair (2026-07-19): a load error is no longer swallowed - it is a
+            // fail-loud error! log (with quarantine detail). The loader falls back
+            // to older candidates internally; an Err arrives only if ALL candidates are broken.
             let v2_load = pm.load_latest_snapshot_v2();
             if let Err(ref e) = v2_load {
                 error!(
@@ -838,19 +838,19 @@ impl Blockchain {
             .expect("chain is seeded with genesis at construction")
     }
 
-    /// Egemen alan sablonunu, adlandirdigi uzlasma alanina baglayarak kaydet.
+    /// Register a sovereign domain template, binding it to the consensus domain it names.
     ///
-    /// Sablon tek basina degerlendirilmez. `register_template_for_domain`
-    /// once alanin kayitli oldugunu, sonra sablonun bildirdigi uzlasma
-    /// turunun ve operatorun alanin gercek degerleriyle ayni oldugunu
-    /// dogrular. Bu kapi olmadan bir sablon, PoS olarak calisan bir alani
-    /// denetime "izinli ve KYC'li" diye gosterebilirdi: iki kayit da kendi
-    /// icinde gecerli, birlikte yanlis.
+    /// A template is not evaluated on its own. `register_template_for_domain`
+    /// first verifies that the domain is registered, then that the consensus kind
+    /// and operator the template declares are the same as the domain's real
+    /// values. Without this gate a template could present a domain running as PoS
+    /// to an auditor as "permissioned and KYC'd": both records are individually
+    /// valid, together they are wrong.
     ///
     /// # Errors
     ///
-    /// Alan kayitli degilse, tur ya da operator uyusmuyorsa, veya sablonun
-    /// kendi dogrulamasi basarisizsa hata doner.
+    /// Returns an error if the domain is not registered, if the kind or operator
+    /// does not match, or if the template's own validation fails.
     pub fn register_sovereign_template(
         &mut self,
         template: crate::domain::SovereignDomainTemplate,
@@ -859,33 +859,33 @@ impl Blockchain {
             .register_template_for_domain(template, &self.domain_registry)
     }
 
-    /// Kayitli egemen sablonlarin koku.
+    /// The root of the registered sovereign templates.
     #[must_use]
     pub fn sovereign_template_root(&self) -> crate::domain::Hash32 {
         self.sovereign_registry.root()
     }
 
-    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    /// Validate an audit export against the registered template.
     ///
-    /// Paketin tasidigi `template_id` once kayit defterinde aranir. Paketin
-    /// kendi icinde tutarli olmasi yetmez: kimlik paketin icinden geliyorsa,
-    /// uydurma bir kimlikle uretilmis paket de tutarli gorunur.
+    /// The `template_id` the bundle carries is looked up in the registry first.
+    /// The bundle being internally consistent is not enough: if the identity
+    /// comes from inside the bundle, a bundle produced with an invented identity looks consistent too.
     ///
     /// # Errors
     ///
-    /// Sablon kayitli degilse ya da paket sablonla uyusmuyorsa hata doner.
+    /// Returns an error if the template is not registered or the bundle does not match the template.
     pub fn validate_sovereign_audit_export(
         &self,
         bundle: &crate::domain::sovereign::AuditExportBundle,
     ) -> Result<(), String> {
         self.sovereign_registry.validate_audit_export(bundle)?;
-        // Dondurma kaydinin bir SONUCU olmali. Defter uzun sure yalniz kayit
-        // Tutuyordu: dondurma cagrilabiliyordu ama dondurulmus olmak hicbir
-        // Seyi degistirmiyordu - "donduruldu" bir not, bir karar degildi.
+        // A freeze record must have a CONSEQUENCE. For a long time the ledger
+        // only kept records: freezing could be called but being frozen changed
+        // nothing - "frozen" was a note, not a decision.
         //
-        // Operator paketten degil, KAYITLI SABLONDAN okunur. Paketin icinden
-        // Gelen bir kimlik, dondurulmus operatorun baskasinin adini yazip
-        // Kapiyi asmasina izin verirdi.
+        // The operator is read from the REGISTERED TEMPLATE, not from the bundle.
+        // An identity coming from inside the bundle would let a frozen operator
+        // write someone else's name and pass the gate.
         let operator = self
             .sovereign_registry
             .template_operator(bundle.template_id)
@@ -904,17 +904,17 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Bir PoA alaninda adresi dondur.
+    /// Freeze an address in a PoA domain.
     ///
-    /// Dondurma yalniz izinli (PoA) alanlarda ve yalniz yetkili yonetici
-    /// tarafindan yapilabilir; ikisi de `PoaComplianceRegistry` icinde
-    /// dogrulanir. Gerekce ozeti sifir olamaz - kanitsiz dondurma, kaydi
-    /// denetlenemez yapar.
+    /// Freezing may only be done in permissioned (PoA) domains and only by an
+    /// authorized administrator; both are verified inside
+    /// `PoaComplianceRegistry`. The reason digest cannot be zero - a freeze
+    /// without evidence makes the record unauditable.
     ///
     /// # Errors
     ///
-    /// Alan kayitli degilse, PoA degilse, yonetici yetkisiz ise veya gerekce
-    /// ozeti sifirsa hata doner.
+    /// Returns an error if the domain is not registered, is not PoA, if the
+    /// administrator is unauthorized, or if the reason digest is zero.
     pub fn freeze_poa_account(
         &mut self,
         domain_id: u32,
@@ -926,8 +926,8 @@ impl Blockchain {
             .domain_registry
             .get(domain_id)
             .ok_or_else(|| format!("unknown domain {domain_id}"))?;
-        // Alanin turu kaydindan okunur, cagirandan degil: cagiran kendi
-        // Alanini "PoA" ilan edip dondurma yetkisi uretemez.
+        // The domain's kind is read from its record, not from the caller: a caller
+        // cannot declare its own domain "PoA" and manufacture freeze authority.
         let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
             crate::registry::ComplianceDomainKind::PoA
         } else {
@@ -1657,7 +1657,7 @@ impl Blockchain {
         )
         .map_err(|e| e.to_string())?;
 
-        // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
+        // Security: prevent u128 -> u64 truncation.
         // Check BOTH final_amount AND fee for u64 overflow.
         if final_amount > u64::MAX as u128 {
             return Err(
@@ -1670,10 +1670,10 @@ impl Blockchain {
 
         // Credit the recipient and the relayer
         // Using try_add_balance to prevent silent u64 overflow capping.
-        // Arz yaratan yol: kopruden gelen varligin zincir uzerindeki
-        // karsiligi burada basiliyor, yani bu iki cagri toplam arzi
-        // buyutuyor. `try_mint_balance` sabit tavani denetler; ucret de
-        // ayni basimdan geliyor ve ayni tavana tabidir.
+        // The supply-creating path: the on-chain counterpart of the asset arriving
+        // from the bridge is minted here, so these two calls grow the total supply.
+        // `try_mint_balance` checks the fixed ceiling; the fee comes from the same
+        // mint and is subject to the same ceiling.
         self.state
             .try_mint_balance(&transfer.recipient, final_amount as u64)
             .map_err(|e| format!("Bridge mint (recipient): {e}"))?;
@@ -1797,22 +1797,22 @@ impl Blockchain {
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
     ) -> Result<(), String> {
-        //: CrossDomainMessage sertleştirme.
-        // 1. verify_id: message_id canonical preimage ile eşleşmeli (kanıt uydurma yüzeyi).
+        // CrossDomainMessage hardening.
+        // 1. verify_id: message_id must match the canonical preimage (a proof-forgery surface).
         if !message.verify_id() {
             return Err(
                 "Cross-domain message ID does not match canonical preimage (potential forgery)"
                     .into(),
             );
         }
-        // 2. Domain-spoofing: source_domain ≠ target_domain (aynı domain'e cross-message yok).
+        // 2. Domain spoofing: source_domain must differ from target_domain (no cross-message to the same domain).
         if message.source_domain == message.target_domain {
             return Err(format!(
                 "Cross-domain message source and target domains must differ (both={})",
                 message.source_domain
             ));
         }
-        // 3. Expiry check: mesaj süresi dolmuşsa reddet.
+        // 3. Expiry check: reject the message if it has expired.
         let current_height = self.chain.len() as u64;
         if message.expiry_height > 0 && current_height > message.expiry_height {
             return Err(format!(
@@ -2064,18 +2064,18 @@ impl Blockchain {
             return Err("payload hash does not bind to the supplied proof".into());
         }
 
-        // 1b. Genel girdi baglamasi: kanit BU zincire ait olmali.
+        // 1b. Public input binding: the proof must belong to THIS chain.
         //
-        // `public_inputs.chain_id` gonderenden gelir ve kanit sistemi onu
-        // yalnizca *kendi icinde* tutarli tutar: STARK, "bu genel girdilerle
-        // bu program boyle kostu" der, girdilerin dogru zincire ait oldugunu
-        // soylemez. Denetim burada yapilmazsa baska bir zincir (ya da test
-        // agi) icin uretilmis, kendi zincirinde tamamen gecerli bir kanit
-        // burada da dogrulanir ve bir alani ilerletirdi.
+        // `public_inputs.chain_id` comes from the sender and the proof system keeps
+        // it consistent only *within itself*: a STARK says "with these public
+        // inputs this program ran this way", it does not say the inputs belong to
+        // the right chain. Without this check a proof produced for another chain
+        // (or a testnet), entirely valid on its own chain, would verify here too
+        // and would advance a domain.
         //
-        // Bu, dogrulayicinin kanit sisteminin kisitlamadigi alani kendi
-        // kodunda denetlemesi gereken siniftir; kanit gecerliligi tek basina
-        // bir yetkilendirme karari degildir.
+        // This is the class where the verifier must inspect, in its own code, the
+        // space the proof system does not constrain; proof validity on its own is
+        // not an authorization decision.
         if submission.public_inputs.chain_id != self.chain_id {
             return Err(format!(
                 "proof public inputs bind to chain {} but this chain is {}",
@@ -2083,17 +2083,17 @@ impl Blockchain {
             ));
         }
 
-        // 1c. Program izin listesi: bu programin bu alani ilerletme hakki var mi?
+        // 1c. The program allow-list: does this program have the right to advance this domain?
         //
-        // Bir onceki denetim kanitin BU zincire ait oldugunu soyluyor, ama
-        // hangi *kodun* kanitlandigini soylemiyor. Dogrulayici programin
-        // hash'ini `public_inputs.program_hash` ile karsilastirir; gonderen
-        // ikisini de kendisi verdigi icin bu denetim her zaman gecer. Yani
-        // saldirgan kendi yazdigi bir programi kusursuz bir kanitla sunabilir:
-        // kanit gecerlidir, yalan soyleyen programdir.
+        // The previous check says the proof belongs to THIS chain, but not which
+        // *code* was proven. The verifier compares the program's hash with
+        // `public_inputs.program_hash`; since the sender supplies both, that check
+        // always passes. So an attacker can present a program they wrote
+        // themselves with a flawless proof: the proof is valid, it is the program
+        // that lies.
         //
-        // Alanin ilan ettigi izin listesi bu boslugu kapatir. Liste bos ise
-        // kapi kapalidir - fail-closed.
+        // The allow-list the domain declares closes that gap. If the list is empty
+        // the gate is closed - fail-closed.
         let claimed_domain = submission.domain();
         let domain = self
             .domain_registry
@@ -2109,26 +2109,26 @@ impl Blockchain {
             ));
         }
 
-        // 1d. Kanit tazeligi: iddia edilen yukseklik zincire yakin olmali.
+        // 1d. Proof freshness: the claimed height must be close to the chain.
         //
-        // Kademe 2 on kosulu (2026-08-22, G0 onayi). Kanit gecerli olsa bile
-        // cok eski bir yukseklige baglanmis olmasi ayri bir kusurdur: ayni
-        // kanit, ne kadar zaman gecerse gecsin "taze" gorunur.
+        // A tier 2 precondition (2026-08-22, G0 approval). Even if the proof is
+        // valid, being bound to a very old height is a separate defect: the same
+        // proof looks "fresh" no matter how much time passes.
         //
-        // `0` **kalici** bir tolerans, gecici bir bosluk degil. Bu yorumun
-        // onceki hali "prove_bytecode henuz yuksekligi yazmiyor" diyordu ve
-        // bayatti: uretici `vm.context.block_height` degerini yaziyor
-        // (`execution/zkvm.rs`). Deger `0` oldugunda anlami "uretici eksik"
-        // degil, **program zincir yuksekligini hic okumadi**: `block_height`
-        // programin syscall 6 ile okudugu yuksekliktir ve okumayan bir
-        // program icin `0` dogru cevaptir.
+        // `0` is a **permanent** tolerance, not a temporary gap. The previous
+        // version of this comment said "prove_bytecode does not write the height
+        // yet" and was stale: the producer writes `vm.context.block_height`
+        // (`execution/zkvm.rs`). When the value is `0` it means not "the producer
+        // is missing" but **the program never read the chain height**:
+        // `block_height` is the height the program reads with syscall 6, and for a
+        // program that does not read it, `0` is the correct answer.
         //
-        // Bir program zincir yuksekligini hic okumadan bir gecisi
-        // kanitlayabilir; o kanitlarin hepsini reddetmek dogru olani
-        // reddetmek olurdu. Iddia tarafi ayrica korunuyor: `source_height`
-        // baglama hash'inin on-goruntusunde, yani kanit baska bir yukseklige
-        // tasinamiyor. Ayrimin tam gerekcesi `prover/mod.rs`,
-        // `ZkProofSubmission::message` dokumantasyonunda.
+        // A program can prove a transition without ever reading the chain height;
+        // rejecting all such proofs would be rejecting the correct thing. The claim
+        // side is protected separately: `source_height` is in the preimage of the
+        // binding hash, so the proof cannot be moved to another height. The full
+        // justification for the distinction is in `prover/mod.rs`, in the
+        // `ZkProofSubmission::message` documentation.
         let chain_height = self.chain.len() as u64;
         let claimed_height = submission.public_inputs.block_height;
         if claimed_height != 0
@@ -2140,15 +2140,15 @@ impl Blockchain {
             ));
         }
 
-        // 1e. Iddia, alanin ilerlemesinin gerisine dusemez (sureklilik).
+        // 1e. A claim cannot fall behind the domain's progress (continuity).
         //
-        // Kabul edilen her kanit alanin `last_committed_height/_hash` alanini
-        // o iddianin yuksekligine ve `final_state_root`'una tasir (asagida,
-        // `ClaimDecision::New` kolunda). Boylece alanin kaydi en son kabul
-        // edilen kanitin final kokunu tasir - `final_state_root` artik yalniz
-        // kanitin icinde yasayan bir deger degil, alanin gercek kokuyle
-        // karsilastirilabilir bir taahhuttur. Geriye yapilan iddia, ucret
-        // yakilmadan burada reddedilir.
+        // Every accepted proof moves the domain's `last_committed_height/_hash`
+        // to that claim's height and `final_state_root` (below, in the
+        // `ClaimDecision::New` branch). So the domain's record carries the final
+        // root of the last accepted proof - `final_state_root` is no longer a
+        // value living only inside the proof but a commitment comparable with the
+        // domain's real root. A backwards claim is rejected here, without the fee
+        // being burned.
         let claim_height = submission.target_height();
         if claim_height < domain.last_committed_height {
             return Err(format!(
@@ -2159,22 +2159,22 @@ impl Blockchain {
 
         // 1f. Ilan edilen butce: harcanan, ilan edilenden fazla olamaz.
         //
-        // `gas_limit` ve `gas_used` genel girdilerin icinde tasiniyor ve
-        // baglama hash'ine giriyor, yani gonderen ikisini de sonradan
-        // degistiremez. Ama ikisi **birbirine karsi** hic denetlenmiyordu:
-        // `gas_used > gas_limit` olan bir kanit, degerler tutarli sekilde
-        // imzalanmis oldugu icin buraya kadar gelip kabul ediliyordu.
+        // `gas_limit` and `gas_used` are carried inside the public inputs and enter
+        // the binding hash, so the sender cannot change either afterwards. But the
+        // two were never checked **against each other**: a proof with
+        // `gas_used > gas_limit` reached this point and was accepted, because the
+        // values were consistently signed.
         //
-        // Kanit sistemi bu iliskiyi kisitlamaz. STARK "bu program bu
-        // girdilerle boyle kostu" der; ilan edilen tavanin asilmadigini
-        // soylemez. Bolum 69'un ayni sinifi: dogrulayici, kanit sisteminin
-        // kisitlamadigi alani kendi kodunda denetlemek zorundadir.
+        // The proof system does not constrain this relationship. A STARK says "this
+        // program ran this way with these inputs"; it does not say the declared
+        // ceiling was not exceeded. The same class as section 69: the verifier must
+        // inspect, in its own code, the space the proof system does not constrain.
         //
-        // Bu, izin listesinin (1c) cevaplamadigi sorudur. Liste **hangi
-        // kodun** calisabilecegini soyler; bu denetim o kodun **ilan ettigi
-        // sinir icinde** kalip kalmadigini. Listeden gecmis bir program,
-        // ilan ettiginden fazlasini harcayarak dogrulama isini sinirsiz
-        // buyutebilirdi.
+        // This is the question the allow-list (1c) does not answer. The list says
+        // **which code** may run; this check says whether that code stayed **within
+        // the limit it declared**. A program that passed the list could otherwise
+        // grow the verification work without bound by spending more than it
+        // declared.
         let declared_limit = submission.public_inputs.gas_limit;
         let spent = submission.public_inputs.gas_used;
         if spent > declared_limit {
@@ -2229,11 +2229,11 @@ impl Blockchain {
                     prover: submitter,
                     rewarded,
                 });
-                // 1e'nin kayit yarisi: alanin ilerlemesini bu kanitin final
-                // kokune bagla. Sonraki kanit bu ilerlemenin gerisine iddia
-                // atamaz (yukaridaki kapi) ve baska yuzler (kopru dogrulama)
-                // alanin kokunu okudugunda en son kabul edilen kanitin
-                // final kokunu gorur.
+                // The recording half of 1e: bind the domain's progress to this
+                // proof's final root. The next proof cannot claim behind this
+                // progress (the gate above), and when other surfaces (bridge
+                // verification) read the domain's root they see the final root of
+                // the last accepted proof.
                 if let Some(d) = self.domain_registry.get_mut(claimed_domain) {
                     d.last_committed_height = key.target_height;
                     d.last_committed_hash = final_state_root;
@@ -2480,7 +2480,7 @@ impl Blockchain {
                 )
                 .map_err(|e| e.to_string())?;
 
-                // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
+                // Security: prevent u128 -> u64 truncation.
                 // Check BOTH final_amount AND fee for u64 overflow.
                 if final_amount > u64::MAX as u128 {
                     return Err(format!(
@@ -2494,9 +2494,9 @@ impl Blockchain {
                 }
 
                 // Try_add_balance for relay bridge mint
-                // Ayni arz yaratimi, relayer boru hattindan gelen ikinci
-                // giris. Iki girisi de ayni kapiya baglamak sart: biri
-                // baglanip oteki unutulursa tavan yalnizca yarim tutar.
+                // The same supply creation, the second entry coming from the
+                // relayer pipeline. Both entries must be bound to the same gate:
+                // if one is bound and the other forgotten, the ceiling holds only half.
                 self.state
                     .try_mint_balance(&transfer.recipient, final_amount as u64)
                     .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
@@ -2550,7 +2550,7 @@ impl Blockchain {
                 )
                 .map_err(|e| e.to_string())?;
 
-                // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
+                // Security: prevent u128 -> u64 truncation.
                 // Check BOTH final_amount AND fee for u64 overflow.
                 if final_amount > u64::MAX as u128 {
                     return Err(format!(
@@ -4385,10 +4385,10 @@ impl Blockchain {
         self.chain = new_chain;
         self.state = new_state;
 
-        // Reorg sonrası domain/bridge/settlement yapılarını
-        // Storage'dan reload et. Eski kod bu alanları olduğu gibi bırakıyordu -
-        // Split-brain (eski zincirin domain/bridge state'i ile yeni zincirin
-        // Account state'i tutarsız oluyordu).
+        // After a reorg, reload the domain/bridge/settlement structures from
+        // storage. The old code left these fields as they were - split brain (the
+        // old chain's domain/bridge state was inconsistent with the new chain's
+        // account state).
         self.domain_registry = crate::domain::ConsensusDomainRegistry::new();
         self.domain_commitment_registry = crate::domain::DomainCommitmentRegistry::new();
         self.global_headers = Vec::new();
