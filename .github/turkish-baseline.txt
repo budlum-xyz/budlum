@@ -110,7 +110,7 @@ crates/lubot/crates/lubot-integrations/src/lib.rs	17
 crates/lubot/crates/lubot-integrations/src/rest.rs	11
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/cache.rs	18
-crates/lubot/crates/lubot-knowledge/src/embed.rs	18
+crates/lubot/crates/lubot-knowledge/src/embed.rs	3
 crates/lubot/crates/lubot-knowledge/src/lib.rs	12
 crates/lubot/crates/lubot-ops/Cargo.toml	1
 crates/lubot/crates/lubot-ops/src/main.rs	17
@@ -167,7 +167,6 @@ src/lubot/metrics.rs	10
 src/lubot/query.rs	6
 src/lubot/social.rs	16
 src/lubot/storage.rs	8
-src/network/node.rs	18
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
 src/privacy/submit.rs	11

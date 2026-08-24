@@ -1455,11 +1455,12 @@ impl Node {
                                SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                                    let remote = endpoint.get_remote_address();
                                    let subnet = ipv4_slash24(remote);
-                                   // Güvenlik denetimi (HIGH): yasakli
-                                   // peer yeniden baglanip /sync isteklerine
-                                   // devam edebiliyordu (handshaked bayragi
-                                   // kopukluklarda yasiyor). Baglanti kabulunde
-                                   // ban durumu once kontrol edilir.
+                                   // Security review (HIGH): a banned peer
+                                   // could reconnect and carry on issuing
+                                   // /sync requests, because the handshaked
+                                   // flag survives a disconnect. The ban is
+                                   // now checked first, when the connection
+                                   // is admitted.
                                    if self.peer_manager_lock().is_banned(&peer_id) {
                                        warn!("Rejecting banned peer {} on reconnect", peer_id);
                                        let _ = self.swarm.disconnect_peer_id(peer_id);
@@ -1487,7 +1488,7 @@ impl Node {
                                        let _ = self.swarm.disconnect_peer_id(peer_id);
                                        continue;
                                    }
-                                   // H5.2 outbound diversity: outbound bağlantılar için ek /24 sınırı.
+                                   // H5.2 outbound diversity: an extra /24 limit for outbound connections.
                                    if endpoint.is_dialer() {
                                        let ob_admit = self
                                            .peer_manager_lock()
@@ -1866,12 +1867,13 @@ impl Node {
                                            }
 
                                            NetworkMessage::GetHeaders { locator, limit } => {
-                                               // Güvenlik denetimi (HIGH): gossip uzerinden gelen
-                                               // GetHeaders/GetBlocksRange/GetBlocksByHeight isteklerine
-                                               // topic'e yanit publish etmek reflected-amplified DoS'tur
-                                               // (yanit tum mesh'e gider, istekciye degil). Bu istekler
-                                               // yalnizca peer-bound request_response (/sync) uzerinden
-                                               // karsilanir; gossip kolu artik yanit vermez.
+                                               // Security review (HIGH): publishing a reply to the topic
+                                               // for GetHeaders/GetBlocksRange/GetBlocksByHeight requests
+                                               // that arrive over gossip is a reflected, amplified DoS
+                                               // (the reply goes to the whole mesh, not to the asker).
+                                               // These requests are served only over the peer-bound
+                                               // request_response (/sync); the gossip arm no longer
+                                               // answers.
                                                if let Err(error) = NetworkMessage::validate_header_request(&locator, limit) {
                                                    warn!("Rejected invalid gossip GetHeaders from {}: {:?}", peer_id, error);
                                                    {
@@ -1911,8 +1913,8 @@ impl Node {
                                            }
 
                                            NetworkMessage::GetBlocksRange { from, to } => {
-                                               // Güvenlik denetimi (HIGH): gossip yaniti publish etme -
-                                               // senkron peer-bound request_response uzerinden isler.
+                                               // Security review (HIGH): do not publish a gossip reply -
+                                               // sync works over the peer-bound request_response.
                                                if from > to {
                                                    warn!("Rejected inverted block range from {peer_id}: {from}..{to}");
                                                    {
@@ -2026,8 +2028,8 @@ impl Node {
                                            }
 
                                            NetworkMessage::GetBlocksByHeight { from_height, to_height } => {
-                                               // Güvenlik denetimi (HIGH): gossip yaniti publish etme -
-                                               // senkron peer-bound request_response uzerinden isler.
+                                               // Security review (HIGH): do not publish a gossip reply -
+                                               // sync works over the peer-bound request_response.
                                                warn!("Ignoring gossip GetBlocksByHeight [{from_height}, {to_height}] from {peer_id}: sync is point-to-point (request_response)");
                                                continue;
                                            }
@@ -2332,10 +2334,10 @@ impl Node {
                                                    Err(e) => {
                                                        warn!("Failed to apply FinalityCert from {peer_id}: {e}");
                                                        if e.contains("Missing verified QC blob") {
-                                                           // Güvenlik denetimi (HIGH): QC blob eksigi
-                                                           // gossip'e GetQcBlob yayinlamaz - bu, FinalityCert
-                                                           // gondererek mesh-geneli QcBlobResponse fan-out'u
-                                                           // tetiklemeye izin verirdi (reflected DoS).
+                                                           // Security review (HIGH): a missing QC blob does
+                                                           // not broadcast GetQcBlob over gossip - that would
+                                                           // let anyone trigger a mesh-wide QcBlobResponse
+                                                           // fan-out by sending a FinalityCert (reflected DoS).
                                                            warn!(
                                                                "Missing verified QC blob for FinalityCert from {peer_id}; refusing legacy gossip QC-blob fetch for epoch={epoch}, height={checkpoint_height}"
                                                            );
@@ -2348,11 +2350,11 @@ impl Node {
                                            }
 
                                            NetworkMessage::GetQcBlob { epoch, checkpoint_height } => {
-                                               // Güvenlik denetimi (HIGH): gossip uzerinden gelen
-                                               // GetQcBlob isteklerine topic'e yanit publish etmek
-                                               // reflected-amplified DoS'tur (yanit tum mesh'e gider).
-                                               // QC blob alisverisi point-to-point olmali; gossip kolu
-                                               // artik yanit vermez.
+                                               // Security review (HIGH): publishing a reply to the topic
+                                               // for GetQcBlob requests that arrive over gossip is a
+                                               // reflected, amplified DoS (the reply goes to the whole
+                                               // mesh). QC blob exchange has to be point-to-point; the
+                                               // gossip arm no longer answers.
                                                warn!("Ignoring gossip GetQcBlob from {peer_id}: QC blob fetch is point-to-point; refusing epoch={epoch}, height={checkpoint_height}");
                                                continue;
                                            }
@@ -2537,9 +2539,9 @@ impl Node {
                                                request_response::Message::Request { request, channel, .. } => {
                                                    let request_allowed = {
                                                        let mut pm = self.peer_manager_lock();
-                                                       // Güvenlik denetimi (HIGH): yasakli peer
-                                                       // /sync istegi yapamaz; ban durumu handshake +
-                                                       // rate-limit ile birlikte kontrol edilir.
+                                                       // Security review (HIGH): a banned peer cannot
+                                                       // issue a /sync request; the ban is checked
+                                                       // together with the handshake and the rate limit.
                                                        !pm.is_banned(&peer)
                                                            && pm.is_handshaked(&peer)
                                                            && pm.check_rate_limit(&peer)
