@@ -267,7 +267,7 @@ impl BudFile {
     /// protection (2026-08-16, S.88 literature).
     pub const MAX_DECOMPRESSED_BYTES: usize = 100 * 1024 * 1024; // 100 MB
     pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024; // 16 MB tek chunk
-    pub const MAX_RATIO: f64 = 100.0; // K25: >100:1 RED
+    pub const MAX_RATIO: f64 = 100.0; // K25: >100:1 RED (reporting only; the gate uses MAX_RATIO_FIXED)
 
     pub fn decode_streaming<F: FnMut(&[u8]) -> Result<(), &'static str>>(
         &self,
@@ -803,13 +803,27 @@ impl MultiRatioConsensus {
 
 pub struct BudGates;
 
+/// The zip-bomb limit in fixed point: the value the gate actually compares
+/// against. `BudFile::MAX_RATIO` is the same 100:1 for humans and for
+/// reporting; this is the one that decides acceptance, and it is an integer so
+/// the decision cannot vary between machines.
+const MAX_RATIO_FIXED: i64 = crate::bud_fixed_point::fixed_from_int(100);
+
 impl BudGates {
     pub fn k_bud(f: &BudFile) -> Result<(), &'static str> {
         f.decode().map(|_| ())
     }
     /// K25: a ratio over 100:1 => refused as a suspected zip bomb.
+    ///
+    /// The comparison runs in fixed point, not on `f64`. This decides whether
+    /// an object is accepted, and a float division is allowed to differ in its
+    /// last bit between machines: two nodes could disagree on whether the same
+    /// file is a bomb, and a verdict that varies by machine is a fork. The
+    /// integer path gives the same answer everywhere.
     pub fn k_bud_ratio(f: &BudFile, original_len: usize) -> Result<(), &'static str> {
-        if f.ratio(original_len) > BudFile::MAX_RATIO {
+        let payload: usize = f.chunks.iter().map(|c| c.data.len()).sum();
+        let measured = crate::bud_fixed_point::fixed_ratio(original_len as u64, payload as u64);
+        if measured > MAX_RATIO_FIXED {
             return Err("K-BUD-RATIO: >100:1 (zip bomb)");
         }
         Ok(())
