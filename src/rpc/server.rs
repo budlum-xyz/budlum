@@ -92,13 +92,13 @@ impl RpcSecurityConfig {
         // At every server start so an operator cannot accidentally ship
         // An unauthenticated RPC to the public internet.
         tracing::warn!(
-            "[GUVENLIK] Operator RPC auth_required=false - yalnizca localhost/ozel ag icindir."
+            "[SECURITY] Operator RPC auth_required=false - for localhost or a private network only."
         );
         tracing::warn!(
-            "[GUVENLIK] Yonetim metodlari public listener'da reddedilir; operator listener yine hassastir."
+            "[SECURITY] Management methods are rejected on the public listener; the operator listener is still sensitive."
         );
         tracing::warn!(
-            "[GUVENLIK] Yalnizca guvenilir / ozel ag uzerinde calistirin (auth_required=true onerilir)."
+            "[SECURITY] Run only on a trusted or private network (auth_required=true is recommended)."
         );
         Self {
             auth_required: false,
@@ -218,9 +218,10 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
-        // Preflight kimlik doğrulamasından önce yanıtlanır: tarayıcı bu isteğe
-        // `x-api-key` koyamaz, 401 dönersek asıl istek hiç gönderilmez. Durum
-        // değiştiren bir yol değildir; IP ve köken denetimi zaten geçilmiştir.
+        // Preflight is answered before authentication: a browser cannot put
+        // `x-api-key` on this request, so a 401 here means the real request is
+        // never sent. It changes no state, and the IP and origin checks have
+        // already run.
         if let CorsOutcome::Allow(ref origin) = cors {
             if is_cors_preflight(&req) {
                 let origin = origin.clone();
@@ -261,8 +262,9 @@ where
         let mut inner = self.inner.clone();
         Box::pin(async move {
             let mut result = inner.call(req).await;
-            // Başarılı yanıt da başlık almazsa tarayıcı gövdeyi JavaScript'e
-            // teslim etmez; izin kararı ancak yanıtta görünürse işe yarar.
+            // Without the headers a browser withholds even a successful body
+            // from JavaScript; the allow decision only counts if it is visible
+            // on the response.
             if let (Ok(ref mut response), CorsOutcome::Allow(ref origin)) = (&mut result, &cors) {
                 apply_cors_headers(response, origin);
             }
@@ -671,11 +673,11 @@ fn validate_operator_bind_address(
     Ok(())
 }
 
-/// `Benches/micro/timing_safe.rs` regresyon bench'i bu fonksiyona
-/// Erişir; bu yüzden `pub`'tır. Public API yüzeyinin parçası DEĞİLDİR
-/// (`#[doc(hidden)]`); dış kullanıcılar için stabilite garantisi yoktur.
-/// Değiştirilirse timing-safe CI kapısı (statik tarama + dudect-tarzı
-/// Istatistiksel test) yeşil kalmak zorundadır.
+/// The regression bench in `benches/micro/timing_safe.rs` reaches this
+/// function, which is why it is `pub`. It is NOT part of the public API
+/// surface (`#[doc(hidden)]`) and carries no stability guarantee for outside
+/// callers. If it changes, the timing-safe CI gate (static scan plus a
+/// dudect-style statistical test) has to stay green.
 #[doc(hidden)]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
@@ -787,33 +789,33 @@ fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
         .any(|allowed| allowed == "*" || allowed == &ip_str)
 }
 
-/// CORS onçözümü: `cors_origins` yalnızca istek reddetmeye yarıyordu, yanıta
-/// hiçbir `Access-Control-*` başlığı eklenmiyordu. Bir tarayıcı için bu, izin
-/// verilen kökenin de engellenmesi demekti: yanıt 200 dönse bile tarayıcı
-/// başlık yokluğunda JavaScript'e teslim etmez. Ayrıca tarayıcı preflight
-/// (`OPTIONS`) isteğine özel başlık koymaz; `auth_required=true` iken preflight
-/// 401 alıyor ve asıl istek hiç gönderilmiyordu. Yani "cors_origins" adının
-/// vaat ettiği şey kodda yoktu.
+/// How the CORS decision resolves. `cors_origins` used to only reject
+/// requests: no `Access-Control-*` header was ever added to a response. To a
+/// browser that blocked the allowed origin too, because a 200 without the
+/// headers is still withheld from JavaScript. A browser also puts no custom
+/// header on a preflight (`OPTIONS`), so with `auth_required=true` the
+/// preflight took a 401 and the real request was never sent. What the name
+/// `cors_origins` promised had no counterpart in the code.
 ///
-/// Karar: CORS **açık izinle** çalışır. `cors_origins` boşsa hiçbir CORS başlığı
-/// yayılmaz (tarayıcı erişimi kapalı); doluysa yalnızca eşleşen köken yansıtılır.
-/// `Access-Control-Allow-Credentials` hiçbir zaman gönderilmez: kimlik
-/// `x-api-key` / `Authorization` başlığıyla taşınır, çerezle değil, böylece
-/// `*` yapılandırması oturum çalmaya dönüşemez.
+/// The decision: CORS works by explicit allow. An empty `cors_origins` emits
+/// no CORS header at all (browser access is closed); a populated one reflects
+/// only a matching origin. `Access-Control-Allow-Credentials` is never sent:
+/// identity travels in the `x-api-key` / `Authorization` header, not in a
+/// cookie, so a `*` configuration cannot turn into session theft.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CorsOutcome {
-    /// CORS kapalı ya da istek tarayıcıdan gelmiyor; başlık eklenmez.
+    /// CORS is off, or the request is not from a browser; no header is added.
     NotApplicable,
-    /// Köken izinli; yanıta başlıklar eklenir.
+    /// The origin is allowed; the headers go on the response.
     Allow(String),
-    /// Köken izinli değil; istek reddedilir.
+    /// The origin is not allowed; the request is rejected.
     Deny,
 }
 
-/// Preflight, asıl isteğin taşıyacağı kimlik başlıklarını taşıyamaz; bu yüzden
-/// kimlik doğrulamasından önce yanıtlanır. Güvenli olmasının sebebi
-/// preflight'ın durum değiştirmemesi: yalnızca "bu köken deneyebilir mi"
-/// sorusuna cevap verir, IP izin listesi ve köken denetimi önce koşar.
+/// A preflight cannot carry the identity headers the real request will carry,
+/// which is why it is answered before authentication. That is safe because a
+/// preflight changes no state: it answers only "may this origin try", and the
+/// IP allowlist and origin check run first.
 fn is_cors_preflight<B>(req: &HttpRequest<B>) -> bool {
     req.method() == hyper::Method::OPTIONS
         && req.headers().contains_key("access-control-request-method")
@@ -841,8 +843,8 @@ pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) 
     }
 }
 
-/// `Vary: Origin` şart: yanıt kökene göre değişiyor, aradaki bir önbellek
-/// bir kökene üretilmiş yanıtı başkasına servis etmemeli.
+/// `Vary: Origin` is required: the response varies by origin, and a cache in
+/// between must not serve one origin's response to another.
 fn apply_cors_headers(response: &mut HttpResponse, origin: &str) {
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(origin) {
@@ -2217,7 +2219,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // + opener zorunlu ve non-zero olmalı
+        // + the opener is required and must be non-zero
         let opener = request
             .opener
             .ok_or_else(|| ErrorObjectOwned::owned(-32602, "opener is required", None::<()>))?;
@@ -2981,8 +2983,8 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let authorization_id = parse_pollen_asset_id(&authorization_id)?;
         let payment_commitment = parse_hex32_field(&payment_commitment, "paymentCommitment")?;
-        // Güvenlik denetimi (HIGH): buyer imzasi zorunlu - satin alma
-        // parametrelerinin tamamina baglanmis ed25519 imzasi.
+        // Security check (HIGH): the buyer signature is required - an ed25519
+        // signature bound to every parameter of the purchase.
         let clean_sig = buyer_signature
             .strip_prefix("0x")
             .unwrap_or(&buyer_signature);
@@ -3206,14 +3208,14 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
-        // Güvenlik denetimi (HIGH): Pollen korumali icerik, AccessGrant
-        // olmadan bu RPC uzerinden cekilememeli. storage_get_manifest ve
-        // storage_get_deals_* handler'lariyla ayni desen: koruyucu asset
-        // varsa erisim reddedilir.
+        // Security check (HIGH): Pollen-protected content must not be
+        // fetchable over this RPC without an AccessGrant. Same pattern as the
+        // storage_get_manifest and storage_get_deals_* handlers: if a
+        // protecting asset exists, access is refused.
         //
-        // Güvenlik denetimi (HIGH): kontrol yalniz storage_root'a
-        // bakiyordu; content_id-set/storage_root-unset kayitlar guard'i
-        // atliyordu. Manifest kimligi content_id oncelikli birlestirilir.
+        // Security check (HIGH): the check used to look at storage_root only,
+        // so a record with content_id set and storage_root unset skipped the
+        // guard. The manifest identity is now resolved with content_id first.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         let manifest_id = resolved.as_ref().and_then(|r| {
             r.content_id
@@ -3245,9 +3247,9 @@ impl BudlumApiServer for RpcServer {
         name: String,
         format: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Ayni Pollen denetimi. Bir bicim istemek, erisim kurallarini
-        // atlamanin yolu olamaz: korumali icerik hangi bicimde istenirse
-        // istensin korumalidir.
+        // The same Pollen check. Asking for a format cannot be a way around
+        // the access rules: protected content stays protected in whatever
+        // format it is requested.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         let manifest_id = resolved.as_ref().and_then(|r| {
             r.content_id
@@ -3649,7 +3651,7 @@ impl BudlumApiServer for RpcServer {
             _ => {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
-                    "perception parametreleri ya tamamen verilmeli ya hiç verilmemeli",
+                    "perception parameters must be given in full or not at all",
                     None::<()>,
                 ));
             }
@@ -4506,21 +4508,21 @@ impl BudlumApiServer for RpcServer {
     }
 }
 
-/// Kablo uzerindeki bicim dizgisini `RenderFormat`'a cevir.
+/// Turn the on-the-wire format string into a `RenderFormat`.
 ///
 /// Kabul edilenler: `svg`, `png:<kenar>`, `frame:<indeks>`.
 ///
-/// Bilinmeyen bir bicim **reddedilir**, varsayilana dusulmez. Dusmek,
-/// isteyenin sordugundan baska bir nesneyi onun kimligiyle dondurmek olurdu:
-/// bicim taahhudun parcasi, dolayisiyla `png` yazmak isteyip `pngg` yazan
-/// birine SVG vermek yanlis cevaptir.
+/// An unknown format is **rejected**, never defaulted. Falling back would
+/// return a different object under the identity of the one that was asked
+/// for: the format is part of the commitment, so handing SVG to someone who
+/// meant `png` and typed `pngg` is the wrong answer.
 ///
-/// `QrStream` kasten disarida. O bir tasima temsili, bir okuma bicimi degil;
-/// RPC uzerinden istenmesinin anlami yok.
+/// `QrStream` is deliberately absent. It is a transport representation, not a
+/// way of reading; asking for it over RPC would mean nothing.
 ///
 /// # Errors
 ///
-/// Bicim taninmazsa veya sayisal parametre cozulemezse.
+/// When the format is unrecognised, or a numeric parameter cannot be parsed.
 fn parse_render_format(format: &str) -> Result<crate::storage::render::RenderFormat, String> {
     use crate::storage::render::RenderFormat;
     match format.split_once(':') {
@@ -4643,8 +4645,8 @@ mod tests {
             .unwrap()
     }
 
-    /// Izin verilen koken yanitta gorunmeli: taryici, basligi olmayan bir
-    /// yanitin govdesini JavaScript'e teslim etmez.
+    /// An allowed origin has to appear on the response: a browser withholds
+    /// the body of a header-less response from JavaScript.
     #[test]
     fn allowed_origin_is_reflected_into_the_response() {
         let config = cors_config(&["https://budscan.example"]);
@@ -4664,13 +4666,13 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("https://budscan.example")
         );
-        // Onbellek bir kokene uretilmis yaniti baskasina servis etmemeli.
+        // A cache must not serve one origin's response to another.
         assert_eq!(
             response.headers().get("vary").and_then(|v| v.to_str().ok()),
             Some("Origin")
         );
-        // Kimlik baslikla tasinir, cerezle degil: kimlik bilgisi izni
-        // hicbir zaman verilmez, boylece `*` oturum calmaya donusemez.
+        // Identity travels in a header, not a cookie: the credentials grant is
+        // never sent, so a `*` configuration cannot turn into session theft.
         assert!(response
             .headers()
             .get("access-control-allow-credentials")
@@ -4685,8 +4687,8 @@ mod tests {
         assert_eq!(outcome, CorsOutcome::Deny);
         assert!(!matches!(outcome, CorsOutcome::Allow(_)));
 
-        // Reddedilen kokene hicbir baslik sizmamali: 403 govdesi bile
-        // baslikla dondurulurse taryici yaniti okuyabilir hale gelir.
+        // No header may leak to a refused origin: even a 403 body becomes
+        // readable to the browser if it is returned with the headers.
         let response = text_response(StatusCode::FORBIDDEN, "Forbidden");
         assert!(response
             .headers()
@@ -4694,7 +4696,7 @@ mod tests {
             .is_none());
     }
 
-    /// CORS yapilandirilmamissa hicbir baslik yayilmaz - varsayilan kapali.
+    /// With CORS unconfigured no header is emitted - the default is closed.
     #[test]
     fn empty_cors_list_emits_no_headers() {
         let config = RpcSecurityConfig {
@@ -4718,7 +4720,7 @@ mod tests {
             .unwrap();
         assert!(is_cors_preflight(&req));
 
-        // Kimlik basligi yok; yine de izin karari uretilebilmeli.
+        // No identity header, and the allow decision still has to be reachable.
         let config = cors_config(&["https://budscan.example"]);
         assert!(!is_authorized(&config, &req));
 
@@ -4732,7 +4734,7 @@ mod tests {
             Some("content-type, x-api-key, authorization")
         );
 
-        // Sade bir OPTIONS preflight degildir.
+        // A plain OPTIONS is not a preflight.
         *req.method_mut() = hyper::Method::POST;
         assert!(!is_cors_preflight(&req));
     }
@@ -4872,7 +4874,7 @@ mod render_format_tests {
     use super::parse_render_format;
     use crate::storage::render::RenderFormat;
 
-    /// Uc bicim taninir ve parametreleri tasinir.
+    /// Three formats are recognised, and their parameters are carried through.
     #[test]
     fn the_three_read_formats_parse() {
         assert_eq!(parse_render_format("svg"), Ok(RenderFormat::Svg));
@@ -4886,34 +4888,36 @@ mod render_format_tests {
         );
     }
 
-    /// Bilinmeyen bicim reddedilir, varsayilana dusulmez.
+    /// An unknown format is rejected, not defaulted.
     ///
-    /// Dusmek, isteyenin sordugundan baska bir nesneyi onun kimligiyle
-    /// dondurmek olurdu. Bicim taahhudun parcasi (§72): `png` yazmak isteyip
-    /// `pngg` yazan birine SVG vermek yanlis cevaptir, esnek davranis degil.
+    /// Falling back would return a different object under the identity of the
+    /// one that was asked for. The format is part of the commitment
+    /// (section 72): handing SVG to someone who meant `png` and typed `pngg`
+    /// is a wrong answer, not leniency.
     #[test]
     fn an_unknown_format_is_refused_not_defaulted() {
         for bad in ["", "pngg", "webp", "SVG", "svg:1", "png", "frame"] {
             assert!(
                 parse_render_format(bad).is_err(),
-                "'{bad}' bir bicim degil, reddedilmeli"
+                "'{bad}' is not a format and must be rejected"
             );
         }
     }
 
-    /// Sayisal parametre cozulemezse hata, sifir degil.
+    /// An unparsable numeric parameter is an error, not a zero.
     #[test]
     fn a_bad_number_is_an_error() {
         assert!(parse_render_format("png:buyuk").is_err());
         assert!(parse_render_format("png:-1").is_err());
-        // u16 tasmasi da hata: sessizce kirpmak baska bir nesne uretirdi.
+        // A u16 overflow is an error too: clamping quietly would produce a
+        // different object.
         assert!(parse_render_format("png:70000").is_err());
         assert!(parse_render_format("frame:abc").is_err());
     }
 
-    /// `QrStream` RPC uzerinden istenemez.
+    /// `QrStream` cannot be requested over RPC.
     ///
-    /// O bir tasima temsili, bir okuma bicimi degil.
+    /// It is a transport representation, not a way of reading.
     #[test]
     fn the_transport_frame_is_not_a_read_format() {
         assert!(parse_render_format("qrstream:0").is_err());
