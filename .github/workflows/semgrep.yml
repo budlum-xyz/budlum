@@ -1,25 +1,25 @@
-# Semgrep: kural tabanlı SAST taraması.
+# Semgrep: rule-based SAST scanning.
 #
-# CodeQL ile örtüşmez, tamamlar: CodeQL veri-akışı (taint) analizi yapar,
-# Semgrep sözdizimsel desen eşleştirir. p/rust + p/security-audit + p/secrets
-# Kural setleri, CodeQL'in Rust sorgu kütüphanesinin kapsamadığı deseneleri
-# (tehlikeli API çağrıları, sabit kodlanmış kimlik bilgisi kalıpları) yakalar.
+# It does not overlap with CodeQL, it completes it: CodeQL does data-flow (taint)
+# analysis, Semgrep matches syntactic patterns. The p/rust + p/security-audit +
+# p/secrets rule sets catch patterns CodeQL's Rust query library does not cover
+# (dangerous API calls, hardcoded credential shapes).
 #
-# Kapı politikası: bulgu = FAIL. Direktifin standing rule'u gereği "çalışıp
-# Yeşil dönmesi yetmez, merge'ü gerçekten bloke etmelidir", bu yüzden
-# `continue-on-error` KULLANILMAZ. SARIF yine de Security sekmesine yüklenir
-# (`if: always`), böylece FAIL durumunda bulgular UI'da görünür.
+# Gate policy: a finding = FAIL. Per the standing rule, "running and returning
+# green is not enough, it must actually block the merge", so `continue-on-error`
+# is NOT USED. The SARIF is still uploaded to the Security tab (`if: always`),
+# so the findings are visible in the UI even on FAIL.
 #
-# `rust.lang.security.temp-dir.temp-dir` hariç tutulur: xtask/gates'teki
-# self-test kanaryaları geçici ağaçları `temp_dir().join("budlum-gates-
+# `rust.lang.security.temp-dir.temp-dir` is excluded: the self-test canaries in
+# xtask/gates set up temporary trees with `temp_dir().join("budlum-gates-
 # <adi>-<pid>-<nanos>")` ile kurar. Ad pid + nanos ile benzersizdir (shell
-# atalarının `mktemp -d` davranışının aynısı), içerik yalnızca fixture'tır,
-# bir güvenlik işlemi değildir; xtask/gates kasıtlı olarak sıfır bağımlılıkla
-# derlenir (tempfile crate'i bu yüzden kullanılamaz). Kural main'de hiçbir
-# dosyayı tetiklemiyor, yani hariç tutma gerçek kod için kapsam kaybettirmez.
+# of shell `mktemp -d`), the content is only a fixture and not a security
+# operation; xtask/gates is deliberately built with zero dependencies (which is
+# why the tempfile crate cannot be used). The rule triggers on no file in main,
+# so the exclusion loses no coverage for real code.
 #
-# Konteyner imajı sürüm + digest ile pinlidir (Güvenlik Planı §3.1 supply-chain
-# Disiplini; repo genelinde action'lar tam SHA'ya pinlendiği gibi).
+# The container image is pinned by version + digest (Security Plan section 3.1
+# supply-chain discipline; the same way actions are pinned to full SHAs repo-wide).
 
 name: Semgrep
 
@@ -29,7 +29,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 4 * * 1" # haftalık, Pazartesi 04:00 UTC
+    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -48,21 +48,21 @@ jobs:
       contents: read
       security-events: write
     container:
-      # Semgrep/semgrep:1.171.0 - digest pinli (tag mutable, digest değil).
+      # semgrep/semgrep:1.171.0 - digest pinned (a tag is mutable, a digest is not).
       image: semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Sürüm kanıtı
+      - name: Version evidence
         run: semgrep --version
 
-      # Vacuous-gate koruması: repo'da hiç bulgu olmaması ile taramanın hiç
-      # Çalışmaması aynı çıktıyı (0 bulgu) verir. Kanarya, bilerek güvensiz bir
-      # Dosya üretip Semgrep'in onu YAKALADIĞINI kanıtlar; yakalayamazsa kapı
-      # Güvenilmezdir ve job burada kırılır.
-      - name: Kanarya - Semgrep alarmının çalıştığının kanıtı
+      # Vacuous-gate protection: having no findings in the repo and the scan never
+      # running give the same output (0 findings). The canary produces a deliberately
+      # unsafe file and proves Semgrep CATCHES it; if it cannot, the gate is
+      # untrustworthy and the job breaks here.
+      - name: Canary - evidence that the Semgrep alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/semgrep-canary
@@ -71,27 +71,27 @@ jobs:
 
 
           def run(user_input):
-              # Kasıtlı güvensiz: shell=True + kullanıcı girdisi (p/security-audit).
+              # Deliberately unsafe: shell=True + user input (p/security-audit).
               subprocess.run("echo " + user_input, shell=True)
           CANARY
           if semgrep --config=p/security-audit --error --quiet /tmp/semgrep-canary; then
-            echo "HATA: Semgrep kanaryayı yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            echo "ERROR: Semgrep failed to catch the canary -> the scan is untrustworthy (vacuous gate)!"
             exit 1
           fi
-          echo "Kanarya yakalandı → Semgrep alarmı çalışıyor."
+          echo "Canary caught -> the Semgrep alarm works."
 
       # --exclude-rule rust.lang.security.args.args:
-      # Kural argv[0]'in bir guvenlik kararina dayanak yapilmasini hedefler.
+      # The rule targets argv[0] being used as the basis of a security decision.
       # Iki isabet var (src/main.rs, src/bin/budlum-relayer.rs) ve ikisi de
       # Argv[0]'i HIC okumuyor: ayristirma sirasiyla index 1 ve 3'ten basliyor,
-      # Hicbir yetki/kimlik karari bu vektore bagli degil. Satir ici
-      # `nosemgrep` marker'lari eklenmisti ve Semgrep bunlari dogru uyguluyor -
+      # No authorization/identity decision depends on this vector. Inline
+      # `nosemgrep` markers had been added and Semgrep applies them correctly -
       # Ama SARIF'e `suppressions: [{kind: inSource}]` ile YINE yaziyor ve
-      # GitHub bastirilmis sonuclari acik alert olarak listeliyor. Sonuc:
-      # Security sekmesinde kalici iki sahte alert. Kurali tarama duzeyinde
-      # Disarida birakmak SARIF'i temiz tutar; marker'lar kaynakta gerekce
-      # Olarak kaliyor.
-      - name: Semgrep taraması (bulgu = fail)
+      # but GitHub lists suppressed results as open alerts. The result: two
+      # permanent false alerts in the Security tab. Excluding the rule at scan level
+      # keeps the SARIF clean; the markers stay in the source as justification.
+      #
+      - name: Semgrep scan (a finding = fail)
         run: |
           set -euo pipefail
           semgrep scan \
@@ -107,7 +107,7 @@ jobs:
             --exclude=budzero/target \
             .
 
-      - name: SARIF yükle (FAIL olsa da bulgular Security sekmesinde görünsün)
+      - name: Upload SARIF (findings visible in the Security tab even on FAIL)
         if: always()
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:

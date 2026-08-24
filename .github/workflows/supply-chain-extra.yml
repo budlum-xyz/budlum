@@ -11,11 +11,11 @@ on:
   pull_request:
     branches: [ main, fix/architecture-tip-adlari ]
   schedule:
-    # Haftalık hijyen taraması (cargo update etkileri + yeni dep'ler)
+    # Weekly hygiene scan (effects of cargo update + new deps)
     - cron: '17 4 * * 1'
   workflow_dispatch:
 
-# Yalnız okur.
+# Read-only.
 concurrency:
   group: supply-chain-extra-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -25,14 +25,14 @@ permissions:
 
 jobs:
   udeps:
-    name: "Udeps: kullanılmayan bağımlılık kapısı"
+    name: "Udeps: the unused dependency gate"
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # udeps nightly-gerektirir (rustc private API); kurulum + çalıştırma aynı nightly'de.
+      # udeps requires nightly (rustc private API); install + run on the same nightly.
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
@@ -42,9 +42,9 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: cargo-udeps kur (locked; crate.io sürümü log'da kanıtlı)
+      - name: Install cargo-udeps (locked; the crates.io version is evidenced in the log)
         run: cargo +nightly install cargo-udeps --locked
-      - name: Kanarya (vacuous-gate koruması)
+      - name: Canary (vacuous-gate protection)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- udeps --self-test
       # `|| true` used to swallow the tool's exit status entirely, so a
       # cargo-udeps that died at startup produced an empty report and the gate
@@ -52,7 +52,7 @@ jobs:
       # non-zero exit is tolerated only when the tool still emitted a
       # parseable report (udeps exits non-zero *because* it found unused
       # dependencies, which is a finding, not a failure).
-      - name: "Ölçüm + kapı (ratchet: baseline dışı bulgu = FAIL)"
+      - name: "Measurement + gate (ratchet: a finding outside the baseline = FAIL)"
         run: |
           set -euo pipefail
 
@@ -62,7 +62,7 @@ jobs:
           set -e
           cat /tmp/udeps1.txt
           if [ "$status1" -ne 0 ] && ! grep -q '^unused dependencies:' /tmp/udeps1.txt; then
-            echo "cargo-udeps parse edilebilir rapor üretmeden $status1 ile öldü." >&2
+            echo "cargo-udeps died with $status1 without producing a parsable report." >&2
             exit "$status1"
           fi
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- udeps /tmp/udeps1.txt
@@ -75,13 +75,13 @@ jobs:
           set -e
           cat /tmp/udeps2.txt
           if [ "$status2" -ne 0 ] && ! grep -q '^unused dependencies:' /tmp/udeps2.txt; then
-            echo "cargo-udeps (budzero) parse edilebilir rapor üretmeden $status2 ile öldü." >&2
+            echo "cargo-udeps (budzero) died with $status2 without producing a parsable report." >&2
             exit "$status2"
           fi
           cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- udeps /tmp/udeps2.txt
 
   geiger:
-    name: "Geiger: unsafe görünürlük (first-party 0 kanıt katmanı)"
+    name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -97,24 +97,24 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: cargo-geiger kur (locked; crate.io sürümü log'da kanıtlı)
+      - name: Install cargo-geiger (locked; the crates.io version is evidenced in the log)
         run: cargo install cargo-geiger --locked
-      - name: Kanarya (vacuous-gate koruması)
+      - name: Canary (vacuous-gate protection)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- geiger --self-test
-      # `|| true` eskiden HER hatayı yutuyordu: tarama yarıda ölse bile kapı
-      # kırpılmış bir raporu temiz sayıyordu. Bunu kaldırmak doğruydu, ama ilk
-      # düzeltme fazla katıydı - cargo-geiger, tarama başarıyla tamamlansa da
-      # bağımlılıklarda `unsafe` bulduğunda "error: Found N warnings" yazıp
-      # non-zero dönüyor. Üçüncü taraf `unsafe`'i bu kapının konusu değil
-      # (first-party crate'ler zaten `#![forbid(unsafe_code)]`), dolayısıyla o
-      # çıkış kodu bir tarama hatası değil.
+      # `|| true` used to swallow EVERY error: even if the scan died halfway the
+      # gate counted a truncated report as clean. Removing it was right, but the
+      # first fix was too strict - even when the scan completes successfully,
+      # cargo-geiger prints "error: Found N warnings" and returns non-zero when it
+      # finds `unsafe` in dependencies. Third-party `unsafe` is not this gate's
+      # subject (first-party crates already carry `#![forbid(unsafe_code)]`), so that
+      # exit code is not a scan failure.
       #
-      # Ayrım rapordan yapılır: rapor first-party satırı içeriyorsa tarama
-      # tamamlanmıştır ve kararı `budlum-gates geiger` verir; içermiyorsa
-      # tarama gerçekten ölmüştür ve kapı zaten hata döndürür (fp_seen == 0
-      # kolu). Böylece hem `|| true`nun sakladığı durum yakalanıyor hem de
-      # dependency `unsafe`'i yanlışlıkla ölümcül sayılmıyor.
-      - name: Ölçüm + first-party kapısı (budlum + budzero)
+      # The distinction comes from the report: if the report contains a first-party
+      # line the scan completed and `budlum-gates geiger` makes the decision; if it
+      # does not, the scan really died and the gate already returns an error (the
+      # fp_seen == 0 branch). This catches the state `|| true` was hiding without
+      # wrongly treating dependency `unsafe` as fatal.
+      - name: Measurement + the first-party gate (budlum + budzero)
         run: |
           set -euo pipefail
 
@@ -124,23 +124,23 @@ jobs:
           set -e
           cat /tmp/geiger1.txt
           if [ "$status1" -ne 0 ] && ! grep -qE '(budlum-core|bud-[a-z]+) [0-9]' /tmp/geiger1.txt; then
-            echo "cargo-geiger taramayı tamamlamadan $status1 ile öldü:" >&2
-            echo "raporda tek bir first-party satırı yok." >&2
+            echo "cargo-geiger died with $status1 without completing the scan:" >&2
+            echo "there is not a single first-party line in the report." >&2
             exit "$status1"
           fi
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- geiger /tmp/geiger1.txt
 
-          # budzero ayrı bir workspace ve kökü VIRTUAL bir manifest (yalnızca
-          # [workspace], paket yok). cargo-geiger böyle bir kökte çalışmayı
+          # budzero is a separate workspace and its root is a VIRTUAL manifest (only
+          # [workspace], no package). cargo-geiger refuses to run at such a root:
           # reddediyor: "is a virtual manifest, but this command requires
-          # running against an actual package". Yani bu adım bugüne kadar
-          # budzero'nun tek bir crate'ini bile taramamıştı - `|| true`
-          # döneminde bu sessizce geçiyordu, kapı fail-closed olunca ortaya
-          # çıktı.
+          # "running against an actual package". So until now this step had not
+          # scanned a single crate of budzero - during the `|| true` era this passed
+          # silently, and it surfaced once the gate became fail-closed.
           #
-          # Çözüm crate crate taramak. Sekiz üyenin her biri gerçek bir paket;
-          # raporları birleştirilip tek kapıdan geçiriliyor, böylece bir
-          # crate'in taranmadan atlanması da fark edilir.
+          #
+          # The fix is scanning crate by crate. Each of the eight members is a real
+          # package; their reports are merged and passed through a single gate, so a
+          # crate being skipped without being scanned is noticed too.
           cd budzero
           : > /tmp/geiger2.txt
           for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-node bud-cli verifier-registry; do
@@ -153,8 +153,8 @@ jobs:
             set -e
             cat "/tmp/geiger-$crate.txt"
             if [ "$status2" -ne 0 ] && ! grep -qE '(budlum-core|bud-[a-z]+|verifier-registry) [0-9]' "/tmp/geiger-$crate.txt"; then
-              echo "cargo-geiger ($crate) taramayı tamamlamadan $status2 ile öldü:" >&2
-              echo "raporda tek bir first-party satırı yok." >&2
+              echo "cargo-geiger ($crate) died with $status2 without completing the scan:" >&2
+              echo "there is not a single first-party line in the report." >&2
               exit "$status2"
             fi
             cat "/tmp/geiger-$crate.txt" >> /tmp/geiger2.txt
