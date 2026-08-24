@@ -1,32 +1,35 @@
-//! B.U.D. 2.0 - Format Kataloğu (2026-08-16)
+//! B.U.D. 2.0 - the format catalogue, 2026-08-16.
 //!
-//! Kapsam: bilinen tüm içerik formatlarından
-//! bahsediyorum." Bu modül, B.U.D.'un format-FARKINDA iddiasının tek yerden haritası:
-//! algılama (magic/imza) → format → önerilen transform + ölçülmüş oran aralığı.
+//! Scope: every known content format. This module is the single map of B.U.D.'s
+//! format-AWARE claim: detection by magic or signature, then the format, then
+//! the recommended transform together with the measured ratio range.
 //!
-//! 30+ içerik formatı kataloglanır; her biri için:
-//!   - imza (magic baytlar)
-//!   - önerilen boru hattı (B.U.D. transformu veya KF2 dış codec)
-//!   - ölçülmüş/dokümante oran aralığı (dürüst - K19)
+//! More than 30 content formats are catalogued, and for each one:
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//!   - the signature, its magic bytes,
+//!   - the recommended pipeline, either a B.U.D. transform or an external KF2
+//!     codec,
+//!   - the measured or documented ratio range, stated honestly, per K19.
+//!
+//! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
 
 #![forbid(unsafe_code)]
 
-/// Format kaydı: imza + öneri + oran aralığı.
+/// A format record: the signature, the recommendation and the ratio range.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FormatCatalogEntry {
     pub name: &'static str,
     pub signature: &'static [u8],
-    pub pipe: &'static str, // B.U.D. transformu veya KF2 dış codec
-    pub ratio_min: f64,     // ölçülmüş alt sınır (dürüst)
-    pub ratio_max: f64,     // ölçülmüş üst sınır
+    pub pipe: &'static str, // a B.U.D. transform or an external KF2 codec
+    pub ratio_min: f64,     // the measured lower bound, stated honestly
+    pub ratio_max: f64,     // the measured upper bound
     pub lossless: bool,
 }
 
-/// 30+ içerik formatı kataloğu (imza + öneri + dürüst oran aralığı).
+/// The catalogue of more than 30 content formats: the signature, the
+/// recommendation and an honest ratio range.
 pub const CATALOG: &[FormatCatalogEntry] = &[
-    // --- Metin / yapılandırılmış ---
+    // --- Text and structured ---
     FormatCatalogEntry {
         name: "JSON",
         signature: b"{",
@@ -83,7 +86,7 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
         ratio_max: 8.0,
         lossless: true,
     },
-    // --- İkili / kod ---
+    // --- Binary and code ---
     FormatCatalogEntry {
         name: "PE-EXE",
         signature: b"MZ",
@@ -140,7 +143,7 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
         ratio_max: 20.0,
         lossless: true,
     },
-    // --- Görüntü ---
+    // --- Images ---
     FormatCatalogEntry {
         name: "JPEG",
         signature: b"\xFF\xD8\xFF",
@@ -197,7 +200,7 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
         ratio_max: 1.0,
         lossless: true,
     },
-    // --- Ses ---
+    // --- Audio ---
     FormatCatalogEntry {
         name: "WAV",
         signature: b"RIFF",
@@ -247,7 +250,7 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
         ratio_max: 206.0,
         lossless: false,
     },
-    // --- Uzman veri ---
+    // --- Specialist data ---
     FormatCatalogEntry {
         name: "FASTQ",
         signature: b"@",
@@ -288,7 +291,7 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
         ratio_max: 1.3,
         lossless: true,
     },
-    // --- Ofis ---
+    // --- Office ---
     FormatCatalogEntry {
         name: "DOCX",
         signature: b"PK\x03\x04",
@@ -307,18 +310,19 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
     },
 ];
 
-/// İmzaya göre format bul (deterministik - ilk eşleşme).
+/// Finds the format by signature; deterministic, taking the first match.
 pub fn catalog_detect(data: &[u8]) -> Option<&'static FormatCatalogEntry> {
     for e in CATALOG {
         if !e.signature.is_empty() && data.starts_with(e.signature) {
             return Some(e);
         }
     }
-    // imzasız formatlar için içerik tahmini
+    // Content-based guessing, for formats without a signature.
     if data.is_empty() {
         return None;
     }
-    // LOG: ilk satır 4 haneli yıl ile başlar (2026-...) VEYA nginx access log deseni
+    // LOG: the first line starts with a four-digit year, such as 2026-, OR it
+    // matches the nginx access log pattern.
     if let Ok(s) = std::str::from_utf8(data) {
         if let Some(fl) = s.lines().next() {
             let fl = fl.trim_start();
@@ -341,7 +345,7 @@ pub fn catalog_detect(data: &[u8]) -> Option<&'static FormatCatalogEntry> {
                 return by_name("LOG");
             }
         }
-        // CSV: virgül + satır içeren düz metin
+        // CSV: plain text containing commas and line breaks.
         let mut comm = 0u32;
         let mut nl = 0u32;
         for b in data.iter().take(4096) {
@@ -358,12 +362,12 @@ pub fn catalog_detect(data: &[u8]) -> Option<&'static FormatCatalogEntry> {
     None
 }
 
-/// Format adından kayıt bul.
+/// Finds a record by format name.
 pub fn by_name(name: &str) -> Option<&'static FormatCatalogEntry> {
     CATALOG.iter().find(|e| e.name == name)
 }
 
-/// Format sayısı (katalog kapsamı kanıtı).
+/// The number of formats, the evidence of the catalogue's coverage.
 pub fn catalog_size() -> usize {
     CATALOG.len()
 }
@@ -374,8 +378,12 @@ mod tests {
 
     #[test]
     fn catalog_covers_major_formats() {
-        assert!(catalog_size() >= 30, "30+ format: {}", catalog_size());
-        // imza bazlı algılama
+        assert!(
+            catalog_size() >= 30,
+            "more than 30 formats: {}",
+            catalog_size()
+        );
+        // Signature-based detection.
         assert_eq!(catalog_detect(b"{").unwrap().name, "JSON");
         assert_eq!(catalog_detect(b"MZ\x90\x00").unwrap().name, "PE-EXE");
         assert_eq!(catalog_detect(b"\x7FELF\x02").unwrap().name, "ELF");
@@ -388,21 +396,26 @@ mod tests {
             catalog_detect(b"\xB5\x55\x44\xB0\x02\x00").unwrap().name,
             "BUD-v2"
         );
-        // bilinmeyen → None
+        // An unknown input gives None.
         assert!(catalog_detect(&[]).is_none());
     }
 
     #[test]
     fn ratios_are_honest_and_sane() {
-        // K19: tüm oranlar pozitif, üst sınır gerçekçi (zip-bomb iddiası yok)
+        // K19: every ratio is positive and every upper bound is realistic; there
+        // is no zip-bomb claim.
         for e in CATALOG {
-            assert!(e.ratio_min > 0.0, "{} ratio_min pozitif", e.name);
-            assert!(e.ratio_max >= e.ratio_min, "{} aralık tutarlı", e.name);
+            assert!(e.ratio_min > 0.0, "{} has a positive ratio_min", e.name);
+            assert!(
+                e.ratio_max >= e.ratio_min,
+                "{} has a consistent range",
+                e.name
+            );
             if e.ratio_max > 2000.0 {
-                panic!("{} üst sınır gerçekçi değil: {}", e.name, e.ratio_max);
+                panic!("{} has an unrealistic upper bound: {}", e.name, e.ratio_max);
             }
         }
-        // bilinen değerler (kanarya)
+        // Known values, as a canary.
         assert_eq!(by_name("JSON").unwrap().ratio_max, 12.07);
         assert_eq!(by_name("TimeSeries").unwrap().ratio_max, 12.8);
         assert_eq!(by_name("FASTQ").unwrap().ratio_min, 3.0);
@@ -410,23 +423,23 @@ mod tests {
 
     #[test]
     fn content_heuristics_detect_log_csv() {
-        // LOG: yıl başlangıçlı satır
+        // LOG: a line beginning with a year.
         let log =
             b"2026-08-16T10:00:00Z INFO req=1 /a s=200\n2026-08-16T10:01:00Z WARN req=2 /b s=404\n";
         assert_eq!(catalog_detect(log).unwrap().name, "LOG");
-        // CSV: virgül + satır
+        // CSV: commas and line breaks.
         let csv = b"a,b,c\n1,2,3\n4,5,6\n";
         assert_eq!(catalog_detect(csv).unwrap().name, "CSV");
-        // JSON tahminle karışmaz
+        // JSON is not confused with the guesses.
         let json = b"[{\"a\":1}]";
         assert_eq!(catalog_detect(json).unwrap().name, "JSON-array");
-        // bilinmeyen → None
+        // An unknown input gives None.
         assert!(catalog_detect(b"\x00\x01\x02\x03").is_none());
     }
     #[test]
     fn by_name_lookup() {
         assert!(by_name("CSV").is_some());
         assert!(by_name("ZIP").is_some());
-        assert!(by_name("YOK").is_none());
+        assert!(by_name("NOT-A-FORMAT").is_none());
     }
 }
