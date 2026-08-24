@@ -1,32 +1,36 @@
-# Üretime Hazırlık, Soundness ve Güvenlik Sertleştirmesi (Production Hardening & Soundness)
+# Production hardening and soundness
 
-Sanal bir makinenin (VM) yerel test ortamında doğru bytecode çalıştırıp yeşil testler vermesi, onun kriptografik olarak güvenli (sound) bir ZKVM olduğu anlamına gelmez. Klasik yazılım dünyasında "doğru girdi -> doğru çıktı" testi yeterliyken, ZKVM dünyasında çok daha büyük bir tehdit modeliyle karşı karşıyayız: **Kötü Niyetli Kanıtlayıcı (Malicious Prover)**.
+A virtual machine running the right bytecode and giving green tests in a local test environment does not mean it is a cryptographically sound ZKVM. In classical software a "correct input -> correct output" test is enough; in the ZKVM world we face a far larger threat model: the **malicious prover**.
 
-Kötü niyetli bir kanıtlayıcı, sanal makineyi yerel olarak hiç çalıştırmadan, çalıştırma izi (execution trace) matrisindeki sayıları tahrif ederek veya AIR kısıtlamalarındaki (algebraic constraints) boşlukları suistimal ederek geçersiz bir eyaleti (state) veya sahte bir işlemi verifier'a (doğrulayıcı) kanıtlayabilir.
+A malicious prover can, without ever running the virtual machine locally, prove an invalid state or a fake transaction to the verifier by falsifying numbers in the execution trace matrix or by exploiting gaps in the algebraic (AIR) constraints.
 
 > [!IMPORTANT]
-> **Soundness (Doğruluk Güvencesi):** Dürüst olmayan hiçbir kanıtlayıcının, yanlış bir iddia (örneğin sıfırdan token yaratma, başkasının bakiyesini çalma veya geçersiz bytecode yürütme) için verifier'dan onay alacak bir kanıt üretememesi garantisidir.
+> **Soundness:** the guarantee that no dishonest prover can produce a proof that the verifier accepts for a false claim - for example minting tokens from nothing, stealing someone else's balance, or executing invalid bytecode.
 
-Bu bölümde, BudZKVM projesini üretime (production-ready) ve güvenlik denetimine (audit-ready) hazırlarken uyguladığımız sertleştirme ve soundness adımlarını, matematiksel formüllerle ve kod yapılarıyla detaylıca inceleyeceğiz.
+This chapter examines in detail, with the mathematical formulas and code structures, the hardening and soundness steps applied while preparing BudZKVM for production and for a security audit.
 
 ---
 
-## 1. Sanal Makine ve ISA Güvenliği (Determinizm & Semantik)
+## 1. Virtual machine and ISA security (determinism and semantics)
 
-Bir ZKVM'in matematiksel kısıtları, sanal makinenin deterministik semantikleri üzerine kurulur. Eğer VM'de sessizce yutulan hatalar veya tanımsız davranışlar (undefined behaviors) varsa, AIR kuralları bu durumları yakalayamaz.
+A ZKVM's mathematical constraints are built on the virtual machine's deterministic semantics. If the VM has silently swallowed errors or undefined behaviour, the AIR rules cannot catch those situations.
 
-### Vm::run Sessiz Hatalarının Önlenmesi
-İlk tasarımlarda `Vm::run` fonksiyonu yürütme sırasında oluşan hataları (örneğin Out of Gas, geçersiz opcode veya yığın taşması) sessizce yutuyor veya panikliyordu. Üretim ortamında bir akıllı sözleşme (contract) çalıştırılırken hata oluşursa, eyaletin deterministik bir şekilde geriye çekilmesi (rollback) ve bu hatanın kriptografik kanıta (proof receipt) yansıması gerekir.
+### Preventing silent `Vm::run` failures
 
-Bunu sağlamak için VM çekirdeğini şu şekilde güncelledik:
-* `Vm::run` artık geriye `Result<ExecutionReceipt, VmError>` döner.
-* `ExecutionReceipt` yapısı, yürütmenin başarısını (`success`), harcanan gas miktarını (`gas_used`), final PC değerini (`final_pc`), oluşan olayları (`events`) ve eyalet yazma özetini (`state_writes_digest`) net bir şekilde taşır.
-* Hata oluştuğunda (örneğin `VmError::OutOfGas` veya `VmError::AssertionFailed`), eyalet yazmaları geri alınır, ancak harcanan gas ve başarısızlık durumu fişe (receipt) yazılarak determinizm korunur.
+In the first designs `Vm::run` silently swallowed errors that occurred during execution (out of gas, an invalid opcode, a stack overflow) or panicked. In production, when an error occurs while running a contract, the state must roll back deterministically and that failure must be reflected in the cryptographic proof receipt.
 
-### IsaProfile (Production vs Experimental Opcode Politikası)
-Sanal makinelere geliştirme görevsında yeni özellikler (örneğin deneysel kriptografik öncüller veya storage opcodeları) eklenir. Ancak bu deneysel komutlar henüz olgunlaşmamış veya AIR kısıtları tam yazılmamış olabilir. Kötü niyetli bir kanıtlayıcı, AIR kısıtı olmayan deneysel bir komutu kullanarak verifier'ı aldatabilir.
+To achieve this the VM core was updated:
 
-BudZKVM'de bu zafiyeti engellemek için **`IsaProfile`** yapısını kurduk:
+* `Vm::run` now returns `Result<ExecutionReceipt, VmError>`.
+* The `ExecutionReceipt` structure clearly carries the success of the execution (`success`), the gas spent (`gas_used`), the final PC (`final_pc`), the events raised (`events`) and the state write digest (`state_writes_digest`).
+* When an error occurs (for example `VmError::OutOfGas` or `VmError::AssertionFailed`), state writes are rolled back, but the gas spent and the failure status are written into the receipt, so determinism is preserved.
+
+### `IsaProfile` (production vs experimental opcode policy)
+
+New features are added to virtual machines during development - experimental cryptographic primitives, storage opcodes and so on. But those experimental instructions may not be mature yet, or their AIR constraints may not be fully written. A malicious prover could deceive the verifier by using an experimental instruction that has no AIR constraint.
+
+To close this weakness BudZKVM introduces **`IsaProfile`**:
+
 ```rust
 pub enum IsaProfile {
     Production,
@@ -34,105 +38,120 @@ pub enum IsaProfile {
     Testing,
 }
 ```
-* `Instruction::decode` metodu, aktif profile bağlı olarak komut çözer. Eğer profile `Production` ise ve bytecode içinde deneysel bir komut (örneğin `SWrite` veya `SRead` deneysel moddayken) bulunursa, VM çözme (decoding) görevsında hata verir.
-* Derleyici (`bud-compiler`) kod üretirken hedef profili denetler. Üretim profili aktifken kaynak kodda deneysel bir ifade veya komut varsa derleme statik olarak engellenir.
 
-### Goldilocks Field-Native Modüler Bölme
-Klasik bilgisayarlarda bölme işlemi tamsayı bölmesidir (`src1 / src2 = bölüm` ve kalanı atar). Ancak sonlu cisimler (finite fields) üzerinde çalışan ZK-STARK sistemlerinde tamsayı bölmesini AIR kısıtlaması olarak yazmak son derece maliyetlidir (bit decomposition ve range check gerekir).
+* `Instruction::decode` decodes according to the active profile. If the profile is `Production` and the bytecode contains an experimental instruction (for example `SWrite` or `SRead` while they are experimental), the VM errors during decoding.
+* The compiler (`bud-compiler`) checks the target profile while generating code. If the production profile is active and the source contains an experimental expression or instruction, compilation is blocked statically.
 
-BudZKVM, yerel olarak Goldilocks cismi ($p = 2^{64} - 2^{32} + 1$) üzerinde çalıştığı için bölme komutunu (`Div`) field-native modüler bölme haline getirdik:
+### Goldilocks field-native modular division
+
+On classical computers division is integer division (`src1 / src2 = quotient`, remainder discarded). In ZK-STARK systems working over finite fields, writing integer division as an AIR constraint is extremely expensive (it needs bit decomposition and range checks).
+
+Because BudZKVM works natively over the Goldilocks field ($p = 2^{64} - 2^{32} + 1$), the division instruction (`Div`) was made a field-native modular division:
+
 $$\text{dst} = \text{src1} \cdot \text{src2}^{-1} \pmod p$$
-Eğer $\text{src2} = 0$ ise, bu işlem matematiksel olarak tanımsızdır. VM yürütme görevsında $\text{src2} = 0$ durumunda `VmError::DivisionByZero` hatası üreterek durur. AIR tarafında ise bu durum modüler ters eleman kısıtıyla zorunlu kılınır (bkz. Aritmetik Ters Eleman Tanıklığı).
+
+If $\text{src2} = 0$ the operation is mathematically undefined. During execution the VM stops with `VmError::DivisionByZero` when $\text{src2} = 0$. On the AIR side this case is enforced with a modular inverse constraint (see the arithmetic inverse witness below).
 
 ---
 
-## 2. AIR Soundness Eksikliklerinin Kapatılması (Matematiksel Güvenlik)
+## 2. Closing the AIR soundness gaps (mathematical security)
 
-Matematiksel soundness, trace matrisinin her bir satırı ve sütunu arasındaki ilişkilerin hiçbir açık kapı bırakmayacak şekilde AIR (Algebraic Intermediate Representation) denklemleriyle kilitlenmesini gerektirir.
+Mathematical soundness requires that the relations between every row and column of the trace matrix be locked down by AIR (algebraic intermediate representation) equations leaving no open door.
 
-### R0 Register Soundness Açığı ve Çözümü
-BudZKVM'de `R0` yazmacı (register) donanımsal olarak her zaman sıfır (`0`) değerine sabitlenmiştir. Ancak ilk trace nesil kodlarında stack işlemleri (`Push`, `Call`, `Ret`) arka planda çalışırken `dst_idx = 0` değerini alıyor ve bu satırlarda `dst_val` (ve dolayısıyla `COL_RD_VAL_NEW`) hücresine sıfır dışı değerler yazılabiliyordu.
+### The R0 register soundness gap and its fix
 
-Kötü niyetli bir kanıtlayıcı, bu zafiyeti kullanarak stack adımlarında `R0` hücresine sahte ara değerler enjekte edebilir ve LogUp CTL (Cross-Table Lookup) veriyolunu bozarak registers tablosu ile CPU tablosunu tutarsız hale getirebilirdi.
+In BudZKVM the `R0` register is hardwired to zero. But in the first trace generation code, stack operations (`Push`, `Call`, `Ret`) took `dst_idx = 0` in the background, and non-zero values could be written into the `dst_val` cell (and hence `COL_RD_VAL_NEW`) on those rows.
 
-Bu soundness açığı iki görevlı olarak kapatıldı:
-1. **VM Trace Düzeyi:** `trace_matrix` oluşturulurken, eğer bir adımda hedef yazma yazmacı `0` ise (`dst_idx == 0`), trace hücresindeki `COL_RD_VAL_NEW` değeri kesin olarak `0` değerine zorlanır:
+A malicious prover could exploit this to inject fake intermediate values into the `R0` cell on stack steps and, by corrupting the LogUp CTL (cross-table lookup) bus, make the register table and the CPU table inconsistent.
+
+This soundness gap was closed in two phases:
+
+1. **VM trace level:** while building `trace_matrix`, if the destination register of a step is `0` (`dst_idx == 0`), the `COL_RD_VAL_NEW` value in the trace cell is forced to `0`:
    ```rust
    let dst_val = if dst_idx == 0 { 0 } else { step.dst_val };
    ```
-2. **AIR Düzeyi:** Register LogUp CTL (Cross-Table Lookup) ve AIR kısıtlamalarında, hedef yazmacın `0` olduğu her durumda yazılan değerin `0` olması cebirsel olarak kısıtlandı:
+2. **AIR level:** in the register LogUp CTL and the AIR constraints, whenever the destination register is `0` the written value is algebraically constrained to be `0`:
    ```rust
-   // R0 her zaman sıfırdır kısıtı
+   // The constraint that R0 is always zero
    builder.when(cur[COL_DST_IDX_IS_ZERO].clone()).assert_zero(rd_val_new.clone());
    ```
 
-### Preprocessed Trace ve Padding Soundness (Dolgu Satırı Sızıntısı)
-ZK-STARK sistemlerinde trace matrisinin boyutu $2^N$ olmak zorundadır. Ancak gerçek bir program 5 adımda bitebilir. Bu durumda matrisin geri kalan 11 satırı **Padding (Dolgu)** satırları ile doldurulur.
+### Preprocessed trace and padding soundness (padding-row leakage)
 
-Eğer padding satırları AIR ve CTLlookup denklemlerinden doğru şekilde yalıtılmazsa, kötü niyetli bir kanıtlayıcı dolgu satırlarında hayali program komutları çalıştırarak verifier'ı aldatabilir.
+In ZK-STARK systems the trace matrix size must be $2^N$. But a real program may finish in 5 steps, in which case the remaining 11 rows of the matrix are filled with **padding** rows.
+
+If the padding rows are not properly isolated from the AIR and CTL lookup equations, a malicious prover could execute imaginary program instructions on the padding rows and deceive the verifier.
 
 > [!CAUTION]
-> **Padding Soundness Açığı:** Prover'ın, programın bittiği (HALT) satırlardan sonraki dolgu satırlarını kullanarak LogUp veriyoluna sahte program okuma/yazma (lookup) istekleri ekleyebilmesi ve verifier'ın bunu fark edememesi.
+> **The padding soundness gap:** the prover being able to add fake program read/write (lookup) requests to the LogUp bus using the padding rows after the program has halted, without the verifier noticing.
 
-Bu açığı kapatmak için şu mimariyi entegre ettik:
-1. **CPU Aktiflik Ayrımı (`COL_CPU_ACTIVE`):** Trace matrisine sadece programın gerçek adımlarında `1`, dolgu (padding) adımlarında `0` değerini alan bir aktiflik sütunu eklendi.
-2. **Preprocessed Active Kolonu:** Program bytecode'unun lookup doğrulaması (Program CTL) yapılırken, sadece `COL_CPU_ACTIVE = 1` olan satırlar LogUp kümesine dahil edildi:
+The following architecture was integrated to close this gap:
+
+1. **CPU activity separation (`COL_CPU_ACTIVE`):** an activity column was added to the trace matrix, taking `1` only on the program's real steps and `0` on padding steps.
+2. **Preprocessed active column:** while the program bytecode's lookup verification (program CTL) runs, only rows with `COL_CPU_ACTIVE = 1` join the LogUp set:
    ```rust
-   // Preprocessed aktiflik kolonu ve memory lookup
+   // Preprocessed activity column and memory lookup
    let term = alpha + memory_addr + memory_val;
    s_mem_next = s_mem + is_active * inv(term);
    ```
-
-
-3. **Derece (Degree) Hizalaması:** Prover ve verifier'ın padding kararlarını aynı cömertlikle hesaplaması için trace derecesi formülü senkronize edildi:
+3. **Degree alignment:** so that the prover and the verifier compute padding decisions with the same generosity, the trace degree formula was synchronized:
    $$\text{degree} = (3 \cdot n_{\text{cpu}} + 1).\text{next\_power\_of\_two}().\text{max}(16)$$
 
-### Aritmetik Ters Eleman Tanıklığı (Arithmetic Inverse Witness)
-AIR denklemlerinde `if (x != 0)` koşulunu yazmak doğrudan imkansızdır. Polinomlar sürekli fonksiyonlar olduğundan, sıfır dışılık durumunu kanıtlamak için **Aritmetik Ters Eleman Tanığı (Arithmetic Inverse Witness)** yöntemi kullanılır.
+### Arithmetic inverse witness
 
-Cebirsel kural şudur: Bir $x$ elemanının sıfır olmadığını kanıtlamak için, prover trace içine yardımcı bir $v$ (inverse) sütunu koyar. AIR bu $v$ değerinin gerçekten $x$'in tersi olduğunu ve $x \neq 0$ durumunu şu denklemlerle doğrular:
-1. $$x \cdot (1, x \cdot v) = 0$$
-2. Eğer $x \neq 0$ ise, $x \cdot v = 1$ olmak zorundadır.
+Writing an `if (x != 0)` condition directly in an AIR equation is impossible. Because polynomials are continuous functions, the **arithmetic inverse witness** method is used to prove non-zeroness.
 
-BudZKVM'de bu mekanizma şu işlemler için tam olarak implement edilmiştir:
-* **`Div` (Bölme):** Paydanın sıfır olmadığı kanıtlanır ve tersi ile çarpım doğrulanır.
-* **`Eq` / `Neq` (Eşitlik / Eşitsizlik):** İki değerin farkı $d = A, B$ hesaplanır. Farkın tersi $v = d^{-1}$ tanık olarak trace'e eklenir. Eşitlik durumu bu ters eleman üzerinden doğrulanır.
-* **`Jnz` (Sıfır Değilse Atla):** Koşul yazmacının sıfır dışı olup olmadığı bu ters eleman tanığıyla denetlenerek dallanma doğruluğu kilitlenir.
+The algebraic rule: to prove an element $x$ is not zero, the prover places an auxiliary $v$ (inverse) column in the trace. The AIR verifies that this $v$ really is the inverse of $x$, and hence $x \neq 0$, with these equations:
+
+1. $$x \cdot (1 - x \cdot v) = 0$$
+2. If $x \neq 0$ then $x \cdot v = 1$ must hold.
+
+In BudZKVM this mechanism is fully implemented for:
+
+* **`Div`:** the denominator is proved non-zero and the product with its inverse is verified.
+* **`Eq` / `Neq`:** the difference of the two values $d = A - B$ is computed. Its inverse $v = d^{-1}$ is added to the trace as a witness, and equality is verified through that inverse.
+* **`Jnz`:** whether the condition register is non-zero is checked with this inverse witness, locking branch correctness.
 
 ```rust
-// JNZ Aritmetik Ters Eleman Kısıtı (plonky3_air.rs)
-// Cond * (1 - cond * cond_inv) = 0
+// The JNZ arithmetic inverse constraint (plonky3_air.rs)
+// cond * (1 - cond * cond_inv) = 0
 builder.when(cur[COL_IS_JNZ].clone()).assert_zero(
     cond.clone() * (one.clone() - cond.clone() * cond_inv.clone())
 );
 ```
 
-### Halt ve Padding Geçiş Kısıtları
-Program bir kez `HALT` opcode'una ulaştığında, sanal makinenin durumunun donması (freeze) gerekir. Aksi takdirde, dürüst olmayan bir prover program bittikten sonra PC'yi veya yazmaçları değiştirebilir.
+### Halt and padding transition constraints
 
-Yazılan transition kısıtları ile:
-* `is_halt` aktif olduğunda, sonraki satırdaki `PC` o anki `PC` ile aynı kalmalıdır:
+Once the program reaches the `HALT` opcode the virtual machine's state must freeze. Otherwise a dishonest prover could change the PC or the registers after the program has ended.
+
+The transition constraints written say:
+
+* when `is_halt` is active, the `PC` on the next row must equal the current `PC`:
   $$\text{is\_halt} \cdot (\text{PC}_{\text{next}} - \text{PC}_{\text{current}}) = 0$$
-* Registers ve hafıza üzerindeki tüm eyalet güncellemeleri durdurulur ve dolgu adımları boyunca kilitlenir.
+* all state updates over registers and memory stop and stay locked through the padding steps.
 
-### Gas Tüketim Sınırları ve Taşma Kontrolü
-Gas limitinin aşılması durumunda VM'in durması yetmez; kanıtlayıcının gas limitini aşan bir trace üretmediği AIR düzeyinde doğrulanmalıdır.
-* Her satırdaki gas tüketimi bir önceki satıra göre birikimli olarak artar:
+### Gas consumption bounds and overflow checks
+
+It is not enough for the VM to stop when the gas limit is exceeded; it must be verified at the AIR level that the prover did not produce a trace exceeding the gas limit.
+
+* Gas consumption on each row increases cumulatively over the previous row:
   $$\text{gas\_used}_{\text{next}} - (\text{gas\_used}_{\text{current}} + \text{gas\_cost}_{\text{current}}) = 0$$
-* En son satırda (veya program boyunca her adımda) toplam harcanan gas miktarının, belirlenen limiti aşmadığı inequality range check veya public input sınırları ile zorunlu kılınır:
+* On the last row (or at every step throughout the program) the total gas spent is enforced not to exceed the set limit, via an inequality range check or public input bounds:
   $$\text{gas\_used} \le \text{gas\_limit}$$
 
 ---
 
-## 3. Serileştirme ve Public Input Güvenliği (Serialization & Public Inputs Envelope)
+## 3. Serialization and public input security (the public inputs envelope)
 
-ZK-STARK ispatları üretildikten sonra ağlar (L1/L2 düğümleri) arasında taşınır. Bu taşıma ve doğrulama katmanındaki zafiyetler tüm sistemi çökertebilir.
+Once ZK-STARK proofs are produced they travel between networks (L1/L2 nodes). Weaknesses in this transport and verification layer can bring the whole system down.
 
-### ExecutionPublicInputs ve Keccak256 Bağlamı
-Verifier, ispatı doğrulamak için public input değerlerine ihtiyaç duyar. Eğer bu girdiler prover ile verifier arasında esnek ve korumasız taşınırsa, prover verifier'a gönderdiği public input parametrelerini yolda değiştirebilir.
+### `ExecutionPublicInputs` and the Keccak256 binding
 
-Bu zafiyeti engellemek için **Keccak256 hash bağlamı** kurduk:
-1. `ExecutionPublicInputs` yapısı, yürütme için kritik olan tüm parametreleri canonical byte serileştirmesiyle paketler:
+The verifier needs the public input values to verify a proof. If those inputs travel loosely and unprotected between prover and verifier, the prover can change the public input parameters it sends in flight.
+
+To block this weakness a **Keccak256 hash binding** was set up:
+
+1. The `ExecutionPublicInputs` structure packs every parameter critical to the execution with canonical byte serialization:
    ```rust
    pub struct ExecutionPublicInputs {
        pub program_hash: [u8; 32],
@@ -144,81 +163,95 @@ Bu zafiyeti engellemek için **Keccak256 hash bağlamı** kurduk:
        pub chain_id: u64,
    }
    ```
-2. Bu byte dizisi Keccak256 ile hash'lenir ve elde edilen tek bir `public_input_hash` STARK ispatının transcriptine (Fiat-Shamir seed) eklenir.
-3. Verifier, ispatı doğrulamadan önce kendi elindeki verilerden bu hash'i yeniden hesaplar ve STARK açılışında doğrular. Böylece en ufak bir parametre değişikliği (örneğin chain_id veya gas_used tahrifatı) ispatın geçersiz kılınmasına neden olur.
+2. This byte string is hashed with Keccak256 and the single resulting `public_input_hash` is added to the STARK proof's transcript (the Fiat-Shamir seed).
+3. Before verifying, the verifier recomputes this hash from the data it holds and checks it at the STARK opening. The smallest parameter change (falsifying `chain_id` or `gas_used`, say) therefore invalidates the proof.
 
-### Güvenli ProofEnvelope ve Bincode Bounded Decoding
-Rust ekosistemindeki `bincode 1.3` sürümü, sınırlandırılmamış girdi boyutu çözme (unbounded decoding) işlemlerinde bellek tüketim zafiyetlerine (RustSec zafiyeti) sahiptir. Kötü niyetli bir saldırgan, verifier RPC düğümüne devasa boyutlu geçersiz bir proof byte dizisi göndererek düğümü çökertebilir (Denial of Service, DoS).
+### A safe `ProofEnvelope` and bounded bincode decoding
 
-Bunu engellemek için proof taşıma katmanını **`ProofEnvelope`** ile sarmaladık:
-* `ProofEnvelope` içinde versiyon bilgisi (`version: u32`), kullanılan backend (`backend: String`) ve asıl ispat byte dizisi bulunur.
-* Verifier tarafındaki deserialization (byte çözme) işlemi kesinlikle sınırlandırılmış (bounded) bincode ayarlarıyla çalışır:
+Version `bincode 1.3` in the Rust ecosystem has memory consumption weaknesses (a RustSec advisory) on unbounded decoding. A malicious attacker could crash a verifier RPC node by sending it an enormous invalid proof byte string (denial of service).
+
+To block this the proof transport layer was wrapped in a **`ProofEnvelope`**:
+
+* `ProofEnvelope` carries version information (`version: u32`), the backend used (`backend: String`) and the actual proof byte string.
+* Deserialization on the verifier side strictly runs with bounded bincode settings:
   ```rust
   let reader = bincode::options()
-      .with_limit(10 * 1024 * 1024) // Maksimum 10 MB sınırı
+      .with_limit(10 * 1024 * 1024) // a maximum of 10 MB
       .with_fixint_encoding();
   let envelope: ProofEnvelope = reader.deserialize(bytes)?;
   ```
-Bu basit ama kritik önlem, üretim ortamındaki L1 doğrulama düğümlerini DoS saldırılarına karşı korur.
+
+This simple but critical measure protects production L1 verification nodes against DoS attacks.
 
 ---
 
-## 4. Operasyonel Güvenlik, Eyalet Modeli ve CLI (Operational State & CLI Validation)
+## 4. Operational security, the state model and the CLI
 
-Kod güvenliği sadece matematikle bitmez. CLI arayüzü ve yerel dosya sistemindeki eyalet (state) yönetiminin de operasyonel olarak güvenli olması şarttır.
+Code security does not end with mathematics. The CLI surface and state management on the local filesystem must be operationally safe too.
 
-### StateBackend Commit ve Rollback Mekanizması
-BudZKVM artık bir akıllı sözleşme eyaleti taşımaktadır. İşlem yürütülürken storage güncellemeleri anında diske yazılırsa ve yarı yolda bir `OutOfGas` hatası veya prover doğrulama hatası oluşursa eyalet tutarsız (corrupted) kalır.
+### `StateBackend` commit and rollback
 
-Bunu önlemek için işlemsel (transactional) bir **`StateBackend`** tasarımı uyguladık:
-* `StateBackend` yapısı içindeki güncellemeleri geçici bir günlük (journal/backup) üzerinde biriktirir.
-* Eğer yürütme tamamen başarılı olursa ve üretilen STARK ispatı doğrulanırsa `commit()` çağrılır ve güncellemeler kalıcı eyalete uygulanır.
-* Yürütme sırasında bir hata oluşursa veya üretilen ispat verifier tarafından doğrulanamazsa `rollback()` tetiklenerek eyalet eski tutarlı durumuna anında geri döndürülür.
+BudZKVM now carries contract state. If storage updates were written to disk immediately during execution and an `OutOfGas` error or a prover verification failure happened midway, the state would be left corrupted.
 
-#### Sıkı Kapsülleme ve CLI Entegrasyonu (Encapsulation)
-Operasyonel güvenliği en üst düzeye çıkarmak için, `State` yapısının içindeki `accounts` HashMap'ini kesin olarak **private** hale getirdik. CLI (`bud-cli`) veya herhangi bir harici modül artık doğrudan bu harita üzerinde okuma/yazma gerçekleştiremez.
+To prevent that a transactional **`StateBackend`** design was applied:
 
-Bunun yerine, yürütme boru hattı (`run_pipeline`) tüm eyalet erişimlerini `StateBackend` trait'inin sunduğu güvenli metotlar (`get_account`, `set_account`, `begin_transaction`, `commit`, `rollback`) üzerinden yürütür. Bu sayede:
-1. Yürütme başında bir işlem günlüğü (`begin_transaction`) başlatılır.
-2. İşlem sonucuna göre ya atomik disk yazımı tetiklenir (`commit`) ya da tüm tahrifatlar geri alınır (`rollback`).
-3. State serileştirme işlemleri de `save_to` metodu ile doğrudan `State` yapısı içinden atomik işletim sistemi komutlarıyla yönetilir.
+* `StateBackend` accumulates its updates in a temporary journal/backup.
+* If the execution succeeds completely and the produced STARK proof verifies, `commit()` is called and the updates are applied to the persistent state.
+* If an error occurs during execution, or the produced proof does not verify, `rollback()` is triggered and the state returns immediately to its previous consistent form.
 
-### 64 Derinlikli Sparse Merkle Tree (SMT) Eyalet Kökü
-Erken sürümlerde eyalet kökü (state root), tüm hesapların düz bir Keccak256 hash'iydi. Düz hash modelleri ZK sistemleri için uygun değildir çünkü L1/L2 düğümlerinin kısmi eyalet kanıtlarını (inclusion proofs) doğrulamasına izin vermez.
+#### Strict encapsulation and CLI integration
 
-BudZKVM eyalet kökü altyapısını **64 Derinlikli Sparse Merkle Tree (SMT)** mimarisiyle yeniden inşa ettik:
-* **Anahtarlar (Keys):** Account ID'leri (u64) 256-bit dizisine dönüştürülerek ağaçta yaprak koordinatlarını belirler.
-* **Yapraklar (Leaves):** Her bir aktif hesabın `nonce`, `balance`, `code_hash` dan `storage_root` alanları birleştirilerek hash'lenir (`hash_account`).
-* **Boş Alt Ağaçlar (Sparse Subtrees):** Ağacın çoğunluğu boş hesaplardan oluştuğu için, $O(2^{64})$ işlem maliyetini önleyen önceden hesaplanmış `EMPTY_HASHES` önbelleği kullanılır.
-* **Merkle İspatları (SMT Proofs):** `get_account_proof` metodu ile bir hesabın eyalette var olduğunu (Inclusion Proof) veya olmadığını (Non-membership Proof) kanıtlayan $O(\log n)$ (64 hash boyutu) Merkle ispatları üretilir. `verify_account_proof` fonksiyonu ile de bu kanıtlar saniyeler içinde doğrulanabilir.
+To maximize operational security, the `accounts` HashMap inside the `State` structure was made strictly **private**. The CLI (`bud-cli`) or any external module can no longer read or write that map directly.
 
-### State Root Domain Separation
-Farklı eyalet veya ağ sürümleri arasındaki çakışmaları engellemek için, Keccak256 eyalet kökü hesaplanırken **Domain Separation** (alan ayrımı) ön eki eklenmiştir:
+Instead, the execution pipeline (`run_pipeline`) performs all state access through the safe methods the `StateBackend` trait offers (`get_account`, `set_account`, `begin_transaction`, `commit`, `rollback`). As a result:
+
+1. a transaction journal (`begin_transaction`) is opened at the start of execution,
+2. depending on the outcome, either an atomic disk write is triggered (`commit`) or all changes are undone (`rollback`),
+3. state serialization is also managed from inside the `State` structure with atomic operating-system calls, through the `save_to` method.
+
+### A 64-depth sparse Merkle tree (SMT) state root
+
+In early versions the state root was a flat Keccak256 hash of all accounts. Flat hash models do not suit ZK systems, because they do not let L1/L2 nodes verify partial state (inclusion) proofs.
+
+The BudZKVM state root infrastructure was rebuilt on a **64-depth sparse Merkle tree (SMT)** architecture:
+
+* **Keys:** account IDs (u64) are converted to a 256-bit string that determines the leaf coordinates in the tree.
+* **Leaves:** each active account's `nonce`, `balance`, `code_hash` and `storage_root` fields are concatenated and hashed (`hash_account`).
+* **Sparse subtrees:** because most of the tree consists of empty accounts, a precomputed `EMPTY_HASHES` cache avoids the $O(2^{64})$ cost.
+* **SMT proofs:** the `get_account_proof` method produces $O(\log n)$ (64 hashes) Merkle proofs showing that an account exists in the state (inclusion proof) or does not (non-membership proof). `verify_account_proof` verifies those proofs in seconds.
+
+### State root domain separation
+
+To prevent collisions between different state or network versions, a **domain separation** prefix is added when computing the Keccak256 state root:
+
 ```rust
 let domain_prefix = b"BUDZKVM_STATE_ROOT_V1";
 let mut hasher = Keccak::v256();
 hasher.update(domain_prefix);
 hasher.update(&bytes);
 ```
-Bu ön ek sayesinde, BudZKVM eyalet kökleri diğer Keccak256 hash kullanan sistemlerden kriptografik olarak yalıtılır ve çakışma (collision) saldırıları önlenir.
 
-### CLI Atomik Eyalet Yazımı ve Hizalama Kontrolleri
-* **Atomik Kaydetme (Atomic Rename):** Eyalet dosyası (`state.json`) güncellenirken doğrudan üzerine yazılmaz. Önce geçici bir dosyaya (`state.json.tmp`) yazılır, diske senkronize edilir (`fsync`) ve ardından işletim sistemi düzeyinde atomik olarak asıl dosyanın üzerine taşınır (`rename`). Bu sayede elektrik kesintisi veya ani çökmelerde eyalet dosyası asla bozulmaz.
-* **8-Byte Bytecode Alignment:** CLI üzerinden bytecode okunurken, verilerin 8-byte hizalı (aligned) olup olmadığı ve eksik/artık byte kalıp kalmadığı sıkı şekilde denetlenir. Hizalama dışı bytecode'lar çalıştırılmadan doğrudan reddedilir.
+This prefix cryptographically isolates BudZKVM state roots from other systems using Keccak256 and prevents collision attacks.
+
+### Atomic CLI state writes and alignment checks
+
+* **Atomic rename:** the state file (`state.json`) is not overwritten in place. It is first written to a temporary file (`state.json.tmp`), synchronized to disk (`fsync`), then atomically moved over the real file at the operating-system level (`rename`). The state file is therefore never corrupted by a power cut or a sudden crash.
+* **8-byte bytecode alignment:** when bytecode is read through the CLI, it is strictly checked whether the data is 8-byte aligned and whether any leftover bytes remain. Misaligned bytecode is refused outright rather than executed.
 
 ---
 
-## 5. Güvenlik Test Matrisi ve Negatif Doğrulama (Testing Soundness Negatives)
+## 5. The security test matrix and negative verification
 
-Bir soundness kısıtının gerçekten çalışıp çalışmadığını test etmenin tek yolu, sisteme **geçersiz bir trace** verip verifier'ın bunu reddettiğini görmektir. Buna **Negatif Test** (Negative Testing) denir.
+The only way to test whether a soundness constraint really works is to hand the system an **invalid trace** and see the verifier refuse it. That is **negative testing**.
 
-BudZKVM'de bu amaçla `bud-proof/tests/soundness_negatives.rs` entegrasyon test paketini yazdık.
+For this purpose BudZKVM has the `bud-proof/tests/soundness_negatives.rs` integration test suite.
 
-### PC Tahrifatı Negatif Testi
-Bu testte, geçerli bir programın (`ADD + HALT`) normal sanal makine izini alıyoruz. Ancak bu iz matrisinin içindeki `PC` (Program Counter) kolonundaki değerleri değiştirip sahte bir PC (`999`) enjekte ediyoruz.
+### The PC tampering negative test
+
+This test takes the normal VM trace of a valid program (`ADD + HALT`), then changes the values in the `PC` column of that trace matrix, injecting a fake PC (`999`).
 
 ```rust
-// Soundness_negatives.rs
+// soundness_negatives.rs
 let mut values = vec![Goldilocks::new(0); 16 * TRACE_WIDTH];
 for (i, step) in vm.trace.iter().enumerate() {
     let row_start = i * TRACE_WIDTH;
@@ -228,28 +261,29 @@ for (i, step) in vm.trace.iter().enumerate() {
 }
 ```
 
-Bu tahrif edilmiş matris Plonky3 prover ve verifier hattına sokulduğunda:
-* Verifier, Out-of-Domain (OOD) evaluation adımında, geçiş polinomunun sıfır çıkmadığını (`nxt_pc - cur_next_pc != 0`) fark eder.
-* Kriptografik doğrulama görevsında ispat **`OodEvaluationMismatch`** hatasıyla anında reddedilir.
+When this tampered matrix goes through the Plonky3 prover and verifier:
 
-Bu negatif testlerin yeşil geçmesi (yani ispatın başarısız olması), AIR kısıtlarımızın ve soundness güvenliğimizin üretim ortamında tıkır tıkır çalıştığının en büyük kanıtıdır.
+* at the out-of-domain (OOD) evaluation step the verifier notices that the transition polynomial is not zero (`nxt_pc - cur_next_pc != 0`),
+* the proof is immediately refused during cryptographic verification with an **`OodEvaluationMismatch`** error.
+
+These negative tests passing (that is, the proof failing) is the strongest evidence that our AIR constraints and soundness protections work in production.
 
 ---
 
-## Özet ve Audit Sonrası Kontrol Listesi
+## Summary and post-audit checklist
 
-BudZKVM'i sıfırdan inşa ederken ve üretime hazırlarken uyguladığımız bu adımlar, onu sadece çalışan bir VM olmaktan çıkarıp, finansal düzeyde güvenlik sunan bir ZKVM haline getirmiştir. Bir ZKVM tasarlarken veya incelerken şu checklist her zaman elinizin altında olmalıdır:
+These steps, applied while building BudZKVM from scratch and preparing it for production, turned it from merely a working VM into a ZKVM offering financial-grade security. When designing or reviewing a ZKVM this checklist should always be at hand:
 
-1. **[x] R0 Koruması:** `R0` yazmacına yapılan her türlü yazma işleminin cebirsel olarak `0` değerine zorlandığından emin olun.
-2. **[x] Padding İzolasyonu:** HALT satırlarından sonraki dolgu satırlarının LogUp CTL/lookup terimlerini kirletmediğini aktiflik selectorleri ile doğrulayın.
-3. **[x] Aritmetik Ters Elemanlar:** Sıfır dışılık gerektiren dallanma ve bölme kurallarında ters eleman tanığının ($v$) cebirsel denklemlerle kilitlendiğinden emin olun.
-4. **[x] Public Input Bağlayıcılığı:** Girdilerin Keccak256 hash'inin transcript'e tohum (seed) olarak beslendiğini doğrulayın.
-5. **[x] Deserialization Güvenliği:** Byte çözme işlemlerinde DoS saldırılarını önlemek için boyut sınırları (bounded decoders) uygulayın. (postcard + MAX_PROOF_BYTES)
-6. **[x] Negatif Testler:** Kritik AIR kurallarını tahrif eden negatif testler yazarak verifier'ın bunları reddettiğini kod düzeyinde kanıtlayın. (8 negatif test)
-7. **[x] Comparison Soundness:** 64-bit decomposition + equality prefix flags ile Lt/Gt/Lte/Gte constraint'leri.
-8. **[x] Bitwise Soundness:** Bit decomposition + cebirsel esdegerlik ile And/Or/Xor/Not constraint'leri.
-9. **[x] Hash Soundness:** Poseidon4 (alpha=7, Goldilocks) ile deterministik hash, round 0 S-box AIR dogrulamasi.
-10. **[x] Storage Soundness:** STORAGE_BASE adresleme ile memory LogUp'a dahil edilmis storage consistency.
-11. **[x] Merkle Soundness:** poseidon4_hash tabanli 64-depth Merkle dogrulama, boolean output constraint.
+1. **[x] R0 protection:** make sure every write to the `R0` register is algebraically forced to `0`.
+2. **[x] Padding isolation:** verify with activity selectors that padding rows after HALT do not pollute the LogUp CTL/lookup terms.
+3. **[x] Arithmetic inverses:** make sure the inverse witness ($v$) is locked by algebraic equations on branch and division rules that require non-zeroness.
+4. **[x] Public input binding:** verify that the Keccak256 hash of the inputs is fed to the transcript as a seed.
+5. **[x] Deserialization safety:** apply size bounds (bounded decoders) to prevent DoS attacks during byte decoding (postcard + MAX_PROOF_BYTES).
+6. **[x] Negative tests:** prove at code level that the verifier refuses tampering, by writing negative tests against the critical AIR rules (8 negative tests).
+7. **[x] Comparison soundness:** Lt/Gt/Lte/Gte constraints via 64-bit decomposition + equality prefix flags.
+8. **[x] Bitwise soundness:** And/Or/Xor/Not constraints via bit decomposition + algebraic equivalence.
+9. **[x] Hash soundness:** deterministic hashing with Poseidon4 (alpha=7, Goldilocks), round 0 S-box AIR verification.
+10. **[x] Storage soundness:** storage consistency folded into the memory LogUp through STORAGE_BASE addressing.
+11. **[x] Merkle soundness:** 64-depth Merkle verification on poseidon4_hash, with a boolean output constraint.
 
-> ** Tamamlandi (2026):** Tum checklist maddeleri karsilanmistir. 31 opcode production-ready, 51 test (8 negatif dahil). Detayli dokumantasyon icin [Bolum 9:  Stabilizasyonu](STABILIZATION.md).
+> **Completed (2026):** every checklist item is met. 31 opcodes are production-ready with 51 tests (8 of them negative). For detailed documentation see [Chapter 9: Stabilization](STABILIZATION.md).
