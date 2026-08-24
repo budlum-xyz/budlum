@@ -1,26 +1,26 @@
-# Cargo-vet, tedarik zinciri güven denetimi (ratchet kapısı)
+# cargo-vet, supply-chain trust auditing (a ratchet gate)
 #
-# NEDEN AYRI BİR KAPI: cargo-audit/cargo-deny/OSV "bu bağımlılıkta BİLİNEN bir
-# Açık var mı?" sorusunu yanıtlar, hepsi bir advisory yayınlanmasını bekler.
-# Cargo-vet farklı bir soruyu sorar: "bu kodu hiç kimse okudu mu?" Kaynağı
-# Güvenilir bir denetim kaydına bağlar (Mozilla, Google, Bytecode Alliance,
-# ISRG, Embark, Zcash import'ları). Bir bağımlılık ele geçirilip zararlı sürüm
-# Yayınlandığında advisory günler/aylar sonra çıkar; denetim kaydının yokluğu
-# Ise ilk dakikadan görünür. Bir L1 zincirin kripto/FFI yüzeyi için bu boşluk
-# Kapatılmalı.
+# WHY A SEPARATE GATE: cargo-audit/cargo-deny/OSV answer "does this dependency
+# have a KNOWN vulnerability?", and all of them wait for an advisory to be published.
+# cargo-vet asks a different question: "has anyone read this code?" It ties the
+# source to a trustworthy audit record (Mozilla, Google, Bytecode Alliance, ISRG,
+# Embark, Zcash imports). When a dependency is compromised and a malicious version
+# is published the advisory appears days or months later; the absence of an audit
+# record is visible from the first minute. For an L1 chain's crypto/FFI surface
+# this gap must be closed.
 #
-# ÖNEMLİ, bu "mevcut aracı CI'a bağlamak" değil, ARACI İLK KEZ ÇALIŞTIRMAK:
-# Supply-chain/config.toml depoda duruyordu ama cargo-vet şemasında olmayan
-# Uydurma anahtarlarla yazılmıştı (`audit-compatible-output`,
-# `[default-criteria] safe-to-run`) ve araç parse hatasıyla düşüyordu. Hiçbir
-# Workflow da onu çağırmıyordu. Dosyanın varlığı denetim yapıldığı izlenimi
-# Veriyordu; gerçekte tek bir bağımlılık bile denetlenmemişti.
+# IMPORTANT, this is not "wiring an existing tool into CI", it is RUNNING THE TOOL
+# FOR THE FIRST TIME: supply-chain/config.toml sat in the repository but was
+# written with invented keys absent from the cargo-vet schema
+# (`audit-compatible-output`, `[default-criteria] safe-to-run`) and the tool fell
+# over with a parse error. No workflow called it either. The file's existence gave
+# the impression of auditing; in reality not a single dependency had been audited.
 #
-# KAPI POLİTİKASI, ratchet, tam-yeşil değil: ilk gerçek ölçüm 437 denetimsiz
-# Bağımlılık (~6.7M satır backlog). Gün-1 `cargo vet check` zorunlu kılınsaydı
-# Kapı kalıcı kırmızı kalır ve ilk sıkışmada gevşetilirdi. Repo'nun diğer kapılarında
-# Zaten kullandığı desen uygulanıyor: sayı ARTAMAZ, düşmesi serbesttir.
-# Bugünden sonra denetimsiz yeni bağımlılık eklemek CI'ı kırar.
+# GATE POLICY, a ratchet rather than all-green: the first real measurement was 437
+# unaudited dependencies (~6.7M lines of backlog). Had `cargo vet check` been made
+# mandatory on day 1 the gate would stay permanently red and be loosened at the
+# first squeeze. The pattern the repo's other gates already use applies: the count
+# MUST NOT RISE, lowering it is free. From today on, adding an unaudited new dependency breaks CI.
 
 name: Cargo Vet
 
@@ -30,7 +30,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 5 * * 2" # haftalık: import edilen denetim kaynakları güncellenir
+    - cron: "0 5 * * 2" # weekly: the imported audit sources are refreshed
   workflow_dispatch:
 
 permissions:
@@ -62,29 +62,29 @@ jobs:
         with:
           shared-key: budlum-core
 
-      - name: cargo-vet kur (--locked, sürüm sabit)
+      - name: Install cargo-vet (--locked, fixed version)
         run: |
           set -euo pipefail
           cargo install --locked --version 0.10.2 cargo-vet
           cargo vet --version
 
-      # Vacuous-gate koruması: ratchet sayacı gerçekten cargo-vet çıktısını mı
-      # Okuyor, yoksa her koşuda sessizce 0 mı dönüyor? Kanarya sentetik
-      # Çıktılarla parse'ı doğrular; bozuksa job burada kırılır.
-      - name: Kanarya - ratchet sayacının çalıştığının kanıtı
+      # Vacuous-gate protection: is the ratchet counter really reading cargo-vet
+      # output, or silently returning 0 on every run? The canary verifies the parse
+      # with synthetic outputs; if it is broken the job breaks here.
+      - name: Canary - evidence that the ratchet counter works
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- cargo-vet --self-test
 
-      - name: Ratchet kapısı (denetimsiz bağımlılık sayısı artamaz)
+      - name: The ratchet gate (the unaudited dependency count must not rise)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- cargo-vet
 
-      # Bilgilendirici: denetim borcunu hangi crate'lerin taşıdığını PR
-      # Özetinde görünür kılar, böylece borç eritme hedefli yapılabilir.
-      - name: Denetim borcu özeti (bilgilendirici)
+      # Informational: it makes visible in the PR summary which crates carry the
+      # audit debt, so paying it down can be targeted.
+      - name: Audit debt summary (informational)
         if: always()
         run: |
           {
-            echo "### cargo-vet denetim borcu"
+            echo "### cargo-vet audit debt"
             echo '```'
-            cargo vet suggest 2>/dev/null | tail -40 || echo "(suggest çalıştırılamadı)"
+            cargo vet suggest 2>/dev/null | tail -40 || echo "(suggest could not run)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

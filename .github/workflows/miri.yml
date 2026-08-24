@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main, fix/architecture-tip-adlari]
-  # Haftalık gece koşusu, sürekli UB denetimi
+  # A weekly nightly run, continuous UB inspection
   schedule:
     - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
 
@@ -18,18 +18,18 @@ permissions:
 
 jobs:
   miri-crypto:
-    # CI Genişletme Madde 4: Miri undefined behavior denetimi.
-    # Crypto ve budzero modüllerinde UB arar.
+    # CI Expansion item 4: Miri undefined behavior inspection.
+    # It looks for UB in the crypto and budzero modules.
     #
-    # Sertleştirme (2026-07-21): nightly artık TARİH-PİNLİ
-    # (nightly-2026-07-19). Öncesi "nightly" kayan etiket → Miri revizyon
-    # Değişince aynı commit'in CI sonucu değişebiliyordu (dışsal kırmızı
-    # Riski + reprodüksiyon zafiyeti). Pin kaldırımı/güncellenmesi yalnızca
-    # Commit mesajında gerekçeyle yapılır (MSRV pin disipliniyle aynı ruh).
+    # Hardening (2026-07-21): nightly is now DATE-PINNED (nightly-2026-07-19).
+    # Previously "nightly" was a floating tag, so when the Miri revision changed the
+    # CI result of the same commit could change (external-red risk + reproduction
+    # weakness). Removing or updating the pin is only done with a justification in
+    # the commit message (the same spirit as the MSRV pin discipline).
     # Not: src/ ve budzero'da `#![forbid(unsafe_code)]` + 0 unsafe temiz
-    # Tabanı var; bu kapı bağımlılık zinciri üzerinden yüzeyleşen UB ve
-    # MIR-düzeyi hatalar için erken uyarıdır.
-    name: Miri UB Denetimi (crypto + budzero, nightly-2026-07-19) (Madde 4)
+    # there is a base; this gate is an early warning for UB surfacing through the
+    # dependency chain and for MIR-level errors.
+    name: Miri UB Inspection (crypto + budzero, nightly-2026-07-19) (item 4)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -66,30 +66,30 @@ jobs:
           echo "Miri storage: $(grep -c 'test result: ok' /tmp/miri-storage.txt || echo '0') suites passed"
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
-        continue-on-error: true  # storage sled bağımlılığı Miri ile uyumsuz olabilir
+        continue-on-error: true  # the storage sled dependency may be incompatible with Miri
 
   asan:
     # cargo-careful'in alternatifi. Arac 0.4.7 pinli nightly ile sysroot
     # kuramiyor (std `panic_unwind`'i `dep:` arkasina aldi, arac hala implicit
-    # ozellik olarak istiyor). Nightly'yi araca gore oynatmak, nightly'nin
+    # as a feature). Moving nightly to suit the tool would mean giving up the
     # pinli olma sebebini tersine cevirirdi.
     #
-    # Bu yuzden arac degil, aracin yaptigi is alindi. cargo-careful iki sey
+    # So the tool was not taken, the work the tool does was. cargo-careful does two
     # yapiyor: std'yi debug_assertions ile derliyor ve ek calisma-ani
     # kontrolleri koyduruyor. Ikisi de dogrudan bayraklarla elde edilebilir:
     #
     #   -Zbuild-std                std'yi kaynaktan derle
-    #   -Zsanitizer=address        bellek hatalarini calisma aninda yakala
-    #   -Cdebug-assertions=on      std'nin performans icin kapattigi
-    #                              iddialari geri ac
+    #   -Zsanitizer=address        catch memory errors at run time
+    #   -Cdebug-assertions=on      re-enable the assertions std turns off for
+    #                              performance
     #
-    # Kapsam farki durust olsun: cargo-careful ekstra olarak bazi rustc
-    # kontrollerini aciyor, ASan ise onun gormedigi bellek hatalarini
-    # goruyor. Ikisi tamamen ayni degil, ama bosluk aracin yoklugunda
-    # kapsanmadan kalan seyin buyuk kismini kapsiyor: Miri'nin
+    # Let the coverage difference be honest: cargo-careful additionally enables some
+    # rustc checks, while ASan sees memory errors it does not. The two are not
+    # identical, but the gap covers most of what would otherwise stay uncovered in
+    # the tool's absence: what Miri
     # calistiramadigi FFI ve sistem cagrisi iceren yollar.
     #
-    # BLOKLAR. Kanaryasi var.
+    # BLOCKS. It has a canary.
     name: AddressSanitizer + debug std (careful yerine)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -108,12 +108,12 @@ jobs:
       - name: protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
-      # Kanarya: bilerek serbest birakilmis bellege erisen bir program yazilir
+      # Canary: a program that deliberately accesses freed memory is written and
       # ve ASan'in onu yakalamasi beklenir. Yakalamazsa arac calismiyor
-      # demektir ve temiz kosu bir sey ifade etmez. TSan isinde ayni sey
-      # yillarca eksikti: "hata yok" ile "ikili hic calismadi" ayirt
+      # means the tool is not working and a clean run means nothing. The same thing
+      # was missing for years in the TSan job: "no error" could not be told apart
       # edilemiyordu.
-      - name: ASan kanaryasi (arac gercekten yakaliyor mu)
+      - name: ASan canary (does the tool really catch it)
         run: |
           set -euo pipefail
           mkdir -p /tmp/asan-canary/src
@@ -137,26 +137,26 @@ jobs:
           EOF
           cd /tmp/asan-canary
           export RUSTFLAGS="-Zsanitizer=address"
-          # Ciktiyi ONCE dosyaya al, SONRA ara.
+          # Capture the output into a file FIRST, search SECOND.
           #
           # Ilk yazim `cargo run ... | tee log | grep -q ...` seklindeydi ve
           # `set -euo pipefail` altinda calismadi: program ASan raporuyla
-          # sifirdan farkli cikinca pipefail boru hattini orada oldurdu, grep
-          # hic kosmadi, ve kanarya "yakalayamadi" dedi. ASan aslinda
-          # yakalamisti; logdaki shadow byte dokumu oradaydi. Yani kanarya
-          # araci degil kendi kabuk mantigini olcuyordu.
+          # exited non-zero pipefail killed the pipeline there, grep never ran, and
+          # the canary said "it could not catch it". ASan actually
+          # had caught it; the shadow byte dump was right there in the log. So the canary
+          # was measuring its own shell logic rather than the tool.
           #
-          # `|| true` bilerek: bu komutun BASARISIZ olmasi bekleniyor, cunku
-          # kasitli bir bellek hatasi calistiriyor. Karar asagidaki grep'te
+          # `|| true` is deliberate: this command is EXPECTED TO FAIL, because it
+          # runs an intentional memory error. The decision is made by the grep below.
           # veriliyor ve o blokluyor.
           cargo +nightly-2026-07-19 run -Zbuild-std \
             --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1 || true
           if grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope" \
                /tmp/asan-canary.log; then
-            echo "kanarya OK: ASan bilerek yazilmis bellek hatasini yakaladi."
+            echo "canary OK: ASan caught the deliberately written memory error."
           else
-            echo "KANARYA DUSTU: ASan bir bellek hatasini yakalayamadi, yani bu is" >&2
-            echo "temiz kossa da bir sey kanitlamaz." >&2
+            echo "CANARY FAILED: ASan could not catch a memory error, so even a clean run" >&2
+            echo "of this job proves nothing." >&2
             tail -25 /tmp/asan-canary.log >&2
             exit 1
           fi
