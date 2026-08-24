@@ -1,28 +1,29 @@
-# Sanal Makine İnşası (bud-vm)
+# Building the virtual machine (bud-vm)
 
-Komut setimizi (ISA) tanımladık. Şimdi bu komutları alıp gerçekten çalıştıracak olan "kalbi", yani Sanal Makineyi (VM) inşa edeceğiz. Bu modüle `bud-vm` adını verdik.
+We have defined our instruction set (the ISA). Now we build the "heart" that will actually take those instructions and run them: the virtual machine. This module is called `bud-vm`.
 
-Sıradan bir yazılım geliştiricisi için VM yazmak karmaşık bir `switch-case` döngüsünden ibarettir. Ancak bir **ZKVM** yazdığınızı asla unutmamalısınız. VM'in her adımını öyle bir kaydetmeliyiz ki, daha sonra ZK Prover (Kanıtlayıcı) bu adımları alıp matematiksel denklemlere dökebilsin.
+To an ordinary software developer, writing a VM is a complicated `switch-case` loop. But you must never forget you are writing a **ZKVM**. Every step of the VM must be recorded in such a way that the ZK prover can later take those steps and turn them into mathematical equations.
 
-## VM'in Durumu (State)
+## The VM state
 
-Bir VM'in anlık halini (State) neler oluşturur?
-1. **Program Counter (PC):** Şu an hangi komut satırını çalıştırıyoruz?
-2. **Registers:** R0'dan R31'e kadar register'ların o anki değerleri.
-3. **Stack:** `Call`, `Ret`, `Push`, `Pop` için kullanılan küçük yürütme yığını.
-4. **Memory/Storage:** Uygulamanın geçici memory ve key-value storage alanı.
-5. **Gas Sayaçları:** `gas_used` ve `gas_limit`. Sonsuz döngü ve DoS risklerini kesmek için her instruction maliyetlendirir.
-6. **Execution Trace (Çalıştırma İzi):** Geçmişte yapılan tüm işlemlerin "log" kayıtları (ZKVM'ler için kritik!).
+What makes up the momentary state of a VM?
 
-## Çalıştırma Döngüsü (Fetch-Decode-Execute)
+1. **Program counter (PC):** which instruction line are we running right now?
+2. **Registers:** the current values of the registers R0 through R31.
+3. **Stack:** the small execution stack used by `Call`, `Ret`, `Push`, `Pop`.
+4. **Memory/storage:** the application's transient memory and key-value storage area.
+5. **Gas counters:** `gas_used` and `gas_limit`. Every instruction has a cost, to cut off infinite loops and DoS risks.
+6. **Execution trace:** the "log" records of everything done so far (critical for ZKVMs).
 
-Bir işlemcinin klasik döngüsüdür:
+## The execution loop (fetch-decode-execute)
 
-1. **Fetch (Getir):** `PC` değerinin gösterdiği adresten sıradaki komutu al.
-2. **Decode (Çöz):** Komutun içindeki Opcode, src1, src2, dst ve imm değerlerini ayrıştır.
-3. **Execute (Çalıştır):** Opcode'un gerektirdiği işlemi yap, sonucu `dst` register'ına yaz ve `PC`'yi bir sonraki komuta geçir.
+The classic processor loop:
 
-`bud-vm/src/lib.rs` içindeki `step(program)` fonksiyonu tam olarak bunu yapar. Güncel VM'de ilk kural şudur: Eğer VM zaten halt olmuşsa veya `pc` program dışına çıkmışsa yeni trace satırı üretilmez.
+1. **Fetch:** take the next instruction from the address the `PC` points at.
+2. **Decode:** split out the opcode, src1, src2, dst and imm inside the instruction.
+3. **Execute:** perform the operation the opcode requires, write the result into the `dst` register, and move `PC` to the next instruction.
+
+The `step(program)` function in `bud-vm/src/lib.rs` does exactly this. In the current VM the first rule is: if the VM has already halted or `pc` has run past the program, no new trace row is produced.
 
 ```rust
 pub fn step(&mut self, program: &[u64]) {
@@ -36,7 +37,7 @@ pub fn step(&mut self, program: &[u64]) {
     let inst = Instruction::decode(raw_inst);
     let cur_pc = self.pc;
 
-    // Her instruction gas tüketir.
+    // Every instruction consumes gas.
     self.consume_gas(Self::gas_cost(inst.opcode));
 
     // 2. Decode
@@ -66,10 +67,10 @@ pub fn step(&mut self, program: &[u64]) {
             self.halted = true;
             (0, cur_pc)
         }
-        // Diğer opcode'lar...
+        // Other opcodes...
     };
 
-    // Execution Trace'i kaydet!
+    // Record the execution trace!
     self.trace.push(Step {
         pc: cur_pc,
         instruction: inst,
@@ -86,127 +87,127 @@ pub fn step(&mut self, program: &[u64]) {
 }
 ```
 
-Bu küçük guard, prover açısından çok önemlidir. Program dışına çıkan bir branch ya da jump için sahte bir instruction satırı üretmeyiz; VM deterministik olarak halt eder. Böylece trace uzunluğu ve trace içeriği aynı bytecode için her zaman aynıdır.
+That small guard matters a lot to the prover. We do not produce a fake instruction row for a branch or jump that leaves the program; the VM halts deterministically. The trace length and the trace content are therefore always the same for the same bytecode.
 
-## Gas Metering
+## Gas metering
 
-`Vm::new(memory_size)` varsayılan olarak `1_000_000` gas limiti ile gelir. Test ve L1 entegrasyonları için `Vm::with_gas_limit(memory_size, gas_limit)` kullanılabilir.
+`Vm::new(memory_size)` comes with a default gas limit of `1_000_000`. For tests and L1 integrations `Vm::with_gas_limit(memory_size, gas_limit)` can be used.
 
-Gas maliyetleri bilinçli olarak basit tutulmuştur:
+Gas costs are deliberately kept simple:
 
-* Basit ALU ve branch komutları çoğunlukla `1` gas.
-* `Load`, `Store`, `SRead`, `SWrite` gibi memory/storage işlemleri `3` gas.
-* `Call`, `Ret`, `Push`, `Pop` `2` gas.
-* `Syscall` `5` gas.
-* `Poseidon` ve `VerifyMerkle` `10` gas.
+* simple ALU and branch instructions are mostly `1` gas,
+* memory/storage operations such as `Load`, `Store`, `SRead`, `SWrite` are `3` gas,
+* `Call`, `Ret`, `Push`, `Pop` are `2` gas,
+* `Syscall` is `5` gas,
+* `Poseidon` and `VerifyMerkle` are `10` gas.
 
-Limit aşılırsa VM `Out of gas` hatasıyla durur. Budlum L1 entegrasyonunda bu hata transaction failure'a çevrilir ve sender state'i atomik olarak değişmeden kalır.
+If the limit is exceeded the VM stops with an `Out of gas` error. In the Budlum L1 integration that error becomes a transaction failure and the sender state stays atomically unchanged.
 
- kapsamında gas davranışı testlerle sabitlendi. `Load + Push + Syscall + Halt` gibi küçük programlarda `gas_used` tam beklenen toplam maliyeti verir. Sonsuz döngü örneği olan `Jmp 0` ise limit aşıldığında `Out of gas` ile kesilir.
+Gas behaviour is pinned by tests. On small programs like `Load + Push + Syscall + Halt`, `gas_used` gives exactly the expected total cost. The infinite-loop example `Jmp 0` is cut off with `Out of gas` when the limit is crossed.
 
-## Deterministik Hata ve Kenar Durumu Semantiği
+## Deterministic error and edge case semantics
 
-Bir ZKVM'de "panic attı mı atmadı mı?" gibi davranışların rastlantısal veya Rust build moduna bağlı olması tehlikelidir. Bu yüzden BudVM'de bazı kenar durumlarını açıkça tanımlıyoruz.
+In a ZKVM it is dangerous for behaviour like "did it panic or not" to be incidental or dependent on the Rust build mode. So BudVM defines some edge cases explicitly.
 
-### Program Dışı PC
+### PC past the program
 
-Eğer `pc >= program.len()` ise:
+If `pc >= program.len()`:
 
-* `halted = true` olur.
-* Yeni `Step` satırı eklenmez.
-* Register ve memory değişmez.
+* `halted = true`,
+* no new `Step` row is added,
+* registers and memory do not change.
 
-Bu durum özellikle program dışına sıçrayan `Jmp` ve `Jnz` instruction'ları için önemlidir. Kontrol akışı bir sonraki `step` çağrısında deterministik olarak biter.
+This matters especially for `Jmp` and `Jnz` instructions that jump outside the program. Control flow ends deterministically on the next `step` call.
 
-### Halt Sonrası Step
+### A step after halt
 
-`Halt` instruction'ı execute edildikten sonra:
+After the `Halt` instruction has executed:
 
-* `pc` aynı kalır.
-* Trace'e `Halt` satırı bir kez eklenir.
-* Sonraki `step` çağrıları trace'e yeni satır eklemez.
-* Register ve memory değişmez.
+* `pc` stays the same,
+* one `Halt` row is added to the trace,
+* subsequent `step` calls add no new rows to the trace,
+* registers and memory do not change.
 
-Bu davranış prover tarafındaki `COL_IS_HALT` kısıtlarını güçlendirmek için temel kabulümüzdür.
+This behaviour is our base assumption for strengthening the `COL_IS_HALT` constraints on the prover side.
 
-### Memory Erişimi
+### Memory access
 
-`Load` iki modda çalışır:
+`Load` works in two modes:
 
-* `rs1 == 0` ise `imm` immediate değer olarak `rd` register'ına yazılır.
-* `rs1 != 0` ise `register[rs1] + imm` adresinden 8 byte little-endian word okunur.
+* if `rs1 == 0`, `imm` is written into the `rd` register as an immediate value,
+* if `rs1 != 0`, an 8-byte little-endian word is read from address `register[rs1] + imm`.
 
-Geçersiz memory okuması `0` döndürür. Geçersiz memory yazması no-op olur. Geçersiz kabul edilen durumlar:
+An invalid memory read returns `0`. An invalid memory write is a no-op. The cases considered invalid:
 
-* Negatif adres.
-* `usize` içine sığmayan adres.
-* `addr + 8` taşması.
+* a negative address,
+* an address that does not fit in `usize`,
+* an `addr + 8` overflow,
 * `addr + 8 > memory.len()`.
 
-Bu davranış `Load` ve `Store` için `memory_word_addr` yardımcı fonksiyonu ile merkezileştirilmiştir.
+This behaviour is centralized for `Load` and `Store` in the `memory_word_addr` helper.
 
-### Register Erişimi
+### Register access
 
-Normal `rd`, `rs1` ve `rs2` alanları ISA decode sırasında 5 bit ile maskelenir; bu yüzden `0..32` aralığındadır. Ancak `VerifyMerkle`, path register'ını `imm` üzerinden seçer. `imm` negatifse veya register aralığı dışındaysa path değeri `0` kabul edilir. Bu sayede kötü bytecode doğrudan index panic üretmez.
+The normal `rd`, `rs1` and `rs2` fields are masked to 5 bits during ISA decoding, so they lie in `0..32`. But `VerifyMerkle` selects its path register through `imm`. If `imm` is negative or out of register range the path value is taken as `0`, so bad bytecode does not directly produce an index panic.
 
-### Aritmetik Semantigi
+### Arithmetic semantics
 
-BudVM aritmetigi Goldilocks asal cismi (P = 2^64 - 2^32 + 1) uzerinde calisir:
+BudVM arithmetic runs over the Goldilocks prime field (P = 2^64 - 2^32 + 1):
 
-* `Add`, `Sub`, `Mul`: wrapping u64 aritmetigi. Debug/release farki yok.
-* `Div`: Goldilocks field-native moduler bolme: `rd = rs1 * rs2^{-1} mod P`. Payda sifirsa sonuc 0.
-* `Inv`: Moduler ters: `rd = rs1^{-1} mod P`. Girdi sifirsa sonuc 0.
-* **`Poseidon`**: 4-round Poseidon hash (alpha=7, width=8). Iki register degerini alir, Goldilocks cisminde Poseidon permutasyonu uygular.
-* **`VerifyMerkle`**: 64-depth Merkle proof dogrulama. `rs1` = root, `rs2` = leaf, `imm` = bellek adresi. Bellek layout'u: `[key: u64, 64x sibling: u64]` (520 byte). Her level'de key'in bitine gore `poseidon4_hash` ile hash yonu belirlenir.
-* **`Not`**: Lojik NOT, `rs1 == 0` ise 1, degilse 0 dondurur.
-* **`Eq/Neq`**: Karsilastirma. `Lt/Gt/Lte/Gte`: 64-bit karsilastirma.
-* **`And/Or/Xor`**: Bitwise islemler. `And`: bitwise AND, `Or`: bitwise OR, `Xor`: bitwise XOR.
-* **`SRead/SWrite`**: Storage okuma/yazma. `imm` ile belirtilen slot'a erisir. Bellek uzerinde `STORAGE_BASE + slot` adresinde saklanir (LogUp CTL icin).
+* `Add`, `Sub`, `Mul`: wrapping u64 arithmetic. No debug/release difference.
+* `Div`: Goldilocks field-native modular division, `rd = rs1 * rs2^{-1} mod P`. If the denominator is zero the result is 0.
+* `Inv`: modular inverse, `rd = rs1^{-1} mod P`. If the input is zero the result is 0.
+* **`Poseidon`**: a 4-round Poseidon hash (alpha=7, width=8). It takes two register values and applies the Poseidon permutation over the Goldilocks field.
+* **`VerifyMerkle`**: 64-depth Merkle proof verification. `rs1` = root, `rs2` = leaf, `imm` = the memory address. Memory layout: `[key: u64, 64x sibling: u64]` (520 bytes). At each level the hash direction is chosen by the key's bit, using `poseidon4_hash`.
+* **`Not`**: logical NOT, returns 1 if `rs1 == 0`, otherwise 0.
+* **`Eq/Neq`**: comparisons. `Lt/Gt/Lte/Gte`: 64-bit comparisons.
+* **`And/Or/Xor`**: bitwise operations. `And`: bitwise AND, `Or`: bitwise OR, `Xor`: bitwise XOR.
+* **`SRead/SWrite`**: storage read/write. It accesses the slot named by `imm`. It is stored in memory at address `STORAGE_BASE + slot` (for the LogUp CTL).
 
-## Call Stack ve Stack Opcodes
+## The call stack and stack opcodes
 
-BudZKVM'in ana veri modeli register tabanlıdır, fakat `Call`, `Ret`, `Push`, `Pop` için VM içinde `Vec<u64>` tabanlı bir stack vardır.
+BudZKVM's main data model is register based, but for `Call`, `Ret`, `Push`, `Pop` there is a `Vec<u64>`-based stack inside the VM.
 
-* `Call`: dönüş adresini stack'e koyar.
-* `Ret`: dönüş adresini stack'ten alır.
-* `Push`: `rs1` register değerini stack'e koyar.
-* `Pop`: stack'ten aldığı değeri `rd` register'ına yazar.
+* `Call`: pushes the return address onto the stack.
+* `Ret`: pops the return address from the stack.
+* `Push`: pushes the `rs1` register value onto the stack.
+* `Pop`: writes the value popped from the stack into the `rd` register.
 
-Stack underflow durumları panic ile yakalanır. Bu davranış, proof/backend katmanında başarısız execution olarak ele alınır.
+Stack underflow is caught by a panic. That behaviour is handled as a failed execution in the proof/backend layer.
 
-## Neden Execution Trace (İz) Kaydediyoruz?
+## Why do we record an execution trace?
 
-Klasik bir VM'de `step` işlemini yapıp eski state'i unuturuz. Fakat ZK dünyasında Prover, **her bir clock cycle'da (saat vuruşunda) ne olduğunu bilmek zorundadır.** Prover'ın işi, *"VM gerçekten bu adımları doğru hesapladı mı?"* sorusunu bir STARK devresi üzerinden kanıtlamaktır.
+In a classic VM we do a `step` and forget the old state. But in the ZK world the prover **must know what happened on every clock cycle.** The prover's job is to prove, over a STARK circuit, the question *"did the VM really compute these steps correctly?"*
 
-Bu yüzden VM çalışırken her bir `Step` objesini bir listeye ekleriz. Buna **Execution Trace** denir. Bu liste daha sonra ZK Prover'a gönderilecek ve satır satır, sütun sütun devasa bir matrise (matrix) dönüştürülecektir.
+So while the VM runs we append each `Step` object to a list. That is the **execution trace**. This list will later be sent to the ZK prover and turned, row by row and column by column, into an enormous matrix.
 
-`Step` satırları artık sadece "hangi opcode çalıştı?" bilgisini taşımaz. Her satırda:
+`Step` rows no longer carry only "which opcode ran". Every row holds:
 
-* `pc` ve `next_pc`
-* decode edilmiş instruction
-* `src1_idx`, `src2_idx`, `dst_idx`
-* execute öncesi `src1_val`, `src2_val`
-* instruction sonucu `dst_val`
-* execute sonrası 32 register'lık snapshot
+* `pc` and `next_pc`,
+* the decoded instruction,
+* `src1_idx`, `src2_idx`, `dst_idx`,
+* `src1_val`, `src2_val` before execution,
+* `dst_val`, the instruction's result,
+* a 32-register snapshot after execution.
 
-bulunur. Ayrıntılı trace sözleşmesi için [BudVM Trace Schema](vm_trace_schema.md) dokümanına bakın.
+For the detailed trace contract see the [BudVM trace schema](vm_trace_schema.md).
 
-## Trace Fixture Testleri
+## Trace fixture tests
 
-'de VM trace davranışını fixture testleriyle sabitledik. Bu testler `bud-vm/tests/trace_fixtures.rs` içinde durur ve üç ana akışı kapsar:
+VM trace behaviour is pinned by fixture tests. They live in `bud-vm/tests/trace_fixtures.rs` and cover three main flows:
 
-1. Aritmetik: `Load`, `Add`, `Sub`, `Mul`, `Halt`.
-2. Kontrol akışı: `Jnz`, `Jmp`, program dışına çıkınca deterministik halt.
-3. Memory/storage/event: `Store`, memory `Load`, `SWrite`, `SRead`, `Log`.
+1. arithmetic: `Load`, `Add`, `Sub`, `Mul`, `Halt`,
+2. control flow: `Jnz`, `Jmp`, and a deterministic halt on leaving the program,
+3. memory/storage/event: `Store`, memory `Load`, `SWrite`, `SRead`, `Log`.
 
-Bu testler sadece final register sonucunu kontrol etmez. Her `Step` satırında `pc`, `next_pc`, opcode, operand değerleri ve seçilmiş register snapshot'ları karşılaştırılır. Böylece VM refactor edildiğinde prover'ın beslendiği trace formatı sessizce değişmez.
+These tests do not check only the final register result. On every `Step` row they compare `pc`, `next_pc`, the opcode, the operand values and selected register snapshots. When the VM is refactored, the trace format the prover is fed therefore cannot change silently.
 
-## Storage ve State Root
+## Storage and the state root
 
-Gerçek dünya uygulamalarında (örneğin akıllı sözleşmelerde) sadece register'lar yetmez, key-value bazlı bir "Storage" (depolama) ihtiyacımız vardır.
+In real applications (contracts, for example) registers alone are not enough; we need key-value storage.
 
-`bud-vm` içinde, basit bir `HashMap` kullanmak yerine ZK'da kanıtlanabilir bir veri yapısı kullanmamız gerekir. Bu genellikle bir **Merkle Tree (Merkle Ağacı)** veya **Sparse Merkle Tree (SMT)** olur.
+Inside `bud-vm`, rather than a plain `HashMap`, we need a data structure provable in ZK. That is usually a **Merkle tree** or a **sparse Merkle tree (SMT)**.
 
-Eğer VM `SWrite` (Storage Write) komutunu işletirse, ağaçtaki bir yaprağın değeri güncellenir ve ağacın **Root (Kök)** değeri değişir. Prover, sadece en son Root değerini public input olarak paylaşarak, milyarlarca verilik bir veritabanının bütünlüğünü birkaç byte ile kanıtlamış olur.
+When the VM executes an `SWrite` (storage write), the value of a leaf in the tree is updated and the tree's **root** changes. By publishing only the latest root as a public input, the prover proves the integrity of a database of billions of records with a few bytes.
 
-Sanal makinemiz artık kodu çalıştırıp Execution Trace'i üretebiliyor. Ancak bu Trace'i ZK matematiğine (polinomlara) oturtmak hiç kolay değil. Bir sonraki bölümde bu mimari sorunu nasıl çözeceğimizi ve **ZK Dostu Mimariyi** inceleyeceğiz.
+Our virtual machine can now run code and produce an execution trace. But seating that trace on ZK mathematics (polynomials) is far from easy. The next chapter examines how we solve that architectural problem and what a **ZK-friendly architecture** looks like.

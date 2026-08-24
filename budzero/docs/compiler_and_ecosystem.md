@@ -1,45 +1,47 @@
-# Derleyici ve Ekosistem (bud-compiler & bud-cli)
+# The compiler and the ecosystem (bud-compiler and bud-cli)
 
-Artık elimizde komut setini anlayan (ISA), bu komutları çalıştırıp Execution Trace üreten bir sanal makine (VM) ve bu trace'in doğruluğunu matematiksel olarak kanıtlayan bir ZK Prover (Plonky3) var.
+We now have an instruction set (the ISA), a virtual machine that runs those instructions and produces an execution trace, and a ZK prover (Plonky3) that proves the trace correct mathematically.
 
-Ancak bir sorun var: Hiçbir geliştirici oturup `Instruction { opcode: Add, dst: 1, src1: 2, src2: 3, imm: 0 }` şeklinde elle bytecode yazmak istemez. Geliştiricilerin `let a = b + c;` gibi yüksek seviyeli kodlar yazabilmesi gerekir. İşte bu noktada **Derleyici (Compiler)** devreye girer.
+But there is a problem: no developer wants to sit down and hand-write bytecode as `Instruction { opcode: Add, dst: 1, src1: 2, src2: 3, imm: 0 }`. Developers need to write high-level code such as `let a = b + c;`. That is where the **compiler** comes in.
 
-## Bud Derleyicisi (bud-compiler)
+## The Bud compiler (bud-compiler)
 
-Projemizdeki `bud-compiler` crate'i, Bud adını verdiğimiz yüksek seviyeli veya assembly benzeri basit dili alıp, bizim VM'imizin anladığı bytecode'a çevirir. Bir derleyici yazmak başlı başına bir sanat olsa da, temel adımları şunlardır:
+The `bud-compiler` crate takes the simple high-level or assembly-like language we call Bud and turns it into the bytecode our VM understands. Writing a compiler is an art in itself, but the basic steps are:
 
-1. **Lexer (Sözcük Analizi):** Kaynak kodunu karakter karakter okuyup anlamlı kelimelere (Token'lara) böler. Örneğin `let x = 5;` ifadesi şu tokenlara dönüşür: `[LET, IDENT(x), EQ, NUMBER(5), SEMICOLON]`.
+1. **Lexer:** it reads the source character by character and splits it into meaningful words (tokens). For example `let x = 5;` becomes `[LET, IDENT(x), EQ, NUMBER(5), SEMICOLON]`.
 
    > [!NOTE]
-   > **Yorum Satırı Desteği:** Lexer katmanında tek satırlı (`// ...`) ve çok satırlı blok yorumlar (`/* ... */`) Logos tabanlı kurallarla dinamik olarak taranır ve derleme görevsına girmeden temiz bir şekilde yoksayılır (`logos::skip`).
+   > **Comment support:** at the lexer layer, single-line (`// ...`) and multi-line block comments (`/* ... */`) are scanned dynamically with Logos-based rules and cleanly ignored before compilation (`logos::skip`).
 
-2. **Parser (Sözdizimi Analizi):** Token dizisini alıp bir "Abstract Syntax Tree" (Soyut Sözdizimi Ağacı, AST) oluşturur. Bu ağaç kodun mantıksal yapısını yansıtır.
+2. **Parser:** it takes the token stream and builds an abstract syntax tree (AST). This tree reflects the logical structure of the code.
 
-   #### Operatör Önceliği ve Parantezlerin Çözümü (Operator Precedence)
-   Düz ve recursive-descent parser tasarımlarında en sık yapılan hata aritmetik ifadelerin düz bir sırayla (soldan sağa) çözülmesidir. Örneğin `2 + 3 * 4` ifadesinin sonucu düz bir parser ile `20` çıkarken, matematiksel olarak `14` olması gerekir.
+   #### Operator precedence and parentheses
 
-   Bud derleyicisinde bu sorunu **Operatör Önceliği (Operator Precedence)** katmanlandırmasıyla çözdük:
-   * **`parse_expr`**: Karşılaştırma operatörlerini (`==`, `!=`, `<`, `>`, `<=`, `>=`) çözümler.
-   * **`parse_arith`**: Toplama ve çıkarma işlemlerini (`+`, `-`) çözümler.
-   * **`parse_term`**: Çarpma ve bölme işlemlerini (`*`, `/`) çözümler.
-   * **`parse_primary`**: En yüksek önceliğe sahip olan literal sayıları, hexadecimal sayıları (`0x...`), değişken isimlerini ve **parantez gruplamalarını** (`( ... )`) çözümler.
+   The most common mistake in flat, recursive-descent parser designs is resolving arithmetic expressions in a flat left-to-right order. For example, a flat parser gives `20` for `2 + 3 * 4` when mathematically it must be `14`.
 
-   Bu sayede `(2 + 3) * 4` gibi gruplamalar ve `2 + 3 * 4` gibi öncelikli işlemler matematiksel kurallara tam uyumlu şekilde derlenir.
+   In the Bud compiler this is solved by layering **operator precedence**:
+   * **`parse_expr`**: resolves the comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`).
+   * **`parse_arith`**: resolves addition and subtraction (`+`, `-`).
+   * **`parse_term`**: resolves multiplication and division (`*`, `/`).
+   * **`parse_primary`**: resolves the highest-precedence items - literal numbers, hexadecimal numbers (`0x...`), variable names and **parenthesized groups** (`( ... )`).
 
-   #### Paniksiz Hata Yönetimi (Result-Based Parsing)
-   Erken  derleyici tasarımlarında parser, karşılaştığı herhangi bir sözdizimi hatasında `panic!()` fırlatıyor ve derleyici sınırı `std::panic::catch_unwind` ile bu panikleri yakalıyordu. Bu yaklaşım hem kırılgandır hem de Rust dilinin güvenlik felsefesine aykırıdır.
+   Groupings such as `(2 + 3) * 4` and precedence-bearing expressions such as `2 + 3 * 4` therefore compile in full agreement with the mathematical rules.
 
-   Parser mimarisini tamamen **Result-based** olacak şekilde yeniden tasarladık:
-   * Tüm parse metotları artık `Result<ASTNode, CompileError>` döner.
-   * Hata durumunda derleyici paniklemek yerine `CompileError::ParserError(String)` üreterek hatayı yukarıya (`?` operatörüyle) temiz bir şekilde fırlatır.
-   * Derleyicinin tüm hata fırlatma durumları `test_parser_error_propagation` negatif testleriyle güvence altına alınmıştır.
+   #### Panic-free error handling (result-based parsing)
 
-3. **Semantic Analyzer (Anlamsal Analiz):** Değişkenler tanımlanmış mı? Tipler uyuşuyor mu? Kullanılmayan değişken var mı? gibi mantıksal hataları yakalar.
-4. **Code Generation (Kod Üretimi):** İşte bizim ISA'mız burada devreye girer. AST üzerinde gezilerek (traversal) her bir düğüm için uygun `Instruction` üretilir. Örneğin `x = 5` ifadesi `Load R1, 5` komutuna dönüştürülür.
+   In early compiler designs the parser threw `panic!()` at any syntax error and the compiler boundary caught those panics with `std::panic::catch_unwind`. That approach is both fragile and contrary to Rust's safety philosophy.
 
-### Kontrol Akışı: `while` ve `for`
+   The parser architecture was redesigned to be entirely **result based**:
+   * every parse method now returns `Result<ASTNode, CompileError>`,
+   * on an error the compiler produces `CompileError::ParserError(String)` and propagates it cleanly upward (with the `?` operator) instead of panicking,
+   * all of the compiler's error paths are guarded by the `test_parser_error_propagation` negative tests.
 
-Bud dili artık iki temel döngü formunu destekler:
+3. **Semantic analyzer:** it catches logical errors - are the variables declared? do the types agree? is there an unused variable?
+4. **Code generation:** this is where our ISA comes in. Traversing the AST, an appropriate `Instruction` is produced for each node. For example `x = 5` becomes `Load R1, 5`.
+
+### Control flow: `while` and `for`
+
+The Bud language now supports two basic loop forms:
 
 ```bud
 while (count < 4) {
@@ -51,91 +53,92 @@ for i in 0..5 {
 }
 ```
 
-`while` doğrudan condition + `Jnz` + geri `Jmp` desenine çevrilir. `for i in start..end` ise compiler tarafından şu mantığa indirgenir:
+`while` translates directly into a condition + `Jnz` + backward `Jmp` pattern. `for i in start..end` is reduced by the compiler to this logic:
 
-1. `start` bir loop register'ına yüklenir.
-2. `end` bir kez hesaplanır ve sabit range sınırı olarak tutulur.
-3. Her iterasyonda `loop_reg < end_reg` karşılaştırılır.
-4. Gövde çalıştıktan sonra `loop_reg = loop_reg + 1` yapılır.
+1. `start` is loaded into a loop register.
+2. `end` is computed once and held as the fixed range bound.
+3. On each iteration `loop_reg < end_reg` is compared.
+4. After the body runs, `loop_reg = loop_reg + 1`.
 
-Bu form yarı-açık aralık kullanır: `0..5`, `0,1,2,3,4` değerlerini üretir.
+This form uses a half-open range: `0..5` produces the values `0,1,2,3,4`.
 
-### Register Tahsisi (Register Allocation)
+### Register allocation
 
-Derleyici yazmanın en zor kısımlarından biri Register yönetimidir. Bizim 32 adet register'ımız var. Eğer programda 50 tane değişken varsa ne olacak? Derleyici, artık kullanılmayan değişkenlerin (out of scope) register'larını boşa çıkarmalı ve yeni değişkenlere tahsis etmelidir. Çok karmaşık programlarda register'lar dolarsa değişkenler Memory/Storage'a yazılır (Buna "Spilling" denir).
+One of the hardest parts of writing a compiler is register management. We have 32 registers. What happens if a program has 50 variables? The compiler must free the registers of variables that are out of scope and allocate them to new ones. In very complex programs, when registers fill up, variables are written to memory/storage (this is called spilling).
 
-## CLI ile Sistemi Birleştirme (bud-cli)
+## Tying the system together with the CLI (bud-cli)
 
-Tüm bu modülleri bir araya getiren "orkestra şefi" `bud-cli` isimli komut satırı aracıdır.
+The "conductor" that brings all these modules together is the command-line tool `bud-cli`.
 
-Sistemin tam akışı şu şekilde işler:
-1. Kullanıcı `bud-cli run --program benimkodum.bud` komutunu çalıştırır.
-2. CLI, dosyayı okur ve `bud-compiler`'a gönderir. Derleyici bytecode'u (komut listesini) geri döndürür.
-3. CLI, bu bytecode'u `bud-vm`'e yükler ve VM'i çalıştırır.
-4. VM çalışmasını bitirir ve sonuçlar ile birlikte bir "Execution Trace" (Çalıştırma İzi) üretir.
-5. CLI, bu Trace'i alır ve `bud-proof` modülüne (Plonky3) gönderir.
-6. Plonky3, AIR kısıtlamalarını kontrol eder, matris matematiğini uygular ve bir **ZK Proof (Sıfır Bilgi Kanıtı)** üretir.
-7. İsteğe bağlı olarak bu kanıt, `verify` fonksiyonu kullanılarak çok kısa bir sürede doğrulanır.
+The full flow of the system:
 
-Örnek döngü programı repo kökünde bulunur:
+1. the user runs `bud-cli run --program mycode.bud`,
+2. the CLI reads the file and hands it to `bud-compiler`, which returns the bytecode (the instruction list),
+3. the CLI loads that bytecode into `bud-vm` and runs the VM,
+4. the VM finishes and produces an execution trace along with the results,
+5. the CLI takes that trace and sends it to the `bud-proof` module (Plonky3),
+6. Plonky3 checks the AIR constraints, applies the matrix mathematics and produces a **ZK proof**,
+7. optionally that proof is verified in a very short time with the `verify` function.
+
+A sample loop program sits at the repository root:
 
 ```bash
 nix develop --command cargo run -p bud-cli -- run --program example_loop.bud
 ```
 
-Bu örnek hem `for` hem `while` kullanır. Beklenen event çıktısı `[10, 6]` şeklindedir:
+This example uses both `for` and `while`. The expected event output is `[10, 6]`:
 
 * `for i in 0..5`: `0 + 1 + 2 + 3 + 4 = 10`
 * `while count < 4`: `0 + 1 + 2 + 3 = 6`
 
 ```rust
-// Bud-cli içinden örnek bir akış
-let trace = vm.trace; // VM'in ürettiği loglar
+// A sample flow from inside bud-cli
+let trace = vm.trace; // the logs the VM produced
 let num_steps = trace.len();
 
-// Kanıt üretme (Ağır İşlem)
+// Producing the proof (heavy)
 let proof = Prover::prove(&trace, num_steps);
 println!("Proof generated ({} bytes)", proof.data.len());
 
-// Kanıt doğrulama (Çok Hızlı)
+// Verifying the proof (very fast)
 let ok = Prover::verify(&proof, num_steps);
 println!("Proof valid: {}", ok);
 ```
 
-## Budlum L1 Entegrasyonu
+## Budlum L1 integration
 
-BudZKVM bytecode'u artık Budlum L1 `infra` reposu içinde `TransactionType::ContractCall` olarak çalıştırılabilir. Bu entegrasyonda:
+BudZKVM bytecode can now run inside the Budlum L1 `infra` repository as a `TransactionType::ContractCall`. In this integration:
 
-1. Client BudZKVM bytecode'u little-endian `u64` instruction byte dizisi olarak `tx.data` alanına koyar.
-2. L1 `src/execution/zkvm.rs` bytecode'u decode eder.
-3. VM gas limitiyle çalıştırılır.
-4. `bud-proof` ile proof üretilir ve verify edilir.
-5. Sadece başarılı execution sonrası sender fee ve nonce state'i güncellenir.
+1. the client places the BudZKVM bytecode into the `tx.data` field as a little-endian `u64` instruction byte string,
+2. L1's `src/execution/zkvm.rs` decodes the bytecode,
+3. the VM runs with a gas limit,
+4. a proof is produced with `bud-proof` and verified,
+5. only after a successful execution are the sender's fee and nonce state updated.
 
-Bu sayede CLI'da üretilen bytecode ile L1 transaction payload formatı aynı kalır.
+The bytecode produced in the CLI and the L1 transaction payload format therefore stay the same.
 
-## Sonuç ve Gelecek
+## Conclusion and what comes next
 
-Tebrikler! Sifirdan baslayarak, kendi komut setini tanimlayan, kodu calistiran ve sonucun dogrulugunu kriptografik olarak kanitlayan tam tesekkullu bir ZKVM tasarladiniz.
+Congratulations. Starting from scratch you have designed a full-fledged ZKVM that defines its own instruction set, runs code, and proves the result correct cryptographically.
 
-** Tamamlandi (31/31 opcode production, 51 test, 0 failure):**
-* Tum opcode'larin AIR constraint'leri tamamlandi (Comparison 64-bit decomposition, Bitwise cebirsel esdegerlik, Poseidon4 hash, Storage STORAGE_BASE memory LogUp, VerifyMerkle poseidon4 tabanli).
-* `postcard` serilestirme (bounded, DoS korumali).
-* `RUST_LOG=info` ile tum pipeline'da structured tracing.
-* 8 negatif test (tampered comparison, bitwise, poseidon S-box, storage, PC, public inputs, program, proof bytes).
+**Completed (31/31 opcodes in production, 51 tests, 0 failures):**
+* the AIR constraints of every opcode are done (comparison 64-bit decomposition, bitwise algebraic equivalence, Poseidon4 hash, storage STORAGE_BASE memory LogUp, poseidon4-based VerifyMerkle),
+* `postcard` serialization (bounded, DoS protected),
+* structured tracing across the whole pipeline with `RUST_LOG=info`,
+* 8 negative tests (tampered comparison, bitwise, Poseidon S-box, storage, PC, public inputs, program, proof bytes),
 * CI: fmt + check + clippy + test + docs link check + cargo deny.
 
-**Sırada Ne Var? (: Performans)**
-* Benchmark suite (criterion), proving/verification time olcumleri.
-* Prover paralellestirme optimizasyonu (Rayon).
-* Proof boyut optimizasyonu (FRI parametre tuning).
+**What is next (performance)?**
+* a benchmark suite (criterion), proving/verification time measurements,
+* prover parallelization (Rayon),
+* proof size optimization (FRI parameter tuning).
 
-**Sırada Ne Var? (: Dil ve Compiler)**
-* Struct/Kayit destegi, Mapping (Map<K,V>), Standart kutuphane.
-* Hata mesajlari ve source span iyilestirmesi (miette).
-* Debug modu ve step-by-step interactive debugger.
+**What is next (language and compiler)?**
+* struct/record support, mappings (Map<K,V>), a standard library,
+* better error messages and source spans (miette),
+* a debug mode and a step-by-step interactive debugger.
 
-**Sırada Ne Var? (: ZK Gelistirmeler)**
-* Recursive proof aggregation (coklu transaction -> tek block proof).
-* ZK mode (zero-knowledge), Verifier WASM/ EVM target.
-* Poseidon multi-round tam AIR dogrulamasi.
+**What is next (ZK work)?**
+* recursive proof aggregation (many transactions -> one block proof),
+* ZK mode (zero knowledge), WASM/EVM verifier targets,
+* full multi-round Poseidon AIR verification.

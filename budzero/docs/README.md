@@ -1,46 +1,46 @@
-# Crafting a ZKVM: BudZKVM Rehberi
+# Crafting a ZKVM: the BudZKVM guide
 
-Bu kitap, sıfırdan bir Sanal Makine (VM) ve bu makine üzerinde çalışan programların doğruluğunu kriptografik olarak kanıtlayabilen bir ZKVM (Zero-Knowledge Virtual Machine) tasarlama rehberidir.
+This book is a guide to designing, from scratch, a virtual machine and a ZKVM (zero-knowledge virtual machine) that can cryptographically prove the correctness of the programs running on it.
 
-Bu rehber, popüler "Crafting Interpreters" kitabının felsefesini benimseyerek, konuyu tamamen pratik, koda dayalı ve adım adım bir yaklaşımla ele alır. Örnek uygulama olarak **BudZKVM** projesini inceliyoruz.
+Following the philosophy of "Crafting Interpreters", the guide is entirely practical, code-driven and step by step. The **BudZKVM** project serves as the worked example.
 
-## Bu Kitap Kimler İçin?
-* Kriptografi ve ZK-STARK kavramlarına meraklı geliştiriciler.
-* Kendi sanal makinesini, komut setini (ISA) veya derleyicisini yazmak isteyenler.
-* Plonky3 gibi modern ZK kanıtlayıcı çerçevelerinin (framework) gerçek dünya projelerinde nasıl kullanıldığını görmek isteyenler.
+## Who is this book for?
+* Developers curious about cryptography and ZK-STARK concepts.
+* Anyone who wants to write their own virtual machine, instruction set (ISA) or compiler.
+* Anyone who wants to see how modern ZK proving frameworks such as Plonky3 are used in a real project.
 
-## BudZKVM Mimarisinin Temel Bileşenleri
-BudZKVM, modüler bir yaklaşımla tasarlanmıştır. Kitap boyunca aşağıdaki bileşenleri adım adım inşa edeceğiz:
+## The main components of the BudZKVM architecture
+BudZKVM is designed modularly. Through the book we build these components step by step:
 
-1. **`bud-isa` (Instruction Set Architecture):** VM'in anladığı donanım komutları ve bu komutların bytecode formatında nasıl kodlandığı.
-2. **`bud-vm` (Sanal Makine):** Bytecode'u adım adım çalıştıran (fetch-decode-execute), register ve memory durumunu güncelleyen çekirdek yapı.
-3. **`bud-compiler` (Derleyici):** Yüksek seviyeli BudL dilini, `bud-isa` bytecode'una çeviren derleyici. `while` ve `for i in start..end` döngüleri dahil temel kontrol akışı desteklenir.
-4. **`bud-proof` (ZK Kanıtlayıcı):** Plonky3 tabanlı, VM'in `Execution Trace`'ini (çalıştırma izi) alıp doğru çalıştığına dair kriptografik kanıt (STARK proof) üreten modül.
-5. **`bud-cli` (Komut Satırı):** Tüm bu modülleri bir araya getiren ve kullanıcıya sunan arayüz.
+1. **`bud-isa` (instruction set architecture):** the hardware instructions the VM understands and how they are encoded in bytecode.
+2. **`bud-vm` (the virtual machine):** the core that runs bytecode step by step (fetch-decode-execute) and updates register and memory state.
+3. **`bud-compiler` (the compiler):** it translates the high-level BudL language into `bud-isa` bytecode. Basic control flow is supported, including `while` and `for i in start..end`.
+4. **`bud-proof` (the ZK prover):** a Plonky3-based module that takes the VM's execution trace and produces a cryptographic proof (a STARK proof) that it ran correctly.
+5. **`bud-cli` (the command line):** the interface that brings all these modules together for the user.
 
-## Güncel Durum Notu
+## A note on current status
 
-BudZKVM artık 31 opcode'luk **tamamen production-ready** bir ZKVM'dir. Tüm opcode'ların AIR constraint'leri tamamlanmış, 51 test (36 proof + 6 negatif dahil) başarıyla geçmektedir.  stabilizasyonu tamamlanmıştır.
+BudZKVM is now a **fully production-ready** ZKVM with 31 opcodes. The AIR constraints of every opcode are complete and 51 tests (36 proof tests, 6 of them negative, included) pass. Stabilization is complete.
 
-## İçindekiler
+## Contents
 
-- [Giriş, ZKVM Nedir ve Neden Kendi ZKVM'imizi Yapıyoruz?](giris.md)
-- [Komut Seti Mimarisi ve Bytecode (bud-isa)](isa_ve_bytecode.md)
-- [Sanal Makine İnşası (bud-vm)](virtual_machine.md)
-  - [BudVM Trace Schema v2](vm_trace_schema.md)
-- [ZK Dostu Mimari Tasarımı](zk_friendly_architecture.md)
-- [STARK, AIR ve Plonky3 (bud-proof)](stark_ve_plonky3.md)
-- [Derleyici ve Ekosistem (bud-compiler & bud-cli)](compiler_and_ecosystem.md)
-- [Prover Stabilizasyonu ve Testler](prover_stabilization_and_tests.md)
-- [Üretime Hazırlık, Soundness ve Güvenlik Sertleştirmesi](production_hardening_and_soundness.md)
-- [Gelişmiş Dil Özellikleri ve Bellek Yönetimi](advanced_language_features_and_memory_management.md)
-- [Stabilizasyon Durumu](STABILIZATION.md)
+- [Introduction: what is a ZKVM and why build our own?](introduction.md)
+- [Instruction set architecture and bytecode (bud-isa)](isa_and_bytecode.md)
+- [Building the virtual machine (bud-vm)](virtual_machine.md)
+  - [BudVM trace schema v2](vm_trace_schema.md)
+- [Designing a ZK-friendly architecture](zk_friendly_architecture.md)
+- [STARK, AIR and Plonky3 (bud-proof)](stark_and_plonky3.md)
+- [The compiler and the ecosystem (bud-compiler and bud-cli)](compiler_and_ecosystem.md)
+- [Prover stabilization and tests](prover_stabilization_and_tests.md)
+- [Production hardening and soundness](production_hardening_and_soundness.md)
+- [Advanced language features and memory management](advanced_language_features_and_memory_management.md)
+- [Stabilization status](STABILIZATION.md)
 
-## Geliştirici Dokümantasyonu
+## Developer documentation
 
-- [Development Workflow](development.md)
-- [Adding an Opcode](adding_opcodes.md)
-- [Proof Format Release Checklist](proof_format_release_checklist.md)
+- [Development workflow](development.md)
+- [Adding an opcode](adding_opcodes.md)
+- [Proof format release checklist](proof_format_release_checklist.md)
 
 ---
-> **Not:** Bu rehberdeki kod örnekleri Rust dilinde yazılmıştır. Rust'ın temel bellek güvenliği konseptlerine aşina olmak faydalı olacaktır.
+> **Note:** the code samples in this guide are written in Rust. Familiarity with Rust's basic memory-safety concepts will help.
