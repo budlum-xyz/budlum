@@ -1,15 +1,15 @@
-//! EVM sözleşme denetim çekirdeği - zincir üstü sözleşmelerin risk
-//! sınıflandırması için bağımlılıksız yardımcılar.
+//! The EVM contract audit core: dependency-free helpers for classifying the
+//! risk of on-chain contracts.
 //!
-//! Kapsam: yaygın standart imzaların (ERC-20/ERC-721) fonksiyon ve olay
-//! seçicileri, EIP-1967 proxy yuva adresleri ve ağırlıklı risk skorlaması.
-//! Derin bytecode çözümlemesi (disassembly) bu modülün kapsamı dışındadır;
-//! amaç, bir tarayıcının ABI/yuva düzeyinde hızlı ve deterministik risk
-//! ipuçları üretebilmesidir.
+//! Scope: the function and event selectors of the common standard signatures,
+//! ERC-20 and ERC-721, the EIP-1967 proxy slot addresses, and weighted risk
+//! scoring. Deep bytecode analysis, meaning disassembly, is outside this
+//! module; the aim is for a scanner to be able to produce fast, deterministic
+//! risk hints at the level of the ABI and the storage slots.
 
 use serde::{Deserialize, Serialize};
 
-/// ERC-20 standart fonksiyon seçicileri (imza adları).
+/// The ERC-20 standard function selectors, by signature name.
 pub const ERC20_FUNCS: [&str; 6] = [
     "totalSupply",
     "balanceOf",
@@ -19,10 +19,10 @@ pub const ERC20_FUNCS: [&str; 6] = [
     "transferFrom",
 ];
 
-/// ERC-20 standart olayları.
+/// The ERC-20 standard events.
 pub const ERC20_EVENTS: [&str; 2] = ["Transfer", "Approval"];
 
-/// ERC-721 standart fonksiyon seçicileri.
+/// The ERC-721 standard function selectors.
 pub const ERC721_FUNCS: [&str; 7] = [
     "balanceOf",
     "ownerOf",
@@ -33,20 +33,20 @@ pub const ERC721_FUNCS: [&str; 7] = [
     "transferFrom",
 ];
 
-/// ERC-721 standart olayları.
+/// The ERC-721 standard events.
 pub const ERC721_EVENTS: [&str; 3] = ["Transfer", "Approval", "ApprovalForAll"];
 
-/// EIP-1967 proxy yuvası: `keccak256("eip1967.proxy.implementation") - 1`.
+/// The EIP-1967 proxy slot: `keccak256("eip1967.proxy.implementation") - 1`.
 pub const EIP1967_IMPLEMENTATION_SLOT: &str =
     "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
-/// EIP-1967 admin yuvası: `keccak256("eip1967.proxy.admin") - 1`.
+/// The EIP-1967 admin slot: `keccak256("eip1967.proxy.admin") - 1`.
 pub const EIP1967_ADMIN_SLOT: &str =
     "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
-/// EIP-1967 beacon yuvası: `keccak256("eip1967.proxy.beacon") - 1`.
+/// The EIP-1967 beacon slot: `keccak256("eip1967.proxy.beacon") - 1`.
 pub const EIP1967_BEACON_SLOT: &str =
     "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
 
-/// Yaygın yönetim seçici imzaları (4 bayt, hex).
+/// The common administrative selector signatures, 4 bytes in hex.
 pub const SELECTOR_OWNER: &str = "0x8da5cb5b"; // owner()
 pub const SELECTOR_TRANSFER_OWNERSHIP: &str = "0xf2fde38b"; // transferOwnership(address)
 pub const SELECTOR_RENOUNCE_OWNERSHIP: &str = "0x715018a6"; // renounceOwnership()
@@ -58,7 +58,7 @@ pub const SELECTOR_SET_MINTER: &str = "0xa9070a1c"; // setMinter(address,bool)
 pub const SELECTOR_BURN: &str = "0x42966c5e"; // burn(uint256)
 pub const SELECTOR_TOTAL_SUPPLY: &str = "0x18160ddd"; // totalSupply()
 
-/// Risk düzeyi.
+/// The risk level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RiskLevel {
     Info,
@@ -67,7 +67,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    /// Skor katkısı: Info=80, Warn=50, High=20.
+    /// The score contribution: Info is 80, Warn is 50 and High is 20.
     #[must_use]
     pub fn score(self) -> u8 {
         match self {
@@ -78,7 +78,7 @@ impl RiskLevel {
     }
 }
 
-/// Tek bir risk kalemi.
+/// A single risk item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskItem {
     pub level: RiskLevel,
@@ -87,7 +87,7 @@ pub struct RiskItem {
     pub evidence: String,
 }
 
-/// Risk raporu.
+/// A risk report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskReport {
     pub items: Vec<RiskItem>,
@@ -115,9 +115,9 @@ impl RiskReport {
     }
 }
 
-/// Ağırlıklı skor bileşenleri. Alanlar sözleşme türüne göre ağırlıklandırılır;
-/// yüzdelerin toplamı 100 olmalıdır. Kayan nokta kullanılmaz (konsensüs
-/// dostu determinizm).
+/// The weighted score components. The areas are weighted according to the
+/// contract type, and the percentages must sum to 100. No floating point is
+/// used, which keeps the determinism consensus-friendly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreWeights {
     pub onchain_pct: u16,
@@ -137,9 +137,9 @@ impl Default for ScoreWeights {
     }
 }
 
-/// Bir kalem listesini skorlamak için kullanılan arayüz.
+/// The interface used to score a list of items.
 pub trait Scorable {
-    /// Kalemleri (skor, alan) çiftlerine çevirir.
+    /// Turns the items into `(score, area)` pairs.
     fn items_scored(&self) -> Vec<(u8, String)>;
 }
 
@@ -152,20 +152,22 @@ impl Scorable for RiskReport {
     }
 }
 
-/// Alan bazında birleştirilmiş skor: her alanın en düşük skoru alınır
-/// (en kötümser), sonra alanlar yüzde ağırlıklarıyla toplanır ve 100'e
-/// bölünür. Tüm aritmetik tam sayıdır.
+/// The score combined per area: each area takes its lowest score, which is the
+/// most pessimistic reading, then the areas are summed under their percentage
+/// weights and divided by 100. All of the arithmetic is integer.
 ///
 /// # Errors
 ///
-/// Ağırlıkların toplamı 100 değilse.
+/// If the weights do not sum to 100.
 pub fn weighted_score(report: &RiskReport, weights: ScoreWeights) -> Result<u8, String> {
     let total_w = weights.onchain_pct
         + weights.static_analysis_pct
         + weights.behavior_pct
         + weights.metadata_pct;
     if total_w != 100 {
-        return Err(format!("ağırlıklar toplamı 100 olmalı, {total_w} geldi"));
+        return Err(format!(
+            "the weights must sum to 100, but {total_w} was given"
+        ));
     }
 
     let mut by_area: std::collections::BTreeMap<String, u8> = std::collections::BTreeMap::new();
@@ -189,12 +191,12 @@ pub fn weighted_score(report: &RiskReport, weights: ScoreWeights) -> Result<u8, 
     for (area, score) in by_area {
         acc += u64::from(score) * u64::from(area_weight(&area));
     }
-    // acc max 80*100 = 8000; /100 -> 80; u8'e sığar.
+    // acc is at most 80*100 = 8000, and dividing by 100 gives 80, which fits a u8.
     let score = u8::try_from(acc / 100).unwrap_or(u8::MAX);
     Ok(score)
 }
 
-/// Yüzde puanını etikete çevirir.
+/// Turns a percentage score into a label.
 #[must_use]
 pub fn rating(score: u8) -> &'static str {
     match score {
@@ -227,13 +229,13 @@ mod tests {
     #[test]
     fn score_weights_round_to_expected() {
         let mut report = RiskReport::default();
-        report.push(RiskLevel::High, "onchain", "sahipsiz", "owner=0");
-        report.push(RiskLevel::Warn, "static", "pause yok", "-");
+        report.push(RiskLevel::High, "onchain", "unowned", "owner=0");
+        report.push(RiskLevel::Warn, "static", "no pause", "-");
         let w = ScoreWeights::default();
         let s = weighted_score(&report, w).unwrap();
         // 20*40 + 50*30 = 800 + 1500 = 2300 / 100 = 23
-        // rating esigi: 25 alti "poor"dur; skor hesabi dogrulugu burada
-        // kanitlanir, etiket ayri testte.
+        // The rating threshold: anything below 25 is "poor". The correctness of
+        // the score calculation is proven here, and the label in a separate test.
         assert_eq!(s, 23);
         assert_eq!(rating(s), "poor");
     }
