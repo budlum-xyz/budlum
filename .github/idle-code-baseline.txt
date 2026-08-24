@@ -1459,7 +1459,6 @@ src/domain/storage_deal.rs	fn	get_reallocation_ticket
 src/domain/storage_deal.rs	fn	lifecycle_state
 src/domain/storage_deal.rs	fn	live_shard_count
 src/domain/storage_deal.rs	fn	may_hold_primary
-src/domain/storage_deal.rs	fn	objects_needing_repair
 src/domain/storage_deal.rs	fn	operator_class
 src/domain/storage_deal.rs	fn	permanence_floor
 src/domain/storage_deal.rs	fn	register_manifest_with_source
