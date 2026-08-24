@@ -182,7 +182,7 @@ impl HeaderStore {
     pub fn strength_of<S: FinalitySource>(&self, source: &S, state_root: &str) -> Evidence {
         let Some(header) = self.headers.iter().find(|h| h.state_root == state_root) else {
             return Evidence::new().with(Claim::new(
-                "hafif-istemci",
+                "light-client",
                 Strength::Refused,
                 "state root takip edilen hicbir kesinlesmis baslikta yok",
             ));
@@ -297,7 +297,7 @@ mod tests {
     impl FinalitySource for HonestChain {
         fn finality_of(&self, header: &TrackedHeader) -> Claim {
             Claim::new(
-                "kesinlik",
+                "finality",
                 Strength::RpcClaimOnly,
                 &format!(
                     "epoch {} icin kesinlik bir RPC beyani; yedi DomainFinalityAdapter \
