@@ -1,6 +1,9 @@
-//! Fiyat modeli - 60 ay amorti yöntemi + external_bench (prover)
-//! Fiziksel: 12.5/60=0.20833 + elec 0.02309 + other 0.002 (external bench) = 0.23342
-//! Gereken: EVENODD 1.286 icin 18.76x
+//! The price model - a 60-month amortisation method plus external_bench
+//! (prover).
+//!
+//! Physical: 12.5/60=0.20833 + elec 0.02309 + other 0.002 (external bench) =
+//! 0.23342.
+//! Required: 18.76x for EVENODD 1.286.
 
 #[derive(Debug, Clone)]
 pub struct PriceModel {
@@ -10,7 +13,7 @@ pub struct PriceModel {
     pub pue: f64,
     pub hours_per_month: f64,
     pub elec_usd_per_kwh: f64,
-    pub other_usd: f64, // prover+ag+denetim external_bench
+    pub other_usd: f64, // prover + network + audit, external_bench
 }
 
 #[derive(Debug, Clone)]
@@ -27,7 +30,7 @@ impl Default for PriceModel {
             pue: 1.15,
             hours_per_month: 730.0,
             elec_usd_per_kwh: 0.10,
-            other_usd: 0.002, // external_bench: Plonky3 0.5-2s ~$0.00002, ama 0.002 konservatif
+            other_usd: 0.002, // external_bench: Plonky3 0.5-2s is about $0.00002, but 0.002 is conservative
         }
     }
 }
@@ -75,8 +78,8 @@ impl Expansion {
 mod tests {
     use super::*;
 
-    /// B.U.D. 2.0'in TEK FIYAT tavani: 0.016 $/TB/ay. Sabit olarak yazildi ki
-    /// testler ayni sayiyi tekrarlamak yerine tek yerden okusun.
+    /// The SINGLE PRICE ceiling of B.U.D. 2.0: 0.016 $/TB/month. Written as a
+    /// constant so the tests read one place instead of repeating the number.
     const CEILING: f64 = 0.016;
 
     #[test]
@@ -103,8 +106,9 @@ mod tests {
     #[test]
     fn json_passes_price_with_7plus1_hybrid() {
         let m = PriceModel::default();
-        // JSON 17.19x, 7+1 16.68 gereken => geçer, ama dokuz 4.32 RED
-        // Bu yüzden hibrit: sıcak Düz 7+1, soğuk EVENODD
+        // JSON 17.19x against the 16.68 required by 7+1 => it passes, but
+        // nine at 4.32 is REFUSED. Hence the hybrid: hot uses plain 7+1, cold
+        // uses EVENODD.
         let cost = m.cost_sold(1.143, 17.191).unwrap();
         assert!(cost <= 0.016 + 0.001); // 0.0155
     }
@@ -112,50 +116,48 @@ mod tests {
     fn jpeg_fails_price_even_with_external_bench() {
         let m = PriceModel::default();
         let cost = m.cost_sold(1.286, 2.53).unwrap(); // AVIF 2.53x
-        assert!(cost > 0.016); // 0.118 >0.016 RED, device-only cozum
+        assert!(cost > 0.016); // 0.118 > 0.016 is REFUSED; device-only is the answer
     }
     #[test]
     fn media_device_only_holds() {
-        // Bu test `assert!(0.0 <= 0.016)` idi: iki DERLEME ZAMANI SABİTİNİ
-        // karşılaştırıyordu, modeli hiç çağırmıyordu (clippy
-        // assertions_on_constants). Yani "cihaz-içi içerik tavanı tutar"
-        // iddiası test edilmiş görünüyor ama hiçbir şey doğrulanmıyordu:
-        // fiyat modeli tamamen bozulsa bile bu test yeşil kalırdı.
+        // This test used to be `assert!(0.0 <= 0.016)`: it compared two
+        // COMPILE-TIME CONSTANTS and never called the model at all (clippy
+        // assertions_on_constants). So the claim "on-device content holds the
+        // ceiling" looked tested while nothing was verified: the test would
+        // have stayed green even if the price model were completely broken.
         //
-        // Cihaz-içi yerleşimin anlamı, kiralanan fiziksel kapasitenin sıfır
-        // olmasıdır (bayt kullanıcının kendi cihazında durur). Model
-        // üzerinden ifadesi: fiziksel maliyet kalemleri sıfırlanınca satılan
-        // maliyet de sıfır olmalı ve tavanın altında kalmalı.
-        let cihaz = PriceModel {
+        // On-device placement means the rented physical capacity is zero (the
+        // bytes sit on the user's own device). Expressed through the model:
+        // once the physical cost items are zeroed, the sold cost must be zero
+        // too and must stay under the ceiling.
+        let on_device = PriceModel {
             disk_usd_per_tb: 0.0,
             power_w_per_tb: 0.0,
             other_usd: 0.0,
             ..PriceModel::default()
         };
         assert_eq!(
-            cihaz.physical_usd_per_tb_month(),
+            on_device.physical_usd_per_tb_month(),
             0.0,
-            "cihaz-içi yerleşimde kiralanan fiziksel kapasite yoktur"
+            "on-device placement rents no physical capacity"
         );
 
-        // Erasure ve oran ne olursa olsun 0 x e / r = 0 -> tavanın altında.
-        let maliyet = cihaz.cost_sold(1.5, 2.0).expect("geçerli oran");
-        assert_eq!(
-            maliyet, 0.0,
-            "sıfır fiziksel maliyet sıfır satılan maliyet verir"
-        );
+        // Whatever the erasure and the ratio are, 0 x e / r = 0, which is
+        // under the ceiling.
+        let cost = on_device.cost_sold(1.5, 2.0).expect("a valid ratio");
+        assert_eq!(cost, 0.0, "zero physical cost gives zero sold cost");
         assert!(
-            maliyet <= CEILING,
-            "cihaz-içi maliyet 0.016 tavanının altında"
+            cost <= CEILING,
+            "the on-device cost is under the 0.016 ceiling"
         );
 
-        // Kanarya: aynı çağrı GERÇEK bir donanım modelinde sıfır DEĞİLDİR.
-        // Bu satır olmasa test, modeli her zaman 0 döndüren bir regresyonu da
-        // kabul ederdi.
-        let gercek = PriceModel::default();
+        // A canary: the same call is NOT zero on a REAL hardware model.
+        // Without this line the test would also accept a regression that
+        // always returns 0 from the model.
+        let real = PriceModel::default();
         assert!(
-            gercek.physical_usd_per_tb_month() > 0.0,
-            "varsayılan donanım modeli sıfır maliyet üretmemeli"
+            real.physical_usd_per_tb_month() > 0.0,
+            "the default hardware model must not produce zero cost"
         );
     }
 }

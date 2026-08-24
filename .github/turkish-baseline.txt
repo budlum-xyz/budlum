@@ -57,7 +57,6 @@ bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
 bud/src/bud_format_social.rs	19
 bud/src/bud_format_telemetry.rs	21
-bud/src/bud_format_tiny.rs	21
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/bud_format_wal.rs	15
@@ -65,7 +64,6 @@ bud/src/churn.rs	6
 bud/src/cli.rs	11
 bud/src/fidelity.rs	8
 bud/src/gates.rs	4
-bud/src/price.rs	21
 bud/src/provider.rs	4
 bud/src/quantum.rs	10
 bud/src/ratio.rs	4
