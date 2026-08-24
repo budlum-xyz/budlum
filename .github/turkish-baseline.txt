@@ -23,7 +23,6 @@
 .gitignore	1
 README.md	1
 bud/fuzz/Cargo.toml	2
-bud/fuzz/fuzz_bud_format.rs	20
 bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
 bud/scripts/measure_ratios.py	18
@@ -116,7 +115,6 @@ crates/lubot/crates/lubot-integrations/src/rest.rs	11
 crates/lubot/crates/lubot-integrations/src/ws.rs	19
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/cache.rs	18
-crates/lubot/crates/lubot-knowledge/src/chunk.rs	20
 crates/lubot/crates/lubot-knowledge/src/embed.rs	18
 crates/lubot/crates/lubot-knowledge/src/lib.rs	12
 crates/lubot/crates/lubot-ops/Cargo.toml	1
