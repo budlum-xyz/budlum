@@ -82,10 +82,8 @@ bud/src/bud_format_telemetry.rs	21
 bud/src/bud_format_timeseries.rs	33
 bud/src/bud_format_tiny.rs	21
 bud/src/bud_format_transpile.rs	7
-bud/src/bud_format_tricore.rs	33
 bud/src/bud_format_ultra.rs	1
 bud/src/bud_format_videopipe.rs	27
-bud/src/bud_format_view.rs	33
 bud/src/bud_format_wal.rs	15
 bud/src/bud_format_zkbridge.rs	26
 bud/src/churn.rs	6
