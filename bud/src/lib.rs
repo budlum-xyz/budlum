@@ -201,9 +201,9 @@ pub mod bud_format_optical_transfer;
 #[cfg(feature = "bud3")]
 pub mod bud_format_qrmatrix;
 #[cfg(feature = "bud3")]
-pub mod bud_format_sartname;
+pub mod bud_format_spec;
 #[cfg(feature = "bud3")]
-pub mod bud_format_tarif;
+pub mod bud_format_recipe_record;
 pub mod bud_format_wire;
 // `bud_format_sertlesme` ve `bud_format_qrvideo` 3.0 modülleridir ama
 // kapısızdı: yukarıda iki `#[cfg(feature = "bud3")]` üst üste yazılmıştı

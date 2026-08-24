@@ -473,13 +473,13 @@ pub struct ChallengeResult {
 /// This policy is externally audited and economically approved.
 pub const STORAGE_REPLICATION_TARGET: u8 = 3;
 
-/// Kanitlanmis okuma hizinin, indirimli bir nesneye bir kopya daha ekleyen
-/// adimi. `ACCESS_SCALE` ile olceklenmis, yari-omur basina okuma cinsinden.
+/// The step of proven read rate that adds one more replica to a discounted
+/// object. Scaled by `ACCESS_SCALE`, in reads per half-life.
 ///
-/// Bir yari-omurde (720 epoch) 8 kanitlanmis okuma. Dusuk, cunku burada
-/// sayilan sey ham okuma degil *kanitlanmis* okuma: her cevaplanan geri
-/// getirme meydan okumasi bir tanedir, ve zincir bunlari nesne basina seyrek
-/// acar. Esik ham trafige gore ayarlansaydi hicbir nesne asamazdi.
+/// Eight proven reads in one half-life (720 epochs). It is low because what
+/// is counted here is not a raw read but a *proven* read: every answered
+/// retrieval challenge is one, and the chain opens those sparsely per object.
+/// Had the threshold been tuned to raw traffic, no object would ever cross it.
 pub const DEMAND_REPLICA_STEP_SCALED: u64 = 8 * crate::storage::living_threshold::ACCESS_SCALE;
 pub const REALLOCATION_ACCEPTANCE_EPOCHS: u64 = 4;
 
@@ -534,21 +534,21 @@ pub struct StorageReallocationTicket {
     pub opened_epoch: u64,
     pub deadline_epoch: u64,
     pub status: ReallocationStatus,
-    /// Yerlesim algoritmasinin bu shard icin hesapladigi tutucu.
+    /// The holder the placement algorithm computed for this shard.
     ///
-    /// **Tavsiye, kural degil.** Bileti kim kabul ederse alir; bu alan
-    /// yalnizca "rendezvous yerlesimi kimi secerdi" sorusunun cevabini
-    /// kayda gecirir. Kabulu buna baglamak acik pazari kapatirdi ve ayri bir
-    /// politika kararidir.
+    /// **A recommendation, not a rule.** Whoever accepts the ticket takes it;
+    /// this field only records the answer to "who would rendezvous placement
+    /// have chosen". Binding acceptance to it would close the open market and
+    /// is a separate policy decision.
     ///
-    /// Kaydedilmesinin sebebi olculebilirlik: sapmanin gorunur olmasi.
-    /// Biletleri surekli baska operatorlerin aliyor olmasi, ya yerlesim
-    /// hesabinin gercek kapasiteyi yansitmadigini ya da atanan operatorlerin
-    /// yukumlulugunu yerine getirmedigini soyler. Ikisi de bilinmeye deger
-    /// ve ikisi de bugun gorunmuyor.
+    /// The reason it is recorded is measurability: making divergence visible.
+    /// Tickets constantly being taken by other operators says either that the
+    /// placement computation does not reflect real capacity or that the
+    /// assigned operators are not meeting their obligation. Both are worth
+    /// knowing and neither is visible today.
     ///
-    /// `None`: aday kumesi yerlesim uretemedi (stake'li dogrulayici yok).
-    /// Bos bir tavsiye, yanlis bir tavsiyeden iyidir.
+    /// `None`: the candidate set produced no placement (no staked validator).
+    /// An empty recommendation is better than a wrong one.
     #[serde(default)]
     pub expected_holder: Option<Address>,
 }
@@ -584,12 +584,12 @@ pub struct StorageRegistry {
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
-    /// Paylasilan sozlukler ve onlara kac manifest'in dayandigi.
+    /// Shared dictionaries and how many manifests depend on them.
     ///
-    /// Burada yasamasinin sebebi referans sayimi: bir sozluk, ona dayanan
-    /// son nesne de gidene kadar silinemez. Sayim manifest kaydiyla ayni
-    /// yerde tutulmazsa ikisi ayrisir ve hala okunan bir sozluk silinebilir
-    /// hale gelir.
+    /// The reason this lives here is reference counting: a dictionary cannot
+    /// be deleted until the last object depending on it is also gone. If the
+    /// count is not kept in the same place as the manifest record the two
+    /// diverge and a dictionary still being read becomes deletable.
     #[serde(default)]
     pub dictionaries: crate::storage::dictionary::DictionaryRegistry,
     /// Finalized read evidence per object, newest last.
@@ -1146,50 +1146,54 @@ impl StorageRegistry {
             .or_insert_with(|| manifest.clone());
     }
 
-    /// Kaynak rejimi beyan eden bir manifest'i kaydet.
+    /// Register a manifest that declares a source regime.
     ///
-    /// **"Uretiliyor" bir indirim talebidir, bu yuzden kanitlanmadan kabul
-    /// edilmez.** `Generated` diyen bir manifest yalnizca bir kopya tutmayi
-    /// hak eder (`required_replica_count`); bu iddia dogrulanmasaydi, siradan
-    /// organik icerigi "uretiliyor" diye etiketleyen biri ucte bir kopyayla
-    /// tam dayaniklilik odemesi alir ve icerik gercekten kaybolurdu.
+    /// **"Generated" is a claim for a discount, so it is not accepted without
+    /// proof.** A manifest saying `Generated` only earns the right to hold one
+    /// replica (`required_replica_count`); if that claim were not verified,
+    /// someone labelling ordinary organic content as "generated" would collect
+    /// full durability payment for a third of the copies and the content would
+    /// genuinely be lost.
     ///
-    /// Dogrulama ucuz ve kesindir: tarifi KOSAR, cikan baytlarin icerik
-    /// kimligini hesaplar ve manifest'in tek shard'iyla karsilastirir.
-    /// Uyduramazsin - tarif uzayi icerik uzayindan kucuktur (guvercin
-    /// yuvasi); tarif ancak icerik gercekten o tariften dogduysa tutar.
+    /// Verification is cheap and exact: it RUNS the recipe, computes the
+    /// content id of the resulting bytes and compares it against the
+    /// manifest's single shard. You cannot fake it - the recipe space is
+    /// smaller than the content space (pigeonhole); the recipe only holds if
+    /// the content really was born from that recipe.
     ///
-    /// `Hybrid` bu yolda kabul edilmez: onek baytlari zincirde degildir, bu
-    /// yuzden dogrulanamaz. Dogrulanamayan bir iddia indirim de almaz.
+    /// `Hybrid` is not accepted on this path: its prefix bytes are not on
+    /// chain, so it cannot be verified. A claim that cannot be verified gets
+    /// no discount either.
     ///
     /// # Errors
     ///
-    /// Tarif kosulamazsa, urettigi baytlar manifest'in kimligiyle
-    /// eslesmezse, manifest tek shard'li degilse ya da rejim `Hybrid` ise
-    /// hata doner.
+    /// Returns an error if the recipe cannot be run, if the bytes it produces
+    /// do not match the manifest's id, if the manifest does not have exactly
+    /// one shard, or if the regime is `Hybrid`.
     pub fn register_manifest_with_source(
         &mut self,
         manifest: &ContentManifest,
     ) -> Result<(), StorageError> {
-        // Sozluk referansi once denetlenir: bir nesne, cozulemeyecegi bir
-        // sozluge dayanarak kaydedilemez.
+        // The dictionary reference is checked first: an object cannot be
+        // registered against a dictionary it could not be decoded with.
         //
-        // Uc ret var ve ucu de kayittan once olmali. Bilinmeyen sozluk:
-        // baytlari kimse tutmuyorsa nesne acilamaz. Emekliye ayrilan sozluk:
-        // silinmesi planlanan bir seye yeni bagimli eklemek, silme tarihini
-        // sessizce gecersiz kilardi. Sozlugun sozluge dayanmasi: zincir
-        // olusur ve bir nesneyi acmak icin kac getirme gerektigi
-        // sinirsizlasir.
+        // There are three refusals and all three must come before the record.
+        // Unknown dictionary: if nobody holds the bytes the object cannot be
+        // opened. Retiring dictionary: adding a new dependant to something
+        // scheduled for deletion would silently invalidate the deletion date.
+        // A dictionary resting on a dictionary: a chain forms and the number
+        // of fetches needed to open one object becomes unbounded.
         //
-        // Kayittan **sonra** denetlemek gec olurdu: manifest kaydi
-        // birinci-yazan-kazanir ve idempotent, yani reddedilen bir kayit
-        // geri alinamaz.
+        // Checking **after** the record would be too late: manifest
+        // registration is first-writer-wins and idempotent, so a rejected
+        // record cannot be taken back.
         match &manifest.source {
             crate::storage::generated::ContentSource::Stored => {}
             crate::storage::generated::ContentSource::Generated(spec) => {
-                // Uretilen icerik tek parcadir: tarif butun nesneyi uretir.
-                // Cok shard'li bir "uretiliyor" iddiasi hangi shard'in hangi
-                // parcaya denk geldigini soylemez, yani dogrulanamaz.
+                // Generated content is a single piece: the recipe produces
+                // the whole object. A multi-shard "generated" claim does not
+                // say which shard corresponds to which part, so it cannot be
+                // verified.
                 if manifest.shards.len() != 1 {
                     return Err(StorageError::InvalidManifest {
                         reason: "Generated manifest must have exactly one shard".into(),
@@ -1202,7 +1206,7 @@ impl StorageRegistry {
                         .ok_or_else(|| StorageError::InvalidManifest {
                             reason: "Generated manifest has no shard".into(),
                         })?;
-                // Tarifi KOS. Iddia burada ya tutar ya dusr.
+                // RUN the recipe. The claim either holds here or falls.
                 crate::storage::generated::generate_and_verify(spec, shard.shard_id).map_err(
                     |e| StorageError::InvalidManifest {
                         reason: format!(
@@ -1218,30 +1222,33 @@ impl StorageRegistry {
                             .into(),
                 });
             }
-            // Bir turetmeyi tam dogrulamak master'in baytlarini gerektirir ve
-            // onlar zincirde degildir - `Hybrid` ile ayni gerekce. Ama
-            // dogrulanamayan kismi reddetmek, dogrulanabilir kismi
-            // denetlememek icin bir mazeret degil: tarifin KENDI ic tutarliligi
-            // burada, master getirilmeden, kesin olarak denetlenebilir.
+            // Fully verifying a derivation requires the master's bytes and
+            // those are not on chain - the same reason as `Hybrid`. But
+            // refusing the part that cannot be verified is no excuse for not
+            // checking the part that can: the recipe's OWN internal
+            // consistency can be checked here, exactly, without fetching the
+            // master.
             //
-            // `check_region` tam da bunun icin yazilmisti: donusum ile alanlar
-            // uyusuyor mu, bolge bos mu, kutu master'in beyan ettigi sinirlarin
-            // disina tasiyor mu. Bu denetimi atlayip yalnizca "dogrulanamaz"
-            // demek, kendi kendisiyle celisen bir tarifi de ayni cop kutusuna
-            // atmak olurdu - oysa o, master hic getirilmeden reddedilebilir.
+            // `check_region` was written for precisely this: do the transform
+            // and the fields agree, is the region empty, does the box spill
+            // outside the bounds the master declares. Skipping that check and
+            // only saying "cannot be verified" would throw a recipe that
+            // contradicts itself into the same bin - whereas that one can be
+            // refused without ever fetching the master.
             crate::storage::generated::ContentSource::Derived(spec) => {
                 spec.check_region()
                     .map_err(|e| StorageError::InvalidManifest {
                         reason: format!("Derived spec is not internally consistent: {e:?}"),
                     })?;
-                // Turetmenin turetmesi yasak, ve bu da master getirilmeden
-                // denetlenebilir: master'in manifest'i KAYITLI ise rejimini
-                // buradan okuruz.
+                // A derivation of a derivation is forbidden, and that too can
+                // be checked without fetching the master: if the master's
+                // manifest is REGISTERED we read its regime from here.
                 //
-                // Kayitli degilse bilmiyoruz demektir ve bilmedigimiz seye
-                // izin vermeyiz - `required_replicas_for` ile ayni fail-closed
-                // durus. Zincir, dayanikliligi baska bir turetmeye bagli olan
-                // bir zincirin ilk halkasini kabul etmemeli.
+                // If it is not registered we do not know, and we do not permit
+                // what we do not know - the same fail-closed posture as
+                // `required_replicas_for`. The chain must not accept the first
+                // link of a chain whose durability depends on another
+                // derivation.
                 let master_is_derived = self.manifests.get(&spec.master_id).is_none_or(|m| {
                     matches!(
                         m.source,
@@ -1259,26 +1266,28 @@ impl StorageRegistry {
                 });
             }
         }
-        // Sozluk referansi burada alinir ve denetim ayni cagriya gomuludur:
-        // `acquire_dictionary` once `check_dictionary_reference`'i kosar.
-        // Ayri bir on denetim yazmak ayni kurali iki yerde tutmak olurdu ve
-        // ikisi ayrisabilirdi (§68).
+        // The dictionary reference is acquired here and the check is embedded
+        // in the same call: `acquire_dictionary` runs
+        // `check_dictionary_reference` first. Writing a separate pre-check
+        // would keep the same rule in two places and the two could diverge
+        // (section 68).
         //
-        // Uc ret var. Bilinmeyen sozluk: baytlari kimse tutmuyorsa nesne
-        // acilamaz. Emekliye ayrilan sozluk: silinmesi planlanan bir seye yeni
-        // bagimli eklemek silme tarihini sessizce gecersiz kilardi. Sozlugun
-        // sozluge dayanmasi: zincir olusur ve bir nesneyi acmak icin kac
-        // getirme gerektigi sinirsizlasir.
+        // There are three refusals. Unknown dictionary: if nobody holds the
+        // bytes the object cannot be opened. Retiring dictionary: adding a new
+        // dependant to something scheduled for deletion would silently
+        // invalidate the deletion date. A dictionary resting on a dictionary:
+        // a chain forms and the number of fetches needed to open one object
+        // becomes unbounded.
         //
-        // Kayittan **once** olmasi sart: manifest kaydi
-        // birinci-yazan-kazanir ve idempotent, yani reddedilen bir kayit geri
-        // alinamaz.
+        // It must come **before** the record: manifest registration is
+        // first-writer-wins and idempotent, so a rejected record cannot be
+        // taken back.
         //
-        // Referans yalnizca **yeni** bir kayit icin alinir. `register_manifest`
-        // birinci-yazan-kazanir ve idempotent; ayni manifest ikinci kez
-        // sunuldugunda sayaci bir daha artirmak, hicbir zaman dusmeyecek bir
-        // referans birakirdi ve sozluk son bagimlisi gittikten sonra bile
-        // silinemez hale gelirdi.
+        // The reference is only acquired for a **new** record.
+        // `register_manifest` is first-writer-wins and idempotent; bumping the
+        // counter again when the same manifest is submitted a second time
+        // would leave a reference that never drops and the dictionary would
+        // become undeletable even after its last dependant is gone.
         let already_registered = self.manifests.contains_key(&manifest.manifest_id);
         if let Some(dict_id) = manifest.dictionary_id {
             if !already_registered {
@@ -1295,10 +1304,11 @@ impl StorageRegistry {
         Ok(())
     }
 
-    /// Bu manifest icin kac kopya gerektigi.
+    /// How many replicas this manifest requires.
     ///
-    /// Kayitli manifest'in beyan ettigi rejime bakar. Kayitli degilse tam
-    /// hedef doner: bilmedigimiz bir seye indirim verilmez (fail-closed).
+    /// Looks at the regime the registered manifest declares. If it is not
+    /// registered the full target is returned: no discount is given for
+    /// something we do not know (fail-closed).
     #[must_use]
     pub fn required_replicas_for(&self, manifest_id: &ContentId) -> u8 {
         self.manifests
@@ -1311,21 +1321,23 @@ impl StorageRegistry {
             })
     }
 
-    /// Kanitlanmis talebi hesaba katarak kac kopya gerektigi.
+    /// How many replicas are required once proven demand is taken into account.
     ///
-    /// Rejim indirimi tabani belirler; talep yalnizca yukari iter. Cok okunan
-    /// bir nesne icin bir kopya, o kopyayi tutan tek operator dustugunde
-    /// herkesin okuyamadigi bir nesne demektir; indirim dayaniklilik icin
-    /// verilmisti, populerlik onu geri alir.
+    /// The regime discount sets the floor; demand only pushes upwards. One
+    /// replica for a heavily read object means an object nobody can read the
+    /// moment the single operator holding that replica falls; the discount was
+    /// given for durability, and popularity takes it back.
     ///
-    /// Talep asagi indirmez. Az okunan bir nesnenin kopyalarini kismak,
-    /// olculen talebin *yoklugunu* dayaniklilik kararina cevirmek olurdu:
-    /// hic okunmamis bir yedek tam da kaybedilmemesi gereken seydir.
+    /// Demand never lowers the count. Trimming the replicas of a rarely read
+    /// object would turn the *absence* of measured demand into a durability
+    /// decision: a backup that has never been read is exactly the thing that
+    /// must not be lost.
     ///
-    /// Esik [`DEMAND_REPLICA_STEP_SCALED`]'in kati basina bir kopya, tam
-    /// hedefe kadar. Sabit bir merdiven, cunku burada donen sayi zincirin
-    /// uzerinde anlasmasi gereken bir sayidir; operatorun kendi donanim
-    /// oranlarina bagli bir esik iki dugume iki cevap verirdi.
+    /// The threshold is one replica per multiple of
+    /// [`DEMAND_REPLICA_STEP_SCALED`], up to the full target. A fixed ladder,
+    /// because the number returned here is a number the chain has to agree on;
+    /// a threshold depending on an operator's own hardware ratios would give
+    /// two nodes two answers.
     #[must_use]
     pub fn required_replicas_with_demand(&self, manifest_id: &ContentId, epoch: u64) -> u8 {
         let floor = self.required_replicas_for(manifest_id);
@@ -2310,8 +2322,9 @@ impl StorageRegistry {
                     opened_epoch: now_epoch,
                     deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
                     status: ReallocationStatus::Pending,
-                    // Aday kumesi kayit defterinde yok; tavsiye acildiktan
-                    // sonra `annotate_expected_holders` ile yazilir.
+                    // The candidate set is not in the registry; the
+                    // recommendation is written after opening, by
+                    // `annotate_expected_holders`.
                     expected_holder: None,
                 }
             });
@@ -2509,19 +2522,19 @@ impl StorageRegistry {
     /// Bekleyen biletlere yerlesim tavsiyesini yaz.
     ///
     /// `assign_shard` rendezvous hashing ile shard basina deterministik bir
-    /// tutucu secer: ayni shard, ayni entropi ve ayni aday kumesi her
-    /// dugumde ayni cevabi verir. Buradaki cevap **tavsiyedir**, bileti kim
-    /// kabul ederse alir (`accept_reallocation_ticket` degismedi).
+    /// chooses a holder: the same shard, the same entropy and the same
+    /// candidate set give the same answer on every node. The answer here is a
+    /// **recommendation**, whoever accepts the ticket takes it
+    /// (`accept_reallocation_ticket` did not change).
     ///
-    /// Yazilmasinin sebebi sapmayi gorunur kilmak. Bugun bir bileti kimin
-    /// aldigi ile yerlesim hesabinin kimi sectigi arasinda hicbir
-    /// karsilastirma yok, dolayisiyla ne hesabin gercek kapasiteyi
-    /// yansitmadigi ne de atanan operatorlerin yukumlulugunu atladigi
-    /// gorulebiliyor.
+    /// The reason it is written is to make divergence visible. Today there is
+    /// no comparison at all between who took a ticket and who the placement
+    /// computation chose, so neither the computation failing to reflect real
+    /// capacity nor assigned operators skipping their obligation can be seen.
     ///
-    /// Yalniz `Pending` biletler ve yalniz bir kez: kabul edilmis bir bilete
-    /// sonradan tavsiye yazmak, tavsiyeyi sonucun ardindan uydurmak olurdu.
-    /// Doner deger yazilan tavsiye sayisidir.
+    /// Only `Pending` tickets and only once: writing a recommendation onto an
+    /// already accepted ticket would be inventing the recommendation after the
+    /// outcome. The return value is the number of recommendations written.
     pub fn annotate_expected_holders(
         &mut self,
         entropy: &crate::domain::Hash32,
@@ -2532,12 +2545,12 @@ impl StorageRegistry {
             if ticket.status != ReallocationStatus::Pending || ticket.expected_holder.is_some() {
                 continue;
             }
-            // Tek kopya: bilet tek bir slotu doldurur, kumeyi degil.
+            // One replica: a ticket fills a single slot, not the set.
             let Ok(placed) =
                 crate::storage::assignment::assign_shard(&ticket.shard_id, entropy, candidates, 1)
             else {
-                // Aday yoksa tavsiye de yok. Bos bir tavsiye, yanlis bir
-                // tavsiyeden iyidir.
+                // No candidate, no recommendation. An empty recommendation
+                // is better than a wrong one.
                 continue;
             };
             ticket.expected_holder = placed.first().copied();
@@ -2548,10 +2561,11 @@ impl StorageRegistry {
         written
     }
 
-    /// Tavsiyeden sapan, kabul edilmis biletler.
+    /// Accepted tickets that diverged from the recommendation.
     ///
-    /// Doner: `(ticket_id, tavsiye edilen, gercekte kabul eden)`. Bos bir
-    /// sonuc yerlesim hesabinin gerceklesen kabullerle ortustugunu soyler.
+    /// Returns `(ticket_id, recommended, actually accepted by)`. An empty
+    /// result says the placement computation agrees with the acceptances that
+    /// actually happened.
     #[must_use]
     pub fn placements_that_diverged(&self) -> Vec<(u64, Address, Address)> {
         self.reallocations
@@ -2790,17 +2804,20 @@ impl StorageRegistry {
             .count()
     }
 
-    /// Hedefin altinda kalan shard'lar, `epoch` itibariyla.
+    /// Shards that stay below target, as of `epoch`.
     ///
-    /// Hedef sabit degil. **Icerigin kaynagina** baglidir (tariften dogan
-    /// icerik icin bir kopya yeterlidir) ve **kanitlanmis talebe** baglidir
-    /// (cok okunan bir nesne indirimini geri verir). Sabit 3 ile olcmek,
-    /// tarifli icerigi surekli "eksik kopyali" gosterip hicbir dayaniklilik
-    /// eklemeyen onarim biletleri actiriyordu; indirimi talepten bagimsiz
-    /// vermek ise cok okunan bir nesneyi tek operatorun arkasinda birakiyordu.
+    /// The target is not fixed. It depends on the **content's source** (one
+    /// replica is enough for content born from a recipe) and on **proven
+    /// demand**
+    /// (a heavily read object gives its discount back). Measuring against a
+    /// fixed 3 kept showing recipe-backed content as "under-replicated" and
+    /// opened repair tickets that added no durability; giving the discount
+    /// independently of demand left a heavily read object behind a single
+    /// operator.
     ///
-    /// `epoch` parametreli tek bir surum var. Talebi goren ve gormeyen iki
-    /// surum birakmak, hangi hedefin uygulandigini cagirana sectirirdi.
+    /// There is one version, parameterised by `epoch`. Leaving two versions,
+    /// one that sees demand and one that does not, would let the caller choose
+    /// which target is applied.
     pub fn under_replicated_shards(&self, epoch: u64) -> Vec<(ContentId, ContentId, usize)> {
         self.deals_by_shard
             .keys()
@@ -2908,8 +2925,8 @@ impl StorageRegistry {
     }
 
     /// Force-prune all storage content associated with a manifest CID.
-    /// Called when an NFT is burned (Constitution §1: "NFT yakılırsa veri
-    /// B.U.D. storage'dan fiziksel silinir").
+    /// Called when an NFT is burned (Constitution section 1: "if an NFT is
+    /// burned the data is physically deleted from B.U.D. storage").
     ///
     /// Expires all active deals for this manifest and removes the manifest
     /// From the registry. Deals that are already Slashed or Expired are
@@ -2991,13 +3008,14 @@ mod tests {
         ContentManifest::from_bytes_sliced(b"some test content for the deal", 8).unwrap()
     }
 
-    // === Sozluk referansi ================================================
+    // === Dictionary reference ============================================
 
-    /// Sozluk kimlige girer: iki manifest ayni baytlari, farkli sozluklerle
-    /// beyan ederse ayni nesne olamazlar.
+    /// The dictionary enters the identity: if two manifests declare the same
+    /// bytes with different dictionaries they cannot be the same object.
     ///
-    /// Girmeseydi bir manifest, kaydi bozulmadan baska bir sozluge
-    /// yonlendirilebilir ve ayni id baska bir icerik cozerdi.
+    /// Had it not entered, a manifest could be redirected to another
+    /// dictionary without breaking its record and the same id would decode to
+    /// different content.
     #[test]
     fn the_dictionary_is_part_of_the_identity() {
         let plain = good_manifest();
@@ -3006,25 +3024,26 @@ mod tests {
         let rebound = with_dict.clone().with_source(with_dict.source.clone());
         assert_ne!(
             rebound.manifest_id, plain.manifest_id,
-            "sozluk beyan eden manifest ayni id'yi tasiyamaz"
+            "a manifest declaring a dictionary cannot carry the same id"
         );
     }
 
-    /// Sozluk beyan etmeyen manifest'in kimligi degismez.
+    /// The identity of a manifest that declares no dictionary does not change.
     ///
-    /// Bu alan eklenmeden once kaydedilmis her manifest buraya duser; goc
-    /// gerekmemesinin sebebi bu.
+    /// Every manifest recorded before this field was added falls here; that is
+    /// why no migration is needed.
     #[test]
     fn no_dictionary_means_no_change_to_the_preimage() {
         let m = good_manifest();
         assert!(m.dictionary_id.is_none());
-        assert_eq!(m.verify_id(), Ok(()), "eski kimlik aynen dogrulanmali");
+        assert_eq!(m.verify_id(), Ok(()), "the old identity must verify unchanged");
     }
 
-    /// Bilinmeyen bir sozluge dayanan nesne kaydedilemez.
+    /// An object resting on an unknown dictionary cannot be registered.
     ///
-    /// Baytlari kimse tutmuyorsa nesne acilamaz; kaydi kabul etmek
-    /// cozulemeyecek bir seye dayaniklilik odemesi yapmak olurdu.
+    /// If nobody holds the bytes the object cannot be opened; accepting the
+    /// record would be paying for the durability of something that could never
+    /// be decoded.
     #[test]
     fn an_unknown_dictionary_is_refused() {
         let mut reg = StorageRegistry::new();
@@ -3032,55 +3051,56 @@ mod tests {
         m.dictionary_id = Some(ContentId([9u8; 32]));
         let err = reg
             .register_manifest_with_source(&m)
-            .expect_err("bilinmeyen sozluk reddedilmeli");
+            .expect_err("an unknown dictionary must be refused");
         assert!(matches!(err, StorageError::InvalidManifest { .. }));
         assert!(
             !reg.manifests.contains_key(&m.manifest_id),
-            "reddedilen kayit deftere girmemeli"
+            "a refused record must not enter the registry"
         );
     }
 
-    /// Kayitli bir sozluge dayanan nesne kabul edilir ve referans alinir.
+    /// An object resting on a registered dictionary is accepted and a
+    /// reference is acquired.
     #[test]
     fn a_registered_dictionary_is_acquired() {
         let mut reg = StorageRegistry::new();
         let dict = ContentId([9u8; 32]);
         reg.dictionaries
             .register_dictionary(dict, 4_096)
-            .expect("sozluk kaydedilmeli");
+            .expect("the dictionary must register");
         let mut m = good_manifest();
         m.dictionary_id = Some(dict);
         reg.register_manifest_with_source(&m)
-            .expect("kayitli sozluge dayanan nesne kabul edilmeli");
+            .expect("an object on a registered dictionary must be accepted");
         assert_eq!(reg.dictionaries.reference_count(&dict), Some(1));
     }
 
-    /// Ayni manifest iki kez sunulursa referans bir kez alinir.
+    /// If the same manifest is submitted twice the reference is acquired once.
     ///
-    /// Kayit birinci-yazan-kazanir ve idempotent. Ikinci kez saymak, hicbir
-    /// zaman dusmeyecek bir referans birakir ve sozluk son bagimlisi
-    /// gittikten sonra bile silinemez hale gelirdi.
+    /// Registration is first-writer-wins and idempotent. Counting a second
+    /// time would leave a reference that never drops and the dictionary would
+    /// become undeletable even after its last dependant is gone.
     #[test]
     fn re_registering_does_not_double_count_the_reference() {
         let mut reg = StorageRegistry::new();
         let dict = ContentId([9u8; 32]);
         reg.dictionaries
             .register_dictionary(dict, 4_096)
-            .expect("sozluk kaydedilmeli");
+            .expect("the dictionary must register");
         let mut m = good_manifest();
         m.dictionary_id = Some(dict);
-        reg.register_manifest_with_source(&m).expect("ilk kayit");
-        reg.register_manifest_with_source(&m).expect("ikinci kayit");
+        reg.register_manifest_with_source(&m).expect("first registration");
+        reg.register_manifest_with_source(&m).expect("second registration");
         assert_eq!(
             reg.dictionaries.reference_count(&dict),
             Some(1),
-            "idempotent kayit sayaci bir daha artirmamali"
+            "an idempotent registration must not bump the counter again"
         );
     }
 
-    // === B.U.D. 3.0: tarif dayanikliligi kopyanin yerine gecer ===========
+    // === B.U.D. 3.0: recipe durability stands in for a replica ===========
 
-    /// Tarifi gercekten kosan, dolayisiyla kaydi kabul edilen bir manifest.
+    /// A manifest whose recipe really runs, so its registration is accepted.
     fn generated_manifest() -> (ContentManifest, crate::storage::generated::GeneratedSpec) {
         use crate::storage::generated::{generate_content, GeneratedSpec, GeneratorId};
         let spec = GeneratedSpec {
@@ -3089,8 +3109,9 @@ mod tests {
             output_len: 32 * 32,
             step_budget: 8_000,
         };
-        // Manifest, tarifin GERCEK ciktisindan kurulur: iddia dogru olsun.
-        let bytes = generate_content(&spec).expect("tarif kosmali");
+        // The manifest is built from the recipe's REAL output: let the claim
+        // be true.
+        let bytes = generate_content(&spec).expect("the recipe must run");
         let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
             .expect("manifest")
             .with_source(crate::storage::generated::ContentSource::Generated(
@@ -3099,11 +3120,11 @@ mod tests {
         (manifest, spec)
     }
 
-    /// Tariften dogan icerik TEK kopya ister; uc kopya dayaniklilik eklemez.
+    /// Content born from a recipe needs ONE copy; three add no durability.
     ///
-    /// Ayni deterministik ureteci uc kez saklamak, ucuncu bir yedek degil
-    /// ayni cevabin uc kopyasidir. Icerigi ayakta tutan sey zincirdeki
-    /// tariftir.
+    /// Storing the same deterministic generator three times is not a third
+    /// backup, it is three copies of the same answer. What keeps the content
+    /// alive is the recipe on chain.
     #[test]
     fn a_recipe_backed_object_needs_one_copy_not_three() {
         use crate::storage::generated::{required_replica_count, ContentSource};
@@ -3115,14 +3136,16 @@ mod tests {
                 STORAGE_REPLICATION_TARGET
             ),
             1,
-            "tarifli icerik tek kopya ister"
+            "recipe-backed content needs one copy"
         );
-        // Tutulan icerik tam hedefi ister: baytlarin baska kaynagi yok.
+        // Stored content needs the full target: the bytes have no other
+        // source.
         assert_eq!(
             required_replica_count(&ContentSource::Stored, STORAGE_REPLICATION_TARGET),
             STORAGE_REPLICATION_TARGET
         );
-        // Hybrid indirim ALMAZ: onek yeniden uretilemeyen gercek bayttir.
+        // Hybrid gets NO discount: the prefix is real bytes that cannot be
+        // regenerated.
         assert_eq!(
             required_replica_count(
                 &ContentSource::Hybrid {
@@ -3132,20 +3155,20 @@ mod tests {
                 STORAGE_REPLICATION_TARGET
             ),
             STORAGE_REPLICATION_TARGET,
-            "onek yeniden uretilemez, indirim alamaz"
+            "the prefix cannot be regenerated, so it earns no discount"
         );
 
         let mut reg = StorageRegistry::new();
         reg.register_manifest_with_source(&manifest)
-            .expect("dogru tarif kabul edilmeli");
+            .expect("a correct recipe must be accepted");
         assert_eq!(reg.required_replicas_for(&manifest.manifest_id), 1);
     }
 
-    /// "Uretiliyor" bir INDIRIM TALEBIDIR; kanitlanmadan kabul edilmez.
+    /// "Generated" is a CLAIM FOR A DISCOUNT; it is not accepted unproven.
     ///
-    /// Kanit olmasaydi, siradan organik icerigi "uretiliyor" diye
-    /// etiketleyen biri ucte bir kopyayla tam dayaniklilik odemesi alir ve
-    /// icerik gercekten kaybolurdu.
+    /// Without proof, someone labelling ordinary organic content as
+    /// "generated" would collect full durability payment for a third of the
+    /// copies and the content would genuinely be lost.
     #[test]
     fn a_false_generated_claim_is_refused_at_registration() {
         use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
@@ -3155,8 +3178,8 @@ mod tests {
             output_len: 32 * 32,
             step_budget: 8_000,
         };
-        // Organik baytlar, "bu tariften dogdu" diye etiketleniyor. Yalan.
-        let organic = b"bu baytlar hicbir tariften dogmadi".to_vec();
+        // Organic bytes, labelled "born from this recipe". A lie.
+        let organic = b"these bytes were born from no recipe".to_vec();
         let manifest = ContentManifest::from_bytes_sliced(&organic, organic.len() as u32)
             .expect("manifest")
             .with_source(ContentSource::Generated(spec));
@@ -3164,21 +3187,23 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let err = reg
             .register_manifest_with_source(&manifest)
-            .expect_err("yalan uretim iddiasi reddedilmeli");
+            .expect_err("a false generated claim must be refused");
         assert!(
             format!("{err:?}").contains("does not reproduce"),
-            "gerekce tarifin icerigi uretmedigini soylemeli: {err:?}"
+            "the reason must say the recipe does not produce the content: {err:?}"
         );
-        // Reddedilen manifest HIC kaydedilmemeli: yoksa indirimi yine alir.
+        // A refused manifest must NOT be recorded at all: otherwise it gets
+        // the discount anyway.
         assert!(reg.get_manifest(&manifest.manifest_id).is_none());
-        // Kayitli olmayan icerik tam hedefe duser (fail-closed).
+        // Unregistered content falls to the full target (fail-closed).
         assert_eq!(
             reg.required_replicas_for(&manifest.manifest_id),
             STORAGE_REPLICATION_TARGET
         );
     }
 
-    /// Dogrulanamayan iddia indirim de almaz: `Hybrid` zincirde kanitlanamaz.
+    /// A claim that cannot be verified earns no discount either: `Hybrid`
+    /// cannot be proven on chain.
     #[test]
     fn a_hybrid_source_is_refused_because_its_prefix_cannot_be_proven() {
         use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
@@ -3188,7 +3213,7 @@ mod tests {
             output_len: 32 * 32,
             step_budget: 8_000,
         };
-        let manifest = ContentManifest::from_bytes_sliced(b"onekli icerik", 13)
+        let manifest = ContentManifest::from_bytes_sliced(b"prefixed cont", 13)
             .expect("manifest")
             .with_source(ContentSource::Hybrid {
                 prefix_bytes: 4,
@@ -3197,17 +3222,17 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let err = reg
             .register_manifest_with_source(&manifest)
-            .expect_err("dogrulanamayan hybrid iddiasi reddedilmeli");
+            .expect_err("an unverifiable hybrid claim must be refused");
         assert!(format!("{err:?}").contains("Hybrid"), "{err:?}");
         assert!(reg.get_manifest(&manifest.manifest_id).is_none());
     }
 
-    /// Kaynak rejimi KIMLIGE girer.
+    /// The source regime enters the IDENTITY.
     ///
-    /// Girmeseydi ayni baytlar icin biri "tutuluyor" digeri "uretiliyor"
-    /// diyen iki manifest ayni id'yi paylasirdi; `register_manifest`
-    /// ilk-yazan-kazanir oldugu icin biri digerinin dayaniklilik
-    /// gereksinimini sessizce degistirebilirdi.
+    /// Had it not, two manifests for the same bytes, one saying "stored" and
+    /// the other "generated", would share the same id; because
+    /// `register_manifest` is first-writer-wins, one could silently change the
+    /// other's durability requirement.
     #[test]
     fn the_source_regime_changes_the_manifest_id() {
         let (generated, _spec) = generated_manifest();
@@ -3216,18 +3241,18 @@ mod tests {
                 crate::storage::generated::ContentSource::Generated(s) => s.clone(),
                 _ => unreachable!("test manifest is Generated"),
             })
-            .expect("tarif"),
+            .expect("recipe"),
             32 * 32,
         )
         .expect("manifest");
 
-        // Ayni baytlar, farkli iddia -> farkli kimlik.
+        // Same bytes, different claim -> different identity.
         assert_ne!(
             generated.manifest_id, stored.manifest_id,
-            "kaynak rejimi kimlige girmeli"
+            "the source regime must enter the identity"
         );
-        // Eski manifest'lerin kimligi degismemeli: `Stored` hicbir bayt
-        // eklemez, bu yuzden bu alan eklenmeden onceki id ile ayni kalir.
+        // The identity of old manifests must not change: `Stored` adds no
+        // bytes, so it stays the same as the id from before this field.
         assert_eq!(
             stored.manifest_id,
             crate::storage::manifest::manifest_id_from_parts_stored(
@@ -3603,10 +3628,10 @@ mod tests {
         );
     }
 
-    /// Format-gecerli test zarfi (durust
-    /// Marker - GERCEK STARK kaniti degil; bincode-deserialize olabilen minimal
-    /// ProofEnvelope). NOT: a0671c4'teki inline 78-baytlık diziler tip hatasi
-    /// (E0308) veriyordu ve niyeti gizliyordu; helper geri yuklendi.
+    /// A format-valid test envelope (an honest marker - NOT a REAL STARK
+    /// proof; a minimal ProofEnvelope that can be bincode-deserialized).
+    /// NOTE: the inline 78-byte arrays in a0671c4 gave a type error (E0308)
+    /// and hid the intent; the helper was restored.
     fn valid_merkle_proof() -> Vec<u8> {
         let envelope = bud_proof::ProofEnvelope {
             proof_format_version: 1,
@@ -3664,7 +3689,7 @@ mod tests {
         reg
     }
 
-    /// Bekleyen bir bilete tavsiye yazilir ve deterministiktir.
+    /// A pending ticket gets an advisory and it is deterministic.
     #[test]
     fn a_pending_ticket_gets_a_deterministic_advisory() {
         let mut reg = registry_with_pending_ticket();
@@ -3674,24 +3699,24 @@ mod tests {
             .all_reallocation_tickets()
             .first()
             .and_then(|t| t.expected_holder)
-            .expect("tavsiye yazilmali");
+            .expect("an advisory must be written");
 
-        // Ayni shard, ayni entropi, ayni aday kumesi: ayni cevap.
+        // Same shard, same entropy, same candidate set: same answer.
         let mut again = registry_with_pending_ticket();
         again.annotate_expected_holders(&[7u8; 32], &cands);
         let second = again
             .all_reallocation_tickets()
             .first()
             .and_then(|t| t.expected_holder)
-            .expect("tavsiye yazilmali");
-        assert_eq!(first, second, "yerlesim her dugumde ayni cevabi vermeli");
+            .expect("an advisory must be written");
+        assert_eq!(first, second, "placement must give the same answer on every node");
     }
 
-    /// Tavsiye bir kez yazilir; ikinci gecis uzerine yazmaz.
+    /// An advisory is written once; a second pass does not overwrite it.
     ///
-    /// Yoksa entropi degistikce tavsiye de degisirdi ve sapma olcumu
-    /// anlamsizlasirdi: kabulun ardindan uydurulan bir tavsiye hicbir seyi
-    /// olcmez.
+    /// Otherwise the advisory would change as the entropy changed and the
+    /// divergence measurement would become meaningless: an advisory invented
+    /// after the acceptance measures nothing.
     #[test]
     fn an_advisory_is_written_once() {
         let mut reg = registry_with_pending_ticket();
@@ -3701,16 +3726,16 @@ mod tests {
             .all_reallocation_tickets()
             .first()
             .and_then(|t| t.expected_holder);
-        // Baska bir entropi ile ikinci gecis: hicbir sey degismemeli.
+        // A second pass with different entropy: nothing must change.
         assert_eq!(reg.annotate_expected_holders(&[9u8; 32], &cands), 0);
         let after = reg
             .all_reallocation_tickets()
             .first()
             .and_then(|t| t.expected_holder);
-        assert_eq!(first, after, "tavsiye sonradan degistirilemez");
+        assert_eq!(first, after, "an advisory cannot be changed afterwards");
     }
 
-    /// Aday yoksa tavsiye de yok: bos bir tavsiye yanlis bir tavsiyeden iyi.
+    /// No candidates means no advisory: an empty advisory beats a wrong one.
     #[test]
     fn no_candidates_means_no_advisory() {
         let mut reg = registry_with_pending_ticket();
@@ -3722,8 +3747,8 @@ mod tests {
             .is_none());
     }
 
-    /// Stake'i sifir olan aday secilmez: kaybedecek seyi olmayan bir
-    /// operator baytlari birakmaktan zarar gormez.
+    /// A candidate with zero stake is never chosen: an operator with nothing
+    /// to lose takes no damage from dropping the bytes.
     #[test]
     fn a_zero_stake_candidate_is_never_advised() {
         let mut reg = registry_with_pending_ticket();
@@ -3734,16 +3759,17 @@ mod tests {
         assert_eq!(reg.annotate_expected_holders(&[7u8; 32], &zero), 0);
     }
 
-    /// Kabul edilmemis bir bilette sapma raporlanmaz.
+    /// No divergence is reported for a ticket that was not accepted.
     ///
-    /// Sapma ancak gerceklesen bir kabul ile tavsiye arasinda olculebilir.
+    /// Divergence can only be measured between an actual acceptance and the
+    /// advisory.
     #[test]
     fn divergence_needs_an_actual_acceptance() {
         let mut reg = registry_with_pending_ticket();
         reg.annotate_expected_holders(&[7u8; 32], &placement_candidates(5));
         assert!(
             reg.placements_that_diverged().is_empty(),
-            "kabul edilmemis bilet sapma uretemez"
+            "a ticket that was not accepted cannot produce divergence"
         );
     }
 
@@ -4506,9 +4532,10 @@ mod tests {
 
     #[test]
     fn prune_content_expires_active_deals_and_removes_manifest() {
-        // F1 (Constitution §1): NFT yakılırsa veri B.U.D. storage'dan fiziksel silinir.
-        // REGRESYON KILIDI - prune_content aktif deal'leri expire etmeli
-        // Ve manifest'i registry'den kaldırmalı.
+        // F1 (Constitution section 1): if an NFT is burned the data is
+        // physically deleted from B.U.D. storage.
+        // REGRESSION LOCK - prune_content must expire active deals
+        // And it must remove the manifest from the registry.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let manifest_id = m.manifest_id;
@@ -4980,40 +5007,40 @@ mod demand_driven_replication_tests {
     use super::*;
     use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
 
-    /// Tariften dogan, hic okunmamis bir nesne indirimini korur.
+    /// A recipe-born object that has never been read keeps its discount.
     ///
-    /// Talebin YOKLUGU bir dayaniklilik karari degildir; taban rejimden
-    /// gelir ve talep yalnizca yukari iter.
+    /// The ABSENCE of demand is not a durability decision; the floor comes
+    /// from the regime and demand only pushes upwards.
     #[test]
     fn an_unread_generated_object_keeps_its_discount() {
         let (reg, manifest_id) = generated_registry();
         assert_eq!(reg.required_replicas_for(&manifest_id), 1);
         assert_eq!(reg.required_replicas_with_demand(&manifest_id, 0), 1);
-        // Cok sonraki bir epoch'ta da ayni: sifir okuma sifir taleptir.
+        // The same at a much later epoch: zero reads is zero demand.
         assert_eq!(reg.required_replicas_with_demand(&manifest_id, 10_000), 1);
     }
 
-    /// Kanitlanmis okuma indirimi geri alir.
+    /// Proven reads claw the discount back.
     ///
-    /// Tek kopya, o kopyayi tutan operator dustugunde nesnenin okunamamasi
-    /// demektir. Indirim dayaniklilik icin verilmisti; populerlik onu geri
-    /// alir.
+    /// One replica means the object cannot be read the moment the operator
+    /// holding that replica falls. The discount was given for durability;
+    /// popularity takes it back.
     #[test]
     fn proven_reads_claw_the_discount_back() {
         let (mut reg, manifest_id) = generated_registry();
-        // Bir adimin altinda kalan okuma hedefi degistirmez.
+        // Reads below one step do not change the target.
         for _ in 0..7 {
             reg.record_proven_read(manifest_id, 5);
         }
         assert_eq!(
             reg.required_replicas_with_demand(&manifest_id, 5),
             1,
-            "esigin altindaki talep indirimi bozmaz"
+            "demand below the threshold does not break the discount"
         );
-        // Bir adimi asinca bir kopya daha.
+        // Crossing one step adds one more replica.
         reg.record_proven_read(manifest_id, 5);
         assert_eq!(reg.required_replicas_with_demand(&manifest_id, 5), 2);
-        // Iki adim: tam hedef.
+        // Two steps: the full target.
         for _ in 0..8 {
             reg.record_proven_read(manifest_id, 5);
         }
@@ -5021,19 +5048,20 @@ mod demand_driven_replication_tests {
             reg.required_replicas_with_demand(&manifest_id, 5),
             STORAGE_REPLICATION_TARGET
         );
-        // Tavani asamaz.
+        // It cannot exceed the ceiling.
         for _ in 0..500 {
             reg.record_proven_read(manifest_id, 5);
         }
         assert_eq!(
             reg.required_replicas_with_demand(&manifest_id, 5),
             STORAGE_REPLICATION_TARGET,
-            "talep hedefi tavanin uzerine cikaramaz"
+            "demand cannot push the target above the ceiling"
         );
     }
 
-    /// Talep unutulur. Bir zamanlar populer olan nesne sonsuza dek uc kopya
-    /// tutmaz; okunmayi birakinca tahmin yari-omurle soner.
+    /// Demand is forgotten. An object that was once popular does not hold
+    /// three replicas forever; once reading stops the estimate decays with the
+    /// half-life.
     #[test]
     fn demand_decays_when_reading_stops() {
         let (mut reg, manifest_id) = generated_registry();
@@ -5045,22 +5073,23 @@ mod demand_driven_replication_tests {
             STORAGE_REPLICATION_TARGET
         );
         let half_life = crate::storage::living_threshold::ACCESS_HALF_LIFE_EPOCHS;
-        // Bir yari-omur sonra 16 -> 8: hala bir adim uzerinde.
+        // After one half-life 16 -> 8: still above one step.
         assert_eq!(
             reg.required_replicas_with_demand(&manifest_id, 5 + half_life),
             2
         );
-        // Uc yari-omur sonra 16 -> 2: adimin altinda, indirim geri geldi.
+        // After three half-lives 16 -> 2: below the step, the discount is
+        // back.
         assert_eq!(
             reg.required_replicas_with_demand(&manifest_id, 5 + 3 * half_life),
             1
         );
     }
 
-    /// Ayni epoch'taki okumalar tek kayitta toplanir.
+    /// Reads in the same epoch collapse into one entry.
     ///
-    /// Yoksa cok okunan bir nesnenin defteri okuma sayisiyla buyurdu; oysa
-    /// bu defter zincir durumunda yasiyor.
+    /// Otherwise the ledger of a heavily read object would grow with the read
+    /// count, and this ledger lives in chain state.
     #[test]
     fn reads_in_one_epoch_collapse_into_one_entry() {
         let (mut reg, manifest_id) = generated_registry();
@@ -5070,17 +5099,17 @@ mod demand_driven_replication_tests {
         let events = reg
             .access_events
             .get(&manifest_id)
-            .expect("okuma kaydi olmali");
-        assert_eq!(events.len(), 1, "bin okuma tek kayit");
+            .expect("there must be a read record");
+        assert_eq!(events.len(), 1, "a thousand reads, one entry");
         assert_eq!(events[0].count, 1000);
     }
 
-    /// Tam hedefte olan icerik zaten tavanda: talep bir sey degistirmez ve
-    /// bosuna hesaplanmaz.
+    /// Content already at the full target is at the ceiling: demand changes
+    /// nothing and is not computed for nothing.
     #[test]
     fn stored_content_is_already_at_the_ceiling() {
         let mut reg = StorageRegistry::new();
-        let bytes = b"siradan tutulan icerik".to_vec();
+        let bytes = b"ordinary stored content".to_vec();
         let manifest =
             ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
         reg.register_manifest(&manifest);
@@ -5093,7 +5122,7 @@ mod demand_driven_replication_tests {
         );
     }
 
-    /// Kayitli olmayan icerik fail-closed: bilmedigimiz seye indirim yok.
+    /// Unregistered content is fail-closed: no discount for what we do not know.
     #[test]
     fn an_unknown_object_gets_the_full_target() {
         let reg = StorageRegistry::new();
@@ -5104,10 +5133,10 @@ mod demand_driven_replication_tests {
         );
     }
 
-    /// Gec gelen bir olay defteri sirasiz birakmaz.
+    /// A late event never leaves the ledger unordered.
     ///
-    /// `AccessEstimate::from_events` sirasiz girdiyi reddediyor; bu test
-    /// reddedilecek girdinin hic olusmadigini gosterir.
+    /// `AccessEstimate::from_events` refuses unordered input; this test shows
+    /// that the input it would refuse never forms in the first place.
     #[test]
     fn a_late_event_never_breaks_the_ordering() {
         let (mut reg, manifest_id) = generated_registry();
@@ -5116,16 +5145,16 @@ mod demand_driven_replication_tests {
         let events = reg
             .access_events
             .get(&manifest_id)
-            .expect("okuma kaydi olmali");
+            .expect("there must be a read record");
         assert!(
             events.windows(2).all(|w| w[0].epoch <= w[1].epoch),
-            "defter her zaman epoch'a gore sirali"
+            "the ledger is always ordered by epoch"
         );
-        assert_eq!(events.len(), 1, "gec olay en yeniye katlanir");
-        assert_eq!(events[0].count, 2, "gec olay kaybolmaz, sayilir");
+        assert_eq!(events.len(), 1, "a late event folds into the newest");
+        assert_eq!(events[0].count, 2, "a late event is not lost, it is counted");
     }
 
-    /// Bir shard'in eksik kopyali sayilmasi talebe gore degisir.
+    /// Whether a shard counts as under-replicated follows demand.
     #[test]
     fn the_shard_view_follows_demand() {
         let (mut reg, manifest_id) = generated_registry();
@@ -5134,9 +5163,10 @@ mod demand_driven_replication_tests {
         reg.deals_by_shard
             .entry((manifest_id, shard_id))
             .or_default();
-        // Bir kopya bile yok ama hedef 1: bu shard eksik sayilir.
+        // Not even one replica but the target is 1: this shard counts as short.
         assert_eq!(reg.under_replicated_shards(0).len(), 1);
-        // Hedef talep ile 3'e cikinca hala eksik, ama hedef gercekten degisti.
+        // When demand raises the target to 3 it is still short, but the
+        // target really did change.
         for _ in 0..16 {
             reg.record_proven_read(manifest_id, 0);
         }
@@ -5160,7 +5190,7 @@ mod demand_driven_replication_tests {
             .with_source(ContentSource::Generated(spec));
         let mut reg = StorageRegistry::new();
         reg.register_manifest_with_source(&manifest)
-            .expect("dogru tarif kabul edilmeli");
+            .expect("a correct recipe must be accepted");
         let id = manifest.manifest_id;
         (reg, id)
     }

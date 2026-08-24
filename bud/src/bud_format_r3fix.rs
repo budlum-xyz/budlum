@@ -136,7 +136,7 @@ impl R3Tarif {
     /// (Kullanıcı düzeltmesi: R3 artık ham gövde değil, codec-sıkışmış gövde.)
     pub fn kira(&self, orijinal_len: usize, erasure: f64) -> f64 {
         let oran = self.ratio(orijinal_len).max(1.0);
-        let zemin = crate::bud_format_tarif::R3_ZEMIN_USD_TB_AY;
+        let zemin = crate::bud_format_recipe_record::R3_ZEMIN_USD_TB_AY;
         zemin * erasure.max(1.0) / oran
     }
 
@@ -189,7 +189,7 @@ pub fn r3_olculen_oran(codec: &Codec) -> f64 {
 /// GERÇEK kira: 0.23342 × erasure / ÖLÇÜLEN oran (ölçüme dayanır).
 pub fn r3_gercek_kira(codec: &Codec, erasure: f64) -> f64 {
     let oran = r3_olculen_oran(codec).max(1.0);
-    crate::bud_format_tarif::R3_ZEMIN_USD_TB_AY * erasure.max(1.0) / oran
+    crate::bud_format_recipe_record::R3_ZEMIN_USD_TB_AY * erasure.max(1.0) / oran
 }
 
 #[cfg(test)]

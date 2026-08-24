@@ -293,20 +293,20 @@ pub fn trace_matrix(
 
     let mut values = vec![Goldilocks::new(0); num_rows * TRACE_WIDTH];
 
-    // Program CTL cokluk taniki. Satir `i`, pc=`i`'nin kac kez calistirildigini
-    // tasir; ROM tarafinin LogUp agirligi budur.
+    // The Program CTL multiplicity witness. Row `i` carries how many times
+    // pc=`i` was executed; that is the LogUp weight of the ROM side.
     //
-    // VerifyMerkle genisletme satirlari orijinal adimla ayni (pc, raw_inst)
-    // demetini yeniden kullanir ve CTL onlari `is_expand` ile disarida birakir,
-    // dolayisiyla burada da sayilmazlar.
+    // VerifyMerkle expansion rows reuse the same (pc, raw_inst) tuple as the
+    // original step and the CTL leaves them out via `is_expand`, so they are
+    // not counted here either.
     {
         let prog_len = program.len();
         let mut mult = vec![0u64; prog_len];
         for step in trace {
-            // Genisletme satirlari orijinal adimla ayni (pc, raw_inst) demetini
-            // yeniden kullanir; CTL onlari `is_expand` ile disladigi icin
-            // cokluga da katilmazlar. Katilsalardi tek bir VerifyMerkle adimi
-            // 65 kez sayilirdi.
+            // Expansion rows reuse the same (pc, raw_inst) tuple as the
+            // original step; because the CTL excludes them via `is_expand`
+            // they do not join the multiplicity either. If they did, a single
+            // VerifyMerkle step would be counted 65 times.
             if step.merkle_is_expand || step.inference_is_expand {
                 continue;
             }
@@ -662,11 +662,11 @@ pub fn trace_matrix(
             bud_isa::Opcode::PrivacyCommit => {
                 // Strix HIGH (CWE-682, 2026-08-17): VM layout'i
                 // poseidon4_hash3(amount=rs1, blinding=rs2, recipient=imm).
-                // recipient, trace'teki COL_IMM ile BIREBIRE ayni olmali:
-                // negatif imm Goldilocks moduler negatifi (P - |imm|)
-                // tasinir, i64->u64 ikiye-tumleyen degil.
+                // recipient must be BYTE-IDENTICAL to COL_IMM in the trace:
+                // a negative imm carries the Goldilocks modular negative
+                // (P - |imm|), not the i64->u64 two's complement.
                 let imm = step.instruction.imm;
-                // unsigned_abs(): -imm i32::MIN'de panic eder (Strix, 2026-08-17).
+                // unsigned_abs(): -imm panics at i32::MIN (Strix, 2026-08-17).
                 let recipient = if imm < 0 {
                     bud_vm::GOLDILOCKS_P.wrapping_sub(imm.unsigned_abs() as u64)
                 } else {
@@ -867,11 +867,12 @@ pub fn trace_matrix(
             // `rem == 2 * rem' + bit`, which is what ties `bit` to `key`;
             // without it the direction bits were free and a flipped bit
             // produced a different root that the AIR still accepted.
-            // Bu genislemeyi baslatan orijinal satirin bekledigi deger: yol
-            // bittiginde ulasilmasi gereken 64. tur ciktisi. Orijinal satir
-            // genislemelerden hemen once gelir, bu yuzden geriye dogru ilk
-            // genisleme-olmayan Merkle satiri aranir. Bulunamazsa 0 kalir ve
-            // AIR'in son-tur esitligi kirilir - sessiz gecmek yerine.
+            // The value expected by the original row that started this
+            // expansion: the round-64 output that must be reached when the
+            // path ends. The original row comes immediately before the
+            // expansions, so we search backwards for the first non-expansion
+            // Merkle row. If none is found it stays 0 and the AIR's last-round
+            // equality breaks - rather than passing silently.
             let final_merkle_value = trace[..i]
                 .iter()
                 .rev()
@@ -883,12 +884,13 @@ pub fn trace_matrix(
             values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
             values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
-            // Bu sutun artik bir bayrak degil, **tasinan bir deger**: orijinal
-            // satirin kok ile karsilastiracagi 64. tur ciktisi, genisleme
-            // boyunca degismeden tasinir ve son turda uretilen ciktiyla
-            // esitligi denetlenir (`plonky3_air.rs`, "Son turun ciktisi ...").
-            // Onceden burada sabit 0 vardi ve AIR sutunu hic okumuyordu; o
-            // yuzden orijinal satirin degeri hicbir seye bagli degildi.
+            // This column is no longer a flag but **a carried value**: the
+            // round-64 output the original row will compare against the root
+            // is carried unchanged through the expansion and checked for
+            // equality with the output produced in the last round
+            // (`plonky3_air.rs`, "The output of the last round ..."). It used
+            // to be a constant 0 here and the AIR never read the column, so
+            // the original row's value was bound to nothing.
             values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(final_merkle_value);
 
             // Poseidon witnesses: on every expansion row,
@@ -1486,10 +1488,11 @@ fn aux_trace_generator(
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
-            // ROM tarafi agirligi cokluk sutunudur, sabit 1 degil. Dallanmali
-            // programda bir pc hic calistirilmaz (atlanan dal) veya birden cok
-            // kez calistirilir (dongu govdesi); sabit 1 bu iki durumda da
-            // dengeyi bozar ve durust prover `InvalidProof` alir.
+            // The ROM-side weight is the multiplicity column, not a constant
+            // 1. In a branching program a pc is either never executed (a
+            // skipped branch) or executed several times (a loop body); a
+            // constant 1 unbalances both cases and an honest prover gets
+            // `InvalidProof`.
             if i < program.len() {
                 let mult = row[COL_PROG_MULT];
                 if mult != Goldilocks::ZERO {
@@ -1718,11 +1721,11 @@ mod tests {
     use bud_vm::Vm;
     use p3_field::PrimeField64;
 
-    /// Kanit uzerinde tek alani bozan mutasyon.
+    /// A mutation that corrupts a single field of a proof.
     ///
-    /// `Vec<(&str, Box<dyn Fn(&mut Proof<MyConfig>)>)>` dogrudan yazildiginda
-    /// clippy `type_complexity` veriyor - hakli, cunku okuyan kisi once tipi
-    /// cozup sonra ne yaptigini anlamak zorunda kaliyor.
+    /// Written directly, `Vec<(&str, Box<dyn Fn(&mut Proof<MyConfig>)>)>`
+    /// triggers clippy's `type_complexity` - rightly, because the reader has
+    /// to unpack the type first and only then work out what it does.
     type ProofMutation = Box<dyn Fn(&mut crate::bud_stark::Proof<MyConfig>)>;
 
     fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
@@ -3847,20 +3850,21 @@ mod tests {
     /// a real proof started landing on this field once the transcript changed
     /// the proof's byte layout. The panic was always reachable; which byte
     /// reaches it is not stable.
-    /// Dogrulayicinin sekil denetimleri gercekten kapi mi.
+    /// Are the verifier's shape checks really a gate.
     ///
-    /// `verify_with_preprocessed` kanitin acilan degerlerinin beklenen
-    /// genislikte oldugunu denetler (`valid_shape`) ve uymayani
-    /// `InvalidProofShape` ile reddeder. Bu denetimler, kanit sisteminin
-    /// **kisitlamadigi** alanlar: PCS bir vektorun uzunlugunu degil, verilen
-    /// noktalardaki acilislari dogrular. Yani burasi dogrulayicinin kendi
-    /// kodunda tutmasi gereken sinir - literaturde en sik rastlanan zkVM
-    /// zafiyet sinifi tam olarak bu (dogrulayicinin devreye guvenip kendi
-    /// denetimini atlamasi).
+    /// `verify_with_preprocessed` checks that the proof's opened values are of
+    /// the expected width (`valid_shape`) and refuses anything that does not
+    /// match with `InvalidProofShape`. These checks cover the areas the proof
+    /// system does **not** constrain: the PCS verifies openings at the given
+    /// points, not the length of a vector. So this is the boundary the
+    /// verifier has to hold in its own code - and this is exactly the most
+    /// common zkVM vulnerability class in the literature (a verifier trusting
+    /// the circuit and skipping its own check).
     ///
-    /// 652 satirlik `bud_stark/verifier.rs` uretim yolunda calisiyordu ve tek
-    /// testi yoktu. Bu test o yuzeye ilk kapiyi koyuyor: durust kanit gecer,
-    /// her biri tek alani bozulmus dort kanit reddedilir.
+    /// The 652-line `bud_stark/verifier.rs` was running on the production path
+    /// with not a single test. This test puts the first gate on that surface:
+    /// an honest proof passes, and four proofs each with one corrupted field
+    /// are refused.
     #[test]
     fn verifier_shape_checks_reject_malformed_openings() {
         let program = vec![
@@ -3902,20 +3906,20 @@ mod tests {
         };
 
         let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
 
-        // Kontrol grubu. Bu gecmezse asagidaki redler saldiriya degil
-        // kurulum hatasina borclu olurdu.
+        // Control group. If this does not pass, the refusals below would be
+        // owed to a setup error rather than to the attack.
         assert!(
             Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
-            "durust kanit dogrulanmali: kurulum bozuk"
+            "an honest proof must verify: the setup is broken"
         );
 
         let base: crate::bud_stark::Proof<MyConfig> =
-            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+            postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
 
-        // Her biri tek alani bozar. Hepsi `valid_shape` uzerinden
-        // `InvalidProofShape`e dusmeli.
+        // Each corrupts a single field. All of them must land on
+        // `InvalidProofShape` through `valid_shape`.
         let mutations: Vec<(&str, ProofMutation)> = vec![
             (
                 "trace_local kisaltildi",
@@ -3953,15 +3957,16 @@ mod tests {
             };
             assert!(
                 Plonky3Adapter::verify(&forged, &pi, &program).is_err(),
-                "sekli bozuk kanit dogrulandi ({ad})"
+                "a malformed-shape proof verified ({ad})"
             );
 
-            // Adapter her hatayi `InvalidProof`e duzlestirir, yani yukaridaki
-            // iddia "reddedildi" der ama **neden** reddedildigini soylemez -
-            // bir kriptografik dogrulama hatasi da ayni cevabi verirdi.
-            // Dogrulayici dogrudan cagrilip reddin gercekten sekil kapisindan
-            // geldigi olculur. Bu ayrim olmadan test, sekil denetimi tamamen
-            // kaldirildiginda bile yesil kaliyordu - olculdu, kaldi.
+            // The adapter flattens every error into `InvalidProof`, so the
+            // assertion above says "it was refused" but not **why** it was
+            // refused - a cryptographic verification failure would give the
+            // same answer. The verifier is called directly so that the refusal
+            // is measured to really come from the shape gate. Without that
+            // distinction the test stayed green even with the shape check
+            // removed entirely - measured, and it did.
             let air_p = BudAir {
                 num_steps: vm.trace.len(),
                 program: program.clone(),
@@ -3980,34 +3985,35 @@ mod tests {
                 .as_ref()
                 .err()
                 .map(|e| format!("{e}"))
-                .unwrap_or_else(|| "kabul edildi".to_string());
+                .unwrap_or_else(|| "accepted".to_string());
             assert_eq!(
                 reason, "invalid proof shape",
-                "{ad}: red sekil kapisindan gelmedi"
+                "{ad}: the refusal did not come from the shape gate"
             );
         }
     }
 
-    /// Sekli dogru ama **icerigi** bozulmus kanit reddedilmeli.
+    /// A proof with the right shape but corrupted **content** must be refused.
     ///
-    /// `VerificationError` bes cesit tasiyor ve olculdu: dordunun
+    /// `VerificationError` carries five variants and it was measured: four of them
     /// (`OodEvaluationMismatch`, `RandomizationError`, `InvalidOpeningArgument`,
-    /// `NextPointUnavailable`) hicbir testte karsiligi yoktu. Sekil kapisi
-    /// (`InvalidProofShape`) testliydi, ama o kapi bir kaniti yalnizca
-    /// *bicimsel* olarak eler.
+    /// `NextPointUnavailable`) had no coverage in any test. The shape gate
+    /// (`InvalidProofShape`) was tested, but that gate only screens a proof
+    /// *formally*.
     ///
-    /// Bu test acilan bir degeri, uzunluklara hic dokunmadan degistiriyor -
-    /// yani sekil kapisini gecen, sadece icerigi yanlis bir kanit. Bir
-    /// saldirganin uretecegi sey tam olarak budur.
+    /// This test changes an opened value without touching any length - that
+    /// is, a proof that passes the shape gate and is merely wrong in its
+    /// content. That is exactly what an attacker would produce.
     ///
-    /// **Olculen red yolu `InvalidOpeningArgument`** (FRI/PCS katmani), test
-    /// yazilirken beklenen `OodEvaluationMismatch` degil: acilan deger
-    /// degistiginde kanit daha kisit denetimine varmadan PCS acilis
-    /// dogrulamasinda eleniyor. Iddia bu yuzden "sekil disi bir sebeple
-    /// reddedildi" seklinde kuruldu; belirli bir hata cesidini pinlemek,
-    /// olcum yapmadan yazilmis bir beklentiyi kodlamak olurdu.
-    /// `OodEvaluationMismatch` yolu hala testsiz - ona ulasmak icin PCS
-    /// acilisiyla tutarli ama kisiti bozan bir kanit uretmek gerekir.
+    /// **The measured refusal path is `InvalidOpeningArgument`** (the FRI/PCS
+    /// layer), not the `OodEvaluationMismatch` expected while the test was
+    /// being written: when an opened value changes, the proof is screened out
+    /// in PCS opening verification before it ever reaches the constraint
+    /// check. The assertion was therefore framed as "refused for a reason
+    /// other than shape"; pinning a specific error variant would encode an
+    /// expectation written without measurement. The `OodEvaluationMismatch`
+    /// path is still untested - reaching it requires producing a proof that is
+    /// consistent with the PCS opening but breaks the constraint.
     #[test]
     fn rejects_a_proof_whose_openings_are_altered_without_changing_its_shape() {
         let program = vec![
@@ -4049,30 +4055,31 @@ mod tests {
         };
 
         let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
 
-        // Kontrol grubu: bu gecmezse asagidaki red saldiriya degil kurulum
-        // hatasina borclu olurdu.
+        // Control group: if this does not pass, the refusal below would be
+        // owed to a setup error rather than to the attack.
         assert!(
             Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
-            "durust kanit dogrulanmali: kurulum bozuk"
+            "an honest proof must verify: the setup is broken"
         );
 
         let base: crate::bud_stark::Proof<MyConfig> =
-            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+            postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
 
-        // Sekli **bozulmamis** mutasyonlar: uzunluklar aynen korunuyor, tek
-        // degisen acilan bir degerin kendisi. Boylece `valid_shape` gecer ve
-        // red, kisit denetiminden gelmek zorunda kalir.
+        // Mutations that leave the shape **intact**: the lengths are kept
+        // exactly and the only change is an opened value itself. That way
+        // `valid_shape` passes and the refusal has to come from the constraint
+        // check.
         let mutations: Vec<(&str, ProofMutation)> = vec![
             (
-                "iz acilisinin bir degeri degistirildi",
+                "a value of the trace opening was altered",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.opened_values.trace_local[0] += MyExtensionField::ONE;
                 }),
             ),
             (
-                "bolum parcasinin bir degeri degistirildi",
+                "a value of the quotient chunk was altered",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.opened_values.quotient_chunks[0][0] += MyExtensionField::ONE;
                 }),
@@ -4102,59 +4109,66 @@ mod tests {
                 .as_ref()
                 .err()
                 .map(|e| format!("{e}"))
-                .unwrap_or_else(|| "kabul edildi".to_string());
+                .unwrap_or_else(|| "accepted".to_string());
             assert_ne!(
-                reason, "kabul edildi",
-                "{ad}: icerigi bozulmus kanit dogrulandi"
+                reason, "accepted",
+                "{ad}: a content-corrupted proof verified"
             );
-            // Red **sekil** kapisindan gelmemeli: sekil korundu, dolayisiyla
-            // bu reddin kriptografik denetimden gelmesi gerekiyor. Sekil
-            // cevabi burada gorulurse mutasyon istemeden uzunluk bozmustur ve
-            // test soundness'i degil yine sekli olcuyor demektir.
+            // The refusal must not come from the **shape** gate: the shape
+            // was preserved, so this refusal has to come from the
+            // cryptographic check. If the shape answer shows up here the
+            // mutation unintentionally broke a length and the test is
+            // measuring shape again rather than soundness.
             assert_ne!(
                 reason, "invalid proof shape",
-                "{ad}: red sekil kapisindan geldi; sekil korundugu icin reddin \
-                 kriptografik denetimden gelmesi gerekiyordu"
+                "{ad}: the refusal came from the shape gate; since the shape was \
+                 preserved the refusal should have come from the cryptographic check"
             );
         }
     }
 
-    /// Public input'larin **her biri** kaniti gecersiz kilmali.
+    /// **Every one** of the public inputs must invalidate the proof.
     ///
-    /// Test `OodEvaluationMismatch` yoluna ulasmak icin yazildi (kisit
-    /// denkleminin zeta'da tutmamasi) ve olcum baska bir sey gosterdi:
-    /// **56 public input degerinin her biri degistirildiginde red
+    /// The test was written to reach the `OodEvaluationMismatch` path (the
+    /// constraint equation failing to hold at zeta) and the measurement showed
+    /// something else:
+    /// **when each of the 56 public input values is altered the refusal
     /// `InvalidPowWitness` uzerinden geliyor**, yani FRI proof-of-work
-    /// denetiminden - kisit denetimine varilmadan once.
+    /// check - before the constraint check is ever reached.
     ///
-    /// Sebep, kanit sistemi acisindan iyi haber: public input'lar Fiat-Shamir
+    /// The reason is good news for the proof system: the public inputs enter
+    /// the Fiat-Shamir
     /// transcript'ine absorbe ediliyor (`prover.rs` `observe_slice`,
-    /// `verifier.rs` aynasi). Bir tanesi degisince tum challenge zinciri
-    /// degisiyor ve FRI sorgulari tutmuyor. Baglama kisit katmanindan **once**
-    /// transcript katmaninda kuruluyor; "Last Challenge Attack" sinifinin
+    /// mirror in `verifier.rs`). When one of them changes the whole challenge
+    /// chain changes and the FRI queries do not hold. The binding is
+    /// established in the transcript layer **before** the constraint layer;
+    /// that is exactly the property the "Last Challenge Attack" class
     /// engellendigi yer tam burasi.
     ///
-    /// Iddia bu yuzden belirli bir hata cesidini degil **reddi** pinliyor:
-    /// hangi katmanin yakaladigi bir uygulama detayi, degismemesi gereken sey
-    /// hicbir public input'in serbest kalmamasi. `OodEvaluationMismatch`'e
-    /// ulasmak transcript'i de tutarli tutan bir sahte kanit uretmeyi
-    /// gerektirir - kanit sistemini kirmadan yapilamaz, ki bu zaten istenen
+    /// The assertion therefore pins the **refusal** rather than a specific
+    /// error variant: which layer catches it is an implementation detail, what
+    /// must not change is that no public input is left free. Reaching
+    /// `OodEvaluationMismatch` would require producing a forged proof that
+    /// also keeps the transcript consistent - which cannot be done without
+    /// breaking the proof system, and that is the desired
     /// ozelliktir.
     ///
-    /// Iki bagimsiz katman oldugu mutasyonla olculdu:
+    /// That there are two independent layers was measured by mutation:
     ///
-    /// * `observe_slice(public_values)` **kismen** (son deger dusurulerek)
-    ///   bozuldugunda test yesil kaliyor - o degeri AIR kisiti da bagliyor.
+    /// * when `observe_slice(public_values)` is broken **partially** (by
+    ///   dropping the last value) the test stays green - that value is bound
+    ///   by the AIR constraint as well.
     /// * Absorbe **tamamen** kaldirildiginda `public input 1` serbest kaliyor
-    ///   ve test kirmizi veriyor - yani bazi degerleri yalnizca transcript
-    ///   bagliyor, kisit katmani degil.
+    ///   and the test goes red - that is, some values are bound only by the
+    ///   transcript and not by the constraint layer.
     ///
-    /// Ikisi birlikte tam kapsama veriyor; biri kaldirilirsa acik olusuyor.
+    /// Together the two give full coverage; removing either opens a hole.
     /// Testin her indisi ayri gezmesinin sebebi de bu: kapsama tek tip
-    /// degil, indise gore farkli katmandan geliyor.
+    /// but comes from a different layer depending on the index.
     ///
-    /// `Plonky3Adapter::verify` bu yolu olcemez: public input'lari kendi
-    /// hash'iyle onceden eler. Dogrulayici bu yuzden dogrudan cagriliyor.
+    /// `Plonky3Adapter::verify` cannot measure this path: it screens the
+    /// public inputs beforehand with its own hash. That is why the verifier is
+    /// called directly.
     #[test]
     fn rejects_a_proof_for_every_altered_public_input() {
         let program = vec![
@@ -4196,9 +4210,9 @@ mod tests {
         };
 
         let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
         let proof: crate::bud_stark::Proof<MyConfig> =
-            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+            postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
 
         let air_p = BudAir {
             num_steps: vm.trace.len(),
@@ -4207,7 +4221,7 @@ mod tests {
         let cfg_p = build_config();
         let pp_p = setup_preprocessed(&cfg_p, &air_p, proof.degree_bits);
 
-        // Kontrol grubu: dogru public input'larla gecmeli.
+        // Control group: it must pass with the correct public inputs.
         let durust = to_public_values(&pi);
         assert!(
             crate::bud_stark::verify_with_preprocessed(
@@ -4218,18 +4232,19 @@ mod tests {
                 pp_p.as_ref().map(|(_, v)| v),
             )
             .is_ok(),
-            "durust kanit dogrulanmali: kurulum bozuk"
+            "an honest proof must verify: the setup is broken"
         );
 
-        // Kanit aynen kaliyor; yalnizca dogrulayiciya sunulan public input
-        // degisiyor. Her indis **ayri** iddia ediliyor: toplu tek bir iddia,
-        // bir indisin hic baglanmamis olmasini digerlerinin basarisi altinda
-        // gizlerdi - SP1'in `committed_value_digest` kisitsizliginin sinifi.
+        // The proof stays as is; only the public input presented to the
+        // verifier changes. Each index is asserted **separately**: a single
+        // bulk assertion would hide one index being entirely unbound beneath
+        // the success of the others - the class of SP1's unconstrained
+        // `committed_value_digest`.
         for i in 0..durust.len() {
             let mut bozuk = durust.clone();
             bozuk[i] += Goldilocks::ONE;
 
-            let sonuc = crate::bud_stark::verify_with_preprocessed(
+            let result = crate::bud_stark::verify_with_preprocessed(
                 &cfg_p,
                 &air_p,
                 &proof,
@@ -4238,19 +4253,20 @@ mod tests {
             );
 
             assert!(
-                sonuc.is_err(),
-                "public input {i} degistirildi ama kanit hala gecerli sayildi; \
-                 bu deger kanita baglanmamis"
+                result.is_err(),
+                "public input {i} was altered but the proof was still considered \
+                 valid; that value is not bound to the proof"
             );
         }
     }
 
-    /// ZK bayragi ile kanittaki rastgelelik taahhudu **uyusmali**.
+    /// The ZK flag and the randomness commitment in the proof must **agree**.
     ///
     /// `verifier.rs:363` bunu acikca denetliyor: ZK acikken rastgelelik
-    /// taahhudu bulunmali, kapaliyken bulunmamali. Hicbir testi yoktu.
-    /// Uyusmazlik kabul edilseydi, ZK acikken rastgeleligi olmayan bir kanit
-    /// gizlilik iddiasini sessizce kaybederdi.
+    /// commitment must be present when it is on and absent when it is off.
+    /// There was no test for it at all. If a mismatch were accepted, a proof
+    /// with no randomness while ZK is on would silently lose the privacy
+    /// claim.
     #[test]
     fn rejects_a_proof_whose_randomization_does_not_match_the_zk_setting() {
         let program = vec![
@@ -4292,9 +4308,9 @@ mod tests {
         };
 
         let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
         let base: crate::bud_stark::Proof<MyConfig> =
-            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+            postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
 
         let air_p = BudAir {
             num_steps: vm.trace.len(),
@@ -4304,7 +4320,7 @@ mod tests {
         let pv_p = to_public_values(&pi);
         let pp_p = setup_preprocessed(&cfg_p, &air_p, base.degree_bits);
 
-        // Kontrol grubu: dokunulmamis kanit gecmeli.
+        // Control group: an untouched proof must pass.
         assert!(
             crate::bud_stark::verify_with_preprocessed(
                 &cfg_p,
@@ -4314,26 +4330,27 @@ mod tests {
                 pp_p.as_ref().map(|(_, v)| v),
             )
             .is_ok(),
-            "durust kanit dogrulanmali: kurulum bozuk"
+            "an honest proof must verify: the setup is broken"
         );
 
-        // Iki yon de ayri ayri olculuyor.
+        // Both directions are measured separately.
         //
-        // Yalnizca taahhudu eklemek yeterli degildi: o durumu `verifier.rs`
-        // icinde **ikinci** bir yer de yakaliyor (acilan rastgelelik degeri
-        // yoksa `RandomizationError`), dolayisiyla ilk kapi tamamen
-        // silindiginde bile test yesil kaliyordu - olculdu. `opened_values`
-        // tarafini bozan ikinci vaka o kapiyi tek basina zorluyor.
+        // Adding the commitment alone was not enough: a **second** place
+        // inside `verifier.rs` also catches that case (`RandomizationError`
+        // when the opened randomness value is missing), so the test stayed
+        // green even with the first gate deleted entirely - measured. The
+        // second case, which corrupts the `opened_values` side, exercises that
+        // gate on its own.
         let vakalar: Vec<(&str, ProofMutation)> = vec![
             (
-                "taahhut var, acilan deger yok",
+                "commitment present, opened value missing",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.commitments.random = Some(p.commitments.quotient_chunks.clone());
                     p.opened_values.random = None;
                 }),
             ),
             (
-                "acilan deger var, taahhut yok",
+                "opened value present, commitment missing",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.commitments.random = None;
                     p.opened_values.random = Some(p.opened_values.quotient_chunks[0].clone());
@@ -4354,11 +4371,11 @@ mod tests {
             )
             .err()
             .map(|e| format!("{e}"))
-            .unwrap_or_else(|| "kabul edildi".to_string());
+            .unwrap_or_else(|| "accepted".to_string());
 
             assert_eq!(
                 reason, "randomization error: FRI batch randomization does not match ZK setting",
-                "{ad}: ZK ayariyla celisen rastgelelik dogru sebeple reddedilmedi"
+                "{ad}: randomness contradicting the ZK setting was not refused for the right reason"
             );
         }
     }
@@ -4693,11 +4710,12 @@ mod tests {
         });
     }
 
-    /// Strix HIGH (CWE-682, 2026-08-17) regression: negatif imm, VM layout'i
-    /// poseidon4_hash3(amount=rs1, blinding=rs2, recipient=imm). Eski witness
-    /// imm'i u32'ye truncate edip "blinding" diyordu; negatif imm'de proof,
-    /// VM'nin hesapladigi commitment'i kanitlamaz (u32 truncate = 2^32-5,
-    /// i64 -> u64 = 2^64-5). Bu test buyuk/negatif imm'de roundtrip zorlar.
+    /// Strix HIGH (CWE-682, 2026-08-17) regression: a negative imm, with the
+    /// VM layout poseidon4_hash3(amount=rs1, blinding=rs2, recipient=imm). The
+    /// old witness truncated imm to u32 and called it "blinding"; with a
+    /// negative imm the proof does not prove the commitment the VM computed
+    /// (u32 truncate = 2^32-5, i64 -> u64 = 2^64-5). This test forces a round
+    /// trip on large/negative imm.
     #[test]
     fn d2_proves_privacy_commit_negative_imm() {
         let amount = 100u64;
@@ -4846,7 +4864,7 @@ mod tests {
 
     // --- (security audit) security audit
     //
-    // `VerifyMerkle` opcode'unun (0x1E) ZK soundness'ı iki katmandan oluşur:
+    // The ZK soundness of the `VerifyMerkle` opcode (0x1E) has two layers:
     //
     //   (a) **Selector binding (partial fix).** The prover can no
     //       Longer set `is_verify_merkle = 0` on a row where
@@ -4867,16 +4885,17 @@ mod tests {
     //       Constraints and `budzero/docs/BudL_SPEC.md` ("VerifyMerkle
     //       Soundness") for the argument.
     //
-    //   (c) **Yolun sonucunun koke baglanmasi.** (a) ve (b) uzun sure
-    //       Yeterli sayildi, degildi. Zincir satir satir dogru
-    //       Hesaplaniyordu ve **ulastigi yer hicbir seye baglanmiyordu**:
-    //       Kok karsilastirmasi orijinal satirin `merkle_current`
-    //       Hucresine bakiyor, o hucreye 64. turun ciktisinin yazildigini
-    //       Zorlayan bir kisit yoktu. Genisleme satirlarina hic dokunmadan
-    //       Orijinal satira iddia edilen kokun kendisini yazan bir prover
-    //       Dogrulanan bir kanit uretiyordu - olculdu, uretti.
-    //       `COL_MERKLE_FINAL_FLAG` artik beklenen degeri genisleme boyunca
-    //       Tasir ve son turda uretilen ciktiyla esitligi denetlenir.
+    //   (c) **Binding the path's result to the root.** (a) and (b) were
+    //       long considered sufficient, and they were not. The chain was
+    //       computed correctly row by row and **where it arrived was bound
+    //       to nothing**: the root comparison looks at the original row's
+    //       `merkle_current` cell, and no constraint forced the round-64
+    //       output to be written into that cell. Without touching the
+    //       expansion rows at all, a prover writing the claimed root itself
+    //       into the original row produced a proof that verified - it was
+    //       measured, and it did. `COL_MERKLE_FINAL_FLAG` now carries the
+    //       expected value through the expansion and its equality with the
+    //       output produced in the last round is checked.
     //       Test: `rejects_verify_merkle_root_not_produced_by_the_path`.
     //
     // What this does *not* license: `verify_merkle_enabled` stays `false`
@@ -4884,10 +4903,10 @@ mod tests {
     // The soundness argument, which is a process step, not a missing
     // Constraint. Do not flip it on the strength of this comment.
     //
-    // (c) bu ayrimin neden korundugunu da gosteriyor: bu yorumun onceki
-    // Surumu (b)'yi "implemented" ilan ediyordu ve ilan dogruydu -
-    // Eksik olan (b) degildi, kimsenin ayri bir madde olarak yazmadigi
-    // (c) idi. Ic degerlendirmenin gozden kacirdigi sey tam olarak budur.
+    // (c) also shows why that distinction is kept: an earlier version of
+    // this comment declared (b) "implemented" and the declaration was true -
+    // what was missing was not (b) but (c), which nobody had written down as
+    // a separate item. That is precisely what an internal review misses.
     //
     // Tests: `verify_merkle_opcode_is_deprecated_for_zk_proofs` pins the
     // 0x1E encoding, `rejects_verify_merkle_with_zero_selector` covers (a),
@@ -6883,25 +6902,26 @@ mod tests {
         );
     }
 
-    /// Yolun uretmedigi bir kok iddiasi reddedilmeli.
+    /// A claimed root the path did not produce must be refused.
     ///
-    /// Kok denetimi, **orijinal** VerifyMerkle satirinin `merkle_current`
-    /// hucresini iddia edilen kokle (`rs1_val`) karsilastirir. Prover o
-    /// hucreye 64. turun ciktisini yazar - ama hicbir kisit bunu zorlamiyordu.
-    /// 64 genisleme satiri Poseidon zincirini satir satir dogru hesapliyor,
-    /// ulastigi sonuc ise hicbir yere baglanmiyordu.
+    /// The root check compares the `merkle_current` cell of the **original**
+    /// VerifyMerkle row against the claimed root (`rs1_val`). The prover
+    /// writes the round-64 output into that cell - but no constraint forced
+    /// it. The 64 expansion rows compute the Poseidon chain correctly row by
+    /// row, and the result they arrive at was bound to nothing.
     ///
-    /// Saldirgan izi VM seviyesinde kurgular: **gecerli** bir yolla baslar
-    /// (ayni kurulum `proves_verify_merkle_valid_64_depth` ile), sonra
-    /// iddia edilen koku degistirir ve orijinal adimin `merkle_current`
-    /// alanina o yeni koku yazip "eslesti" der. Genisleme satirlarina
-    /// dokunulmaz - zincir kendi icinde tutarli kalir, yalnizca vardigi yer
-    /// yok sayilir. `trace_matrix` turev sutunlarin hepsini bu izden tutarli
-    /// uretir, yani ortada bayat tanik yoktur.
+    /// The attacker builds the trace at VM level: it starts with a **valid**
+    /// path (the same setup as `proves_verify_merkle_valid_64_depth`), then
+    /// changes the claimed root and writes that new root into the original
+    /// step's `merkle_current` field, declaring a match. The expansion rows
+    /// are untouched - the chain stays internally consistent, only where it
+    /// arrives is ignored. `trace_matrix` produces every derived column
+    /// consistently from this trace, so there is no stale witness involved.
     ///
-    /// Kisit kaldirilarak olculdu: bu kanit **dogrulandi** (`verify` Ok).
-    /// Kisitla birlikte reddediliyor. Opcode'un uretimde kapali tutulma
-    /// gerekcesi ("unfinished path verification") tam olarak buydu.
+    /// Measured with the constraint removed: this proof **verified**
+    /// (`verify` Ok). With the constraint it is refused. That was exactly the
+    /// reason the opcode is kept off in production ("unfinished path
+    /// verification").
     #[test]
     fn rejects_verify_merkle_root_not_produced_by_the_path() {
         let program = vec![
@@ -6934,8 +6954,9 @@ mod tests {
         assert!(receipt.success);
         assert_eq!(vm.trace.len(), 66);
 
-        // Saldiri: baska bir kok iddia edilir ve orijinal adim, yolun
-        // ulastigi sonuc yerine o koku tasiyip "eslesti" der.
+        // The attack: a different root is claimed and the original step
+        // carries that root instead of the result the path arrived at,
+        // declaring a match.
         let forged_root = honest_root ^ 0xFFFF;
         let mut trace = vm.trace.clone();
         trace[0].src1_val = forged_root;
@@ -6995,8 +7016,8 @@ mod tests {
 
         assert!(
             rejected_at_proving || rejected_at_verification,
-            "yolun uretmedigi bir kok dogrulandi: 64 tur hesaplandi ve sonucu \
-             atlandi. proving_rejected={rejected_at_proving}, \
+            "a root the path did not produce verified: 64 rounds were computed \
+             and their result skipped. proving_rejected={rejected_at_proving}, \
              verification_rejected={rejected_at_verification}"
         );
     }

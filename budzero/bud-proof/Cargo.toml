@@ -35,7 +35,7 @@ name = "proof_baseline"
 harness = false
 
 [dev-dependencies]
-# Derlenmis dallanma testi (tests/derlenmis_dallanma.rs) icin: kanit boru
+# Derlenmis dallanma testi (tests/compiled_branching.rs) icin: kanit boru
 # hattini elle kurulmus komut dizisiyle degil, derleyicinin gercek ciktisiyla
 # besler. Mevcut 106 prover testinin tamami elle kurulmus dizi kullaniyordu.
 bud-compiler = { path = "../bud-compiler" }
