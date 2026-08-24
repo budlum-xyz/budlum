@@ -1,10 +1,11 @@
-//! B.U.D. 2.0 - PCAP TRANSFORMU (100-web bulgusu: "PCAP → zstd 10x (DNS)")
+//! B.U.D. 2.0 - PCAP TRANSFORM (100-web finding: "PCAP -> zstd 10x (DNS)")
 //!
-//! Kalan iş #8: PCAP transformu. Ağ yakalama dosyası (libpcap) yapısal olarak
-//! işlenir: global başlık + paket kayıtları (ts_sec, ts_usec, incl_len, data).
-//! Kayıt alanları ayrı sütunlara ayrılır: ts → delta+varint, len'ler ayrı,
-//! paket verisi olduğu gibi → zstd tekrarı (ortak önekler) daha iyi görür.
-//! KAYIPSIZ: `pcap_restore` orijinal baytları birebir geri üretir.
+//! Remaining work #8: the PCAP transform. A network capture file (libpcap) is
+//! processed structurally: global header + packet records (ts_sec, ts_usec,
+//! incl_len, data). The record fields are split into separate columns: ts ->
+//! delta+varint, the lengths separately, the packet payload as is -> zstd sees
+//! the repetition (shared prefixes) better.
+//! LOSSLESS: `pcap_restore` reproduces the original bytes byte for byte.
 
 #![forbid(unsafe_code)]
 
@@ -13,7 +14,7 @@ use sha3::{Digest, Sha3_256};
 pub const PCAP_MAGIC: [u8; 8] = *b"\xB5PCAP\0\0\0";
 pub const PCAP_VERSION: u8 = 1;
 pub const PCAP_GLOBAL_HDR: usize = 24;
-pub const PCAP_MAX_RECORDS: usize = 1 << 20; // 1M kayıt tavanı (OOM koruması)
+pub const PCAP_MAX_RECORDS: usize = 1 << 20; // a 1M record ceiling (OOM protection)
 
 fn varint(x: u64) -> Vec<u8> {
     let mut x = x;
@@ -30,13 +31,13 @@ fn zigzag(n: i64) -> u64 {
     ((n << 1) ^ (n >> 63)) as u64
 }
 
-/// PCAP'i transform et: global başlık + sütunlu kayıt indeksi + paket verisi.
-/// Çıktı, zstd'ye verilecek ara temsildir; kayıpsız geri çevrilir.
+/// Transform a PCAP: global header + columnar record index + packet payload.
+/// The output is the intermediate representation fed to zstd; it inverts losslessly.
 pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < PCAP_GLOBAL_HDR {
         return None;
     }
-    // magic kontrolü (little-endian a1b2c3d4 veya big-endian d4c3b2a1)
+    // magic check (little-endian a1b2c3d4 or big-endian d4c3b2a1)
     let le = data[0..4] == [0xD4, 0xC3, 0xB2, 0xA1];
     let be = data[0..4] == [0xA1, 0xB2, 0xC3, 0xD4];
     if !le && !be {
@@ -45,8 +46,8 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     let mut pos = PCAP_GLOBAL_HDR;
     let mut out = Vec::with_capacity(data.len());
     out.extend_from_slice(b"PCAP1|");
-    out.extend_from_slice(&data[0..PCAP_GLOBAL_HDR]); // global başlık aynen
-    out.push(0xFF); // ayraç
+    out.extend_from_slice(&data[0..PCAP_GLOBAL_HDR]); // the global header verbatim
+    out.push(0xFF); // separator
     let mut prev_ts: i64 = 0;
     let mut records = 0u32;
     let mut data_start = 0usize;
@@ -55,9 +56,9 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     let mut ts_secs = Vec::new();
     while pos + 16 <= data.len() {
         let rd = |o: usize| -> u32 {
-            // Sabit genislikte okuma: dilim uzunlugu burada her zaman 4, ama
-            // `try_into().unwrap()` bunu derleyiciye degil calisma zamanina
-            // birakiyordu. `copy_from_slice` ayni seyi paniksiz yapar.
+            // A fixed-width read: the slice length is always 4 here, but
+            // `try_into().unwrap()` left that to run time rather than to the
+            // compiler. `copy_from_slice` does the same thing without panicking.
             let mut w = [0u8; 4];
             w.copy_from_slice(&data[pos + o..pos + o + 4]);
             if le {
@@ -70,7 +71,7 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
         let ts_usec = rd(4) as i64;
         let incl_len = rd(8) as usize;
         if incl_len > data.len().saturating_sub(pos + 16) {
-            return None; // bozuk kayıt
+            return None; // corrupt record
         }
         let ts = ts_sec * 1_000_000 + ts_usec;
         dts.push(zigzag(ts - prev_ts));
@@ -86,7 +87,7 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     if records == 0 {
         return None;
     }
-    // sütun blokları
+    // column blocks
     out.extend_from_slice(&records.to_le_bytes());
     for d in &dts {
         out.extend_from_slice(&varint(*d));
@@ -96,8 +97,8 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(&varint(*l));
     }
     out.push(0xFD);
-    // paket verileri (ayraçlı, zstd ortak-önek için düzenli)
-    // NOT: her paketten sonra SONRAKİ KAYDIN 16 baytlık başlığı gelir - atlanır.
+    // packet payloads (separated, laid out for zstd's shared prefixes)
+    // NOTE: after every packet comes the 16-byte header of the NEXT RECORD - it is skipped.
     let mut p = data_start;
     for l in &lens {
         let l = *l as usize;
@@ -110,7 +111,7 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Transform'u geri çevir → ORİJİNAL PCAP (kayıpsızlık kanıtı).
+/// Invert the transform -> the ORIGINAL PCAP (the losslessness proof).
 pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     if !transformed.starts_with(b"PCAP1|") {
         return None;
@@ -130,7 +131,7 @@ pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let records = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
-    // STRIX-deseni: kullanici kontrollu records ile OOM engeli
+    // The STRIX pattern: guard against OOM from a user-controlled record count
     if records > PCAP_MAX_RECORDS {
         return None;
     }
@@ -180,7 +181,7 @@ pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     pos += 1;
-    // yeniden kur
+    // rebuild
     let mut out = g;
     let mut ts_abs: i64 = 0;
     for (i, d) in dts.iter().enumerate() {
@@ -210,14 +211,14 @@ pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         hdr.extend_from_slice(&w(ts_sec as u32));
         hdr.extend_from_slice(&w(ts_usec as u32));
         hdr.extend_from_slice(&w(l as u32));
-        hdr.extend_from_slice(&w(l as u32)); // orig_len = incl_len (capture'da aynı)
+        hdr.extend_from_slice(&w(l as u32)); // orig_len = incl_len (identical in a capture)
         out.extend_from_slice(&hdr);
         out.extend_from_slice(raw);
     }
     Some(out)
 }
 
-/// Transform oranı (original / transformed) - zstd öncesi yapısal kazanç.
+/// The transform ratio (original / transformed) - the structural gain before zstd.
 pub fn pcap_structural_ratio(data: &[u8]) -> Option<f64> {
     let t = pcap_transform(data)?;
     Some(data.len() as f64 / t.len() as f64)
@@ -236,8 +237,8 @@ pub fn pcap_digest(data: &[u8]) -> Option<[u8; 32]> {
 mod tests {
     use super::*;
 
-    /// Sentetik PCAP: 500 DNS-ish paketi (küçük, tekrarlı sorgular).
-    fn ornek_pcap() -> Vec<u8> {
+    /// A synthetic PCAP: 500 DNS-ish packets (small, repetitive queries).
+    fn sample_pcap() -> Vec<u8> {
         let mut d = Vec::new();
         d.extend_from_slice(&0xA1B2C3D4u32.to_le_bytes()); // magic (le)
         d.extend_from_slice(&[2, 4, 0, 0]); // version
@@ -263,38 +264,38 @@ mod tests {
     }
 
     #[test]
-    fn pcap_roundtrip_kayipsiz() {
-        let p = ornek_pcap();
+    fn pcap_roundtrip_is_lossless() {
+        let p = sample_pcap();
         let t = pcap_transform(&p).expect("transform");
         assert!(
             t.len() < p.len(),
-            "transform küçültmeli: {} → {}",
+            "the transform must shrink: {} -> {}",
             p.len(),
             t.len()
         );
         let r = pcap_restore(&t).expect("restore");
-        assert_eq!(r, p, "PCAP birebir");
+        assert_eq!(r, p, "the PCAP comes back byte for byte");
     }
 
     #[test]
-    fn pcap_structural_kazanc_var() {
-        let p = ornek_pcap();
-        let r = pcap_structural_ratio(&p).expect("oran");
-        assert!(r > 1.0, "yapısal kazanç: {r}");
+    fn pcap_has_a_structural_gain() {
+        let p = sample_pcap();
+        let r = pcap_structural_ratio(&p).expect("ratio");
+        assert!(r > 1.0, "structural gain: {r}");
     }
 
     #[test]
-    fn pcap_bozuk_girdi_reddedilir() {
-        assert!(pcap_transform(b"kisa").is_none());
-        assert!(pcap_transform(&[0u8; 24]).is_none()); // magic yok
-        let mut p = ornek_pcap();
-        p.truncate(40); // global hdr + yarım kayıt
-        assert!(pcap_transform(&p).is_none() || pcap_transform(&p).is_some()); // panik yok
+    fn pcap_rejects_corrupt_input() {
+        assert!(pcap_transform(b"short").is_none());
+        assert!(pcap_transform(&[0u8; 24]).is_none()); // no magic
+        let mut p = sample_pcap();
+        p.truncate(40); // global hdr + half a record
+        assert!(pcap_transform(&p).is_none() || pcap_transform(&p).is_some()); // no panic
     }
 
     #[test]
-    fn pcap_digest_deterministik() {
-        let p = ornek_pcap();
+    fn pcap_digest_is_deterministic() {
+        let p = sample_pcap();
         assert_eq!(pcap_digest(&p), pcap_digest(&p));
     }
 }
