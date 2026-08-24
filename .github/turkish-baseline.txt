@@ -254,7 +254,6 @@ src/domain/sovereign.rs	42
 src/domain/storage_deal.rs	2
 src/domain/types.rs	11
 src/execution/executor.rs	3
-src/gateway/atlas.rs	61
 src/gateway/service.rs	15
 src/lib.rs	4
 src/lubot/effort.rs	1
