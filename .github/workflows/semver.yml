@@ -15,20 +15,20 @@ permissions:
 
 jobs:
   semver-check:
-    # CI Genişletme Madde 5: cargo-semver-checks, public API kırılması tespiti.
+    # CI Expansion item 5: cargo-semver-checks, public API breakage detection.
     #
-    # Sertleştirme (2026-07-21): eski sürüm her iki adımda da
-    # `continue-on-error: true` idi → kapı ASLA kırmızı veremiyordu (gözlem
-    # Modu = süsleme). Ayrıca base mekanizması yoktu: `check-release`
-    # Crates.io'ya yayınlanmamış `budlum-core` için çalışamaz. Yeni model:
-    #   * Base = PR'da `pull_request.base.sha`, main push'ta `push.before`.
-    #   * İki ayrı checkout (current/baseline) + `--baseline-root`.
-    #   * nightly toolchain (cargo-semver-checks rustdoc-json üretimi için).
-    #   * Gate: `semver` (Rust, xtask/gates) - kırılma varsa ve
-    #     `.github/semver-exceptions.txt` boşsa FAIL. İstisna satırları
-    #     Kullanıcı onaylı, gerekçeli "kanıtlı skip-list" desenindedir
-    #     (.quality/deny.toml [advisories] ile aynı disiplin).
-    name: "Semver Check (Madde 5: public API breakage gate)"
+    # Hardening (2026-07-21): the old version carried `continue-on-error: true` on
+    # both steps, so the gate could NEVER go red (observation mode = decoration).
+    # It also had no base mechanism: `check-release` cannot work for `budlum-core`,
+    # which is not published to crates.io. The new model:
+    #   * Base = `pull_request.base.sha` on a PR, `push.before` on a main push.
+    #   * Two separate checkouts (current/baseline) + `--baseline-root`.
+    #   * A nightly toolchain (for cargo-semver-checks rustdoc-json generation).
+    #   * Gate: `semver` (Rust, xtask/gates) - FAIL if there is a breakage and
+    #     `.github/semver-exceptions.txt` is empty. Exception lines follow the
+    #     approved, justified "evidenced skip-list" pattern
+    #     (the same discipline as .quality/deny.toml [advisories]).
+    name: "Semver Check (item 5: public API breakage gate)"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -58,27 +58,27 @@ jobs:
         with:
           toolchain: "1.97.0"
       - name: Install pinned nightly (rustdoc-json backend for semver-checks)
-        # 'rustdoc' nightly'de ayrı bir component DEĞİL, rustc component'inin
-        # Parçası (rustup: "did you mean 'rust-docs'?" ile exit 1, 2026-07-21 CI kanıtı).
+        # On nightly 'rustdoc' is NOT a separate component, it is part of the rustc
+        # component (rustup: exit 1 with "did you mean 'rust-docs'?", 2026-07-21 CI evidence).
         run: rustup toolchain install nightly-2026-07-19 --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
-          # İki-checkout yerleşiminde workspace kökünde Cargo.toml yok;
-          # Rust-cache'in `cargo metadata` çağrısı kökte patlar (Error logu).
+          # In the two-checkout layout there is no Cargo.toml at the workspace root;
+          # rust-cache's `cargo metadata` call blows up at the root (Error log).
           workspaces: ./current
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: cargo-semver-checks kur (locked)
+      - name: Install cargo-semver-checks (locked)
         run: cargo +1.97.0 install cargo-semver-checks --locked
-      - name: Gate canary (vacuous-gate koruması)
+      - name: Gate canary (vacuous-gate protection)
         run: BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver --self-test
-      - name: Teşhis (kalıcı kanıt adımı) - doğrudan rustdoc-json
-        # Gelecekteki sessiz-crash sınıflarında wrapper'ın yuttuğu hata gövdesini
-        # Ham olarak görünür kılar (continue-on-error: koşuyu bloklamaz).
-        # NOT: `-o <dir>` YASAK, cargo rustdoc kendisi --out-dir ekler; ikinci
-        # Veriliş "Option 'out-dir' given more than once" ile ölür (2026-07-21
-        # Lokal kanıt). JSON target/doc/budlum_core.json'a düşer.
+      - name: Diagnosis (permanent evidence step) - rustdoc-json directly
+        # For future silent-crash classes it makes the error body swallowed by the
+        # wrapper visible raw (continue-on-error: it does not block the run).
+        # NOTE: `-o <dir>` is FORBIDDEN, cargo rustdoc adds --out-dir itself; a
+        # second one dies with "Option 'out-dir' given more than once" (2026-07-21
+        # local evidence). The JSON lands in target/doc/budlum_core.json.
         continue-on-error: true
         env:
           RUSTUP_TOOLCHAIN: nightly-2026-07-19
@@ -93,24 +93,24 @@ jobs:
       - name: Semver gate - budlum-core vs baseline
         env:
           SEMVER_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          # Kök-neden (kapandı, 2026-07-21): rustdoc-json ölümü nightly'den
-          # Değil --all-features heuristiğinden kaynaklanıyordu - pq-dilithium+
-          # Pq-ml-dsa compile_error! kilidi. Fix: semver kapısı --default-features ile koşar.
-          # Nightly pin rustdoc-json'un -Z gereksinimi için zorunlu kalıyor.
+          # Root cause (closed, 2026-07-21): the rustdoc-json death came not from
+# nightly but from the --all-features heuristic - the pq-dilithium + pq-ml-dsa
+# compile_error! lock. Fix: the semver gate runs with --default-features.
+# The nightly pin remains mandatory for rustdoc-json's -Z requirement.
           RUSTUP_TOOLCHAIN: nightly-2026-07-19
           CARGO_BUILD_JOBS: "2"
           RUSTFLAGS: "-C debuginfo=0"
         run: |
           set +e
           if [ -z "${SEMVER_BEFORE}" ] || [ "${SEMVER_BEFORE}" = "0000000000000000000000000000000000000000" ]; then
-            echo "BASE YOK (ilk push/şüpheli state) - gate atlanmaz, bilgi logu ile PASS."
-            echo "NOT: budlum-core crates.io'da yayınlı değil; base mecburidir."
+            echo "NO BASE (first push/suspicious state) - the gate is not skipped, PASS with an info log."
+            echo "NOTE: budlum-core is not published on crates.io; a base is mandatory."
             exit 0
           fi
           BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver ./current ./baseline
           rc=$?
           if [ "$rc" -ne 0 ]; then
-            echo "::warning::gate exit=$rc - runner memory snapshot (OOM kanıtı için):"
+            echo "::warning::gate exit=$rc - runner memory snapshot (for OOM evidence):"
             free -m || true
           fi
           exit "$rc"

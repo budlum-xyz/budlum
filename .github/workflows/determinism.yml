@@ -15,9 +15,9 @@ permissions:
 
 jobs:
   genesis-reproducibility:
-    # CI Genişletme Madde 1: Genesis reproducibility check.
-    # İki kez build, aynı genesis hash'i üretmeli.
-    name: Genesis Reproducibility (Madde 1)
+    # CI Expansion item 1: genesis reproducibility check.
+    # Build twice, it must produce the same genesis hash.
+    name: Genesis Reproducibility (item 1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,21 +66,21 @@ jobs:
           echo "OK: Genesis hashes match."
 
   cross-platform-determinism:
-    # CI Genişletme Madde 2: Cross-platform determinism matrix.
+    # CI Expansion item 2: cross-platform determinism matrix.
     #
-    # Sertleştirme (2026-07-21):
-    #   * Matrise Windows eklendi (öncesi: yalnız Ubuntu + macOS - kullanıcı
-    #     Maddesi "Linux/macOS/Windows"u üçlü ister).
-    #   * Gerçek "cross" kapandı: eskiden her OS kendi testini koşup geçiyordu
-    #     Ama ÇIKTILAR karşılaştırılmıyordu → aynı isteğin farklı platformda
-    #     Farklı consensus sonucu üretmesi (ör. pointer-width, float, HashMap
-    #     Iteration sızıntısı) bu kapıdan kaçabilirdi. Artık her OS
-    #     `consensus_scenario_digest_cross_platform` testinin ürettiği
-    #     CONSENSUS_DIGEST değerini artefakt olarak yüklüyor ve
-    #     `consensus-digest-compare` job'u üç platformun digest'ini BYTE
-    #     EŞİTLİĞİNE tabi tutuyor. Sapmışsa FAIL (kullanıcı maddesi:
-    #     "consensus çıktısı birebir aynı mı").
-    name: Cross-Platform Digest (${{ matrix.os }}) (Madde 2)
+    # Hardening (2026-07-21):
+    #   * Windows was added to the matrix (before: Ubuntu + macOS only - the
+    #     requirement asks for all three of "Linux/macOS/Windows").
+    #   * Real "cross" was closed: each OS used to run and pass its own test but
+    #     the OUTPUTS were not compared, so the same request producing a different
+    #     consensus result on a different platform (e.g. pointer width, float,
+    #     HashMap iteration leakage) could escape this gate. Now every OS uploads
+    #     the CONSENSUS_DIGEST value produced by the
+    #     `consensus_scenario_digest_cross_platform` test as an artifact, and the
+    #     `consensus-digest-compare` job subjects the three platforms' digests to
+    #     BYTE EQUALITY. On divergence it is a FAIL (the requirement:
+    #     "is the consensus output byte for byte identical").
+    name: Cross-Platform Digest (${{ matrix.os }}) (item 2)
     strategy:
       fail-fast: false
       matrix:
@@ -106,11 +106,11 @@ jobs:
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        # Chocolatey'nin community feed'i 503 verdiginde (2026-08-12'de oldu)
-        # bu adim duser ve determinizm kapisi kodla ilgisiz bir sebeple kirmizi
-        # olur. Resmi protobuf release'inden surum + SHA256 pinli kurulum tek
-        # bir ucuncu-parti feed'e bagimliligi kaldirir ve tedarik zincirini de
-        # dogrulanabilir yapar.
+        # When Chocolatey's community feed returns 503 (it did on 2026-08-12) this
+# step fails and the determinism gate goes red for a reason unrelated to the
+# code. A version + SHA256 pinned install from the official protobuf release
+# removes the dependency on a single third-party feed and makes the supply
+# chain verifiable too.
         run: |
           $ErrorActionPreference = 'Stop'
           $ver = '35.1'
@@ -129,7 +129,7 @@ jobs:
           cargo test --release -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
           N=$(grep -c "^test.*ok$" det-${{ matrix.os }}.txt || true)
           echo "Determinism test count (${{ matrix.os }}): $N"
-      - name: Consensus digest üret
+      - name: Produce the consensus digest
         shell: bash
         run: |
           set -euo pipefail
@@ -139,9 +139,9 @@ jobs:
           test -s digest-${{ matrix.os }}.hex
           D=$(cat digest-${{ matrix.os }}.hex)
           echo "CONSENSUS_DIGEST (${{ matrix.os }}): $D"
-          # Sahte-yeşil kilidi: digest 64 hex karakter olmalı.
+          # False-green lock: the digest must be 64 hex characters.
           test "${#D}" -eq 64
-      - name: Digest artefakt yükle
+      - name: Upload the digest artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: consensus-digest-${{ matrix.os }}
@@ -150,18 +150,18 @@ jobs:
           retention-days: 30
 
   consensus-digest-compare:
-    # Madde 2 tamamlayıcısı: üç platform digest'i byte-eşit olmalı.
+    # The complement of item 2: the three platform digests must be byte-equal.
     name: Consensus Digest Compare (Linux = macOS = Windows)
     needs: cross-platform-determinism
     runs-on: ubuntu-latest
     steps:
-      - name: Digest artefaktlarını topla
+      - name: Collect the digest artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: consensus-digest-*
           merge-multiple: true
           path: digests
-      - name: Byte-eşitlik gate
+      - name: Byte-equality gate
         shell: bash
         run: |
           set -euo pipefail
@@ -171,7 +171,7 @@ jobs:
           W="digests/digest-windows-latest.hex"
           for f in "$U" "$M" "$W"; do
             if [ ! -s "$f" ]; then
-              echo "FAIL: eksik digest artefaktı: $f"
+              echo "FAIL: missing digest artifact: $f"
               exit 1
             fi
           done
@@ -180,9 +180,9 @@ jobs:
           echo "macos:   $DM"
           echo "windows: $DW"
           if [ "$DU" != "$DM" ] || [ "$DU" != "$DW" ]; then
-            echo "FAIL: platformlar arası consensus digest'i farklı!"
-            echo "Bu, Linux/macOS/Windows arasında consensus çıktısı ayrışması"
-            echo "demektir (consensus-critical nondeterminizm)."
+            echo "FAIL: the consensus digest differs across platforms!"
+            echo "This means consensus output divergence between Linux/macOS/Windows"
+            echo "(consensus-critical nondeterminism)."
             exit 1
           fi
-          echo "OK: üç platformda consensus çıktısı BYTE-EŞİT."
+          echo "OK: the consensus output is BYTE-EQUAL on all three platforms."
