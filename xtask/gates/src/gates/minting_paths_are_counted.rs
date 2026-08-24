@@ -1,26 +1,26 @@
-//! Arz yaratan her yol sayilmis ve tavana bagli olmali.
+//! Every path that creates supply must be counted and bound to the ceiling.
 //!
-//! Sabit bir arz tavani, ancak **arz yaratan her yolun tamami** onu sorarsa
-//! bir sinirdir. Tek bir yol disarida kalirsa tavan yalnizca bir belge olur:
-//! okuyan kisi 100 milyonun ust sinir oldugunu sanir, kod baska bir sey yapar.
+//! A fixed supply ceiling is a bound only if **every single supply-creating path** asks it.
+//! If one path is left out the ceiling becomes only a document:
+//! a reader believes 100 million is the upper bound while the code does something else.
 //!
 //! Olculen sey su: `try_add_balance` cagiran her uretim satiri ya
-//! **tasima**dir (var olan parayi bir yerden alip baska yere koyar: iade,
+//! is a **transfer** (it takes existing money from one place to another: a refund,
 //! ucret, kilit cozme) ya da **basim**dir (yeni para yaratir). Basim olanlar
 //! `try_mint_balance` cagirmali; o fonksiyon tavani denetleyen tek yerdir.
 //!
 //! # Neden bir liste tutuluyor
 //!
-//! Kapi, hangi cagrinin tasima hangisinin basim oldugunu kaynaktan
-//! **cikaramaz** - bu bir muhasebe sorusu, bir sozdizimi sorusu degil. O
+//! The gate **cannot infer** from the source which call is a transfer and which is a mint
+//! - that is an accounting question, not a syntax question. So
 //! yuzden asagida her `try_add_balance` cagri yerinin neden tasima oldugu tek
-//! tek yaziliyor. Yeni bir cagri eklendiginde kapi kirmizi yanar ve ekleyen
+//! it is written once. When a new call is added the gate goes red and whoever adds it
 //! kisiyi bu soruyu cevaplamaya zorlar: bu yeni para mi, yoksa yer degistiren
 //! para mi?
 //!
-//! Zahmetli olmasi kasitli. Arz yaratan bir yolun sessizce eklenmesi, bu
-//! zincirin verebilecegi en pahali hatadir; kapinin maliyeti bir satir
-//! gerekce yazmak.
+//! The friction is deliberate. Silently adding a supply-creating path is the most expensive
+//! mistake this chain can make; the cost of the gate is writing one line of
+//! rationale.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -37,24 +37,24 @@ const MOVE_FN: &str = "try_add_balance";
 /// Beklenen `try_add_balance` cagri sayisi ve her birinin neden **tasima**
 /// oldugu.
 ///
-/// Sayi bilerek tutuluyor: bir cagri eklenirse toplam degisir ve kapi yanar.
-/// Gerekceler, o satirlarin neden tavani sormadigini okuyana anlatir.
+/// The count is kept deliberately: if a call is added the total changes and the gate fires.
+/// The rationales tell the reader why those lines do not ask the ceiling.
 const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     (
         "src/chain/blockchain.rs",
         11,
-        "kopru kilidi cozme ve iade (var olan kilitli para geri veriliyor), \
-         depolama anlasmasi iadeleri ve operator bag iadeleri (daha once \
+        "bridge unlock and refund (existing locked money is returned), \
+         storage deal refunds and operator bond refunds (money that was \
          borclandirilmis para), ucret dagitimi (odenmis ucretin paylastirilmasi). \
          Hicbiri yeni arz yaratmaz.",
     ),
     (
         "src/core/account.rs",
         2,
-        "biri unbonding kuyrugunun serbest birakilmasi (daha once stake olarak \
-         taahhut edilmis, tavana zaten sayilan para geri veriliyor - yeni arz \
-         degil, kategori degistiren arz); digeri `try_mint_balance`'in kendi \
-         govdesi, tavani denetledikten sonra asil eklemeyi yapan satir.",
+        "one is the release of the unbonding queue (money already committed as stake \
+         and already counted against the ceiling is returned - not new supply \
+         but supply changing category); the other is the body of `try_mint_balance` itself, \
+         the line that performs the actual addition after checking the ceiling.",
     ),
 ];
 
@@ -66,15 +66,15 @@ fn production_lines(text: &str) -> Vec<(usize, &str)> {
     let mut in_tests = false;
     for (i, line) in text.lines().enumerate() {
         let t = line.trim();
-        // Sinir yalnizca sutun sifirdaki `mod tests`: `#[cfg(test)]` uretim
+        // The boundary is only a column-zero `mod tests`: `#[cfg(test)]` is not production
         // kodunda da geciyor (test-only dallar, test-only yardimcilar), o
         // yuzden onu sinir saymak dosyanin yarisini gorunmez yapardi.
         if line.starts_with("mod tests") || line.starts_with("pub mod tests") {
             in_tests = true;
         }
-        // Yorumlar sayilmaz: bir gerekce metninde gecen fonksiyon adi cagri
-        // degildir. `fn` ile baslayan satir da sayilmaz - fonksiyonun kendi
-        // tanimi, ona yapilan bir cagri degil.
+        // Comments do not count: a function name appearing in a rationale text is not a
+        // call. A line starting with `fn` does not count either - the definition of the
+        // function is not a call to it.
         if in_tests || t.starts_with("//") || t.starts_with("pub fn") || t.starts_with("fn ") {
             continue;
         }
@@ -115,12 +115,12 @@ pub fn run(root: &Path) -> Result<String, String> {
             let _ = write!(
                 problems,
                 "\n  {source}: {found_move} adet `{MOVE_FN}` cagrisi var, \
-                 gerekcelendirilmis sayi {expected}.\n    \
-                 Kayitli gerekce: {why}\n    \
+                 the justified count is {expected}.\n    \
+                 Recorded rationale: {why}\n    \
                  Yeni bir cagri eklendiyse su soru cevaplanmali: bu yeni para mi \
-                 (o zaman `{MINT_FN}` kullanilmali, tavani denetler) yoksa yer \
-                 degistiren para mi (o zaman gerekce bu kapiya yazilmali)? \
-                 Bir cagri silindiyse sayi guncellenmeli."
+                 (then `{MINT_FN}` must be used, it checks the ceiling) or money that \
+                 merely changes place (then the rationale must be written into this gate)? \
+                 If a call was deleted the count must be updated."
             );
         }
     }
@@ -131,13 +131,13 @@ pub fn run(root: &Path) -> Result<String, String> {
     if minting == 0 {
         return Err(format!(
             "minting-paths-are-counted: hic `{MINT_FN}` cagrisi bulunamadi. \
-             Tavan denetimi kaldirildiysa arz tavani yalnizca bir belgedir."
+             If the ceiling check was removed the supply cap is only a document."
         ));
     }
 
     Ok(format!(
-        "minting-paths-are-counted OK: {minting} basim cagrisi tavana bagli, \
-         {moving} tasima cagrisi gerekcelendirilmis"
+        "minting-paths-are-counted OK: {minting} mint calls are bound to the ceiling, \
+         {moving} transfer calls are justified"
     ))
 }
 
@@ -174,10 +174,10 @@ mod tests {
             "self_test: uretimde 1 basim beklenirdi, {mints} sayildi"
         ));
     }
-    // Yorum satirindaki bir ornek sayilmamali.
+    // An example in a comment line must not be counted.
     let commented = "        // self.state.try_add_balance(&a, 1);";
     if !production_lines(commented).is_empty() {
         return Err("self_test: yorumdaki cagri sayildi".into());
     }
-    Ok("minting-paths-are-counted self-test OK: test modulu ve yorumlar sayimin disinda".into())
+    Ok("minting-paths-are-counted self-test OK: the test module and comments are outside the count".into())
 }
