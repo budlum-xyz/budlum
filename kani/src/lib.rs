@@ -7,8 +7,8 @@
 //!
 //! # Why this lives outside `budlum-core`
 //!
-//! Kani ships a pinned nightly. Version 0.67.0 - the newest published release
-//! - bundles rustc 1.93.0-nightly, and `budlum-core` declares
+//! Kani ships a pinned nightly. Version 0.67.0, the newest published release,
+//! bundles rustc 1.93.0-nightly, and `budlum-core` declares
 //! `rust-version = "1.97.0"`, so cargo refuses the build before a harness
 //! runs. The upstream toolchain bump is merged but unreleased. Lowering the
 //! crate's MSRV to suit a verification tool would weaken a promise made to
