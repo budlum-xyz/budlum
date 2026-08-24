@@ -56,7 +56,6 @@ bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
 bud/src/bud_format_social.rs	19
-bud/src/bud_format_telemetry.rs	21
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/bud_format_wal.rs	15
@@ -175,7 +174,6 @@ src/lubot/metrics.rs	10
 src/lubot/query.rs	6
 src/lubot/social.rs	16
 src/lubot/storage.rs	8
-src/mempool/pool.rs	20
 src/network/node.rs	18
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
