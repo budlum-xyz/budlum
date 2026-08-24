@@ -3036,7 +3036,11 @@ mod tests {
     fn no_dictionary_means_no_change_to_the_preimage() {
         let m = good_manifest();
         assert!(m.dictionary_id.is_none());
-        assert_eq!(m.verify_id(), Ok(()), "the old identity must verify unchanged");
+        assert_eq!(
+            m.verify_id(),
+            Ok(()),
+            "the old identity must verify unchanged"
+        );
     }
 
     /// An object resting on an unknown dictionary cannot be registered.
@@ -3089,8 +3093,10 @@ mod tests {
             .expect("the dictionary must register");
         let mut m = good_manifest();
         m.dictionary_id = Some(dict);
-        reg.register_manifest_with_source(&m).expect("first registration");
-        reg.register_manifest_with_source(&m).expect("second registration");
+        reg.register_manifest_with_source(&m)
+            .expect("first registration");
+        reg.register_manifest_with_source(&m)
+            .expect("second registration");
         assert_eq!(
             reg.dictionaries.reference_count(&dict),
             Some(1),
@@ -3709,7 +3715,10 @@ mod tests {
             .first()
             .and_then(|t| t.expected_holder)
             .expect("an advisory must be written");
-        assert_eq!(first, second, "placement must give the same answer on every node");
+        assert_eq!(
+            first, second,
+            "placement must give the same answer on every node"
+        );
     }
 
     /// An advisory is written once; a second pass does not overwrite it.
@@ -5151,7 +5160,10 @@ mod demand_driven_replication_tests {
             "the ledger is always ordered by epoch"
         );
         assert_eq!(events.len(), 1, "a late event folds into the newest");
-        assert_eq!(events[0].count, 2, "a late event is not lost, it is counted");
+        assert_eq!(
+            events[0].count, 2,
+            "a late event is not lost, it is counted"
+        );
     }
 
     /// Whether a shard counts as under-replicated follows demand.
