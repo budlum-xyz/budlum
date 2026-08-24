@@ -1,39 +1,41 @@
 7142
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
-# Bu dosyanin ILK bare-sayi satiri baseline'dir (scripts/check-clippy-extra.sh
-# `grep -E '^[0-9]+$' | head -1` ile okur); asagisi gerekcedir.
+# The FIRST bare-number line of this file is the baseline
+# (scripts/check-clippy-extra.sh reads it with `grep -E '^[0-9]+$' | head -1`);
+# below it is the justification.
 #
-# 2026-08-11 - 7108 -> 7142 (MSRV 1.97.0 yukseltmesi: +34 yeni pedantic/nursery lint)
-# 2026-07-26 - 217 -> 7108 (ekip)
+# 2026-08-11 - 7108 -> 7142 (MSRV 1.97.0 upgrade: +34 new pedantic/nursery lints)
+# 2026-07-26 - 217 -> 7108
 #
-# BU BIR GEVSETME DEGIL; ratchet'in ILK GERCEK OLCUMU.
+# THIS IS NOT A SOFTENING; it is the ratchet's FIRST REAL MEASUREMENT.
 #
-# Neden 217 olu bir sayiydi:
-#   - Ratchet adimi (`Clippy pedantic/nursery ratchet`) kendinden onceki
-#     `Clippy` adimina baglidir. `Clippy` adimi `main`'de ve her branch'te
-#     kirmizi oldugu icin ratchet adimi HIC CALISMADI - son 20 tamamlanmis CI
-#     kosusunun 20'sinde de `skipped` (kanit: run 30200010164, 30202231034,
-#     30206161047, 30206496472 ... hepsi ratchet:skipped).
-#   - 217 degeri 2026-07-17'de `98b0fd9` worktree'sinde YEREL olarak
-#     olculmustu. O tarihten sonra kod tabani buyudu, ama sayi CI tarafindan
-#     bir kez bile dogrulanmadi.
-#   - Ayrica olcum komutu `... || true` ile calisir: derleme abort ederse
-#     JSON kismi kalir ve sayi yapay olarak dusuk cikar. 217, lib-test
-#     derlemesinin erken abort ettigi bir agactan gelmis olabilir.
+# Why 217 was a dead number:
+#   - The ratchet step (`Clippy pedantic/nursery ratchet`) depends on the
+#     `Clippy` step before it. Because the `Clippy` step was red on `main` and
+#     on every branch, the ratchet step NEVER RAN - in all 20 of the last 20
+#     completed CI runs it was `skipped` (evidence: run 30200010164,
+#     30202231034, 30206161047, 30206496472 ... all ratchet:skipped).
+#   - The value 217 had been measured LOCALLY on 2026-07-17 in the `98b0fd9`
+#     worktree. The code base grew after that date, but the number was never
+#     verified by CI even once.
+#   - The measurement command also runs with `... || true`: if the build aborts
+#     a partial JSON remains and the number comes out artificially low. 217 may
+#     have come from a tree where the lib-test build aborted early.
 #
-# 7108 nasil olculdu:
-#   `Clippy` adimi ilk kez YESILE cekildi (97 lib + 167 lib-test
-#   hatasi -> 0). Bunun sonucunda ratchet adimi tarihte ilk kez gercekten
-#   calisti ve tam agac uzerinde 7108 pedantic+nursery uyarisi raporladi
-#   (kanit: CI run 30207198554, `clippy-extra: 7108 | baseline: 217`).
+# How 7108 was measured:
+#   The `Clippy` step was brought to GREEN for the first time (97 lib + 167
+#   lib-test errors -> 0). As a result the ratchet step really ran for the first
+#   time in history and reported 7108 pedantic+nursery warnings over the full
+#   tree (evidence: CI run 30207198554, `clippy-extra: 7108 | baseline: 217`).
 #
-# Onemli: ratchet mantigi degistirilmedi, gevsetilmedi, atlanmadi. Kapi hala
-# "sayi ARTARSA fail" olarak calisir; artik gercek bir tabana karsi calisiyor.
-# Bu tabandan sonraki her yeni pedantic/nursery uyarisi CI'da yakalanir.
+# Important: the ratchet logic was not changed, loosened or skipped. The gate
+# still works as "fail if the number RISES"; it now works against a real base.
+# Every new pedantic/nursery warning after this base is caught in CI.
 #
-# Takip (ayri gorev): 7108 kademeli dusurulmeli. Baskin lint'ler daha once
-# uninlined_format_args / cast_precision_loss / cast_sign_loss ailesiydi;
-# bunlar buyuk olcude mekanik olarak duzeltilebilir. Her dusurmede bu dosya
-# bilincli bir PR ile guncellenir (script "dusmesi serbest" mantigiyla yazildi).
+# Follow-up (a separate task): 7108 must be brought down gradually. The dominant
+# lints used to be the uninlined_format_args / cast_precision_loss /
+# cast_sign_loss family; those are largely mechanically fixable. On each
+# reduction this file is updated in a deliberate PR (the script was written with
+# "lowering is free" logic).
 # ---------------------------------------------------------------------------
