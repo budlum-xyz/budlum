@@ -1,17 +1,17 @@
-# Typos: yazım denetimi.
+# Typos: spell checking.
 #
-# Neden kalite kapısı: yazım hatası kozmetik görünür ama bu repoda somut risk
-# Taşır, yanlış yazılmış bir identifier, config anahtarı veya RPC metot adı
-# Derlenir ama çalışmaz. `Toplogy`/`compromize` gibi bulgular ilk koşuda
-# Gerçekten yakalandı.
+# Why it is a quality gate: a typo looks cosmetic but carries concrete risk in
+# this repo - a misspelled identifier, config key or RPC method name compiles
+# but does not work. Findings such as `Toplogy`/`compromize` were really caught
+# on the first run.
 #
-# İki dillilik: repo kodu İngilizce, dokümantasyonu ağırlıkla Türkçedir.
-# Kalibrasyon `.quality/typos.toml`dadır (Türkçe kelime listesi). Kalibrasyon
-# Gevşetme değildir: liste dışındaki her bulgu FAIL'dir ve düzeltilir,
-# Ignore edilmez. Yeni Türkçe kelime eklenirken gerekçe commit mesajına yazılır.
+# Calibration lives in `.quality/typos.toml`. Calibration is not loosening:
+# every finding outside the list is a FAIL and gets fixed rather than ignored.
+# When a new word is added to the list, the justification goes into the commit
+# message.
 #
-# Araç sürüm + sha256 pinlidir (repo genelindeki gitleaks/hadolint/actionlint
-# Deseniyle aynı supply-chain disiplini).
+# The tool is version + sha256 pinned (the same supply-chain discipline as the
+# gitleaks/hadolint/actionlint pattern used repo-wide).
 
 name: Typos
 
@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   typos:
-    name: Typos (yazım denetimi, TR kalibreli)
+    name: Typos (spell check, calibrated)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,56 +39,56 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: typos v1.48.0 kur (sürüm + sha256 pinli)
+      - name: Install typos v1.48.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/typos.tar.gz \
             https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
           echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
           mkdir -p /tmp/typos-bin
-          # Arşivdeki üyeler './' önekiyle kayıtlıdır (`./typos`), bu yüzden
-          # Üye adı olarak düz `typos` verilirse tar "Not found in archive"
-          # Ile çıkar. Öneki koruyarak çıkarıyoruz.
+          # Members in the archive are recorded with a './' prefix (`./typos`), so
+          # passing the plain member name `typos` makes tar exit with "Not found in
+          # archive". We extract while preserving the prefix.
           tar -xzf /tmp/typos.tar.gz -C /tmp/typos-bin ./typos
           sudo install -m 0755 /tmp/typos-bin/typos /usr/local/bin/typos
           typos --version
 
-      # Vacuous-gate koruması: "0 bulgu" hem temiz repoyu hem de hiç çalışmamış
-      # Taramayı gösterebilir. Kanarya, bilerek yanlış yazılmış bir kelime
-      # Üretip typos'un onu YAKALADIĞINI kanıtlar.
-      - name: Kanarya - typos alarmının çalıştığının kanıtı
+      # Vacuous-gate protection: "0 findings" can mean a clean repo or a scan that
+      # never ran. The canary produces a deliberately misspelled word and proves
+      # typos CATCHES it.
+      - name: Canary - evidence that the typos alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/typos-canary
-          # `recieve` typos sözlüğünde kesin bir hatadır ve .quality/typos.toml
-          # Allow-listesinde yoktur; yakalanmaması taramanın çalışmadığını gösterir.
+          # `recieve` is a definite error in the typos dictionary and is not in the
+          # .quality/typos.toml allow-list; not catching it shows the scan did not run.
           printf 'fn main() { let _recieve = 1; }\n' > /tmp/typos-canary/canary.rs
           if typos --isolated /tmp/typos-canary; then
-            echo "HATA: typos kanaryayı yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            echo "ERROR: typos failed to catch the canary -> the scan is untrustworthy (vacuous gate)!"
             exit 1
           fi
-          echo "Kanarya yakalandı → typos alarmı çalışıyor."
+          echo "Canary caught -> the typos alarm works."
 
-      - name: Repo taraması (bulgu = fail)
+      - name: Repository scan (a finding = fail)
         run: typos --config .quality/typos.toml --format long
 
   trufflehog:
-    # gitleaks'in ustune ikinci bir katman: DOGRULAMA.
+    # A second layer on top of gitleaks: VERIFICATION.
     #
-    # gitleaks (ci.yml, tam gecmis, kanaryali, bloklar) desene bakar: bu dizgi
-    # bir AWS anahtarina benziyor mu. Dogru soru, ama tek basina iki hatayi
-    # birden yapar. Yanlis pozitif: ornek bir anahtar da desene uyar. Yanlis
-    # negatif: desene uymayan gercek bir sir gozden kacar.
+    # gitleaks (ci.yml, full history, with a canary, blocking) looks at the
+    # pattern: does this string look like an AWS key. That is the right question,
+    # but on its own it makes two mistakes at once. False positive: an example key
+    # also matches the pattern. False negative: a real secret that does not match the pattern slips through.
     #
-    # trufflehog bulduklarini SAGLAYICIYA SORAR. --only-verified ile yalniz
-    # canli oldugu kanitlanan sirlari raporlar. Yani bu is dustugunde soylenen
-    # sey "bir sey bir anahtara benziyor" degil, "bir anahtar su anda gecerli".
+    # trufflehog ASKS THE PROVIDER about what it finds. With --only-verified it
+    # reports only secrets proven live. So when this job fails what is said is not
+    # "something looks like a key" but "a key is valid right now".
     #
-    # Ikisi de gerekli ve biri digerinin yerini almiyor: gitleaks olu ya da
-    # iptal edilmis bir sirri da yakalar, ki o da sizmis demektir.
+    # Both are needed and neither replaces the other: gitleaks also catches a dead
+    # or revoked secret, which also means it leaked.
     #
-    # BLOKLAR. Kanaryasi asagida.
-    name: Secret Verification (trufflehog, yalniz dogrulanmis)
+    # BLOCKS. Its canary is below.
+    name: Secret Verification (trufflehog, verified only)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -99,14 +99,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: trufflehog kur (surum + sha256 pinli)
+      - name: Install trufflehog (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/th.tar.gz \
             https://github.com/trufflesecurity/trufflehog/releases/download/v3.90.10/trufflehog_3.90.10_linux_amd64.tar.gz
           echo "32d349aea9b5b6644bb9a8ab8cb44314ce5912d730a16b1466511fc6c69a7ffc  /tmp/th.tar.gz" \
             | sha256sum -c - || {
-              echo "sha256 tutmadi. Surum degistiyse hash bu dosyada guncellenmeli;" >&2
+              echo "the sha256 did not match. If the version changed the hash must be updated in this file;" >&2
               echo "indirilen hash'i kabul etmek pinlemeyi anlamsiz yapar." >&2
               exit 1
             }
@@ -114,24 +114,24 @@ jobs:
           sudo install -m 0755 /tmp/th/trufflehog /usr/local/bin/trufflehog
           trufflehog --version
 
-      # Kanarya: gecersiz bir anahtar --only-verified ile RAPORLANMAMALI.
-      # Raporlanirsa dogrulama calismiyor demektir ve bu is gitleaks'in
-      # tekrari olur, ikinci bir katman degil.
-      - name: Kanarya (dogrulama gercekten calisiyor mu)
+      # Canary: an invalid key MUST NOT be reported under --only-verified.
+      # If it is, verification is not working and this job becomes a repeat of
+      # gitleaks rather than a second layer.
+      - name: Canary (does verification really work)
         run: |
           set -euo pipefail
           mkdir -p /tmp/th-canary && cd /tmp/th-canary
           git init -q .
-          # Bicimi dogru, kendisi gecersiz bir anahtar.
+          # A key with the right shape that is itself invalid.
           printf 'aws_key = "AKIA%s"\n' "IOSFODNN7EXAMPLE" > fake.txt
           git add . && git -c user.email=ci@budlum.xyz -c user.name=ci commit -qm canary
           if trufflehog git file://. --only-verified --fail --no-update 2>&1 \
              | tee /tmp/th-canary.log | grep -q "Verified"; then
-            echo "KANARYA DUSTU: gecersiz bir anahtar dogrulanmis olarak raporlandi," >&2
+            echo "CANARY FAILED: an invalid key was reported as verified," >&2
             echo "yani --only-verified filtrelemiyor ve bu is gitleaks'in tekrari." >&2
             exit 1
           fi
-          echo "kanarya OK: gecersiz anahtar dogrulanmis sayilmadi."
+          echo "canary OK: the invalid key was not counted as verified."
 
-      - name: Tam gecmis, yalniz dogrulanmis sirlar (bulgu = fail)
+      - name: Full history, verified secrets only (a finding = fail)
         run: trufflehog git file://. --only-verified --fail --no-update
