@@ -85,7 +85,6 @@ bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_securededup.rs	22
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
-bud/src/bud_format_shamir.rs	41
 bud/src/bud_format_social.rs	19
 bud/src/bud_format_social2.rs	32
 bud/src/bud_format_telemetry.rs	21
@@ -94,7 +93,6 @@ bud/src/bud_format_tiny.rs	21
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_tricore.rs	33
 bud/src/bud_format_ultra.rs	1
-bud/src/bud_format_video.rs	41
 bud/src/bud_format_videopipe.rs	27
 bud/src/bud_format_view.rs	33
 bud/src/bud_format_wal.rs	15
@@ -251,7 +249,6 @@ src/network/sync_codec.rs	1
 src/pollen/README.md	23
 src/pollen/data_rights.rs	21
 src/pollen/mod.rs	26
-src/pollen/offers.rs	41
 src/privacy/mod.rs	1
 src/privacy/submit.rs	11
 src/prover/mod.rs	25

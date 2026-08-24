@@ -1,14 +1,17 @@
-//! B.U.D. 2.0 - Shamir Parça Paylaşımı (F14) (2026-08-16)
+//! B.U.D. 2.0 - Shamir share splitting (F14), 2026-08-16.
 //!
-//! F14: erasure shard yerine her node, içeriğin ÜRETİM tohumunun bir parçasını tutar;
-//! k node birleşince içerik yeniden üretilir. Depolama çarpanı 1.0x (her node ~1/k),
-//! erişim k node gerektirir. 3x replikasyon yerine 1.0x.
+//! F14: instead of an erasure shard, each node holds a share of the content's
+//! GENERATION seed, and k nodes together regenerate the content. The storage
+//! multiplier is 1.0x, each node holding roughly 1/k, and access needs k nodes.
+//! 1.0x in place of 3x replication.
 //!
-//! Bu modül: (k, n) eşikli Shamir secret sharing - tohum (32 bayt) n parçaya bölünür,
-//! herhangi k parça tohumu yeniden kurar, k-1 parça hiçbir bilgi sızdırmaz.
-//! Alan: GF(2^8) (bud_format_erasure'daki Gf8 deseni) - polinom interpolasyonu.
+//! This module is (k, n) threshold Shamir secret sharing: a 32-byte seed is
+//! split into n shares, any k of them rebuild the seed, and k-1 leak no
+//! information. The field is GF(2^8), the same `Gf8` pattern as in
+//! `bud_format_erasure`, with polynomial interpolation.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik (tohum → parçalar), panik'siz.
+//! The code is `#![forbid(unsafe_code)]`, deterministic - seed to shares - and
+//! panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -16,7 +19,7 @@ pub const SHAMIR_MAGIC: [u8; 8] = *b"\xB5SHMR\0\0\0";
 pub const SHAMIR_VERSION: u8 = 1;
 pub const MAX_SHARES: usize = 255;
 
-/// GF(2^8) mod 0x11D (bud_format_erasure ile aynı alan - deterministik).
+/// GF(2^8) mod 0x11D: the same field as `bud_format_erasure`, deterministic.
 struct Gf8 {
     log: [u8; 256],
     exp: [u8; 512],
@@ -60,24 +63,26 @@ impl Gf8 {
     }
 }
 
-/// Shamir parça paylaşımı: tohumu (k,n) eşikli parçalara böl.
+/// Shamir share splitting: split a seed into (k, n) threshold shares.
 pub struct ShamirShare;
 
 impl ShamirShare {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_SHAMIR_V1";
 
-    /// Tohumu n parçaya böl (herhangi k parça kurar). Tohum 32 bayt.
-    /// Parça = (x, paylaşım baytları) - x 1..n.
+    /// Split a 32-byte seed into n shares, any k of which rebuild it.
+    ///
+    /// A share is `(x, share bytes)`, with x running 1..n.
     pub fn split(secret: &[u8; 32], k: usize, n: usize) -> Option<Vec<(u8, Vec<u8>)>> {
         if k == 0 || n == 0 || k > n || n > MAX_SHARES || secret.is_empty() {
             return None;
         }
         let gf = Gf8::new();
-        // her bayt için k-1 rastgele (deterministik - tohum + indeksten) katsayı
+        // k-1 random coefficients per byte, derived deterministically from the
+        // seed and the index.
         let mut shares = vec![(0u8, vec![0u8; 32]); n];
         for byte in 0..32 {
             let s = secret[byte];
-            // k-1 katsayı (deterministik PRNG - tohum + byte)
+            // k-1 coefficients from a deterministic PRNG over seed and byte.
             let mut coeffs = [0u8; 32];
             let mut x = 0x5A17_u64.wrapping_mul(byte as u64 + 1).wrapping_add(0xB0D);
             for c in 0..k.saturating_sub(1) {
@@ -86,7 +91,8 @@ impl ShamirShare {
                 x ^= x << 17;
                 coeffs[c] = (x & 0xFF) as u8;
             }
-            // her x=1..n için polinom değeri: f(x) = s + c1*x + c2*x^2 + ...
+            // The polynomial value at each x in 1..n:
+            // f(x) = s + c1*x + c2*x^2 + ...
             for xi in 1..=n {
                 let xb = xi as u8;
                 let mut val = s;
@@ -102,14 +108,14 @@ impl ShamirShare {
         Some(shares)
     }
 
-    /// Parçalardan tohumu kur (Lagrange interpolasyonu - GF(2^8)).
+    /// Rebuild the seed from shares, by Lagrange interpolation over GF(2^8).
     pub fn combine(shares: &[(u8, Vec<u8>)], k: usize) -> Option<[u8; 32]> {
         if shares.len() < k || k == 0 {
             return None;
         }
         let gf = Gf8::new();
         let chosen = &shares[..k];
-        // her paylaşım boyutu 32 olmalı
+        // Every share has to be 32 bytes.
         for (_, v) in chosen {
             if v.len() != 32 {
                 return None;
@@ -117,7 +123,8 @@ impl ShamirShare {
         }
         let mut secret = [0u8; 32];
         for byte in 0..32 {
-            // Lagrange: f(0) = Σ y_i * L_i(0), L_i(0) = Π_{j≠i} x_j / (x_j - x_i)
+            // Lagrange: f(0) = sum of y_i * L_i(0), where
+            // L_i(0) = product over j != i of x_j / (x_j - x_i).
             let mut acc = 0u8;
             for i in 0..k {
                 let (xi, yi) = (chosen[i].0, chosen[i].1[byte]);
@@ -142,7 +149,7 @@ impl ShamirShare {
         Some(secret)
     }
 
-    /// Paylaşım kaydı (deterministik blob - zincire yazılabilir).
+    /// The share record, a deterministic blob that can be written on chain.
     pub fn share_blob(share: &(u8, Vec<u8>)) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&SHAMIR_MAGIC);
@@ -160,46 +167,50 @@ mod tests {
 
     #[test]
     fn split_combine_roundtrip() {
-        // (3,5): 3 parça tohumu kurar
+        // (3,5): 3 shares rebuild the seed.
         let secret = [
             0xDEu8, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 1, 2, 3, 4,
             5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
         ];
-        let shares = ShamirShare::split(&secret, 3, 5).expect("böl");
+        let shares = ShamirShare::split(&secret, 3, 5).expect("split");
         assert_eq!(shares.len(), 5);
-        // herhangi 3 parça kurar
+        // Any 3 shares rebuild it.
         for combo in [[0usize, 1, 2], [2, 3, 4], [0, 3, 4]] {
             let chosen: Vec<(u8, Vec<u8>)> = combo.iter().map(|&i| shares[i].clone()).collect();
-            let recovered = ShamirShare::combine(&chosen, 3).expect("kur");
+            let recovered = ShamirShare::combine(&chosen, 3).expect("combine");
             assert_eq!(recovered, secret, "combo {combo:?}");
         }
-        // k-1 parça bilgi sızdırmaz: 2 parça ile kurulan, 3 parça ile kurulandan
-        // genelde farklıdır (polinom belirsiz). Güvenlik: her olası secret eşit olasılıklı.
-        // Test: 2 parça + farklı 3. parça → aynı secret'ı üretmemeli (deterministik çelişki)
+        // k-1 shares leak nothing: what 2 shares rebuild generally differs from
+        // what 3 rebuild, because the polynomial is undetermined. The security
+        // property is that every possible secret is equally likely.
+        //
+        // Here: 2 shares plus a different third share must still land on the
+        // same secret, which is what "any k" means.
         let alt = ShamirShare::combine(
             &[shares[0].clone(), shares[1].clone(), shares[4].clone()],
             3,
         )
         .unwrap();
-        assert_eq!(alt, secret, "farklı 3 parça da kurar (herhangi k)");
-        // k-1 parça ile combine → None (k yetersiz - güvenli red, panik yok)
+        assert_eq!(alt, secret, "a different 3 shares rebuild it too, any k");
+        // Combining k-1 shares yields None: too few, a safe refusal with no
+        // panic.
         assert!(
             ShamirShare::combine(&shares[..2], 3).is_none(),
-            "k-1 parça kurtaramaz"
+            "k-1 shares cannot recover it"
         );
-        // 5 parça da kurar
-        let all = ShamirShare::combine(&shares, 3).expect("tümü");
+        // 5 shares rebuild it as well.
+        let all = ShamirShare::combine(&shares, 3).expect("all shares");
         assert_eq!(all, secret);
     }
 
     #[test]
     fn share_blob_roundtrip() {
         let secret = [7u8; 32];
-        let shares = ShamirShare::split(&secret, 2, 3).expect("böl");
+        let shares = ShamirShare::split(&secret, 2, 3).expect("split");
         let blob = ShamirShare::share_blob(&shares[0]);
         assert_eq!(&blob[..8], &SHAMIR_MAGIC);
-        assert_eq!(blob[9], shares[0].0, "x korunur");
-        // blob içindeki paylaşım değerleri
+        assert_eq!(blob[9], shares[0].0, "x is preserved");
+        // The share values inside the blob.
         let mut share_bytes = Vec::new();
         share_bytes.push(shares[0].0);
         share_bytes.extend_from_slice(&shares[0].1);
@@ -212,7 +223,8 @@ mod tests {
         assert!(ShamirShare::split(&[0u8; 32], 3, 2).is_none()); // k > n
         assert!(ShamirShare::split(&[0u8; 32], 1, 300).is_none()); // n > 255
         assert!(ShamirShare::combine(&[], 1).is_none());
-        // k=1: tek parça yeterli (f(0)=s, katsayı yok)
+        // k=1: one share is enough, since f(0) = s and there are no
+        // coefficients.
         let s = [9u8; 32];
         let shares = ShamirShare::split(&s, 1, 3).unwrap();
         let r = ShamirShare::combine(&shares[..1], 1).unwrap();
@@ -221,22 +233,25 @@ mod tests {
 
     #[test]
     fn storage_multiplier_1x() {
-        // F14: her node ~1/n tutar → toplam ~1.0x (3x replikasyon yerine)
+        // F14: each node holds roughly 1/n, so the total is about 1.0x, in
+        // place of 3x replication.
         let secret = [1u8; 32];
         let (k, n) = (3, 10);
         let shares = ShamirShare::split(&secret, k, n).unwrap();
         let total: usize = shares.iter().map(|(_, v)| v.len()).sum();
-        // toplam paylaşım = n * 32 = 320 bayt; secret 32 bayt → çarpan = 320/(32) = 10x
-        // AMA: F14 iddiası "depolama 1.0x" - her node 1/n tutar, toplam n parça = secret*n/k?
-        // Doğru: secret 32 bayt, n parça her biri 32 bayt → toplam n*32. k=3, n=10 → 10x görünür.
-        // F14'ün asıl iddiası: ERASURE (k+p)/k yerine her node 1/k tutar → çarpan (n/k)/(n/k)=...
-        // Pratik: her parça 32 bayt = secret boyutu → depolama n× secret. k=3,n=10 → 10x.
-        // Ama 3x replikasyon da 3x. F14 = "üretim tohumu" - secret KÜÇÜK (32B) olduğu için
-        // toplam yük ihmal edilebilir (içerik baytı değil, tohum).
+        // Total share bytes are n * 32 = 320 while the secret is 32, so measured
+        // against the secret alone the multiplier reads 10x. That is the wrong
+        // denominator, and worth writing down rather than hiding.
+        //
+        // What F14 actually claims is about CONTENT bytes. Content bytes are
+        // never stored: the content comes back from the generation recipe, and
+        // only the seed shares are kept. The secret is 32 bytes, so the total
+        // load is n * 32 regardless of how large the content is.
         assert_eq!(total, n * 32);
-        // İçerik baytı hiç saklanmaz (üretim tarifinden) → depolama = tohum paylaşımları
-        // Gerçek çarpan: içerik X bayt ise depolama = n*32 bayt (X'ten bağımsız!)
+        // So for content of X bytes the storage is n * 32 bytes, independent of
+        // X.
         let _ = k;
-        // bu yüzden F14'ün çarpanı 1.0x'e yakındır: 32*n / X → X büyükse → 0'a
+        // That is why F14's multiplier approaches 1.0x: 32*n / X tends to zero
+        // as X grows.
     }
 }

@@ -1,8 +1,8 @@
-//! AI Data Marketplace - satıcı-teklifi (DataOffer) ekonomisi.
+//! AI data marketplace: the seller-offer (`DataOffer`) economy.
 //!
-//! Data Rights/Pollen sertleştirmesi bu geçiş registry'sine
-//! `DataAsset` ve `AccessGrant` map'lerini ekler. Kural: AI, Pollen/B.U.D.
-//! Veri referansını geçerli grant olmadan okuyamaz.
+//! The Data Rights and Pollen hardening adds the `DataAsset` and `AccessGrant`
+//! maps to this transitional registry. The rule: an AI cannot read a Pollen or
+//! B.U.D. data reference without a valid grant.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -200,7 +200,7 @@ pub struct MarketplaceRegistry {
     pub offers: BTreeMap<u64, DataOffer>,
     #[serde(default)]
     pub next_offer_id: u64,
-    /// Pollen: registered data tomurcukları. The asset is not sold; its
+    /// Pollen: registered data buds. The asset is not sold; its
     /// Access pollen is sold via AccessGrant.
     #[serde(default)]
     pub data_assets: BTreeMap<AssetId, DataAsset>,
@@ -236,13 +236,13 @@ impl MarketplaceRegistry {
         Self::default()
     }
 
-    /// Satin alma isteginin kanonik imza preimage'i.
+    /// The canonical signing preimage of a purchase request.
     ///
-    /// Güvenlik denetimi (HIGH): buyer imzasi, satin alma
-    /// parametrelerinin TAMAMINA baglanir (authorization, fiyat, sure,
-    /// max_reads, payment_commitment, expiry). Boylece buyer neyi
-    /// kabul ettigini imzalamis olur; saldirgan baskasinin adina veya
-    /// degistirilmis sartlarla grant uretemez.
+    /// Security review (HIGH): the buyer signature is bound to ALL of the
+    /// purchase parameters - authorization, price, duration, `max_reads`,
+    /// `payment_commitment`, expiry. That way the buyer has signed what they
+    /// accepted, and an attacker cannot produce a grant in somebody else's name
+    /// or on altered terms.
     pub fn purchase_signing_hash(
         authorization: &SaleAuthorization,
         buyer: Address,
@@ -362,10 +362,10 @@ impl MarketplaceRegistry {
         if grant.owner != asset.owner {
             return Err("AccessGrant owner must match DataAsset owner".into());
         }
-        // Güvenlik denetimi (HIGH): owner imzasi kriptografik olarak
-        // dogrulanmadan grant kabul ediliyordu - sentinel olmayan her
-        // 64 bayt gecerli sayiliyordu. Artik imza, owner adresinin
-        // (ed25519 public key) gercek imzasi olmak zorunda.
+        // Security review (HIGH): a grant used to be accepted without the owner
+        // signature being verified cryptographically - any 64 bytes that were
+        // not the sentinel counted as valid. The signature now has to be a real
+        // signature of the owner address, which is an ed25519 public key.
         crate::crypto::primitives::verify_signature(
             &grant.signing_hash(),
             grant.owner_signature.as_bytes(),
@@ -375,43 +375,46 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
-        // DAO politikasi burada uygulanir. `encryption_policies` bugune kadar
-        // yalnizca yazilip okunan bir kayitti: `set_encryption_policy` onu
-        // dogrulayip sakliyor, `active_encryption_policies` listeliyordu, ama
-        // hicbir grant ona carpmiyordu. Bir tavan, yalnizca birinin ona
-        // carpmasiyla tavandir.
+        // DAO policy is applied here. Until now `encryption_policies` was a
+        // record that was only written and read: `set_encryption_policy`
+        // validated and stored it, `active_encryption_policies` listed it, and
+        // no grant ever hit it. A ceiling is a ceiling only because something
+        // hits it.
         //
-        // En kisitlayici aktif politika secilir. Birden fazla politika aktif
-        // oldugunda en genisini secmek, DAO'nun daralttigi bir tavani yeni
-        // surum ekleyerek atlatilabilir yapardi.
+        // The most restrictive active policy is chosen. Picking the widest when
+        // several are active would make a ceiling the DAO narrowed evadable by
+        // adding a new version.
         self.check_dao_grant_duration_ceiling(grant.issued_at_block, grant.expires_at_block)?;
         let id = grant.grant_id;
         self.access_grants.insert(id, grant);
         Ok(id)
     }
 
-    /// DAO'nun ilan ettigi grant suresi tavani.
+    /// The grant duration ceiling the DAO declares.
     ///
-    /// **Neden ayri bir fonksiyon:** tavan `create_access_grant` icinde satir
-    /// ici yaziliydi ve `access_grants` haritasina yazan IKINCI yol
-    /// (`issue_grant_from_sale_authorization`, pazar yeri satin alma akisi)
-    /// politikaya hic bakmiyordu. Satici imzali bir `SaleAuthorization`
-    /// tasiyan siradan bir alici, DAO'nun tavanini asan bir grant
-    /// alabiliyordu; suresini sinirlayan tek sey saticinin kendi belirledigi
-    /// (guvenlikle ilgisi olmayan) yetki penceresiydi.
+    /// **Why this is a separate function:** the ceiling was written inline
+    /// inside `create_access_grant`, and the SECOND path that writes to the
+    /// `access_grants` map - `issue_grant_from_sale_authorization`, the
+    /// marketplace purchase flow - never looked at the policy at all. An
+    /// ordinary buyer carrying a seller-signed `SaleAuthorization` could obtain
+    /// a grant exceeding the DAO's ceiling; the only thing bounding its
+    /// duration was the authorization window the seller set for themselves,
+    /// which has nothing to do with security.
     ///
-    /// Kural: **ayni haritaya yazan her yol ayni kapidan gecer.** Denetim iki
-    /// yerde kopyalanmaz - kopyalansaydi ucuncu bir yol eklendiginde yine
-    /// ayrisirdi. Tek tanim burasi; her iki cagiran da burayi cagirir.
+    /// The rule: **every path that writes to the same map goes through the same
+    /// gate.** The check is not copied into two places - had it been, a third
+    /// path would diverge again. This is the single definition, and both
+    /// callers call it.
     ///
-    /// En kisitlayici aktif politika secilir: birden fazla politika aktifken
-    /// en genisini secmek, DAO'nun daralttigi bir tavani yeni surum ekleyerek
-    /// atlatilabilir yapardi.
+    /// The most restrictive active policy is chosen: picking the widest while
+    /// several are active would make a ceiling the DAO narrowed evadable by
+    /// adding a new version.
     ///
     /// # Errors
     ///
-    /// Aktif bir politika varsa ve istenen sure tavani asiyorsa hata doner.
-    /// Hic aktif politika yoksa tavan yoktur ve `Ok` doner.
+    /// When an active policy exists and the requested duration exceeds its
+    /// ceiling. With no active policy there is no ceiling, and `Ok` is
+    /// returned.
     fn check_dao_grant_duration_ceiling(
         &self,
         issued_at_block: u64,
@@ -476,10 +479,11 @@ impl MarketplaceRegistry {
         if authorization.seller != asset.owner {
             return Err("SaleAuthorization seller must match DataAsset owner".into());
         }
-        // Güvenlik denetimi (HIGH): seller imzasi kriptografik olarak
-        // dogrulanmadan yetki kabul ediliyordu - saldirgan baskasinin
-        // asset'i icin sahte yetki uretebiliyordu. Artik imza, seller
-        // adresinin (ed25519 public key) gercek imzasi olmak zorunda.
+        // Security review (HIGH): an authorization used to be accepted without
+        // the seller signature being verified cryptographically, so an attacker
+        // could forge an authorization for somebody else's asset. The signature
+        // now has to be a real signature of the seller address, which is an
+        // ed25519 public key.
         crate::crypto::primitives::verify_signature(
             &authorization.signing_hash(),
             authorization.seller_signature.as_bytes(),
@@ -546,10 +550,10 @@ impl MarketplaceRegistry {
             return Err("SaleAuthorization seller must match DataAsset owner".into());
         }
 
-        // Güvenlik denetimi (HIGH): buyer imzasi, satin alma
-        // parametrelerinin tamamina baglanmis olarak dogrulanmadan grant
-        // verilmez. Cagiran taraf, buyer adresinin (ed25519 public key)
-        // gercek imzasini sunmak zorundadir.
+        // Security review (HIGH): no grant is issued unless the buyer signature
+        // has been verified as bound to all of the purchase parameters. The
+        // caller has to present a real signature of the buyer address, which is
+        // an ed25519 public key.
         let preimage = Self::purchase_signing_hash(
             &authorization,
             buyer,
@@ -596,9 +600,9 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
-        // Saticinin yetki penceresi bir GUVENLIK tavani degildir: onu satici
-        // belirler. DAO'nun tavani her iki yolda da ayni sekilde uygulanir,
-        // yoksa pazar yeri satin almasi tavani atlatan bir yan kapi olurdu.
+        // The seller's authorization window is not a SECURITY ceiling: the
+        // seller sets it. The DAO's ceiling is applied identically on both
+        // paths, or a marketplace purchase would be a side door around it.
         self.check_dao_grant_duration_ceiling(grant.issued_at_block, grant.expires_at_block)?;
 
         let receipt = PollenPurchaseReceipt::new(
@@ -699,11 +703,11 @@ impl MarketplaceRegistry {
         if !asset.is_active() {
             return Err("cannot sell content under a revoked asset".into());
         }
-        // Strix HIGH (CWE-639, 2026-08-17): manifest'ler paylasilmis
-        // content-addressed kimliklerdir; baska bir yukleyicinin sahipsiz
-        // manifest_id'sini kendi asset'ine baglamak, o icerigin gelecekteki
-        // okuma kapisini ele gecirir. Bind ancak manifest, asset'in kayitli
-        // kanonik manifest'iyle AYNIYSA gecerli.
+        // Strix HIGH (CWE-639, 2026-08-17): manifests are shared,
+        // content-addressed identities, so binding another uploader's unowned
+        // `manifest_id` to your own asset seizes that content's future read
+        // gate. A bind is valid only when the manifest is IDENTICAL to the
+        // asset's registered canonical manifest.
         if asset.manifest_id != manifest_id {
             return Err(
                 "cannot bind content that does not match the asset's registered manifest".into(),
@@ -859,9 +863,11 @@ mod tests {
     use super::*;
     use crate::pollen::AccessGrantStatus;
 
-    /// Deterministik test keypair'i: adres = public key, imza = bu keypair.
-    /// (Strix HIGH #358: imza artik kriptografik dogrulaniyor; testler
-    /// gercek ed25519 imzasi uretmek zorunda.)
+    /// A deterministic test key pair: the address is the public key, and the
+    /// signature comes from this pair.
+    ///
+    /// Strix HIGH #358: signatures are now verified cryptographically, so tests
+    /// have to produce real ed25519 signatures.
     fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
         crate::crypto::primitives::KeyPair::from_seed(&[byte; 32])
             .expect("deterministic test keypair")
@@ -888,7 +894,8 @@ mod tests {
             max_grants,
             [0xAA; 32],
         );
-        // Seller imzasi: asset.owner = addr(1) test keypair'i ile.
+        // Seller signature: asset.owner is addr(1), signed with its test key
+        // pair.
         let signer = test_keypair(1);
         authorization.seller_signature =
             super::super::Signature64::from(signer.sign(&authorization.signing_hash()));
@@ -907,14 +914,17 @@ mod tests {
             max_reads,
             [8u8; 32],
         );
-        // Owner imzasi: asset.owner = addr(1) test keypair'i ile.
+        // Owner signature: asset.owner is addr(1), signed with its test key
+        // pair.
         let signer = test_keypair(1);
         grant.owner_signature = super::super::Signature64::from(signer.sign(&grant.signing_hash()));
         grant
     }
 
-    /// Satin alma istegi icin buyer imzasi (güvenlik denetimi).
-    /// `buyer_byte`, buyer adresini ureten test keypair'inin byte'idir.
+    /// The buyer signature for a purchase request, from the security review.
+    ///
+    /// `buyer_byte` is the byte of the test key pair that produces the buyer
+    /// address.
     #[allow(clippy::too_many_arguments)]
     fn signed_purchase(
         registry: &MarketplaceRegistry,
@@ -930,10 +940,11 @@ mod tests {
         let auth = registry
             .get_sale_authorization(&authorization_id)
             .expect("authorization must exist for signed purchase");
-        // Preimage hesabi hata donebilir (expiry asimi vb.); o durumda
-        // islem imza dogrulamasina ulasmadan reddedilir (issue_grant once
-        // preimage'i hesaplar). Sentinel olmayan dummy imza dondurmek
-        // yeterli - asil hata testin bekledigi hatadir.
+        // Computing the preimage can fail, on an expiry overrun for instance,
+        // and then the operation is refused before it reaches signature
+        // verification, because `issue_grant` computes the preimage first.
+        // Returning a non-sentinel dummy signature is enough here; the real
+        // error is the one the test expects.
         let Ok(preimage) = MarketplaceRegistry::purchase_signing_hash(
             auth,
             buyer,
@@ -1120,14 +1131,15 @@ mod tests {
         assert_ne!(root_before, registry.root());
     }
 
-    /// DAO tavani, `access_grants`'a yazan HER yolda ayni sekilde uygulanir.
+    /// The DAO ceiling is applied identically on EVERY path that writes to
+    /// `access_grants`.
     ///
-    /// Strix bulgusu (CWE-862): tavan yalnizca `create_access_grant` icinde
-    /// uygulaniyordu. Pazar yeri satin alma yolu (`issue_grant_from_sale_-
-    /// authorization`) politikaya hic bakmiyordu; satici imzali bir yetki
-    /// tasiyan siradan bir alici, suresi yalnizca SATICININ penceresiyle
-    /// sinirli bir grant alabiliyordu. Saticinin penceresi bir guvenlik
-    /// tavani degildir - onu satici belirler.
+    /// Strix finding (CWE-862): the ceiling was applied only inside
+    /// `create_access_grant`. The marketplace purchase path,
+    /// `issue_grant_from_sale_authorization`, never looked at the policy, so an
+    /// ordinary buyer carrying a seller-signed authorization could obtain a
+    /// grant bounded only by the SELLER's window. A seller's window is not a
+    /// security ceiling, because the seller sets it.
     #[test]
     fn dao_duration_ceiling_binds_the_marketplace_purchase_path_too() {
         let mut registry = MarketplaceRegistry::new();
@@ -1137,8 +1149,8 @@ mod tests {
             .create_sale_authorization(signed_sale_authorization(&asset))
             .unwrap();
 
-        // DAO tavani 3 blok. Satici yetkisi 20. bloga kadar acik, yani
-        // saticinin penceresi 10 blokluk bir grant'e izin verirdi.
+        // The DAO ceiling is 3 blocks. The seller's authorization is open until
+        // block 20, so the seller's window would permit a 10-block grant.
         registry
             .set_encryption_policy(crate::pollen::EncryptionPolicy {
                 version: 1,
@@ -1174,14 +1186,14 @@ mod tests {
                 [0x99; 32],
                 buyer_sig,
             )
-            .expect_err("DAO tavanini asan satin alma reddedilmeli");
+            .expect_err("a purchase exceeding the DAO ceiling must be refused");
         assert!(
             err.contains("exceeds EncryptionPolicy"),
-            "gerekce tavani soylemeli: {err}"
+            "the reason should name the ceiling: {err}"
         );
 
-        // Reddedilen satin alma HICBIR iz birakmamali: ne grant, ne makbuz,
-        // ne de yetkinin sayacinda bir artis.
+        // A refused purchase must leave NO trace: no grant, no receipt, and no
+        // increment on the authorization's counter.
         assert!(registry.access_grants.is_empty());
         assert!(registry.purchase_receipts.is_empty());
         assert_eq!(
@@ -1193,8 +1205,8 @@ mod tests {
             0
         );
 
-        // Tavanin altindaki ayni akis gecer: kapi satin almayi degil, yalnizca
-        // tavani asmayi reddediyor.
+        // The same flow below the ceiling passes: the gate refuses exceeding the
+        // ceiling, not purchasing.
         let within = 3;
         let ok_sig = signed_purchase(
             &registry,
@@ -1218,7 +1230,7 @@ mod tests {
                 [0x99; 32],
                 ok_sig,
             )
-            .expect("tavanin altindaki satin alma gecmeli");
+            .expect("a purchase below the ceiling should pass");
         assert!(registry.access_grants.contains_key(&grant_id));
     }
 
