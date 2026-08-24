@@ -95,7 +95,7 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&tmp).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: değiştirilmemiş kopya reddedildi"));
+        return Err(String::from("canary: an unmodified copy was refused"));
     }
     // Break: never produce Mismatched.
     let deal = tmp.join("src/domain/storage_deal.rs");
@@ -107,10 +107,12 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&tmp).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: Mismatched üretmeyen ağaç geçti"));
+        return Err(String::from(
+            "canary: a tree that produces no Mismatched passed",
+        ));
     }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "Storage proof boundary kanaryası OK (temiz PASS, kırık FAIL).",
+        "Storage proof boundary canary OK (clean PASSes, broken FAILs).",
     ))
 }

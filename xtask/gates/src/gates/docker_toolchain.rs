@@ -74,16 +74,16 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
         let Ok(text) = std::fs::read_to_string(&p) else {
             continue;
         };
-        // Bir is bilerek baska bir derleyici isteyebilir, ama bunu **yazili
-        // bir gerekce ile** yapmali. Dosyada `DELIBERATE-TOOLCHAIN-DIVERGENCE`
+        // A job may deliberately want another compiler, but it must do so **with a
+        // written justification**. If the file carries the `DELIBERATE-TOOLCHAIN-DIVERGENCE`
         // isareti aranir; isaret varsa o dosyadaki surumler pin'e karsi
         // denetlenmez.
         //
-        // Tek mesru ornek bugun `diverse-double-compiling.yml`: isin butun
-        // amaci ayni kaynagi ikinci bir derleyiciyle derlemek, dolayisiyla
+        // Today the only legitimate example is `diverse-double-compiling.yml`: the whole
+        // point of the job is to build the same source with a second compiler, so
         // pin'e esitlemek isi anlamsiz kilardi (bkz. ARCHITECTURE.md §73).
         //
-        // Isaret bir kapi acmiyor, bir beyan istiyor: sapma dosyanin icinde
+        // The marker does not open a door, it demands a declaration: the divergence is
         // gerekcesiyle duruyor ve tesadufen olusamiyor.
         if text.contains("DELIBERATE-TOOLCHAIN-DIVERGENCE") {
             continue;
@@ -238,7 +238,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&wf).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: farklı workflow toolchain'i kabul edildi",
+            "canary: a differing workflow toolchain was accepted",
         ));
     }
 
@@ -262,7 +262,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&nocheck).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: rustc --version içermeyen builder kabul edildi",
+            "canary: a builder with no rustc --version was accepted",
         ));
     }
 
@@ -275,14 +275,16 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&empty).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: Dockerfile'sız ağaç kabul edildi"));
+        return Err(String::from(
+            "canary: a tree with no Dockerfile was accepted",
+        ));
     }
 
     let good = tmp.join("good");
     build_fixture(&good, good_from, good_copy, good_check, "1.97.0")?;
     if run(&good).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: tutarlı ağaç reddedildi"));
+        return Err(String::from("canary: a consistent tree was refused"));
     }
 
     let _ = std::fs::remove_dir_all(&tmp);

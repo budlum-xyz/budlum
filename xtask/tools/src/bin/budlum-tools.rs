@@ -22,14 +22,14 @@ use budlum_tools::{backup_drill, devnet, prepush, repo_root, seed_corpus};
 fn usage() -> String {
     "budlum-tools <arac> [arg...]\n\
      \n\
-     Araclar:\n\
-     \x20 pre-push              cargo fmt + clippy (ikisi de kosar)\n\
-     \x20 install-hook          .git/hooks/pre-push kancasini kur\n\
-     \x20 devnet                yerel iki-dugumlu devnet hazirla\n\
-     \x20 seed-corpus [dizin]   ZKVM fuzz tohumlarini yaz\n\
-     \x20 backup-drill          yedek al, geri yukle, butunlugu dogrula\n\
-     \x20 --self-test           her aracin kanaryasini kos\n\
-     \x20 --list                arac adlarini yaz\n"
+     Tools:\n\
+     \x20 pre-push              cargo fmt + clippy (both run)\n\
+     \x20 install-hook          install the .git/hooks/pre-push hook\n\
+     \x20 devnet                prepare a local two-node devnet\n\
+     \x20 seed-corpus [dir]     write the ZKVM fuzz seeds\n\
+     \x20 backup-drill          take a backup, restore it, verify integrity\n\
+     \x20 --self-test           run every tool's canary\n\
+     \x20 --list                print the tool names\n"
         .to_string()
 }
 
@@ -55,9 +55,9 @@ fn main() {
             }
             return;
         }
-        // Her aracin kanaryasi. Bir arac "0 dondu" ile "hic kosmadi"
-        // arasindaki farki disaridan gostermeli; gates crate'inin
-        // `--self-test` deseni burada da gecerli.
+        // Every tool's canary. A tool must show from outside the difference
+        // between "returned 0" and "never ran"; the `--self-test` pattern of the
+        // gates crate holds here too.
         Some(&"--self-test") => {
             let mut failed = 0usize;
             for (name, result) in [
@@ -75,7 +75,7 @@ fn main() {
                 }
             }
             if failed > 0 {
-                eprintln!("\n{failed} kanarya dustu.");
+                eprintln!("\n{failed} canaries fell.");
                 std::process::exit(1);
             }
             return;

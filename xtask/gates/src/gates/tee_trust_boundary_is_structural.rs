@@ -1,7 +1,7 @@
 //! TEE trust-boundary gate.
 //!
 //! An earlier fix hardened `sign_with_privacy` against self-attested software
-//! runtimes (güvenlik denetimi, MEDIUM/HIGH, CWE-347): the runtime returns only a raw
+//! runtimes (security review, MEDIUM/HIGH, CWE-347): the runtime returns only a raw
 //! hardware quote (`TeeQuoter::quote`) and the wallet verifies it with a
 //! verifier it owns (`TeeQuoteVerifier`) before trusting any field. The
 //! runtime never supplies parsed attestation fields, so a self-attesting

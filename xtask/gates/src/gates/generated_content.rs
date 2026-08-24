@@ -145,25 +145,25 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/storage/generated.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: temiz modül reddedildi"));
+        return Err(String::from("canary: a clean module was refused"));
     }
 
     let floaty = "fn draw_thing(meter: &mut Meter) -> Vec<u8> {\n    let x: f64 = 0.5;\n    meter.charge(1)?;\n    vec![]\n}\n";
     std::fs::write(dir.join("src/storage/generated.rs"), floaty).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: f64 içeren üreteç geçti"));
+        return Err(String::from("canary: a generator containing f64 passed"));
     }
 
     let unmetered = "fn generate_and_verify() {\n    let id = ContentId::of(&bytes);\n}\nfn draw_thing(meter: &mut Meter) -> Vec<u8> {\n    vec![]\n}\n";
     std::fs::write(dir.join("src/storage/generated.rs"), unmetered).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: metresiz üreteç geçti"));
+        return Err(String::from("canary: a generator with no metre passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "generated-content kanaryası OK (temiz PASS, float/metresiz FAIL).",
+        "generated-content canary OK (clean PASSes, float/metreless FAILs).",
     ))
 }
