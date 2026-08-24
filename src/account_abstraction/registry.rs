@@ -1,50 +1,50 @@
-//! Kuantum hesap kayıt defteri: hesap soyutlamanın durum katmanı.
+//! Quantum account registry: the state layer of account abstraction.
 //!
-//! # Bu modül neden var
+//! # Why this module exists
 //!
-//! `QuantumAccount` ve onun `validate_all` koruması yazılmıştı, gerçek
-//! ML-DSA-87'ye bağlıydı ve testleri geçiyordu; ama hiçbir üretim yolu onu
-//! çağırmıyordu, çünkü **hiçbir yerde saklanmıyordu**. Bir hesap türü, onu
-//! tutan bir kayıt olmadan yalnızca bir tiptir.
+//! `QuantumAccount` and its `validate_all` guard had been written, were bound to real
+//! ML-DSA-87 and passed their tests; but no production path called them,
+//! because the account was **stored nowhere**. An account type is only a type
+//! without a registry that holds it.
 //!
-//! Kayıt defteri bir kapı olarak yazıldı: bir hesap ancak `validate_all`
-//! geçerse içeri girer. Böylece "çok imzalı eşik 1..=16 arasında olmalı" ya
-//! da "storage_root sıfırken pact_root sıfır olmamalı" gibi kurallar, kayıt
-//! anında bir kez ve gerçekten uygulanır - sonradan okuyan her kod bunları
-//! yeniden denetlemek zorunda kalmaz.
+//! The registry was written as a gate: an account gets in only if it passes
+//! `validate_all`. That way rules such as "the multisig threshold must be within 1..=16"
+//! or "pact_root must be zero while storage_root is zero" are really enforced once,
+//! at registration time - every later reader is spared from checking them
+//! again.
 //!
-//! # Sınır
+//! # Boundary
 //!
-//! Bu katman hesabın **şeklini** doğrular. Bir işlemin çok imzalı yetkiyle
-//! harcanması ayrı bir karardır: işlem şeması bugün tek imza taşıyor, çok
-//! imzalı yetkilendirme yeni bir imza sürümü gerektiriyor. O iş buraya
-//! değil, işlem şemasına ait.
+//! This layer validates the **shape** of the account. Spending a transaction with multisig
+//! authority is a separate decision: the transaction schema carries a single signature today, and
+//! multisig authorization needs a new signature version. That work belongs to the transaction
+//! schema, not here.
 
 use super::quantum_account::QuantumAccount;
 use crate::storage::pact_binding::PactRegistry;
 use std::collections::BTreeMap;
 
-/// Kayıt defteri hataları.
+/// Registry errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuantumAccountRegistryError {
-    /// Hesap `validate_all` denetiminden geçmedi.
+    /// The account did not pass the `validate_all` check.
     InvalidAccount { address: [u8; 32], reason: String },
-    /// Aynı adres ikinci kez kaydedilmeye çalışıldı.
+    /// The same address was registered a second time.
     AlreadyRegistered { address: [u8; 32] },
     /// Bilinmeyen adres.
     NotRegistered { address: [u8; 32] },
-    /// Adres, hesabın açık anahtarından türetilen adresle uyuşmuyor.
+    /// The address does not match the address derived from the account's public key.
     AddressDoesNotMatchKey {
         declared: [u8; 32],
         derived: [u8; 32],
     },
-    /// Hesabın `pact_root`'u sunulan pact kümesinin köküyle eşleşmiyor.
+    /// The account's `pact_root` does not match the root of the presented pact set.
     PactRootDoesNotMatchRegistry {
         declared: [u8; 32],
         computed: [u8; 32],
     },
-    /// Sunulan pact kaydının kendi kökü bayat: içindeki pact'lerden yeniden
-    /// hesaplanan kök, kaydın taşıdığı kökle aynı değil.
+    /// The presented pact registry has a stale root: the root recomputed from the pacts inside it
+    /// is not the root the registry carries.
     PactRegistryRootIsStale { reason: &'static str },
 }
 
@@ -91,7 +91,7 @@ impl std::fmt::Display for QuantumAccountRegistryError {
 
 impl std::error::Error for QuantumAccountRegistryError {}
 
-/// Kuantum hesapların kayıt defteri.
+/// The registry of quantum accounts.
 #[derive(Debug, Clone, Default)]
 pub struct QuantumAccountRegistry {
     accounts: BTreeMap<[u8; 32], QuantumAccount>,
@@ -103,17 +103,17 @@ impl QuantumAccountRegistry {
         Self::default()
     }
 
-    /// Hesabı kaydet.
+    /// Register the account.
     ///
-    /// Kapı buradadır: `validate_all` geçmeyen bir hesap içeri girmez, ve
-    /// bildirilen adres açık anahtardan türetilen adresle eşleşmek
-    /// zorundadır. İkincisi olmadan bir hesap, başkasının anahtarını
-    /// taşıyan bir adresle kaydedilebilirdi.
+    /// The gate is here: an account that does not pass `validate_all` gets no entry, and
+    /// the declared address must match the address derived from the public
+    /// key. Without the latter an account could be registered under an address
+    /// carrying someone else's key.
     ///
     /// # Errors
     ///
-    /// Hesap geçersizse, adres anahtarla uyuşmuyorsa ya da adres zaten
-    /// kayıtlıysa hata döner.
+    /// Errors if the account is invalid, the address does not match the key, or the address is
+    /// already registered.
     pub fn register(&mut self, account: QuantumAccount) -> Result<(), QuantumAccountRegistryError> {
         let derived = QuantumAccount::address_from_public_key(&account.pq_public_key);
         if derived != account.address {
@@ -137,25 +137,25 @@ impl QuantumAccountRegistry {
         Ok(())
     }
 
-    /// Hesabı, `pact_root`'unun adlandırdığı pact kümesiyle birlikte kaydet.
+    /// Register the account together with the pact set its `pact_root` names.
     ///
-    /// `register` bir hesabın **şeklini** doğrular ve `pact_root`'u olduğu
-    /// gibi kabul eder. Bu yeterli değildi: alan bir kök taşıyordu ama o
-    /// kökün gerçek bir pact kümesini adlandırdığını hiçbir şey
-    /// denetlemiyordu, dolayısıyla `pact_root` bir iddiaydı, bir bağlama
-    /// değil. Aynı sınıf `ProofFixture::bind_verified`'da da vardı: bir
-    /// alanın sıfırdan farklı olması, arkasında bir şey olduğu anlamına
+    /// `register` validates the **shape** of an account and accepts `pact_root` as
+    /// given. That was not enough: the field carried a root, but nothing checked
+    /// that the root named a real pact set, so `pact_root` was a claim,
+    /// not a binding. The same class existed in `ProofFixture::bind_verified`: a field
+    /// being non-zero does not mean there is something
+    /// behind it.
     /// gelmez.
     ///
-    /// İki kapı vardır. Sunulan kayıt defterinin kendi kökü içindeki
-    /// pact'lerden yeniden hesaplanabilmeli, **ve** hesabın `pact_root`'u o
-    /// köke eşit olmalı.
+    /// There are two gates. The presented registry's own root must be recomputable from the
+    /// pacts inside it, **and** the account's `pact_root` must equal that
+    /// root.
     ///
     /// # Errors
     ///
-    /// [`register`](Self::register)'ın döndürdüğü her hata, ayrıca pact
-    /// kaydının kökü bayatsa ya da hesabın kökü onunla eşleşmiyorsa hata
-    /// döner.
+    /// Every error [`register`](Self::register) returns, plus an error if the pact registry's
+    /// root is stale or the account's root does not match
+    /// it.
     pub fn register_with_pacts(
         &mut self,
         account: QuantumAccount,
@@ -193,17 +193,17 @@ impl QuantumAccountRegistry {
         self.accounts.is_empty()
     }
 
-    /// Kayıtlı bir hesabı değiştir.
+    /// Mutate a registered account.
     ///
-    /// Değişiklik sonrası hesap yine `validate_all`'dan geçer; geçmezse
-    /// değişiklik uygulanmaz ve kayıt eski hâlinde kalır. Bir kaydın
-    /// geçerliliği, ona yazan her yolun ayrı ayrı dikkatli olmasına
-    /// bırakılmamalı.
+    /// After the change the account goes through `validate_all` again; if it fails
+    /// the change is not applied and the record stays as it was. The validity of a record
+    /// must not be left to every writing path being careful on its
+    /// own.
     ///
     /// # Errors
     ///
-    /// Adres kayıtlı değilse, ya da değişiklik hesabı geçersiz kılıyorsa
-    /// hata döner.
+    /// Errors if the address is not registered or the change makes the account
+    /// invalid.
     pub fn update<F>(
         &mut self,
         address: &[u8; 32],
@@ -259,20 +259,20 @@ mod tests {
         }
     }
 
-    /// Geçerli bir hesap kaydedilebilmeli.
+    /// A valid account must be registrable.
     #[test]
     fn a_valid_account_registers() {
         let mut registry = QuantumAccountRegistry::new();
         let account = account_with(2, 3);
         let address = account.address;
-        registry.register(account).expect("gecerli hesap");
+        registry.register(account).expect("valid account");
         assert!(registry.is_registered(&address));
         assert_eq!(registry.len(), 1);
     }
 
-    /// `validate_all` artık gerçekten bir kapı: eşiği gardiyan sayısını aşan
-    /// bir hesap içeri giremez. Bu koruma yazılmıştı ama hiçbir üretim yolu
-    /// onu çağırmıyordu.
+    /// `validate_all` is now really a gate: an account whose threshold exceeds the guardian
+    /// count cannot get in. This guard had been written but no production path
+    /// called it.
     #[test]
     fn an_account_whose_threshold_exceeds_its_guardians_is_refused() {
         let mut registry = QuantumAccountRegistry::new();
@@ -283,10 +283,13 @@ mod tests {
             err,
             QuantumAccountRegistryError::InvalidAccount { .. }
         ));
-        assert!(registry.is_empty(), "reddedilen hesap kayda girmemeli");
+        assert!(
+            registry.is_empty(),
+            "a refused account must not enter the registry"
+        );
     }
 
-    /// Adres, hesabın kendi anahtarından türemeli.
+    /// The address must be derived from the account's own key.
     #[test]
     fn an_address_that_does_not_match_the_key_is_refused() {
         let mut registry = QuantumAccountRegistry::new();
@@ -300,31 +303,33 @@ mod tests {
         ));
     }
 
-    /// Aynı hesap iki kez kaydedilemez.
+    /// The same account cannot be registered twice.
     #[test]
     fn registering_the_same_account_twice_is_refused() {
         let mut registry = QuantumAccountRegistry::new();
-        registry.register(account_with(2, 3)).expect("ilk kayit");
+        registry
+            .register(account_with(2, 3))
+            .expect("first registration");
         assert!(matches!(
             registry
                 .register(account_with(2, 3))
-                .expect_err("ikinci kayit reddedilmeli"),
+                .expect_err("the second registration must be refused"),
             QuantumAccountRegistryError::AlreadyRegistered { .. }
         ));
         assert_eq!(registry.len(), 1);
     }
 
-    /// Geçersiz kılan bir değişiklik uygulanmamalı ve kayıt bozulmamalı.
+    /// A change that invalidates must not be applied and must not corrupt the record.
     #[test]
     fn an_update_that_invalidates_the_account_is_refused_and_changes_nothing() {
         let mut registry = QuantumAccountRegistry::new();
         let account = account_with(2, 3);
         let address = account.address;
-        registry.register(account).expect("gecerli hesap");
+        registry.register(account).expect("valid account");
 
         let err = registry
             .update(&address, |a| a.multisig_threshold = 99)
-            .expect_err("gecersiz kilan degisiklik reddedilmeli");
+            .expect_err("an invalidating change must be refused");
         assert!(matches!(
             err,
             QuantumAccountRegistryError::InvalidAccount { .. }
@@ -332,11 +337,11 @@ mod tests {
         assert_eq!(
             registry.get(&address).map(|a| a.multisig_threshold),
             Some(2),
-            "reddedilen degisiklik kaydi bozmamali"
+            "a refused change must not corrupt the record"
         );
     }
 
-    /// Gerçek bir pact kümesi taşıyan hesap kaydedilebilmeli.
+    /// An account carrying a real pact set must be registrable.
     #[test]
     fn an_account_bound_to_its_pact_set_registers() {
         use crate::storage::pact_binding::Pact;
@@ -352,7 +357,7 @@ mod tests {
             Pact::new(
                 [1u8; 32], [0u8; 32], [0u8; 32], commitment, [0u8; 32], 10, 0,
             )
-            .expect("gecerli pact"),
+            .expect("valid pact"),
         );
 
         let mut account = account_with(2, 3);
@@ -367,8 +372,8 @@ mod tests {
         assert!(registry.is_registered(&address));
     }
 
-    /// Uydurma bir `pact_root` reddedilmeli: alanın sıfırdan farklı olması
-    /// arkasında bir pact kümesi olduğu anlamına gelmez.
+    /// A fabricated `pact_root` must be refused: a non-zero field does not mean
+    /// there is a pact set behind it.
     #[test]
     fn a_pact_root_naming_no_pact_set_is_refused() {
         let mut account = account_with(2, 3);
@@ -378,15 +383,18 @@ mod tests {
         let mut registry = QuantumAccountRegistry::new();
         let err = registry
             .register_with_pacts(account, &PactRegistry::new())
-            .expect_err("uydurma kok reddedilmeli");
+            .expect_err("a fabricated root must be refused");
         assert!(matches!(
             err,
             QuantumAccountRegistryError::PactRootDoesNotMatchRegistry { .. }
         ));
-        assert!(registry.is_empty(), "reddedilen hesap kayda girmemeli");
+        assert!(
+            registry.is_empty(),
+            "a refused account must not enter the registry"
+        );
     }
 
-    /// Bayat köklü bir pact kaydı kabul edilmemeli.
+    /// A pact registry with a stale root must not be accepted.
     #[test]
     fn a_pact_registry_with_a_stale_root_is_refused() {
         use crate::storage::pact_binding::Pact;
@@ -394,10 +402,10 @@ mod tests {
         let mut pacts = PactRegistry::new();
         pacts.add_pact(
             Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
-                .expect("gecerli pact"),
+                .expect("valid pact"),
         );
-        // Kok elle bozulur: icindeki pact'lerden yeniden hesaplanamaz.
-        // Sifir kullanilmaz - sifir, bos kumenin gecerli koku.
+        // The root is corrupted by hand: it cannot be recomputed from the pacts inside.
+        // Zero is not used - zero is the valid root of the empty set.
         pacts.root = [0xAA; 32];
 
         let mut account = account_with(2, 3);
@@ -408,12 +416,12 @@ mod tests {
         assert!(matches!(
             registry
                 .register_with_pacts(account, &pacts)
-                .expect_err("bayat kok reddedilmeli"),
+                .expect_err("a stale root must be refused"),
             QuantumAccountRegistryError::PactRegistryRootIsStale { .. }
         ));
     }
 
-    /// Bilinmeyen bir adres güncellenemez.
+    /// An unknown address cannot be updated.
     #[test]
     fn updating_an_unknown_address_is_refused() {
         let mut registry = QuantumAccountRegistry::new();
