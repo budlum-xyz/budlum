@@ -1,114 +1,113 @@
-//! Adres cubugu bir guven sinirdir: bir ad once bu kuraldan gecer.
+//! The address bar is a trust boundary: a name passes this rule first.
 //!
-//! # Olculen sorun
+//! # The measured problem
 //!
-//! `src/bns/registry.rs` bir ada tek kural uyguluyor: 3..=32 karakter.
-//! Karakter kumesi denetimi yok. Bu, zincir tarafinda cogunlukla zararsiz
-//! (kayit bir dizgi, cozum bir arama) ama bir tarayicida degil: Budscan adi
-//! bir kaynak tanimlayicisina cevirir, yani dizgi bir ayristiriciya girer.
-//! `javascript:alert(1)` bugun kaydedilebilir bir BNS adidir.
+//! `src/bns/registry.rs` applies one rule to a name: 3..=32 characters. There
+//! is no character-set check. On the chain side that is mostly harmless - a
+//! record is a string and resolution is a lookup - but not in a browser:
+//! Budscan turns a name into a resource identifier, so the string enters a
+//! parser. `javascript:alert(1)` is a registrable BNS name today.
 //!
-//! # Neden iki katman
+//! # Why two layers
 //!
-//! Zincirin kurali yonetisimle gevseyebilir; bir tarayici bunu varsayamaz.
-//! Bu yuzden tarayicinin kurali her zaman zincirin kuralindan **dar** olur ve
-//! zincir ne kabul ederse etsin burasi kendi kararini verir. Zincirden gelen
-//! ama buradan gecmeyen bir ad **gosterilir**, `acilmaz`, ve neden acilmadigi
-//! soylenir.
+//! The chain's rule can be loosened by governance, and a browser cannot assume
+//! otherwise. So the browser's rule is always **narrower** than the chain's,
+//! and whatever the chain accepts, this file makes its own decision. A name
+//! that comes from the chain but does not pass here **is displayed**, is not
+//! opened, and the reason is stated.
 //!
-//! # Reddin sebebi eyleme gecirilebilir olmali
+//! # A refusal's reason has to be actionable
 //!
-//! Her red sinifinin kendi adi var. Genel bir "gecersiz ad" hatasi, cagirani
-//! hangi ozelligin basarisiz oldugunu bilmekten mahrum birakir; bir kullanici
-//! icin de "acilmadi" ile "iki nokta ust uste bir ad karakteri degil" ayni
-//! sey degildir.
+//! Every refusal class has its own name. A generic "invalid name" error robs
+//! the caller of knowing which property failed, and for a user "it did not
+//! open" and "a colon is not a name character" are not the same thing.
 //!
-//! Bu modul `xtask/gates/src/gates/bns_names_are_safe_in_an_address_bar.rs`
-//! icindeki kuralin calisan surumudur. Iki kopya bilerek ayni tabloyu
-//! uyguluyor ve `budscan-name-rule-parity` kapisi ikisinin ayrismasini
-//! CI'da dusuruyor: ismin ne icerebileceginе karar veren iki yerin birbirinden
-//! habersiz ayrismasi, tek bir yerin kotu karar vermesinden kotudur.
+//! This module is the running version of the rule inside
+//! `xtask/gates/src/gates/bns_names_are_safe_in_an_address_bar.rs`. The two
+//! copies deliberately apply the same table, and the
+//! `budscan-name-rule-parity` gate fails their divergence in CI: two places
+//! deciding what a name may contain, drifting apart unaware of each other, is
+//! worse than one place deciding badly.
 
 use std::fmt;
 
-/// Bir ad neden adres cubuguna konulamaz.
+/// Why a name cannot be put in the address bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameRejection {
-    /// 3..=32 karakter disinda. Registry'nin kendi siniri.
+    /// Outside 3..=32 characters. The registry's own bound.
     WrongLength,
-    /// `a-z`, `0-9`, `-` ve `.` disinda bir karakter.
+    /// A character outside `a-z`, `0-9`, `-` and `.`.
     ///
-    /// Buyuk harf kucultulmez, reddedilir. Kucultmek `UPPER.bud` ile
-    /// `upper.bud`'u tek kayda getirir ve sahipligi ilk kaydedenin belirledigi
-    /// bir yarisa cevirir; reddetmek ikisinden birinin var olmadigini soyler.
+    /// Upper case is refused, not lowercased. Lowercasing would collapse
+    /// `UPPER.bud` and `upper.bud` into one record and turn ownership into a
+    /// race won by whoever registers first; refusing says that one of the two
+    /// does not exist.
     DisallowedCharacter { position: usize, ch: char },
-    /// Bos etiket: bastaki, sondaki ya da ciftlenmis nokta.
+    /// An empty label: a leading, trailing or doubled dot.
     EmptyLabel,
-    /// Bir etiket tire ile basliyor ya da bitiyor. Sekil ayrilmis, cunku
-    /// punycode'un kendi `xn--` oneki taklit edilemesin.
+    /// A label starts or ends with a hyphen. The shape is reserved so that
+    /// punycode's own `xn--` prefix cannot be forged.
     HyphenAtLabelEdge,
-    /// Yazi sistemi karisiyor: bir Latin kelimenin icine bir Kiril harfin
-    /// saklanma bicimi budur. Latin olmadigi icin reddedilmez; tamamen Kiril
-    /// bir ad kabul edilir ve punycode gosterilir.
+    /// Writing systems are mixed, which is how a Cyrillic character hides
+    /// inside a Latin word. It is not refused for being non-Latin: a name
+    /// wholly in Cyrillic is accepted and displayed as punycode.
     MixedScript,
-    /// Nokta yok, yani hangi ad sistemine ait oldugunu soyleyen bir sonek yok.
+    /// No dot, so no suffix saying which naming system the name belongs to.
     NoSuffix,
-    /// Sonek taniniyor ama bu tarayicinin bir cozumleyicisi yok.
+    /// The suffix is recognised, but this browser has no resolver for it.
     UnknownSuffix,
 }
 
 impl fmt::Display for NameRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WrongLength => write!(f, "bir ad 3 ile 32 karakter arasinda olmali"),
+            Self::WrongLength => write!(f, "a name must be 3 to 32 characters"),
             Self::DisallowedCharacter { position, ch } => write!(
                 f,
-                "{position}. konumdaki {ch:?} karakteri a-z, 0-9, tire ve nokta disinda; \
-                 bir ad adres cubuguna ulasir, yani bir URL ayristiricisinin ozel \
-                 davrandigi hicbir sey adin parcasi olamaz"
+                "character {ch:?} at position {position} is outside a-z, 0-9, hyphen \
+                 and dot; a name reaches an address bar, so anything a URL parser \
+                 treats specially cannot be part of one"
             ),
             Self::EmptyLabel => write!(
                 f,
-                "bastaki, sondaki ya da ciftlenmis nokta bos bir etiket birakir ve \
-                 ayristiricilar bunun ne demek oldugunda anlasmaz"
+                "a leading, trailing or doubled dot leaves an empty label, which \
+                 different parsers disagree about"
             ),
             Self::HyphenAtLabelEdge => write!(
                 f,
-                "bir etiket tire ile baslayamaz ya da bitemez; bu sekil punycode'un \
-                 kendi oneki taklit edilemesin diye ayrilmistir"
+                "a label may not start or end with a hyphen; the shape is reserved so \
+                 punycode's own prefix cannot be forged"
             ),
             Self::MixedScript => write!(
                 f,
-                "ad yazi sistemlerini karistiriyor; bir Latin kelimenin icine tek bir \
-                 Kiril harfin saklanma bicimi budur. Tek yazi sistemiyle yazilmis bir \
-                 ad kabul edilir"
+                "the name mixes writing systems, which is how one Cyrillic character \
+                 hides inside a Latin word; a name wholly in one script is accepted"
             ),
             Self::NoSuffix => write!(
                 f,
-                "noktasiz bir ad hicbir sistemi adlandirmaz: .bud Budlum'da, .eth \
-                 Ethereum'da cozulur, cikplak bir etiket ikisini de soylemez"
+                "a name with no dot names no system: .bud resolves on Budlum and .eth \
+                 on Ethereum, and a bare label says neither"
             ),
             Self::UnknownSuffix => write!(
                 f,
-                "bu sonek icin bir cozumleyici yok; tarayici hangi ad sistemine \
-                 soracagini bilmiyor ve tahmin etmiyor"
+                "there is no resolver for this suffix; the browser does not know which \
+                 naming system to ask, and does not guess"
             ),
         }
     }
 }
 
-/// Bir karakterin hangi yazi sistemine ait oldugu, kabaca.
+/// Which writing system a character belongs to, coarsely.
 ///
-/// Yalniz "bu ad tek yazi sistemiyle mi yazilmis" sorusuna cevap verecek
-/// kadar. Latin bir kelimedeki Kiril `a`'yi yakalamak icin tam bir Unicode
-/// script tablosu gerekmiyor ve bagimliligi olmayan bir crate'e boyle bir
-/// tabloyu tasimak bedava degil.
+/// Only enough to answer "is this name written in a single script". Catching a
+/// Cyrillic `a` inside a Latin word does not need a full Unicode script table,
+/// and carrying such a table into a dependency-free crate is not free.
 ///
-/// Noktalama bilerek bir yazi sistemi **degil**. Tanimadigi her karakteri bir
-/// kovaya koyup kovalari karsilastiran ilk surum `javascript:alert(1)` icin
-/// `MixedScript` donduruyordu: iki nokta bir sistem, harfler baskasi. Red
-/// dogru, sebep sacma. Eyleme gecirilemeyen bir sebep, bir reddin var olma
-/// sebebinin cogunu bosa cikarir.
+/// Punctuation is deliberately **not** a script. A first version that put every
+/// unrecognised character into one bucket and compared buckets returned
+/// `MixedScript` for `javascript:alert(1)`: the colon was one system and the
+/// letters another. The refusal was right and the reason was nonsense. A reason
+/// that cannot be acted on wastes most of what a refusal exists for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Script {
     Latin,
@@ -119,7 +118,7 @@ enum Script {
     Han,
 }
 
-/// Bir harfin yazi sistemi; harf olmayan icin `None`.
+/// A letter's writing system; `None` for anything that is not a letter.
 fn script_of(ch: char) -> Option<Script> {
     match ch {
         'a'..='z' | 'A'..='Z' => Some(Script::Latin),
@@ -132,29 +131,29 @@ fn script_of(ch: char) -> Option<Script> {
     }
 }
 
-/// Bu tarayicinin cozumleyicisi olan sonekler.
+/// The suffixes this browser has a resolver for.
 ///
-/// Liste bilerek kisa. Bir sonek buraya, o sonek icin bir kanit yolu
-/// yazildiktan sonra eklenir: cozumu dogrulanamayan bir ad sistemi, adres
-/// cubugunda dogrulanmis gibi duran bir cevap uretir ve bu tarayicinin
-/// kacindigi tek sey odur.
+/// The list is deliberately short. A suffix is added here after a proof path
+/// for it has been written: a naming system whose resolution cannot be verified
+/// produces an answer that looks verified in the address bar, and that is the
+/// one thing this browser avoids.
 pub const RESOLVABLE_SUFFIXES: &[&str] = &["bud", "eth"];
 
-/// Bu ad cozulup gosterilebilir mi?
+/// May this name be resolved and displayed?
 ///
 /// # Errors
 ///
-/// Basarisiz olan ilk ozellik, bir [`NameRejection`] olarak.
+/// The first property that fails, as a [`NameRejection`].
 pub fn check_name(name: &str) -> Result<(), NameRejection> {
     let count = name.chars().count();
     if !(3..=32).contains(&count) {
         return Err(NameRejection::WrongLength);
     }
 
-    // Harfler arasinda tek yazi sistemi. Karakter kumesinden once bakilir ki
-    // tamamen Kiril bir ad, ilk harfinin yasak oldugunu duymak yerine dogru
-    // reddi alsin. Harf olmayanlar burada atlanir; onlar hakkinda konusacak
-    // olan asagidaki karakter kumesi denetimi.
+    // One writing system across the letters. This runs before the character
+    // set so that a wholly Cyrillic name gets the right refusal instead of
+    // being told its first letter is disallowed. Non-letters are skipped here;
+    // the character-set check below is what speaks about them.
     let mut seen: Option<Script> = None;
     for ch in name.chars() {
         let Some(s) = script_of(ch) else { continue };
@@ -187,18 +186,18 @@ pub fn check_name(name: &str) -> Result<(), NameRejection> {
     Ok(())
 }
 
-/// Adin sonekini dondurur (noktadan sonraki son etiket).
+/// Returns the name's suffix: the last label after a dot.
 #[must_use]
 pub fn suffix_of(name: &str) -> Option<&str> {
     name.rsplit('.').next().filter(|s| !s.is_empty())
 }
 
-/// [`check_name`] arti "bu sonegi cozebiliyor muyuz".
+/// [`check_name`], plus "can we resolve this suffix".
 ///
 /// # Errors
 ///
-/// [`check_name`]'in verdigi red, ya da tanimayan bir sonek icin
-/// [`NameRejection::UnknownSuffix`].
+/// Whatever [`check_name`] refuses, or [`NameRejection::UnknownSuffix`] for a
+/// suffix it does not know.
 pub fn check_resolvable(name: &str) -> Result<(), NameRejection> {
     check_name(name)?;
     let suffix = suffix_of(name).ok_or(NameRejection::NoSuffix)?;
@@ -209,13 +208,13 @@ pub fn check_resolvable(name: &str) -> Result<(), NameRejection> {
     }
 }
 
-/// Adres cubugunda gosterilecek bicim.
+/// The form shown in the address bar.
 ///
-/// Kurali gecen bir ad oldugu gibi gosterilir. Gecmeyen bir ad **acilmaz**,
-/// ama gosterilmesi gerekebilir (gecmiste, bir baglantinin ustunde, bir hata
-/// satirinda). O durumda ASCII disi her etiket punycode'a cevrilir, cunku
-/// kullaniciya gosterilen sey ile cozulen sey arasindaki fark tam olarak
-/// homograf saldirisinin yasadigi bosluktur.
+/// A name that passes the rule is shown as it is. A name that does not **is not
+/// opened**, but may still need to be displayed - in history, over a link, on
+/// an error line. In that case every non-ASCII label is converted to punycode,
+/// because the gap between what the user is shown and what is resolved is
+/// exactly where a homograph attack lives.
 #[must_use]
 pub fn display_form(name: &str) -> String {
     if check_name(name).is_ok() {
@@ -232,8 +231,9 @@ pub fn display_form(name: &str) -> String {
             out.push_str("xn--");
             out.push_str(&encoded);
         } else {
-            // Kodlanamayan bir etiket icin ham baytlari gostermek, gosterilen
-            // ile cozulen arasinda tam da kapatmaya calistigimiz farki acar.
+            // Showing the raw bytes of a label that cannot be encoded opens
+            // the very gap between displayed and resolved that we are trying to
+            // close.
             out.push_str("[?]");
         }
     }
@@ -291,20 +291,21 @@ mod tests {
             "ayaz.bud\u{0}x",
             "\u{202E}dub.zaya",
         ] {
-            assert!(check_name(name).is_err(), "{name:?} kabul edildi");
+            assert!(check_name(name).is_err(), "{name:?} was accepted");
         }
     }
 
     #[test]
     fn an_ordinary_name_passes() {
         for name in ["ayaz.bud", "a-b.bud", "x1.eth", "a.b.c.bud"] {
-            assert!(check_name(name).is_ok(), "{name:?} reddedildi");
+            assert!(check_name(name).is_ok(), "{name:?} was refused");
         }
     }
 
     #[test]
     fn a_wholly_cyrillic_name_is_not_called_mixed_script() {
-        // ASCII kumesinden dusmesi dogru; MixedScript demek yanlis teshis olur.
+        // Failing on the ASCII set is right; calling it MixedScript would be a
+        // wrong diagnosis.
         let name = "\u{0430}\u{0431}\u{0432}.\u{0431}\u{0430}\u{0434}";
         assert_ne!(check_name(name), Err(NameRejection::MixedScript));
         assert!(check_name(name).is_err());
@@ -324,8 +325,9 @@ mod tests {
     #[test]
     fn display_form_punycodes_what_it_cannot_accept() {
         assert_eq!(display_form("ayaz.bud"), "ayaz.bud");
-        // Deger hesaplandi, belgeden kopyalanmadi: bkz. `punycode` testindeki
-        // not (mimari belgesi burada `xn--yaz-hlc.bud` yaziyor ve yanlis).
+        // The value was computed, not copied out of the document: see the note
+        // in the `punycode` test. The architecture document writes
+        // `xn--yaz-hlc.bud` here, and that is wrong.
         assert_eq!(display_form("\u{0430}yaz.bud"), "xn--yaz-5cd.bud");
     }
 }
