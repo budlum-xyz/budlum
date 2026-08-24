@@ -1,13 +1,13 @@
-//! Sır maskeleme - LLM girişi ve üretilen yapıtlarda gizli değerleri
-//! gizlerken kod şeklini ve satır yapısını korur.
+//! Secret masking - hides confidential values in LLM input and in generated
+//! artifacts while preserving code shape and line structure.
 //!
-//! Kapalı-devre ilkesi: Lubot'a giren hiçbir metin, API anahtarı, token
-//! veya parola içermemelidir. Bu modül metni iki katmanda temizler:
-//! 1) anahtar-adı desenleri (`api_key: x`, `token = "y"`),
-//! 2) bilinen sır biçimleri (`sk-...`, `AKIA...`, `ghp_...`, JWT).
+//! Closed-circuit principle: no text entering Lubot may contain an API key,
+//! token or password. This module cleans text in two layers:
+//! 1) key-name patterns (`api_key: x`, `token = "y"`),
+//! 2) known secret shapes (`sk-...`, `AKIA...`, `ghp_...`, JWT).
 
-/// Maskeleme sonrası yerine konan sabit belirteç.
-pub const REDACTION_TOKEN: &str = "<GIZLI:MASKE>";
+/// The fixed token substituted after masking.
+pub const REDACTION_TOKEN: &str = "<SECRET:MASKED>";
 
 const SECRET_KEYWORDS: &[&str] = &[
     "api_key",
@@ -68,9 +68,9 @@ fn is_jwt(v: &str) -> bool {
         })
 }
 
-/// Bilinen sır biçimleri: (tür adı, tespit fonksiyonu).
-/// Bir degerin belirli bir sir turune benzeyip benzemedigini soyleyen
-/// yuklem. Tablo `(etiket, yuklem)` ciftlerinden olusur.
+/// Known secret shapes: (kind name, detection function).
+/// A predicate that says whether a value looks like a particular kind of
+/// secret. The table is made of `(label, predicate)` pairs.
 type ValuePredicate = fn(&str) -> bool;
 
 const VALUE_PATTERNS: &[(&str, ValuePredicate)] = &[
@@ -81,7 +81,7 @@ const VALUE_PATTERNS: &[(&str, ValuePredicate)] = &[
     ("jwt", is_jwt),
 ];
 
-/// Maskeleme raporu: tür bazında uygulanan maskeleme sayıları.
+/// Masking report: per-kind counts of the maskings applied.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RedactionReport {
     counts: std::collections::BTreeMap<String, usize>,
@@ -92,26 +92,26 @@ impl RedactionReport {
         *self.counts.entry(kind.to_string()).or_insert(0) += 1;
     }
 
-    /// Toplam maskeleme sayısı.
+    /// Total number of maskings.
     #[must_use]
     pub fn total(&self) -> usize {
         self.counts.values().sum()
     }
 
-    /// Tür bazında sayılar.
+    /// Counts per kind.
     #[must_use]
     pub fn as_map(&self) -> &std::collections::BTreeMap<String, usize> {
         &self.counts
     }
 
-    /// Herhangi bir maskeleme yapıldı mı?
+    /// Was any masking performed?
     #[must_use]
     pub fn changed(&self) -> bool {
         self.total() > 0
     }
 }
 
-/// Maskelenmiş metin + rapor.
+/// Masked text + report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactionResult {
     text: String,
@@ -135,11 +135,11 @@ impl RedactionResult {
     }
 }
 
-/// Bir satırda `anahtar: değer` / `anahtar = değer` biçimindeki gizli
-/// alanı maskele. Anahtar adında bir sır anahtar kelimesi geçiyorsa
-/// değer maske ile değiştirilir.
+/// Mask the confidential field of a `key: value` / `key = value` line. If the
+/// key name contains one of the secret keywords, the value is replaced with the
+/// mask.
 fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
-    // Ayraç konumunu bul: `: ` veya `=` (tırnak içinde olmayan).
+    // Find the separator position: `: ` or `=` (not inside quotes).
     let mut sep = None;
     let mut in_quote = false;
     for (i, c) in line.char_indices() {
@@ -162,14 +162,14 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
         return line.to_string();
     }
 
-    // Değer kısmı: ayraç sonrası, tırnak ve son noktalama korunur.
+    // Value part: after the separator, quotes and trailing punctuation are preserved.
     let after = &line[pos + 1..];
     let trimmed = after.trim_start();
     let lead_ws = &after[..after.len() - trimmed.len()];
     let quote = trimmed.chars().next().filter(|c| *c == '"' || *c == '\'');
     let value_start = quote.map_or(0, |_| 1);
     let value_part = &trimmed[value_start..];
-    // Değerin sonundaki noktalamayı ayır (virgül, noktalı virgül, kapanış parantezi).
+    // Split off the punctuation at the end of the value (comma, semicolon, closing bracket).
     let value_end = value_part
         .char_indices()
         .rev()
@@ -188,7 +188,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
     format!("{key}{sep_str}{lead_ws}{q}{REDACTION_TOKEN}{q}{tail}")
 }
 
-/// Satır içindeki bilinen sır biçimlerini maskele (kelime sınırı korunur).
+/// Mask the known secret shapes inside a line (word boundaries are preserved).
 fn redact_known_values(line: &str, report: &mut RedactionReport) -> String {
     let mut out = String::new();
     let mut current = String::new();
@@ -221,7 +221,7 @@ fn redact_known_values(line: &str, report: &mut RedactionReport) -> String {
     out
 }
 
-/// Metni maskele: kod şeklini ve satır sayısını korur.
+/// Mask the text: preserves code shape and line count.
 #[must_use]
 pub fn redact_text(text: &str) -> RedactionResult {
     let mut report = RedactionReport::default();
@@ -238,7 +238,7 @@ pub fn redact_text(text: &str) -> RedactionResult {
     }
 }
 
-/// Bir değerin sır içerme ihtimali yüksek mi?
+/// Is a value likely to contain a secret?
 #[must_use]
 pub fn looks_secretish(value: &str) -> bool {
     let lower = value.to_lowercase();
@@ -251,9 +251,9 @@ pub fn looks_secretish(value: &str) -> bool {
     VALUE_PATTERNS.iter().any(|(_, detect)| detect(value))
 }
 
-/// Yapısal bir değerdeki tüm string'leri maskeleme fonksiyonundan
-/// geçirir (JSON ağacını yeniden yazar). Önbellek kayıtları ve LLM
-/// çıktıları bu fonksiyondan geçmeden diske yazılmaz.
+/// Runs every string in a structured value through the masking function
+/// (rewrites the JSON tree). Cache records and LLM outputs are not written to
+/// disk without passing through this function.
 #[must_use]
 pub fn redact_model_strings(value: &serde_json::Value) -> serde_json::Value {
     match value {
@@ -279,8 +279,8 @@ mod tests {
 
     #[test]
     fn redacts_api_key_value() {
-        // Test verisi parcali uretilir: statik kaynakta sifre deseni
-        // bulunmaz (sir taramasi test dosyasini sifre sizintisi sanmasin).
+        // The test data is built in pieces: no password pattern appears in the
+        // static source (so a secret scan does not mistake this test file for a leak).
         let secret = format!("sk-{}", "abcdefghijklmnopqrstuvwxyz123");
         let input = format!("api_key: {secret}");
         let r = redact_text(&input);
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn plain_text_untouched() {
-        let input = "fn main() { println!(\"merhaba\"); }";
+        let input = "fn main() { println!(\"hello\"); }";
         let r = redact_text(input);
         assert!(!r.report().changed());
         assert_eq!(r.text(), input);
@@ -335,6 +335,6 @@ mod tests {
         assert!(looks_secretish(&secret));
         assert!(looks_secretish("password hint"));
         assert!(!looks_secretish(&format!("x {REDACTION_TOKEN} y")));
-        assert!(!looks_secretish("merhaba dunya"));
+        assert!(!looks_secretish("hello world"));
     }
 }
