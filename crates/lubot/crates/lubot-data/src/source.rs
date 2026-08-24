@@ -1,42 +1,43 @@
-//! Kapalı-devre kaynak denetimi.
+//! The closed-circuit source check.
 //!
-//! İlke: Lubot'un okuyabildiği kaynak türleri kapalı bir kümedir
-//! (Pollen grant / B.U.D. StorageDeal / SocialFi). İzin **kuralları**
-//! zincirden sorgulanır - burada kopyalanmaz (K3 kararı; budlum'daki
-//! "ikinci kopya en kötü kopyadır" ilkesi).
+//! The principle: the source kinds Lubot can read form a closed set (a Pollen
+//! grant, a B.U.D. StorageDeal, or SocialFi). The permission **rules** are
+//! queried from the chain and are not copied here (the K3 decision; the "the
+//! second copy is the worst copy" principle from budlum).
 
 use lubot_core::dataset::{SourceKind, SourceRef};
 
-/// Veri katmanı hataları.
+/// Data layer errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataError {
-    /// Kapalı-devre dışı kaynak türü (bilinmeyen bayt değeri).
+    /// A source kind outside the closed circuit (an unknown byte value).
     NotClosedLoop { found: u8 },
-    /// Kaynak kapalı-devre ama beklenen tür değil.
+    /// The source is inside the closed circuit but is not the expected
+    /// kind.
     UnexpectedSource {
         expected: SourceKind,
         got: SourceKind,
     },
-    /// SHA-256 doğrulaması başarısız - veri akmaz.
+    /// The SHA-256 verification failed - no data flows.
     HashMismatch { detail: String },
 }
 
-/// Kaynağın kapalı-devre üç kanaldan biri olduğunu doğrula.
+/// Verify that the source is one of the three closed-circuit channels.
 ///
 /// # Errors
 ///
-/// Kaynak türü üç kanaldan biri değilse `NotClosedLoop`.
+/// `NotClosedLoop` when the source kind is not one of the three channels.
 pub fn assert_closed_loop(source: &SourceRef) -> Result<(), DataError> {
     match source.kind {
         SourceKind::PollenGrant | SourceKind::StorageDeal | SourceKind::SocialRef => Ok(()),
     }
 }
 
-/// Ham (bayt) kaynak türünü yorumla; bilinmeyen değerleri reddet.
+/// Interpret the raw (byte) source kind and refuse unknown values.
 ///
 /// # Errors
 ///
-/// `raw_kind` 0..=2 dışındaysa `NotClosedLoop`.
+/// `NotClosedLoop` when `raw_kind` is outside 0..=2.
 pub fn reject_unknown_source(raw_kind: u8) -> Result<SourceKind, DataError> {
     match raw_kind {
         0 => Ok(SourceKind::PollenGrant),
@@ -46,12 +47,12 @@ pub fn reject_unknown_source(raw_kind: u8) -> Result<SourceKind, DataError> {
     }
 }
 
-/// Kaynağın belirli bir kapalı-devre türde olmasını iste (ör. eğitim
-/// planı yalnızca `StorageDeal` kaynaklı setleri kabul edebilir).
+/// Require the source to be a specific closed-circuit kind (for example a
+/// training plan may accept only sets sourced from a `StorageDeal`).
 ///
 /// # Errors
 ///
-/// Tür uyuşmuyorsa `UnexpectedSource`.
+/// `UnexpectedSource` when the kind does not match.
 pub fn require_source(source: &SourceRef, expected: SourceKind) -> Result<(), DataError> {
     assert_closed_loop(source)?;
     if source.kind == expected {
