@@ -208,15 +208,31 @@ mod tests {
         // An R1 generative recipe: NO storage -> the rent channel is closed (0), the step is open.
         let t = RecipeRecord::generative(3, [0x11; 32], vec![0x55; 16]);
         let s = three_meter_k14b(&t, 1.3, 8.5);
-        assert!(three_meter_is_honest(&s), "the step is positive, the commitment is filled");
-        assert_eq!(s.storer_rent_usd, 0.0, "R1 generation stores nothing, rent 0");
-        assert!(s.validator_step_usd > 0.0, "the generation step flows to the validator");
+        assert!(
+            three_meter_is_honest(&s),
+            "the step is positive, the commitment is filled"
+        );
+        assert_eq!(
+            s.storer_rent_usd, 0.0,
+            "R1 generation stores nothing, rent 0"
+        );
+        assert!(
+            s.validator_step_usd > 0.0,
+            "the generation step flows to the validator"
+        );
         // An R3 bodied recipe: there IS storage -> the rent channel opens to the storer.
         let g = RecipeRecord::bodied(vec![0xAB; 512], 1);
         let sg = three_meter_k14b(&g, 1.3, 8.5);
-        assert!(sg.storer_rent_usd > 0.0, "the R3 body rent goes to the storer");
+        assert!(
+            sg.storer_rent_usd > 0.0,
+            "the R3 body rent goes to the storer"
+        );
         // Deterministic: the same recipe -> the same three meters
-        let s2 = three_meter_k14b(&RecipeRecord::generative(3, [0x11; 32], vec![0x55; 16]), 1.3, 8.5);
+        let s2 = three_meter_k14b(
+            &RecipeRecord::generative(3, [0x11; 32], vec![0x55; 16]),
+            1.3,
+            8.5,
+        );
         assert_eq!(s, s2, "the three meters are deterministic");
         // The channels are separate: rent to the storer, the step to the validator
         assert_ne!(s.storer_rent_usd, s.validator_step_usd);

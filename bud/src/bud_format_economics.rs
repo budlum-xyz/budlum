@@ -399,7 +399,10 @@ mod tests {
     fn tape_archive_tier_f3() {
         // F3/F1151: cold content on tape is 0.00025 USD/TB/month - the cold path of the 0.016 commitment
         assert!((TAPE_USD_PER_TB_MONTH - 0.00025).abs() < 0.00001);
-        assert!(tape_holds_ceiling(1.0, 0.016), "tape is always below the ceiling");
+        assert!(
+            tape_holds_ceiling(1.0, 0.016),
+            "tape is always below the ceiling"
+        );
         assert!(tape_holds_ceiling(10.0, 0.016), "10TB bant bile");
         // the media ladder: tape is cheapest, hot is most expensive
         assert!(ArchiveTier::Tape.usd_per_tb_month() < ArchiveTier::RefurbHdd.usd_per_tb_month());
@@ -443,7 +446,10 @@ mod tests {
         );
         // the residual class: size * erasure * coldness
         let p1 = residual_price(1.0, 1.143, 0.0, 0.23342);
-        assert!((p1 - 0.2668).abs() < 0.01, "1 TB residual is about 0.267: {p1}");
+        assert!(
+            (p1 - 0.2668).abs() < 0.01,
+            "1 TB residual is about 0.267: {p1}"
+        );
         // the coldness discount: coldness 1 -> 50 percent lower
         let pcold = residual_price(1.0, 1.143, 1.0, 0.23342);
         assert!(

@@ -35,7 +35,7 @@ pub enum RecipeRecord {
     Bodied {
         commitment: [u8; 32],
         compression: u8, // 0=none, 1=zlib-9 (if it shrinks)
-        body: Vec<u8>, // a compressed (R2) or raw (R3) body
+        body: Vec<u8>,   // a compressed (R2) or raw (R3) body
     },
 }
 

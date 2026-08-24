@@ -161,15 +161,15 @@ fn konteyner_parcalari_dedup_uyumlu() {
     let data = gen_log(200);
     let a = store_with_min(&data, 512).expect("store a");
     let b = store_with_min(&data, 512).expect("store b");
-    assert_eq!(a, b, "the same input gives the same container bytes (deterministic)");
+    assert_eq!(
+        a, b,
+        "the same input gives the same container bytes (deterministic)"
+    );
     let fa = BudV2File::decode(&a).unwrap();
     let fb = BudV2File::decode(&b).unwrap();
     assert_eq!(fa.chunks.len(), fb.chunks.len());
     for (ca, cb) in fa.chunks.iter().zip(fb.chunks.iter()) {
-        assert_eq!(
-            ca.content_id, cb.content_id,
-            "chunk ids are deterministic"
-        );
+        assert_eq!(ca.content_id, cb.content_id, "chunk ids are deterministic");
     }
 }
 
@@ -475,7 +475,10 @@ fn rejenerasyon_zinciri_uctan_uca() {
     let bad_block =
         RegenerationBlock::new(1, [0u8; 32], vec![bad_ch], seg_root, 10_000, 1_768_000_001)
             .unwrap();
-    assert!(!bad_block.verify(), "a wrong-production block is REFUSED (I2)");
+    assert!(
+        !bad_block.verify(),
+        "a wrong-production block is REFUSED (I2)"
+    );
 }
 
 #[test]
@@ -518,7 +521,10 @@ fn engine_kanit_zincire_baglanir() {
     );
     let block = RegenerationBlock::new(7, [0u8; 32], vec![ch], seg_root, 100_000, 1_768_000_001)
         .expect("blok");
-    assert!(block.verify(), "the block is valid - the content bytes are not in the block");
+    assert!(
+        block.verify(),
+        "the block is valid - the content bytes are not in the block"
+    );
 
     // 4) the full chain: the engine output gives a deterministic block hash
     assert_ne!(block.hash, [0u8; 32]);
@@ -539,7 +545,10 @@ fn das_shamir_pact_entegrasyon() {
     assert!(DasSampler::verify_sample(&chunks, &root, 42, 8));
     // 3) chunk ownership: validators declare chunks
     let owner = DasOwnership::new("validator-1", 3, &chunks[3], 1_768_000_000);
-    assert!(owner.verify_hold(&chunks[3]), "the validator holds the chunk");
+    assert!(
+        owner.verify_hold(&chunks[3]),
+        "the validator holds the chunk"
+    );
     // 4) the content's PRODUCTION seed is split into (3,5) shares with Shamir (F14)
     let seed = [0x42u8; 32];
     let shares = ShamirShare::split(&seed, 3, 5).expect("shamir");
@@ -548,7 +557,10 @@ fn das_shamir_pact_entegrasyon() {
     // 5) production: the content produced from the seed gives the PACT commitment
     let produced = b"content produced from the seed 1234567890";
     let pact = PactRecord::pure([0x51u8; 32], seed, produced, 1_768_000_001);
-    assert!(pact.verify_production(produced), "the production verifies (I2)");
+    assert!(
+        pact.verify_production(produced),
+        "the production verifies (I2)"
+    );
     // 6) all together: chunk ownership + the seed + PACT give a verifiable chain
     assert!(owner.verify_hold(&chunks[3]));
     assert_eq!(

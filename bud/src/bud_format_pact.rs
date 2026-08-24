@@ -257,7 +257,10 @@ mod tests {
             pact.verify_production(produced),
             "the production commitment matches"
         );
-        assert!(!pact.verify_production(b"another output"), "a different production is REFUSED");
+        assert!(
+            !pact.verify_production(b"another output"),
+            "a different production is REFUSED"
+        );
         assert!(pact.verify(), "pure production is consistent");
         // blob roundtrip
         let blob = pact.to_blob();
@@ -309,7 +312,10 @@ mod tests {
         let original = b"lossless content 12345";
         let pact = PactRecord::residual_only(original, 300);
         assert!(pact.verify_production(original), "content_id matches");
-        assert!(!pact.verify_production(b"different"), "different content is REFUSED");
+        assert!(
+            !pact.verify_production(b"different"),
+            "different content is REFUSED"
+        );
         assert_eq!(
             pact.commitment,
             crate::bud_format_container::content_id(original)
@@ -323,7 +329,11 @@ mod tests {
         let seed = [1u8; 32];
         let pact = PactRecord::pure([2u8; 32], seed, b"x", 1);
         let blob = pact.to_blob();
-        assert!(blob.len() <= 256, "the PACT record is compact: {} bytes", blob.len());
+        assert!(
+            blob.len() <= 256,
+            "the PACT record is compact: {} bytes",
+            blob.len()
+        );
         // the same fields -> the same hash (deterministic)
         let pact2 = PactRecord::pure([2u8; 32], seed, b"x", 1);
         assert_eq!(pact.record_hash(), pact2.record_hash());
