@@ -1,37 +1,41 @@
-//! B.U.D. 2.0 - Tenant Sözlüğü (zstd-dictionary; fikirler2.0 İ5 / F1048) (2026-08-16)
+//! B.U.D. 2.0 - the tenant dictionary, a zstd dictionary; ideas 2.0 item I5 and
+//! F1048, 2026-08-16.
 //!
-//! Küçük nesnelerde (JSON kayıt, log satırı, config) zstd sözlüksüz zayıftır;
-//! kohort-tabanlı sözlük oranı 2-3x artırır (ölçüm: küçük JSON kayıtları
-//! sözlüksüz 1.20x → sözlüklü 2.75x; determinizm doğrulandı).
+//! On small objects, such as a JSON record, a log line or a config, zstd is
+//! weak without a dictionary; a cohort-based dictionary raises the ratio by two
+//! to three times. The measurement: small JSON records go from 1.20x without a
+//! dictionary to 2.75x with one, and determinism was verified.
 //!
-//! Determinizm (İ5): aynı örnek kümesi + aynı parametre + aynı zstd sürümü →
-//! AYNI sözlük baytları. Sözlük, üretilebilir sınıfa girer: zincirde sözlük BAYTI
-//! değil, eğitim tarifi (örnek hash'leri + parametreler) tutulur; sözlük talep
-//! anında yeniden eğitilir (İ5 Dictionary-as-Recipe).
+//! Determinism (I5): the same sample set, the same parameters and the same zstd
+//! version yield THE SAME dictionary bytes. The dictionary therefore falls into
+//! the reproducible class: the chain holds the training recipe, the sample
+//! hashes and the parameters, not the dictionary BYTES, and the dictionary is
+//! retrained on demand. That is I5, dictionary as recipe.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, panik'siz.
+//! The code is `#![forbid(unsafe_code)]` and panic-free.
 
 #![forbid(unsafe_code)]
 
 use sha3::{Digest, Sha3_256};
 
 pub const DICT_MAGIC: [u8; 8] = *b"\xB5DICT\0\0\0";
-pub const MAX_DICT_SIZE: usize = 128 * 1024; // sözlük tavanı (bomba)
+pub const MAX_DICT_SIZE: usize = 128 * 1024; // the dictionary ceiling, a bomb guard
 pub const MAX_SAMPLES: usize = 100_000;
-pub const MAX_SAMPLE_BYTES: usize = 1024 * 1024; // tek örnek tavanı
+pub const MAX_SAMPLE_BYTES: usize = 1024 * 1024; // the ceiling for one sample
 
 #[derive(Debug, Clone)]
 pub struct TenantDictionary {
-    pub bytes: Vec<u8>,   // zstd sözlük gövdesi (magic BDLM ile sarılı değil - ham)
-    pub digest: [u8; 32], // SHA3("BDLM_BUD_DICT_V1" || bytes) - determinizm çapası
-    pub dict_id: u32,     // zstd dictID (ilk 4 bayt, little-endian)
+    pub bytes: Vec<u8>,   // the zstd dictionary body, raw, not wrapped in a BDLM magic
+    pub digest: [u8; 32], // SHA3("BDLM_BUD_DICT_V1" || bytes), the determinism anchor
+    pub dict_id: u32,     // the zstd dictID, the first 4 bytes, little-endian
     pub sample_count: usize,
 }
 
 impl TenantDictionary {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_DICT_V1";
 
-    /// Sözlük eğit (zstd::dict::from_samples - deterministik, sabit parametreler).
+    /// Train a dictionary with `zstd::dict::from_samples`, which is
+    /// deterministic under fixed parameters.
     pub fn train(samples: &[Vec<u8>], max_size: usize) -> Option<Self> {
         if samples.is_empty() || samples.len() > MAX_SAMPLES || max_size > MAX_DICT_SIZE {
             return None;
@@ -39,7 +43,8 @@ impl TenantDictionary {
         if samples.iter().any(|s| s.len() > MAX_SAMPLE_BYTES) {
             return None;
         }
-        // zstd::dict::from_samples: sözlük eğitimi (COVER benzeri, deterministik)
+        // zstd::dict::from_samples trains the dictionary; it is COVER-like and
+        // deterministic.
         let bytes = zstd::dict::from_samples(samples, max_size).ok()?;
         if bytes.is_empty() || bytes.len() > MAX_DICT_SIZE {
             return None;
@@ -47,7 +52,8 @@ impl TenantDictionary {
         Some(Self::from_bytes(bytes))
     }
 
-    /// Hazır sözlük baytlarından (deterministik doğrulamalı).
+    /// Build from ready dictionary bytes, with the deterministic digest
+    /// computed over them.
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -67,15 +73,17 @@ impl TenantDictionary {
         }
     }
 
-    /// Deterministik sözlük kimliği (İ5: ID yerine gövde hash'i kullan).
+    /// The deterministic dictionary identity; I5 says to use the hash of the
+    /// body rather than an ID.
     pub fn id(&self) -> [u8; 32] {
         self.digest
     }
 
-    /// Sözlükle sıkıştır (EncoderDictionary). Bomba korumalı (max_out tavanı).
+    /// Compress with the dictionary, an `EncoderDictionary`. It is bomb-guarded
+    /// by the `max_out` ceiling.
     pub fn compress_with(&self, data: &[u8], level: i32, max_out: usize) -> Option<Vec<u8>> {
         if data.len() > max_out.saturating_mul(2) {
-            return None; // açılacak boyut tavanı ile orantısız girdi
+            return None; // input out of proportion with the decompressed ceiling
         }
         let mut comp = zstd::bulk::Compressor::with_dictionary(level, &self.bytes).ok()?;
         let c = comp.compress(data).ok()?;
@@ -85,7 +93,8 @@ impl TenantDictionary {
         Some(c)
     }
 
-    /// Sözlükle aç (DecoderDictionary). Tavanlı (bomba koruması).
+    /// Decompress with the dictionary, a `DecoderDictionary`. It is capped, as a
+    /// bomb guard.
     pub fn decompress_with(&self, data: &[u8], max_out: usize) -> Option<Vec<u8>> {
         let mut dec = zstd::bulk::Decompressor::with_dictionary(&self.bytes).ok()?;
         let out = dec.decompress(data, max_out).ok()?;
@@ -101,7 +110,7 @@ mod tests {
     use super::*;
 
     fn gen_records(n: usize) -> Vec<Vec<u8>> {
-        // deterministik küçük JSON kayıtları (kohort simülasyonu)
+        // Deterministic small JSON records, simulating a cohort.
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let rec = format!(
@@ -120,10 +129,11 @@ mod tests {
 
     #[test]
     fn dictionary_improves_small_record_ratio() {
-        // F1048 ölçümü (Python): sözlüksüz 1.20x → sözlüklü 2.75x (Rust'ta benzer)
+        // The F1048 measurement, in Python: 1.20x without a dictionary and 2.75x
+        // with one; Rust is comparable.
         let records = gen_records(2000);
         let raw: usize = records.iter().map(|r| r.len()).sum();
-        // sözlüksüz zstd-19
+        // zstd-19 without a dictionary.
         let plain: usize = records
             .iter()
             .map(|r| {
@@ -132,10 +142,10 @@ mod tests {
                     .unwrap_or(r.len())
             })
             .sum();
-        // sözlük eğit + sözlükle sıkıştır
+        // Train a dictionary, then compress with it.
         let train: Vec<Vec<u8>> = records[..1000].to_vec();
         let test: Vec<Vec<u8>> = records[1000..].to_vec();
-        let dict = TenantDictionary::train(&train, 4096).expect("sözlük eğitilir");
+        let dict = TenantDictionary::train(&train, 4096).expect("the dictionary trains");
         let with_dict: usize = test
             .iter()
             .map(|r| {
@@ -156,20 +166,21 @@ mod tests {
             .sum();
         assert!(
             test_raw as f64 / with_dict as f64 > test_raw as f64 / test_plain as f64,
-            "sözlük oranı artırmalı"
+            "the dictionary must raise the ratio"
         );
-        assert!(plain < raw, "sözlüksüz de sıkışır");
-        // sözlük boyutu sınırda
+        assert!(plain < raw, "it also compresses without a dictionary");
+        // The dictionary size stays within its bound.
         assert!(dict.bytes.len() <= 4096 + 1024);
     }
 
     #[test]
     fn dictionary_determinism() {
-        // İ5: aynı örnekler + aynı parametre → aynı sözlük (aynı makine/sürüm)
+        // I5: the same samples and the same parameters give the same dictionary,
+        // on the same machine and version.
         let records = gen_records(500);
         let d1 = TenantDictionary::train(&records, 4096).expect("d1");
         let d2 = TenantDictionary::train(&records, 4096).expect("d2");
-        assert_eq!(d1.bytes, d2.bytes, "deterministik sözlük");
+        assert_eq!(d1.bytes, d2.bytes, "a deterministic dictionary");
         assert_eq!(d1.id(), d2.id());
         assert_ne!(d1.id(), [0u8; 32]);
     }
@@ -177,20 +188,24 @@ mod tests {
     #[test]
     fn roundtrip_with_dict_and_tamper() {
         let records = gen_records(300);
-        let dict = TenantDictionary::train(&records, 2048).expect("sözlük");
-        // sözlükle sıkıştır → aç = orijinal
+        let dict = TenantDictionary::train(&records, 2048).expect("dictionary");
+        // Compress with the dictionary, then decompress back to the original.
         let rec = records[0].clone();
         let c = dict
             .compress_with(&rec, 19, rec.len().max(8))
-            .expect("sıkıştır");
-        let d = dict.decompress_with(&c, rec.len().max(8) * 2).expect("aç");
-        assert_eq!(d, rec, "sözlüklü roundtrip kayıpsız");
-        // yanlış sözlükle açma → başarısız olabilir (zstd dictID uyuşmazlığı)
+            .expect("compress");
+        let d = dict
+            .decompress_with(&c, rec.len().max(8) * 2)
+            .expect("decompress");
+        assert_eq!(d, rec, "the dictionary roundtrip is lossless");
+        // Decompressing with the wrong dictionary may fail, on a zstd dictID
+        // mismatch.
         let other = TenantDictionary::train(&gen_records(50), 2048).unwrap();
         let attempt = other.decompress_with(&c, rec.len().max(8) * 2);
-        // farklı dictID'li sözlük: zstd reddedebilir veya bozuk çıktı - panik yok
+        // A dictionary with a different dictID: zstd may refuse or produce
+        // garbage, but it must not panic.
         let _ = attempt;
-        // bomba korumaları
+        // The bomb guards.
         assert!(TenantDictionary::train(&[], 100).is_none());
         let mut big_sample = vec![0u8; MAX_SAMPLE_BYTES + 1];
         assert!(TenantDictionary::train(&[big_sample], 100).is_none());
@@ -204,7 +219,7 @@ mod tests {
 
     #[test]
     fn dict_blob_format_never_panics() {
-        // bozuk sözlük baytlarıyla compress/decompress panik'siz
+        // Compress and decompress stay panic-free on corrupt dictionary bytes.
         let dict = TenantDictionary::from_bytes(vec![0x28, 0xB5, 0x2F, 0xFD, 0x00]);
         assert_eq!(dict.dict_id, 0xFD2FB528);
         let _ = dict.compress_with(b"test", 19, 100);
