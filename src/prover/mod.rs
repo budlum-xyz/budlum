@@ -61,27 +61,29 @@ pub struct ZkProofSubmission {
     /// Is the proven target height, and `message.sender` is the submitter (the
     /// Account charged the fee and, if registered, rewarded).
     ///
-    /// # `source_height` ile `public_inputs.block_height` ayni sey degil
+    /// # `source_height` is not the same thing as `public_inputs.block_height`
     ///
-    /// Olculdu, cunku ikisini esitleyen bir kapi koymak cazipti ve yanlis
-    /// olurdu. `public_inputs.block_height`, **programin syscall 6 ile
-    /// okudugu** yukseklik; AIR onu trace'e baglar (`plonky3_air.rs`,
-    /// syscall6 kisiti) ve hicbir sey okumayan bir program icin `0` kalir -
-    /// `prove_bytecode` tam olarak bunu uretir. `source_height` ise kanitin
-    /// **hangi alan yuksekligini ilerlettigi**, yani bir uzlasma iddiasi.
+    /// This was measured, because adding a gate that equates the two was
+    /// tempting and would have been wrong. `public_inputs.block_height` is the
+    /// height **the program read via syscall 6**; the AIR binds it to the trace
+    /// (`plonky3_air.rs`, the syscall6 constraint) and it stays `0` for a
+    /// program that reads nothing - `prove_bytecode` produces exactly that.
+    /// `source_height`, by contrast, is **which domain height the proof
+    /// advances**, that is, a consensus claim.
     ///
-    /// Bir program zincir yuksekligini hic okumadan bir gecisi kanitlayabilir;
-    /// o durumda `block_height = 0` dogru degerdir ve iddia yuksekligi 20
-    /// olabilir. Duz bir esitlik denetimi bu dogru kanitlari reddederdi.
+    /// A program can prove a transition without ever reading the chain height;
+    /// in that case `block_height = 0` is the correct value while the claimed
+    /// height may be 20. A plain equality check would reject those correct
+    /// proofs.
     ///
-    /// Iddia tarafi ayri korunuyor: `source_height` baglama hash'inin
-    /// on-goruntusunde (bkz. [`Self::payload_binding_hash`]), dolayisiyla bir
-    /// kanit baska bir yukseklige tasinamiyor. `block_height` icin anlamli
-    /// kapi, program zincir yuksekligini *okuduysa* onun gercek yukseklikle
-    /// tutarli olmasidir; bunu soyleyebilmek icin trace'in syscall 6
-    /// kullanip kullanmadigini disaridan bilmek gerekir ve bu bilgi su an
-    /// genel girdilerde tasinmiyor. Kapi, o bilgi tasinana kadar
-    /// kurulmuyor - yanlis kapi, kapi olmamasindan kotudur.
+    /// The claim side is protected separately: `source_height` sits in the
+    /// preimage of the binding hash (see [`Self::payload_binding_hash`]), so a
+    /// proof cannot be moved to another height. The meaningful gate for
+    /// `block_height` is that, *if* the program read the chain height, it is
+    /// consistent with the real height; saying that requires knowing from the
+    /// outside whether the trace used syscall 6, and that information is not
+    /// carried in the public inputs today. The gate is not built until that
+    /// information is carried - a wrong gate is worse than no gate.
     pub message: CrossDomainMessage,
     /// The STARK proof.
     pub proof: ProofEnvelope,
@@ -91,14 +93,13 @@ pub struct ZkProofSubmission {
     pub program: Vec<u64>,
 }
 
-/// Bir zk programinin izin listesi kimligi.
+/// The allow-list identity of a zk program.
 ///
-/// Dogrulayicinin (`Plonky3Adapter::verify`) program hash'i icin kullandigi
-/// fonksiyonun **ayni**si: etiketsiz Keccak-256, kelimeler little-endian.
-/// Kasten ayni: izin listesi, kanitin AIR'e karsi baglandigi degerin
-/// tam olarak ayni degeri uzerinden karar vermeli. Ayri bir etiketli hash
-/// kullanmak, listede olan program ile kanitlanan programin farkli olabilecegi
-/// bir aralik acardi.
+/// The **same** function the verifier (`Plonky3Adapter::verify`) uses for the
+/// program hash: untagged Keccak-256, words little-endian. Deliberately the
+/// same: the allow list must decide over exactly the value the proof is bound
+/// to against the AIR. Using a separate tagged hash would open a gap in which
+/// the listed program and the proven program could differ.
 pub fn zk_program_hash(program: &[u64]) -> Hash32 {
     use sha3::{Digest, Keccak256};
     let mut hasher = Keccak256::new();
@@ -108,14 +109,14 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
     hasher.finalize().into()
 }
 
-/// Bir zk kanitinin genel girdisindeki `block_height` icin kabul penceresi.
+/// The acceptance window for `block_height` in the public inputs of a zk proof.
 ///
-/// STARK kaniti "bu girdilerle boyle kostu" der; girdinin cok eski bir
-/// yuksekligi iddia etmesi ayri bir sorundur - gecerli bir eski kanit,
-/// sunuldugu her yerde "taze" gorunur. Pencere, kanitin iddia ettigi
-/// yuksekligi zincirin gercek yuksekligine baglar. `0` bilincli olarak
-/// kabul edilir: `prove_bytecode` henuz yuksekligi yazmiyor; 0 = "iddia
-/// yok". Uretici yuksekligi yazmaya basladiginda pencere tamamiyla isler.
+/// A STARK proof says "it ran this way with these inputs"; the input claiming a
+/// very old height is a separate problem - a valid old proof looks "fresh"
+/// wherever it is presented. The window binds the height the proof claims to the
+/// real height of the chain. `0` is accepted deliberately: `prove_bytecode` does
+/// not write the height yet; 0 = "no claim". Once the prover starts writing the
+/// height, the window applies in full.
 pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
 
 impl ZkProofSubmission {
@@ -123,21 +124,22 @@ impl ZkProofSubmission {
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
     /// With a different proof (or vice-versa).
     ///
-    /// # Hedef alan ve yukseklik neden on-goruntude
+    /// # Why the target domain and the height are in the preimage
     ///
-    /// Bu hash once yalnizca (kanit, genel girdiler, program) uzerindeydi.
-    /// Kanitin **hangi iddiaya** sunuldugu - `target_domain` ve
-    /// `source_height` - disaridaydi, oysa kabul edilen iddianin anahtari
-    /// tam olarak o ikisi (`ProofClaimKey`).
+    /// This hash used to be over (proof, public inputs, program) only. **Which
+    /// claim** the proof was presented for - `target_domain` and
+    /// `source_height` - was left outside, even though those two are exactly the
+    /// key of the accepted claim (`ProofClaimKey`).
     ///
-    /// Sonuc: gecerli tek bir kanit, henuz iddia edilmemis **her** (alan,
-    /// yukseklik) ciftine sunulabiliyordu. Mesaji yeniden kurmak yetiyordu;
-    /// baglama hash'i degismedigi icin hicbir kapi bunu fark etmiyordu.
-    /// Kanit "bir program boyle kostu" der, "bu, 12. yukseklikteki alan 3'un
-    /// gecisidir" demez - o bagi kuran sey bu on-goruntudur.
+    /// The consequence: a single valid proof could be presented for **every**
+    /// (domain, height) pair that had not been claimed yet. Rebuilding the
+    /// message was enough; because the binding hash did not change, no gate
+    /// noticed. A proof says "a program ran this way", it does not say "this is
+    /// the transition of domain 3 at height 12" - what establishes that link is
+    /// this preimage.
     ///
-    /// Alan ayirici bu yuzden `V2`: on-goruntu degisti, eski hash'ler
-    /// kasten gecersiz.
+    /// That is why the domain separator is `V2`: the preimage changed and the
+    /// old hashes are deliberately invalid.
     pub fn payload_binding_hash(
         proof: &ProofEnvelope,
         public_inputs: &ExecutionPublicInputs,
