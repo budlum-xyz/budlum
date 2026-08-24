@@ -1,20 +1,20 @@
-//! B.U.D. 2.0 - Markdown / AI Dosya Sıkıştırması (2026-08-16)
+//! B.U.D. 2.0 - markdown / AI file compression (2026-08-16)
 //!
-//! Kapsam: markdown/metin belgelerinin yapısal sıkıştırması.
+//! Scope: structural compression of markdown/text documents.
 //! Bulgular (K106):
-//!   - HTML → Markdown: token %87.5-90 azalma (web2md/Fern ölçümü) - md, LLM için en verimli
-//!     insan-okunur formattır.
+//!   - HTML -> markdown: 87.5-90 percent token reduction (web2md/Fern measurement) - md is the most efficient
+//!     human-readable format for an LLM.
 //!   - JSON → Markdown tablo: token %20-40 (reinforcementcoding).
-//!   - llms.txt / llms-full.txt: AI ajanların md dokümanı tek istekle alması (Fern).
-//!   - Markdown, HTML'in "sıkıştırılmış hali"dir (yapı korunur, etiket gider).
+//!   - llms.txt / llms-full.txt: AI agents fetch the md document in a single request (Fern).
+//!   - Markdown is the compressed form of HTML (structure is kept, tags go away).
 //!
-//! B.U.D. transformu (kayıpsız): markdown'ı YAPISAL BÖLÜMLERE ayırır - başlık/paragraf/
-//! liste/kod/bağlantı/tablo - her bölüm türüne göre kompakt serileştirilir (başlık derecesi
-//! ayrı bayt, kod blokları ayrı akış). Çıktı: md-token akışı (zstd ile daha iyi sıkışır,
-//! çünkü yapı tekrarı ayrışır) + LLM bağlamı için derlenmiş görünüm (başlık ağacı + özet).
-//! Kayıpsız: token akışı → orijinal md (roundtrip testli). Boş satırlar da
-//! bölüm olarak taşınır (`MdSection::Blank`) ve sondaki yeni satır ayrı bir
-//! bayrakta durur; ikisi de markdown'da ayırıcıdır, atılırsa belge geri gelmez.
+//! The B.U.D. transform (lossless) splits markdown into STRUCTURAL SECTIONS - heading/paragraph/
+//! list/code/link/table - each section type is serialized compactly (heading level as a
+//! separate byte, code blocks as a separate stream). Output: an md-token stream (compresses better with zstd,
+//! because structural repetition separates out) plus a compiled view for LLM context (heading tree + digest).
+//! Lossless: token stream -> original md (roundtrip tested). Blank lines are carried as
+//! sections too (`MdSection::Blank`) and the trailing newline lives in a separate
+//! flag; both are separators in markdown, and dropping them means the document cannot be restored.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -25,7 +25,7 @@ use sha3::{Digest, Sha3_256};
 pub const MD_MAGIC: [u8; 8] = *b"\xB5MDCP\0\0\0";
 pub const MD_VERSION: u8 = 2;
 
-/// Markdown bölüm türü.
+/// Markdown section type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdSection {
     Heading(u8), // # seviyesi 1-6
@@ -34,25 +34,25 @@ pub enum MdSection {
     CodeBlock, // ``` ...
     Link,      // [text](url)
     Table,     // | a | b |
-    Blank,     // bos satir: ayirici, atilirsa belge geri gelmez
+    Blank,     // blank line: a separator; dropping it loses the document
     Other,
 }
 
-/// Markdown yapısal ayrıştırma sonucu: bölüm türleri + içerikler (kayıpsız).
+/// The result of structural markdown parsing: section types + contents (lossless).
 #[derive(Debug, Clone)]
 pub struct MarkdownSplit {
     pub sections: Vec<MdSection>,
-    pub contents: Vec<String>, // her bölümün metni (başlık işareti dahil - birebir)
-    pub heading_tree: Vec<String>, // LLM bağlamı: başlık hiyerarşisi (derlenmiş görünüm)
-    /// Girdi yeni satirla bitiyor muydu. `str::lines` bunu yutar; kayipsizlik
-    /// icin ayrica tasinmasi gerekir.
+    pub contents: Vec<String>, // the text of each section (including the heading marker - verbatim)
+    pub heading_tree: Vec<String>, // LLM context: the heading hierarchy (compiled view)
+    /// Whether the input ended with a newline. `str::lines` swallows this; it must be carried
+    /// separately for losslessness.
     pub trailing_newline: bool,
 }
 
 impl MarkdownSplit {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_MARKDOWN_V1";
 
-    /// Markdown'ı bölümlere ayır (satır bazlı, kayıpsız: contents birleşince orijinal).
+    /// Split markdown into sections (line based, lossless: joining contents gives the original).
     pub fn encode(md: &str) -> Option<Self> {
         if md.is_empty() || md.len() > 32 * 1024 * 1024 {
             return None;
@@ -62,7 +62,7 @@ impl MarkdownSplit {
         let mut heading_tree = Vec::new();
         let mut in_code = false;
         for line in md.lines() {
-            // kod bloğu aç/kapa (in_code'dan bağımsız - satır ``` ise toggle)
+            // open/close a code block (independent of in_code - toggle when the line is ```)
             let is_fence = line.trim_start().starts_with("```");
             let t = if is_fence {
                 in_code = !in_code;
@@ -70,7 +70,7 @@ impl MarkdownSplit {
             } else if in_code {
                 MdSection::CodeBlock
             } else if let Some(stripped) = line.strip_prefix('#') {
-                // başlık: # sayısı
+                // heading: the number of #
                 let depth = line.len() - stripped.len();
                 if depth <= 6 && stripped.starts_with(' ') {
                     heading_tree.push(line.to_string());
@@ -88,9 +88,9 @@ impl MarkdownSplit {
             } else if line.trim_start().starts_with('|') && line.contains('|') {
                 MdSection::Table
             } else if line.trim().is_empty() {
-                // Bos satir markdown'da ayiricidir: paragrafi paragraftan,
-                // listeyi listeden o ayirir. Atilirsa `decode` orijinali geri
-                // veremez ve modulun "kayipsiz" iddiasi yanlis olur. Tur olarak
+                // A blank line is a separator in markdown: it separates paragraph from paragraph,
+                // and list from list. If dropped, `decode` cannot return the
+                // cannot restore, and the module claim of losslessness becomes false. As a type
                 // kaydediliyor, icerigi de oldugu gibi (satir ici bosluk dahil).
                 MdSection::Blank
             } else {
@@ -111,10 +111,10 @@ impl MarkdownSplit {
         })
     }
 
-    /// Bolumleri birlestir. `encode`'un girdisini bayt-birebir geri verir.
+    /// Join the sections. Returns the input of `encode` byte for byte.
     ///
     /// `str::lines` sondaki yeni satiri yutar, bu yuzden onun varligi ayrica
-    /// tasinir: aksi halde "a\n" ile "a" ayni bolum listesini uretir ve biri
+    /// is carried: otherwise "a\n" and "a" produce the same section list and one of them
     /// otekine donusur.
     #[must_use]
     pub fn decode(&self) -> String {
@@ -125,7 +125,7 @@ impl MarkdownSplit {
         out
     }
 
-    /// LLM bağlam verimliliği: başlık ağacı boyutu / orijinal boyut (derlenmiş görünüm).
+    /// LLM context efficiency: heading tree size / original size (compiled view).
     pub fn context_ratio(&self) -> f64 {
         let tree_len: usize = self.heading_tree.iter().map(|s| s.len() + 1).sum();
         let orig: usize = self.contents.iter().map(|s| s.len() + 1).sum();
@@ -135,7 +135,7 @@ impl MarkdownSplit {
         orig as f64 / tree_len.max(1) as f64
     }
 
-    /// Deterministik blob: türler + içerikler + başlık ağacı + digest.
+    /// Deterministic blob: types + contents + heading tree + digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MD_MAGIC);
@@ -149,8 +149,8 @@ impl MarkdownSplit {
         for h in &self.heading_tree {
             push_str(&mut out, h);
         }
-        // Sondaki yeni satir: `str::lines` onu yutar, bolum listesinden geri
-        // turetilemez, bu yuzden blob'a ayri bir bayt olarak giriyor.
+        // The trailing newline: `str::lines` swallows it and it cannot be recovered from the
+        // cannot be derived, so it enters the blob as a separate byte.
         out.push(u8::from(self.trailing_newline));
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -174,15 +174,15 @@ impl MarkdownSplit {
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
         // `count` SALDIRGAN KONTROLLU bir sayidir ve dogrudan `with_capacity`'e
-        // verilirse 45 baytlik bir blob 8,6 GB ayirma talebi uretir (olculdu:
+        // a 45-byte blob produces an 8.6 GB allocation request (measured:
         // "memory allocation of 8589934590 bytes failed" -> SIGABRT; crate
-        // panic="abort" ile derlendiginden dugum aninda olur). Ustteki SHA3
+        // with panic="abort" the node dies instantly). The SHA3 above
         // butunluk kontrolu bunu ENGELLEMEZ: ozet anahtarsizdir ve DOMAIN
-        // sabiti publictir, yani gecerli ozetli blob uretmek serbesttir.
+        // uses a public constant, so producing a blob with a valid digest is free.
         //
-        // Tavan girdinin KENDI uzunlugundan turetilir: her bolum en az 1 bayt
-        // tip + 4 bayt uzunluk = 5 bayt tuketir. Boylece ayirma her zaman
-        // girdiyle orantili kalir ve ayri bir sihirli sabit bakim yuku olmaz.
+        // The ceiling is derived from the input's OWN length: each section consumes at least 1 byte
+        // of type + 4 bytes of length = 5 bytes. That keeps allocation always
+        // proportional to the input, with no separate magic constant to maintain.
         if count > payload_len.saturating_sub(pos) / 5 {
             return None;
         }
@@ -203,7 +203,7 @@ impl MarkdownSplit {
         }
         let tree_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        // Ayni gerekce: her baslik en az 4 baytlik uzunluk alani tuketir.
+        // Same rationale: each heading consumes at least a 4-byte length field.
         if tree_count > payload_len.saturating_sub(pos) / 4 {
             return None;
         }
@@ -218,8 +218,8 @@ impl MarkdownSplit {
         let trailing_newline = match bytes[pos] {
             0 => false,
             1 => true,
-            // Tek bir dogru kodlama: 2 ve ustu bayt reddedilir, yoksa ayni
-            // belge birden cok gecerli bloba sahip olur ve ozet tekil kalmaz.
+            // A single correct encoding: bytes of 2 and above are refused, otherwise the same
+            // document would have several valid blobs and the digest would not be unique.
             _ => return None,
         };
         pos += 1;
@@ -286,11 +286,11 @@ fn read_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
 
-    /// RAM DENETIMI (2026-08-21): sisirilmis `count` alani ile kucuk bir blob,
+    /// RAM AUDIT (2026-08-21): a small blob with an inflated `count` field
     /// govdede karsiligi olmamasina ragmen devasa bir on-ayirma tetikliyordu.
-    /// Olculen: 45 baytlik girdi -> 8.589.934.590 baytlik ayirma talebi ->
+    /// Measured: a 45-byte input -> an 8,589,934,590-byte allocation request ->
     /// SIGABRT (crate panic="abort"). SHA3 butunluk alani KORUMAZ: ozet
-    /// anahtarsiz, DOMAIN sabiti public, yani gecerli ozetli blob uretilebilir.
+    /// is keyless and the DOMAIN constant is public, so a blob with a valid digest can be produced.
     #[test]
     fn sisirilmis_bolum_sayisi_ayirmadan_once_reddedilir() {
         use sha3::{Digest, Sha3_256};
@@ -303,70 +303,70 @@ mod tests {
         h.update(&b);
         b.extend_from_slice(&h.finalize());
 
-        // Ozet GECERLI -- yani ret, bozuk ozetten degil, tavandan gelmeli.
+        // The digest is VALID -- so the refusal must come from the ceiling, not a broken digest.
         assert!(
             MarkdownSplit::from_blob(&b).is_none(),
-            "govdesi olmayan u32::MAX bolum sayisi reddedilmeli"
+            "a u32::MAX section count with no body must be refused"
         );
     }
 
-    /// Kanarya: tavan gecerli girdiyi reddetmemeli (asiri sikilastirma kontrolu).
+    /// Canary: the ceiling must not refuse valid input (an over-tightening check).
     #[test]
     fn gercek_markdown_tavandan_etkilenmez() {
-        let md = "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde\n";
+        let md = "# Heading\n\nParagraph text.\n\n## Subheading\n\n- item\n";
         let split = MarkdownSplit::encode(md).expect("encode");
         let blob = split.to_blob();
-        let geri = MarkdownSplit::from_blob(&blob).expect("gecerli blob kabul edilmeli");
-        assert_eq!(geri.sections, split.sections, "bolum turleri birebir");
-        assert_eq!(geri.contents, split.contents, "bolum icerikleri birebir");
+        let back = MarkdownSplit::from_blob(&blob).expect("a valid blob must be accepted");
+        assert_eq!(back.sections, split.sections, "section types are identical");
+        assert_eq!(back.contents, split.contents, "section contents are identical");
         assert_eq!(
-            geri.heading_tree, split.heading_tree,
-            "baslik agaci birebir"
+            back.heading_tree, split.heading_tree,
+            "the heading tree is identical"
         );
     }
 
-    /// Kayipsizlik: `encode` -> `decode` girdiyi bayt-birebir geri verir.
+    /// Losslessness: `encode` -> `decode` returns the input byte for byte.
     ///
-    /// Onceki surumde `encode` bos satirlari `continue` ile atiyordu ve bir
-    /// test bu kaybi "bilinen sinir" olarak kilitliyordu. Ama modul dokumu uc
-    /// yerde "kayipsiz" diyor ve tur `lib.rs`'ten disa acik: bir cagiran onu
-    /// kayipsiz sanabilir. Sinir kilitlemek yerine sinir kaldirildi.
+    /// In the previous version `encode` dropped blank lines with `continue` and a
+    /// test locked that loss as a known limitation. But the module docs say lossless in three
+    /// places and the type is exported from `lib.rs`: a caller could believe
+    /// it. Instead of locking the limitation, the limitation was removed.
     ///
-    /// Bos satir markdown'da bir ayiricidir - paragrafi paragraftan, listeyi
-    /// listeden o ayirir - yani atilan sey bicim degil anlamdir.
+    /// A blank line is a separator in markdown - it separates paragraph from paragraph and list
+    /// from list - so what is dropped is meaning, not formatting.
     #[test]
     fn markdown_transformu_bayt_birebir_geri_doner() {
         let durumlar = [
-            "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde\n",
-            "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde",
+            "# Heading\n\nParagraph text.\n\n## Subheading\n\n- item\n",
+            "# Heading\n\nParagraph text.\n\n## Subheading\n\n- item",
             "tek satir",
             "tek satir\n",
-            "\n\n\nardisik bos satirlar\n\n\n",
+            "\n\n\nconsecutive blank lines\n\n\n",
             "# B\n\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\nson\n",
-            "   \nbosluklu bos satir korunur\n",
+            "   \na blank line with spaces is preserved\n",
         ];
         for md in durumlar {
             let split = MarkdownSplit::encode(md).expect("encode");
             assert_eq!(
                 split.decode(),
                 md,
-                "encode/decode bayt-birebir olmali: {md:?}"
+                "encode/decode must be byte for byte: {md:?}"
             );
-            // Blob yolu da ayni belgeyi geri vermeli.
+            // The blob path must return the same document.
             let blob = split.to_blob();
-            let geri = MarkdownSplit::from_blob(&blob).expect("gecerli blob");
-            assert_eq!(geri.decode(), md, "blob yolu da kayipsiz olmali: {md:?}");
+            let back = MarkdownSplit::from_blob(&blob).expect("valid blob");
+            assert_eq!(back.decode(), md, "the blob path must be lossless too: {md:?}");
         }
     }
 
-    /// Ayiricinin tasindigi kanit: iki farkli belge ayni bolum listesine
-    /// dusmemeli. Bos satir atilsaydi bu ikisi ayirt edilemezdi.
+    /// Evidence that the separator is carried: two different documents must not fall into the same
+    /// section list. Had the blank line been dropped these two would be indistinguishable.
     #[test]
     fn bos_satir_iki_belgeyi_ayri_tutar() {
         let a = MarkdownSplit::encode("bir\n\niki\n").expect("encode");
         let b = MarkdownSplit::encode("bir\niki\n").expect("encode");
-        assert_ne!(a.contents, b.contents, "bos satir icerikte gorunmeli");
-        assert_ne!(a.to_blob(), b.to_blob(), "iki belge ayni bloba dusmemeli");
+        assert_ne!(a.contents, b.contents, "the blank line must appear in the contents");
+        assert_ne!(a.to_blob(), b.to_blob(), "two documents must not fall into the same blob");
         assert_eq!(a.decode(), "bir\n\niki\n");
         assert_eq!(b.decode(), "bir\niki\n");
     }
@@ -376,34 +376,34 @@ mod tests {
     fn sondaki_yeni_satir_bloba_giriyor() {
         let a = MarkdownSplit::encode("metin\n").expect("encode");
         let b = MarkdownSplit::encode("metin").expect("encode");
-        assert_eq!(a.contents, b.contents, "bolum listeleri ayni");
-        assert_ne!(a.to_blob(), b.to_blob(), "ama bloblar farkli olmali");
+        assert_eq!(a.contents, b.contents, "the section lists are the same");
+        assert_ne!(a.to_blob(), b.to_blob(), "but the blobs must differ");
         assert!(a.trailing_newline && !b.trailing_newline);
     }
     use super::*;
 
     fn sample_md() -> String {
-        "# B.U.D. 2.0\n\nBirleşik depolama motoru.\n\n- kayıpsız\n- doğrulanabilir\n\n```rust\nlet x = 1;\n```\n\n[link](https://example.com)\n\n| a | b |\n|---|---|\n| 1 | 2 |\n".to_string()
+        "# B.U.D. 2.0\n\nUnified storage engine.\n\n- lossless\n- verifiable\n\n```rust\nlet x = 1;\n```\n\n[link](https://example.com)\n\n| a | b |\n|---|---|\n| 1 | 2 |\n".to_string()
     }
 
     #[test]
     fn md_structural_parse() {
         let md = sample_md();
         let split = MarkdownSplit::encode(&md).expect("encode");
-        assert!(split.sections.contains(&MdSection::Heading(1)), "başlık");
+        assert!(split.sections.contains(&MdSection::Heading(1)), "heading");
         assert!(split.sections.contains(&MdSection::Paragraph), "paragraf");
         assert!(split.sections.contains(&MdSection::List), "liste");
         assert!(split.sections.contains(&MdSection::CodeBlock), "kod");
-        assert!(split.sections.contains(&MdSection::Link), "bağlantı");
+        assert!(split.sections.contains(&MdSection::Link), "link");
         assert!(split.sections.contains(&MdSection::Table), "tablo");
         assert!(
             !split.heading_tree.is_empty(),
-            "başlık ağacı (LLM görünümü)"
+            "heading tree (LLM view)"
         );
-        // context_ratio: başlık ağacı orijinalden çok küçük
+        // context_ratio: the heading tree is far smaller than the original
         assert!(
             split.context_ratio() > 3.0,
-            "LLM bağlamı kompakt: {:.1}x",
+            "LLM context is compact: {:.1}x",
             split.context_ratio()
         );
     }
@@ -426,14 +426,14 @@ mod tests {
 
     #[test]
     fn md_token_efficiency_documented() {
-        // K106: md, HTML'in sıkıştırılmış hali (%87-90 token); bu transform yapıyı
-        // bölerek zstd'nin daha iyi görmesini sağlar. Ayrıca başlık ağacı = LLM bağlamı.
+        // K106: md is the compressed form of HTML (87-90 percent of tokens); this transform splits the
+        // structure so zstd sees it better. The heading tree also doubles as LLM context.
         let md = sample_md();
         let split = MarkdownSplit::encode(&md).unwrap();
-        // bölüm türleri deterministik
+        // section types are deterministic
         assert_eq!(split.sections[0], MdSection::Heading(1));
-        // boş satırlar yapıdan ayrışır (birleştirmede \n korunur)
+        // blank lines separate out of the structure (the \n is kept when joining)
         let joined = split.decode();
-        assert!(joined.contains("# B.U.D."), "içerik korunur");
+        assert!(joined.contains("# B.U.D."), "content is preserved");
     }
 }

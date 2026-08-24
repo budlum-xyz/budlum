@@ -3,22 +3,22 @@
 //!
 //! # Boyut sabitleri
 //!
-//! Bu dosya once ML-DSA-87 uzunluklarini kendi `pub const`'lari olarak
-//! yeniden tanimliyordu ve her yerde `[u8; ML_DSA_87_PUBLIC_KEY_LEN]` / `[u8; ML_DSA_87_SIGNATURE_LEN]` cipliak
-//! sayilarini kullaniyordu. Ayni sayinin iki tanimi, birinin degismesi
-//! halinde sessizce ayrilir. Uzunluklar artik
+//! This file used to redefine the ML-DSA-87 lengths as its own `pub const`s
+//! and used the `[u8; ML_DSA_87_PUBLIC_KEY_LEN]` / `[u8; ML_DSA_87_SIGNATURE_LEN]`cipliak
+//! numbers everywhere. Two definitions of the same number diverge silently
+//! when one of them changes. The lengths now come from
 //! `crate::crypto::primitives`'ten geliyor; tek tanim var.
 //!
-//! Dizin `lib.rs`'ten hic ulasilmadigi icin bu dosya derlenmiyordu; kendi
+//! Because the directory was never reachable from `lib.rs` this file did not compile; its own
 //! testi bile derlenmezdi (`GuardianVote.signature` alani `[u8; ML_DSA_87_SIGNATURE_LEN]`
-//! iken teste `vec![1u8; 4627]` yaziliydi). Derlenmeyen kod, hicbir kapinin
+//! the test said `vec![1u8; 4627]`). Code that does not compile is code no gate
 //! gormedigi koddur.
 //!
-//! `validate_all` artik `registry::QuantumAccountRegistry` tarafindan
-//! cagriliyor: bir hesap ancak bu denetimden gecerse kayda girer, ve kaydi
-//! degistiren her yol ayni denetimden yeniden gecer. Daha once bu koruma
-//! yazilmisti ama onu cagiran hicbir uretim yolu yoktu, cunku hesabi tutan
-//! bir kayit da yoktu.
+//! `validate_all` is now called by `registry::QuantumAccountRegistry`:
+//! an account enters the registry only if it passes this check, and every path that
+//! mutates the record goes through the same check again. This guard had been
+//! written before, but no production path called it, because there was no registry
+//! holding the account either.
 
 use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
 use sha3::{Digest, Sha3_256};
@@ -29,17 +29,17 @@ pub const SEED_DOMAIN_V1: &[u8] = b"BUDLUM_MLDSA87_SEED_V1";
 pub const RECOVERY_DOMAIN_V1: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1";
 pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
 
-/// Bir imzalama tohumunu turetmek icin gereken en az girdi baytı.
+/// The minimum input bytes needed to derive a signing seed.
 ///
-/// Turetilen tohum 256 bit. Girdi bundan kisaysa tohumun arama uzayi da o
-/// kadar kucuktur ve hash bunu buyutmez - yalnizca gizler. Gerekcenin tamami
-/// [`QuantumAccount::seed_from_entropy`] uzerinde.
+/// The derived seed is 256 bits. If the input is shorter the seed's search space is
+/// that much smaller, and the hash does not grow it - it only hides it. The full rationale is
+/// on [`QuantumAccount::seed_from_entropy`].
 pub const MIN_SEED_ENTROPY_BYTES: usize = 32;
 
 /// Tohum turetiminin reddettigi durum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedError {
-    /// Girdi [`MIN_SEED_ENTROPY_BYTES`] baytindan kisa.
+    /// The input is shorter than [`MIN_SEED_ENTROPY_BYTES`] bytes.
     InsufficientEntropy { given: usize, required: usize },
 }
 
@@ -49,10 +49,10 @@ impl std::fmt::Display for SeedError {
             Self::InsufficientEntropy { given, required } => write!(
                 f,
                 "KQ-SEED-ENTROPY: tohum girdisi {given} bayt, en az {required} bayt gerekli. \
-                 Turetilen tohum 256 bit tasidigini iddia eder; daha kisa bir girdiden \
+                 The derived seed claims to carry 256 bits; deriving it from a shorter input \
                  turetilirse iddia yanlistir ve adresler onceden hesaplanabilir. \
-                 Girdi isletim sisteminin rastgelelik kaynagindan gelmelidir - \
-                 uzunluk denetlenir, kalitesi denetlenemez."
+                 The input must come from the operating system randomness source - \
+                 the length is checked, the quality cannot be."
             ),
         }
     }
@@ -88,42 +88,42 @@ impl QuantumAccount {
 
     /// Bir ML-DSA-87 imzalama anahtarinin tohumunu entropiden turetir.
     ///
-    /// # Neden bir alt sinir var
+    /// # Why there is a lower bound
     ///
-    /// Bu fonksiyon her zaman 32 bayt dondurur, girdisi ne olursa olsun.
-    /// Cikti **her zaman yuksek entropili gorunur**: SHA3-256'nin ciktisi tek
+    /// This function always returns 32 bytes, whatever its input.
+    /// The output **always looks high entropy**: the output of SHA3-256 is
     /// baytlik bir girdiden de rastgele bir bit dizisi gibi okunur. Bu
-    /// gorunum yaniltir, cunku bir tohumu kiran sey ciktinin bicimi degil
-    /// **girdinin arama uzayidir**. Girdi 2 bayttan geliyorsa tohum 65 536
-    /// olasiliktan biridir; saldirgan hepsini deneyip her birinin adresini
+    /// that appearance misleads, because what breaks a seed is not the shape of the output but
+    /// **the search space of the input**. If the input comes from 2 bytes the seed is one of
+    /// 65 536 possibilities; an attacker tries them all and reads the address of
     /// onceden hesaplar, kamuya acilan adresi tabloda arar ve ozel anahtari
-    /// okur. Hash'in gucu burada hicbir sey yapmaz - dogru cevabi zaten
-    /// bulmustur, sadece hangisi oldugunu bilmiyordur.
+    /// each one. The strength of the hash does nothing here - it has already
+    /// found the right answer, it just does not know which one it is.
     ///
     /// Bu, "adi entropi olan ama entropiyi hic olcmeyen fonksiyon" durumuydu:
-    /// imza `&[u8]` aliyordu ve bos dilim de gecerliydi. `Result` donmesi
-    /// cagiranin bu karari **atlayamamasini** saglar; `#[must_use]` bir
-    /// degeri gormezden gelmeyi zorlastirir, ama `Err` gormezden gelinemez.
+    /// the signature took `&[u8]` and an empty slice was valid too. Returning `Result`
+    /// makes it impossible for the caller to **skip** this decision; `#[must_use]`
+    /// makes ignoring a value harder, but an `Err` cannot be ignored.
     ///
-    /// # Neden 32 bayt
+    /// # Why 32 bytes
     ///
-    /// Turetilen sey 256 bitlik bir tohum. Girdi bundan kisaysa, cikti
-    /// tasidigi bit sayisi kadar guclu olur ve geri kalani susleme. Alt
-    /// siniri ciktinin genisligiyle esitlemek, tohumun **ilan ettigi**
-    /// guvenlik seviyesini gercekten tasimasini saglar. Daha uzun girdi
+    /// What is derived is a 256-bit seed. If the input is shorter, the output is
+    /// only as strong as the bits it carries and the rest is decoration. Setting the lower
+    /// bound equal to the output width makes the seed actually carry the security level it
+    /// **declares**. A longer input
     /// serbesttir: fazlasi zarar vermez.
     ///
-    /// Olculen sey uzunluk, Shannon entropisi degil. Bir cagiran 32 bayt
+    /// What is measured is length, not Shannon entropy. A caller can pass 32 bytes
     /// sifir gonderebilir ve kapi susar. Bunun nedeni, bir baytin gercekten
     /// rastgele olup olmadiginin bu katmandan **olculemez** olmasi: 32 sifir
     /// bayt ile bir CSPRNG'nin urettigi 32 bayt burada ayirt edilemez.
-    /// Uzunluk, dogru tarafta olan ve olculebilen kisimdir; entropi
+    /// Length is the part that is measurable and on the right side; entropy
     /// kaynaginin kalitesi cagiranin sorumlulugudur ve `SeedError`'in metni
-    /// bunu soyler.
+    /// says so.
     ///
     /// # Errors
     ///
-    /// Girdi [`MIN_SEED_ENTROPY_BYTES`] baytindan kisaysa
+    /// If the input is shorter than [`MIN_SEED_ENTROPY_BYTES`] bytes
     /// [`SeedError::InsufficientEntropy`].
     pub fn seed_from_entropy(entropy: &[u8]) -> Result<[u8; 32], SeedError> {
         if entropy.len() < MIN_SEED_ENTROPY_BYTES {
@@ -154,8 +154,8 @@ impl QuantumAccount {
     pub fn storage_cost(&self) -> f64 {
         // physical 0.23342 * e / r, device-only 0
         // For simplicity: storage_bytes * 0.23342 / 1_099_511_627_776 (1TB) / 16.68 (Duz ratio)
-        // Bir hesabın bayt sayısı f64'ün tam tamsayı aralığının (2^53)
-        // çok altında; maliyet zaten ondalıklı bir tahmin.
+        // The byte count of an account is far below the exact integer range of f64 (2^53);
+        // the cost is a fractional estimate anyway.
         #[allow(clippy::cast_precision_loss)]
         let tb = self.storage_bytes as f64 / 1_099_511_627_776.0;
         if self.storage_bytes == 0 {
@@ -167,7 +167,7 @@ impl QuantumAccount {
 
     /// # Errors
     ///
-    /// Eşik 1..=16 aralığında değilse veya gardiyan listesi boş/16'dan büyükse hata döner.
+    /// Errors if the threshold is outside 1..=16 or the guardian list is empty or larger than 16.
     pub const fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
             return Err("KQ-WALLET-MULTISIG-16: guardians empty");
@@ -183,7 +183,7 @@ impl QuantumAccount {
 
     /// # Errors
     ///
-    /// Kurtarma eşiği 1..=16 aralığında değilse veya gardiyan listesi boş/16'dan büyükse hata döner.
+    /// Errors if the recovery threshold is outside 1..=16 or the guardian list is empty or larger than 16.
     pub const fn verify_recovery_policy(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
             return Err("KQ-WALLET-RECOVERY-16: empty");
@@ -199,7 +199,7 @@ impl QuantumAccount {
 
     /// # Errors
     ///
-    /// `storage_root` sıfırken `pact_root` sıfır değilse hata döner.
+    /// Errors if `pact_root` is non-zero while `storage_root` is zero.
     pub fn verify_storage_bound(&self) -> Result<(), &'static str> {
         // storage_root zero but pact_root non-zero -> inconsistent
         if self.storage_root == [0u8; 32] && self.pact_root != [0u8; 32] {
@@ -208,16 +208,16 @@ impl QuantumAccount {
         Ok(())
     }
 
-    /// Tüm KQ-* guard'larını tek giriş noktasından çağırır.
+    /// Calls all KQ-* guards from a single entry point.
     ///
     /// `verify_multisig_threshold`, `verify_recovery_policy` ve
-    /// `verify_storage_bound` ayrı ayrı `pub` oldukları için gate bunların
-    /// üretim yolundan çağrıldığını göremez; bu fonksiyon üçünü de sırayla
-    /// doğrular ve ilk hatada döner. Ana zincire bağlanacak entegrasyonun
-    /// çağıracağı tek yüzey budur.
+    /// Because `verify_storage_bound` and friends are each `pub` separately, the gate cannot see
+    /// that they are called from a production path; this function verifies all three in order
+    /// and returns on the first error. This is the only surface the integration that wires
+    /// into the main chain will call.
     /// # Errors
     ///
-    /// Üç kontrolden herhangi biri reddederse ilk hata döner.
+    /// Returns the first error if any of the three checks refuses.
     pub fn validate_all(&self) -> Result<(), &'static str> {
         self.verify_multisig_threshold()?;
         self.verify_recovery_policy()?;
@@ -239,7 +239,7 @@ pub struct RecoveryProposal {
 impl RecoveryProposal {
     /// # Errors
     ///
-    /// Yeni sahip mevcut sahiple aynıysa veya zaman kilidi taşarsa hata döner.
+    /// Errors if the new owner equals the current owner or the time lock overflows.
     pub fn new(
         current_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
         new_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
@@ -283,18 +283,18 @@ impl RecoveryProposal {
     }
 }
 
-/// PACT bağlama tipi `src/storage/pact_binding.rs`'te yaşar.
+/// The PACT binding type lives in `src/storage/pact_binding.rs`.
 ///
-/// Burada ikinci bir `PactBinding` tanımı vardı: aynı beş alan, aynı 128
-/// baytlık bütçe kontrolü, aynı `verify_commitment`. `storage::Pact` bunun
-/// üst kümesi - `id` ve `mod_flag` da taşıyor, `PactRegistry` ile bir köke
-/// bağlanıyor.
+/// There used to be a second `PactBinding` definition here: the same five fields, the same 128-byte
+/// budget check, the same `verify_commitment`. `storage::Pact` is a superset of it -
+/// it also carries `id` and `mod_flag`, and binds to a root through
+/// `PactRegistry`.
 ///
-/// Aynı kavramın iki tanımı, birinin değişmesi hâlinde sessizce ayrılır.
-/// Buradaki kopya `mod_flag`'i hiç bilmiyordu: `is_pure_production` ile
-/// `is_residual_only` ayrımı bu tarafta yoktu, dolayısıyla "saf üretim" ile
-/// "rezidüel-yalnız" bir PACT'i ayırt edemezdi. Kopya kaldırıldı; tek tanım
-/// dışarıdan kullanılır.
+/// Two definitions of the same concept diverge silently when one of them changes.
+/// The copy here knew nothing of `mod_flag`: the distinction between `is_pure_production` and
+/// `is_residual_only` did not exist on this side, so it could not tell a pure-production PACT
+/// from a residual-only one. The copy was removed; the single definition
+/// is used from outside.
 pub use crate::storage::pact_binding::{Pact, PactRegistry};
 
 // BFT finality for guardian votes (ratio of guardians)
@@ -310,7 +310,7 @@ pub struct BftGuardianFinality;
 impl BftGuardianFinality {
     /// # Errors
     ///
-    /// Oy sayısı eşiğin altındaysa veya nicem tutmazsa hata döner.
+    /// Errors if the vote count is below the threshold or the quorum does not hold.
     pub fn finalize(
         votes: Vec<GuardianVote>,
         n: usize,
@@ -374,7 +374,7 @@ mod tests {
     }
 
     /// `validate_all` uc kapinin da gectigini soylemeli; biri duserse
-    /// tamami dusmeli.
+    /// all of them must fail.
     #[test]
     fn validate_all_refuses_an_out_of_range_threshold() {
         let acc = account(vec![PK], 2, 1);
@@ -392,8 +392,8 @@ mod tests {
         assert!(acc.validate_all().is_err());
     }
 
-    /// Koruyucu koku sirasiz olmali: ayni kume farkli sirada ayni koku
-    /// vermeli, yoksa ayni politika iki farkli hesap gibi gorunur.
+    /// The guardian root must be order independent: the same set in a different order must give the same
+    /// root, otherwise the same policy looks like two different accounts.
     #[test]
     fn the_guardian_root_does_not_depend_on_order() {
         let a = [1u8; ML_DSA_87_PUBLIC_KEY_LEN];
@@ -431,7 +431,7 @@ mod tests {
         assert!(pact.verify_commitment(payload).is_ok());
         assert!(pact.verify_commitment(b"other").is_err());
         assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 129, 0).is_err());
-        // Tek tanımın taşıdığı ayrım: kopya `mod_flag`'i hiç bilmiyordu.
+        // The distinction the single definition carries: the copy knew nothing of `mod_flag`.
         assert!(pact.is_pure_production());
         assert!(
             Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [1u8; 32], 10, 2)
@@ -449,34 +449,34 @@ mod tests {
             signature: SIG,
         };
         assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2), vote(3)], 4, 2).is_ok());
-        // Esigi gecer ama 2n/3 kotasini gecmez: 2 oy, n=4 icin kota 3.
+        // Passes the threshold but not the 2n/3 quorum: 2 votes, quorum is 3 for n=4.
         assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2)], 4, 2).is_err());
         assert!(BftGuardianFinality::finalize(vec![vote(1)], 4, 2).is_err());
     }
 
     /// Kisa girdiden tohum turetilemez.
     ///
-    /// Kapinin olctugu sey ciktinin bicimi degil girdinin arama uzayi.
-    /// Kapidan once bu fonksiyon her uzunlugu kabul ediyordu ve bos dilimden
+    /// What the gate measures is not the shape of the output but the search space of the input.
+    /// Before the gate this function accepted any length and derived a valid-looking seed
     /// bile 32 baytlik, rastgele gorunen bir tohum uretiyordu; bu tohumun
     /// tek bir olasiligi vardi ve tureyen adres herkesce onceden
     /// hesaplanabilirdi.
     #[test]
     fn a_seed_cannot_be_derived_from_thin_entropy() {
-        // Sinirin altindaki her uzunluk reddedilir - bos dilim dahil.
+        // Every length below the bound is refused - including the empty slice.
         for len in [0usize, 1, 2, 16, MIN_SEED_ENTROPY_BYTES - 1] {
             let err = QuantumAccount::seed_from_entropy(&vec![7u8; len])
-                .expect_err("sinirin altindaki girdi reddedilmeli");
+                .expect_err("input below the bound must be refused");
             assert_eq!(
                 err,
                 SeedError::InsufficientEntropy {
                     given: len,
                     required: MIN_SEED_ENTROPY_BYTES,
                 },
-                "{len} bayt icin verilen/gereken degerler bildirilmeli"
+                "the given/required values must be reported for {len} bytes"
             );
             // Mesaj cagirana ne yapmasi gerektigini soylemeli: sayilar ve
-            // entropinin nereden gelmesi gerektigi metinde olmali.
+            // the text must say where the entropy has to come from.
             let text = err.to_string();
             assert!(
                 text.contains(&len.to_string()),
@@ -485,25 +485,25 @@ mod tests {
             assert!(text.contains("32"), "mesaj gereken uzunlugu yazmali");
         }
 
-        // Sinirdaki ve ustundeki girdi gecer.
+        // Input at and above the bound passes.
         let at = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES])
-            .expect("sinirdaki girdi kabul edilmeli");
+            .expect("input at the bound must be accepted");
         let over = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES + 48])
-            .expect("daha uzun girdi kabul edilmeli");
+            .expect("longer input must be accepted");
 
-        // Fazla girdi susleme degil: turetime giriyor, yoksa uzunlugu
+        // Extra input is not decoration: it enters the derivation, otherwise checking the length
         // artirmak guvenligi artirmazdi.
         assert_ne!(at, over, "girdinin tamami tohuma girmeli");
 
-        // Turetim deterministik: ayni girdi ayni tohum.
+        // The derivation is deterministic: the same input gives the same seed.
         assert_eq!(
             at,
             QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES])
-                .expect("ayni girdi yine kabul edilmeli")
+                .expect("the same input must be accepted again")
         );
 
-        // Alan ayirici gercekten ayiriyor: ayni baytlar baska bir baglamda
-        // ayni tohumu vermemeli.
+        // The domain separator really separates: the same bytes in another context
+        // must not give the same seed.
         let mut raw = sha3::Sha3_256::new();
         raw.update([7u8; MIN_SEED_ENTROPY_BYTES]);
         let undomained: [u8; 32] = raw.finalize().into();

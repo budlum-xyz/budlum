@@ -1,24 +1,24 @@
 //! In-tree Merkle-Patricia Trie (MPT) **verifier** - Ethereum Yellow Paper
 //! Appendix D.
 //!
-//! **Verify-only** (RFC Q1 = relayer_produces): proof üretimi relayer binary'sinde
-//!; Budlum yalnız `(proof_nodes, root, key) → value` doğrular.
-//! Deterministik, network'süz - konsensüs güvenliği için kritik.
+//! **Verify only** (RFC Q1 = relayer_produces): proof generation lives in the relayer binary;
+//! Budlum only verifies `(proof_nodes, root, key) -> value`.
+//! Deterministic and network free - critical for consensus safety.
 //!
-//! # MPT node tipleri (RLP-decode sonrası)
+//! # MPT node types (after RLP decoding)
 //!
-//! - **Null**: empty string `""` → boş trie / eksik child.
+//! - **Null**: the empty string `""` -> empty trie / missing child.
 //! - **Leaf**: `[hp_encoded_path, value]` - path terminator flag=1.
 //! - **Extension**: `[hp_encoded_path, child_ref]` - terminator flag=0.
 //! - **Branch**: `[c0, c1, ..., c15, value]` - 17 eleman (16 child + optional value).
 //!
 //! `child_ref` ya 32-byte keccak256 hash'tir (node_map'te lookup) ya da inline
-//! RLP-encoded node (≤32 byte, küçük node optimizasyonu).
+//! an RLP-encoded node (32 bytes or fewer, the small-node optimization).
 //!
-//! # Güvenlik
+//! # Security
 //!
-//! - Node hash = `keccak256(rlp(node))`. Root = kök node'unun hash'i.
-//! - Eksik node, bozuk path, yanlış root → `Err` (kanıt geçersiz).
+//! - Node hash = `keccak256(rlp(node))`. The root is the hash of the root node.
+//! - A missing node, a broken path or a wrong root -> `Err` (the proof is invalid).
 //! - `keccak256` `sha3` crate'inden (mevcut; yeni dependency YOK).
 
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
@@ -47,22 +47,22 @@ use sha3::{Digest, Keccak256};
 pub const MAX_WALK_DEPTH: usize = 128;
 use std::collections::HashMap;
 
-/// MPT doğrulama hatası.
+/// MPT verification error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MptError {
-    /// Key trie'de yok (null child / boş value slot).
+    /// The key is not in the trie (null child / empty value slot).
     KeyNotFound,
-    /// Proof'ta eksik node (referans hash node_map'te yok).
+    /// A node is missing from the proof (the referenced hash is not in node_map).
     MissingNode,
-    /// Node RLP decode hatası.
+    /// Node RLP decode error.
     Rlp(RlpError),
-    /// Geçersiz node yapısı (bilinmeyen liste uzunluğu vb.).
+    /// Invalid node structure (unknown list length and similar).
     InvalidNode,
-    /// Geçersiz hex-prefix encoding.
+    /// Invalid hex-prefix encoding.
     InvalidHpEncoding,
-    /// Geçersiz node referansı (32-byte hash değil, inline RLP de değil).
+    /// Invalid node reference (neither a 32-byte hash nor inline RLP).
     InvalidNodeRef,
-    /// Path eşleşmiyor (leaf/extension path uyuşmazlığı).
+    /// The path does not match (leaf/extension path mismatch).
     PathMismatch,
     /// Trie descent exceeded [`MAX_WALK_DEPTH`].
     ///
@@ -104,16 +104,16 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Boş trie root = `keccak256(rlp(""))` = `keccak256(0x80)`.
-/// Ethereum'da kanonik sabit; tüm boş trie'ler bu root'a sahiptir.
-/// Değer CI-kanıtlı (keccak256(0x80) - lokalde hesaplanamadı, CI test
-/// `empty_trie_root_constant_correct` otorite değeridir).
+/// The empty trie root = `keccak256(rlp(""))` = `keccak256(0x80)`.
+/// A canonical constant in Ethereum; every empty trie has this root.
+/// The value is CI proved (keccak256(0x80) could not be computed locally; the CI test
+/// `empty_trie_root_constant_correct` is the authority).
 pub const EMPTY_TRIE_ROOT: [u8; 32] = [
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
     0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 ];
 
-/// 32-byte hash'i 64 nibble'a açar (MPT path = keccak256(key) nibble'ları).
+/// Expands a 32-byte hash into 64 nibbles (the MPT path is the nibbles of keccak256(key)).
 pub fn to_nibbles(hash: &[u8; 32]) -> Vec<u8> {
     let mut nibbles = Vec::with_capacity(64);
     for &b in hash {
@@ -125,14 +125,14 @@ pub fn to_nibbles(hash: &[u8; 32]) -> Vec<u8> {
 
 /// Hex-prefix encode (Yellow Paper Appendix D \mathrm{compact} fonksiyonu).
 ///
-/// `is_leaf=true` → terminator flag; `nibbles` tek/çift uzunluk olabilir.
+/// `is_leaf=true` -> the terminator flag; `nibbles` may have odd or even length.
 pub fn hp_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     let flag = if is_leaf { 2u8 } else { 0u8 };
     let odd = nibbles.len() % 2 == 1;
     let prefix_nibble = flag + if odd { 1 } else { 0 };
     let mut out = Vec::new();
     if odd {
-        // İlk path nibble'ı prefix ile aynı byte'a paketlenir.
+        // The first path nibble is packed into the same byte as the prefix.
         out.push((prefix_nibble << 4) | nibbles[0]);
         for pair in nibbles[1..].chunks(2) {
             out.push((pair[0] << 4) | pair[1]);
@@ -154,7 +154,7 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     let first = bytes[0];
     let flag_byte = first >> 4;
     if flag_byte > 3 {
-        return Err(MptError::InvalidHpEncoding); // sadece 0/1/2/3 geçerli
+        return Err(MptError::InvalidHpEncoding); // only 0/1/2/3 are valid
     }
     let is_leaf = (flag_byte & 0b10) != 0;
     let odd = (flag_byte & 0b01) != 0;
@@ -170,14 +170,14 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     Ok((is_leaf, nibbles))
 }
 
-/// Bir MPT proof'unu doğrular ve key'e karşı value döner.
+/// Verifies an MPT proof and returns the value for the key.
 ///
-/// - `proof_nodes`: RLP-encoded node byte'ları (hash → bytes map'i kurulur).
-/// - `root`: beklenen kök hash (`keccak256(rlp(kök_node))`).
-/// - `key`: ham key byte'ları (path = `keccak256(key)` nibble'ları).
+/// - `proof_nodes`: RLP-encoded node bytes (a hash -> bytes map is built).
+/// - `root`: the expected root hash (`keccak256(rlp(root_node))`).
+/// - `key`: the raw key bytes (the path is the nibbles of `keccak256(key)`).
 ///
-/// Başarı → value byte'ları (leaf value veya branch value slot, ham).
-/// Başarısız → kanıt geçersiz (MissingNode/PathMismatch/KeyNotFound/...).
+/// On success -> the value bytes (leaf value or branch value slot, raw).
+/// On failure -> the proof is invalid (MissingNode/PathMismatch/KeyNotFound and so on).
 pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Vec<u8>, MptError> {
     // Node map: hash → RLP bytes (relayer proof'tan).
     let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
@@ -185,7 +185,7 @@ pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Ve
         node_map.insert(keccak256(node_bytes), node_bytes.clone());
     }
 
-    // Kök node'u çöz.
+    // Resolve the root node.
     let root_bytes = node_map.get(root).ok_or(MptError::MissingNode)?;
     let root_item = rlp::decode(root_bytes)?;
     let path = to_nibbles(&keccak256(key));
@@ -193,7 +193,7 @@ pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Ve
     walk(&root_item, &path, &node_map, 0)
 }
 
-/// Recursive trie walk. `nibbles` = kalan path nibble'ları.
+/// Recursive trie walk. `nibbles` holds the remaining path nibbles.
 fn walk(
     node: &Item,
     nibbles: &[u8],
@@ -204,10 +204,10 @@ fn walk(
         return Err(MptError::NestingTooDeep);
     }
     match node {
-        // Null node → boş/eksik.
+        // A null node -> empty/missing.
         Item::String(b) if b.is_empty() => Err(MptError::KeyNotFound),
 
-        // 2-eleman liste: leaf veya extension.
+        // A two-element list: leaf or extension.
         Item::List(items) if items.len() == 2 => {
             let path_bytes = rlp::as_bytes(&items[0])?;
             let (is_leaf, node_path) = hp_decode(path_bytes)?;
@@ -216,13 +216,13 @@ fn walk(
             }
             let remaining = &nibbles[node_path.len()..];
             if is_leaf {
-                // Leaf: tüm path tüketilmeli → value döner.
+                // Leaf: the whole path must be consumed -> returns the value.
                 if !remaining.is_empty() {
                     return Err(MptError::PathMismatch);
                 }
                 return Ok(rlp::as_bytes(&items[1])?.to_vec());
             }
-            // Extension: child referansını çöz ve devam et.
+            // Extension: resolve the child reference and continue.
             let child = resolve_ref(&items[1], node_map)?;
             walk(&child, remaining, node_map, depth + 1)
         }
@@ -230,7 +230,7 @@ fn walk(
         // 17-eleman liste: branch.
         Item::List(items) if items.len() == 17 => {
             if nibbles.is_empty() {
-                // Tüm path tükendi → branch value slot (index 16).
+                // The whole path is consumed -> the branch value slot (index 16).
                 let value_slot = &items[16];
                 return match value_slot {
                     Item::String(b) if b.is_empty() => Err(MptError::KeyNotFound),
@@ -246,7 +246,7 @@ fn walk(
     }
 }
 
-/// Node referansını çözer: 32-byte hash (node_map lookup) veya inline RLP node.
+/// Resolves a node reference: a 32-byte hash (node_map lookup) or an inline RLP node.
 fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Item, MptError> {
     match item {
         Item::String(b) if b.is_empty() => Err(MptError::KeyNotFound),
@@ -257,11 +257,11 @@ fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Ite
             rlp::decode(node_bytes).map_err(MptError::from)
         }
         Item::String(b) => {
-            // Inline node (≤32 byte RLP) - decode et ve yerinde işle.
+            // An inline node (RLP of 32 bytes or fewer) - decode and handle in place.
             rlp::decode(b).map_err(MptError::from)
         }
         Item::List(_) => {
-            // İç içe decode edilmiş inline node (branch child doğrudan liste).
+            // A nested decoded inline node (the branch child is a list directly).
             Ok(item.clone())
         }
     }
@@ -272,7 +272,7 @@ mod tests {
     use super::*;
     use crate::cross_domain::evm::rlp::{decode as rlp_decode, encode as rlp_encode};
 
-    /// Test-yardımcı: leaf node RLP byte'ları üretir (test trie builder).
+    /// Test helper: produces leaf node RLP bytes (a test trie builder).
     fn leaf_node_bytes(nibbles: &[u8], value: &[u8]) -> Vec<u8> {
         let node = Item::List(vec![
             Item::String(hp_encode(nibbles, true)),
@@ -281,7 +281,7 @@ mod tests {
         rlp_encode(&node)
     }
 
-    /// Test-yardımcı: extension node RLP byte'ları.
+    /// Test helper: extension node RLP bytes.
     fn extension_node_bytes(nibbles: &[u8], child_hash: &[u8; 32]) -> Vec<u8> {
         let node = Item::List(vec![
             Item::String(hp_encode(nibbles, false)),
@@ -290,7 +290,7 @@ mod tests {
         rlp_encode(&node)
     }
 
-    /// Test-yardımcı: branch node RLP byte'ları (16 child + value).
+    /// Test helper: branch node RLP bytes (16 children + value).
     fn branch_node_bytes(children: [Option<Vec<u8>>; 16], value: Option<Vec<u8>>) -> Vec<u8> {
         let mut items: Vec<Item> = children
             .iter()
@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(hp_decode(&[0x40]).unwrap_err(), MptError::InvalidHpEncoding);
     }
 
-    // ---- keccak256 + EMPTY_TRIE_ROOT doğrulama ----
+    // ---- keccak256 + EMPTY_TRIE_ROOT verification ----
 
     #[test]
     fn empty_trie_root_constant_correct() {
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn verify_single_leaf_hit() {
-        // Tek girişli trie: key → value (tek leaf node = root).
+        // A single-entry trie: key -> value (one leaf node is the root).
         let key = b"hello";
         let value = b"world";
         let nibbles = to_nibbles(&keccak256(key));
@@ -376,17 +376,17 @@ mod tests {
         let node_bytes = leaf_node_bytes(&nibbles, value);
         let root = keccak256(&node_bytes);
 
-        // Farklı key → path uyuşmazlığı (leaf path nibbles'ı farklı).
+        // A different key -> a path mismatch (the leaf path nibbles differ).
         let err = verify(&[node_bytes], &root, b"different").unwrap_err();
         assert_eq!(err, MptError::PathMismatch);
     }
 
-    // ---- verify: leaf + extension + branch (çok node) ----
+    // ---- verify: leaf + extension + branch (multiple nodes) ----
 
     #[test]
     fn verify_two_keys_share_branch() {
-        // İki key'in ilk nibble'ları farklı → branch root, her child bir leaf.
-        // Keccak256("a") ve keccak256("b") ilk nibble'ları farklı olmalı (büyük olasılıkla).
+        // The first nibbles of the two keys differ -> a branch root with a leaf per child.
+        // keccak256("a") and keccak256("b") should differ in their first nibble (very likely).
         let key_a = b"a";
         let val_a = b"alpha";
         let key_b = b"b";
@@ -408,8 +408,8 @@ mod tests {
         children[nib_a[0] as usize] = Some(hash_a.to_vec());
         children[nib_b[0] as usize] = Some(hash_b.to_vec());
 
-        // Absent-key kontrolü children move olmadan ÖNCE (branch_node_bytes
-        // Ownership alır). c-key ilk nibble slot'u dolu mu?
+        // The absent-key check happens BEFORE the children are moved (branch_node_bytes
+        // takes ownership). Is the first-nibble slot of the c key occupied?
         let absent = b"c";
         let nib_c = to_nibbles(&keccak256(absent));
         let absent_slot_empty = children[nib_c[0] as usize].is_none();
@@ -435,12 +435,12 @@ mod tests {
 
     #[test]
     fn verify_extension_path() {
-        // İki key ortak prefix paylaşsın diye yapay nibble'larla test:
+        // A test with synthetic nibbles so the two keys share a prefix:
         // Root = extension([0,1,2,3] → branch); branch child'lar leaf.
-        // Gerçek key yerine doğrudan nibble-walk'u hp_encode ile test ediyoruz.
+        // Instead of a real key we test the nibble walk directly through hp_encode.
         let shared = vec![0u8, 1, 2, 3];
-        // Branch'ın 4. child'ı bir leaf (path = [] → branch value).
-        let leaf_nibbles: Vec<u8> = vec![9, 9, 9, 9]; // branch'in 9. child'ına
+        // The 4th child of the branch is a leaf (path = [] -> the branch value).
+        let leaf_nibbles: Vec<u8> = vec![9, 9, 9, 9]; // into the 9th child of the branch
         let leaf_bytes = leaf_node_bytes(&leaf_nibbles, b"leaf-val");
         let leaf_hash = keccak256(&leaf_bytes);
 
@@ -459,9 +459,9 @@ mod tests {
             .chain(std::iter::once(9))
             .chain(leaf_nibbles.iter().cloned())
             .collect();
-        // Key bytes (path'in her çift nibble'ı bir byte), tam 64 nibble olması
-        // Şart değil çünkü verify keccak256(key)'i kullanır; burada doğrudan
-        // Walk test etmek için verify yerine walk çağırıyoruz.
+        // Key bytes (each nibble pair of the path is a byte); exactly 64 nibbles is not
+        // required because verify uses keccak256(key); here we call walk instead of verify
+        // in order to test the walk directly.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         node_map.insert(keccak256(&ext_bytes), ext_bytes.clone());
         node_map.insert(keccak256(&branch_bytes), branch_bytes.clone());
@@ -471,14 +471,14 @@ mod tests {
         let result = walk(&root_item, &full_path, &node_map, 0).unwrap();
         assert_eq!(result, b"leaf-val");
 
-        // Yanlış path (shared prefix değil) → PathMismatch
+        // A wrong path (not a shared prefix) -> PathMismatch
         let bad_path = vec![5u8, 6, 7, 8];
         assert_eq!(
             walk(&root_item, &bad_path, &node_map, 0).unwrap_err(),
             MptError::PathMismatch
         );
 
-        // Root hash doğrulama
+        // Root hash verification
         assert_eq!(keccak256(&ext_bytes), root);
     }
 
@@ -493,7 +493,7 @@ mod tests {
         let node_bytes = leaf_node_bytes(&nibbles, value);
         let root = keccak256(&node_bytes);
 
-        // Boş proof → kök node map'te yok.
+        // An empty proof -> the root node is not in the map.
         let err = verify(&[], &root, key).unwrap_err();
         assert_eq!(err, MptError::MissingNode);
     }
@@ -509,7 +509,7 @@ mod tests {
 
         let err = verify(&[node_bytes], &wrong_root, key).unwrap_err();
         assert_eq!(err, MptError::MissingNode); // wrong root → lookup miss
-        let _ = real_root; // (real root doğrulandı önceki testte)
+        let _ = real_root; // (the real root was verified in the previous test)
     }
 
     #[test]
@@ -520,14 +520,14 @@ mod tests {
         assert_eq!(err, MptError::KeyNotFound);
     }
 
-    // ---- inline node desteği ----
+    // ---- inline node support ----
 
     #[test]
     fn verify_inline_branch_child() {
-        // Branch'in child'ı hash yerine inline leaf (≤32 byte RLP). Gerçek
-        // Ethereum leaf'leri 64-nibble path'le inline olmaz; burada yapay kısa
-        // Path ile inline mekanizmasını test ediyoruz (walk + resolve_ref yolu).
-        // Path = 2 nibble [0xa, 0xb], value = 1 byte → küçük leaf.
+        // The branch child is an inline leaf rather than a hash (RLP of 32 bytes or fewer). Real
+        // Ethereum leaves with a 64-nibble path are never inline; here we test the inline
+        // mechanism with a synthetic short path (the walk + resolve_ref path).
+        // Path = 2 nibbles [0xa, 0xb], value = 1 byte -> a small leaf.
         let inline_leaf = leaf_node_bytes(&[0xa, 0xb], b"v");
         assert!(inline_leaf.len() <= 32, "precondition: inline-able");
 
@@ -537,8 +537,8 @@ mod tests {
         let branch_bytes = branch_node_bytes(children, None);
         let root = keccak256(&branch_bytes);
 
-        // Verify keccak256(key)'i path yapar - biz doğrudan walk ile test edelim
-        // Çünkü key'den path = keccak256(key) geliyor ve yapay path'e uymaz.
+        // verify turns keccak256(key) into the path - we test through walk directly
+        // because the path from a key is keccak256(key) and would not match the synthetic path.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         node_map.insert(keccak256(&branch_bytes), branch_bytes.clone());
 
@@ -547,11 +547,11 @@ mod tests {
         let result = walk(&root_item, &path, &node_map, 0).unwrap();
         assert_eq!(result, b"v");
 
-        // Root hash doğrulama
+        // Root hash verification
         assert_eq!(keccak256(&branch_bytes), root);
     }
 
-    // ---- fuzz-benzeri: rastgele node bytes → hata (panic değil) ----
+    // ---- fuzz-like: random node bytes -> an error (not a panic) ----
 
     #[test]
     fn garbage_proof_does_not_panic() {
@@ -564,11 +564,11 @@ mod tests {
         ];
         let root = [0x42u8; 32];
         for proof in &garbage_sets {
-            // Sonuç Err olmalı (MissingNode / InvalidNode / Rlp), panic değil.
+            // The result must be Err (MissingNode / InvalidNode / Rlp), not a panic.
             let _ = verify(proof, &root, b"key");
         }
-        // Root hash'leri proof'ta olmadığı için MissingNode beklenir, önemli
-        // Olan panic olmaması (DoS güvenliği).
+        // MissingNode is expected because the root hashes are not in the proof; what matters
+        // is that there is no panic (DoS safety).
     }
 }
 
