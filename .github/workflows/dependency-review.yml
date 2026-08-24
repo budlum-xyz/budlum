@@ -1,11 +1,11 @@
-name: Dependency Review (PR güvenlik kapısı)
+name: Dependency Review (PR security gate)
 
-# Bu kapı, her pull_request'te PR diff'inde yeni tanıtılan bağımlılıkların
-# Bilinen zaafiyet/lisans sorunları için GitHub Advisory veritabanına göre
-# Denetlenmesini sağlar. cargo-audit / cargo-deny TÜM bağımlılık ağacını
-# Tararken, bu kapı yalnızca PR'ın getirdiği DELTAYA odaklanır, yani bir PR
-# Bilinen zaafiyetli bir sürüm eklemeye çalışırsa (dependabot dahil) main'e
-# Merge olmadan RED edilir. Tamamlayıcı, tekrarlamaz.
+# On every pull_request this gate has the dependencies newly introduced in the
+# PR diff inspected against the GitHub Advisory database for known
+# vulnerability/license problems. While cargo-audit / cargo-deny scan the WHOLE
+# dependency tree, this gate focuses only on the DELTA the PR brings, so if a PR
+# tries to add a version with a known vulnerability (dependabot included) it is
+# REJECTED before merging to main. Complementary, not a repetition.
 
 on:
   pull_request:
@@ -31,9 +31,9 @@ jobs:
       - name: Dependency Review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
-          # PR diff'inde tanıtılan moderate+ zaafiyetli bağımlılık → fail.
-          # (low = yalnızca uyarı; high/critical çok geç kalır; moderate denge.)
+          # A moderate+ vulnerable dependency introduced in the PR diff = fail.
+          # (low = warning only; high/critical is too late; moderate is the balance.)
           fail-on-severity: moderate
-          # Lisans reddi listesi .quality/deny.toml [licenses] içinde yönetilir; burada
-          # Yalnızca advisory odaklı. comment-summary-in-pr opsiyonel.
+          # The license denial list is managed in .quality/deny.toml [licenses]; here
+          # the focus is advisories only. comment-summary-in-pr is optional.
           comment-summary-in-pr: always
