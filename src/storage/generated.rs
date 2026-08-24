@@ -183,24 +183,26 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
     }
 }
 
-/// Bu kaynak icin kac bagimsiz kopya tutulmasi gerektigi.
+/// How many independent copies must be held for this source.
 ///
-/// **B.U.D. 3.0'in cekirdek kurali.** Replikasyon hedefi bugune kadar sabit
-/// bir sayiydi (`STORAGE_REPLICATION_TARGET` = 3) ve ne tuttugunu
-/// sormuyordu. Tariften dogan bir icerik icin uc kopya tutmak ayni
-/// deterministik ureteci uc kez saklamaktir: kopyalar **dayaniklilik
-/// eklemez**, cunku icerik zaten zincirdeki tariften yeniden uretilebilir.
-/// Bir kopya, tarifin cikti verdigini gosteren canli ornektir; dayanikliligi
-/// saglayan sey tarifin kendisidir.
+/// **The core rule of B.U.D. 3.0.** Until now the replication target was a
+/// fixed number, `STORAGE_REPLICATION_TARGET` = 3, and it did not ask what it
+/// was holding. Holding three copies of content that is born from a recipe is
+/// storing the same deterministic generator three times: the copies **add no
+/// durability**, because the content can already be reproduced from the recipe
+/// on chain. One copy is a live example showing that the recipe produces
+/// output; what provides the durability is the recipe itself.
 ///
-/// - `Generated` -> **1**. Tarif zincirde; kaybolan kopya yeniden uretilir.
-/// - `Hybrid` -> tam hedef. Onek gercek, yeniden uretilemeyen bayttir; onu
-///   kaybetmek icerigi kaybetmektir.
-/// - `Stored` -> tam hedef. Baytlarin baska kaynagi yok.
+/// - `Generated` -> **1**. The recipe is on chain, and a lost copy is
+///   regenerated.
+/// - `Hybrid` -> the full target. The prefix is real, irreproducible bytes, and
+///   losing it is losing the content.
+/// - `Stored` -> the full target. The bytes have no other source.
 ///
-/// Neden `Hybrid` indirim ALMAZ: indirim, kaybi telafi eden bir uretecin
-/// varligindan gelir. Onek boyle bir uretecten dogmaz. Kismi indirim
-/// vermek, korunmayan bayta korunuyormus muamelesi yapardi.
+/// Why `Hybrid` gets NO discount: the discount comes from the existence of a
+/// generator that makes up for the loss. A prefix is not born from such a
+/// generator. Granting a partial discount would treat an unprotected byte as
+/// though it were protected.
 #[must_use]
 pub fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
     match source {
@@ -324,10 +326,10 @@ pub enum GenerateError {
     },
     /// The declared output is larger than any generator may emit.
     OutputTooLarge { declared: u32, max: u32 },
-    /// Ilan edilen adim butcesi, cikti boyutunun izin verdigi tavani asiyor.
+    /// The declared step budget exceeds the ceiling the output size allows.
     ///
-    /// Butce yukleyicinin beyani; tavan onu bagliyor. Ikisi de tasiniyor ki
-    /// cagiran neyi ne kadar asmis oldugunu soyleyebilsin.
+    /// The budget is the uploader's declaration; the ceiling binds it. Both are
+    /// carried so that the caller can say what was exceeded, and by how much.
     BudgetAboveCeiling { declared: u32, ceiling: u32 },
     /// A zero-length object was described. Nothing has a zero-byte identity
     /// worth committing to, and `encode_object` refuses empty input anyway.
@@ -382,63 +384,68 @@ pub const MAX_GENERATED_BYTES: u32 = 4 * 1024 * 1024;
 /// budget produce a huge object, so the output itself is metered.
 const STEPS_PER_OUTPUT_BYTE: u32 = 1;
 
-/// Ilan edilen adim butcesinin cikti baytina orani icin ust sinir.
+/// The upper bound on the ratio of declared step budget to output byte.
 ///
-/// # Neden bir tavan gerekiyor
+/// # Why a ceiling is needed
 ///
-/// `step_budget` bir olcer, ama olcerin **kendisi spec'ten geliyor** - yani
-/// yukleyicinin beyani. Tavansiz bir `u32`, dort milyara yakin adim ilan
-/// edebilir. O adimlari kim harcar: uretici, tarifi kaydeden **her
-/// dogrulayicida** kosuyor. Butce, uretici sonsuza kadar kosmasin diye
-/// kondu; ama butcenin kendisi sinirsizsa, sinirladigi sey yok.
+/// `step_budget` is a meter, but the meter **itself comes from the spec**, so
+/// it is the uploader's declaration. An uncapped `u32` can declare close to
+/// four billion steps. Who spends those steps? The generator runs on **every
+/// validator** that records the recipe. The budget was put there so a generator
+/// would not run forever; but if the budget itself is unbounded, there is
+/// nothing it bounds.
 ///
-/// Bu, "adi butce olan ama tavani olmayan sayac" durumuydu. Kodu okuyan biri
-/// `Meter`'i gordugunde is miktarinin bagli oldugunu dusunur; bagli olan tek sey
-/// yukleyicinin secmeye razi oldugu sayidir.
+/// This was the case of "a counter named a budget that has no ceiling". A
+/// reader of the code seeing `Meter` assumes the amount of work is bound; the
+/// only thing bound was the number the uploader was willing to choose.
 ///
-/// # Neden cikti boyutunun bir kati
+/// # Why a multiple of the output size
 ///
-/// Katalogdaki her uretici cikti boyutuyla **dogrusal** calisiyor: avatar
-/// `cells * half + side * side`, gradient ve rings satir basina sabit is.
-/// Yani mesru bir tarifin adim sayisi, urettigi bayt sayisinin sabit bir
-/// kati. Tavani bu orana baglamak, mesru her tarife yer birakirken oranin
-/// disina cikan hicbir seye izin vermez.
+/// Every generator in the catalogue runs **linearly** in the output size:
+/// avatar is `cells * half + side * side`, and gradient and rings do constant
+/// work per row. So a legitimate recipe's step count is a fixed multiple of the
+/// number of bytes it produces. Tying the ceiling to that ratio leaves room for
+/// every legitimate recipe while allowing nothing outside the ratio.
 ///
-/// # S2.2: ayni tavan sinif sahteciligini de kapatir
+/// # S2.2: the same ceiling also closes class forgery
 ///
-/// "Uretilebilir" sinifi tek replika ile saklanir, cunku baytlar tariften
-/// yeniden uretilebilir. Organik bir icerigi (foto, video) bu sinifa sokmanin
-/// yolu, iceriği govdesinde tasiyan bir uretici yazmaktir - sabit bir blob
-/// donduren tarif. Boyle bir tarifin **maliyeti blob ile orantilidir**, yani
-/// adim/bayt orani katalogdaki gercek ureticilerinkiyle ayni mertebede olmaz;
-/// blob'u tasimak ve yazmak, onu hesaplamaktan cok daha az adim harcar.
-/// Oranin **altini** denetlemek bu turden sahteciligi yakalamaz, ama ustunu
-/// denetlemek, "pahali hesap" kilifina girmeye calisan tarifleri keser.
-/// Sinif sahteciliginin geri kalani yeniden-uretim sinaviyla kapali: tarif
-/// baytlari uretemezse manifest reddediliyor.
+/// The "reproducible" class is stored with a single replica, because the bytes
+/// can be regenerated from the recipe. The way to force organic content, a
+/// photo or a video, into that class is to write a generator that carries the
+/// content in its body: a recipe that returns a fixed blob. The **cost of such
+/// a recipe is proportional to the blob**, so its step-per-byte ratio is not of
+/// the same order as that of the real generators in the catalogue; carrying and
+/// writing a blob spends far fewer steps than computing it. Checking **below**
+/// the ratio does not catch that kind of forgery, but checking above it cuts
+/// off recipes trying to dress themselves up as "expensive computation". The
+/// rest of class forgery is closed by the regeneration exam: if the recipe
+/// cannot produce the bytes, the manifest is refused.
 ///
-/// # Katsayi nereden
+/// # Where the coefficient comes from
 ///
-/// Avatar en pahali uretici: `cells * half` (izgara) + `side` (her satir).
-/// `side * side = output_len / 4` oldugundan satir toplami `output_len / 4`,
-/// izgara payi ondan kucuk, ve girise pesin yazilan `STEPS_PER_OUTPUT_BYTE`
-/// bir `output_len` daha ekliyor. Toplam iki `output_len`in altinda kaliyor.
-/// Sekiz kat, olculen en kotu duruma dort kat pay birakir: katalog buyuyunce
-/// tavan degil, tavanin gerekcesi yeniden olculmeli.
+/// Avatar is the most expensive generator: `cells * half` for the grid plus
+/// `side` per row. Since `side * side = output_len / 4`, the row total is
+/// `output_len / 4`, the grid share is smaller than that, and the
+/// `STEPS_PER_OUTPUT_BYTE` charged upfront on entry adds one more `output_len`.
+/// The total stays below two `output_len`. A factor of eight leaves four times
+/// the headroom over the worst measured case: as the catalogue grows, it is not
+/// the ceiling but the ceiling's justification that must be measured again.
 pub const MAX_STEPS_PER_OUTPUT_BYTE: u32 = 8;
 
-/// Boyuttan bagimsiz kurulum payi, adim cinsinden.
+/// The size-independent setup allowance, in steps.
 ///
-/// Bir ureticinin isi cikti boyutuyla dogrusal, ama tamami degil: palet
-/// cikarmak, izgarayi kurmak, sabit-nokta katsayilarini hazirlamak kac bayt
-/// uretilecek olursa olsun ayni. Tavan yalnizca orandan hesaplanirsa cok
-/// kucuk ciktilar (tek bayt, birkac bayt) bu sabit maliyetin altinda kalir ve
-/// mesru bir tarif, gercekte harcadigi isi ilan edemedigi icin reddedilir.
+/// A generator's work is linear in the output size, but not entirely: deriving
+/// the palette, building the grid and preparing the fixed-point coefficients
+/// cost the same however many bytes are produced. If the ceiling were computed
+/// from the ratio alone, very small outputs, of one byte or a few, would fall
+/// below that fixed cost, and a legitimate recipe would be refused for being
+/// unable to declare the work it actually spends.
 ///
-/// Pay, orana **eklenir**: tavan `taban + boyut * oran`. Boylece kucuk
-/// ciktilarda kurulum maliyeti karsilanir, buyuk ciktilarda taban ihmal
-/// edilir hale gelir ve siniri belirleyen yine oran olur - yani DoS
-/// yuzeyi buyudukce sinir sikilasir, gevsemez.
+/// The allowance is **added** to the ratio: the ceiling is
+/// `base + size * ratio`. Small outputs therefore have their setup cost
+/// covered, on large outputs the base becomes negligible and the ratio again
+/// decides the bound, which means the bound tightens rather than loosens as the
+/// DoS surface grows.
 pub const STEP_BUDGET_BASE: u32 = 4096;
 
 /// A step meter.
@@ -527,9 +534,9 @@ pub fn generate_content(spec: &GeneratedSpec) -> Result<Vec<u8>, GenerateError> 
         });
     }
 
-    // Butcenin kendisi de sinirli. Bu denetim uretici kosmadan once, cunku
-    // amaci uretici kosarken harcanacak isi bagladmak; sonradan bakmak
-    // bakilan seyi kacirir.
+    // The budget itself is bounded too. This check runs before the generator
+    // does, because its purpose is to bind the work spent while the generator
+    // runs; checking afterwards would miss the very thing being checked.
     let ceiling =
         STEP_BUDGET_BASE.saturating_add(spec.output_len.saturating_mul(MAX_STEPS_PER_OUTPUT_BYTE));
     if spec.step_budget > ceiling {
@@ -956,21 +963,22 @@ mod tests {
         );
     }
 
-    /// Ilan edilen butce, cikti boyutunun izin verdigi tavani asamaz.
+    /// A declared budget cannot exceed the ceiling the output size allows.
     ///
-    /// Butcenin isi, uretici kosarken harcanacak isi baglamakti. Tavan
-    /// eklenmeden once butce `u32` genisliginde serbestti: dort milyara
-    /// yakin adim ilan eden bir tarif, onu kaydeden **her dogrulayicida** o
-    /// isi yaptirabilirdi. Sinirlayicinin kendisi sinirsizsa sinirladigi bir
-    /// sey yoktur.
+    /// The budget's job was to bind the work spent while the generator runs.
+    /// Before the ceiling was added, the budget was free across the whole width
+    /// of a `u32`: a recipe declaring close to four billion steps could have
+    /// that work done on **every validator** that recorded it. If the limiter
+    /// itself is unlimited, there is nothing it limits.
     #[test]
     fn a_declared_budget_cannot_exceed_what_the_output_size_allows() {
         let len = 32 * 32;
         let ceiling = STEP_BUDGET_BASE + len * MAX_STEPS_PER_OUTPUT_BYTE;
 
-        // Tavanin ustundeki butce, uretici hic kosmadan reddedilir.
+        // A budget above the ceiling is refused without the generator running
+        // at all.
         let err = generate_content(&spec(GeneratorId::Avatar, 1, len, ceiling + 1))
-            .expect_err("tavanin ustundeki butce reddedilmeli");
+            .expect_err("a budget above the ceiling must be refused");
         assert!(
             matches!(
                 err,
@@ -979,35 +987,40 @@ mod tests {
                     ceiling: c,
                 } if declared == ceiling + 1 && c == ceiling
             ),
-            "ret, ilan edileni ve tavani tasimali: {err:?}"
+            "the refusal must carry the declared value and the ceiling: {err:?}"
         );
 
-        // Onceki sinirsiz dunyada mesru sayilan deger artik reddedilir.
+        // A value considered legitimate in the previously unbounded world is now
+        // refused.
         assert!(
             generate_content(&spec(GeneratorId::Avatar, 1, len, 1_000_000)).is_err(),
-            "1e6 adim, 1 KB'lik bir cikti icin tavanin cok ustunde"
+            "1e6 steps is far above the ceiling for a 1 KB output"
         );
 
-        // Tavandaki butce gecer: kapi mesru tarifi engellememeli.
+        // A budget exactly at the ceiling passes: the gate must not block a
+        // legitimate recipe.
         generate_content(&spec(GeneratorId::Avatar, 1, len, ceiling))
-            .expect("tavandaki butce kabul edilmeli");
+            .expect("a budget at the ceiling must be accepted");
 
-        // Katalogdaki her uretici tavanin altinda kalmali - tavan, gercek
-        // maliyeti karsilamiyorsa mesru icerigi reddeden bir kapi olurdu.
+        // Every generator in the catalogue must stay under the ceiling; a
+        // ceiling that does not cover the real cost would be a gate that refuses
+        // legitimate content.
         for generator in [
             GeneratorId::Avatar,
             GeneratorId::Gradient,
             GeneratorId::Rings,
         ] {
-            generate_content(&spec(generator, 3, len, ceiling))
-                .unwrap_or_else(|e| panic!("{generator:?} tavan icinde uretebilmeli, {e:?} dondu"));
+            generate_content(&spec(generator, 3, len, ceiling)).unwrap_or_else(|e| {
+                panic!("{generator:?} must be able to generate within the ceiling, got {e:?}")
+            });
         }
 
-        // Tavan cikti boyutuyla olcekleniyor: kucuk cikti kucuk tavan.
+        // The ceiling scales with the output size: a small output gets a small
+        // ceiling.
         let small = 64u32;
         assert!(
             generate_content(&spec(GeneratorId::Gradient, 2, small, ceiling)).is_err(),
-            "buyuk ciktinin tavani kucuk cikti icin gecerli olmamali"
+            "a large output's ceiling must not hold for a small output"
         );
     }
 

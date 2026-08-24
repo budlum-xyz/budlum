@@ -37,7 +37,6 @@ bud/src/bud_format_bloom.rs	15
 bud/src/bud_format_catalog.rs	29
 bud/src/bud_format_checkpoint.rs	13
 bud/src/bud_format_crop.rs	28
-bud/src/bud_format_culling.rs	37
 bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
@@ -259,7 +258,6 @@ src/socialfi/mod.rs	6
 src/storage/content_id.rs	2
 src/storage/db.rs	2
 src/storage/erasure.rs	2
-src/storage/generated.rs	37
 src/storage/manifest.rs	29
 src/storage/msr.rs	5
 src/storage/pact_binding.rs	24
