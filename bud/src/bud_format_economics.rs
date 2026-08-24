@@ -15,8 +15,8 @@ pub struct BudEconomics {
 }
 
 impl BudEconomics {
-    /// Aylık TB maliyeti. K38: geçersiz oran (<=0 veya sonlu değil) → +inf (tavanı ASLA
-    /// tutamaz - dürüst RED), IEEE bölmesine güvenilmez. device_only → 0 (cihaz içi bedava).
+    /// Monthly cost per TB. K38: an invalid ratio (<=0 or non-finite) -> +inf (it can NEVER
+    /// hold the ceiling - an honest REFUSAL); IEEE division is not trusted. device_only -> 0 (free on device).
     pub fn cost_per_tb_month(&self) -> f64 {
         if self.device_only {
             return 0.0;
@@ -40,22 +40,22 @@ impl BudEconomics {
     }
 }
 
-/// K60 sıfır-egress modeli (araştırma: R2 benzeri sıfır-egress CDN, S.190):
-/// Ağ İÇİ erişim (aynı B.U.D. ağı, CDN önbelleği, peer) EGREss 0'dır; yalnız
-/// İnternet'e çıkış ücretlidir. Depolama maliyetine egress eklenmez (iş modeli avantajı).
+/// The K60 zero-egress model (research: an R2-like zero-egress CDN, p.190):
+/// IN-NETWORK access (the same B.U.D. network, a CDN cache, a peer) has ZERO egress; only
+/// egress to the internet is charged. Egress is not added to the storage cost (a business model advantage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressZone {
-    InNetwork, // aynı ağ/CDN - egress 0 (K60)
-    Internet,  // dış çıkış - rate ile ücretli
+    InNetwork, // the same network/CDN - zero egress (K60)
+    Internet,  // external egress - charged at the rate
 }
 
-/// Egress maliyeti: InNetwork her zaman 0 (sıfır-egress garantisi, K60).
+/// Egress cost: InNetwork is always 0 (the zero-egress guarantee, K60).
 pub fn egress_cost(zone: EgressZone, tb: f64, rate_usd_per_tb: f64) -> f64 {
     match zone {
         EgressZone::InNetwork => 0.0,
         EgressZone::Internet => {
             if !rate_usd_per_tb.is_finite() || rate_usd_per_tb < 0.0 {
-                f64::INFINITY // bozuk oran → dürüst RED (K38)
+                f64::INFINITY // a broken ratio -> an honest REFUSAL (K38)
             } else {
                 tb.max(0.0) * rate_usd_per_tb
             }
@@ -63,15 +63,15 @@ pub fn egress_cost(zone: EgressZone, tb: f64, rate_usd_per_tb: f64) -> f64 {
     }
 }
 
-/// Kapı: egress bütçeyi tutuyor mu? InNetwork her zaman tutar (egress 0).
+/// Gate: does egress hold the budget? InNetwork always holds (zero egress).
 pub fn holds_egress(zone: EgressZone, tb: f64, rate_usd_per_tb: f64, budget: f64) -> bool {
     egress_cost(zone, tb, rate_usd_per_tb) <= budget + 1e-12
 }
 
-/// İ6 REZİDÜEL SINIF EKONOMİSİ (fikirler2.0 İ6; pay-as-you-go yerine):
-/// ücret yalnız REZİDÜEL bayta bağlanır; üretilebilir kısım depolama ücreti ÖDEMEZ
-/// (yalnız üretim piyasası üzerinden okuma ücreti - İ3).
-/// Üretilebilir sınıf (rezidüel = 0) → aylık depolama maliyeti 0.
+/// I6 RESIDUAL CLASS ECONOMICS (I6 of the ideas document; replacing pay-as-you-go):
+/// the fee binds only to RESIDUAL bytes; the generatable part pays NO storage fee
+/// (only a read fee through the generation market - I3).
+/// The generatable class (residual = 0) -> zero monthly storage cost.
 pub fn residual_price(
     residual_tb: f64,
     erasure_multiplier: f64,
@@ -96,7 +96,7 @@ pub fn residual_price(
     residual_tb * erasure_multiplier * physical_usd_per_tb_month * cold_discount
 }
 
-/// İ6 kapısı: üretilebilir sınıf (rezidüel 0) taahhüdü her zaman tutar.
+/// The I6 gate: the generatable class (zero residual) always holds the commitment.
 pub fn residual_holds_price(
     residual_tb: f64,
     erasure_multiplier: f64,
@@ -107,12 +107,12 @@ pub fn residual_holds_price(
     residual_price(residual_tb, erasure_multiplier, coldness, physical) <= ceiling + 1e-12
 }
 
-/// Ekonomi kararı: TEK FİYAT.
-/// "tek fiyat olacak, CPU gibi masraflar hali hazırda validatör tarafından karşılanıyor."
-/// → Kullanıcıya yansıyan TEK kalem depolama fiyatıdır; üretim/CPU/erasure onarım maliyeti
-/// validatörün yüküdür (fiyata girmez). Pay-as-you-go zaten kaldırıldı; İ6 rezidüel
-/// sınıf ekonomisi de bu kararla SADELEŞTİ: her içerik sınıfı aynı taban fiyattan.
-/// Fiyat = fiziksel taban × erasure çarpanı / ölçülen oran (tek formül, herkes için).
+/// Economic decision: A SINGLE PRICE.
+/// There is one price; costs such as CPU are already borne by the validator.
+/// The SINGLE line item the user sees is the storage price; generation/CPU/erasure repair cost
+/// is the validator's burden and does not enter the price. Pay-as-you-go was already removed; the I6 residual
+/// class economics was SIMPLIFIED by this decision too: every content class starts from the same base price.
+/// Price = physical base * erasure multiplier / measured ratio (one formula, for everyone).
 pub fn flat_price(
     physical_usd_per_tb_month: f64,
     erasure_multiplier: f64,
@@ -125,28 +125,28 @@ pub fn flat_price(
         || !measured_ratio.is_finite()
         || measured_ratio <= 0.0
     {
-        return f64::INFINITY; // K38: bozuk girdi → dürüst RED
+        return f64::INFINITY; // K38: broken input -> an honest REFUSAL
     }
     physical_usd_per_tb_month * erasure_multiplier / measured_ratio
 }
 
-/// TEK FİYAT kapısı: tavanı tutuyor mu? (K19 - ölçülen oranla)
+/// The SINGLE PRICE gate: does it hold the ceiling? (K19 - with the measured ratio)
 pub fn flat_holds_ceiling(physical: f64, erasure: f64, ratio: f64, ceiling: f64) -> bool {
     flat_price(physical, erasure, ratio) <= ceiling + 1e-12
 }
 
 // ===========================================================================
-// BORU HATTI EKONOMİSİ: tek fiyat, 0.016 $/TB tavanına kadar.
+// PIPELINE ECONOMICS: a single price, up to the 0.016 USD/TB ceiling.
 // ===========================================================================
-// Her format sınıfı için: boru_hatti_orani = tek_dosya × çarpan; çarpanlar
-// ÖLÇÜLMÜŞ tavanların içinde tutulur (bud_format_matrix::matrix_honesty_check).
+// For each format class: pipeline_ratio = single_file * multiplier; the multipliers
+// are kept inside MEASURED ceilings (bud_format_matrix::matrix_honesty_check).
 
-/// Ölçülmüş çarpan tavanları (matrix canary'sinin dayandığı sabitler).
+/// Measured multiplier ceilings (the constants the matrix canary rests on).
 pub const CORPUS_DEDUP_MEASURED: f64 = 9.67; // korpus geneli 16KB SHA256
-pub const FLEET_DEDUP_MEASURED: f64 = 25.43; // 25 özdeş ELF (dosya-içi parçalama)
-pub const CULLING_MULT_MEASURED: f64 = 2.52; // 1/(1-0.603) erişim deseni
+pub const FLEET_DEDUP_MEASURED: f64 = 25.43; // 25 identical ELFs (intra-file chunking)
+pub const CULLING_MULT_MEASURED: f64 = 2.52; // 1/(1-0.603), the access pattern
 
-/// Ölçülmüş medya codec oranları (bud_format_media canary'si).
+/// Measured media codec ratios (the bud_format_media canary).
 pub const AVIF_LOSSLESS_BMP_MEASURED: f64 = 15.84;
 pub const JXL_LOSSLESS_PNG_MEASURED: f64 = 4.20;
 pub const AVIF_LOSSY_JPEG_MEASURED: f64 = 3.20;
@@ -154,7 +154,7 @@ pub const AVIF_LOSSY_GIF_MEASURED: f64 = 16.75;
 pub const FLAC_WAV_MEASURED: f64 = 6.26;
 pub const AV1_YUV_MEASURED: f64 = 904.0;
 
-/// Boru hattı oranı: transform × codec × dedup × culling (her bileşen ölçülü).
+/// Pipeline ratio: transform * codec * dedup * culling (every component measured).
 pub fn pipeline_ratio(transform: f64, codec: f64, dedup: f64, culling: f64) -> f64 {
     let p = transform.max(1.0) * codec.max(1.0) * dedup.max(1.0) * culling.max(1.0);
     if p.is_finite() && p > 0.0 {
@@ -164,7 +164,7 @@ pub fn pipeline_ratio(transform: f64, codec: f64, dedup: f64, culling: f64) -> f
     }
 }
 
-/// Boru hattı $/TB/ay: 0.23342 × erasure / boru_hatti_orani.
+/// Pipeline USD/TB/month: 0.23342 * erasure / pipeline_ratio.
 pub fn pipeline_price(
     physical_usd_per_tb_month: f64,
     erasure_multiplier: f64,
@@ -180,7 +180,7 @@ pub fn pipeline_price(
     )
 }
 
-/// Boru hattı tavan kapısı.
+/// The pipeline ceiling gate.
 pub fn pipeline_holds_ceiling(
     physical: f64,
     erasure: f64,
@@ -192,12 +192,12 @@ pub fn pipeline_holds_ceiling(
 ) -> bool {
     pipeline_price(physical, erasure, transform, codec, dedup, culling) <= ceiling + 1e-12
 }
-/// F3/F1151 TAPE ARŞİV SINIFI - soğuk içerik bantta (idle 0W):
-/// LTO-9 ~$5/TB (30 yıl), 1PB 10 yıl $30K vs disk $480K; güç/soğutma ~%1.
-/// 0.003 $/GB/yıl = 0.00025 $/TB/ay. Erişim gecikmesi kabul (bant dakikalar).
-pub const TAPE_USD_PER_TB_MONTH: f64 = 0.00025; // F3 ölçümü
+/// F3/F1151 TAPE ARCHIVE CLASS - cold content on tape (0 W idle):
+/// LTO-9 is about 5 USD/TB (30 years); 1 PB over 10 years costs 30K USD versus 480K USD on disk; power/cooling about 1 percent.
+/// 0.003 USD/GB/year = 0.00025 USD/TB/month. Access latency is accepted (tape takes minutes).
+pub const TAPE_USD_PER_TB_MONTH: f64 = 0.00025; // the F3 measurement
 
-/// Arşiv sınıfı maliyeti: bantta soğuk içerik (TB başına).
+/// Archive class cost: cold content on tape (per TB).
 pub fn tape_cost_per_tb_month(tb: f64) -> f64 {
     if !tb.is_finite() || tb < 0.0 {
         return f64::INFINITY;
@@ -205,18 +205,18 @@ pub fn tape_cost_per_tb_month(tb: f64) -> f64 {
     tb * TAPE_USD_PER_TB_MONTH
 }
 
-/// Arşiv kapısı: bantta soğuk içerik $0.016/TB/ay altında mı?
+/// The archive gate: is cold content on tape below 0.016 USD/TB/month?
 pub fn tape_holds_ceiling(tb: f64, ceiling: f64) -> bool {
     tape_cost_per_tb_month(tb) <= ceiling + 1e-12
 }
 
-/// Medya merdiveni (F1153): sıcak NVMe → QLC → refurb HDD → bant (TCO azalan).
+/// The media ladder (F1153): hot NVMe -> QLC -> refurbished HDD -> tape (decreasing TCO).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveTier {
-    HotNvme,   // pahalı, düşük gecikme
-    Qlc,       // sıcak-tier
+    HotNvme,   // expensive, low latency
+    Qlc,       // the warm tier
     RefurbHdd, // $10/TB
-    Tape,      // $5/TB, 30 yıl
+    Tape,      // 5 USD/TB, 30 years
 }
 
 impl ArchiveTier {
@@ -340,7 +340,7 @@ mod tests {
     use super::*;
     #[test]
     fn economics_holds() {
-        // JSON 17.19x Düz 7+1 (e=1.143) ile 0.016 tutar: 0.23342*1.143/17.19 = 0.01552 <= 0.016
+        // JSON 17.19x with plain 7+1 (e=1.143) holds 0.016: 0.23342*1.143/17.19 = 0.01552 <= 0.016
         let econ = BudEconomics {
             physical_usd: 0.23342,
             expansion: 1.143,
@@ -348,7 +348,7 @@ mod tests {
             device_only: false,
         };
         assert!(econ.holds_price(0.016));
-        // EVENODD (e=1.286) ile TUTMAZ: 0.23342*1.286/17.19 = 0.01747 > 0.016 - bu gerçek ölçümdür (kanarya)
+        // With EVENODD (e=1.286) it does NOT hold: 0.23342*1.286/17.19 = 0.01747 > 0.016 - this is the real measurement (a canary)
         let econ2 = BudEconomics {
             physical_usd: 0.23342,
             expansion: 1.286,
@@ -373,17 +373,17 @@ mod tests {
     }
     #[test]
     fn k60_egress_zero_in_network() {
-        // K60: ağ içi erişim egress 0 - 10TB bile bedava
+        // K60: in-network access has zero egress - even 10 TB is free
         assert_eq!(egress_cost(EgressZone::InNetwork, 10.0, 0.005), 0.0);
         assert!(
             holds_egress(EgressZone::InNetwork, 10.0, 0.005, 0.0),
-            "InNetwork her zaman bütçeyi tutar"
+            "InNetwork always holds the budget"
         );
-        // İnternet çıkışı ücretli
+        // Internet egress is charged
         assert!((egress_cost(EgressZone::Internet, 1.0, 0.005) - 0.005).abs() < 1e-12);
         assert!(
             !holds_egress(EgressZone::Internet, 1.0, 0.005, 0.001),
-            "1TB internet çıkışı 0.001 bütçeyi tutmaz"
+            "1 TB of internet egress does not hold a 0.001 budget"
         );
         // bozuk oran → +inf (K38)
         assert_eq!(egress_cost(EgressZone::Internet, 1.0, -1.0), f64::INFINITY);
@@ -391,66 +391,66 @@ mod tests {
             egress_cost(EgressZone::Internet, 1.0, f64::NAN),
             f64::INFINITY
         );
-        // negatif TB → 0 egress (mantıklı sınır)
+        // negative TB -> zero egress (a sane bound)
         assert_eq!(egress_cost(EgressZone::Internet, -5.0, 0.005), 0.0);
     }
 
     #[test]
     fn tape_archive_tier_f3() {
-        // F3/F1151: bantta soğuk içerik 0.00025 $/TB/ay - 0.016 taahhüdünün soğuk yolu
+        // F3/F1151: cold content on tape is 0.00025 USD/TB/month - the cold path of the 0.016 commitment
         assert!((TAPE_USD_PER_TB_MONTH - 0.00025).abs() < 0.00001);
-        assert!(tape_holds_ceiling(1.0, 0.016), "bant her zaman tavan altı");
+        assert!(tape_holds_ceiling(1.0, 0.016), "tape is always below the ceiling");
         assert!(tape_holds_ceiling(10.0, 0.016), "10TB bant bile");
-        // medya merdiveni: bant en ucuz, sıcak en pahalı
+        // the media ladder: tape is cheapest, hot is most expensive
         assert!(ArchiveTier::Tape.usd_per_tb_month() < ArchiveTier::RefurbHdd.usd_per_tb_month());
         assert!(ArchiveTier::RefurbHdd.usd_per_tb_month() < ArchiveTier::Qlc.usd_per_tb_month());
         assert!(ArchiveTier::Qlc.usd_per_tb_month() < ArchiveTier::HotNvme.usd_per_tb_month());
-        // bozuk girdi → +inf
+        // broken input -> +inf
         assert_eq!(tape_cost_per_tb_month(-1.0), f64::INFINITY);
         assert_eq!(tape_cost_per_tb_month(f64::NAN), f64::INFINITY);
     }
 
     #[test]
     fn flat_single_price_user_decision() {
-        // TEK FİYAT: CPU/üretim maliyeti validatörde; kullanıcıya tek kalem depolama.
+        // SINGLE PRICE: CPU/generation cost sits with the validator; the user sees one storage line item.
         // JSON OrderFree 12.07x + LRC 1.031x → tek fiyat
         let p = flat_price(0.23342, 1.031, 12.07);
         assert!((p - 0.0199).abs() < 0.001, "tek fiyat ~0.0199: {p}");
-        // video hareketli 101x → çok altı
+        // motion video at 101x -> far below
         let pv = flat_price(0.23342, 1.031, 101.0);
         assert!(pv < 0.005, "video tek fiyat: {pv}");
         // statik 1394x → ~0
         let ps = flat_price(0.23342, 1.031, 1394.0);
         assert!(ps < 0.0005, "statik: {ps}");
-        // tavan: 12.07x + LRC 0.016 tutmaz, 0.02 tutar
+        // the ceiling: 12.07x + LRC does not hold 0.016 but does hold 0.02
         assert!(!flat_holds_ceiling(0.23342, 1.031, 12.07, 0.016));
         assert!(flat_holds_ceiling(0.23342, 1.031, 12.07, 0.02));
-        // bozuk girdi → +inf
+        // broken input -> +inf
         assert_eq!(flat_price(-1.0, 1.031, 12.07), f64::INFINITY);
         assert_eq!(flat_price(0.23342, 1.031, 0.0), f64::INFINITY);
     }
     #[test]
     fn residual_class_economy_i6() {
-        // İ6: üretilebilir sınıf (rezidüel 0) → depolama maliyeti 0
+        // I6: the generatable class (zero residual) -> zero storage cost
         assert_eq!(
             residual_price(0.0, 1.143, 0.0, 0.23342),
             0.0,
-            "üretilebilir bedava"
+            "generatable is free"
         );
         assert!(
             residual_holds_price(0.0, 1.143, 0.0, 0.23342, 0.016),
-            "üretilebilir tavanı her zaman tutar"
+            "generatable always holds the ceiling"
         );
-        // rezidüel sınıf: boyut × erasure × soğukluk
+        // the residual class: size * erasure * coldness
         let p1 = residual_price(1.0, 1.143, 0.0, 0.23342);
-        assert!((p1 - 0.2668).abs() < 0.01, "1TB rezidüel ~0.267: {p1}");
-        // soğukluk indirimi: coldness 1 → %50 düşük
+        assert!((p1 - 0.2668).abs() < 0.01, "1 TB residual is about 0.267: {p1}");
+        // the coldness discount: coldness 1 -> 50 percent lower
         let pcold = residual_price(1.0, 1.143, 1.0, 0.23342);
         assert!(
             (p1 / pcold - 2.0).abs() < 0.05,
-            "soğuk %50 ucuz: {p1} vs {pcold}"
+            "cold is 50 percent cheaper: {p1} vs {pcold}"
         );
-        // bozuk girdi → +inf (K38)
+        // broken input -> +inf (K38)
         assert_eq!(residual_price(-1.0, 1.143, 0.0, 0.23342), f64::INFINITY);
         assert_eq!(residual_price(1.0, 0.5, 0.0, 0.23342), f64::INFINITY);
         assert_eq!(residual_price(f64::NAN, 1.143, 0.0, 0.23342), f64::INFINITY);
@@ -480,7 +480,7 @@ mod tests {
             device_only: false,
         };
         assert_eq!(neg.cost_per_tb_month(), f64::INFINITY);
-        // device_only her zaman 0
+        // device_only is always 0
         let d = BudEconomics {
             physical_usd: 0.23342,
             expansion: 1.286,
