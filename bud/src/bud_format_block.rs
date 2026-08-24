@@ -1,14 +1,19 @@
-//! B.U.D. 2.0 İCAT - Rejenerasyon Bloğu (blockchain santrali) (2026-08-16)
+//! A B.U.D. 2.0 INVENTION: the regeneration block, the blockchain power plant,
+//! 2026-08-16.
 //!
-//! İ2 + K89 sentezi: her epoch bir REJENERASYON BLOĞU üretir -
-//!   epoch + seçilen PACT sınavları (rejenerasyon mutabakatı) + segment defteri kökü
-//!   + bayt-bütçe (İ8) + önceki blok hash'i → blok hash'i (zincir).
+//! The synthesis of I2 and K89: every epoch produces a REGENERATION BLOCK, made
+//! of the epoch, the selected PACT exams, which are the regeneration consensus,
+//! the segment ledger root, the byte budget (I8) and the previous block hash,
+//! all hashed into the block hash that forms the chain.
 //!
-//! Doğrulama: herhangi bir node bloğu yeniden hesaplayabilir (deterministik);
-//! PACT sınavları "üretimi doğrula" ile (RejenerasyonMutabakatı) geçtiyse blok geçerli.
-//! Blok, içerik BAYTI taşımaz - yalnız commitment'lar + sınav sonuçları (İ2 tezi).
+//! Verification: any node can recompute the block, because it is deterministic.
+//! If the PACT exams passed under "verify the production", the regeneration
+//! consensus, the block is valid.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! The block carries NO content BYTES, only commitments and exam results. That
+//! is the I2 thesis.
+//!
+//! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -20,24 +25,25 @@ pub const BLOCK_MAGIC: [u8; 8] = *b"\xB5REGNB\0\0";
 pub const BLOCK_VERSION: u8 = 1;
 pub const MAX_PACTS_PER_BLOCK: usize = 10_000;
 
-/// Bloktaki tek PACT sınav kaydı: commitment + sınav sonucu (bayt YOK - İ2).
+/// A single PACT exam record inside the block: the commitment and the exam
+/// result, with NO bytes, per I2.
 #[derive(Debug, Clone)]
 pub struct PactChallengeInBlock {
-    pub pact_hash: [u8; 32], // PACT kaydının hash'i
+    pub pact_hash: [u8; 32], // the hash of the PACT record
     pub outcome: RegenerationOutcome,
-    pub cost_units: u64, // üretim maliyeti (İ2 ekonomi)
+    pub cost_units: u64, // the production cost, the I2 economics
 }
 
-/// Rejenerasyon bloğu (zincir halkası).
+/// A regeneration block, one link of the chain.
 #[derive(Debug, Clone)]
 pub struct RegenerationBlock {
     pub epoch: u64,
     pub prev_hash: [u8; 32],
     pub pact_challenges: Vec<PactChallengeInBlock>,
-    pub segment_root: [u8; 32], // defter kökü (K89)
-    pub byte_budget: u64,       // İ8: ağın toplam fiziksel yük tavanı
+    pub segment_root: [u8; 32], // the ledger root (K89)
+    pub byte_budget: u64,       // I8: the ceiling on the network's total physical load
     pub ts_unix: u64,
-    pub hash: [u8; 32], // zincir çapası (deterministik)
+    pub hash: [u8; 32], // the chain anchor, deterministic
 }
 
 impl RegenerationBlock {
@@ -67,7 +73,8 @@ impl RegenerationBlock {
         Some(b)
     }
 
-    /// Domain-etiketli zincir hash'i (deterministik - her node aynı sonucu üretir).
+    /// The domain-tagged chain hash; it is deterministic, so every node produces
+    /// the same result.
     pub fn compute_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -88,7 +95,8 @@ impl RegenerationBlock {
         h.finalize().into()
     }
 
-    /// Blok doğrulama: hash zinciri + tüm sınavlar VERIFIED mi (İ2: üretim mutabakatı).
+    /// Block verification: the hash chain plus whether every exam is VERIFIED.
+    /// That is I2, the production consensus.
     pub fn verify(&self) -> bool {
         self.hash == self.compute_hash()
             && self
@@ -97,8 +105,11 @@ impl RegenerationBlock {
                 .all(|c| c.outcome == RegenerationOutcome::Verified)
     }
 
-    /// Rejenerasyon sınavını bloğa eklemeden önce DOĞRULA (İ2 çekirdeği).
-    /// `produced` = tariften üretilen baytlar; PACT commitment'ıyla karşılaştırılır.
+    /// VERIFY the regeneration exam before adding it to the block; that is the
+    /// core of I2.
+    ///
+    /// `produced` is the bytes generated from the recipe, and it is compared
+    /// against the PACT commitment.
     pub fn add_challenge(
         pact: &PactRecord,
         produced: &[u8],
@@ -112,13 +123,14 @@ impl RegenerationBlock {
         })
     }
 
-    /// Rejenerasyon ekonomisi (İ2 kabul): bloktaki toplam üretim maliyeti,
-    /// karşılık gelen kanıt maliyetinden (PoR/zk) çok düşük olmalı.
+    /// The regeneration economics, the I2 premise: the total production cost in
+    /// the block must be far below the corresponding proof cost, whether proof of
+    /// replication or zero knowledge.
     pub fn total_production_cost(&self) -> u64 {
         self.pact_challenges.iter().map(|c| c.cost_units).sum()
     }
 
-    /// Deterministik blob: magic + sürüm + alanlar + digest.
+    /// The deterministic blob: magic, version, the fields and a digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&BLOCK_MAGIC);
@@ -207,7 +219,7 @@ impl RegenerationBlock {
             hash,
         };
         if b.hash != b.compute_hash() {
-            return None; // kurcalama
+            return None; // tampering
         }
         Some(b)
     }
@@ -218,7 +230,7 @@ mod tests {
     use super::*;
 
     fn sample_pact() -> (PactRecord, Vec<u8>) {
-        let produced = b"deterministik uretim ciktisi 1234567890";
+        let produced = b"deterministic production output 1234567890";
         let pact = PactRecord::pure([1u8; 32], [7u8; 32], produced, 100);
         (pact, produced.to_vec())
     }
@@ -230,18 +242,21 @@ mod tests {
         assert_eq!(ch.outcome, RegenerationOutcome::Verified);
         let block =
             RegenerationBlock::new(1, [0u8; 32], vec![ch], [9u8; 32], 1_000_000, 1_768_000_000)
-                .expect("blok");
-        assert!(block.verify(), "blok geçerli (tüm sınavlar VERIFIED)");
+                .expect("the block");
+        assert!(
+            block.verify(),
+            "the block is valid, since every exam is VERIFIED"
+        );
         // blob roundtrip
         let blob = block.to_blob();
         let back = RegenerationBlock::from_blob(&blob).expect("blob");
         assert_eq!(back.hash, block.hash);
         assert!(back.verify());
-        // kurcalama red
+        // Tampering is refused.
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(RegenerationBlock::from_blob(&bad).is_none());
-        // artık bayt red
+        // A surplus byte is refused.
         let mut extra = blob.clone();
         extra.push(0x00);
         assert!(RegenerationBlock::from_blob(&extra).is_none());
@@ -249,25 +264,30 @@ mod tests {
 
     #[test]
     fn block_rejects_mismatch_challenge() {
-        // sınav Mismatch ise blok GEÇERSİZ (İ2: üretim mutabakatı şart)
+        // If an exam is a Mismatch, the block is INVALID; I2 requires the
+        // production consensus.
         let (pact, _) = sample_pact();
-        let ch = RegenerationBlock::add_challenge(&pact, b"yanlis uretim", 50).expect("challenge");
+        let ch =
+            RegenerationBlock::add_challenge(&pact, b"wrong production", 50).expect("challenge");
         assert_eq!(ch.outcome, RegenerationOutcome::Mismatch);
         let block =
-            RegenerationBlock::new(2, [1u8; 32], vec![ch], [0u8; 32], 100, 10).expect("blok");
-        assert!(!block.verify(), "Mismatch sınav bloğu RED eder (İ2)");
+            RegenerationBlock::new(2, [1u8; 32], vec![ch], [0u8; 32], 100, 10).expect("the block");
+        assert!(
+            !block.verify(),
+            "a Mismatch exam makes the block REFUSE, per I2"
+        );
     }
 
     #[test]
     fn chain_links_prev_hash() {
-        // zincir: blok N'nin prev_hash'i blok N-1'in hash'i olmalı
+        // The chain: block N's prev_hash must be block N-1's hash.
         let (pact, produced) = sample_pact();
         let ch = RegenerationBlock::add_challenge(&pact, &produced, 10).unwrap();
         let b0 = RegenerationBlock::new(0, [0u8; 32], vec![ch.clone()], [1u8; 32], 100, 1).unwrap();
         let b1 = RegenerationBlock::new(1, b0.hash, vec![ch], [2u8; 32], 100, 2).unwrap();
-        assert_eq!(b1.prev_hash, b0.hash, "zincir halkası");
+        assert_eq!(b1.prev_hash, b0.hash, "the chain link");
         assert!(b1.verify());
-        // b1'i b0'ın YANLIŞ hash'iyle bağla → hash farklı (deterministik)
+        // Link b1 to the WRONG hash for b0 and the hash differs, deterministically.
         let b1_bad = RegenerationBlock::new(1, [9u8; 32], vec![], [2u8; 32], 100, 2).unwrap();
         assert_ne!(b1_bad.hash, b1.hash);
     }
@@ -280,10 +300,10 @@ mod tests {
             .collect();
         let block = RegenerationBlock::new(3, [0u8; 32], chs, [0u8; 32], 100, 3).unwrap();
         assert_eq!(block.total_production_cost(), 55);
-        // boş sınav listesi → geçerli blok (bütçe 0)
+        // An empty exam list still gives a valid block, with a budget of zero.
         let empty = RegenerationBlock::new(4, block.hash, vec![], [0u8; 32], 0, 4).unwrap();
         assert!(empty.verify());
-        // MAX_PACTS aşımı → None
+        // Exceeding MAX_PACTS gives None.
         let too_many = vec![
             PactChallengeInBlock {
                 pact_hash: [0u8; 32],
