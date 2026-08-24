@@ -53,7 +53,6 @@ bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_nvc.rs	27
 bud/src/bud_format_office.rs	29
 bud/src/bud_format_optical.rs	3
-bud/src/bud_format_optical_transfer.rs	30
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_pcap.rs	26
 bud/src/bud_format_pgm.rs	28
@@ -123,7 +122,6 @@ crates/budscan/src/punycode.rs	16
 crates/budscan/src/query.rs	27
 crates/lubot/Cargo.toml	5
 crates/lubot/NOTICE.md	18
-crates/lubot/README.md	29
 crates/lubot/config/datasets.toml	7
 crates/lubot/config/models.toml	4
 crates/lubot/crates/lubot-core/Cargo.toml	1
