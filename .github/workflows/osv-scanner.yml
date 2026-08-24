@@ -1,22 +1,22 @@
-# OSV-Scanner, RustSec dışı zafiyet kaynaklarını kapatan tarama
+# OSV-Scanner, the scan that closes vulnerability sources outside RustSec
 #
-# NEDEN cargo-audit/cargo-deny YETMİYOR: her ikisi de yalnız RustSec advisory
-# Veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
-# RustSec'te karşılığı olmayan kayıtları da görür.
+# WHY cargo-audit/cargo-deny ARE NOT ENOUGH: both read only the RustSec advisory
+# database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and also sees
+# records that have no RustSec counterpart.
 #
-# Bu somut olarak kanıtlandı: bu workflow eklenirken yapılan ilk tarama
-# CVE-2026-32314 / GHSA-vxx9-2994-q338'i yakaladı - yamux'ta kimlik doğrulaması
-# GEREKTİRMEYEN, uzaktan tetiklenebilir panic (DoS), CVSS 8.7. Aynı ağaçta
-# `cargo audit` "0 vulnerabilities found" diyordu, çünkü bu kaydın RustSec
-# Karşılığı yok (rustsec/advisory-db/crates/yamux → 404). Bir L1 node'un P2P
-# Multiplexer'ında bu, cargo-audit'in yapısal olarak göremeyeceği bir sınıf.
+# This was proven concretely: the first scan run while adding this workflow
+# caught CVE-2026-32314 / GHSA-vxx9-2994-q338 - a remotely triggerable panic
+# (DoS) in yamux that requires NO authentication, CVSS 8.7. On the same tree
+# `cargo audit` said "0 vulnerabilities found", because this record has no
+# RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404). In an L1 node's
+# P2P multiplexer this is a class cargo-audit structurally cannot see.
 #
-# Kapı politikası: bulgu = FAIL (`continue-on-error` YOK). İstisnalar
-# .quality/osv-scanner.toml ve budzero/osv-scanner.toml içinde, her biri kodda neden
-# ERİŞİLEMEZ olduğunun kanıtıyla (VEX mantığı) yazılır. Erişilebilir bir bulgu
-# Ignore edilmez, bağımlılık yükseltilir.
+# Gate policy: a finding = FAIL (NO `continue-on-error`). Exceptions live in
+# .quality/osv-scanner.toml and budzero/osv-scanner.toml, each written with
+# evidence of why it is UNREACHABLE in the code (VEX logic). A reachable finding
+# is not ignored, the dependency is upgraded.
 #
-# Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
+# The tool is version + sha256 pinned (the gitleaks/hadolint/actionlint/typos pattern).
 
 name: OSV Scanner
 
@@ -26,7 +26,7 @@ on:
   push:
     branches: [main]
   schedule:
-    # Haftalık: yeni advisory kod değişmeden de yayınlanabilir.
+    # Weekly: a new advisory can be published without the code changing.
     - cron: "0 5 * * 1"
   workflow_dispatch:
 
@@ -47,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: osv-scanner v2.4.0 kur (sürüm + sha256 pinli)
+      - name: Install osv-scanner v2.4.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/osv-scanner \
@@ -56,11 +56,11 @@ jobs:
           sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
           osv-scanner --version
 
-      # Vacuous-gate koruması: "No issues found" hem temiz bir ağacı hem de hiç
-      # Çalışmamış/ağa ulaşamamış bir taramayı gösterebilir. Kanarya, bilinen
-      # Savunmasız bir sürümü içeren sentetik bir lockfile üretip tarayıcının
-      # Onu YAKALADIĞINI kanıtlar; yakalayamazsa kapı güvenilmezdir.
-      - name: Kanarya - OSV alarmının çalıştığının kanıtı
+      # Vacuous-gate protection: "No issues found" can show a clean tree or a scan
+      # that never ran / could not reach the network. The canary produces a
+      # synthetic lockfile containing a known vulnerable version and proves the
+      # scanner CATCHES it; if it cannot, the gate is untrustworthy.
+      - name: Canary - evidence that the OSV alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/osv-canary
@@ -78,25 +78,25 @@ jobs:
           source = "registry+https://github.com/rust-lang/crates.io-index"
           CANARY
           if osv-scanner scan source --lockfile=/tmp/osv-canary/Cargo.lock; then
-            echo "HATA: OSV kanaryayı (yamux 0.12.1 / GHSA-vxx9-2994-q338) yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            echo "ERROR: OSV failed to catch the canary (yamux 0.12.1 / GHSA-vxx9-2994-q338) -> the scan is untrustworthy (vacuous gate)!"
             exit 1
           fi
-          echo "Kanarya yakalandı → OSV alarmı çalışıyor."
+          echo "Canary caught -> the OSV alarm works."
 
       # fuzz/Cargo.lock ve crates/wallet-core/Cargo.lock buraya sonradan eklendi.
-      # Depoda dort kilit dosyasi var, tarama ikisini okuyordu. fuzz kilidi
-      # kok kilitle ayni 23 git paketini ve ayrica kendi libfuzzer zincirini
+      # The repository has four lockfiles and the scan read two of them. The fuzz
+      # lock carries the same 23 git packages as the root lock plus its own
       # tasiyor; wallet-core BIP39 ve SLIP-0010 anahtar turetmesini tasiyor,
       # yani taranmayan iki agactan biri dogrudan anahtar ureten agacti.
-      # Fuzz kosucusu CI makinesinde ve gelistirici makinesinde calisir,
-      # cuzdan kodu ise kullanicinin tohumunu gorur; ikisi de "sadece test"
+      # libfuzzer chain. The fuzz runner executes on the CI machine and on developer
+      # machines, and the wallet code sees the user's seed; neither is "just a test".
       # degildir.
       #
-      # crates/budscan/Cargo.lock ayni sebeple eklendi ve asagidaki "her lockfile
-      # tarandi mi" adimi tam olarak bunu yakaladi: budscan kendi
-      # workspace'i oldugu icin kok kilide girmiyor, listeye elle
-      # eklenmeden once kapsam disindaydi. Kapi calisti.
-      - name: Tarama - depodaki her lockfile (bulgu = fail)
+      # crates/budscan/Cargo.lock was added for the same reason, and the "was every
+      # lockfile scanned" step below caught exactly this: because budscan is its own
+      # workspace it does not enter the root lock, and before being added to the
+      # list by hand it was out of scope. The gate worked.
+      - name: Scan - every lockfile in the repository (a finding = fail)
         run: |
           set -euo pipefail
           osv-scanner scan source \
@@ -112,10 +112,10 @@ jobs:
             --lockfile=crates/budscan/Cargo.lock \
             --lockfile=bud/Cargo.lock
 
-      # Yukaridaki listenin eksilmemesi icin: depodaki her Cargo.lock taranmali.
-      # Yeni bir alt-crate eklendiginde kilidi sessizce kapsam disinda kalirsa
-      # bu adim kirmizi doner.
-      - name: Her lockfile tarandi mi
+      # So the list above never shrinks: every Cargo.lock in the repository must
+      # be scanned. If a new sub-crate is added and its lock silently stays out
+      # of scope, this step goes red.
+      - name: Was every lockfile scanned
         run: |
           set -euo pipefail
           missing=0
@@ -127,7 +127,7 @@ jobs:
             fi
           done < <(find . -name Cargo.lock -not -path './target/*' -not -path '*/target/*')
           if [ "$missing" -ne 0 ]; then
-            echo "Yukaridaki kilit dosyalari OSV taramasinin disinda."
+            echo "The lockfiles above are outside the OSV scan."
             exit 1
           fi
           echo "Depodaki her Cargo.lock OSV taramasinda."
