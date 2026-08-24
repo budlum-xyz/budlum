@@ -30,11 +30,9 @@ bud/fuzz/fuzz_bud_format.rs	20
 bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
 bud/scripts/measure_ratios.py	18
-bud/src/bud_fixed_point.rs	19
 bud/src/bud_format.rs	3
 bud/src/bud_format_autozstd.rs	12
 bud/src/bud_format_av2.rs	28
-bud/src/bud_format_bft.rs	27
 bud/src/bud_format_block.rs	32
 bud/src/bud_format_bloom.rs	15
 bud/src/bud_format_catalog.rs	29
