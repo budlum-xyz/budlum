@@ -90,6 +90,18 @@ const VACUITY_FLOOR: usize = 200;
 /// How many findings are printed before the list is summarised.
 const MAX_REPORTED: usize = 40;
 
+/// Report every finding instead of the first [`MAX_REPORTED`], so the output
+/// can be turned into a baseline. See the note on the same helper in
+/// `tree_is_english`: hand-editing the constant is what let a stray value
+/// reach CI.
+fn report_limit() -> usize {
+    if std::env::var_os("BUDLUM_GATE_REPORT_ALL").is_some() {
+        usize::MAX
+    } else {
+        MAX_REPORTED
+    }
+}
+
 /// One public item: where it is defined and what kind it is.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Item {
@@ -539,11 +551,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !new_idle.is_empty() {
         let n = new_idle.len();
         let mut msg = format!("{n} newly idle public item(s):\n");
-        for item in new_idle.iter().take(MAX_REPORTED) {
+        for item in new_idle.iter().take(report_limit()) {
             let _ = writeln!(msg, "  {}: pub {} {}", item.file, item.kind, item.name);
         }
-        if n > MAX_REPORTED {
-            let _ = writeln!(msg, "  ... and {} more", n - MAX_REPORTED);
+        if n > report_limit() {
+            let _ = writeln!(msg, "  ... and {} more", n - report_limit());
         }
         msg.push_str(
             "\n  Nothing outside the defining file names these. Either call them from the\n  \
@@ -559,11 +571,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !stale.is_empty() {
         let n = stale.len();
         let mut msg = format!("{n} stale baseline entr(ies) in {BASELINE_PATH}:\n");
-        for k in stale.iter().take(MAX_REPORTED) {
+        for k in stale.iter().take(report_limit()) {
             let _ = writeln!(msg, "  {k}");
         }
-        if n > MAX_REPORTED {
-            let _ = writeln!(msg, "  ... and {} more", n - MAX_REPORTED);
+        if n > report_limit() {
+            let _ = writeln!(msg, "  ... and {} more", n - report_limit());
         }
         msg.push_str(
             "\n  These are no longer idle, so the baseline is claiming a debt that was\n  \
