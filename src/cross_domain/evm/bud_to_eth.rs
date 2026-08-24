@@ -1,57 +1,64 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
-//! F10.5 Bud→ETH yönü - Budlum burn event + finality proof → Ethereum claim.
+//! F10.5, the Bud-to-Ethereum direction: a Budlum burn event plus a finality
+//! proof turned into an Ethereum claim.
 //!
-//! İki taraf:
+//! There are two sides:
 //!
-//! 1. **Budlum-taraflı (bu modül):** relayer, Budlum burn event'ini + Budlum
-//!    Finality proof'unu (BLS/QC) paketler → Ethereum'a gönderilecek tx payload'u
-//!    Üretir.
-//! 2. **Ethereum-taraflı (Solidity):** Budlum light-client kontratı, Budlum
-//!    Finality'sini EVM'de verify eder → bridge unlock. Bu büyük ayrı iş
-//!    (ayrı repo/audit kapsamında).
+//! 1. **The Budlum side, this module:** the relayer packages the Budlum burn
+//!    event together with the Budlum finality proof, a BLS aggregate or a
+//!    quorum certificate, and produces the transaction payload to be sent to
+//!    Ethereum.
+//! 2. **The Ethereum side, in Solidity:** a Budlum light client contract
+//!    verifies Budlum finality inside the EVM and unlocks the bridge. That is a
+//!    large separate piece of work, under its own repository and audit.
 //!
-//! **Güvenlik:** Bud→ETH yönünde Budlum finality'sini EVM'de verify etmek gerek
-//! (BLS12-381 precompile + sync-committee Solidity impl). Ethereum bu proof'u
-//! Bağımsız doğrular - Budlum'u trust ETMEZ.
+//! **Security:** in the Bud-to-Ethereum direction, Budlum finality has to be
+//! verified inside the EVM, which needs the BLS12-381 precompile and a Solidity
+//! sync committee implementation. Ethereum verifies that proof independently and
+//! DOES NOT trust Budlum.
 
 use crate::cross_domain::bridge::{BridgeState, BridgeStatus, BridgeTransfer};
 use crate::cross_domain::message::MessageId;
 use crate::domain::types::Hash32;
 
-/// Bud→ETH relay paketi (relayer, Budlum'dan toplayıp Ethereum'a gönderir).
+/// A Bud-to-Ethereum relay package, which the relayer collects from Budlum and
+/// sends to Ethereum.
 #[derive(Debug, Clone)]
 pub struct BudToEthClaim {
-    /// Budlum burn event'in message_id (replay koruması).
+    /// The `message_id` of the Budlum burn event, which guards against replay.
     pub message_id: MessageId,
-    /// Burn edilen varlık (Ethereum'da unlock edilecek).
+    /// The burned asset, to be unlocked on Ethereum.
     pub asset_id: [u8; 32],
-    /// Unlock miktarı (Ethereum'da mint/release).
+    /// The unlock amount, minted or released on Ethereum.
     pub amount: u128,
-    /// Alıcı Ethereum adresi (20 byte).
+    /// The recipient Ethereum address, 20 bytes.
     pub recipient_eth: [u8; 20],
-    /// Budlum blok yüksekliği (burn'in finalize edildiği).
+    /// The Budlum block height at which the burn was finalised.
     pub finalized_height: u64,
-    /// Budlum finalized header hash (light-client checkpoint).
+    /// The Budlum finalised header hash, the light client checkpoint.
     pub finalized_header_hash: Hash32,
-    /// Budlum finality proof (BLS aggregate veya QC), Solidity verify eder.
+    /// The Budlum finality proof, a BLS aggregate or a quorum certificate, which
+    /// Solidity verifies.
     pub finality_proof: Vec<u8>,
-    /// Burn event Merkle proof (Budlum event tree → Budlum root).
+    /// The burn event Merkle proof, from the Budlum event tree up to the Budlum
+    /// root.
     pub burn_event_proof: Vec<u8>,
 }
 
-/// Bud→ETH claim hatası.
+/// A Bud-to-Ethereum claim error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudToEthError {
-    /// Burn event bulunamadı / geçersiz.
+    /// The burn event was not found, or is invalid.
     BurnEventNotFound,
-    /// Transfer Burned status'unda değil.
+    /// The transfer is not in the `Burned` status.
     NotBurned,
-    /// Alıcı adres geçersiz (Ethereum 20-byte).
+    /// The recipient address is invalid; Ethereum uses 20 bytes.
     InvalidRecipient,
-    /// Finality proof eksik/geçersiz.
+    /// The finality proof is missing or invalid.
     FinalityProofMissing,
-    /// Miktar u128 → Ethereum'da overflow (ERC-20 uint256 sığar ama bridge cap).
+    /// The amount is above the bridge cap. An ERC-20 `uint256` would hold it, but
+    /// the bridge sets its own limit.
     AmountExceedsCap,
 }
 
@@ -71,15 +78,16 @@ impl std::fmt::Display for BudToEthError {
 
 impl std::error::Error for BudToEthError {}
 
-/// Bridge bridge cap (Ethereum ERC-20 uint256 sığar ama bridge güven için).
-/// Mainnet governance ile ayarlanabilir.
+/// The bridge cap. An Ethereum ERC-20 `uint256` would hold more, but the bridge
+/// bounds itself for trust reasons. On mainnet it is adjustable by governance.
 pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 
-/// Budlum burn event'inden Bud→ETH claim paketi üret.
+/// Builds a Bud-to-Ethereum claim package from a Budlum burn event.
 ///
-/// Relayer bu fonksiyonu çağırır: Budlum node'dan burn transfer + finality
-/// State toplar → `BudToEthClaim` (Ethereum bridge kontratına gönderilecek
-/// Calldata). Ethereum kontratı Budlum finality'sini verify edip unlock eder.
+/// The relayer calls this: it collects the burn transfer and the finality state
+/// from a Budlum node and produces a `BudToEthClaim`, the calldata to be sent to
+/// the Ethereum bridge contract. The Ethereum contract verifies Budlum finality
+/// and unlocks.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bud_to_eth_claim(
     bridge: &BridgeState,
@@ -91,7 +99,7 @@ pub fn build_bud_to_eth_claim(
     recipient_eth: [u8; 20],
     bridge_cap: u128,
 ) -> Result<BudToEthClaim, BudToEthError> {
-    // 1. Transfer mevcut + Burned status kontrolü.
+    // 1. Check that the transfer exists and is in the Burned status.
     let transfer: &BridgeTransfer = bridge
         .transfer(message_id)
         .ok_or(BudToEthError::BurnEventNotFound)?;
@@ -99,18 +107,18 @@ pub fn build_bud_to_eth_claim(
         return Err(BudToEthError::NotBurned);
     }
 
-    // 2. Finality proof mevcut.
+    // 2. The finality proof is present.
     if finality_proof.is_empty() {
         return Err(BudToEthError::FinalityProofMissing);
     }
 
-    // 3. Miktar cap kontrolü (tek lookup).
+    // 3. Check the amount against the cap, in a single lookup.
     let amount = transfer.amount;
     if amount > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }
 
-    // 4. Asset ID (tek lookup).
+    // 4. The asset id, in a single lookup.
     let bytes: &[u8] = transfer.asset_id.as_ref();
     let mut asset_id = [0u8; 32];
     let len = bytes.len().min(32);
@@ -141,13 +149,13 @@ mod tests {
             &MessageId::default(),
             100,
             [0u8; 32],
-            vec![], // boş finality proof
+            vec![], // an empty finality proof
             vec![],
             [0u8; 20],
             DEFAULT_BRIDGE_CAP,
         )
         .unwrap_err();
-        assert_eq!(err, BudToEthError::BurnEventNotFound); // önce transfer yok
+        assert_eq!(err, BudToEthError::BurnEventNotFound); // the transfer is missing first
     }
 
     #[test]
@@ -165,7 +173,7 @@ mod tests {
 
     #[test]
     fn garbage_claim_does_not_panic() {
-        // DoS güvenliği: boş bridge + rastgele → Err, panic YOK.
+        // DoS safety: an empty bridge with random input gives an Err and NO panic.
         let bridge = BridgeState::new();
         let _ = build_bud_to_eth_claim(
             &bridge,
