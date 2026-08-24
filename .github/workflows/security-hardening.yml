@@ -1,20 +1,20 @@
-# Security Hardening, Ek denetimler
+# Security Hardening, extra inspections
 #
-# Eksik denetimler:
-#   - cargo machete (kullanılmayan bağımlılıklar)
+# Missing inspections:
+#   - cargo machete (unused dependencies)
 #   - cargo mutants (mutation testing)
-#   - cargo-supply-chain (yayıncı görünürlüğü)
-#   - ThreadSanitizer (data race tespiti)
-#   - RUSTFLAGS overflow-checks doğrulaması
+#   - cargo-supply-chain (publisher visibility)
+#   - ThreadSanitizer (data race detection)
+#   - RUSTFLAGS overflow-checks verification
 #
-# Bu workflow haftalık çalışır (yoğun/yavaş denetimler).
-# PR'larda tetiklenmez - sadece schedule + workflow_dispatch.
+# This workflow runs weekly (heavy/slow inspections).
+# It is not triggered on PRs - only schedule + workflow_dispatch.
 
 name: Security Hardening
 
 on:
   schedule:
-    - cron: "30 5 * * 1"   # haftalık, Pazartesi 05:30 UTC
+    - cron: "30 5 * * 1"   # weekly, Monday 05:30 UTC
   workflow_dispatch:
 
 concurrency:
@@ -42,10 +42,10 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      # Surum pinsizdi. extra-tooling.yml ayni araci 0.8.0'a pinliyor;
-      # ayni surum, ayni sha256 burada da kullaniliyor, yoksa iki workflow
-      # ayni adla farkli araclar calistirir.
-      - name: Install cargo-machete (sürüm + sha256 pinli)
+      # The version was unpinned. extra-tooling.yml pins the same tool to 0.8.0;
+      # the same version and the same sha256 are used here too, otherwise two
+      # workflows would run different tools under the same name.
+      - name: Install cargo-machete (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/machete.tar.gz \
@@ -64,17 +64,17 @@ jobs:
   #
   #   error: unexpected argument '--test-timeout' found
   #
-  # cargo-mutants 27.1.0'da bayrak `--timeout`. Komut saniyeler icinde
-  # argüman hatasiyla oluyordu, `|| true` cikis kodunu yutuyordu,
-  # `continue-on-error` geri kalani ortuyordu, ve is YESIL raporluyordu.
-  # Iki dakikalik bir "mutation testing" is'i aslinda arac kurulumundan
-  # ibaretti. Yumusatmanin en pahali bicimi bu: bir kapinin dusmesini degil,
-  # hic kosmadigini gizler.
+  # In cargo-mutants 27.1.0 the flag is `--timeout`. The command died within
+  # seconds on an argument error, `|| true` swallowed the exit code,
+  # `continue-on-error` covered the rest, and the job reported GREEN.
+  # A two-minute "mutation testing" job actually consisted of installing the
+  # tool. This is the most expensive form of softening: it hides not a gate
+  # failing, but a gate never running at all.
   #
-  # Olctugu sey de baska hicbir kapinin olcmedigi sey. Butun diger kapilar
-  # kodun ne yaptigini denetler; bu, testlerin bir degisikligi FARK EDIP
-  # etmedigini denetler. Yesil bir test paketi, hicbir seyi iddia etmeyen
-  # testlerden de olusabilir.
+  # What it measures is also what no other gate measures. Every other gate
+  # inspects what the code does; this inspects whether the tests NOTICE a
+  # change. A green test suite can also consist of tests that assert nothing.
+  #
   mutants:
     name: cargo mutants (mutation testing)
     runs-on: ubuntu-latest
@@ -94,12 +94,12 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
-      # Kanarya: bilerek hicbir seyi iddia etmeyen bir testle bir crate
-      # yazilir ve cargo-mutants'in hayatta kalan bir mutanti bildirmesi
-      # beklenir. Bildirmezse temiz bir rapor "testler saglam" demez, en
-      # fazla "arac kosmadi" der. Bu is tam olarak o durumda aylarca yesil
-      # kaldi, o yuzden kanarya burada bir formalite degil.
-      - name: mutants kanaryasi (arac gercekten hayatta kalan buluyor mu)
+      # Canary: a crate is written with a test that deliberately asserts nothing
+      # and cargo-mutants is expected to report a surviving mutant. If it does
+      # not, a clean report does not say "the tests are solid", at most "the tool
+      # did not run". This job stayed green for months in exactly that state, so
+      # the canary here is not a formality.
+      - name: mutants canary (does the tool really find survivors)
         run: |
           set -euo pipefail
           mkdir -p /tmp/mutants-canary/src
@@ -109,9 +109,9 @@ jobs:
           version = "0.0.0"
           edition = "2021"
           EOF
-          # Test fonksiyonu cagiriyor ve sonucu hakkinda hicbir sey
-          # soylemiyor. `cargo test` yesil; govde nasil degisirse degissin
-          # yesil kalir, ki mutation testing tam olarak bunu bulmak icindir.
+          # The test calls the function and says nothing about the result.
+          # `cargo test` is green; it stays green however the body changes, which
+          # is exactly what mutation testing exists to find.
           cat > /tmp/mutants-canary/src/lib.rs <<'EOF'
           pub fn double(x: i32) -> i32 {
               x * 2
@@ -127,51 +127,51 @@ jobs:
           EOF
           cd /tmp/mutants-canary
           cargo test --quiet
-          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda boru
-          # hattinda program sifirdan farkli cikarsa grep hic kosmaz.
+          # Capture the output into a file first: under `set -euo pipefail`, if a
+          # program in a pipeline exits non-zero, grep never runs.
           set +e
           cargo mutants --in-place --timeout 60 > /tmp/mutants-canary.log 2>&1
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "KANARYA DUSTU: hicbir seyi iddia etmeyen bir testin altinda" >&2
+            echo "CANARY FAILED: no surviving mutant was reported under a test that" >&2
             echo "hayatta kalan mutant bildirilmedi, yani arac ya kosmuyor ya" >&2
             echo "da bir sey olcmuyor." >&2
             tail -30 /tmp/mutants-canary.log >&2
             exit 1
           fi
           if grep -qi "MISSED\|missed" /tmp/mutants-canary.log; then
-            echo "kanarya OK: arac bos testin altindaki mutanti hayatta buldu."
+            echo "canary OK: the tool found the mutant surviving under the empty test."
           else
-            echo "KANARYA DUSTU: arac dustu ama sebep hayatta kalan mutant degil." >&2
+            echo "CANARY FAILED: the tool failed but the reason is not a surviving mutant." >&2
             tail -30 /tmp/mutants-canary.log >&2
             exit 1
           fi
       # `--in-diff`: her kosuda tum agaci mutasyona ugratmak saatler surer ve
-      # bir PR'in degistirmedigi koda dair bulgu uretir. Bu dalin diff'i
-      # denetlenir, yani soru "bu degisiklik test edilmis mi" olur, ki
-      # cevaplanabilir tek soru odur.
+      # findings about code a PR did not change. This branch's diff is inspected,
+      # so the question becomes "is this change tested", which is the only
+      # answerable question.
       #
-      # Dal adi kabuga `${{ }}` ile genisletilmez. Bir dal adi neredeyse her
-      # seyi icerebilir ve `run:` icinde genisleyen bir ifade, o metni komut
-      # olarak calistirir: `$(...)` tasiyan bir dal adi bu adimda kod
-      # calistirir. zizmor bunu template-injection olarak yuksek guvenle
-      # bildirdi ve hakliydi. Deger ortam degiskeni uzerinden gecer, kabuk
-      # onu tirnak icinde veri olarak okur.
-      - name: Diff'i cikar
+      # The branch name is not expanded into the shell with `${{ }}`. A branch
+      # name can contain almost anything and an expression expanding inside `run:`
+      # runs that text as a command: a branch name carrying `$(...)` executes code
+      # in this step. zizmor reported this as template-injection with high
+      # confidence and was right. The value passes through an environment variable
+      # and the shell reads it as quoted data.
+      - name: Extract the diff
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}
         run: |
           set -euo pipefail
           git diff "origin/${BASE_REF}..." > /tmp/pr.diff || git diff HEAD~1 > /tmp/pr.diff
-      - name: cargo mutants (bu degisiklige dokunan kod)
+      - name: cargo mutants (code touched by this change)
         run: cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
     runs-on: ubuntu-latest
-    # `publishers` tek tek sorarken 15 dakikayi asiyordu; `update` toplu
-    # cektigi icin sure dusuyor, ama onbellek soguksa ilk cekim uzun surer.
+    # Querying `publishers` one by one exceeded 15 minutes; `update` fetches in
+    # bulk so the time drops, but with a cold cache the first fetch takes long.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -188,25 +188,25 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-supply-chain
         run: cargo install cargo-supply-chain --locked
-      # `publishers` her calistiginda crates.io'ya kraft basina ~2 saniyeden
-      # sorar ve 566 bagimlilikta bu 15 dakikalik timeout'u asiyordu: is
-      # iptal oluyor, hicbir cikti uretmiyordu. `update` ayni veriyi bir
-      # kerede toplu ceker, sonraki komutlar onbellekten okur.
-      - name: Yayıncı verisini topluca çek
+      # Every run of `publishers` asked crates.io per crate at more than about
+      # 2 seconds each, and with 566 dependencies that exceeded the 15-minute
+      # timeout: the job was cancelled and produced no output. `update` fetches
+      # the same data in one batch and later commands read from the cache.
+      - name: Fetch publisher data in bulk
         run: cargo supply-chain update --cache-max-age 1w
       - name: cargo supply-chain publishers
         run: cargo supply-chain publishers
       - name: cargo supply-chain crates
         run: cargo supply-chain crates
-      # Bu is'in bir esigi yoktu, o yuzden dusemiyordu ve `|| true`
-      # tasiyordu. Esik su: agac, YAYINCISI OLMAYAN bir bagimliliga
-      # ulasmamali. crates.io'da sahipsiz bir kraft, kimsenin
-      # devralamayacagi ve kimsenin yamayamayacagi bir kraftir; bir zincir
-      # icin bu bir surum gecikmesi degil, kapanmayacak bir aciktir.
+      # This job had no threshold, so it could not fail, and it carried `|| true`.
+      # The threshold is this: the tree must not reach a dependency with NO
+      # PUBLISHER. An ownerless crate on crates.io is one nobody can take over and
+      # nobody can patch; for a chain that is not a version lag but a hole that
+      # will never close.
       #
-      # Sayi degil varlik denetleniyor: "kac yayinci" bir esik degildir,
-      # cunku dogru sayi bilinmez. "Sifir yayinci" ise her zaman yanlistir.
-      - name: Sahipsiz bağımlılık kapısı
+      # Existence is inspected, not a count: "how many publishers" is not a
+      # threshold because the right number is unknown. "Zero publishers" is always wrong.
+      - name: The ownerless dependency gate
         run: |
           set -euo pipefail
           cargo supply-chain json --diffable > /tmp/supply-chain.json
@@ -216,8 +216,8 @@ jobs:
           with open("/tmp/supply-chain.json") as f:
               data = json.load(f)
 
-          # Sahibi olmayan kraftlar: ne bir kullanici ne bir takim
-          # yayinlayabiliyor. Boyle bir bagimlilik yamalanamaz.
+          # Crates with no owner: neither a user nor a team can publish them.
+          # Such a dependency cannot be patched.
           orphans = []
           for crate in data.get("crates_io_crates", []):
               name = crate.get("name", "?")
@@ -228,8 +228,8 @@ jobs:
           total = len(data.get("crates_io_crates", []))
           if total == 0:
               print(
-                  "KAPI BOS KOSTU: cargo-supply-chain hicbir kraft bildirmedi, "
-                  "yani bu kontrol hicbir seyi denetlemedi.",
+                  "THE GATE RAN EMPTY: cargo-supply-chain reported no crates, "
+                  "so this check inspected nothing.",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -239,8 +239,8 @@ jobs:
               for o in sorted(orphans):
                   print(f"  {o}", file=sys.stderr)
               print(
-                  "\nSahipsiz bir kraft kimse tarafindan yamalanamaz. Bir aciik "
-                  "cikarsa bekleyecek kimse yok; bagimliligi degistirin ya da "
+                  "\nAn ownerless crate cannot be patched by anyone. If a vulnerability "
+                  "appears there is nobody to wait for; replace the dependency or "
                   "icerlestirin.",
                   file=sys.stderr,
               )
@@ -249,12 +249,12 @@ jobs:
           print(f"Sahipsiz bagimlilik yok: {total} crates.io kraftinin hepsinin yayincisi var.")
           PY
 
-  # BLOKLAR. Bir zincir icin veri yarisi kararsiz test degil: iki dugum bir
-  # yarisin sonucuna gore farkli duruma varirsa bu bir catallanmadir.
+  # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
+  # different states depending on the outcome of a race, that is a fork.
   #
   # Onceki hali hem `continue-on-error: true` hem `|| true` tasiyordu, yani
-  # hicbir kosulda dusemezdi, ve kanaryasi yoktu: "veri yarisi yok" ile "ikili
-  # hic calismadi" ayirt edilemiyordu. Ikisi de kaldirildi, kanarya eklendi.
+  # so it could not fail under any condition, and it had no canary: "no data
+  # race" could not be told apart from "the binary never ran". Both were removed and a canary added.
   tsan:
     name: ThreadSanitizer (data race detection)
     runs-on: ubuntu-latest
@@ -272,11 +272,11 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      # Kanarya: bilerek yarisan bir program yazilir ve TSan'in onu yakalamasi
+      # Canary: a deliberately racing program is written and TSan is expected to
       # beklenir. Yakalamazsa arac calismiyor demektir ve temiz rapor bir sey
-      # ifade etmez. Kanarya olmadan bu is'in yesil olmasi, taramanin
-      # kostugunu degil, en fazla dusmedigini soylerdi.
-      - name: TSan kanaryasi (arac gercekten yakaliyor mu)
+      # nothing. Without the canary a green job would say not that the scan ran,
+      # but at most that it did not fail.
+      - name: TSan canary (does the tool really catch it)
         run: |
           set -euo pipefail
           mkdir -p /tmp/tsan-canary/src
@@ -287,7 +287,7 @@ jobs:
           edition = "2021"
           EOF
           cat > /tmp/tsan-canary/src/main.rs <<'EOF'
-          // Iki is parcacigi ayni adrese senkronizasyonsuz yaziyor. TSan bunu
+          // Two threads write to the same address without synchronization. If TSan
           // gormezse tarama guvenilmez.
           fn main() {
               let mut value = 0i64;
@@ -309,10 +309,10 @@ jobs:
           export RUSTFLAGS="-Zsanitizer=thread"
           if cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu 2>&1 \
              | tee /tmp/tsan-canary.log | grep -q "WARNING: ThreadSanitizer"; then
-            echo "kanarya OK: TSan bilerek yazilmis yarisi yakaladi."
+            echo "canary OK: TSan caught the deliberately written race."
           else
-            echo "KANARYA DUSTU: TSan bir veri yarisini yakalayamadi, yani bu is" >&2
-            echo "temiz rapor verse de bir sey kanitlamaz." >&2
+            echo "CANARY FAILED: TSan could not catch a data race, so even a clean report" >&2
+            echo "from this job proves nothing." >&2
             tail -20 /tmp/tsan-canary.log >&2
             exit 1
           fi
@@ -323,24 +323,24 @@ jobs:
           export RUSTFLAGS="-Zsanitizer=thread"
           cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1
 
-  # BLOKLAR. TSan gordugu yarisi bildirir, loom gormedigini kanitlar.
+  # BLOCKS. TSan reports the race it sees, loom proves the one it does not see.
   #
-  # Ikisi ayni seyi olcmez ve biri digerinin yerine gecmez. TSan makinenin o
-  # an sectigi zamanlamayi denetler, yani yesil bir kosu "denenen
-  # zamanlamalar temizdi" der. Bir kilit ters cevrilmesi icin iki is
-  # parcaciginin yanlis anda yanlis sirada varmasi gerekir, ki bu yuklu bir
-  # runner'in en az uretecegi zamanlamadir.
+  # The two do not measure the same thing and neither replaces the other. TSan
+  # inspects the schedule the machine happened to pick, so a green run says "the
+  # schedules tried were clean". A lock inversion needs two threads arriving at
+  # the wrong moment in the wrong order, which is the schedule a loaded runner
+  # is least likely to produce.
   #
-  # loom modeli kosar: bellek modelinin izin verdigi HER serpistirme,
-  # tuketici olarak. Kilitlenmeyi beklemeyle degil, kosabilir is parcacigi
-  # kalmamis bir durum olarak tespit eder. Gecince siralama model icin
-  # kanitlanmis olur, bir kez gozlenmis degil.
+  # loom runs the model: EVERY interleaving the memory model allows, exhaustively.
+  # It detects deadlock not by waiting but as a state with no runnable thread
+  # left. When it passes, the ordering is proven for the model rather than
+  # observed once.
   #
-  # PoSEngine dort kilit tutuyor ve uc cagri yeri ikisini birden aliyor:
-  # seen_blocks -> checkpoints -> slashing_evidence. Kanitlanan bu zincirin
-  # dongusuz oldugu.
+  # PoSEngine holds four locks and three call sites take two of them at once:
+  # seen_blocks -> checkpoints -> slashing_evidence. What is proven is that this
+  # chain is acyclic.
   loom:
-    name: loom (konsensüs kilit sırası, tüketici model)
+    name: loom (consensus lock order, exhaustive model)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -356,12 +356,12 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      # Kanarya: bilerek ters sirada kilit alan bir model yazilir ve loom'un
-      # kilitlenmeyi bulmasi beklenir. Bulmazsa asil testlerin yesil olmasi
-      # siralamanin dogru oldugunu degil, en fazla loom'un kosmadigini
-      # soylerdi. `--cfg loom` unutuldugunda testler sessizce derlenmez ve
-      # hicbir sey kosmaz, kanarya tam olarak bu durumu yakalar.
-      - name: loom kanaryasi (arac gercekten kilitlenmeyi buluyor mu)
+      # Canary: a model that deliberately takes locks in reverse order is written
+      # and loom is expected to find the deadlock. If it does not, the real tests
+      # being green would say not that the ordering is correct, but at most that
+      # loom did not run. When `--cfg loom` is forgotten the tests silently do not
+      # compile and nothing runs; the canary catches exactly that state.
+      - name: loom canary (does the tool really find the deadlock)
         run: |
           set -euo pipefail
           mkdir -p /tmp/loom-canary/src
@@ -375,8 +375,8 @@ jobs:
           loom = "0.7"
           EOF
           cat > /tmp/loom-canary/src/main.rs <<'EOF'
-          // Iki is parcacigi ayni iki kilidi TERS sirada aliyor. loom bunu
-          // bulmazsa asil kilit-sirasi testleri bir sey kanitlamaz.
+          // Two threads take the same two locks in REVERSE order. If loom does not
+          // find it, the real lock-order tests prove nothing.
           use loom::sync::Mutex;
           use loom::thread;
           use std::sync::Arc;
@@ -406,31 +406,31 @@ jobs:
           }
           EOF
           cd /tmp/loom-canary
-          # Bu komutun BASARISIZ olmasi bekleniyor: model kilitleniyor.
-          # Ciktiyi once dosyaya aliyoruz, cunku `set -euo pipefail` altinda
-          # bir boru hattinda program sifirdan farkli cikarsa grep hic
-          # kosmaz ve kanarya kendi kabugunu olcer.
+          # This command is EXPECTED TO FAIL: the model deadlocks.
+          # We capture the output into a file first, because under `set -euo pipefail`
+          # if a program in a pipeline exits non-zero grep never runs and the canary
+          # measures its own shell.
           set +e
           RUSTFLAGS="--cfg loom" cargo run --release > /tmp/loom-canary.log 2>&1
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "KANARYA DUSTU: loom bilerek ters cevrilmis bir kilit sirasini" >&2
-            echo "kilitlenme olarak bildirmedi, yani asil testler bos kosuyor." >&2
+            echo "CANARY FAILED: loom did not report a deliberately inverted lock order" >&2
+            echo "as a deadlock, so the real tests are running empty." >&2
             tail -30 /tmp/loom-canary.log >&2
             exit 1
           fi
           if grep -qi "deadlock" /tmp/loom-canary.log; then
-            echo "kanarya OK: loom bilerek ters cevrilmis siralamayi kilitlenme olarak buldu."
+            echo "canary OK: loom found the deliberately inverted ordering as a deadlock."
           else
-            echo "KANARYA DUSTU: loom dustu ama sebep kilitlenme degil." >&2
+            echo "CANARY FAILED: loom failed but the reason is not a deadlock." >&2
             tail -30 /tmp/loom-canary.log >&2
             exit 1
           fi
-      # `--cfg loom` olmadan model modulu derlenmez. Envanter testi bu
-      # bayraktan bagimsiz kosar ve modelin motoru hala tarif ettigini
-      # dogrular, o yuzden ayrica burada da cagriliyor.
-      - name: loom modeli (her serpistirme)
+      # Without `--cfg loom` the model module does not compile. The inventory test
+      # runs independently of that flag and verifies the model still describes the
+      # engine, so it is called here as well.
+      - name: The loom model (every interleaving)
         run: |
           set -euo pipefail
           RUSTFLAGS="--cfg loom" \
