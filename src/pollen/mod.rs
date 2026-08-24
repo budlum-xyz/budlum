@@ -1,25 +1,25 @@
-//! B.U.D. Marketplace - AccessGrant v2 (APPROVED RFC) §3.1 temel tipleri (P0).
+//! B.U.D. Marketplace - AccessGrant v2 (APPROVED RFC) section 3.1 base types (P0).
 //!
-//! Kapsam (P0-deseni, tek atomik iş): `AssetId`, `Signature64`, `GrantId`.
-//! P1 (primitifler) bu tipler main'de yeşil olduktan sonra başlar.
+//! Scope (the P0 pattern, one atomic piece of work): `AssetId`, `Signature64`,
+//! `GrantId`. P1 (primitives) starts once these types are green on main.
 //!
-//! Sabitler:
-//! - **R2:** `Signature` tipi kod tabanında yoktu; burada bounded
-//!   `Signature64` olarak tanımlanır. `Default` = sıfır-sentinel
-//!   (geçersiz-imza); sentinel ile hiçbir doğrulama geçemez (§5 kuralı).
-//! - **R3:** serde_json object-key yalnız string olabilir; ham `[u8; N]`
-//!   Anahtar serialize patlar (`permissionless.rs:176` tuzağı). `AssetId`
-//!   Address deseniyle string-serialize (`core/address.rs:64-73`).
-//! - ** (review kararı; revize - kullanıcı scope_v1):** bu `AssetId`
-//!   Başlangıçta `crate::bud::marketplace` yolundaydı; kategorizasyon C2 ile
-//!   `crate::pollen` altına taşındı. `cross_domain::AssetId`
-//!   (= `Hash32` alias) dokunulmaz.
+//! Fixed points:
+//! - **R2:** there was no `Signature` type in the code base; it is defined here
+//!   as a bounded `Signature64`. `Default` = the zero sentinel (invalid
+//!   signature); no verification passes with the sentinel (the section 5 rule).
+//! - **R3:** a serde_json object key can only be a string; a raw `[u8; N]` key
+//!   blows up on serialize (the `permissionless.rs:176` trap). `AssetId`
+//!   string-serializes with the Address pattern (`core/address.rs:64-73`).
+//! - **(review decision; revised - user scope_v1):** this `AssetId` originally
+//!   lived under `crate::bud::marketplace`; categorization C2 moved it under
+//!   `crate::pollen`. `cross_domain::AssetId` (= the `Hash32` alias) is
+//!   untouched.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
-/// JSON-safe map anahtarı: hex-string serde wrapper, Address deseni.
+/// A JSON-safe map key: a hex-string serde wrapper, the Address pattern.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AssetId(pub [u8; 32]);
 
@@ -101,15 +101,16 @@ impl From<[u8; 32]> for AssetId {
     }
 }
 
-/// Ed25519 imzası - bounded, sentinel-default (R2 çözümü).
+/// An Ed25519 signature - bounded, sentinel default (the R2 resolution).
 ///
-/// `Default` sıfır-imzadır (geçersiz-sentinel): boş bırakılmış imza alanı
-/// Geçerli imza gibi davranamaz; §5 kuralı sentinel'i her zaman reddeder.
+/// `Default` is the zero signature (the invalid sentinel): a signature field
+/// left empty cannot behave like a valid signature; the section 5 rule always
+/// rejects the sentinel.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Signature64(pub [u8; 64]);
 
 impl Signature64 {
-    /// Geçersiz-imza sentinel'i (`Default` ile aynı değer).
+    /// The invalid-signature sentinel (the same value as `Default`).
     pub const SENTINEL: Self = Signature64([0u8; 64]);
 
     pub fn is_sentinel(&self) -> bool {
@@ -189,8 +190,9 @@ impl From<[u8; 64]> for Signature64 {
     }
 }
 
-/// Grant kimliği = hash(grant payload) üzerinden deterministik anahtar (§3.2).
-/// Alias bırakılmıştır: formatı `AssetId` ile aynıdır (doc-lock testi kilitler).
+/// The grant id = a deterministic key over hash(grant payload) (section 3.2).
+/// It is left as an alias: its format is the same as `AssetId` (a doc-lock test
+/// pins this down).
 pub type GrantId = AssetId;
 
 #[cfg(test)]
@@ -213,15 +215,15 @@ mod tests {
         assert!(AssetId::from_hex("not-hex").is_err());
     }
 
-    /// R3 kilidi: `BTreeMap<AssetId, _>` serde_json object-key olarak roundtrip
-    /// Yapmalı ve anahtarlar string olmalı (ham [u8; 32] anahtar YASAK).
+    /// The R3 lock: `BTreeMap<AssetId, _>` must round trip as a serde_json
+    /// object key and the keys must be strings (a raw [u8; 32] key is FORBIDDEN).
     #[test]
     fn asset_id_is_json_map_key_safe() {
         let mut map = BTreeMap::new();
         map.insert(AssetId::from([1u8; 32]), 10u64);
         map.insert(AssetId::from([2u8; 32]), 20u64);
         let json = serde_json::to_string(&map).unwrap();
-        assert!(json.starts_with("{\""), "key string olmali: {json}");
+        assert!(json.starts_with("{\""), "the key must be a string: {json}");
         let back: BTreeMap<AssetId, u64> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, map);
     }
@@ -244,7 +246,7 @@ mod tests {
         assert!(Signature64::from_hex(&"ab".repeat(65)).is_err());
     }
 
-    /// R2 kilidi: `Default` sentinel'dir ve sıfırdan farklı her imza sentinel değildir.
+    /// The R2 lock: `Default` is the sentinel and no non-zero signature is the sentinel.
     #[test]
     fn signature64_default_is_sentinel() {
         assert_eq!(Signature64::default(), Signature64::SENTINEL);
@@ -260,7 +262,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Signature64>(&json).unwrap(), sig);
     }
 
-    /// Doc-lock: `GrantId` alias'ı `AssetId` ile aynı serileşir (§3.2).
+    /// Doc-lock: the `GrantId` alias serializes the same as `AssetId` (section 3.2).
     #[test]
     fn grant_id_alias_matches_asset_id_format() {
         let grant: GrantId = AssetId::from([5u8; 32]);
@@ -273,12 +275,12 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// (kategorizasyonu, mkt_migrate) AI DataOffer
-// Ekonomisi `src/marketplace`'ten buraya taşındı. Fiziksel taşıma bu adımda;
-// Model birleştirmesi (DataOffer (u64 id, seller, cid, price, active) ↔
-// V2 DataAsset/MarketplaceListing (AssetId + SaleAuthorization)) P1/P2
-// Kapsamında tasarlanır - bu modül v2 ile ÇAKIŞAN İKİ modeli barındırmaz,
-// Geçiş köprüsüdür (bkz. RFC_ACCESSGRANT_V2 §3.2/).
+// (categorization, mkt_migrate) The AI DataOffer economy moved here from
+// `src/marketplace`. The physical move happens in this step; merging the models
+// (DataOffer (u64 id, seller, cid, price, active) vs. the v2
+// DataAsset/MarketplaceListing (AssetId + SaleAuthorization)) is designed in the
+// P1/P2 scope - this module does not host TWO models that CONFLICT with v2, it
+// is the transition bridge (see RFC_ACCESSGRANT_V2 section 3.2).
 // ---------------------------------------------------------------------------
 
 /// Pollen Data Rights / AccessGrant v2 primitives.
@@ -291,7 +293,7 @@ pub use data_rights::{
     SaleAuthorization, SaleAuthorizationId, POLLEN_AI_INPUT_REF_PREFIX,
 };
 
-/// AI Data Marketplace (satıcı-teklifi ekonomisi) - geçiş modülü.
+/// The AI Data Marketplace (seller-offer economy) - the transition module.
 pub mod offers;
 pub use content_gate::{ContentGateError, ProtectedContent};
 pub use offers::{DataOffer, MarketplaceRegistry, PollenPurchaseReceipt};

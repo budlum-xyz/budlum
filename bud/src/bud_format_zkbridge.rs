@@ -1,13 +1,14 @@
-//! B.U.D. 2.0 - zk KÖPRÜSÜ: ÜRETİM WİTNESS'İ (nexus/zkVM köprüsü - tasarım + API)
+//! B.U.D. 2.0 - zk BRIDGE: PRODUCTION WITNESS (nexus/zkVM bridge - design + API)
 //!
-//! Kalan iş #9: "zk-STARK köprüsü - 'bu .bud şu dönüşümlerle üretildi' ispatı."
-//! fikirler2.0 §1.4: zkVM ispatı ekonomik değil (222 yıl saklamaya bedel) →
-//! doğru yol `generate_and_verify` (yeniden üret + hash'le). Bu modül aradaki
-//! KÖPRÜYÜ kurar: engine boru hattı adımlarını STARK-dostu bir WITNESS izine
-//! dönüştürür (adım listesi + girdi/çıktı özetleri + ara hash'ler). Gerçek ispat
-//! (nexus/SP1) sandbox dışıdır; witness determinizmi burada test edilir ve bir
-//! zkVM'nin ispatlayacağı devrenin SPEC'ini verir. Zincirde `generate_and_verify`
-//! (İ9) zaten ucuz doğrulama sağlar.
+//! Remaining work #9: "zk-STARK bridge - a proof that 'this .bud was produced
+//! with these transforms'." ideas2.0 section 1.4: a zkVM proof is not economical
+//! (it costs as much as 222 years of storage) -> the right path is
+//! `generate_and_verify` (regenerate + hash). This module builds the BRIDGE in
+//! between: it converts the engine pipeline steps into a STARK-friendly WITNESS
+//! trace (step list + input/output digests + intermediate hashes). The real
+//! proof (nexus/SP1) lives outside the sandbox; witness determinism is tested
+//! here and it gives the SPEC of the circuit a zkVM would prove. On chain,
+//! `generate_and_verify` (I9) already provides cheap verification.
 
 #![forbid(unsafe_code)]
 
@@ -17,16 +18,16 @@ use sha3::{Digest, Sha3_256};
 pub const ZK_MAGIC: [u8; 8] = *b"\xB5ZKBR\0\0\0";
 pub const ZK_VERSION: u8 = 1;
 
-/// STARK-dostu adım kaydı (devreye çevrilecek işlem).
+/// A STARK-friendly step record (the operation to be turned into a circuit).
 #[derive(Debug, Clone)]
 pub struct WitnessStep {
     pub op: u8, // PipeStep::to_u8
     pub input_digest: [u8; 32],
     pub output_digest: [u8; 32],
-    pub arg: u64, // adım parametresi (ör. zstd seviyesi)
+    pub arg: u64, // the step parameter (e.g. the zstd level)
 }
 
-/// Engine çıktısından witness izi üret (deterministik).
+/// Produce a witness trace from the engine output (deterministic).
 pub fn engine_to_witness(res: &EngineResult) -> Vec<WitnessStep> {
     let mut prev = Sha3_256::new();
     prev.update(b"BDLM_ZK_INIT");
@@ -37,7 +38,7 @@ pub fn engine_to_witness(res: &EngineResult) -> Vec<WitnessStep> {
         let mut out = Sha3_256::new();
         out.update(init);
         out.update([s.to_u8()]);
-        // adım çıktısını temsil eden özet: konteyner boyutu (deterministik ara değer)
+        // the digest standing for the step output: the container size (a deterministic intermediate)
         out.update(res.container.len().to_le_bytes());
         let o: [u8; 32] = out.finalize().into();
         let arg: u64 = match s {
@@ -58,7 +59,7 @@ pub fn engine_to_witness(res: &EngineResult) -> Vec<WitnessStep> {
     steps
 }
 
-/// Witness izinin kök özeti (zincire yazılır - ispat bağlanır).
+/// The root digest of the witness trace (written on chain - the proof binds to it).
 pub fn witness_root(steps: &[WitnessStep]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(ZK_MAGIC);
@@ -72,12 +73,12 @@ pub fn witness_root(steps: &[WitnessStep]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// `generate_and_verify` (İ9): witness izinden adım sayısı + kök doğrula.
+/// `generate_and_verify` (I9): verify the step count and the root from the witness trace.
 pub fn verify_witness(steps: &[WitnessStep], expected_root: &[u8; 32]) -> bool {
     if steps.is_empty() {
         return false;
     }
-    // ardışık bağ: her adımın girdisi bir öncekinin çıktısı olmalı
+    // the consecutive link: every step input must be the previous step output
     for w in steps.windows(2) {
         if w[1].input_digest != w[0].output_digest {
             return false;
@@ -86,13 +87,14 @@ pub fn verify_witness(steps: &[WitnessStep], expected_root: &[u8; 32]) -> bool {
     &witness_root(steps) == expected_root
 }
 
-/// STARK-dostu ALAN İZİ: her adımı Goldilocks asal alanına (p = 2^64 - 2^32 + 1)
-/// indirgenmiş 10 alan elemanına çevirir → nexus/SP1 devresi doğrudan tüketir.
-/// Satır: [op, arg, in0..in3, out0..out3] - digest 32 bayt → 4×u64 (LE) mod p.
+/// A STARK-friendly FIELD TRACE: converts every step into 10 field elements
+/// reduced into the Goldilocks prime field (p = 2^64 - 2^32 + 1) -> a nexus/SP1
+/// circuit consumes it directly.
+/// Row: [op, arg, in0..in3, out0..out3] - a 32-byte digest -> 4 x u64 (LE) mod p.
 pub const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001; // 2^64 - 2^32 + 1
 
 fn mod_p(w: u64) -> u64 {
-    // w < 2^64; p ≈ 2^64 - 2^32 → w - p tek çıkarmada (w >= p ise)
+    // w < 2^64; p ~= 2^64 - 2^32 -> w - p in a single subtraction (when w >= p)
     let mut x = w;
     if x >= GOLDILOCKS_P {
         x -= GOLDILOCKS_P;
@@ -125,7 +127,7 @@ pub fn witness_to_field_trace(steps: &[WitnessStep]) -> Vec<[u64; 10]> {
     rows
 }
 
-/// Alan izi satır sayısı (devre boyutu göstergesi) + kök (bağlama).
+/// The field trace row count (an indicator of circuit size) + the root (the binding).
 pub fn field_trace_meta(rows: &[[u64; 10]]) -> (usize, [u8; 32]) {
     let mut h = Sha3_256::new();
     h.update(b"BDLM_ZK_FIELDTRACE_V1");
@@ -143,8 +145,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn witness_deterministik_ve_dogrulanir() {
-        let data = b"zk witness test verisi ".repeat(200);
+    fn witness_is_deterministic_and_verifies() {
+        let data = b"zk witness test data ".repeat(200);
         let r1 = crate::bud_format_engine::engine_store(&data, false, 42).unwrap();
         let r2 = crate::bud_format_engine::engine_store(&data, false, 42).unwrap();
         let w1 = engine_to_witness(&r1);
@@ -152,20 +154,20 @@ mod tests {
         assert_eq!(
             witness_root(&w1),
             witness_root(&w2),
-            "witness deterministik"
+            "the witness is deterministic"
         );
         assert!(verify_witness(&w1, &witness_root(&w1)));
         assert!(!w1.is_empty());
     }
 
     #[test]
-    fn bos_witness_reddedilir() {
+    fn an_empty_witness_is_rejected() {
         assert!(!verify_witness(&[], &[0u8; 32]));
     }
 
     #[test]
-    fn alan_izi_stark_dostu() {
-        let data = b"alan izi testi ".repeat(100);
+    fn the_field_trace_is_stark_friendly() {
+        let data = b"field trace test ".repeat(100);
         let r = crate::bud_format_engine::engine_store(&data, false, 3).unwrap();
         let w = engine_to_witness(&r);
         let rows = witness_to_field_trace(&w);
@@ -173,10 +175,10 @@ mod tests {
         for row in &rows {
             assert_eq!(row.len(), 10);
             for &el in row {
-                assert!(el < GOLDILOCKS_P, "alan elemanı p altında");
+                assert!(el < GOLDILOCKS_P, "a field element must be below p");
             }
         }
-        // deterministik + meta
+        // deterministic + meta
         let rows2 = witness_to_field_trace(&engine_to_witness(
             &crate::bud_format_engine::engine_store(&data, false, 3).unwrap(),
         ));
@@ -186,17 +188,17 @@ mod tests {
     }
 
     #[test]
-    fn zincir_baglantisi_bozulursa_red() {
-        let data = b"bag testi ".repeat(100);
+    fn a_broken_chain_link_is_rejected() {
+        let data = b"link test ".repeat(100);
         let r = crate::bud_format_engine::engine_store(&data, false, 1).unwrap();
         let w = engine_to_witness(&r);
-        let orijinal_kok = witness_root(&w);
-        let mut bozuk = w.clone();
-        if !bozuk.is_empty() {
-            bozuk[0].op ^= 1;
+        let original_root = witness_root(&w);
+        let mut tampered = w.clone();
+        if !tampered.is_empty() {
+            tampered[0].op ^= 1;
             assert!(
-                !verify_witness(&bozuk, &orijinal_kok),
-                "bozuk iz orijinal kökle eşleşmemeli"
+                !verify_witness(&tampered, &original_root),
+                "a tampered trace must not match the original root"
             );
         }
     }
