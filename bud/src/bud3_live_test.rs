@@ -8,7 +8,7 @@
 //! zincirin DOĞRULUĞU test edilir - oranlar codec'e göre değişir, kayıpsızlık değil.
 //!
 //! Veriler `tests/fixtures/` altında repo icindedir (CI'da /tmp yoktur; kanit:
-//! 2026-08-17 gorsel.png video.yuv metin.log repo'ya gomuldu).
+//! 2026-08-17 gorsel.png video.yuv text.log repo'ya gomuldu).
 
 #![cfg(test)]
 
@@ -81,7 +81,7 @@ fn video_yuv_kayipsiz_tam_cozunurluk() {
 
 #[test]
 fn metin_log_kayipsiz() {
-    let log = fixture("metin.log");
+    let log = fixture("text.log");
     assert!(r3_roundtrip(&log, "text/plain"), "log kayıpsız");
 }
 

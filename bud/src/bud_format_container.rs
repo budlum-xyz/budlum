@@ -1,49 +1,52 @@
-//! B.U.D. 2.0 Icat - Konteyner .bud format v2 + Yapisal Parcalama + Rol-Uzman Multi-Ratio
+//! B.U.D. 2.0 - container .bud format v2 + structural splitting + role-expert multi-ratio
 //!
-//! Araştırma bulgularından hayata geçirilen yönler (2026-08-16):
-//! 1. **Yapısal parçalama ön-adımı** (S.82 konteyner/MIME/EBML, S.174 Parquet, ilham-2 C):
-//!    içerik önce yapısal sınırlara ayrılır (JSON kayıt / CSV satır / log satır / kod AST),
-//!    her parça ayrı ContentId alır - CDC16K'dan önce format-farkında kesim (kayıpsız).
-//! 3. **Konteyner .bud format iyileştirmeleri**:
-//!    - magic: high-bit set + ASCII degil (S.47: file(1) karışmasın) - v1 magic korunur, v2 ek flag
-//!    - multihash benzeri alan (K34): hash_algo kodu + digest - BLAKE3/SHA3/SHA512 yükseltilebilir
-//!    - format_class registry (K23/K43): yeni format eklenince registry güncellenir
-//!    - deterministik, kayıpsız (KF2: çözünürlük korunur, format değişebilir)
-//! 2. **Rol-uzman multi-ratio** (ilham-2 E + S.123 AgentNet): her format bir "uzman rol",
-//!    kendi boru hattını aday oran üretir, BFT finality en kanıtlı adayı seçer.
+//! Directions taken from the research findings (2026-08-16):
+//! 1. **Structural splitting pre-step** (S.82 container/MIME/EBML, S.174 Parquet, inspiration-2 C):
+//!    content is first divided at structural boundaries (JSON record / CSV row / log line / code AST),
+//!    each piece gets its own ContentId - a format-aware cut before CDC16K (lossless).
+//! 3. **Container .bud format improvements**:
+//!    - magic: high-bit set + not ASCII (S.47: do not confuse file(1)) - the v1 magic is kept, v2 adds a flag
+//!    - a multihash-like field (K34): hash_algo code + digest - upgradable to BLAKE3/SHA3/SHA512
+//!    - format_class registry (K23/K43): the registry is updated when a new format is added
+//!    - deterministic, lossless (KF2: resolution is preserved, the format may change)
+//! 2. **Role-expert multi-ratio** (inspiration-2 E + S.123 AgentNet): every format is an "expert role",
+//!    its own pipeline produces a candidate ratio, and BFT finality picks the best-evidenced candidate.
 //!
-//! Kod: no unsafe, deterministik, testlerle. #![forbid(unsafe_code)] korunur.
+//! Code: no unsafe, deterministic, with tests. #![forbid(unsafe_code)] is kept.
 
 #![forbid(unsafe_code)]
 
 use sha3::{Digest, Sha3_256};
 
-// ── 1. Yapısal parçalama (format-farkında, kayıpsız) ─────────────────────────
+// -- 1. Structural splitting (format-aware, lossless) ------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuralKind {
-    Json,   // JSON dizisi: kayıt sınırından kes
-    Csv,    // CSV: satır sınırından kes
-    Log,    // Log: satır sınırından kes (şablon sonra)
-    Text,   // Metin: cümle/paragraf sınırı (basit: satır)
-    Binary, // İkili: CDC (içerik-tanımlı) - sabit ortalama
+    Json,   // JSON array: cut at record boundaries
+    Csv,    // CSV: cut at row boundaries
+    Log,    // Log: cut at line boundaries (templating comes later)
+    Text,   // Text: sentence/paragraph boundary (simple: line)
+    Binary, // Binary: CDC (content-defined) - fixed average
 }
 
 #[derive(Debug, Clone)]
 pub struct StructuralChunk {
-    pub content_id: [u8; 32], // BDLM_CONTENT_V1 || len || baytlar (kriptografik, K3)
+    pub content_id: [u8; 32], // BDLM_CONTENT_V1 || len || bytes (cryptographic, K3)
     pub data: Vec<u8>,
 }
 
-/// İçeriği yapısal sınırlardan keser (kayıpsız: birleştir = orijinal).
-/// JSON: ayraçlar parçalara gömülür, derinlik-1 virgül parça sınırıdır (virgül SONRAKİ
-/// parçanın başında korunur). Dizi değilse/bozuksa dahi tek parça → her girdi kayıpsız.
-/// CSV/Log/Text: satır sınırı.
-/// Binary: sabit blok (CDC ön-adımı basitleştirilmiş - avg boyut).
+/// Cuts content at structural boundaries (lossless: join = original).
+/// JSON: the delimiters are embedded in the pieces, a depth-1 comma is a piece
+/// boundary (the comma is kept at the start of the NEXT piece). Even if the
+/// input is not an array or is malformed it becomes a single piece, so every
+/// input is lossless.
+/// CSV/Log/Text: line boundary.
+/// Binary: fixed block (a simplified CDC pre-step - average size).
 ///
-/// Kayıpsızlık TAMLIĞI (K38): `structural_join(kind, structural_split(kind, d)) == d`
-/// HER `d` için (boş, bozuk UTF-8, çerçevesiz JSON, negatif derinlik dahil) geçerlidir;
-/// birleştirme saf birleştirmedir, ayraç bilgisi parçalarda taşınır.
+/// COMPLETENESS of losslessness (K38): `structural_join(kind, structural_split(kind, d)) == d`
+/// holds for EVERY `d` (empty, malformed UTF-8, unframed JSON, negative depth
+/// included); the join is a pure concatenation and the delimiter information
+/// travels inside the pieces.
 pub fn structural_split(kind: StructuralKind, data: &[u8]) -> Vec<StructuralChunk> {
     if data.is_empty() {
         return vec![];
@@ -51,9 +54,10 @@ pub fn structural_split(kind: StructuralKind, data: &[u8]) -> Vec<StructuralChun
     let mut out = Vec::new();
     match kind {
         StructuralKind::Json => {
-            // Taranan her parça orijinal baytların bitişik alt dizisi olduğundan ve hiçbir
-            // bayt atlanmadığından birleştirme her zaman orijinali üretir (K38). Derinlik
-            // i32'dir; bozuk girdide negatife iner ama panik olmaz, kayıpsızlık sürer.
+            // Because every scanned piece is a contiguous subslice of the
+            // original bytes and no byte is skipped, the join always produces
+            // the original (K38). The depth is an i32; on malformed input it
+            // goes negative but does not panic, and losslessness holds.
             let s = match std::str::from_utf8(data) {
                 Ok(s) => s,
                 Err(_) => return split_fixed(data, 65536),
@@ -72,13 +76,14 @@ pub fn structural_split(kind: StructuralKind, data: &[u8]) -> Vec<StructuralChun
                     match c {
                         '{' | '[' => depth += 1,
                         '}' | ']' => depth -= 1,
-                        // derinlik-1 virgül: dizinin üst seviye kayıt sınırı
+                        // depth-1 comma: the array's top-level record boundary
                         ',' if depth == 1 => {
                             if i > start {
                                 push_chunk(&mut out, &s[start..i]);
                             }
-                            // virgül SONRAKİ parçanın başında korunur: start = i (i+1 değil!),
-                            // aksi halde virgül parçalar arasında düşer, JSON bozulur.
+                            // the comma is kept at the start of the NEXT
+                            // piece: start = i (not i+1!), otherwise the comma
+                            // falls between the pieces and the JSON breaks.
                             start = i;
                         }
                         _ => {}
@@ -89,7 +94,7 @@ pub fn structural_split(kind: StructuralKind, data: &[u8]) -> Vec<StructuralChun
             out
         }
         StructuralKind::Csv | StructuralKind::Log | StructuralKind::Text => {
-            // Satır sınırı (kayıpsız: \n korunur - her parça satır sonuyla biter)
+            // Line boundary (lossless: \n is kept - every piece ends with a newline)
             for line in data.split_inclusive(|&b| b == b'\n') {
                 let chunk = line.to_vec();
                 out.push(StructuralChunk {
@@ -134,10 +139,11 @@ pub fn content_id(bytes: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Kayıpsızlık kanıtı: parçaları birleştir → orijinal.
-/// K38: SAF birleştirme - parçalama ayraçları (`[`, `]`, virgül) parçalara gömülür,
-/// birleştirme hiçbir tür için `[`/`]` eklemez, böylece roundtrip HER girdi için
-/// birebir orijinaldir (çerçevesiz JSON, bozuk UTF-8, boş girdi dahil).
+/// Proof of losslessness: join the pieces -> the original.
+/// K38: a PURE join - the splitting delimiters (`[`, `]`, comma) are embedded
+/// in the pieces and the join adds no `[`/`]` for any kind, so the round trip
+/// is byte-identical to the original for EVERY input (unframed JSON, malformed
+/// UTF-8, empty input included).
 pub fn structural_join(_kind: StructuralKind, chunks: &[StructuralChunk]) -> Vec<u8> {
     let total: usize = chunks.iter().map(|c| c.data.len()).sum();
     let mut out = Vec::with_capacity(total);
@@ -149,7 +155,7 @@ pub fn structural_join(_kind: StructuralKind, chunks: &[StructuralChunk]) -> Vec
 
 // ── 3. Konteyner .bud v2: multihash + format registry + rol-uzman ────────────
 
-/// Multihash benzeri: hash algoritması kodu + digest (K34).
+/// Multihash-like: a hash algorithm code + digest (K34).
 /// 0x12 = SHA-256, 0x16 = SHA3-256, 0x1e = BLAKE3-256, 0x13 = SHA-512 (temsili).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultiHash {
@@ -182,7 +188,7 @@ impl MultiHash {
     }
 }
 
-/// Format registry (K23/K43): yeni format eklenince kodlanır, geriye uyumlu.
+/// Format registry (K23/K43): a new format gets a code, backwards compatible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum FormatCodec {
@@ -222,26 +228,29 @@ impl FormatCodec {
     }
 }
 
-/// Rol-uzman boru hattı adayı (ilham-2 E): her format uzmanı kendi oranını üretir.
+/// A role-expert pipeline candidate (inspiration-2 E): every format expert
+/// produces its own ratio.
 #[derive(Debug, Clone)]
 pub struct ExpertCandidate {
     pub expert: &'static str, // "json-expert", "log-expert" ...
     pub pipe: &'static str,   // "structural+zstd19", "columnar+dict" ...
-    pub ratio: f64,           // ölçülmüş oran (elle yazılmaz; ölçümden)
-    pub lossless: bool,       // kayıpsızlık garantisi (KF2)
+    pub ratio: f64,           // the measured ratio (never hand-written; from measurement)
+    pub lossless: bool,       // the losslessness guarantee (KF2)
     pub payload: Vec<u8>,
 }
 
-/// Rol-uzman çoklu aday üretici: her format için birden çok aday (deterministik).
-/// Oranlar placeholder değildir; gerçek ölçümden gelecek (runner tarafında ölçülür, sonra sabitlenir).
+/// Role-expert multi-candidate producer: several candidates per format
+/// (deterministic). The ratios are not placeholders; they come from real
+/// measurement (measured on the runner side, then pinned).
 pub fn expert_candidates(
     codec: FormatCodec,
     original: &[u8],
     structural: &[StructuralChunk],
 ) -> Vec<ExpertCandidate> {
-    // Yapısal parçalama her uzman için ortak girdi; farklı boru hatları aday üretir.
+    // Structural splitting is the common input for every expert; different
+    // pipelines produce candidates.
     let ratio_base = if structural.len() > 1 {
-        // parçalama tekrar oranı: parça sayısı / benzersiz parça (dedup potansiyeli)
+        // split repetition ratio: piece count / unique pieces (dedup potential)
         let uniq = {
             let mut v: Vec<[u8; 32]> = structural.iter().map(|c| c.content_id).collect();
             v.sort();
@@ -262,14 +271,14 @@ pub fn expert_candidates(
             ExpertCandidate {
                 expert: "json-expert",
                 pipe: "structural+zstd19",
-                ratio: ratio_base * 7.83, // ölçüm: JSON zstd-19 7.83x (measure_ratios.py seed=7, EK13)
+                ratio: ratio_base * 7.83, // measured: JSON zstd-19 7.83x (measure_ratios.py seed=7, EK13)
                 lossless: true,
                 payload: original.to_vec(),
             },
             ExpertCandidate {
                 expert: "json-expert",
                 pipe: "structural+xz9",
-                ratio: ratio_base * 8.07, // ölçüm: JSON xz9 8.07x (EK13)
+                ratio: ratio_base * 8.07, // measured: JSON xz9 8.07x (EK13)
                 lossless: true,
                 payload: original.to_vec(),
             },
@@ -277,14 +286,14 @@ pub fn expert_candidates(
         FormatCodec::Log => vec![ExpertCandidate {
             expert: "log-expert",
             pipe: "structural+zstd19",
-            ratio: ratio_base * 6.17, // ölçüm: LOG zstd-19 6.17x (EK13)
+            ratio: ratio_base * 6.17, // measured: LOG zstd-19 6.17x (EK13)
             lossless: true,
             payload: original.to_vec(),
         }],
         FormatCodec::Csv => vec![ExpertCandidate {
             expert: "csv-expert",
             pipe: "structural+zstd19",
-            ratio: ratio_base * 3.55, // ölçüm: CSV zstd-19 3.55x (EK13)
+            ratio: ratio_base * 3.55, // measured: CSV zstd-19 3.55x (EK13)
             lossless: true,
             payload: original.to_vec(),
         }],
@@ -298,7 +307,8 @@ pub fn expert_candidates(
     }
 }
 
-/// Çoklu adaydan en iyi KAYIPSIZ adayı seç (BFT finality ayrı modülde - burada deterministik max).
+/// Pick the best LOSSLESS candidate from the set (BFT finality lives in
+/// another module - here it is a deterministic max).
 pub fn select_best_lossless(candidates: Vec<ExpertCandidate>) -> Option<ExpertCandidate> {
     candidates
         .into_iter()
@@ -306,10 +316,11 @@ pub fn select_best_lossless(candidates: Vec<ExpertCandidate>) -> Option<ExpertCa
         .max_by(|a, b| a.ratio.total_cmp(&b.ratio)) // K38: total_cmp NaN panik yapmaz
 }
 
-/// .bud v2 konteyner başlığı: magic v2 (high-bit set) + multihash + format + parça sayısı.
+/// The .bud v2 container header: magic v2 (high-bit set) + multihash + format
+/// + piece count.
 #[derive(Debug, Clone)]
 pub struct BudV2Header {
-    pub magic: [u8; 8], // b"\xB5\x55\x44\xB0\x02\x00\x00\x00" - high-bit, ASCII degil (S.47)
+    pub magic: [u8; 8], // b"\xB5\x55\x44\xB0\x02\x00\x00\x00" - high-bit, not ASCII (S.47)
     pub codec: FormatCodec,
     pub content_id: MultiHash,
     pub chunk_count: u32,
@@ -375,9 +386,10 @@ impl BudV2Header {
     }
 }
 
-/// Parça kodlayıcı: parçaların nasıl saklandığı (gerçek kayıpsız sıkıştırma bayrağı).
-/// Raw = ham baytlar; Huffman = gerçek Huffman sıkıştırması (bud_format_huffman, K38);
-/// Zstd = gerçek zstd FFI (bud_format_real, V21 yol haritası - en yüksek oran).
+/// Piece encoder: how the pieces are stored (the real lossless compression
+/// flag). Raw = raw bytes; Huffman = real Huffman compression
+/// (bud_format_huffman, K38); Zstd = real zstd FFI (bud_format_real, the V21
+/// roadmap - the highest ratio).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkCodec {
     Raw = 0,
@@ -394,17 +406,19 @@ impl ChunkCodec {
             0 => Some(Self::Raw),
             1 => Some(Self::Huffman),
             2 => Some(Self::Zstd),
-            _ => None, // bilinmeyen kodlayıcı → red (ileri uyumluluk kasıtlı)
+            _ => None, // unknown encoder -> refuse (forward compatibility is deliberate)
         }
     }
 }
 
-/// .bud v2 TAM DOSYA: başlık + parça kodlayıcı + parça listesi (len-prefixed, doğrulanabilir).
-/// K38 sertleştirme: header'ın yanına parçaları güvenli şekilde yazar/okur;
-/// bomb koruması (K25 deseni): MAX_CHUNK_COUNT / MAX_CHUNK_BYTES / MAX_TOTAL_BYTES.
-/// Her parça (u64 len + 32B content_id + veri) ile yazılır; decode her parçanın
-/// content_id'sini YENİDEN hesaplayarak doğrular → payload üzerinde herhangi bir
-/// bayt değişikliği reddedilir. Tüm decode yolları panik'siz Option döner (fuzz-güvenli).
+/// The .bud v2 FULL FILE: header + piece encoder + piece list (length-prefixed,
+/// verifiable). K38 hardening: writes/reads the pieces safely alongside the
+/// header; bomb protection (the K25 pattern): MAX_CHUNK_COUNT /
+/// MAX_CHUNK_BYTES / MAX_TOTAL_BYTES.
+/// Every piece is written as (u64 len + 32B content_id + data); decode
+/// verifies each piece by RECOMPUTING its content_id, so any byte change in
+/// the payload is refused. Every decode path returns an Option without
+/// panicking (fuzz-safe).
 #[derive(Debug, Clone)]
 pub struct BudV2File {
     pub header: BudV2Header,
@@ -417,14 +431,15 @@ impl BudV2File {
     pub const MAX_CHUNK_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
     pub const MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
-    /// Güvenli kurucu (RAW parçalar): boyut/kapasite sınırlarını daha baştan reddeder.
+    /// Safe constructor (RAW pieces): refuses size/capacity violations up front.
     pub fn new(codec: FormatCodec, chunks: Vec<StructuralChunk>) -> Option<Self> {
         Self::new_with_codec(codec, ChunkCodec::Raw, chunks)
     }
 
-    /// Huffman ile sıkıştırılmış konteyner: her parça GERÇEKTEN sıkıştırılır (deterministik),
-    /// content_id sıkıştırılmış baytlara göre yeniden kurulur (bütünlük = saklanan baytlar).
-    /// Aynı orijinal parça → aynı sıkıştırılmış bayt → aynı cid (dedup uyumlu).
+    /// A Huffman-compressed container: every piece is REALLY compressed
+    /// (deterministically) and the content_id is rebuilt over the compressed
+    /// bytes (integrity = the bytes actually stored). The same original piece
+    /// -> the same compressed bytes -> the same cid (dedup compatible).
     pub fn new_compressed(codec: FormatCodec, chunks: Vec<StructuralChunk>) -> Option<Self> {
         let compressed: Vec<StructuralChunk> = chunks
             .into_iter()
@@ -439,9 +454,10 @@ impl BudV2File {
         Self::new_with_codec(codec, ChunkCodec::Huffman, compressed)
     }
 
-    /// GERÇEK zstd ile sıkıştırılmış konteyner (V21 yol haritası, K38):
-    /// her parça zstd level 19 ile sıkıştırılır; decode/açma ZSTD_MAX_DECOMPRESSED tavanıyla
-    /// güvenlidir (K25 bomba koruması). Huffman'dan daha iyi oran (testle kanıtlı).
+    /// A container compressed with REAL zstd (the V21 roadmap, K38): every
+    /// piece is compressed at zstd level 19; decode/decompression is safe
+    /// under the ZSTD_MAX_DECOMPRESSED ceiling (K25 bomb protection). A better
+    /// ratio than Huffman (proven by test).
     pub fn new_zstd(codec: FormatCodec, chunks: Vec<StructuralChunk>) -> Option<Self> {
         let compressed: Vec<StructuralChunk> = chunks
             .into_iter()
@@ -495,9 +511,10 @@ impl BudV2File {
         v
     }
 
-    /// Sıkı decode: sihir, başlık, parça kodlayıcı, her parçanın content_id'si, toplam
-    /// uzunluk ve kök content_id doğrulanır; herhangi bir tutarsızlık → None. Fazla
-    /// (artık) bayta izin verilmez (kurcalama algılama). Hiçbir girdi panik üretemez.
+    /// Strict decode: the magic, the header, the piece encoder, every piece's
+    /// content_id, the total length and the root content_id are verified; any
+    /// inconsistency -> None. Trailing (leftover) bytes are not allowed
+    /// (tamper detection). No input can cause a panic.
     pub fn decode(raw: &[u8]) -> Option<Self> {
         const HDR: usize = 8 + 2 + 34 + 4 + 8; // header boyutu (56)
         if raw.len() < HDR + 1 + 4 {
@@ -513,13 +530,14 @@ impl BudV2File {
             return None;
         }
         let mut pos = HDR + 5;
-        // K38: count GÜVENİLMEZ bayttan gelir - with_capacity(count) küçük dosyada
-        // devasa ayırım (bellek DoS) üretirdi; lazy büyüme kullanılır (bomba yok).
+        // K38: count comes from UNTRUSTED bytes - with_capacity(count) would
+        // make a huge allocation from a small file (memory DoS); lazy growth
+        // is used instead (no bomb).
         let mut chunks: Vec<StructuralChunk> = Vec::new();
         let mut total: u64 = 0;
         for _ in 0..count {
             if raw.len() < pos + 40 {
-                return None; // len(8) + cid(32) başlığı yok
+                return None; // no len(8) + cid(32) header
             }
             let len = u64::from_le_bytes(raw[pos..pos + 8].try_into().ok()?);
             if len > Self::MAX_CHUNK_BYTES {
@@ -534,7 +552,7 @@ impl BudV2File {
             }
             let data = raw[pos..end].to_vec();
             if content_id(&data) != cid {
-                return None; // payload kurcalanmış
+                return None; // the payload was tampered with
             }
             total = total.checked_add(len)?;
             if total > Self::MAX_TOTAL_BYTES {
@@ -547,7 +565,7 @@ impl BudV2File {
             pos = end;
         }
         if pos != raw.len() {
-            return None; // artık bayt → sıkı red
+            return None; // trailing bytes -> strict refusal
         }
         if chunks.len() as u32 != header.chunk_count || total != header.total_len {
             return None;
@@ -563,10 +581,11 @@ impl BudV2File {
         Some(f)
     }
 
-    /// ORİJİNAL baytları geri getir: parçaları (gerekirse açarak) sırayla birleştir.
-    /// Kayıpsızlık garantisi: kodlayıcıdan bağımsız olarak `restore_original(decode(x))`
-    /// orijinal girdiyi üretir (Raw → aynen, Huffman → aç, Zstd → aç). Panik yok;
-    /// zstd açma K25 tavanıyla sınırlı (ZSTD_MAX_DECOMPRESSED).
+    /// Restore the ORIGINAL bytes: join the pieces in order, decompressing
+    /// where needed. The losslessness guarantee: regardless of the encoder,
+    /// `restore_original(decode(x))` produces the original input (Raw -> as
+    /// is, Huffman -> decompress, Zstd -> decompress). No panics; zstd
+    /// decompression is bounded by the K25 ceiling (ZSTD_MAX_DECOMPRESSED).
     pub fn restore_original(&self) -> Option<Vec<u8>> {
         let mut out = Vec::new();
         for c in &self.chunks {
@@ -588,8 +607,9 @@ impl BudV2File {
         Some(out)
     }
 
-    /// Kanıt zinciri: kök content_id'yi parça cid'lerinden yeniden hesaplar (veri
-    /// yeniden hash'lenmez - parça cid'leri zaten decode'da doğrulandı).
+    /// Proof chain: recomputes the root content_id from the piece cids (the
+    /// data is not rehashed - the piece cids were already verified during
+    /// decode).
     pub fn verify(&self) -> bool {
         if !self.header.verify() {
             return false;
@@ -611,10 +631,11 @@ impl BudV2File {
     }
 }
 
-/// K35 compaction: min boyut altındaki parçaları birleştir (kayıpsız).
-/// Küçük-nesne amplifikasyonu (K21/K35, S.61 MinIO/Ceph dersi) çözümü:
-/// çok küçük parçalar dedup/kanıt verimini düşürür; bitişik min-altı parçalar
-/// tek parçada toplanır. `structural_join` ile hâlâ birebir orijinal.
+/// K35 compaction: merge pieces below the minimum size (lossless).
+/// The fix for small-object amplification (K21/K35, the S.61 MinIO/Ceph
+/// lesson): very small pieces lower dedup/proof efficiency, so adjacent
+/// under-minimum pieces are gathered into one. Still byte-identical to the
+/// original under `structural_join`.
 pub fn structural_split_compact(
     kind: StructuralKind,
     data: &[u8],
@@ -628,12 +649,12 @@ pub fn structural_split_compact(
     let mut acc: Vec<u8> = Vec::new();
     for c in raw {
         if acc.is_empty() && c.data.len() >= min_chunk {
-            // büyük parça doğrudan
+            // a large piece goes straight through
             out.push(c);
         } else if acc.len() + c.data.len() <= min_chunk.max(1) {
             acc.extend_from_slice(&c.data);
         } else {
-            // akümülatörü boşalt, sonra yeni parça başlat
+            // flush the accumulator, then start a new piece
             if !acc.is_empty() {
                 let v = std::mem::take(&mut acc);
                 out.push(StructuralChunk {
@@ -657,7 +678,7 @@ pub fn structural_split_compact(
     out
 }
 
-/// Parça sayısı (tanı testi için yardımcı).
+/// Piece count (a helper for diagnostic tests).
 pub fn structural_chunks(kind: StructuralKind, data: &[u8]) -> usize {
     structural_split(kind, data).len()
 }
@@ -668,19 +689,19 @@ mod tests {
 
     #[test]
     fn json_structural_split_roundtrip() {
-        // kayıpsız: parçala + birleştir = orijinal
+        // lossless: split + join = the original
         let json = br#"[{"a":1,"b":2},{"a":3,"b":4},{"a":5,"b":6}]"#;
         let chunks = structural_split(StructuralKind::Json, json);
         assert!(
             chunks.len() >= 3,
-            "JSON kayıt sayısı kadar parça: {}",
+            "as many pieces as JSON records: {}",
             chunks.len()
         );
         let joined = structural_join(StructuralKind::Json, &chunks);
         assert_eq!(
             &joined[..],
             &json[..],
-            "JSON yapısal parçalama kayıpsız olmalı"
+            "JSON structural splitting must be lossless"
         );
     }
 
@@ -698,8 +719,8 @@ mod tests {
         let a = content_id(b"budlum");
         let b = content_id(b"budlum");
         assert_eq!(a, b, "deterministik");
-        assert_ne!(a, content_id(b"budlu"), "farklı girdi farklı hash");
-        assert_ne!(a, [0u8; 32], "sıfır değil (kriptografik)");
+        assert_ne!(a, content_id(b"budlu"), "different input, different hash");
+        assert_ne!(a, [0u8; 32], "not zero (cryptographic)");
     }
 
     #[test]
@@ -714,7 +735,7 @@ mod tests {
 
     #[test]
     fn select_best_lossless_nan_safe() {
-        // K38: NaN oranlı aday sıralamayı çökertmemeli (total_cmp)
+        // K38: a candidate with a NaN ratio must not break the ordering (total_cmp)
         let nan_cand = ExpertCandidate {
             expert: "nan-expert",
             pipe: "structural+nan",
@@ -730,7 +751,7 @@ mod tests {
             payload: vec![],
         };
         let best =
-            select_best_lossless(vec![nan_cand, ok_cand]).expect("NaN elenir, OK aday seçilir");
+            select_best_lossless(vec![nan_cand, ok_cand]).expect("NaN is dropped, the OK candidate is chosen");
         assert_eq!(best.ratio, 7.83);
         assert!(select_best_lossless(vec![]).is_none());
     }
@@ -740,9 +761,9 @@ mod tests {
         let json = br#"[{"x":1},{"x":2}]"#;
         let chunks = structural_split(StructuralKind::Json, json);
         let cands = expert_candidates(FormatCodec::Json, json, &chunks);
-        assert!(cands.len() >= 2, "JSON uzmanı çoklu aday üretmeli");
+        assert!(cands.len() >= 2, "the JSON expert must produce several candidates");
         let best = select_best_lossless(cands).unwrap();
-        assert!(best.ratio >= 7.5, "en iyi kayıpsız aday seçilmeli");
+        assert!(best.ratio >= 7.5, "the best lossless candidate must be chosen");
         assert!(best.lossless);
     }
 
@@ -752,7 +773,7 @@ mod tests {
         let chunks = structural_split(StructuralKind::Json, json);
         let hdr = BudV2Header::new(FormatCodec::Json, &chunks);
         assert!(hdr.verify());
-        assert_ne!(hdr.magic[0], b'B', "magic high-bit set, ASCII degil (S.47)");
+        assert_ne!(hdr.magic[0], b'B', "magic has the high bit set, not ASCII (S.47)");
         let bytes = hdr.to_bytes();
         let dec = BudV2Header::from_bytes(&bytes).unwrap();
         assert_eq!(dec.codec, FormatCodec::Json);
@@ -767,17 +788,17 @@ mod tests {
 
     #[test]
     fn compact_merges_small_chunks_lossless() {
-        // CSV: her satır ~12B; min 64B ile birleştirilmeli, kayıpsız
+        // CSV: every row is ~12B; must merge under a 64B minimum, lossless
         let csv = b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n10,11,12\n";
         let raw = structural_split(StructuralKind::Csv, csv);
         let comp = structural_split_compact(StructuralKind::Csv, csv, 64);
         assert!(
             raw.len() > comp.len(),
-            "compaction parça sayisini dusurmeli"
+            "compaction must lower the piece count"
         );
         let joined = structural_join(StructuralKind::Csv, &comp);
         assert_eq!(joined, csv, "compaction kayipsiz");
-        // her birlesik parcada content_id dogru
+        // the content_id is correct in every merged piece
         for c in &comp {
             assert_eq!(c.content_id, content_id(&c.data));
         }
@@ -792,9 +813,9 @@ mod tests {
         assert_eq!(joined, log);
     }
 
-    // ── K38: kayıpsızlık TAMLIĞI - mülkiyet testleri ────────────────────────────
+    // -- K38: COMPLETENESS of losslessness - property tests --------------------
 
-    /// Deterministik xorshift64* - dış bağımlılık yok (rand crate'siz).
+    /// Deterministic xorshift64* - no external dependency (no rand crate).
     struct Rng(u64);
     impl Rng {
         fn next(&mut self) -> u64 {
@@ -818,12 +839,12 @@ mod tests {
         let n = rng.below(10);
         for _ in 0..n {
             match rng.below(6) {
-                0 => out.push(b'\\'), // kaçış (string durumu sınar)
-                1 => out.push(b'"'),  // kaçışlı tırnak
+                0 => out.push(b'\\'), // escape (exercises the string state)
+                1 => out.push(b'"'),  // escaped quote
                 2 => out.push(b'{'),
                 3 => out.push(b','),
                 _ => {
-                    // ascii veya çok baytlı UTF-8 (é)
+                    // ascii or multi-byte UTF-8
                     if rng.below(2) == 0 {
                         out.push(0xC3);
                         out.push(0xA9);
@@ -881,12 +902,12 @@ mod tests {
             for _ in 0..len {
                 out.push(b'a' + (rng.below(26) as u8));
                 if rng.below(5) == 0 {
-                    out.push(b','); // satır içi virgül
+                    out.push(b','); // an inline comma
                 }
             }
             match rng.below(4) {
-                0 => {}               // satır sonu yok (son satır)
-                1 => out.push(b'\r'), // tek \r (satır sonu değil)
+                0 => {}               // no line ending (last line)
+                1 => out.push(b'\r'), // a lone \r (not a line ending)
                 _ => out.push(b'\n'),
             }
         }
@@ -895,7 +916,7 @@ mod tests {
 
     #[test]
     fn total_losslessness_property() {
-        // K38: HER girdi için split+join = orijinal; compact (çeşitli min) de kayıpsız.
+        // K38: for EVERY input split+join = the original; compact (at various minimums) is lossless too.
         let mut rng = Rng(0xB0B2_2026_0816_1337);
         for round in 0..400u32 {
             let kind = match rng.below(5) {
@@ -921,14 +942,14 @@ mod tests {
             assert_eq!(
                 &joined[..],
                 &data[..],
-                "round {round} kind={kind:?} split+join kayıpsız olmalı"
+                "round {round} kind={kind:?} split+join must be lossless"
             );
             for mc in [1usize, 7, 64, 257, 4096] {
                 let comp = structural_split_compact(kind, &data, mc);
                 assert_eq!(
                     structural_join(kind, &comp),
                     data,
-                    "round {round} kind={kind:?} compact(min={mc}) kayıpsız olmalı"
+                    "round {round} kind={kind:?} compact(min={mc}) must be lossless"
                 );
             }
         }
@@ -936,7 +957,7 @@ mod tests {
 
     #[test]
     fn edge_inputs_lossless() {
-        // boş, çerçevesiz JSON, bozuk UTF-8, negatif derinlik, yalnız boşluk
+        // empty, unframed JSON, malformed UTF-8, negative depth, whitespace only
         for kind in [
             StructuralKind::Json,
             StructuralKind::Csv,
@@ -949,19 +970,19 @@ mod tests {
             assert!(structural_join(kind, &[]).is_empty());
         }
         let cases: &[&[u8]] = &[
-            b"",                                  // boş
-            b"   ",                               // boşluk
-            b"{\"a\":1}",                         // nesne (dizi değil)
+            b"",                                  // empty
+            b"   ",                               // whitespace
+            b"{\"a\":1}",                         // an object (not an array)
             b"\"merhaba\"",                       // ilkel
-            b"1,2,3",                             // üst seviye ilkeller
-            b"[]}",                               // bozuk: fazla kapanış
-            b"[{\"a\":1}",                        // bozuk: kapanış eksik
-            b"{\"a\":[1,2],\"b\":[3,4]}",         // iç içe diziler
-            b"[[1,2],[3,4]]",                     // dizi içinde dizi
-            b"[\n  {\"a\": 1},\n  {\"a\": 2}\n]", // çok satırlı
-            &[0xFF, 0xFE, 0x00, 0x41, 0x22],      // geçersiz UTF-8
+            b"1,2,3",                             // top-level primitives
+            b"[]}",                               // malformed: extra closer
+            b"[{\"a\":1}",                        // malformed: missing closer
+            b"{\"a\":[1,2],\"b\":[3,4]}",         // nested arrays
+            b"[[1,2],[3,4]]",                     // an array inside an array
+            b"[\n  {\"a\": 1},\n  {\"a\": 2}\n]", // multi-line
+            &[0xFF, 0xFE, 0x00, 0x41, 0x22],      // invalid UTF-8
             b"a\r\nb\r\nc",                       // CRLF
-            b"\"{\"",                             // string içinde ayraç
+            b"\"{\"",                             // a delimiter inside a string
         ];
         for (i, data) in cases.iter().enumerate() {
             for kind in [
@@ -975,7 +996,7 @@ mod tests {
                 assert_eq!(
                     structural_join(kind, &chunks),
                     *data,
-                    "case {i} kind={kind:?} kayıpsız olmalı"
+                    "case {i} kind={kind:?} must be lossless"
                 );
             }
         }
@@ -985,15 +1006,15 @@ mod tests {
     fn json_record_boundaries_at_depth1_commas() {
         let json = br#"[{"a":1},{"a":2},{"a":3}]"#;
         let chunks = structural_split(StructuralKind::Json, json);
-        assert!(chunks.len() >= 3, "kayıt sayısı kadar parça");
+        assert!(chunks.len() >= 3, "as many pieces as records");
         assert!(
             chunks[0].data.starts_with(b"["),
-            "ilk parça açılış ayracını taşır"
+            "the first piece carries the opening delimiter"
         );
         for c in &chunks[1..] {
             assert!(
                 c.data.starts_with(b","),
-                "parça sınırı virgülle başlamalı (JSON geçerliliği korunur)"
+                "a piece boundary must start with a comma (JSON validity is preserved)"
             );
         }
         assert_eq!(structural_join(StructuralKind::Json, &chunks), json);
@@ -1003,12 +1024,12 @@ mod tests {
     fn compact_json_merges_without_losing_records() {
         let json = br#"[{"a":1},{"a":2},{"a":3},{"a":4}]"#;
         let comp = structural_split_compact(StructuralKind::Json, json, 1024);
-        assert_eq!(comp.len(), 1, "tamamı tek parçaya birleşmeli");
+        assert_eq!(comp.len(), 1, "everything must merge into one piece");
         assert_eq!(structural_join(StructuralKind::Json, &comp), json);
         assert_eq!(comp[0].content_id, content_id(&comp[0].data));
     }
 
-    // ── BudV2File: tam dosya roundtrip + kurcalama + bomb koruması ─────────────
+    // -- BudV2File: full-file round trip + tampering + bomb protection ---------
 
     #[test]
     fn bud_v2_file_roundtrip_and_tamper() {
@@ -1017,36 +1038,36 @@ mod tests {
         let f = BudV2File::new(FormatCodec::Csv, chunks).unwrap();
         assert!(f.verify());
         let enc = f.encode();
-        let dec = BudV2File::decode(&enc).expect("temiz dosya decode olmalı");
+        let dec = BudV2File::decode(&enc).expect("a clean file must decode");
         assert!(dec.verify());
         assert_eq!(dec.header.codec, FormatCodec::Csv);
         assert_eq!(dec.chunks.len(), f.chunks.len());
         assert_eq!(
             structural_join(StructuralKind::Csv, &dec.chunks),
             csv,
-            "decode sonrası birleştir = orijinal"
+            "join after decode = the original"
         );
-        // (1) payload baytı çevir → content_id uyuşmaz → red
+        // (1) flip a payload byte -> content_id mismatch -> refuse
         let mut t1 = enc.clone();
         *t1.last_mut().unwrap() ^= 0xFF;
         assert!(BudV2File::decode(&t1).is_none(), "payload tamper red");
-        // (2) kırp → eksik parça → red
+        // (2) truncate -> missing piece -> refuse
         let mut t2 = enc.clone();
         t2.truncate(enc.len() - 3);
-        assert!(BudV2File::decode(&t2).is_none(), "kırpma red");
+        assert!(BudV2File::decode(&t2).is_none(), "truncation is refused");
         // (3) magic boz → red
         let mut t3 = enc.clone();
         t3[0] = 0x00;
         assert!(BudV2File::decode(&t3).is_none(), "magic tamper red");
-        // (4) total_len boz (başlık 48..56) → decode red (tutarlılık)
+        // (4) corrupt total_len (header 48..56) -> decode refuses (consistency)
         let mut t4 = enc.clone();
         t4[48] ^= 0x01;
         assert!(BudV2File::decode(&t4).is_none(), "total_len tamper red");
-        // (5) artık bayt ekle → sıkı red
+        // (5) append trailing bytes -> strict refusal
         let mut t5 = enc.clone();
         t5.push(0x00);
-        assert!(BudV2File::decode(&t5).is_none(), "artık bayt red");
-        // (6) kısa girdiler → red (panik yok)
+        assert!(BudV2File::decode(&t5).is_none(), "trailing bytes are refused");
+        // (6) short inputs -> refuse (no panic)
         assert!(BudV2File::decode(&[]).is_none());
         assert!(BudV2File::decode(&enc[..20]).is_none());
         assert!(BudV2File::decode(&enc[..59]).is_none());
@@ -1057,27 +1078,27 @@ mod tests {
         let csv = b"a\n";
         let chunks = structural_split(StructuralKind::Csv, csv);
         let hdr = BudV2Header::new(FormatCodec::Csv, &chunks);
-        // (1) parça sayısı bombası: başlık + codec + dev count, veri yok
+        // (1) piece-count bomb: header + codec + a huge count, no data
         let mut bomb = hdr.to_bytes();
         bomb.push(ChunkCodec::Raw.to_u8());
         bomb.extend_from_slice(&2_000_000u32.to_le_bytes());
         assert!(
             BudV2File::decode(&bomb).is_none(),
-            "parça sayısı bombası red"
+            "the piece-count bomb is refused"
         );
-        // (2) parça boyu bombası: 1 parça ama len = 1 GiB iddiası (MAX_CHUNK_BYTES üstü)
+        // (2) piece-size bomb: 1 piece claiming len = 1 GiB (above MAX_CHUNK_BYTES)
         let mut b2 = hdr.to_bytes();
         b2.push(ChunkCodec::Raw.to_u8());
         b2.extend_from_slice(&1u32.to_le_bytes());
         b2.extend_from_slice(&(1u64 << 30).to_le_bytes());
         b2.extend_from_slice(&[0u8; 32]);
-        assert!(BudV2File::decode(&b2).is_none(), "boy bombası red");
-        // (3) u32::MAX parça sayısı (cast taşması yok)
+        assert!(BudV2File::decode(&b2).is_none(), "the size bomb is refused");
+        // (3) a u32::MAX piece count (no cast overflow)
         let mut b3 = hdr.to_bytes();
         b3.push(ChunkCodec::Raw.to_u8());
         b3.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(BudV2File::decode(&b3).is_none(), "u32::MAX bombası red");
-        // (4) bilinmeyen parça kodlayıcı → red
+        assert!(BudV2File::decode(&b3).is_none(), "the u32::MAX bomb is refused");
+        // (4) an unknown piece encoder -> refuse
         let mut b4 = hdr.to_bytes();
         b4.push(0x7F);
         b4.extend_from_slice(&0u32.to_le_bytes());
@@ -1086,7 +1107,7 @@ mod tests {
 
     #[test]
     fn bud_v2_file_new_rejects_oversize() {
-        // 65 MiB parça → MAX_CHUNK_BYTES (64 MiB) üstü → None
+        // a 65 MiB piece -> above MAX_CHUNK_BYTES (64 MiB) -> None
         let big = vec![0u8; 65 * 1024 * 1024];
         let chunks = vec![StructuralChunk {
             content_id: content_id(&big),
@@ -1099,19 +1120,19 @@ mod tests {
     fn bud_v2_file_verify_detects_inconsistency() {
         let csv = b"x\n";
         let chunks = structural_split(StructuralKind::Csv, csv);
-        // total_len tutarsızlığı
+        // total_len inconsistency
         let mut f = BudV2File::new(FormatCodec::Csv, chunks.clone()).unwrap();
         f.header.total_len += 1;
-        assert!(!f.verify(), "total_len uyumsuzluğu verify'da yakalanır");
-        // chunk_count tutarsızlığı
+        assert!(!f.verify(), "a total_len mismatch is caught in verify");
+        // chunk_count inconsistency
         let mut f2 = BudV2File::new(FormatCodec::Csv, chunks).unwrap();
         f2.header.chunk_count += 1;
-        assert!(!f2.verify(), "chunk_count uyumsuzluğu verify'da yakalanır");
+        assert!(!f2.verify(), "a chunk_count mismatch is caught in verify");
     }
 
     #[test]
     fn zstd_container_roundtrip_and_beats_huffman() {
-        // K38 + V21: zstd konteyner kayıpsız + Huffman'dan küçük (gerçek zstd FFI)
+        // K38 + V21: the zstd container is lossless and smaller than Huffman (real zstd FFI)
         let line = b"2026-08-16 INFO req=123 /api/a s=200 b=42 reg=tr\n";
         let mut data = Vec::new();
         for _ in 0..2000 {
@@ -1123,11 +1144,11 @@ mod tests {
         let zh = z.encode();
         assert!(
             zh.len() < hfm.encode().len(),
-            "zstd Huffman'dan küçük: {} vs {}",
+            "zstd is smaller than Huffman: {} vs {}",
             zh.len(),
             hfm.encode().len()
         );
-        assert_eq!(z.restore_original().unwrap(), data, "zstd kayıpsız");
+        assert_eq!(z.restore_original().unwrap(), data, "zstd is lossless");
         // decode + restore + kurcalama red
         let dec = BudV2File::decode(&zh).unwrap();
         assert_eq!(dec.chunk_codec, ChunkCodec::Zstd);
@@ -1142,7 +1163,7 @@ mod tests {
 
     #[test]
     fn compressed_container_roundtrip_and_smaller() {
-        // tekrarlı log: sıkıştırılmış konteyner GERÇEKTEN küçülmeli + kayıpsız
+        // a repetitive log: the compressed container must REALLY shrink and stay lossless
         let line = b"2026-08-16 INFO req=123 /api/a s=200 b=42 reg=tr\n";
         let mut data = Vec::new();
         for _ in 0..3000 {
@@ -1153,11 +1174,11 @@ mod tests {
         let comp = BudV2File::new_compressed(FormatCodec::Log, chunks).unwrap();
         assert!(
             comp.encode().len() < raw.encode().len(),
-            "sıkıştırılmış konteyner küçülmeli: raw {} vs comp {}",
+            "the compressed container must shrink: raw {} vs comp {}",
             raw.encode().len(),
             comp.encode().len()
         );
-        // kayıpsızlık: her ikisi de orijinali geri verir
+        // losslessness: both give the original back
         assert_eq!(raw.restore_original().unwrap(), data);
         assert_eq!(comp.restore_original().unwrap(), data);
         // decode + restore_original yolu
@@ -1172,8 +1193,8 @@ mod tests {
 
     #[test]
     fn bud_v2_file_decode_never_panics_on_truncation() {
-        // K38: geçerli bir dosyanın HER kırpma uzunluğunda decode panik üretmemeli
-        // (alloc-bomb fix'i sonrası küçük dosya üzerinde tam tarama hızlıdır)
+        // K38: decode must not panic at ANY truncation length of a valid file
+        // (after the alloc-bomb fix a full scan over a small file is fast)
         let line = b"2026-08-16 INFO req=1 /a s=200 b=7 reg=tr\n";
         let mut data = Vec::new();
         for _ in 0..40 {
@@ -1193,7 +1214,7 @@ mod tests {
                 };
                 let bytes = f.encode();
                 for i in 0..bytes.len() {
-                    let _ = BudV2File::decode(&bytes[..i]); // panik olmamalı
+                    let _ = BudV2File::decode(&bytes[..i]); // must not panic
                 }
                 let _ = BudV2File::decode(&bytes);
             }
@@ -1202,7 +1223,7 @@ mod tests {
 
     #[test]
     fn decode_garbage_count_no_alloc_bomb() {
-        // K38: çöp count alanı devasa ön-ayırım üretmemeli (lazy büyüme) - hızlı döner
+        // K38: a garbage count field must not cause a huge pre-allocation (lazy growth) - returns fast
         let csv = b"a\n";
         let chunks = structural_split(StructuralKind::Csv, csv);
         let hdr = BudV2Header::new(FormatCodec::Csv, &chunks);
@@ -1211,7 +1232,7 @@ mod tests {
         tiny.extend_from_slice(&999_999u32.to_le_bytes()); // dev count, veri YOK
         let start = std::time::Instant::now();
         assert!(BudV2File::decode(&tiny).is_none());
-        // tekrar tekrar deneme de hızlı kalmalı (bellek DoS değil)
+        // repeated attempts must also stay fast (not a memory DoS)
         for _ in 0..1000 {
             assert!(BudV2File::decode(&tiny).is_none());
         }
@@ -1224,9 +1245,9 @@ mod tests {
 
     #[test]
     fn decode_never_panics_on_arbitrary_bytes() {
-        // Mini-fuzz (K38): rastgele bayt dizilerinde tüm decode/parse yolları panik'siz.
+        // Mini-fuzz (K38): every decode/parse path is panic-free on random byte strings.
         // BudV2File::decode, BudV2Header::from_bytes, MultiHash::decode her girdide
-        // Some/None dönmeli, ASLA panik üretmemeli (fuzz-güvenli tasarım kanıtı).
+        // It must return Some/None and NEVER panic (evidence of a fuzz-safe design).
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -1256,7 +1277,7 @@ mod tests {
             let _ = structural_split(StructuralKind::Binary, slice);
             let _ = structural_split_compact(StructuralKind::Json, slice, 7);
             if round % 100 == 0 {
-                // belirli uzunlukta girdiler (başlık boyutları, sınırlar)
+                // inputs at specific lengths (header sizes, boundaries)
                 for l in [0usize, 1, 55, 56, 57, 59, 60, 99, 100, 255] {
                     let _ = BudV2File::decode(&slice[..l.min(len)]);
                 }
