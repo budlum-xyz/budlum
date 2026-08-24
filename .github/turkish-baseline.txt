@@ -14,7 +14,6 @@
 #
 # Format: <path>\t<remaining Turkish lines>
 # Recorded: 2026-08-24. 347 files, 5742 lines.
-.github/idle-code-baseline.txt	1
 .github/workflows/ci.yml	6
 .github/workflows/docker-smoke.yml	1
 .github/workflows/extra-tooling.yml	3

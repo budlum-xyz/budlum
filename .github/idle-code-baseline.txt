@@ -154,7 +154,7 @@ bud/src/bud_format_edition.rs	const	ED_VERSION
 bud/src/bud_format_edition.rs	fn	bud1_digest
 bud/src/bud_format_edition.rs	fn	device_validator
 bud/src/bud_format_edition.rs	fn	liability_user
-bud/src/bud_format_edition.rs	fn	tarif_zorunlu
+bud/src/bud_format_edition.rs	fn	recipe_required
 bud/src/bud_format_edition.rs	struct	EditionChoice
 bud/src/bud_format_encpact.rs	const	ENCPACT_MAGIC
 bud/src/bud_format_encpact.rs	enum	EncryptionDecl
@@ -412,7 +412,7 @@ bud/src/bud_format_qos.rs	fn	decide_qos
 bud/src/bud_format_qos.rs	fn	qos_digest
 bud/src/bud_format_qrmatrix.rs	const	QRM_MAGIC
 bud/src/bud_format_qrmatrix.rs	const	QRM_VERSION
-bud/src/bud_format_qrmatrix.rs	fn	damladan_kareler
+bud/src/bud_format_qrmatrix.rs	fn	frames_from_drops
 bud/src/bud_format_qrmatrix.rs	fn	version_for
 bud/src/bud_format_qrmatrix.rs	struct	QrMatrix
 bud/src/bud_format_qrvideo.rs	const	BLOCK
