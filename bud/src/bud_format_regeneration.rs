@@ -1,17 +1,20 @@
-//! B.U.D. 2.0 İCAT - Rejenerasyon Mutabakatı (Regeneration-as-Consensus) (2026-08-16)
+//! B.U.D. 2.0 INVENTION - Regeneration-as-Consensus (2026-08-16)
 //!
-//! fikirler2.0 İ2 + DEPOLAMA-ZERO-MIMARI-TEZ: konsensüs "baytı kanıtla" (PoR/PoSt)
-//! yerine **"üretimi doğrula"** der: validatör talep anında içeriği üreticiten üretir,
-//! hash'ler, PACT commitment'ı ile karşılaştırır; eşleşme mutabakatın kendisidir.
+//! ideas2.0 I2 + the STORAGE-ZERO ARCHITECTURE THESIS: instead of "prove the
+//! byte" (PoR/PoSt), consensus says **"verify the production"**: on demand the
+//! validator produces the content from the producer, hashes it, and compares it
+//! with the PACT commitment; the match is consensus itself.
 //!
-//! Neden "blockchainde yeni": mevcut yaklaşımlar "sakla+kanıtla", "sakla+BFT tasdiki",
-//! "sakla+erişim kanıtı", "hesapla+ispatla" (ispat pahalı) ve
-//! "olayları sakla+state'i yeniden hesapla" (olay günlüğü kalıcı) der. **Hiçbiri**
-//! "içerik baytı hiç saklanmaz; üretim eşleşmesi konsensüs doğrulamasıdır" demiyor.
+//! Why this is "new on a blockchain": existing approaches say "store+prove",
+//! "store+BFT attestation", "store+proof of access", "compute+prove" (proving is
+//! expensive) and "store events+recompute state" (the event log is permanent).
+//! **None of them** says "the content byte is never stored; a production match
+//! is the consensus verification".
 //!
-//! Bu modül: sınav (challenge) → üret → hash → commitment karşılaştır → sonuç.
-//! Sınav zincire yazılmaz; yalnız sonuç hash'i denetim için saklanır (İ2).
-//! Başarısız üretim → itibar skoru düşer (provider.rs deseni).
+//! This module: a challenge -> produce -> hash -> compare with the commitment ->
+//! a result. The challenge is not written on chain; only the result hash is kept
+//! for audit (I2). A failed production lowers the reputation score (the
+//! provider.rs pattern).
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -23,24 +26,25 @@ use sha3::{Digest, Sha3_256};
 pub const REGEN_MAGIC: [u8; 8] = *b"\xB5RGEN\0\0\0";
 pub const REGEN_VERSION: u8 = 1;
 
-/// Sınav sonucu (İ2): üretim mutabakatı geçti mi + maliyet.
+/// The challenge result (I2): did the production consensus pass, and at what cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegenerationOutcome {
-    Verified,      // üretim commitment ile eşleşti → mutabakat
-    Mismatch,      // üretim commitment ile eşleşmedi → RED + itibar düşer
-    NotProducible, // üretici üretilemedi (sınıf yalanı/bozuk üretici)
+    Verified,      // the production matched the commitment -> consensus
+    Mismatch,      // the production did not match the commitment -> REFUSED, reputation drops
+    NotProducible, // the producer could not produce (a class lie or a broken producer)
 }
 
-/// Rejenerasyon sınavı: verilen PACT için üretilen baytları doğrula.
-/// İ2 tezi: "üretim maliyeti < kanıt maliyeti" - bu fonksiyon maliyeti ölçer.
+/// The regeneration challenge: verify the produced bytes against the given
+/// PACT. The I2 thesis is "the cost of producing is below the cost of proving" -
+/// this function measures that cost.
 pub struct RegenerationChallenge;
 
 impl RegenerationChallenge {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_REGENERATION_V1";
 
-    /// Üretilen baytları PACT commitment'ına karşı doğrula (İ2 çekirdeği).
-    /// - PureProduction/RecipePlusResidual: commitment = H(üretilen bayt)
-    /// - ResidualOnly: commitment = content_id(original) (kayıpsız bütünlük)
+    /// Verify the produced bytes against the PACT commitment (the core of I2).
+    /// - PureProduction/RecipePlusResidual: commitment = H(produced bytes)
+    /// - ResidualOnly: commitment = content_id(original) (lossless integrity)
     pub fn verify(pact: &PactRecord, produced: &[u8]) -> RegenerationOutcome {
         if !pact.verify() {
             return RegenerationOutcome::NotProducible;
@@ -52,8 +56,9 @@ impl RegenerationChallenge {
         }
     }
 
-    /// Rezidüel bütünlük: üretilemeyen artık commitment ile eşleşiyor mu (İ6)?
-    /// RecipePlusResidual modunda rezidüel de doğrulanmalı - sınıf yalanı yakalanır.
+    /// Residual integrity: does the remainder that cannot be produced match the
+    /// commitment (I6)? In RecipePlusResidual mode the residual must be verified
+    /// too - a class lie is caught this way.
     pub fn verify_with_residual(
         pact: &PactRecord,
         produced: &[u8],
@@ -71,7 +76,7 @@ impl RegenerationChallenge {
         }
     }
 
-    /// Sınav kaydı: epoch + pact_hash + sonuç + maliyet (denetim için, zincire yazılabilir).
+    /// The challenge record: epoch + pact_hash + result + cost (for audit, writable on chain).
     pub fn record_hash(
         epoch: u64,
         pact_hash: [u8; 32],
@@ -91,14 +96,16 @@ impl RegenerationChallenge {
         h.finalize().into()
     }
 
-    /// İ2 kabul: üretim maliyeti, karşılık gelen kanıt maliyetinin %1'inden az olmalı.
-    /// (zkVM ispatı 222 yıl saklamaya bedel - DEPOLAMA-ZERO ölçümü; üretim ~okuma maliyeti.)
+    /// The I2 acceptance rule: the cost of producing must be below 1 percent of
+    /// the corresponding proving cost. (A zkVM proof is worth 222 years of
+    /// storage - the STORAGE-ZERO measurement; producing costs about as much as
+    /// reading.)
     pub fn regeneration_beats_proof(production_cost: u64, proof_cost: u64) -> bool {
         proof_cost > 0 && (production_cost as f64) < (proof_cost as f64) * 0.01
     }
 }
 
-/// Rejenerasyon mutabakatı kaydı (zincire yazılabilir küçük kayıt - İ8 bayt-bütçe uyumlu).
+/// The regeneration consensus record (a small on-chain record - within the I8 byte budget).
 #[derive(Debug, Clone)]
 pub struct RegenerationRecord {
     pub epoch: u64,
@@ -131,7 +138,7 @@ impl RegenerationRecord {
         )
     }
 
-    /// Deterministik blob (magic + sürüm + alanlar + digest).
+    /// A deterministic blob (magic + version + fields + digest).
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&REGEN_MAGIC);
@@ -185,22 +192,22 @@ mod tests {
 
     #[test]
     fn pure_production_regenerates_consensus() {
-        // İ2: saf üretim - üretilen bayt commitment'a uyuyorsa mutabakat VERIFIED
+        // I2: pure production - if the produced byte matches the commitment, consensus is VERIFIED
         let producer = [1u8; 32];
         let seed = [7u8; 32];
-        let produced = b"deterministik uretim ciktisi 1234567890";
+        let produced = b"deterministic production output 1234567890";
         let pact = PactRecord::pure(producer, seed, produced, 100);
         assert_eq!(
             RegenerationChallenge::verify(&pact, produced),
             RegenerationOutcome::Verified,
-            "üretim eşleşmesi mutabakatın kendisidir"
+            "a production match is consensus itself"
         );
         assert_eq!(
-            RegenerationChallenge::verify(&pact, b"yanlis uretim"),
+            RegenerationChallenge::verify(&pact, b"wrong production"),
             RegenerationOutcome::Mismatch,
-            "farklı üretim RED"
+            "a different production is REFUSED"
         );
-        // sınav kaydı zincire yazılabilir
+        // the challenge record can be written on chain
         let rec = RegenerationRecord::new(1, pact.record_hash(), RegenerationOutcome::Verified, 50);
         let blob = rec.to_blob();
         let back = RegenerationRecord::from_blob(&blob).expect("blob");
@@ -214,48 +221,48 @@ mod tests {
 
     #[test]
     fn residual_class_verified_with_residual() {
-        // İ6: üretici + rezidüel - üretim VE rezidüel birlikte doğrulanmalı
-        let produced = b"uretilen kisim";
-        let residual = b"organik artik 0x1234";
+        // I6: producer + residual - the production AND the residual must be verified together
+        let produced = b"the produced part";
+        let residual = b"organic remainder 0x1234";
         let pact =
             PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
         assert_eq!(
             RegenerationChallenge::verify_with_residual(&pact, produced, residual),
             RegenerationOutcome::Verified
         );
-        // rezidüel yanlış → Mismatch (sınıf yalanı)
+        // a wrong residual -> Mismatch (a class lie)
         assert_eq!(
-            RegenerationChallenge::verify_with_residual(&pact, produced, b"farkli"),
+            RegenerationChallenge::verify_with_residual(&pact, produced, b"different"),
             RegenerationOutcome::Mismatch
         );
-        // üretim yanlış → Mismatch
+        // a wrong production -> Mismatch
         assert_eq!(
-            RegenerationChallenge::verify_with_residual(&pact, b"yanlis", residual),
+            RegenerationChallenge::verify_with_residual(&pact, b"wrong", residual),
             RegenerationOutcome::Mismatch
         );
     }
 
     #[test]
     fn residual_only_matches_content_id() {
-        // kayıpsız .bud: commitment = content_id → üretim = orijinal baytlar
-        let original = b"kayipsiz icerik 12345";
+        // a lossless .bud: commitment = content_id -> production = the original bytes
+        let original = b"lossless content 12345";
         let pact = PactRecord::residual_only(original, 300);
         assert_eq!(
             RegenerationChallenge::verify(&pact, original),
             RegenerationOutcome::Verified
         );
         assert_eq!(
-            RegenerationChallenge::verify(&pact, b"farkli"),
+            RegenerationChallenge::verify(&pact, b"different"),
             RegenerationOutcome::Mismatch
         );
     }
 
     #[test]
     fn regeneration_beats_proof_economy() {
-        // İ2 kabul: üretim maliyeti kanıt maliyetinin %1'inden az (zkVM ispatı pahalı)
+        // The I2 rule: producing costs below 1 percent of proving (a zkVM proof is expensive)
         assert!(
             RegenerationChallenge::regeneration_beats_proof(1, 1000),
-            "üretim %0.1 kanıt maliyeti"
+            "producing is 0.1 percent of the proving cost"
         );
         assert!(
             RegenerationChallenge::regeneration_beats_proof(50, 10_000),
@@ -273,10 +280,10 @@ mod tests {
 
     #[test]
     fn tampered_pact_rejected() {
-        // bozuk PACT (sınıf yalanı) → NotProducible
+        // a corrupt PACT (a class lie) -> NotProducible
         let produced = b"x";
         let mut pact = PactRecord::pure([1u8; 32], [2u8; 32], produced, 1);
-        pact.residual_len = 5; // PureProduction'da rezidüel 0 olmalı - verify RED
+        pact.residual_len = 5; // in PureProduction the residual must be 0 - verify REFUSES
         assert_eq!(
             RegenerationChallenge::verify(&pact, produced),
             RegenerationOutcome::NotProducible

@@ -1,81 +1,88 @@
-//! .bud real compression - GERÇEK kayıpsız sıkıştırma (2026-08-16)
+//! .bud real compression - REAL lossless compression (2026-08-16)
 //!
-//! ÖNCEKİ SÜRÜM STUB'TI: `zstd_compress`/`xz_compress` zstd/xz MAGIC taklidi + ilk 100
-//! bayt döndürüyordu - gerçek sıkıştırma değildi, sahte zarf üretiyordu (hiçbir gerçek
-//! açıcı onu açamazdı). Bu sürüm onu DEĞİŞTİRİR: gerçek, kayıpsız, sıfır-bağımlılık
-//! Huffman codec'i (bud_format_huffman) kullanılır; magic B.U.D.'a özgüdür (taklit yok).
-//! zstd/xz/avif gerçek FFI entegrasyonu ayrı bir adımdır (ölçümler ayrı belgelenir).
+//! THE PREVIOUS VERSION WAS A STUB: `zstd_compress`/`xz_compress` imitated the
+//! zstd/xz MAGIC and returned the first 100 bytes - it was not real compression,
+//! it produced a fake envelope (no real decompressor could open it). This
+//! version REPLACES it: the real, lossless, zero-dependency Huffman codec
+//! (bud_format_huffman) is used, and the magic is specific to B.U.D. (no
+//! imitation). Real zstd/xz/avif FFI integration is a separate step (its
+//! measurements are documented separately).
 
 #![forbid(unsafe_code)]
 
 use crate::bud_format_huffman::{HuffmanCoder, BUD_HFM_MAGIC};
 
-/// Gerçek kayıpsız sıkıştırıcı (Huffman tabanlı, no unsafe, deterministik).
+/// A real lossless compressor (Huffman based, no unsafe, deterministic).
 pub struct RealCompressor;
 
-/// Gerçek zstd FFI (V21 yol haritası - zstd crate).
-/// `zstd_compress`: level ile gerçek zstd sıkıştırma (unsafe bizim koda değil, crate içinde).
-/// `zstd_decompress_safe`: frame content size + çıktı boyutu TAVANLI açma (K25 bomba koruması).
+/// Real zstd FFI (the V21 roadmap - the zstd crate).
+/// `zstd_compress`: real zstd compression at a level (the unsafe lives in the
+/// crate, not in our code).
+/// `zstd_decompress_safe`: decompression with a CEILING on both the frame
+/// content size and the output size (K25 bomb protection).
 pub fn zstd_compress(data: &[u8], level: i32) -> Option<Vec<u8>> {
     zstd::encode_all(data, level).ok()
 }
 
-pub const ZSTD_MAX_DECOMPRESSED: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB (K25 tavanı)
+pub const ZSTD_MAX_DECOMPRESSED: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB (the K25 ceiling)
 
 pub fn zstd_decompress_safe(bytes: &[u8], max_out: u64) -> Option<Vec<u8>> {
     use std::io::Read;
-    // frame başlığından orijinal boyut (zstd_safe::get_frame_content_size)
+    // the original size from the frame header (zstd_safe::get_frame_content_size)
     let frame_sz = zstd::zstd_safe::get_frame_content_size(bytes).ok()?;
     if let Some(sz) = frame_sz {
         if sz > max_out {
-            return None; // bomba: frame, tavanın üstünde orijinal boyut iddia ediyor
+            return None; // bomb: the frame claims an original size above the ceiling
         }
     }
     let mut dec = zstd::stream::read::Decoder::new(bytes).ok()?;
     let mut out = Vec::new();
     dec.read_to_end(&mut out).ok()?;
     if out.len() as u64 > max_out {
-        return None; // savunma: çıktı yine de tavanı aşamaz
+        return None; // defence: the output still cannot pass the ceiling
     }
     Some(out)
 }
 
 impl RealCompressor {
-    /// Sıkıştır: BUD-HFM1 zarfı. Dönen veri KENDİ içinde açılabilir (decompress).
+    /// Compress: a BUD-HFM1 envelope. The returned data can be opened on ITS OWN (decompress).
     pub fn compress(data: &[u8]) -> Vec<u8> {
         HuffmanCoder::compress(data)
     }
 
-    /// Aç: sıkı doğrula (magic + tavan + Kraft + kod geçerliliği) → orijinal.
-    /// Herhangi bir tutarsızlık → None (panik yok).
+    /// Decompress: verify strictly (magic + ceiling + Kraft + code validity)
+    /// -> the original.
+    /// Any inconsistency -> None (no panic).
     pub fn decompress(bytes: &[u8]) -> Option<Vec<u8>> {
         HuffmanCoder::decompress(bytes)
     }
 
-    /// Bu veri B.U.D.-Huffman zarfı mı? (v1/v2 ayrımı ve tanı için)
+    /// Is this data a B.U.D.-Huffman envelope? (For v1/v2 discrimination and diagnostics.)
     pub fn is_bud_hfm(bytes: &[u8]) -> bool {
         bytes.len() >= 8 && bytes[0..8] == BUD_HFM_MAGIC
     }
 }
 
-/// Gerçek ölçüm tablosu (2026-08-16 runner: Python zstd-19/xz9, deterministik korpus).
-/// Uydurma sayı YOK - her satır ölçülmüştür; boru hattı adı + gerçek oran.
-/// (zstd/xz Rust FFI'si olmadığından hız değerleri verilmez; oran = boyut küçülmesi.)
+/// The real measurement table (2026-08-16 runner: Python zstd-19/xz9, a
+/// deterministic corpus). NO invented numbers - every row was measured; a
+/// pipeline name plus a real ratio. (Since there is no Rust FFI for zstd/xz, no
+/// speed values are given; the ratio is the size reduction.)
 pub struct RealBench;
 
 impl RealBench {
-    /// Doğrulanmış oranlar: `scripts/measure_ratios.py --seed 7` ile TEKRARLANABİLİR
-    /// (deterministik korpus 50k JSON / 60k CSV / 80k LOG). Eski tabloda yazılı
-    /// 8.48x/5.51x/7.68x değerleri farklı (tekrarlanamayan) bir korpustandı - K19
-    /// dürüstlüğü gereği doğrulanmış değerlerle değiştirildi (EK13).
+    /// Verified ratios: REPRODUCIBLE with `scripts/measure_ratios.py --seed 7`
+    /// (a deterministic corpus of 50k JSON / 60k CSV / 80k LOG). The
+    /// 8.48x/5.51x/7.68x values written in the old table came from a different
+    /// (non-reproducible) corpus - as K19 honesty requires, they were replaced
+    /// with the verified values (EK13).
     pub fn measured_ratios() -> Vec<(&'static str, f64)> {
         vec![
-            ("structural+zstd19 JSON", 7.83), // measure_ratios.py seed=7 (50k kayıt)
+            ("structural+zstd19 JSON", 7.83), // measure_ratios.py seed=7 (50k records)
             ("structural+xz9 JSON", 8.07),    // measure_ratios.py seed=7
-            ("structural+zstd19 CSV", 3.55),  // measure_ratios.py seed=7 (60k satır)
-            ("structural+zstd19 LOG", 6.17),  // measure_ratios.py seed=7 (80k satır)
+            ("structural+zstd19 CSV", 3.55),  // measure_ratios.py seed=7 (60k lines)
+            ("structural+zstd19 LOG", 6.17),  // measure_ratios.py seed=7 (80k lines)
             ("structural+xz9 LOG", 6.30),     // measure_ratios.py seed=7
-            ("BUD-HFM1 (yerleşik Huffman) LOG", 1.69), // 13.98MB örnek üzerinde (CLI kanıtı)
+            ("BUD-HFM1 (built-in Huffman) LOG", 1.69), // over a 13.98MB sample (CLI evidence)
         ]
     }
 }
@@ -86,7 +93,7 @@ mod tests {
 
     #[test]
     fn real_compress_roundtrip() {
-        let line = b"a=b c=d e=f g=h tekrar tekrar tekrar tekrar tekrar\n";
+        let line = b"a=b c=d e=f g=h repeat repeat repeat repeat repeat\n";
         let mut data = Vec::new();
         for _ in 0..30 {
             data.extend_from_slice(line);
@@ -94,18 +101,18 @@ mod tests {
         let c = RealCompressor::compress(&data);
         assert!(
             c.len() < data.len(),
-            "tekrarlı veri gerçekten sıkışmalı: {} -> {}",
+            "repetitive data must genuinely compress: {} -> {}",
             data.len(),
             c.len()
         );
-        assert!(RealCompressor::is_bud_hfm(&c), "BUD-HFM zarfı");
+        assert!(RealCompressor::is_bud_hfm(&c), "a BUD-HFM envelope");
         let d = RealCompressor::decompress(&c).unwrap();
-        assert_eq!(d, data, "kayıpsız roundtrip");
+        assert_eq!(d, data, "lossless roundtrip");
     }
 
     #[test]
-    fn fake_zstd_magic_yok() {
-        // Eski stub zstd magic (28 B5 2F FD) ile başlardı - artık asla üretilmemeli.
+    fn there_is_no_fake_zstd_magic() {
+        // The old stub started with the zstd magic (28 B5 2F FD) - it must never be produced again.
         let data = vec![b'x'; 1000];
         let c = RealCompressor::compress(&data);
         assert_ne!(
@@ -122,57 +129,58 @@ mod tests {
 
     #[test]
     fn measured_ratios_documented() {
-        // Tüm oranlar > 1.0 (gerçek sıkıştırma) ve tavanla tutarlı (K19)
+        // Every ratio is > 1.0 (real compression) and consistent with the ceiling (K19)
         for (name, r) in RealBench::measured_ratios() {
-            assert!(r > 1.0, "{name} oran > 1 olmalı");
+            assert!(r > 1.0, "{name} ratio must be > 1");
             assert!(
                 r < 30.0,
-                "{name} oran gerçekçi (<30) - zip-bomb iddiası yok"
+                "{name} ratio is realistic (<30) - no zip-bomb claim"
             );
         }
     }
     #[test]
     fn zstd_roundtrip_and_beats_huffman() {
-        // GERÇEK zstd: sıkıştır → aç = orijinal; tekrarlı veride Huffman'dan iyi
+        // REAL zstd: compress -> decompress = the original; better than Huffman on repetitive data
         let line = b"2026-08-16 INFO req=123 /api/a s=200 b=42 reg=tr\n";
         let mut data = Vec::new();
         for _ in 0..5000 {
             data.extend_from_slice(line);
         }
-        let c = zstd_compress(&data, 19).expect("zstd sıkıştırma");
+        let c = zstd_compress(&data, 19).expect("zstd compression");
         assert!(
             c.len() < data.len(),
-            "zstd sıkışmalı: {} -> {}",
+            "zstd must compress: {} -> {}",
             data.len(),
             c.len()
         );
-        let d = zstd_decompress_safe(&c, ZSTD_MAX_DECOMPRESSED).expect("zstd açma");
-        assert_eq!(d, data, "zstd kayıpsız");
-        // Huffman ile karşılaştır
+        let d = zstd_decompress_safe(&c, ZSTD_MAX_DECOMPRESSED).expect("zstd decompression");
+        assert_eq!(d, data, "zstd is lossless");
+        // compare against Huffman
         let h = RealCompressor::compress(&data);
         assert!(
             c.len() < h.len(),
-            "zstd Huffman'dan iyi olmalı: zstd {} vs hfm {}",
+            "zstd must beat Huffman: zstd {} vs hfm {}",
             c.len(),
             h.len()
         );
     }
     #[test]
     fn zstd_decompress_bomb_guards() {
-        // K25: sahte zstd frame (çok büyük content size) → None, panik yok
-        // zstd frame başlığı: magic + frame header; content size 2^32 üstü iddiası
+        // K25: a fake zstd frame (a very large content size) -> None, no panic
+        // zstd frame header: magic + frame header; it claims a content size
+        // above 2^32
         let fake = [
             0x28u8, 0xB5, 0x2F, 0xFD, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
         ];
         let _ = zstd_decompress_safe(&fake, ZSTD_MAX_DECOMPRESSED); // panik yok
-                                                                    // bozuk veri → None
+                                                                    // corrupt data -> None
         assert!(zstd_decompress_safe(b"BUD", 1024).is_none());
-        // küçük tavanlı açma: 1MB veriyi 1KB tavanla açma → None
+        // decompression with a small ceiling: opening 1MB of data under a 1KB ceiling -> None
         let data = vec![b'a'; 1024 * 1024];
         let c = zstd_compress(&data, 3).expect("zstd");
         assert!(
             zstd_decompress_safe(&c, 1024).is_none(),
-            "tavan aşımı None dönmeli"
+            "passing the ceiling must return None"
         );
     }
 }
