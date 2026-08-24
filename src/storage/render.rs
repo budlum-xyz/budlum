@@ -82,21 +82,21 @@ pub enum RenderFormat {
     /// reader can ask for frame 17 of a loop and get the same bytes every
     /// time. The container (MP4/WebM) is a separate encoder step.
     VideoFrame { frame: u16 },
-    /// Bir tasima karesi: icerigin optik kanal icin paketlenmis hali.
+    /// A transport frame: the content packed for an optical channel.
     ///
-    /// **Bu bir depolama bicimi degil, bir TASIMA temsilidir.** Kare talep
-    /// aninda uretilir, hicbir ara urun saklanmaz - dolayisiyla bu format
-    /// hicbir rejimde depolama EKLEMEZ (§59). Icerigin kalici hali yine
-    /// manifest'in soyledigi seydir: tarifli icerikte tarif, organik
-    /// icerikte baytlar.
+    /// **This is not a storage format, it is a TRANSPORT representation.** A frame
+    /// is produced on demand and no intermediate product is stored, so this format
+    /// ADDS NO storage under any regime (§59). The persistent form of the content is
+    /// still whatever the manifest says: the recipe for recipe-backed content, the
+    /// bytes for organic content.
     ///
-    /// Kanal geri kanalsizdir: alici kayip kareyi yeniden isteyemez. Bu
-    /// yuzden kareler **bagimsiz** olmak zorundadir - her kare kendi
-    /// basligini tasir ve tek basina dogrulanir. `seq` kacinci kare
-    /// oldugunu soyler; ayni `seq` her zaman ayni baytlari verir, cunku
-    /// uretim tariften belirlenimlidir.
+    /// The channel has no back channel: a receiver cannot re-request a lost frame.
+    /// So frames must be **independent** - each frame carries its own
+    /// header and verifies on its own. `seq` says which frame it is;
+    /// the same `seq` always yields the same bytes, because
+    /// production from a recipe is deterministic.
     QrStream {
-        /// Kacinci tasima karesi.
+        /// Which transport frame this is.
         seq: u32,
         /// Kare basina tasinan yuk (bayt).
         payload_len: u16,
@@ -418,41 +418,41 @@ fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<
     Ok(out)
 }
 
-/// Tasima karesi basliginin uzunlugu.
+/// Length of a transport frame header.
 const QR_FRAME_HEADER_LEN: usize = 16;
 
-/// Tarif-adresli akis kimligi icin alan etiketi.
+/// Domain tag for a recipe-addressed stream id.
 const QR_STREAM_ID_TAG: &[u8] = b"BDLM_QR_STREAM_ID_V1";
 
-/// Tasima karesi ureten yol.
+/// The path that produces a transport frame.
 ///
-/// **Kare kendini tanimlar.** Optik/yayin kanalinda geri kanal yoktur: alici
-/// kayip bir kareyi yeniden isteyemez, el sikisma yapamaz, akisa ortasindan
-/// katilir. Bu yuzden her kare tek basina ayristirilabilir olmak zorundadir;
-/// baglam tasiyan bir kare, o baglami kaciran alici icin coptur.
+/// **A frame is self-describing.** An optical/broadcast channel has no back channel:
+/// a receiver cannot re-request a lost frame, cannot handshake, and joins the stream
+/// mid-flight. So every frame must be parseable on its own;
+/// a frame that carries context is garbage to a receiver that missed that context.
 ///
-/// Baslik alanlari ve NEDEN oradalar:
+/// The header fields and WHY they are there:
 ///
-/// - **Iki sihirli bayt** - "bu bizim mi" sorusu, herhangi bir surum
-///   adlandirilmadan ONCE cevaplanmali. Tek bayta bakan bir alici, hicbir
-///   zaman bu protokolu konusmamis bir kaynagi "surumun eski" diye
-///   suclayabilir; kamera goruntusundeki her kod bu yoldan gecer.
-/// - **Surum** - ayristirmayi butunuyle kapiya baglar. Bilinmeyen surum
-///   sessizce yanlis ayristirilmaz, adlandirilir.
-/// - **Bayraklar** - `0x0F` anlasilmasi ZORUNLU yari, `0xF0` yok sayilabilir
-///   yari. Bolme bastan gelir cunku sonradan eklenemez: "her bilinmeyen bit
-///   olumcul" denmis bir aliciyi ancak yeni bir kirilma duzeltir.
-/// - **`seq`** - kacinci kare. Ayni `seq` her zaman ayni baytlari verir.
-/// - **`total_len`** - icerigin tam uzunlugu; alici ne kadarini topladigini
-///   bilir.
-/// - **`payload_digest`** - yukun ozeti. Kare bozuksa yuk KULLANILMAZ.
+/// - **Two magic bytes** - the question "is this ours" must be answered BEFORE any
+///   version is named. A receiver looking at a single byte could accuse a source that
+///   never spoke this protocol of being "on an old version"; every code in the
+///   camera's view passes through this path.
+/// - **Version** - gates parsing as a whole. An unknown version is not silently
+///   misparsed, it is named.
+/// - **Flags** - `0x0F` is the MUST-understand half, `0xF0` the ignorable
+///   half. The split comes from the start because it cannot be added later: a receiver
+///   told "every unknown bit is fatal" can only be fixed by another break.
+/// - **`seq`** - which frame this is. The same `seq` always yields the same bytes.
+/// - **`total_len`** - the full length of the content, so a receiver knows how much
+///   it has collected.
+/// - **`payload_digest`** - the payload digest. If the frame is corrupt the payload is NOT USED.
 ///
-/// # Ne yapmaz
+/// # What it does not do
 ///
-/// Bu fonksiyon bir kanal kodlayici DEGILDIR: silinti kodu (fountain),
-/// gercek QR modul matrisi ve video konteyneri ayri, surumlenmis adimlardir.
-/// Burasi yalnizca **kanalin tasiyacagi kendini-tanimlayan kareyi** kurar.
-/// Kare uretimi belirlenimlidir; kanalin kendisi degildir.
+/// This function is NOT a channel encoder: the erasure code (fountain),
+/// the real QR module matrix and the video container are separate, versioned steps.
+/// This only builds **the self-describing frame the channel will carry**.
+/// Frame production is deterministic; the channel itself is not.
 fn render_qr_stream_frame(
     spec: &GeneratedSpec,
     payload: &[u8],
@@ -463,8 +463,8 @@ fn render_qr_stream_frame(
     if want == 0 {
         return Err(RenderError::MissingParam("qr stream payload_len"));
     }
-    // Kare `seq`'in gosterdigi dilimi tasir. Icerik bittiginde dilim bos
-    // kalir; bos bir kare, olmayan bir seyi varmis gibi gosterirdi.
+    // A frame carries the slice `seq` points at. When the content runs out the slice
+    // is empty; an empty frame would present something absent as if it were present.
     let start = (seq as usize).saturating_mul(want);
     if start >= payload.len() {
         return Err(RenderError::MissingParam("qr stream seq past end"));
@@ -480,73 +480,73 @@ fn render_qr_stream_frame(
     out.push(0u8);
     out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    // Yuk ozetinin ilk 4 bayti: kare butunlugu icin yeterli, baslik kucuk
-    // kalir. Icerik kimligi bu degildir - onu manifest tasir.
+    // The first 4 bytes of the payload digest: enough for frame integrity while the
+    // header stays small. This is not the content id - the manifest carries that.
     //
-    // Ozet **oturuma bagli**: on-goruntu, kareyi ureten tarifin ozetini de
-    // iceriyor. Bagli olmasaydi bir karenin butunlugu yalnizca kendi
-    // baytlarindan dogrulanirdi, ve ayni `seq` degerini tasiyan **baska bir
-    // icerigin** karesi bu akisin karesi yerine gecebilirdi: alici dogru bir
-    // ozet gorur, dogru ayristirir ve iki farkli nesnenin parcalarini tek
-    // nesne diye birlestirir. Optik kanalda bu ucuz bir saldiri - kameranin
-    // gordugu her kod aday.
+    // The digest is **session bound**: the preimage also contains the digest of the
+    // recipe that produced the frame. Unbound, a frame's integrity would be verified
+    // from its own bytes alone, and a frame of **different content** carrying the same
+    // `seq` could stand in for a frame of this stream: the receiver sees a correct
+    // digest, parses correctly, and merges parts of two different objects into one
+    // object. On an optical channel this is a cheap attack - every code the camera
+    // sees is a candidate.
     //
-    // Cape tarif ozeti, cunku bu katmanda bilinen ve kareyi ureten sey odur;
-    // manifest kimligi bu fonksiyona ulasmiyor. Iki farkli tarif iki farkli
-    // ozet uretir, ki aranan ayirt etme budur.
+    // The recipe digest is the anchor, because at this layer that is what is known and
+    // what produces the frame; the manifest id does not reach this function. Two
+    // different recipes produce two different digests, which is the distinction wanted.
     let session = generated_spec_digest(spec);
-    // Ozet **konuma** da bagli. Yalnizca dilim baytlari hashlenseydi, ayni
-    // baytlari tasiyan iki kare akisin farkli yerlerinde birebir ayni ozeti
-    // tasirdi - olculdu, tasiyordu: tekduze bir yukun dort karesi ayni dort
-    // bayti veriyordu. O durumda bir kare, ayni akisin baska bir konumundaki
-    // karenin yerine gecebilir. Alici dogru bir ozet gorur, kareyi kabul
-    // eder ve dilimi yanlis konuma yazar; butunluk korunur, sira korunmaz.
-    // Optik kanalda kareler zaten sirasiz gelir ve alici sirayi basliktaki
-    // `seq` alanindan okur - o alan ozetin disinda kaldigi surece
-    // degistirilebilir bir ipucudur, dogrulanmis bir iddia degil.
+    // The digest is also **position bound**. If only the slice bytes were hashed, two
+    // frames carrying the same bytes at different places in the stream would carry the
+    // exact same digest - it was measured and they did: four frames of a uniform
+    // payload gave the same four bytes. In that case a frame can stand in for a frame
+    // at another position of the same stream. The receiver sees a correct digest,
+    // accepts the frame and writes the slice at the wrong position; integrity holds, order does not.
+    // On an optical channel frames already arrive out of order and the receiver reads
+    // the order from the header's `seq` field - while that field stays outside the
+    // digest it is a mutable hint, not a verified claim.
     let digest = hash_fields_bytes(&[b"BDLM_QR_FRAME_V2", &session, &seq.to_be_bytes(), slice]);
     out.extend_from_slice(digest.get(..4).ok_or(RenderError::MissingParam("digest"))?);
     out.extend_from_slice(slice);
     Ok(out)
 }
 
-/// Tarif-adresli icerik kimligi: bir akisi baytlariyla degil, karelerinin
-/// ozet dizisiyle adresler.
+/// A recipe-addressed content id: it addresses a stream not by its bytes but by
+/// the sequence of its frame digests.
 ///
-/// # Neden
+/// # Why
 ///
-/// `ContentSource::Generated` ile ag icerigin baytlarini degil **tarifini**
-/// saklar. Ama kimlik katmani bunu soylemiyordu: `ContentId::of` uretilmis
-/// baytlarin ozetidir, yani kimligi ogrenmek icin once uretmek gerekir.
-/// "Sakladigimiz sey tariftir" iddiasi adres katmanina inmemisti.
+/// With `ContentSource::Generated` the network stores not the content's bytes but its
+/// **recipe**. But the identity layer did not say so: `ContentId::of` is the digest of
+/// the produced bytes, so learning the id requires producing them first.
+/// The claim "what we store is the recipe" had not reached the addressing layer.
 ///
-/// Burada kimlik dogrudan tariften turer. Her kare zaten kendi ozetini
-/// tasiyor (`render_qr_stream_frame`, `BDLM_QR_FRAME_V2`) ve o ozet tarife
-/// bagli; kareler sirayla katlandiginda ortaya cikan deger, o tarifin o
-/// bicimde urettigi akisin kimligidir. Bayt tutmaya gerek yok: elde tarif
-/// varsa kimlik yeniden hesaplanabilir, elde kimlik varsa uretilen akisin
-/// dogru akis oldugu dogrulanabilir.
+/// Here the id derives directly from the recipe. Every frame already carries its own
+/// digest (`render_qr_stream_frame`, `BDLM_QR_FRAME_V2`) and that digest is bound to
+/// the recipe; folding the frames in order yields the id of the stream that recipe
+/// produces in that format. No bytes need be held: given the recipe the id can be
+/// recomputed, and given the id a produced stream can be verified to be the
+/// right stream.
 ///
-/// # Sira semaya girer
+/// # Order is part of the scheme
 ///
-/// Kareler `seq` ile numaralanir ve ozet dizisi **sirayla** katlanir. Sira
-/// serbest birakilsaydi ayni karelerin baska duzeni ayni kimligi verirdi -
-/// oysa karusel duzeni akisin bir parcasi, cunku alici kareleri o sirayla
-/// birlestiriyor. Sirasi degisen akis baska bir akistir.
+/// Frames are numbered by `seq` and the digest sequence is folded **in order**. If
+/// order were left free, another arrangement of the same frames would give the same
+/// id - yet the carousel order is part of the stream, because the receiver reassembles
+/// the frames in that order. A stream with a different order is a different stream.
 ///
-/// # Ne degildir
+/// # What it is not
 ///
-/// Bu bir depolama kaniti degildir. Kimligin dogru olmasi, karsi tarafin
-/// baytlari tuttugunu degil, tarifi calistirdiginda ayni akisi uretecegini
-/// soyler - zaten istenen de budur. Organik icerik bu semaya **giremez**:
-/// `Stored` baytlarin bir tarifi yoktur ve olmayan bir tarifi adreslemek
-/// sinif yalani olurdu. Ayrimi `ContentSource` zaten tasiyor.
+/// This is not a proof of storage. A correct id says not that the other side holds the
+/// bytes but that running the recipe will produce the same stream - which is exactly
+/// what is wanted. Organic content **cannot enter** this scheme:
+/// `Stored` bytes have no recipe, and addressing a recipe that does not exist would be
+/// a category lie. `ContentSource` already carries the distinction.
 ///
-/// # Hatalar
+/// # Errors
 ///
-/// `frame_count` sifirsa hata doner: sifir kareli bir akis yoktur ve bos bir
-/// katlama, birbirinden farkli butun bos-olmayan akislarla ayni sabit degeri
-/// verirdi.
+/// Returns an error if `frame_count` is zero: a stream of zero frames does not exist,
+/// and an empty fold would give the same constant value as every distinct non-empty
+/// stream.
 pub fn qr_stream_content_id(
     spec: &GeneratedSpec,
     payload: &[u8],
@@ -556,25 +556,25 @@ pub fn qr_stream_content_id(
     if frame_count == 0 {
         return Err(RenderError::MissingParam("qr stream frame_count"));
     }
-    // Sema bilerek dar. Kare ozeti zaten tarifi, konumu ve dilim baytlarini
-    // bagliyor; katlamada bunlari **tekrar** baglamak yeni bir sey soylemez.
+    // The scheme is deliberately narrow. The frame digest already binds the recipe, the
+    // position and the slice bytes; binding them **again** in the fold says nothing new.
     //
-    // Ilk yazilan surum uc alani daha tasiyordu - tarif ozeti, kare sayisi,
-    // dilim boyu - ve ucu de gereksiz cikti. Mutasyonla olculdu: her biri
-    // semadan tek tek cikarildiginda hicbir test kirilmadi, cunku ucunun de
-    // ayirt ettigi sey kare ozetlerinin icinde zaten vardi. Farkli dilim
-    // boyu farkli kareler uretir; farkli kare sayisi farkli uzunlukta bir
-    // katlama yapar; farkli tarif farkli kare ozeti verir.
+    // The first version carried three more fields - recipe digest, frame count,
+    // slice length - and all three turned out redundant. Measured by mutation: removing
+    // each one from the scheme broke no test, because what all three distinguished was
+    // already inside the frame digests. A different slice
+    // length produces different frames; a different frame count produces a fold of a
+    // different length; a different recipe gives a different frame digest.
     //
-    // Bir semayi savunan sey, kaldirildiginda bir seyin bozulmasidir.
-    // Bozmuyorsa orada degildir, yalnizca orada duruyordur - ve duran alan
-    // okuyana "bu da baglanmis" der, yani yanlis bir guvence uretir.
+    // What defends a field in a scheme is that removing it breaks something.
+    // If it breaks nothing it is not there, it is merely sitting there - and a field
+    // that merely sits tells a reader "this is bound too", producing a false assurance.
     let mut acc = hash_fields_bytes(&[QR_STREAM_ID_TAG]);
     for seq in 0..frame_count {
         let frame = render_qr_stream_frame(spec, payload, seq, payload_len)?;
-        // Karenin kendi ozeti basligin 12..16 araligindadir. Kareyi bastan
-        // hashlemek yerine o deger kullanilir: kimlik, alicinin kare basina
-        // zaten dogruladigi seyin ustune kurulur, ayri bir ozet semasi degil.
+        // A frame's own digest sits at header range 12..16. Instead of hashing the
+        // frame afresh that value is used: the id builds on what the receiver already
+        // verifies per frame, not on a separate digest scheme.
         let frame_digest = frame
             .get(12..QR_FRAME_HEADER_LEN)
             .ok_or(RenderError::MissingParam("qr frame digest"))?;
@@ -638,62 +638,62 @@ mod tests {
         }
     }
 
-    /// Kare, ait oldugu akisa baglidir.
+    /// A frame is bound to the stream it belongs to.
     ///
-    /// Kare basligi kendini tanimlar ama **hangi akisa** ait oldugunu
-    /// soylemiyordu: ozet yalnizca kendi yukunden hesaplaniyordu. Iki farkli
-    /// icerik ayni bayt dilimini uretebilir - ozellikle duz renkli bolgeler
-    /// farkli tariflerde ayni baytlari verir - ve o durumda iki akisin ayni
-    /// sirali kareleri **bit bit ayni** olur. Alici, kameranin gordugu her
-    /// kodu aday sayar; iki akis ayni anda goruntudeyse dogru bir ozet
-    /// gorur, dogru ayristirir ve iki nesnenin parcalarini tek nesne diye
-    /// birlestirir. Butunluk korunur, dogruluk korunmaz.
+    /// The frame header is self-describing but did not say **which stream** it
+    /// belonged to: the digest was computed from its own payload alone. Two different
+    /// contents can produce the same byte slice - flat colour regions especially
+    /// give the same bytes under different recipes - and then the same-ordered frames
+    /// of two streams are **bit for bit identical**. A receiver treats every code the
+    /// camera sees as a candidate; with two streams in view at once it sees a correct
+    /// digest, parses correctly, and merges parts of two objects into one
+    /// object. Integrity holds, correctness does not.
     ///
-    /// Bir kare, akistaki konumuna baglidir.
+    /// A frame is bound to its position in the stream.
     ///
-    /// Kare ozeti once yalnizca tarif ozetini ve dilim baytlarini
-    /// baglıyordu. Tekduze bir yukte - ki bos alan, dolgu ve duz renk
-    /// bolgeleri bunu siradan yapar - ardisik dilimler ayni baytlari tasir,
-    /// yani dort kare **birebir ayni** ozeti tasiyordu. Olculdu: 4 karenin
-    /// dordu de `[72, 41, 61, 244]`.
+    /// The frame digest at first bound only the recipe digest and the slice
+    /// bytes. On a uniform payload - which empty space, padding and flat colour
+    /// regions make ordinary - consecutive slices carry the same bytes, so four
+    /// frames carried an **identical** digest. Measured: all four of the 4 frames
+    /// gave `[72, 41, 61, 244]`.
     ///
-    /// O durumda bir kare, ayni akisin baska bir konumundaki karenin yerine
-    /// gecebilir. Alici dogru bir ozet gorur, kareyi kabul eder ve dilimi
-    /// yanlis konuma yazar. Sirayi basliktaki `seq` alanindan okuyor, ve o
-    /// alan ozetin disindayken degistirilebilir bir ipucudur - dogrulanmis
-    /// bir iddia degil. Butunluk korunur, sira korunmaz.
+    /// In that case a frame can stand in for a frame at another position of the same
+    /// stream. The receiver sees a correct digest, accepts the frame and writes the
+    /// slice at the wrong position. It reads the order from the header's `seq` field,
+    /// and while that field is outside the digest it is a mutable hint - not a
+    /// verified claim. Integrity holds, order does not.
     #[test]
     fn a_frame_is_bound_to_its_position_in_the_stream() {
         let spec = avatar_spec();
-        // Tekduze yuk: her dilim ayni baytlari tasir, yani konum baglamasi
-        // yoksa kareler ayirt edilemez. Carpismanin olcusu tam olarak bu.
+        // Uniform payload: every slice carries the same bytes, so without position
+        // binding the frames are indistinguishable. That is exactly the collision measure.
         let payload = [0xABu8; 256];
 
-        let first = super::render_qr_stream_frame(&spec, &payload, 0, 64).expect("ilk kare");
-        let second = super::render_qr_stream_frame(&spec, &payload, 1, 64).expect("ikinci kare");
+        let first = super::render_qr_stream_frame(&spec, &payload, 0, 64).expect("first frame");
+        let second = super::render_qr_stream_frame(&spec, &payload, 1, 64).expect("second frame");
 
-        let d_first = first.get(12..16).expect("ilk ozet");
-        let d_second = second.get(12..16).expect("ikinci ozet");
+        let d_first = first.get(12..16).expect("first digest");
+        let d_second = second.get(12..16).expect("second digest");
         assert_ne!(
             d_first, d_second,
-            "ayni baytlari tasiyan iki kare ayni ozeti tasiyor: biri digerinin \
-             yerine gecebilir"
+            "two frames carrying the same bytes carry the same digest: one can stand \
+             in for the other"
         );
 
-        // Dilim baytlari gercekten ayni - fark yalnizca konumdan geliyor.
+        // The slice bytes really are the same - the difference comes only from position.
         assert_eq!(
             first.get(16..),
             second.get(16..),
-            "test kurulumu anlamsiz: dilimler zaten farkli"
+            "the test setup is vacuous: the slices already differ"
         );
     }
 
-    /// Tarif-adresli kimlik: ayni tarif ayni kimligi, farkli tarif farkli
-    /// kimligi verir - ve kareler bayt tutulmadan adreslenir.
+    /// A recipe-addressed id: the same recipe gives the same id, a different recipe a
+    /// different id - and the frames are addressed without holding any bytes.
     ///
-    /// Olculen sey `qr_stream_content_id`'nin bir **adres** olarak
-    /// kullanilabilir olmasi: belirlenimli (ayni girdi ayni cikti), ayirt
-    /// edici (tarif degisince kimlik degisir) ve **siraya duyarli**.
+    /// What is measured is that `qr_stream_content_id` is usable as an **address**:
+    /// deterministic (the same input gives the same output), distinguishing
+    /// (a changed recipe changes the id) and **order sensitive**.
     #[test]
     fn a_stream_is_addressed_by_its_recipe_not_its_bytes() {
         let one = avatar_spec();
@@ -702,88 +702,88 @@ mod tests {
 
         let payload = [0xABu8; 256];
 
-        // Belirlenimli: iki kez hesaplamak ayni degeri verir. Aksi halde
-        // kimlik bir adres degil, bir olcum artigi olurdu.
+        // Deterministic: computing it twice gives the same value. Otherwise the id
+        // would be a measurement artefact, not an address.
         let id_a = super::qr_stream_content_id(&one, &payload, 64, 4).expect("ilk kimlik");
         let id_again = super::qr_stream_content_id(&one, &payload, 64, 4).expect("yeniden");
-        assert_eq!(id_a, id_again, "ayni tarif ayni kimligi vermeli");
+        assert_eq!(id_a, id_again, "the same recipe must give the same id");
 
-        // Ayirt edici: tarif degisince kimlik degisir. Bu olmadan iki farkli
-        // akis ayni adresi paylasirdi.
+        // Distinguishing: a changed recipe changes the id. Without this two different
+        // streams would share the same address.
         let id_b = super::qr_stream_content_id(&two, &payload, 64, 4).expect("ikinci kimlik");
-        assert_ne!(id_a, id_b, "farkli tarif farkli kimlik vermeli");
+        assert_ne!(id_a, id_b, "a different recipe must give a different id");
 
-        // Siraya duyarli: kare sayisi semaya girer, yani akisin uzunlugu
-        // kimligin parcasi. Girmeseydi bir akisin on eki, akisin kendisiyle
-        // ayni adresi tasiyabilirdi.
-        let id_short = super::qr_stream_content_id(&one, &payload, 64, 3).expect("kisa akis");
-        assert_ne!(id_a, id_short, "kare sayisi kimlige girmeli");
+        // Order sensitive: the frame count enters the scheme, so the stream length is
+        // part of the id. Otherwise a prefix of a stream could carry the same
+        // address as the stream itself.
+        let id_short = super::qr_stream_content_id(&one, &payload, 64, 3).expect("short stream");
+        assert_ne!(id_a, id_short, "the frame count must enter the id");
 
-        // Sifir kare reddedilir: bos katlama butun akislar icin ayni sabiti
+        // Zero frames are refused: an empty fold would give every stream the same
         // verirdi.
         assert!(
             super::qr_stream_content_id(&one, &payload, 64, 0).is_err(),
-            "sifir kareli akis kimligi olmamali"
+            "a zero-frame stream must have no id"
         );
     }
 
-    /// Oturum baglamasi bunu keser: ayni baytlar, farkli tarif, farkli ozet.
+    /// Session binding cuts this off: same bytes, different recipe, different digest.
     #[test]
     fn a_frame_is_bound_to_the_stream_it_belongs_to() {
-        // Ayni yuk dilimini iki farkli tarif altinda kareye koy. Baytlar
-        // ayni oldugu icin, oturum baglamasi olmadan iki kare ayirt
-        // edilemezdi - carpismanin tam olarak olcusu bu.
+        // Put the same payload slice into a frame under two different recipes. Because
+        // the bytes are the same, without session binding the two frames would be
+        // indistinguishable - that is exactly the collision measure.
         let one = avatar_spec();
         let mut two = avatar_spec();
         two.seed = [8u8; 32];
 
         let payload = [0xABu8; 128];
-        let a = super::render_qr_stream_frame(&one, &payload, 0, 64).expect("ilk akis");
-        let b = super::render_qr_stream_frame(&two, &payload, 0, 64).expect("ikinci akis");
+        let a = super::render_qr_stream_frame(&one, &payload, 0, 64).expect("first stream");
+        let b = super::render_qr_stream_frame(&two, &payload, 0, 64).expect("second stream");
 
-        // Yuk ayni: iki karenin govdesi bit bit ayni.
+        // Same payload: the bodies of the two frames are bit for bit identical.
         assert_eq!(
             a.get(16..),
             b.get(16..),
-            "kurulum gecerli degil - yukler ayni olmaliydi"
+            "the setup is invalid - the payloads should have been identical"
         );
-        // Sabit baslik alanlari da ayni: ayni protokol, surum, seq, uzunluk.
+        // The fixed header fields match too: same protocol, version, seq, length.
         assert_eq!(
             a.get(..12),
             b.get(..12),
-            "sabit baslik alanlari ayni olmali"
+            "the fixed header fields must match"
         );
 
-        // Ayirt eden tek sey ozet olmali. Oturum baglamasi olmasaydi bu
-        // iddia dusetdi, cunku ozet yalnizca ayni olan yukten hesaplanirdi.
+        // The digest must be the only thing that distinguishes them. Without session
+        // binding this claim would fail, since the digest came from the identical payload alone.
         assert_ne!(
             a.get(12..16),
             b.get(12..16),
-            "ayni yuku tasiyan iki akisin karesi ayni ozeti tasimamali"
+            "frames of two streams carrying the same payload must not carry the same digest"
         );
 
-        // Baglanma yukun kendisini de kapsamaya devam ediyor: ayni akista
-        // farkli yuk farkli ozet.
+        // The binding still covers the payload itself: in the same stream a different
+        // payload gives a different digest.
         let mut other_payload = payload;
         other_payload[0] = 0x00;
-        let c = super::render_qr_stream_frame(&one, &other_payload, 0, 64).expect("farkli yuk");
+        let c = super::render_qr_stream_frame(&one, &other_payload, 0, 64).expect("different payload");
         assert_ne!(
             a.get(12..16),
             c.get(12..16),
             "yuk ozete girmeye devam etmeli"
         );
 
-        // Belirlenimlilik korunuyor: ayni akis, ayni yuk, ayni kare.
+        // Determinism holds: same stream, same payload, same frame.
         assert_eq!(
             a,
             super::render_qr_stream_frame(&one, &payload, 0, 64).expect("yeniden uretim")
         );
     }
 
-    /// Tasima karesi kendini tanimlar ve belirlenimlidir.
+    /// A transport frame is self-describing and deterministic.
     ///
-    /// Geri kanalsiz bir kanalda alici akisa ortasindan katilir; baglam
-    /// tasiyan bir kare o baglami kaciran alici icin coptur.
+    /// On a channel with no back channel a receiver joins mid-stream; a frame that
+    /// carries context is garbage to a receiver that missed that context.
     #[test]
     fn a_transport_frame_describes_itself_and_repeats_exactly() {
         let spec = avatar_spec();
@@ -793,22 +793,22 @@ mod tests {
         };
         let a = render(&spec, &fmt).unwrap();
         let b = render(&spec, &fmt).unwrap();
-        assert_eq!(a, b, "ayni seq her zaman ayni baytlari vermeli");
+        assert_eq!(a, b, "the same seq must always give the same bytes");
 
-        // Iki sihirli bayt: "bu bizim mi" sorusu surumden ONCE cevaplanir.
+        // Two magic bytes: the question "is this ours" is answered BEFORE the version.
         assert_eq!(a.first().copied(), Some(0xBD));
         assert_eq!(a.get(1).copied(), Some(0x1A));
-        // Surum ve bayrak alanlari basligin sabit yerinde.
+        // The version and flag fields sit at fixed places in the header.
         assert_eq!(a.get(2).copied(), Some(1));
         assert_eq!(a.get(3).copied(), Some(0));
-        // Kare kendi sirasini tasir: baglam gerektirmez.
+        // A frame carries its own order: it needs no context.
         assert_eq!(
             a.get(4..8),
             Some(&2u32.to_be_bytes()[..]),
-            "kare kacinci oldugunu kendi soylemeli"
+            "a frame must say for itself which one it is"
         );
 
-        // Farkli seq farkli karedir ve kimlige girer.
+        // A different seq is a different frame and enters the id.
         let other = render(
             &spec,
             &RenderFormat::QrStream {
@@ -827,21 +827,21 @@ mod tests {
                 },
                 &other
             ),
-            "seq kimlige girmeli"
+            "seq must enter the id"
         );
     }
 
-    /// Tasima temsili DEPOLAMA EKLEMEZ.
+    /// A transport representation ADDS NO STORAGE.
     ///
-    /// Bu, tum tasarimin dayandigi ozellik: kare talep aninda uretilir ve
-    /// hicbir ara urun saklanmaz. Kalici olan sey yine tariftir.
+    /// This is the property the whole design rests on: a frame is produced on demand
+    /// and no intermediate product is stored. What persists is still the recipe.
     #[test]
     fn a_transport_representation_adds_no_stored_bytes() {
         use crate::storage::generated::{held_bytes, ContentSource};
         let spec = avatar_spec();
         let object_len = u64::from(spec.output_len);
 
-        // Kareler uretilebiliyor...
+        // Frames can be produced...
         let frame = render(
             &spec,
             &RenderFormat::QrStream {
@@ -852,17 +852,17 @@ mod tests {
         .unwrap();
         assert!(!frame.is_empty());
 
-        // ...ama tutulan bayt hala sifir: temsil kalici degil.
+        // ...but the held byte count is still zero: the representation is not persistent.
         assert_eq!(
             held_bytes(&ContentSource::Generated(spec), object_len),
             Some(0),
-            "tasima temsili depolama eklememeli"
+            "a transport representation must add no storage"
         );
     }
 
-    /// Icerigin sonunu gecen kare uretilmez.
+    /// A frame past the end of the content is not produced.
     ///
-    /// Bos bir kare, olmayan bir seyi varmis gibi gosterirdi.
+    /// An empty frame would present something absent as if it were present.
     #[test]
     fn a_frame_past_the_end_is_refused() {
         let spec = avatar_spec();
@@ -874,7 +874,7 @@ mod tests {
             }
         )
         .is_err());
-        // Sifir uzunluklu yuk de reddedilir.
+        // A zero-length payload is refused too.
         assert!(render(
             &spec,
             &RenderFormat::QrStream {
