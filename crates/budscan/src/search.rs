@@ -136,7 +136,7 @@ pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
             format!("blok:{h}"),
             "blok goruntusu; basligin kesinligi ayrica gosterilir",
             Claim::new(
-                "zincir",
+                "chain",
                 Strength::RpcClaimOnly,
                 "baslik kesinligi tarayicida dogrulanmiyor",
             ),
@@ -145,7 +145,7 @@ pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
             format!("tx:0x{}", hex::encode(h)),
             "islem goruntusu",
             Claim::new(
-                "zincir",
+                "chain",
                 Strength::RpcClaimOnly,
                 "islem makbuzu bir kanitla gelmedi",
             ),
@@ -158,7 +158,7 @@ pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
                 candidates.join(", ")
             ),
             Claim::new(
-                "siniflandirma",
+                "classification",
                 Strength::Refused,
                 "belirsiz bir girdi tahmin edilmez",
             ),
@@ -167,7 +167,7 @@ pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
             input.clone(),
             format!("{scheme}: bu semada bir sey acilmaz"),
             Claim::new(
-                "sema",
+                "schema",
                 Strength::Refused,
                 &format!("{scheme} semasi adres cubugundan acilmaz"),
             ),
@@ -175,7 +175,7 @@ pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
         Query::RefusedName { input, rejection } => nothing(
             input.clone(),
             rejection.to_string(),
-            Claim::new("ad-kurali", Strength::Refused, &rejection.to_string()),
+            Claim::new("name-rule", Strength::Refused, &rejection.to_string()),
         ),
     }
 }
@@ -199,7 +199,8 @@ fn nothing(input: String, note: String, claim: Claim) -> SearchResult {
 
 fn account_hit<V: ChainView>(view: &V, address: &[u8; 32]) -> SearchResult {
     if let Some(account) = view.account(address) {
-        let evidence = Evidence::new().with(proven_claim("hesap", account.proven, "bakiye/nonce"));
+        let evidence =
+            Evidence::new().with(proven_claim("account", account.proven, "bakiye/nonce"));
         return SearchResult {
             hit: Hit::Account(Box::new(account)),
             evidence,
@@ -212,7 +213,7 @@ fn account_hit<V: ChainView>(view: &V, address: &[u8; 32]) -> SearchResult {
              gecerli bir adrestir",
         ),
         Claim::new(
-            "hesap",
+            "account",
             Strength::RpcClaimOnly,
             "yokluk kaniti sunulmadi; 'yok' ile 'bilmiyorum' ayirt edilemiyor",
         ),
@@ -240,7 +241,7 @@ fn nft_hit<V: ChainView>(view: &V, id: u64) -> SearchResult {
         let evidence = Evidence::new()
             .with(proven_claim("nft", nft.proven, "NFT kaydi"))
             .with(Claim::new(
-                "nft-icerik",
+                "nft-content",
                 Strength::RpcClaimOnly,
                 "NFT'nin content_id'si bir isaret; baytlar getirilip hash'lenene kadar \
                  icerik dogrulanmis degil",
@@ -265,13 +266,13 @@ fn name_hit<V: ChainView>(view: &V, name: &str, suffix: &str) -> SearchResult {
     };
     let claim = if suffix == "bud" {
         Claim::new(
-            "bns-cozumu",
+            "bns-resolution",
             Strength::RpcClaimOnly,
             "cozum kanitsiz; BnsRegistry::root() bugun isim basina kanit uretmiyor",
         )
     } else {
         Claim::new(
-            "ens-cozumu",
+            "ens-resolution",
             Strength::RpcClaimOnly,
             "ENS cozumu bir MPT kaniti gerektiriyor ve bu arama katmani onu \
              dogrulamiyor; acmadan once dogrulanir",
@@ -293,7 +294,7 @@ fn free_text_hit<V: ChainView>(view: &V, text: &str) -> SearchResult {
             text.to_string(),
             &format!("#{tag} etiketinde {} NFT", hits.len()),
             Claim::new(
-                "etiket-arama",
+                "tag-search",
                 Strength::RpcClaimOnly,
                 "etiket dizini bir dugumun urettigi siralamadir; kanitlanmaz",
             ),
@@ -306,7 +307,7 @@ fn free_text_hit<V: ChainView>(view: &V, text: &str) -> SearchResult {
              basina # koyun",
         ),
         Claim::new(
-            "siniflandirma",
+            "classification",
             Strength::RpcClaimOnly,
             "girdi bir sinifa oturmadi",
         ),
