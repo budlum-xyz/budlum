@@ -1,20 +1,26 @@
-//! B.U.D. 2.0 - EXE / PDF Format Transformları (2026-08-16)
+//! B.U.D. 2.0 - EXE / PDF Format Transforms (2026-08-16)
 //!
-//! Kapsam: exe, pdf ve benzeri kapsayıcı dosya türleri.
-//! İki domain transformu (kayıpsız, format-farkında - zstd'nin göremediği yapıyı görür):
+//! Scope: exe, pdf and similar container file types.
+//! Two domain transforms (lossless, format-aware - they see structure zstd
+//! cannot):
 //!
-//! 1. **EXE (PE/ELF bölüm bazında):** ikili dosyayı bölümlere ayırır (metin/kod yüksek
-//!    tekrarlı, veri rastgele). Bölümler ayrı sıkıştırılır: kod bölümü opcode tekrarları
-//!    içerir → zstd daha iyi görür; veri bölümü ayrı tutulur (kirlilik yaymaz).
-//!    Sıfır-bağımlılık bölümleme: PE `\x4D\x5A` (MZ) başlangıcı + ELF `\x7FELF` tespiti;
-//!    bölüm ayrımı için basit eşik (bölüm başlıkları çözümlenmez - güvenli).
+//! 1. **EXE (per PE/ELF section):** it splits the binary into sections
+//!    (text/code is highly repetitive, data is random). The sections are
+//!    compressed separately: the code section contains opcode repetitions so
+//!    zstd sees it better; the data section is kept apart (it does not spread
+//!    noise). Zero-dependency splitting: detection of the PE `\x4D\x5A` (MZ)
+//!    start and the ELF `\x7FELF` magic; a simple threshold for the section
+//!    boundary (section headers are not parsed - safe).
 //!
-//! 2. **PDF akış ayrımı:** PDF = metin (objeler/sözlükler) + akışlar (deflate ile
-//!    zaten sıkıştırılmış). Akışları (stream ... endstream) ayırır: metin kısmı zstd ile
-//!    iyi sıkışır, akışlar ayrı tutulur (zaten sıkışmış). Kayıpsız: birleştir = orijinal.
+//! 2. **PDF stream separation:** a PDF is text (objects/dictionaries) plus
+//!    streams (already deflate compressed). It separates the streams
+//!    (stream ... endstream): the text part compresses well with zstd, the
+//!    streams are kept apart (they are already compressed). Lossless: joining
+//!    them gives the original.
 //!
-//! Her ikisi de: `#![forbid(unsafe_code)]`, deterministik, panik'siz, kayıpsız (K38),
-//! düzensiz girdide None (çağıran ham yola düşer).
+//! Both of them: `#![forbid(unsafe_code)]`, deterministic, panic free,
+//! lossless (K38), None on irregular input (the caller falls back to the raw
+//! path).
 
 #![forbid(unsafe_code)]
 
@@ -24,12 +30,12 @@ pub const EXE_SPLIT_MAGIC: [u8; 8] = *b"\xB5EXES\0\0\0";
 pub const PDF_SPLIT_MAGIC: [u8; 8] = *b"\xB5PDFS\0\0\0";
 pub const SPLIT_VERSION: u8 = 1;
 
-/// EXE bölüm transformu: ikiliyi (kod, veri) bölümlerine ayırır (kayıpsız).
+/// EXE section transform: it splits a binary into (code, data) sections (lossless).
 #[derive(Debug, Clone)]
 pub struct ExeSectionSplit {
     pub kind: ExeKind,
-    pub code: Vec<u8>, // yüksek tekrarlı bölüm (kod)
-    pub data: Vec<u8>, // geri kalan (veri/padding)
+    pub code: Vec<u8>, // the highly repetitive section (code)
+    pub data: Vec<u8>, // the remainder (data/padding)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +64,9 @@ impl ExeKind {
 }
 
 impl ExeSectionSplit {
-    /// İkiliyi kod/veri bölümlerine ayır (kayıpsız: birleştir = orijinal).
-    /// Strateji: ilk %60 = kod (yüksek tekrarlı), gerisi veri. Deterministik eşik.
+    /// Split the binary into code/data sections (lossless: joining gives the
+    /// original). Strategy: the first 60 percent is code (highly repetitive),
+    /// the rest is data. A deterministic threshold.
     pub fn encode(data: &[u8]) -> Option<Self> {
         if data.is_empty() || data.len() > 512 * 1024 * 1024 {
             return None;
@@ -71,18 +78,21 @@ impl ExeSectionSplit {
         } else {
             ExeKind::Unknown
         };
-        // Kod/veri ayrımı SABİT ORANLIDIR: ilk %60 kod, gerisi veri.
+        // The code/data split is at a FIXED RATIO: the first 60 percent is
+        // code, the rest is data.
         //
-        // Buradaki `if` iki dalında da `data[..split]` döndürüyordu (clippy
-        // if_same_then_else): sıfır yoğunluğu ölçülüyor, karşılaştırılıyor ve
-        // sonuç atılıyordu. Yani "içerik farkına göre ayır" yorumu koda
-        // karşılık gelmiyordu: ölü bir dallanma sabit davranışı içerik-duyarlı
-        // gösteriyordu. Ölçüm kaldırıldı; davranış (ve dolayısıyla kayıpsızlık)
-        // birebir aynı: `decode` iki bölümü sırayla birleştirir.
+        // The `if` here returned `data[..split]` on both branches (clippy
+        // if_same_then_else): zero density was measured, compared, and the
+        // result thrown away. So the comment "split by content difference" had
+        // no counterpart in the code: a dead branch made fixed behaviour look
+        // content sensitive. The measurement was removed; the behaviour (and
+        // therefore the losslessness) is exactly the same: `decode` joins the
+        // two sections in order.
         //
-        // Gerçek içerik-duyarlı bölümleme istenirse bölüm sınırının kendisi
-        // konteynere yazılmalıdır; sabit oranda buna gerek yok, `split` çözümde
-        // `code.len()` üzerinden zaten geri geliyor.
+        // If genuinely content-sensitive splitting is wanted, the section
+        // boundary itself must be written into the container; at a fixed ratio
+        // that is unnecessary, since `split` already comes back through
+        // `code.len()` on decode.
         let split = (data.len() * 3) / 5;
         let code = data[..split].to_vec();
         Some(ExeSectionSplit {
@@ -92,7 +102,7 @@ impl ExeSectionSplit {
         })
     }
 
-    /// Bölümleri birleştir → orijinal (kayıpsızlık kanıtı).
+    /// Join the sections -> the original (the losslessness proof).
     pub fn decode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.code.len() + self.data.len());
         out.extend_from_slice(&self.code);
@@ -100,7 +110,7 @@ impl ExeSectionSplit {
         out
     }
 
-    /// Deterministik blob: magic + tür + kod + veri + digest.
+    /// Deterministic blob: magic + type + code + data + digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&EXE_SPLIT_MAGIC);
@@ -138,15 +148,15 @@ impl ExeSectionSplit {
     }
 }
 
-/// PDF akış ayrımı: metin + akışlar (kayıpsız).
+/// PDF stream separation: text + streams (lossless).
 #[derive(Debug, Clone)]
 pub struct PdfStreamSplit {
-    pub text: Vec<u8>,         // PDF yapısı (objeler, sözlükler) - zstd ile iyi sıkışır
-    pub streams: Vec<Vec<u8>>, // akış içerikleri (zaten sıkışmış - ayrı tutulur)
+    pub text: Vec<u8>, // PDF structure (objects, dictionaries) - compresses well with zstd
+    pub streams: Vec<Vec<u8>>, // stream contents (already compressed - kept apart)
 }
 
 impl PdfStreamSplit {
-    /// PDF'i metin + akışlara ayır (kayıpsız: birleştir = orijinal).
+    /// Split the PDF into text + streams (lossless: joining gives the original).
     pub fn encode(data: &[u8]) -> Option<Self> {
         if !data.starts_with(b"%PDF-") || data.len() > 256 * 1024 * 1024 {
             return None;
@@ -155,12 +165,12 @@ impl PdfStreamSplit {
         let mut streams = Vec::new();
         let mut pos = 0usize;
         while pos < data.len() {
-            // "stream\r\n" veya "stream\n" ara (akış başlangıcı)
+            // look for "stream\r\n" or "stream\n" (the start of a stream)
             if let Some(rel) = find_sub(&data[pos..], b"stream") {
                 let abs = pos + rel;
-                // stream'den önceki kısmı metne ekle
+                // append the part before the stream to the text
                 text.extend_from_slice(&data[pos..abs]);
-                // stream'den sonra satır sonu
+                // the line break after the stream keyword
                 let mut s = abs + 6;
                 if data.get(s) == Some(&b'\r') {
                     s += 1;
@@ -172,7 +182,7 @@ impl PdfStreamSplit {
                 let end_rel = find_sub(&data[s..], b"endstream")?;
                 let end = s + end_rel;
                 streams.push(data[s..end].to_vec());
-                // "endstream"i metne ekle (yapı korunur)
+                // append "endstream" to the text (the structure is preserved)
                 let after_end = end + b"endstream".len();
                 text.extend_from_slice(&data[end..after_end]);
                 pos = after_end;
@@ -182,33 +192,38 @@ impl PdfStreamSplit {
             }
         }
         if streams.is_empty() {
-            return None; // akış yok → ayrım gereksiz (çağıran ham yola düşer)
+            return None; // no streams -> separation is pointless (the caller falls back to raw)
         }
         Some(PdfStreamSplit { text, streams })
     }
 
-    /// Birleştir → orijinal (kayıpsızlık kanıtı).
+    /// Join -> the original (the losslessness proof).
     pub fn decode(&self) -> Vec<u8> {
-        // stream içerikleri "stream\n...\nendstream" şablonuyla yeniden kurulamaz -
-        // bu yüzden blob'da akışlar ORİJİNAL BAYTLARIYLA saklanır ve text ile birleştirilir.
-        // Dikkat: encode, akış gövdesini ayrı tuttuğu için decode = text + stream gövdeleri
-        // SADECE gövde değil, tüm orijinali kurmak için metin + gövde + endstream gerekir.
-        // Pratik: bu modülün blob'u akışları gövde olarak tutar; decode orijinali yeniden
-        // kurmak için şablonu yeniden uygular (kayıpsızlık aşağıda testle kanıtlı).
+        // Stream contents cannot be rebuilt from a "stream\n...\nendstream"
+        // template, so the blob keeps the streams with their ORIGINAL BYTES and
+        // joins them with the text. Note: because encode keeps the stream body
+        // apart, decode is text + stream bodies; rebuilding the whole original
+        // needs text + body + endstream, not the body alone. In practice: this
+        // module's blob keeps the streams as bodies and decode reapplies the
+        // template to rebuild the original (losslessness is proven by the test
+        // below).
         let mut out = Vec::with_capacity(
             self.text.len() + self.streams.iter().map(|s| s.len()).sum::<usize>(),
         );
-        // metin, akışların yerine yer tutucu içerir (encode'da endstream'e kadar eklendi)
-        // akış gövdeleri metindeki "stream\n...\nendstream" boşluğuna geri konur:
-        // Bunun yerine decode: metin parçaları + akışların sırasıyla birleşimi.
-        // En basit doğru yol: akış gövdelerini metindeki boş "stream\n\nendstream"e yerleştir.
-        // (encode bu boşluğu bırakmaz - bu yüzden bu modül için blob akışları orijinal
-        // konum bilgisiyle saklamalı. Test, kayıpsızlığı doğrular.)
+        // The text carries a placeholder where the streams were (encode
+        // appended up to endstream), and the stream bodies go back into the
+        // "stream\n...\nendstream" gap in the text. Instead of that, decode
+        // joins the text pieces and the streams in order. The simplest correct
+        // way is to place the stream bodies into the empty
+        // "stream\n\nendstream" in the text. (Encode does not leave that gap,
+        // which is why for this module the blob must keep the streams with
+        // their original position information. The test verifies the
+        // losslessness.)
         out.extend_from_slice(&self.text);
         out
     }
 
-    /// Blob: text + akış gövdeleri + digest (kayıpsızlık: metin akış yerlerini korur).
+    /// Blob: text + stream bodies + digest (losslessness: the text preserves the stream positions).
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&PDF_SPLIT_MAGIC);
@@ -291,7 +306,7 @@ mod tests {
 
     #[test]
     fn exe_split_roundtrip() {
-        // PE ikili simülasyonu: MZ + kod (tekrarlı) + veri (sıfır ağırlıklı)
+        // A simulated PE binary: MZ + code (repetitive) + data (zero weighted)
         let mut exe = b"MZ".to_vec();
         for _ in 0..1000 {
             exe.extend_from_slice(&[0x48, 0x8B, 0x05, 0x01, 0x00, 0x00, 0x00]); // mov rax,[rip]
@@ -299,7 +314,7 @@ mod tests {
         exe.extend_from_slice(&[0u8; 500]); // veri/padding
         let split = ExeSectionSplit::encode(&exe).expect("encode");
         assert_eq!(split.kind, ExeKind::Pe);
-        assert_eq!(split.decode(), exe, "kayıpsız");
+        assert_eq!(split.decode(), exe, "lossless");
         let blob = split.to_blob();
         let back = ExeSectionSplit::from_blob(&blob).expect("blob");
         assert_eq!(back.decode(), exe);
@@ -321,7 +336,7 @@ mod tests {
 
     #[test]
     fn pdf_stream_split_roundtrip() {
-        // PDF: metin + 2 akış (zaten sıkışmış içerik)
+        // PDF: text + 2 streams (already compressed content)
         let mut pdf = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
         pdf.extend_from_slice(b"2 0 obj\n<< /Length 10 >>\nstream\n");
         pdf.extend_from_slice(&[0x78, 0x9C, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // deflate benzeri
@@ -330,8 +345,8 @@ mod tests {
         pdf.extend_from_slice(&[0x9C, 0x78, 0x01, 0x02]);
         pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
         let split = PdfStreamSplit::encode(&pdf).expect("encode");
-        assert_eq!(split.streams.len(), 2, "iki akış ayrıştı");
-        // metin akış gövdelerini içermez
+        assert_eq!(split.streams.len(), 2, "two streams were separated");
+        // the text does not contain the stream bodies
         assert!(!split
             .text
             .windows(8)
