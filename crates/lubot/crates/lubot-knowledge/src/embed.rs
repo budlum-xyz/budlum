@@ -1,14 +1,19 @@
-//! Bağımlılıksız TF-IDF gömme - harici vektör API'si gerektirmeden
-//! metinleri sayısal vektöre çevirir ve kosinüs benzerliğiyle arama
-//! yapar. Kapalı-devre ilkesi: gömme işlemi yerel çalışır, veri dışarı
-//! çıkmaz.
+//! Dependency-free TF-IDF embedding - turns text into numeric vectors and
+//! searches by cosine similarity, without needing an external vector API. The
+//! closed-circuit principle: embedding runs locally and no data leaves the
+//! machine.
+//!
+//! The stopword list below keeps Turkish words on purpose: the corpus this
+//! index reads is bilingual, and dropping the Turkish function words is what
+//! the list is for. The same goes for the Turkish fixtures in the tests, which
+//! measure that the tokenizer handles them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Vektör = boyutlu `f64` dizisi.
+/// A vector is a dimensioned array of `f64`.
 pub type EmbeddingVector = Vec<f64>;
 
-/// İngilizce + Türkçe sık geçen sözcükler (gömme gürültüsünü azaltır).
+/// Frequent English and Turkish words (they reduce the embedding noise).
 const STOPWORDS: &[&str] = &[
     "the", "is", "in", "it", "of", "and", "or", "to", "a", "an", "for", "on", "with", "as", "at",
     "be", "this", "that", "are", "was", "were", "by", "from", "not", "but", "if", "so", "do", "we",
@@ -17,14 +22,14 @@ const STOPWORDS: &[&str] = &[
     "veya", "icin", "ile", "degil", "ama", "sonra", "gibi", "cok", "daha",
 ];
 
-/// Varsayılan gömme boyutu.
+/// The default embedding dimension.
 pub const DEFAULT_DIMENSIONS: usize = 256;
 
-/// TF-IDF gömücü.
+/// The TF-IDF embedder.
 #[derive(Debug, Clone)]
 pub struct TfIdfEmbedder {
     dimensions: usize,
-    /// Sıralı terim listesi (sözlük).
+    /// The ordered term list (the vocabulary).
     vocab: Vec<String>,
     vocab_index: BTreeMap<String, usize>,
     idf: BTreeMap<String, f64>,
@@ -58,7 +63,7 @@ impl TfIdfEmbedder {
             .collect()
     }
 
-    /// Korpus üzerinde sözlük ve IDF ağırlıklarını kur.
+    /// Build the vocabulary and the IDF weights over a corpus.
     pub fn fit(&mut self, texts: &[String]) {
         if texts.is_empty() {
             return;
@@ -71,7 +76,7 @@ impl TfIdfEmbedder {
                 *doc_freq.entry(tok).or_insert(0) += 1;
             }
         }
-        // Sıklığa göre sırala, boyut kadar tut.
+        // Sort by frequency and keep as many as the dimension allows.
         let mut ranked: Vec<(String, usize)> = doc_freq.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         // `ranked` is still needed below to look up document frequencies, so
@@ -105,7 +110,7 @@ impl TfIdfEmbedder {
         self.fitted = true;
     }
 
-    /// Metni TF-IDF vektörüne çevir (birim-normalize).
+    /// Turn text into a TF-IDF vector (unit-normalised).
     #[must_use]
     pub fn embed(&self, text: &str) -> EmbeddingVector {
         let tokens = Self::tokenize(text);
@@ -128,7 +133,7 @@ impl TfIdfEmbedder {
         vec
     }
 
-    /// İki vektörün kosinüs benzerliği.
+    /// The cosine similarity of two vectors.
     #[must_use]
     pub fn cosine_similarity(a: &EmbeddingVector, b: &EmbeddingVector) -> f64 {
         if a.len() != b.len() {
@@ -143,7 +148,7 @@ impl TfIdfEmbedder {
         dot / (na * nb)
     }
 
-    /// Sorgu vektörüne en yakın `k` öğeyi (id, skor) döndürür.
+    /// Returns the `k` items closest to the query vector, as (id, score).
     #[must_use]
     pub fn top_k_similar(
         &self,
@@ -200,7 +205,7 @@ mod tests {
             .map(|(i, t)| (i.to_string(), e.embed(t)))
             .collect();
         let top = e.top_k_similar(&query, &items, 3);
-        // Erasure içerenler üstte olmalı.
+        // The ones mentioning erasure have to come out on top.
         assert_eq!(top[0].0, "0");
         assert_eq!(top[1].0, "2");
     }
@@ -223,7 +228,8 @@ mod tests {
 
     #[test]
     fn cosine_zero_for_zero_vectors() {
-        // `&[]` bir `&[_; 0]`; imza `&EmbeddingVector` (= `&Vec<f64>`) istiyor.
+        // `&[]` is a `&[_; 0]`, while the signature wants an
+        // `&EmbeddingVector` (that is, a `&Vec<f64>`).
         let empty: EmbeddingVector = Vec::new();
         assert_eq!(TfIdfEmbedder::cosine_similarity(&empty, &empty), 0.0);
         let zero = vec![0.0; 8];
