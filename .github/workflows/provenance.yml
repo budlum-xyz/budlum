@@ -1,24 +1,24 @@
 name: Provenance (SBOM attestation)
 
-# Bir SBOM, kimin urettigi bilinmiyorsa bir iddiadir.
+# An SBOM is a claim if who produced it is unknown.
 #
-# ci.yml zaten CycloneDX SBOM'u uretip artefakt olarak yukluyor. Onu indiren
-# biri icerigini okuyabiliyor ama su soruyu soramiyor: bu dosya gercekten bu
-# depodan, bu commit'ten, bu workflow'dan mi cikti? Imzasiz bir SBOM, elle
-# yazilmis bir SBOM'dan ayirt edilemez, ve tedarik zinciri saldirisinin isledigi
-# yer tam olarak burasi: kaynak temiz, uretilen artefakt degil.
+# ci.yml already produces a CycloneDX SBOM and uploads it as an artifact. Whoever
+# downloads it can read the contents but cannot ask: did this file really come
+# from this repository, this commit, this workflow? An unsigned SBOM cannot be
+# told apart from a hand-written one, and that is exactly where a supply-chain
+# attack operates: the source is clean, the produced artifact is not.
 #
-# Bu workflow SBOM'u uretir ve GitHub'in attestation altyapisiyla imzalar.
-# Altyapi Sigstore kullaniyor: kisa omurlu sertifika Fulcio'dan, imza kaydi
-# Rekor seffaflik logundan geciyor, yani uzun omurlu bir anahtar tutulmuyor ve
-# imza olayi geri alinamaz bicimde kayda giriyor.
+# This workflow produces the SBOM and signs it with GitHub's attestation
+# infrastructure. That infrastructure uses Sigstore: a short-lived certificate
+# from Fulcio and a signature record through the Rekor transparency log, so no
+# long-lived key is held and the signing event is recorded irreversibly.
 #
-# Ne iddia edilmiyor: bu SLSA Build L3 degil. L3 yalitilmis bir yapi platformu
-# ister ve GitHub'in barindirilan runner'lari o yalitimi vermez. Bu, uretilen
-# dosyanin bu is tarafindan uretildigini soyleyen imzali bir beyandir, daha
-# fazlasi degil. Fazlasini iddia etmek sahte bir garanti olurdu, ve bu depo
-# bunu bir kez yasadi: extra-tooling.yml gecersiz provenance uretecek bir SLSA
-# job'i tasiyordu, kaldirildi ve yerine taklidi konulmadi.
+# What is not claimed: this is not SLSA Build L3. L3 requires an isolated build
+# platform and GitHub's hosted runners do not provide that isolation. This is a
+# signed statement saying the produced file was produced by this job, no more.
+# Claiming more would be a fake guarantee, and this repository lived through it
+# once: extra-tooling.yml carried a SLSA job that would produce invalid
+# provenance; it was removed and no imitation was put in its place.
 
 on:
   push:
@@ -39,8 +39,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      # Attestation icin gerekli: id-token OIDC kimligini, attestations ise
-      # beyanin depoya yazilmasini saglar. Ikisi de bu is disinda verilmiyor.
+      # Required for attestation: id-token provides the OIDC identity and
+      # attestations lets the statement be written to the repository. Neither is granted outside this job.
       id-token: write
       attestations: write
     steps:
@@ -59,27 +59,27 @@ jobs:
       - name: SBOM uret (CycloneDX)
         run: bash ./ops/scripts/generate-sbom.sh
 
-      # Kanarya: imzalanacak dosya gercekten bir SBOM mu. Bos ya da bozuk bir
-      # dosyayi imzalamak, imzanin kendisini anlamsiz yapar; imza icerigin
-      # dogru oldugunu degil, bu isten ciktigini soyler.
-      - name: SBOM kanaryasi (imzalanacak sey bir SBOM mu)
+      # Canary: is the file to be signed really an SBOM. Signing an empty or broken
+# file makes the signature itself meaningless; a signature says not that the
+# content is correct but that it came out of this job.
+      - name: SBOM canary (is the thing to be signed an SBOM)
         run: |
           set -euo pipefail
-          test -s sbom.cdx.json || { echo "SBOM bos ya da yok" >&2; exit 1; }
+          test -s sbom.cdx.json || { echo "the SBOM is empty or missing" >&2; exit 1; }
           python3 - <<'PY'
           import json, sys
           d = json.load(open("sbom.cdx.json"))
           fmt = d.get("bomFormat")
           comps = d.get("components") or []
           if fmt != "CycloneDX":
-              print(f"bomFormat 'CycloneDX' degil: {fmt!r}", file=sys.stderr)
+              print(f"bomFormat is not 'CycloneDX': {fmt!r}", file=sys.stderr)
               sys.exit(1)
-          # Depo yuzlerce bagimlilik tasiyor. Bir avuc bilesen, uretimin
-          # yarida kesildigini gosterir ve imzalanmasi yanlis olur.
+          # The repository carries hundreds of dependencies. A handful of
+          # components indicates production was cut short and signing would be wrong.
           if len(comps) < 50:
-              print(f"yalnizca {len(comps)} bilesen; uretim eksik", file=sys.stderr)
+              print(f"only {len(comps)} components; production is incomplete", file=sys.stderr)
               sys.exit(1)
-          print(f"kanarya OK: CycloneDX, {len(comps)} bilesen.")
+          print(f"canary OK: CycloneDX, {len(comps)} components.")
           PY
 
       - name: SBOM'u imzala (Sigstore uzerinden beyan)

@@ -17,7 +17,7 @@ on:
     branches: [ main, fix/architecture-tip-adlari ]
   workflow_dispatch:
 
-# Minimal permissions - bu workflow yalniz okur (build+scan+smoke).
+# Minimal permissions - this workflow only reads (build+scan+smoke).
 concurrency:
   group: docker-smoke-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -28,8 +28,8 @@ permissions:
 jobs:
   docker-smoke:
     runs-on: ubuntu-latest
-    # Security-events: write, Trivy IMAGE bulgularinin Security sekmesine
-    # SARIF olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`.
+    # security-events: write is required for Trivy IMAGE findings to be uploaded
+    # to the Security tab as SARIF. The workflow default is `contents: read`.
     permissions:
       contents: read
       security-events: write
@@ -41,24 +41,24 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Build mainnet image
         # docker buildx build -f ops/Dockerfile runner'da 'open Dockerfile' ile
-        # dusuyordu (buildx -f cozumlemesi). docker compose build ayni
-        # context/dockerfile'i cagirir ve devnet smoke'da dogrulanmis sekilde
-        # calisir; imaj budlum-core:devnet olarak uretilir (trivy buna isaret
-        # eder).
-        # Tum node'lari TEK komutla build et: smoke_rpc.sh sonradan compose up
-        # yaptiginda node2-4'u PROTOC'suz build edip 'Could not find protoc'
-        # veriyordu. Hepsi burada (build.rs protoc_executable ile protoc'u
-        # bulur) uretilir; smoke_rpc.sh imajlari cache'ten kullanir.
+        # (buildx -f resolution). docker compose build calls the same
+# context/dockerfile and works the way verified in the devnet smoke test; the
+# image is produced as budlum-core:devnet (which is what trivy points at).
+        #
+        # Build ALL nodes with a SINGLE command: when smoke_rpc.sh later ran
+# compose up it built node2-4 without PROTOC and gave 'Could not find protoc'.
+# They are all produced here (build.rs finds protoc via protoc_executable);
+# smoke_rpc.sh uses the images from cache.
         run: docker compose -f ops/docker-compose.yml build
-      - name: İmza kanıtı - taranan imaj az önce BURADA build edilen
+      - name: Identity evidence - the scanned image is the one just built HERE
         run: |
-          docker image inspect budlum-core:devnet --format 'taranan_imaj_id={{.Id}} boyut={{.Size}}byte'
-      # Uc adimli: once SARIF uret (exit-code 0 -> adim dusmez), sonra Security
-      # Sekmesine yukle, en son kapiyi calistir. Tek adimda hem SARIF hem
-      # Exit-code 1 verilirse bulgu bulundugunda adim orada olur ve upload hic
-      # Calismaz; yani gorulmesi en kritik olan bulgular Security sekmesine
-      # Dusmez. ci.yml'deki Trivy fs taramasiyla ayni desen.
-      - name: Trivy IMAGE taramasi - SARIF uret (raporlama, kapi degil)
+          docker image inspect budlum-core:devnet --format 'scanned_image_id={{.Id}} size={{.Size}}bytes'
+      # Three steps: first produce SARIF (exit code 0 -> the step does not fail),
+# then upload to the Security tab, and run the gate last. If a single step gave
+# both SARIF and exit code 1, the step would die on a finding and the upload
+# would never run; the findings most critical to see would not land in the
+# Security tab. The same pattern as the Trivy fs scan in ci.yml.
+      - name: Trivy IMAGE scan - produce SARIF (reporting, not a gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image

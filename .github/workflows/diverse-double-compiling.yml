@@ -1,33 +1,33 @@
 name: Diverse Double Compiling
 
-# Bir ikilinin kendi kaynagindan dogdugunu, derleyiciye guvenerek
-# soyleyemezsiniz.
+# You cannot say a binary came from its own source by trusting the compiler.
 #
-# `determinism.yml` zaten iki kez derleyip ayni genesis hash'ini aldigini
-# dogruluyor. O, **ciktinin belirlenimli** oldugunu soyler ve degerlidir; ama
-# ayni derleyici iki kez kosarsa, o derleyicinin kaynakta olmayan bir sey
-# eklemesi durumunda iki kosu da ayni fazlaligi uretir ve karsilastirma gecer.
-# Kendini yeniden ureten bir derleyici arka kapisi tam olarak boyle gorunmez.
 #
-# Wheeler'in gozlemi sudur: sorun guven degil, **bagimsiz dogrulamanin
-# yoklugu**. Ayni kaynak iki ayri derleyiciyle derlenir; ikisi de ayni
-# baytlari uretiyorsa, ikisinin ayni fazlaligi bagimsiz olarak eklemis olmasi
-# gerekir. Bu is bunu kurar.
+# `determinism.yml` already verifies that compiling twice yields the same genesis
+# hash. That says the **output is deterministic** and it is valuable; but if the
+# same compiler runs twice and that compiler adds something absent from the
+# source, both runs produce the same surplus and the comparison passes.
+# A self-reproducing compiler backdoor is invisible in exactly this way.
+#
+# The observation is this: the problem is not trust but **the absence of
+# independent verification**. The same source is built with two different
+# compilers; if both produce the same bytes, both must have added the same
+# surplus independently. This job sets that up.
 #
 # DELIBERATE-TOOLCHAIN-DIVERGENCE
 #
 # Bu is `rust-toolchain.toml`'daki pin'den bilerek sapar ve `docker-toolchain`
-# kapisi bu isareti gorup bu dosyayi denetlemez. Sapma isin amacidir: ayni
-# kaynagi ikinci bir derleyiciyle derlemek. Pin'e esitlemek, iki kez ayni
-# derleyiciyi kosturmak olurdu ve `determinism.yml` zaten onu yapiyor.
+# gate sees this marker and does not inspect this file. Divergence is the point
+# of the job: building the same source with a second compiler. Matching the pin
+# would mean running the same compiler twice, and `determinism.yml` already does that.
 #
-# Karsilastirilan sey ikili degil, **ikilinin davranisinin kanonik ozeti**.
-# Rust ikilileri bugun bit-bit yeniden uretilebilir degil: yol on ekleri,
-# artimli derleme meta verisi ve panik mesajlarindaki mutlak yollar iki
-# kosuda farkli baytlar uretir. Bu farklar davranisi degistirmez ve
-# karsilastirilirsa is her zaman kirmizi olur, yani hicbir sey olcmez.
-# Bunun yerine zincirin uzerinde anlastigi degerler karsilastirilir: genesis
-# hash'i, kanonik program hash'i ve durum kok ornekleri. Bir arka kapinin
+# What is compared is not the binary but **the canonical summary of the binary's
+# behaviour**. Rust binaries are not bit-for-bit reproducible today: path
+# prefixes, incremental build metadata and absolute paths in panic messages
+# produce different bytes across two runs. Those differences do not change
+# behaviour, and comparing them would make the job always red, measuring nothing.
+# Instead the values the chain agrees on are compared: the genesis hash, the
+# canonical program hash and state root samples. For a backdoor
 # gizlenebilecegi yer tam da bunlardir.
 
 on:
@@ -35,8 +35,8 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Haftada bir: iki tam derleme pahali, ve arka kapi siniflari her
-    # commit'te degismez.
+    # Once a week: two full builds are expensive, and backdoor classes do not
+    # change on every commit.
     - cron: "0 4 * * 1"
   workflow_dispatch:
 
@@ -56,12 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Kanonik derleyici: repo'nun sabitledigi surum.
+          # The canonical compiler: the version the repository pins.
           - label: pinned
             toolchain: "1.97.0"
-          # Bagimsiz derleyici: farkli bir surum, dolayisiyla farkli bir
-          # ikili ve farkli bir derleme gecmisi. Ayni arka kapiyi tasimasi
-          # icin ikisinin ayni sekilde ele gecirilmis olmasi gerekir.
+          # The independent compiler: a different version, hence a different binary
+          # and a different build history. For it to carry the same backdoor, both would
+          # have to have been compromised in the same way.
           - label: independent
             toolchain: "1.98.0"
     steps:
@@ -86,17 +86,17 @@ jobs:
         id: digests
         run: |
           set -euo pipefail
-          # Genesis: zincirin ilk uzlasma degeri. Kaynakta olmayan bir sey
-          # buraya karisirsa iki derleyici ayrisir.
+          # Genesis: the chain's first agreed value. If something absent from the
+          # source gets in here, the two compilers diverge.
           cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis.txt
           GENESIS=$(grep "GENESIS_HASH=" /tmp/genesis.txt | tail -1 | cut -d= -f2)
           test -n "${GENESIS}"
 
-          # Kanonik program hash'i: zkVM programinin kimligi. Bir derleyici
-          # uretilen kodu degistirirse bu deger kayar.
-          # `|| true` yok. Kapi kosmazsa bu is kirmizi doner: olculemeyen bir
-          # sey yesil sayilamaz, ve sessizce atlanan bir asama karsilastirmayi
-          # bosaltir.
+          # The canonical program hash: the identity of the zkVM program. If a
+          # compiler changes the generated code this value shifts.
+          # No `|| true`. If the gate does not run this job goes red: something
+          # unmeasurable cannot be counted green, and a silently skipped stage empties
+          # the comparison.
           (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/proghash.txt 2>&1
           PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${PROGRAM}"
@@ -138,12 +138,12 @@ jobs:
           echo "--- independent"
           cat digests-independent.txt
 
-          # Kullanilamayan bir deger karsilastirilmaz ve **sessizce
-          # gecilmez**: olculemeyen bir sey yesil sayilamaz.
+          # A value that cannot be used is not compared and **not silently
+          # passed**: something unmeasurable cannot be counted green.
           if ! diff -u digests-pinned.txt digests-independent.txt; then
-            echo "FAIL: iki bagimsiz derleyici ayni kaynaktan farkli kanonik"
-            echo "degerler uretti. Ya derleme surece bagimli bir sey kacirdi,"
-            echo "ya biri kaynakta olmayan bir sey ekledi. Ikisi de arastirilir."
+            echo "FAIL: two independent compilers produced different canonical values"
+            echo "from the same source. Either the build picked up something"
+            echo "process-dependent, or one added something absent from the source. Both are investigated."
             exit 1
           fi
-          echo "OK: iki bagimsiz derleyici ayni kanonik degerleri uretti."
+          echo "OK: two independent compilers produced the same canonical values."

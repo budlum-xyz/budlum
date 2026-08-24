@@ -23,18 +23,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Skill doğrulama (bud2/ varsa)
+      - name: Skill verification (if bud2/ exists)
         run: |
           if [ -d bud2 ]; then
-            echo "::group::skill envanteri"
+            echo "::group::skill inventory"
             find bud2 -name "*.py" | sort
             if [ -f bud2/core/xor_code.py ]; then python3 bud2/core/xor_code.py 2>&1 | tail -10; fi
             if [ -f bud2/tests/test_iskelet.py ]; then python3 bud2/tests/test_iskelet.py -v 2>&1 | tail -15; fi
             echo "::endgroup::"
           else
-            echo "bud2/ yok - skill testleri atlandı (bud asıl hedef)"
+            echo "bud2/ is absent - skill tests skipped (bud is the real target)"
           fi
-      - name: Varlık kontrolü
+      - name: Presence check
         id: check
         run: |
           if [ -d bud ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
@@ -56,8 +56,8 @@ jobs:
         working-directory: bud
         shell: bash
         run: |
-          # pipefail ZORUNLU: grep zinciri cargo'nun cikis kodunu yutuyordu
-          # (kanit: 3 test FAILED iken adim yesildi; pipefail ile 101)
+          # pipefail is MANDATORY: the grep chain was swallowing cargo's exit code
+          # (evidence: the step was green with 3 tests FAILED; with pipefail it is 101)
           set -o pipefail
           cargo build
           cargo test 2>&1 | tee /tmp/t1.log | grep -E "test result|FAILED" | head -10

@@ -69,16 +69,16 @@ jobs:
         continue-on-error: true  # the storage sled dependency may be incompatible with Miri
 
   asan:
-    # cargo-careful'in alternatifi. Arac 0.4.7 pinli nightly ile sysroot
-    # kuramiyor (std `panic_unwind`'i `dep:` arkasina aldi, arac hala implicit
+    # An alternative to cargo-careful. With the pinned nightly the 0.4.7 tool
+# cannot build a sysroot (std moved `panic_unwind` behind `dep:` while the tool
     # as a feature). Moving nightly to suit the tool would mean giving up the
-    # pinli olma sebebini tersine cevirirdi.
+# still asks for it implicitly as a feature).
     #
     # So the tool was not taken, the work the tool does was. cargo-careful does two
-    # yapiyor: std'yi debug_assertions ile derliyor ve ek calisma-ani
-    # kontrolleri koyduruyor. Ikisi de dogrudan bayraklarla elde edilebilir:
+# things: it builds std with debug_assertions and adds extra run-time checks.
+# Both can be obtained directly with flags:
     #
-    #   -Zbuild-std                std'yi kaynaktan derle
+    #   -Zbuild-std                build std from source
     #   -Zsanitizer=address        catch memory errors at run time
     #   -Cdebug-assertions=on      re-enable the assertions std turns off for
     #                              performance
@@ -87,7 +87,7 @@ jobs:
     # rustc checks, while ASan sees memory errors it does not. The two are not
     # identical, but the gap covers most of what would otherwise stay uncovered in
     # the tool's absence: what Miri
-    # calistiramadigi FFI ve sistem cagrisi iceren yollar.
+# cannot execute: paths containing FFI and system calls.
     #
     # BLOCKS. It has a canary.
     name: AddressSanitizer + debug std (careful yerine)
@@ -109,10 +109,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       # Canary: a program that deliberately accesses freed memory is written and
-      # ve ASan'in onu yakalamasi beklenir. Yakalamazsa arac calismiyor
+      # ASan is expected to catch it. If it does not, the tool is not working.
       # means the tool is not working and a clean run means nothing. The same thing
       # was missing for years in the TSan job: "no error" could not be told apart
-      # edilemiyordu.
+      # from "the binary never ran".
       - name: ASan canary (does the tool really catch it)
         run: |
           set -euo pipefail
@@ -139,8 +139,8 @@ jobs:
           export RUSTFLAGS="-Zsanitizer=address"
           # Capture the output into a file FIRST, search SECOND.
           #
-          # Ilk yazim `cargo run ... | tee log | grep -q ...` seklindeydi ve
-          # `set -euo pipefail` altinda calismadi: program ASan raporuyla
+          # The first version was `cargo run ... | tee log | grep -q ...` and it
+          # did not work under `set -euo pipefail`: when the program
           # exited non-zero pipefail killed the pipeline there, grep never ran, and
           # the canary said "it could not catch it". ASan actually
           # had caught it; the shadow byte dump was right there in the log. So the canary
@@ -148,7 +148,7 @@ jobs:
           #
           # `|| true` is deliberate: this command is EXPECTED TO FAIL, because it
           # runs an intentional memory error. The decision is made by the grep below.
-          # veriliyor ve o blokluyor.
+          # and that one blocks.
           cargo +nightly-2026-07-19 run -Zbuild-std \
             --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1 || true
           if grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope" \
