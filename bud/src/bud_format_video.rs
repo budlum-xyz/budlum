@@ -1,29 +1,35 @@
-//! B.U.D. 2.0 İcat - Video İçerik-Sınıfı + Codec Seçimi (2026-08-16)
+//! B.U.D. 2.0 invention - video content class plus codec selection, 2026-08-16.
 //!
-//! K84 bulgusu (GERÇEK ffmpeg ölçümü): "x265 her zaman x264'ten iyidir" YANLIŞ -
-//! içerik türüne bağlı (testsrc2 deseninde x264 kazandı). Statik/temporal içerik
-//! 1300-1600x oran verirken hareketli 70-206x. Bu modül:
-//!   - içerik sınıfını ham YUV karelerinden TESPIT eder (ortalama kare farkı - saf Rust,
-//!     ffmpeg gerektirmez),
-//!   - içerik sınıfına göre codec + GOP önerisi üretir (dürüst ölçüm tablosundan),
-//!   - üretim kanıtı ile birleşebilen video kaydı taşır (BudVideoRecord).
+//! Finding K84, from a real ffmpeg measurement: "x265 always beats x264" is
+//! WRONG - it depends on the content type, and x264 won on the testsrc2
+//! pattern. Static and temporal content reached 1300-1600x while moving content
+//! reached 70-206x. So this module:
 //!
-//! Kayıpsızlık/doğrulama: B.U.D. video bitstream'i SAKLAR ve ORANINI kanıtlar; codec
-//! seçimi içeriğe göre yapılır (registry + üretim kanıtı). Kod: `#![forbid(unsafe_code)]`.
+//! - DETECTS the content class from raw YUV frames, using the mean frame
+//!   difference, in pure Rust;
+//! - produces a codec and GOP suggestion for that class, out of the honest
+//!   measurement table;
+//! - carries a video record that can be combined with a generation proof
+//!   (`BudVideoRecord`).
+//!
+//! On losslessness and verification: B.U.D. STORES the video bitstream and
+//! proves its RATIO; the codec choice follows the content, through the registry
+//! and the generation proof. The code is `#![forbid(unsafe_code)]`.
 
 #![forbid(unsafe_code)]
 
 use crate::bud_format_container::FormatCodec;
 
-/// Video içerik sınıfı (kare-farkı istatistiğinden).
+/// Video content class, from the frame-difference statistic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoContentClass {
-    Static,     // kareler neredeyse aynı (kamera sabit, ekran kaydı, slideshow)
-    LowMotion,  // az hareket (röportaj, sunum)
-    HighMotion, // çok hareket (spor, aksiyon, drone)
+    Static,     // frames nearly identical: fixed camera, screen capture, slides
+    LowMotion,  // little motion: interview, presentation
+    HighMotion, // heavy motion: sport, action, drone
 }
 
-/// Ölçülmüş codec önerisi (K84 tablosu, sentetik korpus - içsel tutarlı karşılaştırma).
+/// A measured codec suggestion, from the K84 table over a synthetic corpus, so
+/// the comparison is internally consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
@@ -35,9 +41,9 @@ pub enum VideoCodec {
 pub struct VideoSuggestion {
     pub codec: VideoCodec,
     pub gop_frames: u32,         // depolama: UZUN GOP (K85)
-    pub scenecut_threshold: u8,  // içerik sınıfına göre (spor 60, slideshow 10)
-    pub lossless: bool,          // kayıpsız mod önerisi (arşiv için)
-    pub expected_ratio_min: f64, // K84 ölçüm aralığı (sentetik)
+    pub scenecut_threshold: u8,  // per content class: 60 for sport, 10 for slides
+    pub lossless: bool,          // lossless mode suggestion, for archival
+    pub expected_ratio_min: f64, // the K84 measured range, synthetic
     pub expected_ratio_max: f64,
 }
 
@@ -60,11 +66,17 @@ impl VideoSuggestion {
         }
     }
 
-    /// İçerik sınıfına göre öneri (K84/K85 ölçümleri):
-    /// - Static: AV1, çok uzun GOP (240+), düşük scenecut (10) → 1300-1600x
-    /// - LowMotion: AV1, uzun GOP (120), orta scenecut (30) → ~150-250x
-    /// - HighMotion: AV1, orta GOP (60), yüksek scenecut (60) → ~70-200x
-    ///   (H.264/HEVC alternatifleri tabloda; AV1 ölçümde lossless'ta da lider - K84)
+    /// The suggestion for a content class, from the K84 and K85 measurements:
+    ///
+    /// - Static: AV1, a very long GOP of 240 or more, a low scenecut of 10,
+    ///   giving 1300-1600x.
+    /// - LowMotion: AV1, a long GOP of 120, a middling scenecut of 30, giving
+    ///   roughly 150-250x.
+    /// - HighMotion: AV1, a GOP of 60, a high scenecut of 60, giving roughly
+    ///   70-200x.
+    ///
+    /// The H.264 and HEVC alternatives are in the table; AV1 also led in the
+    /// lossless measurement (K84).
     pub fn for_class(class: VideoContentClass) -> Self {
         match class {
             VideoContentClass::Static => Self::new(VideoCodec::Av1, 240, 10, false, 1300.0, 1600.0),
@@ -75,7 +87,8 @@ impl VideoSuggestion {
         }
     }
 
-    /// Arşiv önerisi: AV1 lossless (K84: svtav1-lossless 134x - kayıpsızda lider).
+    /// The archival suggestion: AV1 lossless. K84 measured svtav1-lossless at
+    /// 134x, the leader among lossless.
     pub fn archival(class: VideoContentClass) -> Self {
         match class {
             VideoContentClass::Static => Self::new(VideoCodec::Av1, 240, 10, true, 100.0, 134.0),
@@ -84,9 +97,12 @@ impl VideoSuggestion {
     }
 }
 
-/// İçerik sınıfı tespiti: ardışık karelerin ortalama piksel farkı (YUV420).
-/// Her kare `w*h*3/2` bayt; `frames` = ardışık kare çifti sayısı (ör. 10).
-/// Dönüş: (sınıf, ortalama fark 0-255).
+/// Content class detection: the mean pixel difference of consecutive YUV420
+/// frames.
+///
+/// Each frame is `w*h*3/2` bytes, and `frames` is the number of consecutive
+/// frame pairs, 10 for instance. It returns the class and the mean difference,
+/// in 0-255.
 pub fn classify_content(
     yuv: &[u8],
     w: usize,
@@ -108,14 +124,14 @@ pub fn classify_content(
     for f in 0..n {
         let a = &yuv[f * frame_bytes..(f + 1) * frame_bytes];
         let b = &yuv[(f + 1) * frame_bytes..(f + 2) * frame_bytes];
-        // örnekleme: her 64. bayt (hız) - Y düzlemi baskın
+        // Sampling every 64th byte, for speed; the Y plane dominates.
         let mut diff: u64 = 0;
         let mut cnt: u64 = 0;
         for i in (0..frame_bytes).step_by(64) {
             diff += (a[i] as i64 - b[i] as i64).unsigned_abs();
             cnt += 1;
         }
-        let _ = cnt; // örnekleme sayacı (istatistik için kullanılabilir)
+        let _ = cnt; // the sample counter, usable for statistics
         total_diff += diff;
     }
     let avg = total_diff as f64 / (n as f64 * (frame_bytes as f64 / 64.0));
@@ -129,7 +145,8 @@ pub fn classify_content(
     Some((class, avg))
 }
 
-/// Video üretim kaydı: codec + çözünürlük + GOP + sınıf + oran → üretim kanıtına bağlanabilir.
+/// A video generation record: codec, resolution, GOP, class and ratio, which
+/// can be bound to a generation proof.
 #[derive(Debug, Clone)]
 pub struct BudVideoRecord {
     pub codec: VideoCodec,
@@ -138,9 +155,9 @@ pub struct BudVideoRecord {
     pub height: u32,
     pub gop_frames: u32,
     pub lossless: bool,
-    pub original_len: u64,  // ham video boyutu (ör. YUV)
-    pub stored_len: u64,    // sıkıştırılmış bitstream boyutu
-    pub claimed_ratio: f64, // original_len / stored_len (ÜRETİM ANINDA ölçülen)
+    pub original_len: u64,  // raw video size, YUV for instance
+    pub stored_len: u64,    // compressed bitstream size
+    pub claimed_ratio: f64, // original_len / stored_len, measured AT GENERATION
 }
 
 impl BudVideoRecord {
@@ -172,7 +189,8 @@ impl BudVideoRecord {
         }
     }
 
-    /// Tutarlılık: oran boyutlarla eşleşiyor mu + değerler geçerli mi (K38).
+    /// Consistency (K38): does the ratio match the sizes, and are the values
+    /// valid.
     pub fn verify(&self) -> bool {
         if !self.claimed_ratio.is_finite() || self.claimed_ratio <= 0.0 {
             return false;
@@ -188,21 +206,23 @@ impl BudVideoRecord {
         (self.claimed_ratio - actual).abs() <= 0.01
     }
 
-    /// K19: iddia, içerik sınıfının ölçüm aralığına uygun mu? (uydurma oran RED)
+    /// K19: does the claim fit the measured range of its content class? An
+    /// invented ratio is refused.
     pub fn plausible(&self, suggestion: &VideoSuggestion) -> bool {
         self.claimed_ratio >= suggestion.expected_ratio_min * 0.5
             && self.claimed_ratio <= suggestion.expected_ratio_max * 2.0
     }
 
     pub fn format_codec(&self) -> FormatCodec {
-        FormatCodec::Mp4 // video konteyner sınıfı (registry kodu)
+        FormatCodec::Mp4 // the video container class, the registry code
     }
 }
 
 pub struct VideoGates;
 
 impl VideoGates {
-    /// İçerik sınıfı tespiti başarılı mı + kayıt tutarlı mı + ölçüm aralığına uygun mu?
+    /// Did the class detection succeed, is the record consistent, and does it
+    /// fit the measured range?
     pub fn k_bud_video(
         rec: &BudVideoRecord,
         suggestion: &VideoSuggestion,
@@ -211,7 +231,7 @@ impl VideoGates {
             return Err("K-BUD-VIDEO: record inconsistent");
         }
         if !rec.plausible(suggestion) {
-            return Err("K-BUD-VIDEO: ratio outside measured range (uydurma iddia)");
+            return Err("K-BUD-VIDEO: ratio outside measured range, an invented claim");
         }
         Ok(())
     }
@@ -227,20 +247,20 @@ mod tests {
 
     #[test]
     fn static_content_classified() {
-        // aynı kare tekrarı → Static
+        // The same frame repeated yields Static.
         let mut yuv = static_frame();
         let f = yuv.clone();
         for _ in 0..4 {
             yuv.extend_from_slice(&f);
         }
-        let (class, avg) = classify_content(&yuv, 320, 240, 10).expect("yeterli kare");
+        let (class, avg) = classify_content(&yuv, 320, 240, 10).expect("enough frames");
         assert_eq!(class, VideoContentClass::Static);
-        assert!(avg < 1.0, "fark 0 olmalı: {avg}");
+        assert!(avg < 1.0, "the difference should be 0: {avg}");
     }
 
     #[test]
     fn high_motion_classified() {
-        // her kare rastgele → HighMotion
+        // Every frame random yields HighMotion.
         let mut yuv = Vec::new();
         let mut x = 0x1234_5678u64;
         for _ in 0..6 * (320 * 240 * 3 / 2) {
@@ -249,7 +269,7 @@ mod tests {
             x ^= x << 17;
             yuv.push((x & 0xff) as u8);
         }
-        let (class, _avg) = classify_content(&yuv, 320, 240, 5).expect("yeterli");
+        let (class, _avg) = classify_content(&yuv, 320, 240, 5).expect("enough frames");
         assert_eq!(class, VideoContentClass::HighMotion);
     }
 
@@ -258,10 +278,13 @@ mod tests {
         let s = VideoSuggestion::for_class(VideoContentClass::Static);
         assert_eq!(s.codec, VideoCodec::Av1);
         assert!(s.gop_frames >= 240);
-        assert!(s.expected_ratio_min >= 1000.0, "statik ölçüm ~1300-1600x");
+        assert!(
+            s.expected_ratio_min >= 1000.0,
+            "the static measurement is roughly 1300-1600x"
+        );
         let h = VideoSuggestion::for_class(VideoContentClass::HighMotion);
         assert!(h.expected_ratio_max >= 200.0);
-        // arşiv: lossless önerisi
+        // Archival: the lossless suggestion.
         assert!(VideoSuggestion::archival(VideoContentClass::LowMotion).lossless);
     }
 
@@ -286,9 +309,10 @@ mod tests {
         let sugg = VideoSuggestion::for_class(VideoContentClass::HighMotion);
         assert!(
             VideoGates::k_bud_video(&rec, &sugg).is_ok(),
-            "101x HighMotion aralığında"
+            "101x is inside the HighMotion range"
         );
-        // uydurma 17x iddiası yüksek hareketli video için RED (ölçüm 70-206x altı)
+        // An invented 17x claim is refused for high-motion video: it is below
+        // the measured 70-206x.
         let fake = BudVideoRecord::new(
             VideoCodec::Av1,
             VideoContentClass::HighMotion,
@@ -301,13 +325,13 @@ mod tests {
         );
         assert!(
             VideoGates::k_bud_video(&fake, &sugg).is_err(),
-            "17x HighMotion RED (K19)"
+            "17x is refused for HighMotion (K19)"
         );
     }
 
     #[test]
     fn insufficient_frames_returns_none() {
-        let yuv = static_frame(); // tek kare
+        let yuv = static_frame(); // a single frame
         assert!(classify_content(&yuv, 320, 240, 2).is_none());
         assert!(classify_content(&[], 0, 0, 1).is_none());
     }
