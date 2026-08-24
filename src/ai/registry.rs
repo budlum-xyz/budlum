@@ -1,4 +1,4 @@
-//! Canonical AI Registry & State Tracking (``, `Bölüm 1`).
+//! Canonical AI registry and state tracking (section 1).
 //!
 //! Tracks active models, pending inference requests, accumulated verifier attestations,
 //! And finalized consensus outcomes. Provides deterministic `state_root` calculation.
@@ -30,11 +30,11 @@ pub fn is_equivocation_error(error: &str) -> bool {
 /// Prevents Sybil attacks - verifiers must have economic skin-in-the-game.
 pub const MIN_VERIFIER_STAKE: u64 = 1_000;
 
-/// Tavan ilan etmemiş bir operatörün varsayılan çaba tavanı.
+/// The default effort ceiling for an operator that never declared one.
 ///
-/// Baseline (`1.0x`). Varsayılanı `DEEPEST` yapmak, hiçbir şey ilan etmemiş
-/// bir makineyi `10.0x` isteğe uygun saymak olurdu -- kapının engellemek için
-/// var olduğu durumun tam kendisi.
+/// Baseline, `1.0x`. Defaulting to `DEEPEST` would treat a machine that has
+/// declared nothing as eligible for a `10.0x` request, which is precisely the
+/// case the gate exists to stop.
 pub const DEFAULT_OPERATOR_CEILING: EffortTier = EffortTier::BASELINE;
 
 /// Callback events retained per address.
@@ -78,15 +78,16 @@ pub struct AiRegistry {
     /// Economic commitment to the inference layer.
     pub verifier_stakes: BTreeMap<Address, u64>,
 
-    /// Operatörün ilan ettiği çaba tavanı: hizmet verebileceği en derin kademe.
+    /// The effort ceiling an operator declared: the deepest tier it can serve.
     ///
-    /// `src/lubot/effort.rs` iki kural tanımlar ve ikincisini -- "declared
-    /// capability gates eligibility" -- uygulanamaz olarak işaretler, çünkü
-    /// operatörün tavanını ilan edecek bir yer yoktu. Burası o yer.
+    /// `src/lubot/effort.rs` states two rules and marks the second one,
+    /// "declared capability gates eligibility", as unenforceable, because there
+    /// was nowhere for an operator to declare its ceiling. This is that place.
     ///
-    /// Kayıt yoksa operatör tavan ilan etmemiştir; `DEFAULT_OPERATOR_CEILING`
-    /// (baseline `1.0x`) varsayılır. Sessizce `10.0x` varsaymak, tavanı
-    /// olmayan bir makineyi en derin isteğe uygun saymak olurdu.
+    /// No entry means the operator declared no ceiling, and
+    /// `DEFAULT_OPERATOR_CEILING` (baseline `1.0x`) applies. Silently assuming
+    /// `10.0x` would treat a machine with no declared ceiling as eligible for
+    /// the deepest request there is.
     #[serde(default)]
     pub verifier_effort_ceilings: BTreeMap<Address, EffortTier>,
     /// Callback event queue.
@@ -182,20 +183,20 @@ impl AiRegistry {
                 "require_execution_proof requires execution_program_hash and execution_dims".into(),
             );
         }
-        // Iki alanin VARLIGI yetmez, birbirini tutmasi gerekir.
+        // Both fields being PRESENT is not enough; they have to agree.
         //
-        // `execution_program_hash` ile `execution_dims` ayri ayri veriliyor ve
-        // buraya kadar hicbir sey ikisinin ayni programi tarif ettigini
-        // denetlemiyordu. Oysa dogrulama zamaninda program **dims'ten yeniden
-        // kuruluyor** (`guest_program_for_model`) ve kanit, kaydedilen hash'e
-        // Karsi olculuyor. Ikisi ayrisirsa hicbir gecerli kanit o modeli
-        // Gecemez: model, kaydi kabul edilmis ama sonsuza kadar dogrulanamaz
-        // Bir durumda kalir.
+        // `execution_program_hash` and `execution_dims` arrive separately, and
+        // nothing up to this point checked that the two describe the same
+        // program. Yet at verification time the program is **rebuilt from the
+        // dims** (`guest_program_for_model`) and the proof is measured against
+        // the recorded hash. If the two diverge, no valid proof can ever clear
+        // that model: it is registered, and permanently unverifiable.
         //
-        // Bu bir sahtecilik acigi degil - AI yolu programi gonderenden degil
-        // Kayittan aldigi icin fail-closed. Ama sessiz bir tuzak: hata,
-        // Kaydi yapanin yanlisini kaydin kendisinde degil, aylar sonra
-        // Dogrulamada gosterir. Tutarsizligi kaynaginda reddediyoruz.
+        // This is not a forgery hole. The AI path is fail-closed because it
+        // takes the program from the record, not from the sender. It is a
+        // silent trap though: the mistake shows up months later at verification
+        // rather than at the record that caused it. We reject the inconsistency
+        // where it originates.
         if let (Some(registered_hash), Some(_)) =
             (spec.execution_program_hash, spec.execution_dims.as_ref())
         {
@@ -268,10 +269,10 @@ impl AiRegistry {
                 request.deadline_block
             ));
         }
-        // effort.rs Kural 2: hiçbir yetkili operatörün tavanına sığmayan bir
-        // istek fail-closed reddedilir. Alternatif -- kabul edip daha ucuz bir
-        // cevaba sessizce indirmek -- requester'ın imzaladığı kademeyi
-        // karşılamadan ücretini almak olurdu.
+        // effort.rs rule 2: a request that fits under no authorized operator's
+        // ceiling is rejected fail-closed. The alternative, accepting it and
+        // quietly settling for a cheaper, shallower answer, would mean charging
+        // for the tier the requester signed without ever meeting it.
         if let Some(reason) = self.unservable_reason(request.effort) {
             return Err(format!("Request is unservable: {reason}"));
         }
@@ -287,11 +288,11 @@ impl AiRegistry {
         result: AiInferenceResult,
         current_block: u64,
     ) -> Result<Option<AiInferenceOutcome>, String> {
-        // Güvenlik denetimi (HIGH): verifier kimligi denetlenmeden sonuc
-        // sayiliyordu - herhangi bir adres uydurma verifier ile
-        // agreement_threshold'a katkida bulunabiliyordu. Artik sonuc
-        // ancak yetkili (stake esigini karsilayan, whitelist modunda
-        // listede olan) bir verifier'dan kabul edilir.
+        // Security review (HIGH): an outcome counted without the verifier's
+        // identity being checked, so any address could contribute to
+        // `agreement_threshold` under a made-up verifier. An outcome is now
+        // accepted only from an authorized verifier: one that meets the stake
+        // threshold, and is on the list when whitelist mode is on.
         if !self.is_verifier_authorized(&result.verifier) {
             return Err(format!(
                 "Verifier {} is not authorized to submit AI results",
@@ -927,8 +928,9 @@ impl AiRegistry {
         // Slash verifier stake if present.
         // Return the staked amount that was seized.
         let seized_stake = self.verifier_stakes.remove(verifier).unwrap_or(0);
-        // Tavan stake'e bağlıdır: stake gidince ilan da gider, yoksa artık
-        // yetkili olmayan bir adresin tavanı state_root'ta asılı kalır.
+        // The ceiling hangs off the stake: when the stake goes, the declaration
+        // goes with it, or the ceiling of an address that is no longer
+        // authorized stays dangling in `state_root`.
         self.verifier_effort_ceilings.remove(verifier);
 
         Ok((*verifier, seized_stake))
@@ -949,15 +951,14 @@ impl AiRegistry {
         Ok(new_stake)
     }
 
-    /// Operatörün çaba tavanını ilan et.
+    /// Declares an operator's effort ceiling.
     ///
-    /// Tavan, operatörün sahip olduğu makinenin gerçekten hizmet verebileceği
-    /// en derin kademedir. `effort.rs` Kural 2'nin ihtiyaç duyduğu ilan yeri
-    /// burasıdır.
+    /// The ceiling is the deepest tier the operator's machine can actually
+    /// serve. This is the declaration point rule 2 in `effort.rs` needs.
     ///
-    /// Yalnızca yetkili (stake eşiğini karşılayan) operatör ilan edebilir:
-    /// aksi halde stake'i olmayan bir adres tavan yazıp `unservable_reason`
-    /// çıktısını kirletebilirdi.
+    /// Only an authorized operator, one that meets the stake threshold, may
+    /// declare: otherwise an address with no stake could write a ceiling and
+    /// pollute what `unservable_reason` reports.
     pub fn declare_effort_ceiling(
         &mut self,
         verifier: &Address,
@@ -973,7 +974,7 @@ impl AiRegistry {
         Ok(())
     }
 
-    /// Operatörün ilan ettiği tavan; ilan yoksa `DEFAULT_OPERATOR_CEILING`.
+    /// The ceiling the operator declared, or `DEFAULT_OPERATOR_CEILING`.
     #[must_use]
     pub fn effort_ceiling(&self, verifier: &Address) -> EffortTier {
         self.verifier_effort_ceilings
@@ -982,7 +983,7 @@ impl AiRegistry {
             .unwrap_or(DEFAULT_OPERATOR_CEILING)
     }
 
-    /// Şu an yetkili olan operatörlerin ilan ettiği tavanlar.
+    /// The ceilings declared by the operators authorized right now.
     fn authorized_ceilings(&self) -> Vec<EffortTier> {
         self.verifier_stakes
             .keys()
@@ -991,7 +992,7 @@ impl AiRegistry {
             .collect()
     }
 
-    /// İstek hiçbir yetkili operatörün tavanına sığmıyorsa sebebini döndür.
+    /// Returns why a request fits under no authorized operator's ceiling.
     ///
     /// `effort.rs` Kural 2: "a request above every declared ceiling must fail
     /// closed rather than be silently downgraded to a cheaper answer."
@@ -999,10 +1000,11 @@ impl AiRegistry {
     #[must_use]
     pub fn unservable_reason(&self, tier: EffortTier) -> Option<String> {
         let ceilings = self.authorized_ceilings();
-        // Hiç yetkili operatör yoksa bu bir admission sorunu değil, canlılık
-        // sorunudur: istek finalize olmaz, ama reddetmek de doğru değil --
-        // operatörler istekten sonra da katılabilir. Kural 2'nin koruduğu
-        // durum, operatörlerin VAR olup hiçbirinin yetişememesidir.
+        // With no authorized operator at all this is a liveness problem, not an
+        // admission one: the request will not finalize, but rejecting it is not
+        // right either, since operators can join after a request arrives. What
+        // rule 2 guards is the case where operators DO exist and none of them
+        // can reach the requested depth.
         if ceilings.is_empty() {
             return None;
         }
@@ -1618,9 +1620,9 @@ impl AiRegistry {
     /// If whitelist is empty (permissionless mode), any sufficiently staked verifier is allowed.
     /// If whitelist is non-empty (permissioned mode), only whitelisted verifiers.
     pub fn is_verifier_authorized(&self, verifier: &Address) -> bool {
-        // Güvenlik denetimi (HIGH): stake esigi her modda zorunludur;
-        // "staked" = bir kayit var, ama MIN_VERIFIER_STAKE altinda kalan
-        // bir kayit Sybil direncini saglamaz.
+        // Security review (HIGH): the stake threshold is mandatory in every
+        // mode. "Staked" only means an entry exists, and an entry below
+        // `MIN_VERIFIER_STAKE` buys no Sybil resistance.
         if self.verifier_stake(verifier) < MIN_VERIFIER_STAKE {
             return false;
         }
@@ -1799,9 +1801,9 @@ impl AiRegistry {
 
         // Domain: verifier_effort_ceilings
         //
-        // Tavan zincir durumudur: `submit_request` admission kararını buna
-        // göre veriyor, dolayısıyla state_root'a girmezse iki düğüm aynı
-        // isteği farklı sonuçlandırır.
+        // The ceiling is chain state: `submit_request` decides admission from
+        // it, so if it stays out of `state_root` two nodes settle the same
+        // request differently.
         hasher.update(b"BDLM_AI_VERIFIER_CEILINGS");
         for (verifier, ceiling) in &self.verifier_effort_ceilings {
             hasher.update(verifier.as_bytes());
