@@ -152,7 +152,6 @@ ops/scripts/generate-sbom.sh	1
 rust-toolchain.toml	2
 src/account_abstraction/mod.rs	8
 src/account_abstraction/quantum_account.rs	9
-src/ai/README.md	23
 src/ai/mod.rs	2
 src/ai/types.rs	15
 src/bin/bud.rs	2
@@ -169,7 +168,6 @@ src/core/chain_config.rs	16
 src/core/governance.rs	6
 src/core/transaction.rs	6
 src/cross_domain/bridge.rs	10
-src/cross_domain/evm/header.rs	24
 src/cross_domain/evm/mod.rs	10
 src/cross_domain/evm/receipt.rs	12
 src/crypto/domain_tags.rs	21
@@ -192,7 +190,6 @@ src/lubot/storage.rs	8
 src/mempool/pool.rs	20
 src/network/node.rs	18
 src/network/sync_codec.rs	1
-src/pollen/README.md	23
 src/pollen/data_rights.rs	21
 src/privacy/mod.rs	1
 src/privacy/submit.rs	11
@@ -210,7 +207,6 @@ src/storage/content_id.rs	2
 src/storage/db.rs	2
 src/storage/erasure.rs	2
 src/storage/msr.rs	5
-src/storage/pact_binding.rs	24
 src/storage/render.rs	2
 src/tests/ai_verification_status_locks.rs	2
 src/tests/blockchair_fixture_locks.rs	57
