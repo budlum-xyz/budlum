@@ -233,7 +233,7 @@ jobs:
       # had shifted together. It was caught by recomputing outside Rust.
       - name: Threshold ratios single-scale canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale --self-test
-      - name: Esik oranlari tek olcekte
+      - name: Threshold ratios on a single scale
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale
       - name: Derivation durability canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master --self-test

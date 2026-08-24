@@ -19,20 +19,20 @@ permissions:
 
 jobs:
   skills:
-    name: "Skill envanteri + iskelet doğrulama"
+    name: "Skill inventory + skeleton verification"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Skill dosyaları (varsa)
+      - name: Skill files (if any)
         run: |
           if [ -d bud2 ]; then
-            echo "skill py dosyaları: $(find bud2 -name '*.py' | wc -l)"
+            echo "skill py files: $(find bud2 -name '*.py' | wc -l)"
             find bud2 -name "*.py" | sort
             if [ -f bud2/tests/test_iskelet.py ]; then
               python3 bud2/tests/test_iskelet.py -v 2>&1 | tail -12
             fi
           else
-            echo "bud2/ yok - skill testleri atlandı"
+            echo "bud2/ is absent - skill tests skipped"
           fi
