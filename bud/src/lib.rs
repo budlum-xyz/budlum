@@ -201,9 +201,9 @@ pub mod bud_format_optical_transfer;
 #[cfg(feature = "bud3")]
 pub mod bud_format_qrmatrix;
 #[cfg(feature = "bud3")]
-pub mod bud_format_spec;
-#[cfg(feature = "bud3")]
 pub mod bud_format_recipe_record;
+#[cfg(feature = "bud3")]
+pub mod bud_format_spec;
 pub mod bud_format_wire;
 // `bud_format_hardening` and `bud_format_qrvideo` are 3.0 modules but they had
 // no gate: two `#[cfg(feature = "bud3")]` attributes were written on top of
@@ -216,10 +216,10 @@ pub mod bud_format_wire;
 pub mod bud3_live_test;
 pub mod bud_format_edition;
 #[cfg(feature = "bud3")]
+pub mod bud_format_hardening;
+#[cfg(feature = "bud3")]
 pub mod bud_format_qrvideo;
 #[cfg(feature = "bud3")]
 pub mod bud_format_r3fix;
-#[cfg(feature = "bud3")]
-pub mod bud_format_hardening;
 #[cfg(feature = "bud3")]
 pub mod bud_format_ux;

@@ -318,7 +318,10 @@ mod tests {
         let blob = split.to_blob();
         let back = MarkdownSplit::from_blob(&blob).expect("a valid blob must be accepted");
         assert_eq!(back.sections, split.sections, "section types are identical");
-        assert_eq!(back.contents, split.contents, "section contents are identical");
+        assert_eq!(
+            back.contents, split.contents,
+            "section contents are identical"
+        );
         assert_eq!(
             back.heading_tree, split.heading_tree,
             "the heading tree is identical"
@@ -355,7 +358,11 @@ mod tests {
             // The blob path must return the same document.
             let blob = split.to_blob();
             let back = MarkdownSplit::from_blob(&blob).expect("valid blob");
-            assert_eq!(back.decode(), md, "the blob path must be lossless too: {md:?}");
+            assert_eq!(
+                back.decode(),
+                md,
+                "the blob path must be lossless too: {md:?}"
+            );
         }
     }
 
@@ -365,8 +372,15 @@ mod tests {
     fn bos_satir_iki_belgeyi_ayri_tutar() {
         let a = MarkdownSplit::encode("bir\n\niki\n").expect("encode");
         let b = MarkdownSplit::encode("bir\niki\n").expect("encode");
-        assert_ne!(a.contents, b.contents, "the blank line must appear in the contents");
-        assert_ne!(a.to_blob(), b.to_blob(), "two documents must not fall into the same blob");
+        assert_ne!(
+            a.contents, b.contents,
+            "the blank line must appear in the contents"
+        );
+        assert_ne!(
+            a.to_blob(),
+            b.to_blob(),
+            "two documents must not fall into the same blob"
+        );
         assert_eq!(a.decode(), "bir\n\niki\n");
         assert_eq!(b.decode(), "bir\niki\n");
     }
@@ -396,10 +410,7 @@ mod tests {
         assert!(split.sections.contains(&MdSection::CodeBlock), "kod");
         assert!(split.sections.contains(&MdSection::Link), "link");
         assert!(split.sections.contains(&MdSection::Table), "tablo");
-        assert!(
-            !split.heading_tree.is_empty(),
-            "heading tree (LLM view)"
-        );
+        assert!(!split.heading_tree.is_empty(), "heading tree (LLM view)");
         // context_ratio: the heading tree is far smaller than the original
         assert!(
             split.context_ratio() > 3.0,
