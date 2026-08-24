@@ -1,26 +1,30 @@
-//! Komut ayrıştırma (std::env tabanlı; clap üretim fazında girer).
-//! Yardım metinleri Türkçe, kimlikler İngilizce (repo kuralı).
+//! Command parsing (built on std::env; clap arrives in the production phase).
+//!
+//! Help text and identifiers are both English: the tree is written in English,
+//! so the earlier split between Turkish help text and English identifiers no
+//! longer holds.
 
-/// CLI komutları.
+/// The CLI commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Model kaydı taslağı (32 bayt hex).
+    /// Model registration draft (32-byte hex).
     Register { model_id_hex: Option<String> },
-    /// Operator compute-bond taslağı (zincir üstü `MIN_OPERATOR_BOND` ile karşılaştırılır).
+    /// Operator compute-bond draft (compared against the on-chain
+    /// `MIN_OPERATOR_BOND`).
     Bond { amount: Option<u64> },
-    /// Serving köprüsü yapılandırma özeti.
+    /// Serving-bridge configuration summary.
     Serve,
-    /// Varsayılan eğitim planı taslağı.
+    /// Default training plan draft.
     Tune,
-    /// Sağlık özeti.
+    /// Health summary.
     Status,
-    /// JSONL veri dosyasını şema kapısından geçir (lubot-tune::schema).
+    /// Run a JSONL data file through the schema gate (lubot-tune::schema).
     Validate { path: Option<String> },
-    /// Yardım metni.
+    /// The help text.
     Help,
 }
 
-/// Komut satırını ayrıştır. `argv` program adını içermez.
+/// Parse the command line. `argv` does not include the program name.
 #[must_use]
 pub fn parse(argv: &[String]) -> Command {
     let cmd = argv.first().map(String::as_str).unwrap_or("");
@@ -41,22 +45,22 @@ pub fn parse(argv: &[String]) -> Command {
     }
 }
 
-/// Yardım metni (Türkçe).
+/// The help text.
 pub const HELP: &str = "\
-lubot-ops - Lubot off-chain operatör CLI (iskelet)
+lubot-ops - the Lubot off-chain operator CLI (skeleton)
 
-Kullanım:
-  lubot-ops register [MODEL_ID_HEX]   model kaydı taslağı
-  lubot-ops bond [MIKTAR]             operator compute-bond taslağı
-  lubot-ops serve                     serving köprüsü özeti
-  lubot-ops tune                      eğitim planı taslağı
-  lubot-ops status                    sağlık özeti
-  lubot-ops validate [JSONL_DOSYASI]  veri seti şema kapısı (boş alan, bayt
-                                      tavanı, satır numaralı hata, TR oranı)
-  lubot-ops help                      bu metin
+Usage:
+  lubot-ops register [MODEL_ID_HEX]   model registration draft
+  lubot-ops bond [AMOUNT]             operator compute-bond draft
+  lubot-ops serve                     serving-bridge summary
+  lubot-ops tune                      training plan draft
+  lubot-ops status                    health summary
+  lubot-ops validate [JSONL_FILE]     data set schema gate (empty field, byte
+                                      ceiling, line-numbered error, TR ratio)
+  lubot-ops help                      this text
 
-Not: Zincir üstü işlemler (kayıt, bond) budlum düğüm RPC'si üzerinden
-yapılır; bu CLI yalnızca iskelet taslaklarını gösterir.
+Note: on-chain operations (registration, bond) go through the budlum node RPC;
+this CLI only prints the skeleton drafts.
 ";
 
 #[cfg(test)]
@@ -88,9 +92,9 @@ mod tests {
         assert_eq!(parse(&["tune".into()]), Command::Tune);
         assert_eq!(parse(&["status".into()]), Command::Status);
         assert_eq!(
-            parse(&["validate".into(), "veri.jsonl".into()]),
+            parse(&["validate".into(), "data.jsonl".into()]),
             Command::Validate {
-                path: Some("veri.jsonl".into())
+                path: Some("data.jsonl".into())
             }
         );
     }
