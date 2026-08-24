@@ -1,15 +1,16 @@
-//! B.U.D. 2.0 - Video Pipeline Konteyner Entegrasyonu (2026-08-16)
+//! B.U.D. 2.0 - Video Pipeline Container Integration (2026-08-16)
 //!
-//! Video içerik-sınıfı (bud_format_video) → codec/GOP önerisi → .bud konteyner
-//! (BudV2File) → üretim kanıtı (BudProductionRecord) → PACT. Uçtan uca.
+//! Video content class (bud_format_video) -> codec/GOP suggestion -> .bud
+//! container (BudV2File) -> production proof (BudProductionRecord) -> PACT. End
+//! to end.
 //!
-//! Akış:
-//!   1. Ham YUV'dan içerik sınıfı tespit (kare-farkı - K84 ölçümüne dayalı).
-//!   2. Sınıfa göre codec/GOP önerisi (VideoSuggestion - dürüst ölçüm aralığı).
-//!   3. Video bitstream'i .bud konteynerine (zstd) gömülür + BudVideoRecord üretilir.
-//!   4. Üretim kanıtı: orijinal boyut + saklanan boyut → ölçülen oran (K19).
+//! Flow:
+//!   1. Detect the content class from raw YUV (frame difference - based on the K84 measurement).
+//!   2. Codec/GOP suggestion per class (VideoSuggestion - honest measurement range).
+//!   3. The video bitstream is embedded into the .bud container (zstd) and a BudVideoRecord is produced.
+//!   4. Production proof: original size + stored size -> measured ratio (K19).
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -24,18 +25,18 @@ use crate::bud_format_video::{
 pub const VIDEO_PIPE_MAGIC: [u8; 8] = *b"\xB5VPIP\0\0\0";
 pub const VIDEO_PIPE_VERSION: u8 = 1;
 
-/// Video boru hattı sonucu: konteyner + video kaydı + üretim kanıtı (uçtan uca).
+/// Video pipeline result: container + video record + production proof (end to end).
 #[derive(Debug, Clone)]
 pub struct VideoPipelineResult {
-    pub container: Vec<u8>, // .bud konteyner baytları (zstd)
+    pub container: Vec<u8>, // .bud container bytes (zstd)
     pub class: VideoContentClass,
     pub suggestion: VideoSuggestion,
     pub video_record: BudVideoRecord,
     pub production_record: BudProductionRecord,
 }
 
-/// Video boru hattı: ham YUV + codec çıktısı → .bud konteyner + kanıt zinciri.
-/// `video_bytes` = codec çıktısı (H.264/AV1 bitstream); `original_len` = ham YUV boyutu.
+/// Video pipeline: raw YUV + codec output -> .bud container + proof chain.
+/// `video_bytes` = codec output (H.264/AV1 bitstream); `original_len` = raw YUV size.
 pub fn run_video_pipeline(
     yuv_sample: &[u8],
     w: usize,
@@ -45,15 +46,15 @@ pub fn run_video_pipeline(
     original_len: u64,
     ts_unix: u64,
 ) -> Option<VideoPipelineResult> {
-    // 1) sınıf tespiti (örnek karelerden)
+    // 1) class detection (from the sample frames)
     let (class, _avg) = classify_content(yuv_sample, w, h, frames)?;
-    // 2) codec/GOP önerisi (dürüst ölçüm aralığı - K84)
+    // 2) codec/GOP suggestion (honest measurement range - K84)
     let suggestion = VideoSuggestion::for_class(class);
-    // 3) .bud konteyner: video bitstream'ini yapısal parçala (Binary) + zstd sıkıştır
+    // 3) .bud container: split the video bitstream structurally (Binary) + zstd compress
     let chunks = structural_split_compact(StructuralKind::Binary, video_bytes, 64 * 1024);
     let file = BudV2File::new_zstd(FormatCodec::Mp4, chunks)?;
     let container = file.encode();
-    // 4) video kaydı + üretim kanıtı (ölçülen oran - K19)
+    // 4) video record + production proof (measured ratio - K19)
     let video_record = BudVideoRecord::new(
         suggestion.codec,
         class,
@@ -83,7 +84,7 @@ pub fn run_video_pipeline(
     })
 }
 
-/// Boru hattı sonucu → deterministik blob (kayıt zinciri).
+/// Pipeline result -> deterministic blob (record chain).
 impl VideoPipelineResult {
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -107,7 +108,7 @@ mod tests {
     use super::*;
 
     fn static_yuv() -> Vec<u8> {
-        // statik kare: aynı çerçeve tekrarı
+        // static frame: the same frame repeated
         let frame = vec![0u8; 160 * 120 * 3 / 2];
         let mut yuv = Vec::new();
         for _ in 0..6 {
@@ -118,28 +119,28 @@ mod tests {
 
     #[test]
     fn static_video_pipeline_end_to_end() {
-        // statik video → AV1 önerisi + .bud konteyner + kanıt (uçtan uca)
+        // static video -> AV1 suggestion + .bud container + proof (end to end)
         let yuv = static_yuv();
-        let codec_out = b"fake av1 bitstream 1234567890 ".repeat(1000); // codec çıktısı
+        let codec_out = b"fake av1 bitstream 1234567890 ".repeat(1000); // codec output
         let res = run_video_pipeline(&yuv, 160, 120, 5, &codec_out, 1_000_000, 1_768_000_000)
-            .expect("boru hattı");
+            .expect("pipeline");
         assert_eq!(res.class, VideoContentClass::Static);
         assert_eq!(
             res.suggestion.codec,
             crate::bud_format_video::VideoCodec::Av1
         );
-        assert!(res.suggestion.gop_frames >= 240, "statik uzun GOP");
-        // konteyner açılabilir + içeriği orijinal
-        let file = BudV2File::decode(&res.container).expect("konteyner");
+        assert!(res.suggestion.gop_frames >= 240, "static means a long GOP");
+        // the container can be opened and its content is the original
+        let file = BudV2File::decode(&res.container).expect("container");
         assert_eq!(
             file.restore_original().unwrap(),
             codec_out,
-            "video bitstream kayıpsız"
+            "the video bitstream is lossless"
         );
-        // video kaydı tutarlı + oran ölçüm aralığında
+        // the video record is consistent and the ratio is inside the measurement range
         assert!(res.video_record.verify());
         assert!(res.video_record.claimed_ratio > 1.0);
-        // üretim kanıtı tutarlı
+        // the production proof is consistent
         assert!(res.production_record.verify());
         // blob roundtrip
         let blob = res.to_blob();
@@ -149,7 +150,7 @@ mod tests {
 
     #[test]
     fn high_motion_pipeline() {
-        // hareketli video → HighMotion + orta GOP
+        // moving video -> HighMotion + medium GOP
         let mut yuv = Vec::new();
         let mut x = 0x1234_5678u64;
         for _ in 0..6 * (160 * 120 * 3 / 2) {
@@ -160,15 +161,15 @@ mod tests {
         }
         let codec_out = b"av1 high motion stream ".repeat(500);
         let res =
-            run_video_pipeline(&yuv, 160, 120, 5, &codec_out, 2_000_000, 100).expect("boru hattı");
+            run_video_pipeline(&yuv, 160, 120, 5, &codec_out, 2_000_000, 100).expect("pipeline");
         assert_eq!(res.class, VideoContentClass::HighMotion);
-        assert!(res.suggestion.gop_frames <= 120, "hareketli kısa GOP");
+        assert!(res.suggestion.gop_frames <= 120, "motion means a short GOP");
         assert!(res.video_record.verify());
     }
 
     #[test]
     fn insufficient_frames_none() {
-        // tek kare → sınıf tespiti yok → None
+        // a single frame -> no class detection -> None
         let yuv = vec![0u8; 160 * 120 * 3 / 2];
         let codec_out = b"x".repeat(100);
         assert!(run_video_pipeline(&yuv, 160, 120, 2, &codec_out, 1000, 1).is_none());
