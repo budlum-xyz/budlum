@@ -30,7 +30,6 @@ bud/mime.types.bud.json	1
 bud/scripts/measure_ratios.py	18
 bud/src/bud_format.rs	3
 bud/src/bud_format_autozstd.rs	12
-bud/src/bud_format_av2.rs	28
 bud/src/bud_format_bloom.rs	15
 bud/src/bud_format_checkpoint.rs	13
 bud/src/bud_format_dbdelta.rs	7
@@ -80,7 +79,6 @@ bud/src/provider.rs	4
 bud/src/quantum.rs	10
 bud/src/quantum_chain.rs	23
 bud/src/ratio.rs	4
-bud/tests/test_bud2.rs	38
 bud/tests/test_integration.rs	3
 budzero/bud-cli/src/main.rs	8
 budzero/bud-cli/tests/toolchain_end_to_end.rs	5
