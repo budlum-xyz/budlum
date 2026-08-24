@@ -1,23 +1,23 @@
-# SEMVER EXCEPTIONS - budlum-core public API kırılması istisna listesi (ADIM-1, 2026-07-21)
+# SEMVER EXCEPTIONS - the budlum-core public API breakage exception list (step 1, 2026-07-21)
 #
-# Bu liste BOŞ kalmalıdır; boş liste = cargo-semver-checks kapısı tam
-# fail-closed çalışır (Madde 5: public API kırılması tespiti → FAIL).
+# This list must stay EMPTY; an empty list = the cargo-semver-checks gate runs
+# fully fail-closed (item 5: public API breakage detection -> FAIL).
 #
-# İstisna kuralları (deny.toml [advisories] disipliniyle aynı):
-#   * Her satır tek bir kırılma kabulü taşır ve MUTLAKA gerekçe içerir.
-#   * Kullanıcı onayı olmadan satır eklenmez; onay kanıtı (STATUS_ONLINE
-#     girdisi / karar notu) satırda referanslanır.
-#   * Format: <semver-checks lint adı veya API yüzeyi> | <gerekçe> | <onay kanıtı>
+# Exception rules (the same discipline as deny.toml [advisories]):
+#   * Each line carries a single accepted breakage and MUST contain a justification.
+#   * No line is added without approval; the approval evidence (a STATUS_ONLINE
+#     entry / decision note) is referenced on the line.
+#   * Format: <semver-checks lint name or API surface> | <justification> | <approval evidence>
 #
-# Örnek (şablon - AKTİF DEĞİL, satır # ile yorumda tutulur):
-#   # method_missing: AccountState::legacy_probe | mainnet-öncesi bilinçli API
-#   #   temizliği, 0.x sürüm hattı | STATUS_ONLINE 2026-07-21 onayı
+# Example (a template - NOT ACTIVE, kept commented out with #):
+#   # method_missing: AccountState::legacy_probe | deliberate pre-mainnet API
+#   #   cleanup, the 0.x version line | STATUS_ONLINE 2026-07-21 approval
 #
-# Not: Bu dosyadaki yorum satırları gate'i ETKİLEMEZ; yalnızca yorum-olmayan
-# satırlar istisna sayılır (bkz. scripts/check-semver.sh).
+# Note: comment lines in this file DO NOT AFFECT the gate; only non-comment
+# lines count as exceptions (see scripts/check-semver.sh).
 #
-# ekip EIP-1559 fee distribution (ADIM G): yeni public metod.
-# AccountState::distribute_block_fees - block finalization'da fee dağıtımı.
-# cargo-semver-checks yeni metod eklediğini tespit eder; bu 0.x sürüm
-# hattında minor ekleme kabul edilir. Onay: STATUS_ONLINE 2026-07-21.
-AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (ADIM G) - yeni public metod, block finalization'a bağlandı | STATUS_ONLINE 2026-07-21 onayı
+# EIP-1559 fee distribution (step G): a new public method.
+# AccountState::distribute_block_fees - fee distribution at block finalization.
+# cargo-semver-checks detects that a new method was added; on this 0.x version
+# line a minor addition is accepted. Approval: STATUS_ONLINE 2026-07-21.
+AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (step G) - a new public method wired into block finalization | STATUS_ONLINE 2026-07-21 approval
