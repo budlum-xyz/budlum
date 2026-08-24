@@ -1,27 +1,28 @@
-# NOTICE - Atıf Bildirimi
+# NOTICE - Attribution
 
-Lubot, aşağıdaki üçüncü taraf eserlere dayanır. Bu bildirim, atıf politikasının
-teknik karşılığıdır: kopyalanan üçüncü taraf kodu ve ağırlık adları olduğu gibi
-korunur; "Lubot" adı yalnızca kendi katmanımızda kullanılır.
+Lubot builds on the third-party works below. This notice is the technical form
+of the attribution policy: copied third-party code and weight names are kept as
+they are, and the name "Lubot" is used only for our own layer.
 
-## 1. DeepSeek V4 (taban model - MIT)
+## 1. DeepSeek V4 (the base model - MIT)
 
-- Checkpoint'ler: `deepseek-ai/DeepSeek-V4-Flash-Base`, `deepseek-ai/DeepSeek-V4-Pro-Base`
-  ve instruct varyantları (Hugging Face / ModelScope).
-- Lisans: MIT - "Copyright (c) 2023 DeepSeek". Telif ve izin bildirimi, dağıtılan
-  kopyalarda korunmalıdır.
-- Lubot ince ayar çıktıları "Lubot-{sürüm} (DeepSeek-V4-…-Base tabanlı)" olarak
-  adlandırılır; model kartı tabanı açıkça belirtir.
-- Kaynak: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/LICENSE
-  (2026-08-13'te doğrulandı).
+- Checkpoints: `deepseek-ai/DeepSeek-V4-Flash-Base`,
+  `deepseek-ai/DeepSeek-V4-Pro-Base` and the instruct variants (Hugging Face /
+  ModelScope).
+- Licence: MIT - "Copyright (c) 2023 DeepSeek". The copyright and permission
+  notice has to be preserved in distributed copies.
+- Lubot fine-tuning outputs are named "Lubot-{version} (based on
+  DeepSeek-V4-…-Base)"; the model card states the base explicitly.
+- Source: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/LICENSE
+  (verified on 2026-08-13).
 
-## 2. Aday veri setleri (lisansları kullanım öncesi yeniden doğrulanır)
+## 2. Candidate datasets (licences are re-verified before use)
 
-| Set | Lisans | Durum |
+| Set | Licence | Status |
 |---|---|---|
-| turkish-nlp-suite/InstrucTurca | Apache-2.0 | doğrulandı |
-| hasankursun/turkish-corpus-100b | Apache-2.0 | doğrulandı (sft split aday) |
-| ogulcanaydogan/Turkish-LLM-v10-Training | açık (kart doğrulanacak) | şartlı aday |
-| merve/turkish_instructions | kart boş (doğrulanacak) | şartlı aday |
-| BAAI/Infinity-Instruct | CC-BY-SA-4.0 | şartlı (ShareAlike türev notu) |
-| Magpie veri setleri | CC BY-NC + Llama | uygun değil (NC) |
+| turkish-nlp-suite/InstrucTurca | Apache-2.0 | verified |
+| hasankursun/turkish-corpus-100b | Apache-2.0 | verified (the sft split is a candidate) |
+| ogulcanaydogan/Turkish-LLM-v10-Training | open (card to be verified) | conditional candidate |
+| merve/turkish_instructions | the card is empty (to be verified) | conditional candidate |
+| BAAI/Infinity-Instruct | CC-BY-SA-4.0 | conditional (a ShareAlike derivative note) |
+| Magpie datasets | CC BY-NC + Llama | not suitable (NC) |
