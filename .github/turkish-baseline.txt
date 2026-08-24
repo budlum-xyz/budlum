@@ -32,7 +32,6 @@ bud/scripts/measure_ratios.py	18
 bud/src/bud_format.rs	3
 bud/src/bud_format_autozstd.rs	12
 bud/src/bud_format_av2.rs	28
-bud/src/bud_format_block.rs	32
 bud/src/bud_format_bloom.rs	15
 bud/src/bud_format_catalog.rs	29
 bud/src/bud_format_checkpoint.rs	13
@@ -49,7 +48,6 @@ bud/src/bud_format_hardening.rs	2
 bud/src/bud_format_hw.rs	19
 bud/src/bud_format_jpegre.rs	11
 bud/src/bud_format_lazyrepair.rs	22
-bud/src/bud_format_lowrank.rs	32
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_nvc.rs	27
