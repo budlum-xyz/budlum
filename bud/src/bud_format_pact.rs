@@ -1,17 +1,17 @@
-//! B.U.D. 2.0 - Üretim Sözleşmesi (PACT) Kaydı (2026-08-16)
+//! B.U.D. 2.0 - the production contract (PACT) record (2026-08-16)
 //!
-//! fikirler2.0.md İ1 (PACT Registry) icadının .bud formatındaki karşılığı:
-//! içeriğin zincirdeki varlığı bayt değil `(üretici_hash, tohum, commitment,
-//! reziduel_commitment)` üçlüsüdür. Bu modül:
-//!   - bir .bud konteynerinin "üretilebilirlik sınıfını" hesaplar (rezidüel = 0
-//!     ise baytlar tamamen üreticiten yeniden üretilebilir - F1/F14/fikirler.md),
-//!   - PACT kaydını domain-etiketli SHA3 ile hash'ler (zincire yazılabilir),
-//!   - doğrulama: üretilen baytın commitment'ı kayıtla eşleşmeli (İ2 generate_and_verify).
+//! The .bud format counterpart of invention I1 (PACT registry):
+//! the on-chain existence of content is not bytes but the tuple `(producer_hash, seed, commitment,
+//! residual_commitment)`. This module:
+//!   - computes the generatability class of a .bud container (with residual = 0
+//!     the bytes are fully reproducible from the producer - F1/F14),
+//!   - hashes the PACT record with domain-tagged SHA3 (writable on chain),
+//!   - verification: the commitment of the produced bytes must match the record (I2 generate_and_verify).
 //!
-//! Kayıpsızlık: PACT kaydı ORİJİNALİN yerine geçmez; konteynerin bütünlük çapasıdır.
-//! "Üretilebilir sınıf" iddiası, .bud içinde KAYIPLI dönüşüm (ör. video codec) kullanılsa
-//! bile bütünlük doğrulamasına izin verir: commitment = H(üretici_çıktısı), bayt yeniden
-//! üretilebilir. Kayıpsız sınıfta commitment = content_id(original) (K3).
+//! Losslessness: a PACT record does not replace the ORIGINAL; it is the integrity anchor of the container.
+//! The generatable class claim permits integrity verification even when a LOSSY transform
+//! (for example a video codec) is used inside the .bud: commitment = H(producer output), and the bytes are
+//! reproducible. In the lossless class commitment = content_id(original) (K3).
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -22,14 +22,14 @@ use sha3::{Digest, Sha3_256};
 pub const PACT_MAGIC: [u8; 8] = *b"\xB5PACT\0\0\0";
 pub const PACT_VERSION: u8 = 1;
 
-/// Üretim modu (fikirler2.0 İ1 `mod` alanı).
+/// Production mode (the `mod` field of invention I1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PactMode {
-    /// Saf üretim: rezidüel yok, tüm baytlar üreticiten üretilir (F1/F14)
+    /// Pure production: no residual, all bytes are produced from the producer (F1/F14)
     PureProduction = 0,
-    /// Tarif + rezidüel: üretilemeyen artık sahip/erasure'da (İ6)
+    /// Recipe plus residual: the unproducible remainder sits in the owner/erasure layer (I6)
     RecipePlusResidual = 1,
-    /// Rezidüel yalnız: üretilemez sınıf (organik), sıradan kayıpsız saklama
+    /// Residual only: the unproducible class (organic), ordinary lossless storage
     ResidualOnly = 2,
 }
 
@@ -47,24 +47,24 @@ impl PactMode {
     }
 }
 
-/// Üretim sözleşmesi kaydı (İ1). `~100 bayt` - içerik 1GB bile olsa.
+/// The production contract record (I1). About 100 bytes - even if the content is 1 GB.
 #[derive(Debug, Clone)]
 pub struct PactRecord {
     pub mode: PactMode,
-    pub producer_id: [u8; 32], // deterministik üretici fonksiyonun hash'i
-    pub seed: [u8; 32],        // üreticinin girdisi (tohum)
-    pub commitment: [u8; 32],  // H(üretilen bayt) - üretimle eşleşme kanıtı
-    pub residual_commitment: [u8; 32], // H(rezidüel) - boş değilse RecipePlusResidual
-    pub residual_len: u64,     // rezidüel boyut (İ6 fiyat fonksiyonu girdisi)
-    pub byte_budget: u64,      // ağa fiziksel yük tavanı (İ8)
+    pub producer_id: [u8; 32], // the hash of the deterministic producer function
+    pub seed: [u8; 32],        // the producer input (the seed)
+    pub commitment: [u8; 32],  // H(produced bytes) - the proof of matching production
+    pub residual_commitment: [u8; 32], // H(residual) - RecipePlusResidual when non-empty
+    pub residual_len: u64,     // the residual size (the input of the I6 price function)
+    pub byte_budget: u64,      // the ceiling on physical load imposed on the network (I8)
     pub ts_unix: u64,
 }
 
 impl PactRecord {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_PACT_V1";
-    pub const EMPTY_RESIDUAL: [u8; 32] = [0u8; 32]; // boş rezidüel gösterimi (İ1)
+    pub const EMPTY_RESIDUAL: [u8; 32] = [0u8; 32]; // the representation of an empty residual (I1)
 
-    /// Saf üretim kaydı (rezidüel = 0, commitment = H(üretilen bayt)).
+    /// A pure production record (residual = 0, commitment = H(produced bytes)).
     pub fn pure(producer_id: [u8; 32], seed: [u8; 32], produced: &[u8], ts: u64) -> Self {
         PactRecord {
             mode: PactMode::PureProduction,
@@ -78,7 +78,7 @@ impl PactRecord {
         }
     }
 
-    /// Tarif + rezidüel kaydı (üretilemeyen artık ayrı commitment).
+    /// A recipe plus residual record (the unproducible remainder gets its own commitment).
     pub fn producer_plus_residual(
         producer_id: [u8; 32],
         seed: [u8; 32],
@@ -98,7 +98,7 @@ impl PactRecord {
         }
     }
 
-    /// Kayıpsız .bud için: commitment = content_id(original) (K3) - birebir bütünlük.
+    /// For a lossless .bud: commitment = content_id(original) (K3) - exact integrity.
     pub fn residual_only(original: &[u8], ts: u64) -> Self {
         let cid = crate::bud_format_container::content_id(original);
         PactRecord {
@@ -113,7 +113,7 @@ impl PactRecord {
         }
     }
 
-    /// Domain-etiketli kriptografik hash - zincire yazılabilir kimlik (İ1).
+    /// A domain-tagged cryptographic hash - an identity writable on chain (I1).
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -128,12 +128,12 @@ impl PactRecord {
         h.finalize().into()
     }
 
-    /// CONSENSUS-GÜVENLİ SERİLEŞTİRME (kalan iş #5 - doğrulama testi aşağıda):
-    /// `to_blob`/`from_blob` aşağıda (PACT_MAGIC + alanlar + record_hash digest)
-    /// zaten vardır ve CANONICAL'dir: aynı mantıksal kayıt → AYNI baytlar → state
-    /// kökü etkisi yok (fikirler2.0 §10.3). Test: `consensus_guvenli_serilestirme_roundtrip`.    ///
-    /// Üretim doğrulaması (İ2 generate_and_verify): üretilen bayt commitment'ı karşılar mı?
-    /// Kayıpsız sınıfta (ResidualOnly) commitment = content_id(original) - K3 ile eşleşmeli.
+    /// CONSENSUS-SAFE SERIALIZATION (remaining work item 5 - the verification test is below):
+    /// `to_blob`/`from_blob` below (PACT_MAGIC + fields + the record_hash digest)
+    /// already exist and are CANONICAL: the same logical record -> the SAME bytes -> no effect on the state
+    /// root (section 10.3). Test: `consensus_safe_serialization_roundtrip`.
+    /// Production verification (I2 generate_and_verify): do the produced bytes satisfy the commitment?
+    /// In the lossless class (ResidualOnly) commitment = content_id(original) - it must match K3.
     pub fn verify_production(&self, produced: &[u8]) -> bool {
         match self.mode {
             PactMode::PureProduction | PactMode::RecipePlusResidual => {
@@ -145,7 +145,7 @@ impl PactRecord {
         }
     }
 
-    /// Sınıf yalanı kontrolü (İ6): residual_len 0 ama mode RecipePlusResidual ise tutarsız.
+    /// Class-lie check (I6): residual_len 0 with mode RecipePlusResidual is inconsistent.
     pub fn verify(&self) -> bool {
         match self.mode {
             PactMode::PureProduction => self.residual_len == 0,
@@ -158,7 +158,7 @@ impl PactRecord {
         }
     }
 
-    /// Rezidüel doğrulama (İ6): verilen rezidüel baytlar commitment'ı karşılıyor mu?
+    /// Residual verification (I6): do the given residual bytes satisfy the commitment?
     pub fn verify_residual(&self, residual: &[u8]) -> bool {
         match self.mode {
             PactMode::RecipePlusResidual => {
@@ -180,7 +180,7 @@ impl PactRecord {
     }
 }
 
-/// Deterministik blob (magic + sürüm + alanlar + digest).
+/// A deterministic blob (magic + version + fields + digest).
 impl PactRecord {
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -230,7 +230,7 @@ impl PactRecord {
         r.ts_unix = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
         pos += 8;
         if bytes.len() != pos + 32 {
-            return None; // artık bayt → sıkı red
+            return None; // trailing bytes -> strict refusal
         }
         if bytes[pos..] != r.record_hash() {
             return None; // kurcalama
@@ -248,17 +248,17 @@ mod tests {
 
     #[test]
     fn pure_production_roundtrip_and_verify() {
-        // saf üretim: üretici + tohum → bayt; commitment üretimle eşleşmeli
+        // pure production: producer + seed -> bytes; the commitment must match the production
         let seed = [7u8; 32];
         let producer = [1u8; 32];
         let produced = b"deterministik uretim ciktisi 1234567890";
         let pact = PactRecord::pure(producer, seed, produced, 100);
         assert!(
             pact.verify_production(produced),
-            "üretim commitment'ı eşleşir"
+            "the production commitment matches"
         );
-        assert!(!pact.verify_production(b"baska cikti"), "farklı üretim RED");
-        assert!(pact.verify(), "saf üretim tutarlı");
+        assert!(!pact.verify_production(b"another output"), "a different production is REFUSED");
+        assert!(pact.verify(), "pure production is consistent");
         // blob roundtrip
         let blob = pact.to_blob();
         let back = PactRecord::from_blob(&blob).expect("blob okunur");
@@ -267,49 +267,49 @@ mod tests {
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(PactRecord::from_blob(&bad).is_none());
-        // artık bayt red
+        // trailing bytes are refused
         let mut extra = blob.clone();
         extra.push(0x00);
         assert!(PactRecord::from_blob(&extra).is_none());
-        // kısa girdi
+        // short input
         assert!(PactRecord::from_blob(&[0u8; 20]).is_none());
     }
 
     #[test]
     fn producer_plus_residual_classification() {
-        // üretici + rezidüel: üretilemeyen artık ayrı commitment (İ6)
+        // producer plus residual: the unproducible remainder gets its own commitment (I6)
         let produced = b"uretilen kisim";
-        let residual = b"organik artik: gurultu 0x1234";
+        let residual = b"organic remainder: noise 0x1234";
         let pact =
             PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
         assert!(pact.verify_production(produced));
-        assert!(pact.verify(), "rezidüel >0 tutarlı");
+        assert!(pact.verify(), "a residual above zero is consistent");
         assert_eq!(pact.residual_len, residual.len() as u64);
-        // sınıf yalanı: mode RecipePlusResidual ama residual_len 0 → verify RED (İ6)
+        // class lie: mode RecipePlusResidual with residual_len 0 -> verify REFUSES (I6)
         let mut liar = pact.clone();
         liar.residual_len = 0;
-        assert!(!liar.verify(), "rezidüel gizleme RED");
-        // doğru rezidüel → verify_residual OK; farklı rezidüel → RED (İ6)
-        assert!(pact.verify_residual(residual), "doğru rezidüel eşleşir");
+        assert!(!liar.verify(), "hiding the residual is REFUSED");
+        // the right residual -> verify_residual passes; a different residual -> refused (I6)
+        assert!(pact.verify_residual(residual), "the right residual matches");
         assert!(
-            !pact.verify_residual(b"farkli reziduel"),
-            "farklı rezidüel RED"
+            !pact.verify_residual(b"a different residual"),
+            "a different residual is REFUSED"
         );
         let mut liar2 = pact.clone();
         liar2.residual_commitment = [1u8; 32];
         assert!(
             !liar2.verify_residual(residual),
-            "kurcalanmış commitment RED"
+            "a tampered commitment is REFUSED"
         );
     }
 
     #[test]
     fn residual_only_matches_content_id() {
-        // kayıpsız .bud: commitment = content_id(original) (K3)
-        let original = b"kayipsiz icerik 12345";
+        // a lossless .bud: commitment = content_id(original) (K3)
+        let original = b"lossless content 12345";
         let pact = PactRecord::residual_only(original, 300);
-        assert!(pact.verify_production(original), "content_id eşleşir");
-        assert!(!pact.verify_production(b"farkli"), "farklı içerik RED");
+        assert!(pact.verify_production(original), "content_id matches");
+        assert!(!pact.verify_production(b"different"), "different content is REFUSED");
         assert_eq!(
             pact.commitment,
             crate::bud_format_container::content_id(original)
@@ -319,27 +319,27 @@ mod tests {
 
     #[test]
     fn pact_record_small_and_deterministic() {
-        // İ1 kabul: PACT kaydı ~100-150 bayt
+        // I1 acceptance: a PACT record is about 100-150 bytes
         let seed = [1u8; 32];
         let pact = PactRecord::pure([2u8; 32], seed, b"x", 1);
         let blob = pact.to_blob();
-        assert!(blob.len() <= 256, "PACT kaydı kompakt: {} bayt", blob.len());
-        // aynı alanlar → aynı hash (deterministik)
+        assert!(blob.len() <= 256, "the PACT record is compact: {} bytes", blob.len());
+        // the same fields -> the same hash (deterministic)
         let pact2 = PactRecord::pure([2u8; 32], seed, b"x", 1);
         assert_eq!(pact.record_hash(), pact2.record_hash());
         assert_ne!(pact.record_hash(), [0u8; 32]);
     }
 
     #[test]
-    fn consensus_guvenli_serilestirme_roundtrip() {
-        // İ1: to_blob → from_blob = birebir; blob canonical (sabit boyut, sıra).
+    fn consensus_safe_serialization_roundtrip() {
+        // I1: to_blob -> from_blob is exact; the blob is canonical (fixed size and order).
         let p1 = PactRecord::pure([7u8; 32], [9u8; 32], b"uretilen veri", 1_768_000_000);
         let blob = p1.to_blob();
-        let p2 = PactRecord::from_blob(&blob).expect("blob aç");
-        assert_eq!(p1.record_hash(), p2.record_hash(), "serileştirme birebir");
+        let p2 = PactRecord::from_blob(&blob).expect("the blob opens");
+        assert_eq!(p1.record_hash(), p2.record_hash(), "serialization is exact");
         assert_eq!(p1.mode, p2.mode);
         assert_eq!(p1.residual_len, p2.residual_len);
-        // canonical: aynı kayıt → aynı baytlar (state kökü etkisi yok)
+        // canonical: the same record -> the same bytes (no effect on the state root)
         let p3 = PactRecord::pure([7u8; 32], [9u8; 32], b"uretilen veri", 1_768_000_000);
         assert_eq!(blob, p3.to_blob());
         // bozuk blob → None (panik yok)

@@ -5,38 +5,38 @@ use std::collections::BTreeMap;
 
 pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 
-/// Kayitli tutulabilecek en fazla domain sayisi.
+/// The maximum number of domains that may be kept registered.
 ///
-/// # Neden bir tavan gerekiyor
+/// # Why a ceiling is needed
 ///
-/// Kayit izinli degil: yeterli bagi yatiran herkes domain acabilir. Bagin
-/// kendisi bir maliyettir ama **sinir degildir** - geri alinabilir bir
-/// mevduattir, harcanan bir ucret degil. Unbond suresi dolunca operator
-/// parasini geri alir, yani yeterli sermayeli biri icin bir domain acmanin
-/// net maliyeti yalnizca paranin o sure boyunca bagli kalmasidir.
+/// Registration is permissionless: anyone who posts enough bond can open a domain. The bond
+/// is itself a cost but **not a bound** - it is a refundable
+/// deposit, not a spent fee. When the unbond period expires the operator
+/// gets the money back, so for someone with enough capital the net cost of opening a domain
+/// is only that the money stays locked for that period.
 ///
-/// Kayitli her domain zincirin **blok basina** isine ekleniyor: [`ConsensusDomainRegistry::root`]
-/// her domain icin bir yaprak hash'i hesaplar ve bu kok her blokta yeniden
-/// uretilir. Yani kayit sayisi dogrudan her dogrulayicinin her blokta yaptigi
-/// isi belirler, ve o is domain sahibi tarafindan degil **ag tarafindan**
-/// odenir. Bag geri alinabildigi icin, sermayesi olan bir saldirgan bu isi
-/// kalici olarak yukseltip parasini geri alabilir.
+/// Every registered domain adds to the chain's **per-block** work: [`ConsensusDomainRegistry::root`]
+/// computes a leaf hash for every domain and this root is recomputed in every
+/// block. So the registration count directly determines the work every validator does in every
+/// block, and that work is paid **by the network**, not by the domain
+/// owner. Because the bond is refundable, an attacker with capital can raise that work
+/// permanently and still get their money back.
 ///
 /// Tavan bu bilesimi kirar: bagin geri alinabilirligi degismez, ama toplam
-/// yuk artik sabit bir ustten sinirli. `u16` genisliginde bir sayi secildi
-/// (65 536 degil 4096): 4096 yaprakli bir Merkle agaci 12 seviyedir ve her
-/// blokta yeniden hesaplanmasi olculebilir bir maliyettir; bunun ustu, hicbir
-/// mesru ihtiyacin karsiligi olmadan dogrulayici maliyetini buyutur.
+/// the load is now bounded from above by a constant. A number within `u16` width was chosen
+/// (4096, not 65 536): a Merkle tree with 4096 leaves is 12 levels deep and recomputing it in
+/// every block is a measurable cost; anything above that grows validator cost without
+/// corresponding to any legitimate need.
 ///
-/// # Tavan dolunca ne olur
+/// # What happens when the ceiling is reached
 ///
-/// Yeni kayit reddedilir. Bu bir yonetim kararini zorunlu kilar - tavani
+/// New registrations are refused. That forces a governance decision - raising the
 /// yukseltmek ya da kullanilmayan domainleri emekliye ayirmak - ve o karar
-/// gorunur olur. Sessizce buyuyen bir maliyetten, konusulan bir karara.
+/// becomes visible. From a silently growing cost to a discussed decision.
 ///
 /// Emekli (`Retired`) domainler de sayilir: yaprak agacta durdugu surece kok
-/// hesabina girer. Sayimin disinda tutulmalari icin kayittan **silinmeleri**
-/// gerekir, ki o ayri bir karar ve ayri bir yol.
+/// count against it. To be excluded from the count they must be **removed** from the
+/// registry, which is a separate decision and a separate path.
 pub const MAX_REGISTERED_DOMAINS: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -55,8 +55,8 @@ impl ConsensusDomainRegistry {
         if self.domains.contains_key(&domain.id) {
             return Err(format!("Domain {} is already registered", domain.id));
         }
-        // Sayim, kimlik denetiminden sonra: zaten kayitli bir id ile gelen
-        // istek tavani mesgul etmemeli, cunku yeni bir yaprak eklemiyor.
+        // The count comes after the identity check: a request arriving with an already registered id
+        // must not occupy the ceiling, because it adds no new leaf.
         if self.domains.len() >= MAX_REGISTERED_DOMAINS {
             return Err(format!(
                 "Domain {} rejected: registry is at its ceiling of {MAX_REGISTERED_DOMAINS} \
@@ -205,22 +205,22 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
-    /// Bir zk programini alanin izin listesine ekler.
+    /// Adds a zk program to the domain allowlist.
     ///
-    /// # Neden bu yol var
+    /// # Why this path exists
     ///
-    /// `zk_program_allowlist` `submit_zk_proof`'ta okunuyor ve bos liste
-    /// fail-closed anlamina geliyor - dogru varsayilan. Ama listeye **ekleme
+    /// `zk_program_allowlist` is read in `submit_zk_proof` and an empty list means
+    /// fail-closed - the right default. But no code touched the **insertion**
     /// yolu yoktu**: alan olusturulurken `Vec::new()` yaziliyor ve baska
-    /// hicbir kod dokunmuyordu. Yani kapinin arkasinda hicbir zaman bir sey
-    /// olamazdi; okunan ama hicbir zaman doldurulamayan bir liste, kodu
-    /// okuyana "programlar yonetiliyor" izlenimi verir ve yonetilmez.
+    /// side of the list. So there could never be anything behind the gate; a list that is
+    /// read but can never be filled gives a reader the impression that "programs are
+    /// managed" while they are not.
     ///
     /// # Errors
     ///
-    /// Alan yoksa, ya da program zaten listedeyse. Ikinci durum sessizce
-    /// gecilebilirdi, ama "zaten oradaydi" ile "simdi eklendi" ayni cevabi
-    /// verirse, bir yonetim islemi kendi etkisini dogrulayamaz.
+    /// If the domain does not exist, or the program is already in the list. The second case could have been
+    /// passed silently, but if "it was already there" and "it was just added" give the same answer,
+    /// a governance operation cannot verify its own effect.
     pub fn allow_zk_program(&mut self, id: DomainId, program: Hash32) -> Result<(), String> {
         let domain = self
             .domains
@@ -238,19 +238,19 @@ impl ConsensusDomainRegistry {
 
     /// Bir zk programini izin listesinden cikarir.
     ///
-    /// # Neden geri cekme sart
+    /// # Why revocation is mandatory
     ///
     /// Kabul edilmis bir program, alanin durumunu ilerletme hakkina sahiptir.
-    /// O programda sonradan bir hata bulunursa - kanit sisteminin
-    /// kisitlamadigi bir alan, yanlis bir gecis kurali - tek savunma onu
+    /// If a defect is later found in that program - a field the proof system does not
+    /// constrain, a wrong transition rule - the only defence is to take it
     /// listeden cikarmaktir. Ekleme yolu olup cikarma yolu olmayan bir izin
     /// listesi, tek yonlu bir kapidir: iceri alinan bir daha disari
-    /// cikarilamaz, ve o programin yanlis oldugu anlasildiginda yapilabilecek
-    /// tek sey tum alani dondurmak olur.
+    /// cannot be removed, and once that program is known to be wrong the only thing
+    /// left to do would be to freeze the whole domain.
     ///
     /// Cikarma **geriye donuk degildir**: cikarilmadan once uretilmis ve
-    /// kabul edilmis kanitlar gecerli kalir. Zincirin gecmisi yeniden
-    /// yazilmaz; degisen sey bundan sonra ne kabul edilecegi.
+    /// already accepted proofs stay valid. The history of the chain is not rewritten;
+    /// what changes is what will be accepted from now on.
     ///
     /// # Errors
     ///
@@ -403,49 +403,49 @@ mod tests {
         assert_eq!(first.root(), second.root());
     }
 
-    /// Kayit defteri tavanini asamaz.
+    /// The registry cannot exceed its ceiling.
     ///
-    /// Kayitli her domain her blokta yeniden hesaplanan kayit kokune bir
-    /// yaprak ekler; o isi agin tamami karsiliyor, domain sahibi degil. Operator bagi geri
-    /// alinabildigi icin bag bu buyumeyi sinirlamaz - tek sinir tavan.
+    /// Every registered domain adds a leaf to the registry root that is recomputed in every
+    /// block; the whole network bears that work, not the domain owner. Because the operator bond is
+    /// refundable the bond does not bound this growth - the ceiling is the only bound.
     #[test]
     fn the_registry_does_not_grow_past_its_ceiling() {
         let mut registry = ConsensusDomainRegistry::new();
 
-        // Tavana kadar dolduruluyor. Her kayit basarili olmali: tavan
+        // Filled up to the ceiling. Every registration must succeed: the ceiling
         // dolmadan reddeden bir kapi mesru kullanimi engellerdi.
         for id in 0..MAX_REGISTERED_DOMAINS {
             let id = u32::try_from(id).expect("tavan u32'ye sigar");
             registry
                 .register(default_domain(id, ConsensusKind::PoS, 1338, "pos", 0))
-                .expect("tavana kadar her kayit kabul edilmeli");
+                .expect("every registration up to the ceiling must be accepted");
         }
         assert_eq!(registry.domains().len(), MAX_REGISTERED_DOMAINS);
 
-        // Tavanin ustundeki ilk kayit reddedilir.
+        // The first registration above the ceiling is refused.
         let overflow = u32::try_from(MAX_REGISTERED_DOMAINS).expect("tavan+0 u32'ye sigar");
         let err = registry
             .register(default_domain(overflow, ConsensusKind::PoS, 1338, "pos", 0))
-            .expect_err("tavanin ustundeki kayit reddedilmeli");
+            .expect_err("a registration above the ceiling must be refused");
         assert!(
             err.contains("ceiling"),
-            "ret gerekcesi tavani soylemeli: {err}"
+            "the refusal reason must state the ceiling: {err}"
         );
 
-        // Ret gercekten kayda girmemis olmali - mesaj verip yine de eklemek
+        // The refusal must really have kept it out of the registry - reporting a message and adding anyway
         // tavani sussuz birakirdi.
         assert_eq!(
             registry.domains().len(),
             MAX_REGISTERED_DOMAINS,
-            "reddedilen kayit deftere girmemeli"
+            "a refused registration must not enter the registry"
         );
 
-        // Zaten kayitli bir id ile gelen istek tavan gerekcesiyle degil
-        // yinelenme gerekcesiyle reddedilir: yeni yaprak eklemedigi icin
+        // A request with an already registered id is refused for duplication,
+        // not for the ceiling: because it adds no new leaf
         // tavanla ilgisi yok.
         let dup = registry
             .register(default_domain(0, ConsensusKind::PoS, 1338, "pos", 0))
-            .expect_err("yinelenen kayit reddedilmeli");
+            .expect_err("a duplicate registration must be refused");
         assert!(
             dup.contains("already registered"),
             "yinelenme, tavandan once denetlenmeli: {dup}"
@@ -454,20 +454,20 @@ mod tests {
 
     /// Bir program listeye alinabilir ve geri cekilebilir.
     ///
-    /// Kapidan once liste yalnizca okunuyordu: `submit_zk_proof` ona bakiyor
-    /// ama hicbir kod ona yazmiyordu. Okunan ama doldurulamayan bir izin
+    /// Before the gate the list was only read: `submit_zk_proof` looked at it
+    /// but no code wrote to it. An allowlist that is read but cannot be filled
     /// listesi, yonetiliyormus gibi gorunen ve yonetilmeyen bir kapidir.
     #[test]
     fn a_zk_program_can_be_admitted_and_withdrawn() {
         let mut registry = ConsensusDomainRegistry::new();
         registry
             .register(default_domain(5, ConsensusKind::PoS, 1338, "pos", 0))
-            .expect("kayit");
+            .expect("registration");
 
         let program = [9u8; 32];
         let other = [8u8; 32];
 
-        // Baslangicta liste bos: fail-closed varsayilan korunuyor.
+        // The list starts empty: the fail-closed default is preserved.
         let domain = registry.get(5).expect("alan");
         assert!(domain.zk_program_allowlist.is_empty());
 
@@ -477,25 +477,25 @@ mod tests {
             vec![program]
         );
 
-        // Ayni programi iki kez eklemek sessizce gecmez: bir yonetim islemi
-        // kendi etkisini dogrulayabilmeli.
+        // Adding the same program twice does not pass silently: a governance operation
+        // must be able to verify its own effect.
         assert!(registry.allow_zk_program(5, program).is_err());
 
-        // Geri cekme calisir ve yalnizca hedefi kaldirir.
+        // Revocation works and removes only the target.
         registry.allow_zk_program(5, other).expect("ikinci ekleme");
         registry.revoke_zk_program(5, &program).expect("geri cekme");
         assert_eq!(
             registry.get(5).expect("alan").zk_program_allowlist,
             vec![other],
-            "yalnizca hedeflenen program cikmali"
+            "only the targeted program must be removed"
         );
 
-        // Listede olmayani geri cekmek hata: basarisiz bir geri cekme,
+        // Revoking something not in the list is an error: a failed revocation
         // basarili gibi okunursa program hala kabul edilirken kaldirildigi
         // sanilir.
         assert!(registry.revoke_zk_program(5, &program).is_err());
 
-        // Bilinmeyen alan her iki yolda da reddedilir.
+        // An unknown domain is refused on both paths.
         assert!(registry.allow_zk_program(404, program).is_err());
         assert!(registry.revoke_zk_program(404, &program).is_err());
     }

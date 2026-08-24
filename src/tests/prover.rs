@@ -32,11 +32,11 @@ fn fresh_chain() -> Blockchain {
     Blockchain::new(consensus, None, 45262, None)
 }
 
-/// Alani kaydeder ve verilen programi zk izin listesine yazar.
+/// Registers the domain and writes the given program into the zk allowlist.
 ///
-/// Bu yardimci var, cunku artik bir kanit yalnizca gecerli olmakla kabul
-/// edilmiyor: alanin o program icin acikca izin vermis olmasi gerekiyor. Izin
-/// listesi bos dogar, yani kayit tek basina yetmez.
+/// This helper exists because a proof is no longer accepted merely for being valid:
+/// the domain must have explicitly allowed that program. The allowlist
+/// is born empty, so registration alone is not enough.
 fn register_domain_allowing(bc: &mut Blockchain, id: u32, program: &[u64]) {
     let mut domain = crate::domain::plugin::default_domain(
         id,
@@ -358,12 +358,12 @@ fn proof_claim_registry_persists_across_restart() {
     assert_eq!(restarted.proof_claims.len(), 1);
 }
 
-/// Baska bir zincir icin uretilmis kanit, burada kabul edilmemeli.
+/// A proof produced for another chain must not be accepted here.
 ///
-/// `public_inputs.chain_id` gonderenden gelir. STARK yalnizca "bu genel
-/// girdilerle bu program boyle kostu" der; girdilerin **hangi zincire** ait
-/// oldugunu kisitlamaz. Denetim dogrulayicida yapilmazsa, kendi zincirinde
-/// tamamen gecerli bir kanit burada da gecer ve bir alani ilerletir.
+/// `public_inputs.chain_id` comes from the sender. The STARK only says "the program ran
+/// this way with these public inputs"; it does not constrain **which chain** the inputs
+/// belong to. Without a check in the verifier, a proof entirely valid on its own chain
+/// would pass here too and advance a domain.
 #[test]
 fn a_proof_bound_to_another_chain_is_refused() {
     let mut bc = fresh_chain();
@@ -373,35 +373,35 @@ fn a_proof_bound_to_another_chain_is_refused() {
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&sender, fee);
 
-    // Ayni kanit, yalnizca chain_id baska bir zincire isaret ediyor.
+    // The same proof, only chain_id points at another chain.
     let mut foreign = pi.clone();
     foreign.chain_id = pi.chain_id + 1;
 
     let before = bc.state.get_balance(&sender);
     let err = bc
         .submit_zk_proof(submission(sender, 1, 11, &proof, &foreign, &program))
-        .expect_err("baska zincire bagli kanit reddedilmeli");
+        .expect_err("a proof bound to another chain must be refused");
     assert!(
         err.contains("chain"),
-        "hata zincir baglamasini anlatmali: {err}"
+        "the error must describe the chain binding: {err}"
     );
     assert_eq!(
         bc.state.get_balance(&sender),
         before,
-        "reddedilen kanit ucret yakmamali: denetim ucretten once"
+        "a refused proof must not burn a fee: the check comes before the fee"
     );
 
-    // Kontrol: dogru chain_id ile ayni kanit kabul edilir.
+    // Control: with the right chain_id the same proof is accepted.
     bc.submit_zk_proof(submission(sender, 1, 11, &proof, &pi, &program))
-        .expect("dogru zincire bagli kanit kabul edilmeli");
+        .expect("a proof bound to the right chain must be accepted");
 }
 
-/// Bir yukseklik icin uretilmis kanit, baska bir yukseklige sunulamamali.
+/// A proof produced for one height must not be submittable at another height.
 ///
 /// Kabul edilen iddianin anahtari `(alan, yukseklik)`. Baglama hash'i bu
-/// ikisini kapsamazsa, gecerli tek bir kanit henuz iddia edilmemis her
-/// cifte sunulabilir: saldirgan yalnizca tasima mesajini yeniden kurar,
-/// kanita hic dokunmaz. Kanit "bir program boyle kostu" der; "bu, su
+/// does not cover both, a single valid proof can be submitted to every
+/// pair not yet claimed: the attacker only rebuilds the transport message and
+/// never touches the proof. A proof says "a program ran this way"; it does not say "this is
 /// yukseklikteki gecistir" demez.
 #[test]
 fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
@@ -412,41 +412,41 @@ fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&sender, fee * 4);
 
-    // 20. yukseklik icin gecerli bir iddia.
+    // A valid claim for height 20.
     bc.submit_zk_proof(submission(sender, 1, 20, &proof, &pi, &program))
-        .expect("ilk iddia kabul edilmeli");
+        .expect("the first claim must be accepted");
 
-    // Ayni kanit, 21. yukseklige sunuluyor: mesaj yeniden kuruluyor ama
-    // baglama hash'i artik yuksekligi de kapsadigi icin tutmuyor.
+    // The same proof submitted at height 21: the message is rebuilt but
+    // the binding hash now covers the height too, so it does not hold.
     let mut replayed = submission(sender, 1, 20, &proof, &pi, &program);
     replayed.message.source_height = 21;
     let err = bc
         .submit_zk_proof(replayed)
-        .expect_err("yuksekligi degistirilen kanit reddedilmeli");
+        .expect_err("a proof with an altered height must be refused");
     assert!(
         err.contains("payload hash"),
-        "hata baglamayi anlatmali: {err}"
+        "the error must describe the binding: {err}"
     );
 
-    // Alan degistirmek de ayni sekilde tutmamali.
+    // Changing the domain must fail the same way.
     let mut cross_domain = submission(sender, 1, 20, &proof, &pi, &program);
     cross_domain.message.target_domain = 2;
     let err = bc
         .submit_zk_proof(cross_domain)
-        .expect_err("alani degistirilen kanit reddedilmeli");
+        .expect_err("a proof with an altered domain must be refused");
     assert!(
         err.contains("payload hash"),
-        "hata baglamayi anlatmali: {err}"
+        "the error must describe the binding: {err}"
     );
 }
 
-/// Kanit kusursuz, program yetkisiz: reddedilmeli.
+/// The proof is flawless, the program unauthorized: it must be refused.
 ///
-/// Saldirinin bicimi sudur: saldirgan kendi programini yazar, onu durustce
-/// calistirir ve gercek bir STARK uretir. Kanit gecerlidir - hicbir kriptografik
-/// denetim onu yakalayamaz, cunku yalan kanitta degil, calistirilan kodun
-/// kendisindedir. `program_hash` denetimi de yardim etmez: gonderen hem programi
-/// hem hash'i verdigi icin o denetim her zaman gecer.
+/// The shape of the attack: the attacker writes their own program, runs it honestly
+/// and produces a real STARK. The proof is valid - no cryptographic
+/// check can catch it, because the lie is not in the proof but in the code that was
+/// run. The `program_hash` check does not help either: since the sender supplies both the program
+/// and the hash, that check always passes.
 ///
 /// Reddi saglayan tek sey alanin onceden ilan ettigi izin listesidir.
 #[test]
@@ -454,7 +454,7 @@ fn a_valid_proof_over_an_unauthorized_program_is_refused() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
 
-    // Alan kayitli ve zk kabul ediyor, ama BASKA bir program icin izin veriyor.
+    // The domain is registered and accepts zk, but allows a DIFFERENT program.
     let mut other_program = program.clone();
     other_program.push(0);
     register_domain_allowing(&mut bc, 1, &other_program);
@@ -469,17 +469,17 @@ fn a_valid_proof_over_an_unauthorized_program_is_refused() {
         .unwrap_err();
     assert!(
         err.contains("not on the zk allowlist"),
-        "izinsiz program izin listesi gerekcesiyle reddedilmeli, gelen: {err}"
+        "an unauthorized program must be refused for the allowlist reason, got: {err}"
     );
 
-    // Kapi ucretten once: reddedilen gonderim para yakmamali.
+    // The gate comes before the fee: a refused submission must not burn money.
     assert_eq!(
         bc.state.get_balance(&sender),
         before,
-        "izin listesi reddi ucretten once olmali"
+        "the allowlist refusal must come before the fee"
     );
 
-    // Ve hicbir iddia kaydedilmemeli.
+    // And no claim must be recorded.
     assert!(bc
         .proof_claims
         .get(&ProofClaimKey {
@@ -489,7 +489,7 @@ fn a_valid_proof_over_an_unauthorized_program_is_refused() {
         .is_none());
 }
 
-/// Bos izin listesi = kapali kapi.
+/// An empty allowlist is a closed gate.
 ///
 /// Varsayilanin yonu onemli: yeni ya da goc etmis bir alan, kimse ona program
 /// vermeden zk ile ilerletilememeli. Fail-open bir varsayilan bu alani sussuz
@@ -508,7 +508,7 @@ fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
     );
     assert!(
         domain.zk_program_allowlist.is_empty(),
-        "alan zk kanitina kapali dogmali"
+        "a domain must be born closed to zk proofs"
     );
     bc.domain_registry.register(domain).expect("register");
 
@@ -522,7 +522,7 @@ fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
     assert!(err.contains("not on the zk allowlist"), "gelen: {err}");
 }
 
-/// Kayitsiz alan: kanit degerlendirilmeden reddedilir.
+/// An unregistered domain: the proof is refused without being evaluated.
 #[test]
 fn a_proof_for_an_unknown_domain_is_refused() {
     let mut bc = fresh_chain();
@@ -537,8 +537,8 @@ fn a_proof_for_an_unknown_domain_is_refused() {
     assert!(err.contains("unknown domain 77"), "gelen: {err}");
 }
 
-/// 1d (tazelik): genel girdi cok eski bir yukseklik iddia ederse kanit,
-/// kanit sisteminin kendisi dogrulamadan once reddedilir.
+/// 1d (freshness): if a public input claims a height that is too old the proof is refused
+/// before the proof system itself verifies it.
 #[test]
 fn a_proof_claiming_a_stale_block_height_is_rejected() {
     let mut bc = fresh_chain();
@@ -550,11 +550,14 @@ fn a_proof_claiming_a_stale_block_height_is_rejected() {
     let err = bc
         .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
         .unwrap_err();
-    assert!(err.contains("block height"), "hata sebebi soylemeli: {err}");
+    assert!(
+        err.contains("block height"),
+        "the error must state the reason: {err}"
+    );
 }
 
-/// 1e (sureklilik): kabul edilen kanit alanin ilerlemesini kendi final
-/// kokune tasir; bu ilerlemenin gerisine yapilan iddia reddedilir.
+/// 1e (continuity): an accepted proof carries the domain progress to its own final
+/// root; a claim behind that progress is refused.
 #[test]
 fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
     let mut bc = fresh_chain();
@@ -569,7 +572,7 @@ fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
         .unwrap();
     assert!(matches!(out, ProofAcceptance::Accepted { .. }));
 
-    let d = bc.domain_registry.get(1).expect("alan kayitli");
+    let d = bc.domain_registry.get(1).expect("the domain is registered");
     assert_eq!(
         d.last_committed_height, 10,
         "kabul, alanin ilerlemesini tasimali"
@@ -579,33 +582,33 @@ fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
         "final kok alana baglanmali"
     );
 
-    // Ayni kanit, geride bir yukseklige iddia: ucret yakilmadan kapi 1e'de red.
+    // The same proof claimed at an earlier height: refused at gate 1e without burning a fee.
     let err = bc
         .submit_zk_proof(submission(sender, 1, 9, &proof, &pi, &program))
         .unwrap_err();
     assert!(
         err.contains("stale zk claim"),
-        "hata sebebi soylemeli: {err}"
+        "the error must state the reason: {err}"
     );
 
-    // Ilerlemeyi tasiyan ilk kabulden sonra ayni yukseklige yeniden sunum
-    // idempotent kalir (kapi 1e esitlige dokunmaz, calisma iddia katmaninin).
+    // After the first acceptance that carries the progress, resubmitting at the same height
+    // stays idempotent (gate 1e does not touch equality; the work belongs to the claim layer).
     let again = bc
         .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
         .unwrap();
     assert_eq!(again, ProofAcceptance::Idempotent);
 }
 
-/// Ilan edilen butcenin asilmasi reddedilir.
+/// Exceeding the declared budget is refused.
 ///
-/// `gas_limit` ve `gas_used` genel girdilerin icinde ve baglama hash'inde:
-/// gonderen ikisini de sonradan degistiremez. Ama ikisi **birbirine karsi**
+/// `gas_limit` and `gas_used` are inside the public inputs and the binding hash:
+/// the sender cannot change either afterwards. But nothing checked them **against each
 /// denetlenmezse tutarli sekilde imzalanmis bir asim kabul edilirdi.
 ///
-/// Kanit sistemi bu iliskiyi kisitlamaz - STARK "bu program bu girdilerle
-/// boyle kostu" der, ilan edilen tavanin asilmadigini soylemez. Izin listesi
-/// de soylemez: o **hangi kodun** calisabilecegini denetler, bu ise o kodun
-/// ilan ettigi sinir icinde kalip kalmadigini.
+/// The proof system does not constrain this relation - the STARK says "this program ran
+/// this way with these inputs", not that the declared ceiling was respected. Nor does the allowlist:
+/// it checks **which code** may run, whereas this checks whether that code stayed inside
+/// the bound it declared.
 #[test]
 fn gas_used_above_the_declared_limit_is_refused() {
     let mut bc = fresh_chain();
@@ -622,18 +625,18 @@ fn gas_used_above_the_declared_limit_is_refused() {
 
     let err = bc
         .submit_zk_proof(submission(sender, 1, 10, &proof, &overspent, &program))
-        .expect_err("ilan edilen butcenin asilmasi reddedilmeli");
+        .expect_err("exceeding the declared budget must be refused");
     assert!(
         err.contains("gas"),
         "ret, asilan seyin butce oldugunu soylemeli: {err}"
     );
-    // Ret ucretten once: reddedilen bir kanit bakiyeye dokunmaz.
+    // The refusal comes before the fee: a refused proof does not touch the balance.
     assert_eq!(bc.state.get_balance(&sender), before);
 }
 
-/// Tam tavanda harcama kabul edilir: sinir asilmadi.
+/// Spending exactly at the ceiling is accepted: the bound was not exceeded.
 ///
-/// `>` degil `>=` yazmak, ilan ettigi kadarini harcayan durust bir programi
+/// Writing `>=` instead of `>` would refuse an honest program that spends exactly what it
 /// reddederdi.
 #[test]
 fn spending_exactly_the_declared_limit_is_allowed() {
@@ -648,8 +651,8 @@ fn spending_exactly_the_declared_limit_is_allowed() {
     exact.gas_limit = 5_000;
     exact.gas_used = 5_000;
 
-    // Butce denetimi bu kaniti gecirmeli. Kanit dogrulamasi baska sebeplerle
-    // duserse de olur; olculen sey butce kapisinin yanlis reddetmemesi.
+    // The budget check must let this proof through. Proof verification may fail for other
+    // reasons; what is measured is that the budget gate does not refuse wrongly.
     let outcome = bc.submit_zk_proof(submission(sender, 1, 10, &proof, &exact, &program));
     if let Err(e) = &outcome {
         assert!(
