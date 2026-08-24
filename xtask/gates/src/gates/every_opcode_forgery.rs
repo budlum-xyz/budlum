@@ -42,7 +42,7 @@ fn check_test_refusals(
         // count. The marker is a comparison against the sentinel this suite
         // uses for "the verifier returned Ok", since a test that never
         // constructs that string is not measuring a refusal.
-        let pins_refusal_reason = body.contains("\"kabul edildi\"");
+        let pins_refusal_reason = body.contains("\"accepted\"");
         if !delegates && !asserts_failure && !rejects_at_vm && !pins_refusal_reason {
             problems.push(format!(
                 "`{name}` builds a forgery and never asserts the proof is \
@@ -286,7 +286,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         // 16 opcodes, only 2 covered -> must FAIL
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: kapsanmayan opcode'lar gecti"));
+        return Err(String::from("canary: uncovered opcodes passed"));
     }
     // Full coverage.
     let mut prover2 = String::new();
@@ -303,10 +303,10 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: tam kapsama reddedildi"));
+        return Err(String::from("canary: full coverage was refused"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "every-opcode kanaryasi OK (kapsama FAIL, tam kapsama PASS).",
+        "every-opcode canary OK (partial coverage FAILs, full coverage PASSes).",
     ))
 }

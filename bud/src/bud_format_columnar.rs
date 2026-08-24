@@ -1,26 +1,26 @@
-//! B.U.D. 2.0 İcat - Kayıpsız JSON Columnar Transform (2026-08-16)
+//! B.U.D. 2.0 invention - lossless JSON columnar transform (2026-08-16)
 //!
-//! Sıkıştırma ÖNCESİ kayıpsız dönüşüm: JSON kayıt dizisini sütun dizilerine ayırır;
-//! aynı anahtarın değerleri bitişik → zstd benzeri sıkıştırıcı tekrarları daha iyi
-//! görür (Parquet'in row-group columnar yaklaşımının JSON'a kayıpsız uyarlaması).
+//! A lossless transform applied BEFORE compression: it splits an array of JSON records into column arrays;
+//! values of the same key become adjacent -> a zstd-like compressor sees the repetition better
+//! (a lossless adaptation of Parquet's row-group columnar approach to JSON).
 //!
-//! v2 (bu sürüm): TİP-FARKINDA sütunlar - sayısal sütunlar (u64/i64/f64) ve boole
-//! BINARY saklanır (string değil), string sütunlar len-prefix. Yüksek entropili
-//! sayılar zstd'nin göremediği şekilde daraltılır (ölçüm seed=7, 50k kayıt):
+//! v2 (this version): TYPE-AWARE columns - numeric columns (u64/i64/f64) and booleans
+//! are stored BINARY (not as strings), string columns are length prefixed. High-entropy
+//! numbers shrink in a way zstd cannot see (measurement seed=7, 50k records):
 //!   RAW JSON zstd19          7.83x
 //!   columnar Exact (str)     8.53x
 //!   columnar Exact + NUMBIN  8.84x
-//!   columnar OrderFree+NUM   12.07x   ← Parquet-benzeri en iyi (sıralama bitişikliği)
+//!   columnar OrderFree+NUM   12.07x   <- the Parquet-like best (adjacency through sorting)
 //!
-//! İki mod:
-//! - **Exact**: sütunlar orijinal kayıt sırasında → decode birebir orijinal JSON
-//!   (K38: `decode(encode(d)) == d`). Anahtar sırası preserve_order ile korunur.
-//! - **OrderFree**: kayıtlar deterministik sıralanır (sayısal kolonlarda sayısal
-//!   karşılaştırma) → oran artar; decode kayıt KÜMESİNİ aynen üretir, sıra değişebilir
-//!   (KF2: veri korunur, sıra format meselesidir).
+//! Two modes:
+//! - **Exact**: columns follow the original record order -> decode returns the original JSON exactly
+//!   (K38: `decode(encode(d)) == d`). Key order is preserved through preserve_order.
+//! - **OrderFree**: records are sorted deterministically (numeric comparison on numeric
+//!   columns) -> the ratio improves; decode reproduces the record SET exactly, the order may change
+//!   (KF2: the data is preserved, order is a formatting matter).
 //!
-//! Düzensiz girdi (kayıtlar farklı anahtar kümesinde) → None (boru hattı ham JSON'a
-//! düşer; kayıpsızlık KORUNUR, transform uygulanmaz). Bomb korumalı + panik'siz.
+//! Irregular input (records with different key sets) -> None (the pipeline falls back to raw JSON;
+//! losslessness is PRESERVED, the transform is simply not applied). Bomb guarded and panic free.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, testli.
 
@@ -29,15 +29,15 @@
 use serde_json::Value;
 
 pub const COLUMNAR_MAGIC: [u8; 8] = *b"\xB5COL\0\0\0\0";
-pub const COLUMNAR_VERSION: u8 = 2; // v2: tip-farkında sütunlar
+pub const COLUMNAR_VERSION: u8 = 2; // v2: type-aware columns
 pub const MAX_RECORDS: u64 = 10_000_000;
 pub const MAX_COLUMNS: usize = 256;
-pub const MAX_VALUE_BYTES: u64 = 1024 * 1024; // tek string değer tavanı (bomba)
+pub const MAX_VALUE_BYTES: u64 = 1024 * 1024; // ceiling for a single string value (bomb guard)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnarMode {
     Exact = 0,     // byte-identical (K38)
-    OrderFree = 1, // kayıt kümesi korunur (KF2), daha yüksek oran
+    OrderFree = 1, // the record set is preserved (KF2), higher ratio
 }
 
 impl ColumnarMode {
@@ -53,7 +53,7 @@ impl ColumnarMode {
     }
 }
 
-/// Sütun değer tipi (Parquet-benzeri, kayıpsız).
+/// Column value type (Parquet-like, lossless).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColType {
     Str = 0,
@@ -82,12 +82,12 @@ impl ColType {
 #[derive(Debug, Clone)]
 pub struct JsonColumnar {
     pub mode: ColumnarMode,
-    pub keys: Vec<String>, // anahtar sırası (Exact: orijinal; OrderFree: sözlük)
-    pub col_types: Vec<ColType>, // her sütunun tipi
-    pub columns: Vec<Vec<Value>>, // her anahtar için değerler (kayıt sırasında, tipli)
+    pub keys: Vec<String>, // key order (Exact: original; OrderFree: lexicographic)
+    pub col_types: Vec<ColType>, // the type of each column
+    pub columns: Vec<Vec<Value>>, // values per key (in record order, typed)
 }
 
-/// Değerin sütun tipi adayı (kolon tek tipte toplanır; uyumsuz → Str düşer).
+/// The candidate column type of a value (a column collapses to one type; a mismatch falls back to Str).
 fn cell_type(v: &Value) -> ColType {
     match v {
         Value::Number(n) => {
@@ -100,14 +100,14 @@ fn cell_type(v: &Value) -> ColType {
             }
         }
         Value::Bool(_) => ColType::Bool,
-        _ => ColType::Str, // String/Array/Object/Null → Str (stringleştirilir)
+        _ => ColType::Str, // String/Array/Object/Null -> Str (stringified)
     }
 }
 
-/// Dönüştür: JSON dizisi → sütunlar. Düzensiz girdi → None (kayıpsızlık korunur).
+/// Transform a JSON array into columns. Irregular input -> None (losslessness is preserved).
 pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> {
     if data.len() as u64 > 1 << 30 {
-        return None; // 1 GiB girdi tavanı
+        return None; // 1 GiB input ceiling
     }
     let value: Value = serde_json::from_slice(data).ok()?;
     let arr = value.as_array()?;
@@ -119,7 +119,7 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     if keys.is_empty() || keys.len() > MAX_COLUMNS {
         return None;
     }
-    // tüm kayıtlar nesne + AYNI anahtar kümesinde mi?
+    // are all records objects with the SAME key set?
     let mut canon: Vec<String> = keys.clone();
     canon.sort();
     for rec in arr {
@@ -135,14 +135,14 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             }
         }
     }
-    // OrderFree: kayıt sıralaması (deterministik - anahtar sırasıyla; sayısal kolonlarda
-    // sayısal karşılaştırma, eşitlikte indeks). Sıra kayıpsızlığı etkilemez (KF2).
-    // Yukaridaki dongu her kaydin nesne oldugunu ve ayni anahtar kumesini
-    // tasidigini dogruladi. Bu dokuz `unwrap` "dogruladik, o halde guvenli"
-    // diyordu; dogru bir muhakeme, ama dogrulama ile kullanim arasindaki
+    // OrderFree: record sorting (deterministic - by key order; numeric comparison on numeric
+    // columns, index on ties). Order does not affect losslessness (KF2).
+    // The loop above verified that every record is an object carrying the same key
+    // set. Those nine `unwrap`s said "we verified it, therefore it is safe";
+    // sound reasoning, but the distance between verification and use
     // mesafeyi koruyan bir sey yok: araya bir `return` ya da bir kosul
-    // eklendiginde panik geri gelir. Nesneleri bir kez, paniksiz toplayip
-    // asagida onlari kullaniyoruz - ayni maliyet, tasinmayan varsayim yok.
+    // brings the panic back once something is inserted in between. We collect the objects once,
+    // panic free, and use them below - same cost, no assumption left uncarried.
     let objs: Vec<&serde_json::Map<String, Value>> = arr
         .iter()
         .map(Value::as_object)
@@ -152,8 +152,8 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     if matches!(mode, ColumnarMode::OrderFree) {
         indices.sort_by(|&a, &b| {
             for k in &keys {
-                // Anahtar kumesi dogrulandi; yine de eksik anahtar panik
-                // degil "esit" sayilir, boylece siralama toplam kalir.
+                // The key set is verified; even so a missing key counts as equal rather than
+                // panicking, keeping the ordering total.
                 let c = match (objs[a].get(k), objs[b].get(k)) {
                     (Some(va), Some(vb)) => cmp_value(va, vb),
                     _ => std::cmp::Ordering::Equal,
@@ -165,7 +165,7 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             a.cmp(&b)
         });
     }
-    // kolon tiplerini ilk değerden tespit et; uyumsuz değer kolonu Str'e düşürür
+    // detect column types from the first value; a mismatching value degrades the column to Str
     let mut col_types: Vec<ColType> = Vec::with_capacity(keys.len());
     let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(arr.len()); keys.len()];
     let first_idx = *indices.first()?;
@@ -177,7 +177,7 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
         let o = objs[idx];
         for (ci, k) in keys.iter().enumerate() {
             let v = o.get(k)?;
-            // tip uyumsuzluğu → kolonu Str'e çevir (sonraki değerler stringleştirilir)
+            // type mismatch -> turn the column into Str (later values are stringified)
             if cell_type(v) != col_types[ci] {
                 col_types[ci] = ColType::Str;
             }
@@ -192,7 +192,7 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     })
 }
 
-/// Sayısal-önce deterministik değer karşılaştırması (OrderFree sıralaması için).
+/// Numeric-first deterministic value comparison (for OrderFree sorting).
 fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
@@ -206,7 +206,7 @@ fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// Geri dönüştür: sütunlar → JSON dizisi (Exact: birebir orijinal; OrderFree: sıralı).
+/// Transform back: columns -> a JSON array (Exact: the original exactly; OrderFree: sorted).
 pub fn columnar_decode(col: &JsonColumnar) -> Option<Vec<u8>> {
     let n = col.columns.first().map(|c| c.len()).unwrap_or(0);
     if n == 0 {
@@ -232,7 +232,7 @@ pub fn columnar_decode(col: &JsonColumnar) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Tipli değeri blob'a yaz (Str: len-prefix; U64/I64/F64: 8 bayt; Bool: 1 bayt).
+/// Write a typed value to the blob (Str: length prefixed; U64/I64/F64: 8 bytes; Bool: 1 byte).
 fn push_value(out: &mut Vec<u8>, t: ColType, v: &Value) -> bool {
     match t {
         ColType::U64 => match v.as_u64() {
@@ -267,7 +267,7 @@ fn push_value(out: &mut Vec<u8>, t: ColType, v: &Value) -> bool {
             let s = match v {
                 Value::String(s) => s.as_bytes(),
                 Value::Null => b"",
-                _ => return false, // karışık tip (kolon Str etiketli ama değer uymuyor)
+                _ => return false, // mixed type (the column is tagged Str but the value does not fit)
             };
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
             out.extend_from_slice(s);
@@ -276,8 +276,8 @@ fn push_value(out: &mut Vec<u8>, t: ColType, v: &Value) -> bool {
     }
 }
 
-/// Deterministik blob (boru hattına besleme): magic + mod + anahtar/kolon sayıları
-/// + tip baytları + len-prefix'li değerler. Bomba korumalı; panik'siz.
+/// A deterministic blob (fed into the pipeline): magic + mode + key/column counts
+/// + type bytes + length-prefixed values. Bomb guarded and panic free.
 pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&COLUMNAR_MAGIC);
@@ -298,14 +298,14 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
         let t = col.col_types[ci];
         for v in c {
             if !push_value(&mut out, t, v) {
-                // tip uyumsuz değer: Str olarak yaz (kayıpsız fallback)
+                // type-mismatching value: write it as Str (a lossless fallback)
                 let s = v.to_string();
                 out.extend_from_slice(&(s.len() as u32).to_le_bytes());
                 out.extend_from_slice(s.as_bytes());
             }
         }
     }
-    // K38 bütünlük: domain-etiketli SHA3-256 digest (kurcalama tespiti, K3 deseni)
+    // K38 integrity: a domain-tagged SHA3-256 digest (tamper detection, the K3 pattern)
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();
     h.update(b"BDLM_BUD_COLUMNAR_V1");
@@ -315,7 +315,7 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
     out
 }
 
-/// Blob → JsonColumnar (sıkı doğrulama: magic, mod, tipler, boyut tavanları, digest).
+/// Blob -> JsonColumnar (strict validation: magic, mode, types, size ceilings, digest).
 pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
     const HDR: usize = 8 + 1 + 1 + 2;
     if bytes.len() < HDR || bytes[0..8] != COLUMNAR_MAGIC || bytes[8] != COLUMNAR_VERSION {
@@ -358,7 +358,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         col_types.push(ColType::from_u8(bytes[pos + i])?);
     }
     pos += key_count;
-    // değerler
+    // values
     let mut columns: Vec<Vec<Value>> = Vec::with_capacity(key_count);
     for _ in 0..key_count {
         let t = col_types[columns.len()];
@@ -370,9 +370,9 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         columns.push(col);
     }
     if pos + 32 != bytes.len() {
-        return None; // digest eksik veya artık bayt → sıkı red
+        return None; // missing digest or trailing bytes -> strict refusal
     }
-    // digest doğrula
+    // verify the digest
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();
     h.update(b"BDLM_BUD_COLUMNAR_V1");
@@ -389,7 +389,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
     })
 }
 
-/// Tipli değer parse (panik'siz; bomba tavanlı).
+/// Parse a typed value (panic free, with a bomb ceiling).
 fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
     match t {
         ColType::U64 => {
@@ -452,17 +452,17 @@ mod tests {
 
     #[test]
     fn exact_roundtrip_byte_identical() {
-        // K38: Exact modda decode(encode(d)) == d (bayt birebir) - tipli sütunlarla
+        // K38: in Exact mode decode(encode(d)) == d (byte for byte) - with typed columns
         let d = sample_json();
-        let col = columnar_encode(&d, ColumnarMode::Exact).expect("düzenli JSON encode");
+        let col = columnar_encode(&d, ColumnarMode::Exact).expect("regular JSON encodes");
         let back = columnar_decode(&col).expect("decode");
-        assert_eq!(back, d, "Exact mod byte-identical (K38 mülkiyeti)");
-        // sayısal sütunlar tipli (U64) - v ve s
-        assert_eq!(col.col_types[3], ColType::U64, "v sütunu sayısal");
-        assert_eq!(col.col_types[4], ColType::U64, "s sütunu sayısal");
+        assert_eq!(back, d, "Exact mode is byte identical (the K38 property)");
+        // numeric columns are typed (U64) - v and s
+        assert_eq!(col.col_types[3], ColType::U64, "column v is numeric");
+        assert_eq!(col.col_types[4], ColType::U64, "column s is numeric");
         // blob roundtrip
         let blob = columnar_to_blob(&col);
-        let col2 = columnar_from_blob(&blob).expect("blob çözülür");
+        let col2 = columnar_from_blob(&blob).expect("the blob decodes");
         assert_eq!(col2.mode, ColumnarMode::Exact);
         assert_eq!(col2.col_types, col.col_types, "tipler blob'da korunur");
         assert_eq!(columnar_decode(&col2).unwrap(), d);
@@ -470,7 +470,7 @@ mod tests {
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(columnar_from_blob(&bad).is_none());
-        // artık bayt red
+        // trailing bytes are refused
         let mut extra = blob.clone();
         extra.push(0x00);
         assert!(columnar_from_blob(&extra).is_none());
@@ -478,17 +478,17 @@ mod tests {
         let mut bm = blob.clone();
         bm[0] = 0x00;
         assert!(columnar_from_blob(&bm).is_none());
-        // bozuk tip baytı red
+        // a corrupt type byte is refused
         let mut bt = blob.clone();
         bt[HDR_BYTE] = 0x7F;
         assert!(columnar_from_blob(&bt).is_none());
     }
 
-    const HDR_BYTE: usize = 8 + 1 + 1 + 2; // magic+sürüm+mod+key_count (test sabiti)
+    const HDR_BYTE: usize = 8 + 1 + 1 + 2; // magic+version+mode+key_count (a test constant)
 
     #[test]
     fn orderfree_roundtrip_preserves_record_set() {
-        // KF2: OrderFree kayıt KÜMESİNİ korur (sıra deterministik değişir)
+        // KF2: OrderFree preserves the record SET (the order changes deterministically)
         let d = sample_json();
         let col = columnar_encode(&d, ColumnarMode::OrderFree).expect("encode");
         let back = columnar_decode(&col).expect("decode");
@@ -498,7 +498,7 @@ mod tests {
         let mut b: Vec<&Value> = got.as_array().unwrap().iter().collect();
         a.sort_by_key(|v| v.to_string());
         b.sort_by_key(|v| v.to_string());
-        assert_eq!(a, b, "OrderFree kayıt kümesini korur (KF2)");
+        assert_eq!(a, b, "OrderFree preserves the record set (KF2)");
         assert_eq!(col.mode, ColumnarMode::OrderFree);
     }
 
@@ -518,26 +518,26 @@ mod tests {
 
     #[test]
     fn mixed_numeric_types_fall_to_str() {
-        // karışık sayı tipleri (u64 + i64) → kolon U64'ten... v1'de tipler ayrı;
-        // burada "v" bazıları negatif olursa I64'e düşmez, Str'e düşer (kayıpsız fallback)
+        // mixed numeric types (u64 + i64) -> the column starts as U64; in v1 the types were separate,
+        // here if some values of "v" are negative the column falls back to Str, not I64 (a lossless fallback)
         let d = br#"[{"v":1},{"v":-2}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
-        // ilk değer u64 (1) → U64; ama ikinci -2 i64 → kolon Str'e düşer
+        // the first value u64 (1) -> U64; but the second -2 is i64 -> the column falls back to Str
         assert_eq!(
             col.col_types[0],
             ColType::Str,
-            "karışık sayı tipi Str'e düşer"
+            "a mixed numeric type falls back to Str"
         );
         let back = columnar_decode(&col).unwrap();
         assert_eq!(
             back, d,
-            "kayıpsız (stringleştirilmiş değer JSON'a geri döner)"
+            "lossless (the stringified value returns to JSON)"
         );
     }
 
     #[test]
     fn blob_never_panics_on_arbitrary() {
-        // K38: rastgele baytlarda from_blob panik'siz (None döner)
+        // K38: from_blob is panic free on random bytes (it returns None)
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn numeric_columns_are_typed() {
-        // K38: sayısal JSON değerleri sütunda U64/I64/F64 olarak saklanır (binary)
+        // K38: numeric JSON values are stored as U64/I64/F64 in the column (binary)
         let d = br#"[{"a":1,"b":-5,"c":2.5,"d":true,"e":"x"}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).unwrap();
         assert_eq!(col.col_types[0], ColType::U64);

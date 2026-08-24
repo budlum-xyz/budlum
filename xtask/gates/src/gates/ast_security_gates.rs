@@ -1,41 +1,41 @@
-//! Round 5 kök çözüm: `syn` tabanlı AST güvenlik gate'leri.
+//! Round 5 root fix: `syn`-based AST security gates.
 //!
 //! Substring+brace-walk gate'ler (`zero_address_sender_is_verified`,
 //! `tee_trust_boundary_is_structural`, `gov_slash_evidence_is_validator_only`)
-//! Strix'in parser-seviyesi düşüncesini modelleyemedi: her turda yeni bir
+//! could not model parser-level reasoning: each round found a new
 //! varyant (closure, nested helper, nested conditional, move closure,
-//! collection item) buldu. Bu modül aynı üç korumayı GERÇEK Rust AST'si
-//! üzerinde doğrular; `syn::visit` ile fonksiyon gövdeleri geçilir, closure
-//! ve nested bloklar AST düğümleri olarak ayırt edilir.
+//! collection item). This module verifies the same three guards on a REAL Rust AST;
+//! function bodies are walked with `syn::visit`, and closures
+//! and nested blocks are distinguished as AST nodes.
 //!
 //! Korumalar:
-//!   1. zero-address: `validate_transaction_with_context` içinde, zero-address
-//!      dalındaki başarı (`Ok(())` / `return Ok(())`), `if tx.verify()`
-//!      bloğunun DOĞRUDAN içinde (closure, nested fn item, nested if, match
-//!      arm, loop dışında) olmalı ve verify bloğundan sonraki yol fail-closed
-//!      olmalı (`return Err` / `Err` tail).
-//!   2. TEE: `sign_with_privacy` içinde `verifier.verify_quote` çağrısı sonucu
-//!      (attestation) `if !verify_measurement/backend/report_data` koşullarında
-//!      DOĞRUDAN `return Err` ile kullanılmalı (closure/nested blok decoy'u
-//!      sayılmaz) ve bu guard'lar başarıdan ÖNCE gelmeli.
-//!   3. gov-slash: `execute_proposal` içindeki `SlashValidator` dalında digest
-//!      karşılaştırması success'i yönlendirmeli: ya `if digest == evidence_hash`
-//!      bloğunda DOĞRUDAN `return true;`, ya da `.any(|..| { ..; digest == hash })`
-//!      closure'ında TAIL ifade olarak.
+//!   1. zero-address: inside `validate_transaction_with_context`, success in the zero-address
+//!      branch (`Ok(())` / `return Ok(())`) must be DIRECTLY inside the `if tx.verify()`
+//!      block (not in a closure, nested fn item, nested if, match
+//!      arm or loop), and the path after the verify block must be fail-closed
+//!      (`return Err` / an `Err` tail).
+//!   2. TEE: inside `sign_with_privacy` the result of the `verifier.verify_quote` call
+//!      (the attestation) must be used with a DIRECT `return Err` in the
+//!      `if !verify_measurement/backend/report_data` conditions (a closure/nested-block decoy
+//!      does not count), and these guards must come BEFORE the success.
+//!   3. gov-slash: in the `SlashValidator` branch of `execute_proposal` the digest
+//!      comparison must drive the success: either a DIRECT `return true;` in the
+//!      `if digest == evidence_hash` block, or as the TAIL expression of the
+//!      `.any(|..| { ..; digest == hash })` closure.
 //!
-//! Sertleştirme notu (Round 5 sonrası): Strix'in son tur bulguları
+//! Hardening note (after round 5): the last-round findings
 //! (nested conditional `return true`, nested-item `Ok(())`, nested conditional
-//! `return Err`, closure decoy) AST seviyesinde de kapatıldı; her visitor
-//! nesting sayacı taşıyor ve yalnızca hedef bloğun DOĞRUDAN üyesi olan
-//! kontrolleri sayıyor.
+//! (`return Err`, closure decoy) were closed at AST level too; each visitor
+//! carries a nesting counter and counts only the checks that are DIRECT members of the
+//! target block.
 
 use quote::ToTokens;
 use std::path::Path;
 use syn::visit::{self, Visit};
 use syn::{Expr, ExprCall, ExprReturn, Stmt};
 
-/// Whitespace-compact token metni: token akışındaki boşlukları atar, böylece
-/// karşılaştırmalar biçimlendirmeden bağımsız olur.
+/// Whitespace-compact token text: drops the spaces in the token stream so
+/// comparisons become formatting independent.
 fn compact<T: ToTokens>(t: &T) -> String {
     t.to_token_stream()
         .to_string()
@@ -44,28 +44,28 @@ fn compact<T: ToTokens>(t: &T) -> String {
         .collect()
 }
 
-/// `Ok(())` çağrısı mı? Path'in son segmenti `Ok` ve tek argüman boş tuple.
+/// Is it an `Ok(())` call? The last path segment is `Ok` and the single argument is the empty tuple.
 fn is_ok_unit_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Ok"))
         && node.args.len() == 1
         && matches!(&node.args[0], Expr::Tuple(t) if t.elems.is_empty())
 }
 
-/// Herhangi bir `Ok(...)` çağrısı mı? (sıralama kontrolü için; payload tipi
-/// önemsiz.)
+/// Is it any `Ok(...)` call? (For the ordering check; the payload type
+/// does not matter.)
 fn is_ok_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Ok"))
 }
 
-/// `Err(...)` çağrısı mı? (tail fail-closed formu için.)
+/// Is it an `Err(...)` call? (For the tail fail-closed form.)
 fn is_err_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Err"))
 }
 
-/// `if tx.verify() { .. }` bloğunun içini gez; başarı yalnızca doğrudan
-/// (nesting == 0) `Ok(())` / `return Ok(())` olarak sayılır. Closure, nested
-/// fn item, nested if, match arm ve loop içindeki `Ok(())` decoy'dur (Strix
-/// CWE-697, round 8/10 bulguları: nested helper ve nested-item decoy).
+/// Walk the inside of the `if tx.verify() { .. }` block; success counts only as a direct
+/// (nesting == 0) `Ok(())` / `return Ok(())`. An `Ok(())` inside a closure, nested
+/// fn item, nested if, match arm or loop is a decoy (
+/// CWE-697, round 8/10 findings: nested helper and nested-item decoys).
 #[derive(Default)]
 struct VerifySuccess {
     found: bool,
@@ -122,19 +122,19 @@ impl<'ast> Visit<'ast> for VerifySuccess {
     }
 }
 
-/// Sıralı olarak zero-address dalını gez: `if tx.verify()`'yi bul, içini
-/// `VerifySuccess` ile kontrol et, sonrasındaki ifadelerin fail-closed
-/// olduğunu doğrula.
+/// Walk the zero-address branch in order: find `if tx.verify()`, check its inside
+/// with `VerifySuccess`, and verify that the following expressions are
+/// fail-closed.
 #[derive(Default)]
 struct ZeroBlockCheck {
     guarded_success: bool,
     after_verify_has_success: bool,
 }
 
-/// Verify bloğundan sonra gelen ifade fail-closed mu? Yalnızca `return Err`,
-/// `Err(...)` tail veya çıplak `return;` sayılır; bir yardımcı çağrısı, macro
-/// veya değer ifadesi, dışarıya başarı sızdırabilir (Strix CWE-697, round
-/// 6/7 bulguları: helper ve tail success).
+/// Is the expression after the verify block fail-closed? Only `return Err`,
+/// an `Err(...)` tail or a bare `return;` counts; a helper call, a macro
+/// or a value expression could leak success outwards (CWE-697, round
+/// 6/7 findings: helper and tail success).
 fn stmt_fails_closed(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(Expr::Return(ret), _) => match &ret.expr {
@@ -146,8 +146,8 @@ fn stmt_fails_closed(stmt: &Stmt) -> bool {
     }
 }
 
-/// İfadede herhangi bir `Ok(())` var mı? (verify öncesi guard'sız başarıyı
-/// yakalar.)
+/// Does the expression contain any `Ok(())`? (Catches unguarded success before
+/// the verify.)
 fn stmt_contains_unit_ok(stmt: &Stmt) -> bool {
     struct UnitOkFinder {
         found: bool,
@@ -175,7 +175,7 @@ impl<'ast> Visit<'ast> for ZeroBlockCheck {
                     let mut vs = VerifySuccess::default();
                     vs.visit_block(&ifn.then_branch);
                     self.guarded_success = vs.found;
-                    // Else dalındaki başarı verify tarafından korunmuyor.
+                    // Success in the else branch is not guarded by the verify.
                     if let Some((_, else_expr)) = &ifn.else_branch {
                         if let Expr::Block(else_block) = else_expr.as_ref() {
                             let mut evs = VerifySuccess::default();
@@ -193,7 +193,7 @@ impl<'ast> Visit<'ast> for ZeroBlockCheck {
                 self.after_verify_has_success = true;
             }
             if !after_verify && stmt_contains_unit_ok(stmt) {
-                // Verify öncesi başarı, guard'sız başarıdır (örn.
+                // Success before the verify is unguarded success (for example
                 // `if !tx.verify() { return Ok(()); }`).
                 self.after_verify_has_success = true;
             }
@@ -201,8 +201,8 @@ impl<'ast> Visit<'ast> for ZeroBlockCheck {
     }
 }
 
-/// `validate_transaction_with_context` fonksiyonuna çapalanır; zero-address
-/// dalını bulur ve `ZeroBlockCheck` ile doğrular.
+/// Anchors on the `validate_transaction_with_context` function; finds the zero-address
+/// branch and verifies it with `ZeroBlockCheck`.
 #[derive(Default)]
 struct ZeroAddressFinder {
     result: Option<ZeroBlockCheck>,
@@ -242,9 +242,9 @@ impl<'ast> Visit<'ast> for ZeroAddressFinder {
     }
 }
 
-/// TEE guard'ının `then` bloğunu gez; `return Err` yalnızca doğrudan
-/// (nesting == 0) sayılır. Closure/nested if/nested item/match arm/loop
-/// içindeki `return Err` decoy'dur (Strix CWE-697, round 5/6/7/10 bulguları).
+/// Walk the `then` block of the TEE guard; `return Err` counts only when direct
+/// (nesting == 0). A `return Err` inside a closure/nested if/nested item/match arm/loop
+/// is a decoy (CWE-697, round 5/6/7/10 findings).
 #[derive(Default)]
 struct GuardErrCheck {
     found: bool,
@@ -358,7 +358,7 @@ impl<'ast> Visit<'ast> for TeeVisitor {
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.in_sign_with_privacy && is_ok_call(node) {
-            // Kaynak siralidir (pre-order): guard'lar success'ten sonra
+            // The source is ordered (pre-order): if the guards come after the success
             // islenirse asagida yakalanir.
             self.saw_success = true;
         }
@@ -403,8 +403,8 @@ impl<'ast> Visit<'ast> for TeeVisitor {
     }
 }
 
-/// `if digest == evidence_hash { .. }` bloğunun içini gez; `return true;`
-/// yalnızca doğrudan (nesting == 0) sayılır (Strix CWE-697, round 10 bulgusu:
+/// Walk the inside of the `if digest == evidence_hash { .. }` block; `return true;`
+/// counts only when direct (nesting == 0) (CWE-697, round 10 finding:
 /// nested conditional `return true` decoy).
 #[derive(Default)]
 struct TopLevelTrue {
@@ -455,9 +455,9 @@ impl<'ast> Visit<'ast> for TopLevelTrue {
     }
 }
 
-/// `.any(|..| { .. })` closure'ının tail ifadesi digest karşılaştırması mı?
-/// Sondaki `;`'li ifade veya `true` gibi bir değer, karşılaştırmayı
-/// yönlendirmez (Strix CWE-697, round 8 bulgusu: tail formun override'ı).
+/// Is the tail expression of the `.any(|..| { .. })` closure the digest comparison?
+/// A trailing expression with `;` or a value such as `true` does not drive the
+/// comparison (CWE-697, round 8 finding: overriding the tail form).
 fn closure_tail_is_digest_cmp(body: &Expr) -> bool {
     let last: Option<&Expr> = match body {
         Expr::Block(b) => match b.block.stmts.last() {
@@ -472,9 +472,9 @@ fn closure_tail_is_digest_cmp(body: &Expr) -> bool {
     })
 }
 
-/// Closure gövdesinde herhangi bir digest karşılaştırması var mı? (Tail
-/// olmasa da `has_digest_condition` için yeterli; `digest_guards_return`
-/// yalnızca tail formda.)
+/// Does the closure body contain any digest comparison? (Enough for
+/// `has_digest_condition` even when not in tail position; `digest_guards_return`
+/// only accepts the tail form.)
 fn closure_has_digest_cmp(body: &Expr) -> bool {
     let c = compact(body);
     c.contains("evidence_hash") && c.contains("sha2")
@@ -570,7 +570,7 @@ impl<'ast> Visit<'ast> for GovSlashVisitor {
     }
 }
 
-/// Hangi korumaların bu dosyada aranacağı.
+/// Which guards to look for in this file.
 #[derive(Clone, Copy)]
 struct Checks {
     zero_address: bool,
@@ -595,13 +595,13 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
             Some(check) => {
                 if !check.guarded_success || check.after_verify_has_success {
                     problems.push(String::from(
-                        "AST: validate_transaction_with_context zero-address dalinda gercek bir guard'li basari yok: Ok(()) tx.verify() blogunun dogrudan icinde olmali (closure, nested fn, nested if, match arm veya loop disinda) ve verify sonrasi yol fail-closed olmali (return Err / Err). CWE-306 guard'i dogrulanamadi.",
+                        "AST: no real guarded success in the zero-address branch of validate_transaction_with_context: Ok(()) must be directly inside the tx.verify() block (not in a closure, nested fn, nested if, match arm or loop) and the path after verify must be fail-closed (return Err / Err). The CWE-306 guard could not be verified.",
                     ));
                 }
             }
             None => {
                 problems.push(String::from(
-                    "AST: validate_transaction_with_context icinde Address::zero dali bulunamadi; CWE-306 guard'i eksik.",
+                    "AST: no Address::zero branch found in validate_transaction_with_context; the CWE-306 guard is missing.",
                 ));
             }
         }
@@ -612,22 +612,22 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
         tee.visit_file(&ast);
         if !tee.has_quote_call || !tee.has_verify_quote {
             problems.push(String::from(
-                "AST: sign_with_privacy quote->verify_quote zinciri yok.",
+                "AST: the sign_with_privacy quote to verify_quote chain is missing.",
             ));
         }
         if !tee.measurement_guard {
             problems.push(String::from(
-                "AST: verify_measurement fail-closed guard yok veya return Err closure/nested blok icinde.",
+                "AST: no verify_measurement fail-closed guard, or the return Err sits inside a closure/nested block.",
             ));
         }
         if !tee.backend_guard {
             problems.push(String::from(
-                "AST: backend fail-closed guard yok veya return Err closure/nested blok icinde.",
+                "AST: no backend fail-closed guard, or the return Err sits inside a closure/nested block.",
             ));
         }
         if !tee.report_guard {
             problems.push(String::from(
-                "AST: verify_report_data fail-closed guard yok veya return Err closure/nested blok icinde.",
+                "AST: no verify_report_data fail-closed guard, or the return Err sits inside a closure/nested block.",
             ));
         }
         let after_success = [
@@ -638,7 +638,7 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
         for (after, name) in after_success {
             if after {
                 problems.push(format!(
-                    "AST: {name} guard'i sign_with_privacy icinde success'ten sonra geliyor; attestation kontrolu calismadan basari donulemez."
+                    "AST: the {name} guard comes after the success in sign_with_privacy; success cannot be returned before the attestation check runs."
                 ));
             }
         }
@@ -649,11 +649,11 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
         gs.visit_file(&ast);
         if !gs.has_digest_condition {
             problems.push(String::from(
-                "AST: SlashValidator dalinda digest kosulu (if digest == evidence_hash veya .any closure tail'i) yok.",
+                "AST: no digest condition in the SlashValidator branch (neither if digest == evidence_hash nor an .any closure tail).",
             ));
         } else if !gs.digest_guards_return {
             problems.push(String::from(
-                "AST: SlashValidator dalinda digest kosulu success'i yonlendirmiyor: if blogunda dogrudan return true yok veya .any closure tail'i digest karsilastirmasi degil.",
+                "AST: the digest condition in the SlashValidator branch does not drive the success: there is no direct return true in the if block, or the .any closure tail is not the digest comparison.",
             ));
         }
     }
@@ -663,7 +663,7 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
 
 /// # Errors
 ///
-/// AST tabanlı bulgular.
+/// AST-based findings.
 pub fn run(root: &Path) -> Result<String, String> {
     let mut problems = Vec::new();
     let plan: &[(&str, Checks)] = &[
@@ -712,8 +712,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     Err(problems.join("\n"))
 }
 
-// Self-test kanaryaları: her biri gate'in reddetmesi/kabul etmesi gereken
-// bir kaynak ağacı. Const olarak tutulması self_test'i kısa tutar.
+// Self-test canaries: each is a source tree the gate must refuse or accept.
+// Keeping them as consts keeps self_test short.
 const GOOD_TREE: &str = r#"
 fn validate_transaction_with_context(&self, tx: &Transaction) -> Result<(), String> {
     if tx.from == Address::zero() {
@@ -826,7 +826,7 @@ fn execute_proposal(&mut self, proposal: &Proposal) {
 
 /// # Errors
 ///
-/// Kanaryalar.
+/// Canaries.
 fn expect_problem(
     problems: &mut Vec<String>,
     src: &str,
@@ -849,7 +849,7 @@ fn expect_clean(problems: &mut Vec<String>, src: &str, checks: Checks, broken: &
 
 /// # Errors
 ///
-/// Kanaryalar.
+/// Canaries.
 pub fn self_test() -> Result<String, String> {
     let mut problems = Vec::new();
     let all = Checks {
@@ -873,7 +873,7 @@ pub fn self_test() -> Result<String, String> {
         gov_slash: true,
     };
 
-    // Iyi agaclar: uc korumanin da dogru sekli.
+    // Good trees: the correct shape of all three guards.
     expect_clean(&mut problems, GOOD_TREE, all, "good tree rejected");
     expect_clean(
         &mut problems,
@@ -917,21 +917,21 @@ pub fn self_test() -> Result<String, String> {
         &mut problems,
         TEE_NESTED_CONDITIONAL,
         tee_only,
-        "guard yok",
+        "fail-closed guard",
         "TEE nested conditional return Err decoy accepted",
     );
     expect_problem(
         &mut problems,
         TEE_CLOSURE_DECOY,
         tee_only,
-        "guard yok",
+        "fail-closed guard",
         "TEE closure-decoy return Err accepted",
     );
     expect_problem(
         &mut problems,
         TEE_AFTER_SUCCESS,
         tee_only,
-        "success'ten sonra",
+        "comes after the success",
         "TEE guards after the success were accepted",
     );
 
@@ -940,14 +940,14 @@ pub fn self_test() -> Result<String, String> {
         &mut problems,
         GOV_NESTED_CONDITIONAL,
         gov_only,
-        "yonlendirmiyor",
+        "does not drive the success",
         "gov-slash nested conditional return true accepted",
     );
     expect_problem(
         &mut problems,
         GOV_NON_TAIL,
         gov_only,
-        "yonlendirmiyor",
+        "does not drive the success",
         "gov-slash non-tail .any closure accepted",
     );
 
