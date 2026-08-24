@@ -1,7 +1,7 @@
-//! .bud format V8 - Üretim Listelerden Çıkarıldı, Repolara Bağımlı Değil, Tüm Dosyalarda Devrim, Tüm İşleyiş Raporlarda
-//! Video 1000x keyframe dedup + delta motion + columnar YUV + global dedup, Görsel 100x blok dedup + columnar RGB + palette, PDF 50x kabuk soyma text 10x image 20x font 10x, EXE 25x code/data/resource split opcode dict
-//! Kapılar: K-BUD-GENERATIVE-REMOVED, K-BUD-REPO-DEP, K-BUD-REPORT, K-BUD-VIDEO-REVOLUTIONARY, K-BUD-IMAGE-REVOLUTIONARY, K-BUD-PDF-REVOLUTIONARY, K-BUD-EXE-REVOLUTIONARY + önceki 15 kapı
-//! no_float, byte_identical + transcode_replace kaldırıldı artık sadece deterministic, device-only 0
+//! .bud format V8 - generation removed from the lists, no repo dependency, a revolution across all files, the whole workflow in the reports
+//! Video 1000x keyframe dedup + delta motion + columnar YUV + global dedup, images 100x block dedup + columnar RGB + palette, PDF 50x shell peeling text 10x image 20x font 10x, EXE 25x code/data/resource split opcode dict
+//! Gates: K-BUD-GENERATIVE-REMOVED, K-BUD-REPO-DEP, K-BUD-REPORT, K-BUD-VIDEO-REVOLUTIONARY, K-BUD-IMAGE-REVOLUTIONARY, K-BUD-PDF-REVOLUTIONARY, K-BUD-EXE-REVOLUTIONARY + the previous 15 gates
+//! no_float, byte_identical + transcode_replace removed, now deterministic only, device-only 0
 
 #![forbid(unsafe_code)]
 
@@ -94,11 +94,11 @@ impl BudFlags {
 
     pub fn new(b: bool, r: bool, l: bool, d: bool, pq: bool, enc: bool) -> Self {
         let mut f = 0u16;
-        // Altı bağımsız bayrak. Tek satıra dizilmiş `if ... } if ... {` dizisi
-        // clippy::possible_missing_else tetikliyordu: `}` ve `if` aynı satırda
-        // olduğu için okuyan (ve lint) bunu `else if` sanabiliyor. Anlam
-        // bağımsız kurulum olduğundan her biri kendi satırına alındı; davranış
-        // aynı.
+        // Six independent flags. A `if ... } if ... {` sequence packed onto one
+        // line used to trigger clippy::possible_missing_else: with `}` and `if`
+        // on the same line a reader (and the lint) can mistake it for
+        // `else if`. Since the meaning is an independent set of assignments,
+        // each one was moved onto its own line; the behaviour is the same.
         if b {
             f |= Self::BYTE_IDENTICAL;
         }
@@ -207,7 +207,7 @@ pub struct BudFile {
     pub chunks: Vec<BudChunk>,
     pub merkle_root: [u8; 32],
     pub pq_signature: Option<Vec<u8>>,
-    pub pq_public_key: Option<Vec<u8>>, // STRIX: ML-DSA-87 doğrulama anahtarı (PQ_SIGNED zorunlu)
+    pub pq_public_key: Option<Vec<u8>>, // STRIX: the ML-DSA-87 verification key (required for PQ_SIGNED)
     pub encryption_key_wrapped: Option<Vec<u8>>,
     pub pollen_consent_token: Option<String>,
     pub files: Vec<BudFileEntry>,
@@ -262,8 +262,9 @@ impl BudFile {
         }
     }
 
-    /// K25/K-BUD-STREAM gerçek implementasyon: parça parça aç, toplam 100MB sınırı,
-    /// tek chunk 16MB sınırı - zip bomb / OOM koruması (2026-08-16, S.88 literatür).
+    /// K25/K-BUD-STREAM real implementation: decompress chunk by chunk, with a
+    /// 100MB total bound and a 16MB single-chunk bound - zip bomb / OOM
+    /// protection (2026-08-16, S.88 literature).
     pub const MAX_DECOMPRESSED_BYTES: usize = 100 * 1024 * 1024; // 100 MB
     pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024; // 16 MB tek chunk
     pub const MAX_RATIO: f64 = 100.0; // K25: >100:1 RED
@@ -289,7 +290,7 @@ impl BudFile {
         Ok(total)
     }
 
-    /// Sıkıştırma oranı (orijinal / payload). > MAX_RATIO => şüpheli zip bomb (K25).
+    /// Compression ratio (original / payload). > MAX_RATIO => a suspected zip bomb (K25).
     pub fn ratio(&self, original_len: usize) -> f64 {
         let payload: usize = self.chunks.iter().map(|c| c.data.len()).sum();
         if payload == 0 {
@@ -298,22 +299,23 @@ impl BudFile {
         original_len as f64 / payload as f64
     }
 
-    /// STRIX FIX (2026-08-16): PQ_SIGNED bayrağı taşıyan .bud yalnızca imza
-    /// BOYUTUNA bakılarak kabul edilmemeli; imza, ML-DSA-87 (FIPS 204 NIST final)
-    /// genel anahtarıyla KİPTOLOJİK olarak doğrulanmalıdır. Mesaj domain-etiketlidir:
-    /// BDLM_PQ_SIGN_V1 || content_id. Doğrulanamayan imza RED.
+    /// STRIX FIX (2026-08-16): a .bud carrying the PQ_SIGNED flag must not be
+    /// accepted by looking at the signature SIZE alone; the signature must be
+    /// verified CRYPTOGRAPHICALLY against the ML-DSA-87 (FIPS 204 NIST final)
+    /// public key. The message is domain tagged: BDLM_PQ_SIGN_V1 || content_id.
+    /// A signature that cannot be verified is REFUSED.
     pub fn verify_pq_signature(&self) -> Result<(), &'static str> {
         let sig = self.pq_signature.as_ref().ok_or("KQ-BUD-PQ: no sig")?;
         let pk = self
             .pq_public_key
             .as_ref()
             .ok_or("KQ-BUD-PQ: no public key")?;
-        // ML-DSA-87: anahtar ve imza kod çözümü
+        // ML-DSA-87: decode the key and the signature
         let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk.as_slice())
-            .map_err(|_| "KQ-BUD-PQ: gecersiz public key")?;
+            .map_err(|_| "KQ-BUD-PQ: invalid public key")?;
         let vk87 = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
         let sig87 = ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
-            .map_err(|_| "KQ-BUD-PQ: gecersiz imza")?;
+            .map_err(|_| "KQ-BUD-PQ: invalid signature")?;
         // domain-etiketli mesaj: BDLM_PQ_SIGN_V1 || content_id
         let mut msg = Vec::with_capacity(13 + 32);
         msg.extend_from_slice(b"BDLM_PQ_SIGN_V1");
@@ -323,7 +325,7 @@ impl BudFile {
             .map_err(|_| "KQ-BUD-PQ: imza dogrulanamadi")
     }
 
-    /// PQ imzalı .bud üretimi (test/üretim): ML-DSA-87 ile imzala.
+    /// Producing a PQ-signed .bud (test/production): sign with ML-DSA-87.
     pub fn sign_pq(
         &mut self,
         sk: &ml_dsa::SigningKey<ml_dsa::MlDsa87>,
@@ -431,7 +433,7 @@ impl BudFile {
         if data[0..8] != BUD_MAGIC {
             return Err("K-BUD: magic");
         }
-        // K38: version+class+mime_len okumaları için minimum 14 bayt (magic 8 + 2+2+2)
+        // K38: a minimum of 14 bytes for the version+class+mime_len reads (magic 8 + 2+2+2)
         if data.len() < 14 {
             return Err("K-BUD: hdr2");
         }
@@ -531,7 +533,7 @@ impl BudFile {
         let mut merkle = [0u8; 32];
         merkle.copy_from_slice(&data[off..off + 32]);
         off += 32;
-        // K38: uzunluk okumalarından ÖNCE sınır kontrolü - merkle'de biten girdi PANİK üretmemeli
+        // K38: bounds check BEFORE the length reads - input ending inside the merkle must not PANIC
         if data.len() < off + 2 {
             return Err("K-BUD: siglen");
         }
@@ -607,7 +609,7 @@ impl BudFile {
     }
 }
 
-/// Multi-Ratio Consensus V8 - Üretim Çıkarıldı, Repoya Bağımlı Değil, Tüm Dosyalarda Devrim
+/// Multi-Ratio Consensus V8 - generation removed, no repo dependency, a revolution across all files
 
 #[derive(Debug, Clone)]
 pub struct RatioCandidate {
@@ -622,13 +624,14 @@ pub struct MultiRatioConsensus;
 
 impl MultiRatioConsensus {
     pub fn candidates_for_format(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {
-        // Üretim listelerden çıkarıldı: regenerative, optical prompt, diffusion, code tarif yok
-        // Sadece deterministik, kanıtlı, repo bağımlı değil
+        // Generation was removed from the lists: no regenerative, optical
+        // prompt, diffusion or code recipe. Deterministic and proven only, with
+        // no repo dependency.
         match class {
             BudFormatClass::Json => vec![
                 RatioCandidate {
                     pipe_id: 1,
-                    pipe_name: "düz",
+                    pipe_name: "flat",
                     ratio: 1.2,
                     payload: original.to_vec(),
                     flags: BudFlags::new(true, true, false, false, false, false),
@@ -681,7 +684,7 @@ impl MultiRatioConsensus {
                 },
                 RatioCandidate {
                     pipe_id: 41,
-                    pipe_name: "4 katman 13750x",
+                    pipe_name: "4 layers 13750x",
                     ratio: 13750.0,
                     payload: original.to_vec(),
                     flags: BudFlags::new(true, true, false, false, false, false),
@@ -704,7 +707,7 @@ impl MultiRatioConsensus {
                 },
                 RatioCandidate {
                     pipe_id: 52,
-                    pipe_name: "4 katman 1000x",
+                    pipe_name: "4 layers 1000x",
                     ratio: 1000.0,
                     payload: original.to_vec(),
                     flags: BudFlags::new(false, true, false, true, true, false),
@@ -804,7 +807,7 @@ impl BudGates {
     pub fn k_bud(f: &BudFile) -> Result<(), &'static str> {
         f.decode().map(|_| ())
     }
-    /// K25: >100:1 oran => zip bomb şüphesi RED.
+    /// K25: a ratio over 100:1 => refused as a suspected zip bomb.
     pub fn k_bud_ratio(f: &BudFile, original_len: usize) -> Result<(), &'static str> {
         if f.ratio(original_len) > BudFile::MAX_RATIO {
             return Err("K-BUD-RATIO: >100:1 (zip bomb)");
@@ -814,17 +817,17 @@ impl BudGates {
     pub fn k_bud_generative_removed(f: &BudFile) -> Result<(), &'static str> {
         // generative flag varsa RED
         if f.header.pipe_id >= 10 && f.header.pipe_id <= 19 {
-            // eski optical range, şimdi yasak
-            return Err("K-BUD-GENERATIVE-REMOVED: generative pipe_id 10-19 yasak, üretim listelerden çıkarıldı");
+            // the old optical range, now forbidden
+            return Err("K-BUD-GENERATIVE-REMOVED: generative pipe_id 10-19 is forbidden, generation was removed from the lists");
         }
         Ok(())
     }
     pub fn k_bud_repo_dep(_f: &BudFile) -> Result<(), &'static str> {
-        // repo hash var mı? self-contained OK
+        // is there a repo hash? self-contained is OK
         Ok(())
     }
     pub fn k_bud_report_exists() -> Result<(), &'static str> {
-        // rapor var mı kontrol (dosya sistemi)
+        // check whether the report exists (file system)
         Ok(())
     }
     pub fn k_bud_video_revolutionary(ratio: f64) -> Result<(), &'static str> {
@@ -879,7 +882,7 @@ mod tests {
             BudFlags::new(false, true, true, true, false, false),
             b"data".to_vec(),
         );
-        // pipe 11 eski optical, şimdi yasak
+        // pipe 11 is the old optical one, now forbidden
         assert!(BudGates::k_bud_generative_removed(&f2).is_err());
     }
     #[test]
@@ -974,7 +977,7 @@ mod tests {
     }
     #[test]
     fn from_bytes_never_panics_on_truncation() {
-        // K38: her kırpma uzunluğunda from_bytes PANİK üretmemeli (Err döner)
+        // K38: from_bytes must not PANIC at any truncation length (it returns Err)
         let f = BudFile::encode(
             b"merhaba",
             BudFormatClass::Json,
@@ -987,10 +990,10 @@ mod tests {
         );
         let bytes = f.to_bytes();
         for i in 0..bytes.len() {
-            let _ = BudFile::from_bytes(&bytes[..i]); // panik olmamalı
+            let _ = BudFile::from_bytes(&bytes[..i]); // there must be no panic
         }
         let _ = BudFile::from_bytes(&bytes); // tam dosya OK
-                                             // sağdan kesilen uçlar (imza/anahtar/token uzunluk okumaları)
+                                             // ends truncated from the right (signature/key/token length reads)
         for cut in [bytes.len().saturating_sub(2), bytes.len().saturating_sub(3)] {
             let _ = BudFile::from_bytes(&bytes[..cut]);
         }
@@ -999,11 +1002,12 @@ mod tests {
     #[test]
     fn pq_imza_dogrulanir_ve_sahte_reddedilir() {
         use ml_dsa::SigningKey as Msk;
-        // üret: encode → ML-DSA-87 imzala → decode doğrula
-        // ml-dsa 0.1: generate yok - deterministik Seed ile from_seed (32 bayt)
+        // produce: encode -> sign with ML-DSA-87 -> verify on decode
+        // ml-dsa 0.1: there is no generate - use from_seed with a deterministic
+        // seed (32 bytes)
         let sk = Msk::<ml_dsa::MlDsa87>::from_seed(&[7u8; 32].into());
         let mut f = BudFile::encode(
-            b"pq imzali icerik",
+            b"pq signed content",
             BudFormatClass::Text,
             "text/plain",
             0,
@@ -1014,17 +1018,23 @@ mod tests {
         );
         f.header.flags = BudFlags(BudFlags::PQ_SIGNED);
         f.sign_pq(&sk).expect("imzala");
-        assert!(f.verify_pq_signature().is_ok(), "doğru imza kabul");
-        // imzayı boz → RED
-        let mut bozuk = f.clone();
-        let sig = bozuk.pq_signature.as_mut().unwrap();
+        assert!(
+            f.verify_pq_signature().is_ok(),
+            "a correct signature is accepted"
+        );
+        // corrupt the signature -> REFUSED
+        let mut corrupted = f.clone();
+        let sig = corrupted.pq_signature.as_mut().unwrap();
         sig[10] ^= 0xFF;
-        assert!(bozuk.verify_pq_signature().is_err(), "bozuk imza RED");
+        assert!(
+            corrupted.verify_pq_signature().is_err(),
+            "a corrupt signature is REFUSED"
+        );
         // public key yoksa RED
         let mut no_pk = f.clone();
         no_pk.pq_public_key = None;
         assert!(no_pk.verify_pq_signature().is_err());
-        // PQ_SIGNED flag yoksa doğrulama gerekmez (decode geçer)
+        // without the PQ_SIGNED flag no verification is needed (decode passes)
         let mut plain = f.clone();
         plain.header.flags = BudFlags(0);
         assert!(plain.decode().is_ok());
@@ -1032,7 +1042,7 @@ mod tests {
 
     #[test]
     fn select_best_nan_ratio_never_panics() {
-        // K38: NaN oranlı aday sıralamayı çökertmemeli
+        // K38: a candidate with a NaN ratio must not break the ordering
         let nan_cands = vec![
             RatioCandidate {
                 pipe_id: 1,

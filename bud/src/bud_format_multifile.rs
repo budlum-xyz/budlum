@@ -1,16 +1,21 @@
-//! B.U.D. 2.0 - Çoklu Dosya Tenant Dedup + Delta (2026-08-16)
+//! B.U.D. 2.0 - Multi-File Tenant Dedup + Delta (2026-08-16)
 //!
-//! V7 66x yedek senaryosunun kod karşılığı (K20 + fikirler F9/F10):
-//! - **Content-addressed dedup:** parçalar content_id ile teke iner (aynı parça bir kez).
-//! - **Delta:** bir önceki sürümle XOR/delta - küçük değişimlerde çok küçük delta.
-//! - **Referans:** yedek/snapshot %1 günlük değişim → ilk tam + sonraki delta (66x).
+//! The code counterpart of the V7 66x backup scenario (K20 plus ideas F9/F10):
+//! - **Content-addressed dedup:** chunks collapse to one via content_id (the
+//!   same chunk is stored once).
+//! - **Delta:** an XOR/delta against the previous version - a very small delta
+//!   on small changes.
+//! - **Reference:** a backup/snapshot with 1 percent daily change -> one full
+//!   copy plus deltas afterwards (66x).
 //!
-//! Mimar: TenantMultifileStore - dosya setini parçalara ayırır, parça cid'leriyle dedup
-//! indeksi kurar, delta modunda önceki sürümle farkı hesaplar (kayıpsız: base + delta = yeni).
+//! Design: TenantMultifileStore splits a file set into chunks, builds a dedup
+//! index from the chunk cids, and in delta mode computes the difference against
+//! the previous version (lossless: base + delta = the new version).
 //!
-//! Ölçüm (V7): yedek %1 günlük değişim 16KB parça → 66x; %5 değişim → 13.7x.
-//! Bu modülün delta + dedup birleşimi o senaryoyu gerçekleştirir (dedup indeks maliyeti
-//! fiyata girer - V7 dersi).
+//! Measurement (V7): a backup with 1 percent daily change at a 16KB chunk size
+//! -> 66x; 5 percent change -> 13.7x. The delta + dedup combination in this
+//! module realises that scenario (the cost of the dedup index enters the price -
+//! the V7 lesson).
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -19,26 +24,26 @@
 use crate::bud_format_container::content_id;
 use sha3::{Digest, Sha3_256};
 
-// OOM korumasi: kullanici kontrollu parca sayisi tavani (STRIX deseni)
+// OOM protection: a ceiling on the caller-controlled chunk count (the STRIX pattern)
 pub const MAX_MULTIFILE_CHUNKS: usize = 1 << 20;
 pub const MULTI_MAGIC: [u8; 8] = *b"\xB5MFLE\0\0\0";
 pub const MULTI_VERSION: u8 = 1;
 pub const MAX_FILES: usize = 100_000;
 pub const MAX_CHUNK: usize = 64 * 1024 * 1024;
-pub const DEFAULT_CHUNK: usize = 16 * 1024; // V7: 16KB parça (66x senaryosu)
+pub const DEFAULT_CHUNK: usize = 16 * 1024; // V7: a 16KB chunk (the 66x scenario)
 
-/// Parça kaydı (content-addressed - dedup çapası).
+/// A chunk record (content-addressed - the dedup anchor).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultifileChunk {
     pub content_id: [u8; 32],
     pub data: Vec<u8>,
 }
 
-/// Tenant çoklu dosya deposu: parça havuzu + dosya → parça indeksi + delta desteği.
+/// Tenant multi-file store: a chunk pool, a file-to-chunk index and delta support.
 #[derive(Debug, Clone, Default)]
 pub struct TenantMultifileStore {
-    pub chunks: Vec<MultifileChunk>, // benzersiz parçalar (content-addressed)
-    pub file_chunks: Vec<Vec<[u8; 32]>>, // her dosyanın parça cid listesi
+    pub chunks: Vec<MultifileChunk>, // unique chunks (content-addressed)
+    pub file_chunks: Vec<Vec<[u8; 32]>>, // the chunk cid list of every file
     pub saved_bytes: u64,
 }
 
@@ -47,8 +52,8 @@ impl TenantMultifileStore {
         Self::default()
     }
 
-    /// Dosya ekle (chunk boyutu parametreli): parçala → dedup et → indeksle.
-    /// Dönüş: (eklenen yeni parça sayısı, tasarruf baytı).
+    /// Add a file (with the chunk size as a parameter): chunk it, dedup it,
+    /// index it. Returns: (the number of new chunks added, the bytes saved).
     pub fn add_file(&mut self, data: &[u8], chunk_size: usize) -> (usize, u64) {
         if data.is_empty() || chunk_size == 0 || chunk_size > MAX_CHUNK {
             return (0, 0);
@@ -74,7 +79,7 @@ impl TenantMultifileStore {
         (new_chunks, saved)
     }
 
-    /// Dosyayı geri kur (parça cid'lerinden - kayıpsızlık kanıtı).
+    /// Restore a file (from its chunk cids - the losslessness proof).
     pub fn restore(&self, file_index: usize) -> Option<Vec<u8>> {
         let cids = self.file_chunks.get(file_index)?;
         let mut out = Vec::new();
@@ -85,7 +90,7 @@ impl TenantMultifileStore {
         Some(out)
     }
 
-    /// Tenant dedup oranı (V7: dedup yapan senaryo).
+    /// The tenant dedup ratio (V7: the scenario that dedups).
     pub fn dedup_ratio(&self, original_total: u64) -> f64 {
         if original_total == 0 {
             return 1.0;
@@ -94,8 +99,10 @@ impl TenantMultifileStore {
         original_total as f64 / stored.max(1) as f64
     }
 
-    /// Delta ekle: önceki sürümle farkı hesapla (kayıpsız: base + delta = yeni).
-    /// Basit blok-bazlı delta: aynı bloklar referans, farklı bloklar tam saklanır.
+    /// Add a delta: compute the difference against the previous version
+    /// (lossless: base + delta = the new version). A simple block-based delta:
+    /// identical blocks become a reference, differing blocks are stored in
+    /// full.
     pub fn add_delta(&mut self, prev: &[u8], next: &[u8], chunk_size: usize) -> Vec<u8> {
         let mut delta = Vec::new();
         let prev_chunks: Vec<&[u8]> = prev.chunks(chunk_size).collect();
@@ -103,10 +110,10 @@ impl TenantMultifileStore {
         for (i, nc) in next_chunks.iter().enumerate() {
             let same = prev_chunks.get(i).map(|p| *p == *nc).unwrap_or(false);
             if same {
-                // referans: 1 bayt işaret + cid yok - değişmedi
+                // reference: a 1 byte marker, no cid - unchanged
                 delta.push(0x00);
             } else {
-                // değişti: tam blok
+                // changed: the full block
                 delta.push(0x01);
                 delta.extend_from_slice(nc);
             }
@@ -114,7 +121,7 @@ impl TenantMultifileStore {
         delta
     }
 
-    /// Delta uygula: base + delta = yeni (kayıpsızlık kanıtı).
+    /// Apply a delta: base + delta = the new version (the losslessness proof).
     pub fn apply_delta(&self, prev: &[u8], delta: &[u8], chunk_size: usize) -> Option<Vec<u8>> {
         let prev_chunks: Vec<&[u8]> = prev.chunks(chunk_size).collect();
         let mut out = Vec::new();
@@ -135,13 +142,13 @@ impl TenantMultifileStore {
                 out.extend_from_slice(&delta[pos..pos + chunk_size]);
                 pos += chunk_size;
             } else {
-                return None; // bozuk delta
+                return None; // corrupt delta
             }
         }
         Some(out)
     }
 
-    /// Çoklu dosya deposu blob'u (deterministik - zincire yazılabilir).
+    /// The multi-file store blob (deterministic - writable on chain).
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MULTI_MAGIC);
@@ -178,7 +185,7 @@ impl TenantMultifileStore {
             return None;
         }
         let chunk_count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
-        // STRIX-deseni: kullanici kontrollu chunk_count ile OOM engeli
+        // The STRIX pattern: block OOM from a caller-controlled chunk_count
         if chunk_count > MAX_MULTIFILE_CHUNKS {
             return None;
         }
@@ -244,29 +251,32 @@ mod tests {
 
     #[test]
     fn tenant_dedup_ratio_v7() {
-        // V7: yedek %1 değişim → 66x; dedup indeksi olmadan %5 → 13.7x
+        // V7: a backup with 1 percent change -> 66x; without a dedup index, 5 percent -> 13.7x
         let mut store = TenantMultifileStore::new();
-        // 100 özdeş dosya (aynı parçalar)
-        let data = b"yedek veri: tekrarlanan icerik blogu 1234567890 ".repeat(40);
+        // 100 identical files (the same chunks)
+        let data = b"backup data: a repeated content block 1234567890 ".repeat(40);
         let original_total = data.len() as u64 * 100;
         for _ in 0..100 {
             store.add_file(&data, DEFAULT_CHUNK);
         }
         let ratio = store.dedup_ratio(original_total);
-        assert!(ratio > 50.0, "özdeş 100 dosya → yüksek dedup: {ratio:.1}x");
-        assert!(ratio > 60.0, "V7 66x hedefine yakın: {ratio:.1}x");
-        // restore kayıpsız
+        assert!(
+            ratio > 50.0,
+            "100 identical files -> high dedup: {ratio:.1}x"
+        );
+        assert!(ratio > 60.0, "close to the V7 66x target: {ratio:.1}x");
+        // restore is lossless
         for i in 0..5 {
-            assert_eq!(store.restore(i).unwrap(), data, "dosya {i} kayıpsız");
+            assert_eq!(store.restore(i).unwrap(), data, "file {i} is lossless");
         }
     }
 
     #[test]
     fn delta_small_change_is_cheap() {
-        // %1 değişim: 1000 bloktan 10'u değişti → delta küçük
+        // 1 percent change: 10 of 1000 blocks changed -> the delta is small
         let base = b"a".repeat(16_000_000);
         let mut next = base.clone();
-        // 100 bloktan ~5'ini değiştir (16KB bloklar)
+        // change about 5 of 100 blocks (16KB blocks)
         for i in [0usize, 33, 67, 99, 130] {
             let off = i * DEFAULT_CHUNK;
             if off + 4 < next.len() {
@@ -275,46 +285,46 @@ mod tests {
         }
         let mut store = TenantMultifileStore::new();
         let delta = store.add_delta(&base, &next, DEFAULT_CHUNK);
-        // delta = 1 bayt işaret/blok + değişen bloklar
+        // delta = a 1 byte marker per block plus the changed blocks
         let blocks = base.len().div_ceil(DEFAULT_CHUNK);
         assert!(
             delta.len() < base.len() / 50,
-            "delta çok küçük: {} vs base {}",
+            "the delta is very small: {} vs base {}",
             delta.len(),
             base.len()
         );
         assert_eq!(
             delta.len(),
             blocks + 5 * DEFAULT_CHUNK,
-            "5 değişen blok tam"
+            "5 changed blocks in full"
         );
-        // apply: base + delta = next (kayıpsız)
+        // apply: base + delta = next (lossless)
         let restored = store
             .apply_delta(&base, &delta, DEFAULT_CHUNK)
             .expect("apply");
-        assert_eq!(restored, next, "delta kayıpsız");
+        assert_eq!(restored, next, "the delta is lossless");
     }
 
     #[test]
     fn multifile_roundtrip_and_tamper() {
         let mut store = TenantMultifileStore::new();
         store.add_file(&b"dosya 1 icerigi ".repeat(10), 16);
-        store.add_file(&b"dosya 2 icerigi farkli".repeat(10), 16);
+        store.add_file(&b"file 2 has different content".repeat(10), 16);
         let blob = store.to_blob();
         let back = TenantMultifileStore::from_blob(&blob).expect("blob");
         assert_eq!(back.restore(0).unwrap(), b"dosya 1 icerigi ".repeat(10));
         assert_eq!(
             back.restore(1).unwrap(),
-            b"dosya 2 icerigi farkli".repeat(10)
+            b"file 2 has different content".repeat(10)
         );
         // kurcalama red
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(TenantMultifileStore::from_blob(&bad).is_none());
-        // bozuk delta
+        // corrupt delta
         assert!(
             store.apply_delta(b"abc", &[0x99], 4).is_none(),
-            "bozuk bayrak RED"
+            "a corrupt flag is REFUSED"
         );
     }
 
@@ -322,17 +332,17 @@ mod tests {
     fn limits_and_empty() {
         let mut store = TenantMultifileStore::new();
         assert_eq!(store.add_file(&[], 16), (0, 0));
-        assert!(store.restore(0).is_none(), "boş depo");
+        assert!(store.restore(0).is_none(), "an empty store");
         assert!(TenantMultifileStore::from_blob(&[0u8; 10]).is_none());
     }
 }
 
 #[test]
-fn strix_oom_chunk_count_reddedilir() {
-    // kullanici kontrollu devasa chunk_count → None (OOM yok)
+fn strix_oom_chunk_count_is_refused() {
+    // a caller-controlled huge chunk_count -> None (no OOM)
     let mut bytes = vec![0u8; 64];
     bytes[0..8].copy_from_slice(b"\xB5MFLE\0\0\0");
     bytes[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
     let _ = crate::bud_format_multifile::TenantMultifileStore::from_blob(&bytes);
-    // panik yok, None ya da Err döner
+    // no panic, it returns None or Err
 }
