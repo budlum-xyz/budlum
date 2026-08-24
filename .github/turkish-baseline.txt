@@ -120,7 +120,6 @@ crates/lubot/crates/lubot-integrations/src/ws.rs	19
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/cache.rs	18
 crates/lubot/crates/lubot-knowledge/src/chunk.rs	20
-crates/lubot/crates/lubot-knowledge/src/context.rs	21
 crates/lubot/crates/lubot-knowledge/src/embed.rs	18
 crates/lubot/crates/lubot-knowledge/src/lib.rs	12
 crates/lubot/crates/lubot-ops/Cargo.toml	1
@@ -134,7 +133,7 @@ crates/lubot/crates/lubot-tune/Cargo.toml	1
 crates/lubot/crates/lubot-tune/src/lib.rs	5
 crates/lubot/crates/lubot-tune/src/lock.rs	9
 crates/lubot/crates/lubot-tune/src/plan.rs	16
-crates/lubot/crates/lubot-tune/src/schema.rs	21
+crates/lubot/crates/lubot-tune/src/schema.rs	4
 crates/wallet-core/Cargo.toml	2
 crates/wallet-core/src/lib.rs	1
 crates/wallet-core/src/tee.rs	2
