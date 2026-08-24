@@ -1,26 +1,26 @@
-//! Çok-node / adversarial finality testleri.
+//! Multi-node / adversarial finality tests.
 //!
-//! Bu paket, gerçek libp2p ağı kurmadan, `FinalityAggregator` + `sign_bls` +
-//! `FinalityCert::verify` fonksiyonlarını doğrudan çağırarak birden görevla
-//! "sanal" validator kimliğini (her biri kendi GERÇEK BLS anahtar çiftiyle)
-//! Simüle eder. `src/chain/finality.rs` içindeki mevcut test-harness deseninin
-//! (`make_test_key`, `make_snapshot_with_keys`, gerçek `sign_bls` imzaları)
-//! Doğal bir genişlemesidir - mock/placeholder imza KULLANILMAZ.
+//! Without standing up a real libp2p network, this suite calls `FinalityAggregator` + `sign_bls` +
+//! `FinalityCert::verify` directly to simulate several
+//! "virtual" validator identities, each with its own REAL BLS keypair.
+//! It is a natural extension of the existing test-harness pattern in
+//! `src/chain/finality.rs` (`make_test_key`, `make_snapshot_with_keys`, real `sign_bls`
+//! signatures) - NO mock/placeholder signature is used.
 //!
-//! ## sonrası davranış (bulguları düzeltildi)
+//! ## Behaviour after the fixes
 //!
-//! * **1.1 Equivocation:** Aynı voter'ın FARKLI bir hash'e verdiği oy hâlâ
-//!   Sayıma girmez, AMA artık bir `DoubleSign` slashing-evidence
-//!   ÜRETİLİR ve mevcut `submit_registry_slashing_report` yolundan geçirilerek
-//!   Gerçek bir slash'e yol açar (bkz. `equivocation_generates_slashing_evidence`).
-//! * **1.3 Geçersiz imza:** `add_prevote`/`add_precommit` artık bireysel BLS
-//!   Imzasını INGEST'te doğrular (Seçenek A). Geçersiz imza
-//!   Aggregat'a HİÇ girmez; dürüst alt-küme her zaman finalize edebilir, tek
-//!   Kötü aktör round'u durduramaz (bkz.
+//! * **1.1 Equivocation:** a vote the same voter casts for a DIFFERENT hash still
+//!   does not count, BUT a `DoubleSign` slashing evidence is now
+//!   PRODUCED and passed through the existing `submit_registry_slashing_report` path,
+//!   leading to a real slash (see `equivocation_generates_slashing_evidence`).
+//! * **1.3 Invalid signature:** `add_prevote`/`add_precommit` now verify the individual BLS
+//!   signature AT INGEST (Option A). An invalid signature
+//!   NEVER enters the aggregate; the honest subset can always finalize and a single
+//!   bad actor cannot stall the round (see
 //!   `finality_recovers_honest_subset_after_invalid_signature`).
 
-// Bu testler `sks[i]` ve `snap.validators[i]` paralel dizilerini AYNI indeksle
-// Eşleştirir; index-tabanlı döngü burada `enumerate`'ten daha okunaklıdır.
+// These tests pair the parallel arrays `sks[i]` and `snap.validators[i]` by the SAME index;
+// an index-based loop reads better here than `enumerate`.
 #![allow(clippy::needless_range_loop)]
 
 use crate::chain::blockchain::Blockchain;
@@ -43,9 +43,9 @@ use crate::registry::MemberStatus;
 use bls12_381::{G2Affine, G2Projective, Scalar};
 use std::sync::Arc;
 
-// --- Test harness: gerçek BLS anahtar çiftleri --------------------------------
+// --- Test harness: real BLS keypairs --------------------------------
 
-/// Deterministik ama gerçek bir BLS anahtar çifti üretir (mock DEĞİL).
+/// Produces a deterministic but real BLS keypair (NOT a mock).
 fn make_test_key(seed: u8) -> (Scalar, Vec<u8>) {
     let mut sk_bytes = [0u8; 64];
     sk_bytes[0] = seed + 1;
@@ -80,7 +80,7 @@ fn install_consensus_keys(
     validator.active = true;
 }
 
-/// `n` validator'lık, her biri gerçek BLS + geçerli PoP taşıyan bir snapshot.
+/// A snapshot of `n` validators, each carrying a real BLS key and a valid PoP.
 fn make_snapshot_with_keys(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {
     let mut sks = Vec::new();
     let validators: Vec<ValidatorEntry> = (0..n)
@@ -103,7 +103,7 @@ fn make_snapshot_with_keys(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, 
     (ValidatorSetSnapshot::new(1, validators), sks)
 }
 
-/// Gerçek BLS imzalı bir prevote üretir.
+/// Produces a prevote with a real BLS signature.
 fn signed_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address) -> Prevote {
     let mut v = Prevote {
         epoch,
@@ -116,7 +116,7 @@ fn signed_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Addre
     v
 }
 
-/// Gerçek BLS imzalı bir precommit üretir (imza `hash` üzerinden).
+/// Produces a precommit with a real BLS signature (signed over `hash`).
 fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address) -> Precommit {
     let msg = checkpoint_signing_message(epoch, height, hash);
     Precommit {
@@ -128,7 +128,7 @@ fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Add
     }
 }
 
-/// Prevote quorum'una ulaşana kadar ilk `count` validator ile prevote atar.
+/// Casts prevotes with the first `count` validators until the prevote quorum is reached.
 fn drive_prevote_quorum(
     agg: &mut FinalityAggregator,
     snap: &ValidatorSetSnapshot,
@@ -144,12 +144,12 @@ fn drive_prevote_quorum(
     }
 }
 
-// 1.1 - Equivocation (eşdeğer oy)
+// 1.1 - Equivocation (conflicting vote)
 
-/// Bir voter aynı yükseklik/epoch için iki FARKLI checkpoint hash'e prevote
-/// Imzalıyor. Çelişkili oy sayıma GİRMEZ (aggregator tek-hash'e bağlı) AMA artık
-///  Bir equivocation slashing-evidence ÜRETİLİR, sessizce yutulmaz.
-/// Aynı hash'e tekrar oy ise "Duplicate" olur ve yeni evidence üretmez.
+/// A voter signs prevotes for two DIFFERENT checkpoint hashes at the same height/epoch.
+/// The conflicting vote DOES NOT count (the aggregator is bound to a single hash) BUT an
+/// equivocation slashing evidence is now PRODUCED rather than silently swallowed.
+/// A repeat vote for the same hash becomes "Duplicate" and produces no new evidence.
 #[test]
 fn finality_rejects_equivocating_voter() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
@@ -158,16 +158,16 @@ fn finality_rejects_equivocating_voter() {
     let mut agg = FinalityAggregator::new(epoch, height, "HASH_A".into());
     agg.set_validator_snapshot(snap.clone());
 
-    // Voter 0, doğru hash'e (HASH_A) oy verir -> kabul, evidence yok.
+    // Voter 0 votes for the correct hash (HASH_A) -> accepted, no evidence.
     let pv_a = signed_prevote(&sks[0], epoch, height, "HASH_A", snap.validators[0].address);
     agg.add_prevote(pv_a).expect("first (honest) vote accepted");
     assert!(
         agg.detected_equivocations.is_empty(),
-        "tek dürüst oy evidence üretmemeli"
+        "a single honest vote must produce no evidence"
     );
 
-    // Aynı voter, ÇELİŞKİLİ hash'e (HASH_B) oy verir -> sayıma girmez ama
-    // Equivocation evidence üretir.
+    // The same voter votes for a CONFLICTING hash (HASH_B) -> does not count but
+    // produces equivocation evidence.
     let pv_b = signed_prevote(&sks[0], epoch, height, "HASH_B", snap.validators[0].address);
     let err = agg
         .add_prevote(pv_b)
@@ -176,33 +176,33 @@ fn finality_rejects_equivocating_voter() {
     assert_eq!(
         agg.detected_equivocations.len(),
         1,
-        "çelişkili oy tam olarak bir slashing-evidence üretmeli"
+        "a conflicting vote must produce exactly one slashing evidence"
     );
 
-    // Aynı voter, AYNI hash'e ikinci oy verirse -> Duplicate, yeni evidence YOK.
+    // If the same voter votes a second time for the SAME hash -> Duplicate, NO new evidence.
     let pv_a2 = signed_prevote(&sks[0], epoch, height, "HASH_A", snap.validators[0].address);
     let err2 = agg
         .add_prevote(pv_a2)
         .expect_err("duplicate vote must be rejected");
     assert!(
         err2.contains("Duplicate"),
-        "beklenen 'Duplicate', görülen: {err2}"
+        "expected 'Duplicate', got: {err2}"
     );
     assert_eq!(
         agg.detected_equivocations.len(),
         1,
-        "duplicate yeni evidence üretmemeli"
+        "a duplicate must produce no new evidence"
     );
 
-    // Yalnızca tek (dürüst) oy sayıldı; equivocation quorum'u zorlayamadı.
+    // Only the single honest vote counted; the equivocation could not force a quorum.
     assert_eq!(agg.prevotes.len(), 1);
     assert!(!agg.prevote_quorum_reached);
 }
 
-// 1.2 - Quorum altı senaryo
+// 1.2 - Below-quorum scenario
 
-/// N=4, quorum 2/3 -> 2667 gerekiyor. Sadece 2 validator (2000 stake) imzalarsa
-/// Cert üretilmez, finality Pending kalır.
+/// N=4, quorum 2/3 -> 2667 required. If only 2 validators (2000 stake) sign,
+/// no cert is produced and finality stays Pending.
 #[test]
 fn finality_stays_pending_below_quorum() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
@@ -212,29 +212,29 @@ fn finality_stays_pending_below_quorum() {
     let mut agg = FinalityAggregator::new(epoch, height, hash.into());
     agg.set_validator_snapshot(snap.clone());
 
-    // Yalnız 2/4 prevote -> 2000 < 2667.
+    // Only 2/4 prevotes -> 2000 < 2667.
     drive_prevote_quorum(&mut agg, &snap, &sks, 2, epoch, height, hash);
-    assert!(!agg.prevote_quorum_reached, "2/4 quorum'u karşılamamalı");
+    assert!(!agg.prevote_quorum_reached, "2/4 must not meet the quorum");
 
-    // Prevote quorum olmadan precommit reddedilir.
+    // Without a prevote quorum the precommit is refused.
     let pc = signed_precommit(&sks[0], epoch, height, hash, snap.validators[0].address);
     assert!(agg.add_precommit(pc).is_err());
 
-    // Cert üretilemez.
+    // No cert can be produced.
     assert!(agg.try_produce_cert().is_none());
 }
 
-// 1.3 - Karışık geçersiz imza (Seçenek A: ingest-time doğrulama)
+// 1.3 - Mixed invalid signature (Option A: ingest-time verification)
 
-/// **BİLİNÇLİ davranış değişikliği** (regresyon DEĞİL):
-/// Eski `finality_invalid_signature_poisons_aggregate` testi, tek geçersiz
-/// Imzanın tüm agregasyonu düşürdüğünü (fail-closed) doğruluyordu.
-/// (Seçenek A) ile geçersiz imza artık AGGREGAT'A HİÇ GİRMEZ, ingest'te
-/// Reddedilir. Böylece dürüst alt-küme (3/4) yine de finalize edebilir ve tek
-/// Kötü aktör round'u durduramaz (DoS önlendi).
+/// **DELIBERATE behaviour change** (NOT a regression):
+/// the old `finality_invalid_signature_poisons_aggregate` test verified that a single invalid
+/// signature brought down the whole aggregation (fail-closed).
+/// With Option A an invalid signature NEVER ENTERS THE AGGREGATE; it is refused at
+/// ingest. So the honest subset (3/4) can still finalize and a single
+/// bad actor cannot stall the round (DoS prevented).
 #[test]
 fn finality_recovers_honest_subset_after_invalid_signature() {
-    // 4 validator, quorum 3 (2667). 4 dürüst prevote ile prevote quorum'u aş.
+    // 4 validators, quorum 3 (2667). Pass the prevote quorum with 4 honest prevotes.
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
     let epoch = 1;
     let height = 10;
@@ -245,7 +245,7 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
     drive_prevote_quorum(&mut agg, &snap, &sks, 4, epoch, height, hash);
     assert!(agg.prevote_quorum_reached);
 
-    // Validator 3 GEÇERSİZ imzalı precommit gönderir (yanlış mesajdan imza).
+    // Validator 3 sends a precommit with an INVALID signature (signed over the wrong message).
     let wrong_msg = checkpoint_signing_message(epoch, height, "WRONG_HASH");
     let bad_pc = Precommit {
         epoch,
@@ -254,32 +254,32 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
         voter_id: snap.validators[3].address,
         sig_bls: sign_bls(&sks[3], &wrong_msg),
     };
-    // Ingest'te REDDEDİLİR, aggregat'a hiç girmez.
+    // REFUSED at ingest, never enters the aggregate.
     let err = agg
         .add_precommit(bad_pc)
-        .expect_err("geçersiz imza ingest'te reddedilmeli");
+        .expect_err("an invalid signature must be refused at ingest");
     assert!(err.contains("Invalid precommit signature"));
 
-    // Dürüst 3/4 precommit -> quorum karşılanır.
+    // Honest 3/4 precommits -> quorum met.
     for i in 0..3 {
         let pc = signed_precommit(&sks[i], epoch, height, hash, snap.validators[i].address);
         agg.add_precommit(pc).expect("honest precommit accepted");
     }
     assert!(
         agg.precommit_quorum_reached,
-        "dürüst 3/4 quorum'u karşılamalı"
+        "an honest 3/4 must meet the quorum"
     );
 
-    // Cert üretilir VE doğrulanır - dürüst alt-küme kötü aktöre rağmen finalize etti.
+    // The cert is produced AND verifies - the honest subset finalized despite the bad actor.
     let cert = agg.try_produce_cert().expect("honest subset cert produced");
-    assert_eq!(cert.signer_count(4), 3, "sadece dürüst 3 imza sayılmalı");
+    assert_eq!(cert.signer_count(4), 3, "only the 3 honest signatures must count");
     cert.verify(&snap)
-        .expect("dürüst alt-küme sertifikası doğrulanabilir olmalı");
+        .expect("the honest subset certificate must verify");
 }
 
-/// Karşı-kanıt: aynı 3 validator TÜMÜ geçerli imza atarsa cert doğrulanır.
-/// Bu, 1.3'teki başarısızlığın gerçekten geçersiz imzadan kaynaklandığını,
-/// Harness'tan değil, kanıtlar.
+/// Counter-evidence: if all 3 of the same validators sign validly the cert verifies.
+/// This proves the failure in 1.3 really came from the invalid signature and
+/// not from the harness.
 #[test]
 fn finality_valid_quorum_produces_verifiable_cert() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
@@ -299,11 +299,11 @@ fn finality_valid_quorum_produces_verifiable_cert() {
     cert.verify(&snap).expect("valid quorum cert must verify");
 }
 
-// 1.4 - Ağ bölünmesi (split quorum) / split-brain
+// 1.4 - Network partition (split quorum) / split-brain
 
-/// 4 validator, quorum 3 (2667). İki alt-grup 2-2 bölünür, her biri FARKLI bir
-/// Checkpoint hash'e oy verir. Hiçbir taraf kendi başına quorum'a ulgörevz;
-/// Dolayısıyla aynı yükseklikte iki çelişkili cert (split-brain) OLUŞAMAZ.
+/// 4 validators, quorum 3 (2667). Two subgroups split 2-2, each voting for a DIFFERENT
+/// checkpoint hash. Neither side reaches a quorum on its own,
+/// so two conflicting certs at the same height (split-brain) CANNOT form.
 #[test]
 fn finality_prevents_split_brain_on_partition() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
@@ -326,24 +326,24 @@ fn finality_prevents_split_brain_on_partition() {
         agg_b.add_prevote(pv).expect("group B prevote");
     }
 
-    // İki taraf da quorum altında -> hiçbir cert yok.
+    // Both sides are below quorum -> no cert at all.
     assert!(
         !agg_a.prevote_quorum_reached,
-        "grup A tek başına finalize edememeli"
+        "group A must not finalize on its own"
     );
     assert!(
         !agg_b.prevote_quorum_reached,
-        "grup B tek başına finalize edememeli"
+        "group B must not finalize on its own"
     );
     assert!(agg_a.try_produce_cert().is_none());
     assert!(agg_b.try_produce_cert().is_none());
 }
 
-// 1.5 - Geç gelen oylar (cert üretildikten sonra)
+// 1.5 - Late votes (after the cert is produced)
 
-/// Cert üretildikten sonra gelen oylar sistemi bozmaz: (a) daha önce sayılmış
-/// Bir voter'ın tekrar oyu "Duplicate" ile reddedilir, (b) yeni bir geç oy
-/// Eklense bile ilk cert'in checkpoint bağlamı değişmez ve doğrulanabilir kalır.
+/// Votes arriving after the cert do not break the system: (a) a repeat vote from an
+/// already counted voter is refused as "Duplicate", (b) even if a new late vote is
+/// added, the first cert's checkpoint context does not change and stays verifiable.
 #[test]
 fn finality_ignores_late_votes_after_cert() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
@@ -363,35 +363,35 @@ fn finality_ignores_late_votes_after_cert() {
     let original_hash = cert.checkpoint_hash.clone();
     let original_height = cert.checkpoint_height;
 
-    // (a) Zaten sayılmış voter'ın geç/tekrar oyu -> Duplicate, güvenle reddedilir.
+    // (a) A late/repeat vote from an already counted voter -> Duplicate, safely refused.
     let dup = signed_precommit(&sks[0], epoch, height, hash, snap.validators[0].address);
     assert!(
         agg.add_precommit(dup).is_err(),
-        "geç gelen tekrar oy reddedilmeli"
+        "a late repeat vote must be refused"
     );
 
-    // (b) Yeni (4.) validator'dan geç oy; state bozulmamalı, cert bağlamı sabit.
+    // (b) A late vote from a new (4th) validator; state must not break, cert context fixed.
     let late = signed_precommit(&sks[3], epoch, height, hash, snap.validators[3].address);
     agg.add_precommit(late)
         .expect("new late precommit ingested");
     let cert2 = agg.try_produce_cert().expect("cert still producible");
     assert_eq!(
         cert2.checkpoint_hash, original_hash,
-        "checkpoint hash değişmemeli"
+        "the checkpoint hash must not change"
     );
     assert_eq!(
         cert2.checkpoint_height, original_height,
-        "yükseklik değişmemeli"
+        "the height must not change"
     );
     cert2.verify(&snap).expect("post-late cert still verifies");
 }
 
-// 1.6 - Gürültü altında dürüst quorum
+// 1.6 - Honest quorum under noise
 
-/// 7 validator, quorum 2/3 -> 4667. 5 dürüst validator HONEST hash'e oy verir
-/// (5000 >= 4667). 2 byzantine validator ÇELİŞKİLİ bir hash'e "gürültü" oyu
-/// Gönderir; bunlar honest aggregator tarafından reddedilir ve honest finality'yi
-/// ENGELLEMEZ - dürüst quorum yine de doğrulanabilir cert üretir.
+/// 7 validators, quorum 2/3 -> 4667. 5 honest validators vote for the HONEST hash
+/// (5000 >= 4667). 2 byzantine validators send a "noise" vote for a CONFLICTING
+/// hash; these are refused by the honest aggregator and do NOT block honest
+/// finality - the honest quorum still produces a verifiable cert.
 #[test]
 fn finality_honest_quorum_survives_byzantine_noise() {
     let (snap, sks) = make_snapshot_with_keys(7, 1000);
@@ -402,23 +402,23 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     let mut agg = FinalityAggregator::new(epoch, height, honest_hash.into());
     agg.set_validator_snapshot(snap.clone());
 
-    // Byzantine gürültüsü ÖNCE gelsin (çelişkili hash) -> reddedilmeli.
+    // Let the byzantine noise arrive FIRST (conflicting hash) -> must be refused.
     for i in 5..7 {
         let noise = signed_prevote(&sks[i], epoch, height, byz_hash, snap.validators[i].address);
         assert!(
             agg.add_prevote(noise).is_err(),
-            "byzantine (çelişkili-hash) gürültü reddedilmeli"
+            "byzantine (conflicting-hash) noise must be refused"
         );
     }
 
-    // 5 dürüst prevote.
+    // 5 honest prevotes.
     drive_prevote_quorum(&mut agg, &snap, &sks, 5, epoch, height, honest_hash);
     assert!(
         agg.prevote_quorum_reached,
-        "dürüst 5/7 quorum'u karşılamalı"
+        "an honest 5/7 must meet the quorum"
     );
 
-    // Byzantine gürültü precommit görevında da tekrar denesin -> yine reddedilir.
+    // Let the byzantine noise try again in the precommit phase -> refused again.
     for i in 5..7 {
         let noise = Precommit {
             epoch,
@@ -432,11 +432,11 @@ fn finality_honest_quorum_survives_byzantine_noise() {
         };
         assert!(
             agg.add_precommit(noise).is_err(),
-            "byzantine precommit reddedilmeli"
+            "the byzantine precommit must be refused"
         );
     }
 
-    // 5 dürüst precommit -> quorum, cert üretilir ve DOĞRULANIR.
+    // 5 honest precommits -> quorum, the cert is produced and VERIFIES.
     for i in 0..5 {
         let pc = signed_precommit(
             &sks[i],
@@ -454,18 +454,18 @@ fn finality_honest_quorum_survives_byzantine_noise() {
         .expect("honest quorum cert must verify despite noise");
 }
 
-// Uçtan uca: equivocation -> evidence -> slash (Blockchain akışı)
+// End to end: equivocation -> evidence -> slash (Blockchain flow)
 
-/// Bir Blockchain kurar, `checkpoint_height` gerçek bloğa kadar üretir,
-/// Prevote görevını başlatır. `voter` gerçek BLS anahtarıyla önce doğru hash'e,
-/// Sonra çelişkili bir hash'e imza atar. `Blockchain::handle_prevote`, tespit
-/// Edilen equivocation evidence'ını mevcut `submit_registry_slashing_report`
-/// Yolundan geçirir ve gerçek bir slash uygular.
+/// Sets up a Blockchain, produces real blocks up to `checkpoint_height`,
+/// and starts the prevote phase. With a real BLS key, `voter` signs the correct hash first,
+/// then a conflicting one. `Blockchain::handle_prevote` passes the detected
+/// equivocation evidence through the existing `submit_registry_slashing_report`
+/// path and applies a real slash.
 #[test]
 fn equivocation_generates_slashing_evidence() {
     use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
 
-    // İki validator: `honest` blokları üretir, `equivocator` çifte imza atacak.
+    // Two validators: `honest` produces the blocks, `equivocator` will double-sign.
     let mut hsk = [0u8; 64];
     hsk[0] = 11;
     let honest_bls = Scalar::from_bytes_wide(&hsk);
@@ -490,7 +490,7 @@ fn equivocation_generates_slashing_evidence() {
     install_consensus_keys(&mut bc, honest, &honest_bls, honest_pk);
     install_consensus_keys(&mut bc, equivocator, &equiv_bls, equiv_pk);
 
-    // Slash öncesi: equivocator kayıtlı, aktif, tam stake.
+    // Before the slash: the equivocator is registered, active, at full stake.
     let before = bc
         .state
         .registry
@@ -514,7 +514,7 @@ fn equivocation_generates_slashing_evidence() {
         .expect("aggregator active")
         .epoch;
 
-    // Equivocator önce KANONİK hash'e imzalar (sayılır), sonra ÇELİŞKİLİ hash'e.
+    // The equivocator signs the CANONICAL hash first (counts), then a CONFLICTING one.
     let mut pv1 = Prevote {
         epoch,
         checkpoint_height: cp,
@@ -533,10 +533,10 @@ fn equivocation_generates_slashing_evidence() {
         sig_bls: vec![],
     };
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
-    // Çelişkili oy sayıma girmez (hash mismatch) ama evidence üretip slash tetikler.
+    // The conflicting vote does not count (hash mismatch) but produces evidence and triggers a slash.
     let _ = bc.handle_prevote(pv2);
 
-    // Slash sonrası: equivocator jail'lenmiş (Slashed) ve stake %50 kesilmiş.
+    // After the slash: the equivocator is jailed (Slashed) and 50% of the stake is cut.
     let after = bc
         .state
         .registry
@@ -544,14 +544,14 @@ fn equivocation_generates_slashing_evidence() {
         .expect("still present after slash");
     assert!(
         matches!(after.status, MemberStatus::Slashed),
-        "equivocator jail'lenmeli, görülen: {:?}",
+        "the equivocator must be jailed, got: {:?}",
         after.status
     );
     assert_eq!(
         after.stake, 5_000,
         "double-sign %50 kesmeli (10000 -> 5000)"
     );
-    // Dürüst validator etkilenmez.
+    // The honest validator is unaffected.
     let honest_reg = bc.state.registry.get(&honest, roles::VALIDATOR).unwrap();
     assert!(matches!(honest_reg.status, MemberStatus::Active));
     assert_eq!(honest_reg.stake, 10_000);
@@ -559,9 +559,9 @@ fn equivocation_generates_slashing_evidence() {
 
 // Equivocation -> slash -> KALICILIK (snapshot round-trip)
 
-/// Equivocation üretilip slash uygulandıktan SONRA snapshot alınır
-/// (`try_to_bytes`) ve geri yüklenir (`from_snapshot_v2`). Kalıcı slashing
-/// Geçmişi kaydının hayatta kaldığı ve birebir aynı olduğu doğrulanır.
+/// A snapshot is taken AFTER the equivocation is produced and the slash applied
+/// (`try_to_bytes`) and restored (`from_snapshot_v2`). It verifies the persistent slashing
+/// history record survives and is byte-identical.
 #[test]
 fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
@@ -569,7 +569,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::evidence::SlashingProof;
 
-    // BLS anahtarlı equivocator + dürüst üretici.
+    // A BLS-keyed equivocator + an honest producer.
     let mut esk = [0u8; 64];
     esk[0] = 44;
     let equiv_bls = Scalar::from_bytes_wide(&esk);
@@ -616,12 +616,12 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
     let _ = bc.handle_prevote(pv2);
 
-    // Slash uygulandı VE kalıcı geçmişe yazıldı.
+    // The slash was applied AND written to the persistent history.
     let history_before = bc.state.registry.slashing_history_for(&equivocator);
     assert_eq!(
         history_before.len(),
         1,
-        "equivocation kalıcı geçmişe yazılmalı"
+        "the equivocation must be written to the persistent history"
     );
     let rec_penalty = history_before[0].penalty;
     let rec_remaining = history_before[0].remaining_stake;
@@ -630,7 +630,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         SlashingProof::DoubleSign { .. }
     ));
 
-    // Snapshot al -> geri yükle.
+    // Take a snapshot -> restore it.
     let params = StateSnapshotV2Params {
         height: cp,
         block_hash: block.hash.clone(),
@@ -645,9 +645,9 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     let restored = StateSnapshotV2::from_bytes(&bytes).expect("snapshot deserialize");
     let restored_state = AccountState::from_snapshot_v2(&restored);
 
-    // Kayıt hayatta ve birebir aynı.
+    // The record survives and is byte-identical.
     let history_after = restored_state.registry.slashing_history_for(&equivocator);
-    assert_eq!(history_after.len(), 1, "restore sonrası kayıt kaybolmamalı");
+    assert_eq!(history_after.len(), 1, "the record must not be lost after restore");
     assert_eq!(history_after[0].report.offender, equivocator);
     assert_eq!(history_after[0].penalty, rec_penalty);
     assert_eq!(history_after[0].remaining_stake, rec_remaining);
@@ -657,10 +657,10 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     ));
 }
 
-// Tekrarlı geçersiz imza -> rate-limit tabanlı slash
+// Repeated invalid signatures -> rate-limit based slash
 
-/// Bir validator eşik (`max_invalid_votes_per_epoch`) kadar geçersiz imzalı oy
-/// Gönderir → uçtan uca `handle_prevote` akışından slash tetiklenir.
+/// A validator sends as many invalid-signature votes as the threshold
+/// (`max_invalid_votes_per_epoch`) allows -> a slash is triggered through the end-to-end `handle_prevote` flow.
 #[test]
 fn repeated_invalid_signatures_trigger_slash() {
     use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
@@ -668,8 +668,8 @@ fn repeated_invalid_signatures_trigger_slash() {
 
     let honest = test_addr_from_byte(1u8);
     let spammer = test_addr_from_byte(2u8);
-    // Spammer'a gerçek BLS anahtarı ver (üyelik kontrolünü geçsin) ama geçersiz
-    // Imza göndersin.
+    // Give the spammer a real BLS key (so it passes the membership check) but let it send
+    // an invalid signature.
     let mut ssk = [0u8; 64];
     ssk[0] = 55;
     let spammer_bls = Scalar::from_bytes_wide(&ssk);
@@ -688,7 +688,7 @@ fn repeated_invalid_signatures_trigger_slash() {
         .unwrap()
         .bls_public_key = spammer_pk;
 
-    // Küçük eşik ile testi hızlandır.
+    // Speed the test up with a small threshold.
     let threshold = 3u64;
     bc.state.registry.set_params(RegistryParams {
         max_invalid_votes_per_epoch: threshold,
@@ -703,25 +703,25 @@ fn repeated_invalid_signatures_trigger_slash() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Eşik-1 geçersiz imza: henüz slash yok.
+    // Threshold-1 invalid signatures: no slash yet.
     for _ in 0..(threshold - 1) {
         let bad = Prevote {
             epoch,
             checkpoint_height: cp,
             checkpoint_hash: block.hash.clone(),
             voter_id: spammer,
-            sig_bls: vec![0u8; 48], // geçersiz
+            sig_bls: vec![0u8; 48], // invalid
         };
         let _ = bc.handle_prevote(bad);
     }
     let mid = bc.state.registry.get(&spammer, roles::VALIDATOR).unwrap();
     assert!(
         matches!(mid.status, MemberStatus::Active),
-        "eşik altında slash olmamalı"
+        "there must be no slash below the threshold"
     );
     assert_eq!(mid.stake, 10_000);
 
-    // Eşiği aşan geçersiz imza -> slash.
+    // An invalid signature past the threshold -> slash.
     let bad = Prevote {
         epoch,
         checkpoint_height: cp,
@@ -734,22 +734,22 @@ fn repeated_invalid_signatures_trigger_slash() {
     let after = bc.state.registry.get(&spammer, roles::VALIDATOR).unwrap();
     assert!(
         matches!(after.status, MemberStatus::Slashed),
-        "eşik aşılınca slash+jail olmalı, görülen: {:?}",
+        "crossing the threshold must slash and jail, got: {:?}",
         after.status
     );
-    // MaliciousBehaviour oranı %100 (onaylı karar): stake sıfırlanır.
+    // The MaliciousBehaviour rate is 100% (approved decision): the stake is zeroed.
     assert_eq!(
         after.stake, 0,
         "invalid-sig spam MaliciousBehaviour %100 kesmeli"
     );
-    // Kalıcı geçmişte InvalidSignatureSpam kaydı var.
+    // There is an InvalidSignatureSpam record in the persistent history.
     let hist = bc.state.registry.slashing_history_for(&spammer);
     assert_eq!(hist.len(), 1);
     assert!(matches!(
         hist[0].report.proof,
         crate::registry::evidence::SlashingProof::InvalidSignatureSpam { .. }
     ));
-    // Dürüst validator etkilenmez.
+    // The honest validator is unaffected.
     assert!(matches!(
         bc.state
             .registry
@@ -760,7 +760,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     ));
 }
 
-/// Eşiğin ALTINDA kalan sayıda geçersiz imza slash tetiklemez (yanlış pozitif
+/// A number of invalid signatures BELOW the threshold does not trigger a slash (false-positive
 /// Yok).
 #[test]
 fn invalid_signatures_below_threshold_do_not_slash() {
@@ -801,7 +801,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Threshold-1 geçersiz imza: slash YOK.
+    // Threshold-1 invalid signatures: NO slash.
     for _ in 0..(threshold - 1) {
         let bad = Prevote {
             epoch,
@@ -816,7 +816,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
     let reg = bc.state.registry.get(&spammer, roles::VALIDATOR).unwrap();
     assert!(
         matches!(reg.status, MemberStatus::Active),
-        "eşik altında slash olmamalı"
+        "there must be no slash below the threshold"
     );
     assert_eq!(reg.stake, 10_000);
     assert!(bc.state.registry.slashing_history_for(&spammer).is_empty());
@@ -826,8 +826,8 @@ fn invalid_signatures_below_threshold_do_not_slash() {
     );
 }
 
-/// Uçtan uca: `Blockchain::handle_prevote` geçersiz BLS imzalı bir
-/// Oyu ingest'te reddeder - aggregat'a hiç girmez, state değişmez.
+/// End to end: `Blockchain::handle_prevote` refuses a vote with an invalid BLS
+/// signature at ingest - it never enters the aggregate and state does not change.
 #[test]
 fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
@@ -854,7 +854,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Geçersiz imzalı oy -> ingest'te reddedilir.
+    // A vote with an invalid signature -> refused at ingest.
     let bad = Prevote {
         epoch,
         checkpoint_height: cp,
@@ -869,6 +869,6 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     assert_eq!(
         bc.finality_aggregator.as_ref().unwrap().prevotes.len(),
         0,
-        "geçersiz oy aggregat'a girmemeli"
+        "an invalid vote must not enter the aggregate"
     );
 }

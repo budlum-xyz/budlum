@@ -1,180 +1,168 @@
-# B.U.D.: Broad Universal Database (modül README'si)
+# B.U.D.: Broad Universal Database (module README)
 
-**Modül-ayrımı kuralı gereği B.U.D.'un kendi README'sidir.**
-Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
+**By the module-separation rule this is B.U.D.'s own README.**
+The root `README.md` is a dashboard only; maturity and risk warnings live here.
 
-## Durum
+## Status
 
-- **Olgunluk:** devnet-only. Mainnet'e dahil edilip edilmeyeceği ayrı karar.
-- **Kod konumu:** `src/storage/` (manifest, deal, params), RPC uçları `src/rpc/api.rs` (`bud_storage*`),
-  E2E testleri `src/tests/bud_e2e.rs`.
-- **RPC yüzeyi:** `bud_storageRegisterManifest`, `bud_storageOpenDeal`,
+- **Maturity:** devnet-only. Whether it ships on mainnet is a separate decision.
+- **Code location:** `src/storage/` (manifest, deal, params), RPC endpoints in `src/rpc/api.rs` (`bud_storage*`),
+  E2E tests in `src/tests/bud_e2e.rs`.
+- **RPC surface:** `bud_storageRegisterManifest`, `bud_storageOpenDeal`,
   `bud_storageGetManifest`, `bud_storageGetDealsByManifest`, `bud_storageGetDealsByShard`,
   `bud_storageOpenChallenge`, `bud_storageAnswerChallenge`,
   `bud_storageGetOutcome`, `bud_storageGetEconomicsSummary`,
   `bud_storageGetEconomicsEvents`, `bud_storageGetOperatorEconomics`.
-- **Veri egemenliği kuralı:** whitelist/admin/pause/freeze hook'u YOK; her RPC her node
-  tarafından sunulabilir. Bu kural CI'daki 9 invariant ile kilitli.
+- **Data sovereignty rule:** there is NO whitelist/admin/pause/freeze hook; every RPC can be
+  served by every node. This rule is locked by the 9 invariants in CI.
 
-## Olgunluk uyarıları (kök dashboard'a taşınmadan burada kalır)
+## Maturity warnings (they stay here rather than moving to the root dashboard)
 
-1. **Sahte-yeşil riski:** `RetrievalChallenge` gerçek Proof-of-Storage değildir,
-   yanıt yalnız `range_hash` kabul eder (bkz. `api.rs` notu); operatör tam veri yerine
-   yalnız istenen byte-range'i saklayarak gate'i geçebilir. `bud_storageGetOutcome`
-   bu nedenle her yanıtta `proofKind` / `proof_kind = "interim_availability_only"` döndürür. Tam
-   kanıt BudZKVM `VerifyMerkle` 64-derinlik Production-gate'ine bağlıdır (kapalı).
-2. **İzin/consent katmanı yok:** manifest ve deal bilgisi tamamen açıktır;
-   `AccessGrant` kavramı izin katmanında tasarlanacaktır
-   (hard-enforcement hedefli, egemenlik kuralı soft enforcement'ı eler).
-3. **`ContentManifest` owner taşır, ama zorunlu değil.** F01 ile `owner` alanı
-   eklendi ve `manifest_id` hesabı owner'ı kapsıyor (alanlar:
-   `manifest_id/owner/total_size/shard_count/shards`). Ancak `from_shards()`
-   owner'ı zero-address ile başlatır ve gerçek sahip `with_owner()` ile ayrıca
-   set edilir. Bu çağrı atlanırsa manifest "sahipsiz" olarak kaydedilir ve aynı
-   içeriği yükleyen iki farklı kullanıcı aynı `manifest_id`'yi üretir. Kayıt
-   yolunda owner'ın zorunlu kılınması izin katmanının işi.
-4. **Replikalar ayırt edilemez (outsourcing/Sybil).** `ContentId` düz içerik
-   hash'i olduğu için aynı shard'ı saklayan N operatör bayt-bayt aynı veriyi
-   tutar. Tek fiziksel kopya N deal'i karşılayabilir ve tek makine N kimlikle
-   N ödül toplayabilir. Filecoin'in PoRep'i bunu replika-başına kodlama ile
-   çözer; B.U.D.'da böyle bir kodlama **yok**. Ayrıntı ve yol haritası:
+1. **Risk of a false green:** `RetrievalChallenge` is not a real Proof-of-Storage;
+   the answer only accepts a `range_hash` (see the note in `api.rs`), so an operator can pass
+   the gate by storing only the requested byte range instead of the full data.
+   `bud_storageGetOutcome` therefore returns `proofKind` / `proof_kind = "interim_availability_only"`
+   on every answer. A full proof depends on the BudZKVM `VerifyMerkle` 64-depth production gate (closed).
+2. **No permission/consent layer:** manifest and deal information is fully public;
+   the `AccessGrant` concept will be designed in the permission layer
+   (aimed at hard enforcement; the sovereignty rule rules out soft enforcement).
+3. **`ContentManifest` carries an owner, but it is not mandatory.** F01 added the `owner`
+   field and the `manifest_id` computation covers the owner (fields:
+   `manifest_id/owner/total_size/shard_count/shards`). However `from_shards()`
+   initialises the owner with the zero address and the real owner is set separately with
+   `with_owner()`. If that call is skipped the manifest is registered as "ownerless", and two
+   different users uploading the same content produce the same `manifest_id`. Making the owner
+   mandatory on the registration path is the permission layer's job.
+4. **Replicas are indistinguishable (outsourcing/Sybil).** Because `ContentId` is a plain content
+   hash, N operators storing the same shard hold byte-identical data. One physical copy can
+   satisfy N deals and one machine can collect N rewards under N identities. Filecoin's PoRep
+   solves this with per-replica encoding; B.U.D. has **no** such encoding. Detail and roadmap:
    `docs/BUD_STORAGE_ROADMAP.md`.
+5. **Erasure coding exists, but parity generation is not wired into the production flow.**
+   `ShardRef` now carries a `kind` (`Data` / `Parity`) and `ContentManifest`
+   carries an `ErasureScheme { k, n }`; `src/storage/erasure.rs` is a real Reed-Solomon
+   encoder over GF(2^8) and tests all fifteen two-loss patterns of a `(4,6)` code.
 
-5. **Erasure coding var, parity üretimi üretim akışına bağlı değil.**
-   `ShardRef` artık `kind` (`Data` / `Parity`) taşıyor ve `ContentManifest`
-   bir `ErasureScheme { k, n }` taşıyor; `src/storage/erasure.rs` GF(2^8)
-   üzerinde gerçek bir Reed-Solomon kodlayıcıdır ve `(4,6)` bir kodun on beş
-   iki-kayıp deseninin tamamını test eder.
+   Two points remain open and both touch the durability promise.
 
-   Açık kalan iki nokta var ve ikisi de dayanıklılık vaadine dokunur.
+   First: **nobody computes the parity bytes**. `encode_object` and
+   `to_manifest` are called from nowhere in the production tree; the manifest arrives at the
+   chain ready-made from the client. The `WIRING: unwired` marker at the top of the module
+   says exactly this.
 
-   Birincisi: parity baytlarını **kimse hesaplamıyor**. `encode_object` ve
-   `to_manifest` üretim ağacında hiçbir yerden çağrılmıyor; manifest zincire
-   istemciden hazır geliyor. Modülün başındaki `WIRING: unwired` işareti bunu
-   söylüyor.
+   Second, and deeper: the chain **never sees the shard bytes**, only their
+   hashes. `validate_untrusted` checks the consistency of the counts
+   (Data count `k`, Parity count `n - k`), but it cannot check whether a parity shard really
+   is correct parity. A manifest declaring `(k=4, n=6)` with six random byte strings is
+   accepted today; the error only surfaces when data is actually lost, which is too late.
 
-   İkincisi, ve daha derini: zincir shard **baytlarını hiç görmez**, yalnızca
-   hash'lerini görür. `validate_untrusted` sayıların tutarlılığını denetler
-   (Data sayısı `k`, Parity sayısı `n - k`), ama bir parity shard'ın gerçekten
-   doğru parity olup olmadığını denetleyemez. Rastgele altı bayt dizisiyle
-   `(k=4, n=6)` beyan eden bir manifest bugün kabul edilir; hata ancak
-   gerçekten kayıp olduğunda, yani iş işten geçtikten sonra görünür.
+   This second point is not a missing line but a design item. Ethereum's danksharding faced the
+   same question and defined two routes: a fraud proof, where a party that downloads the bytes
+   proves the encoding is wrong; or a polynomial commitment (KZG) / FRI, a proof of correct
+   encoding that does not require downloading the data. B.U.D.'s current challenge mechanism
+   sits close to the first: `RetrievalChallenge` already requests a byte range and verifies its hash.
 
-   Bu ikinci nokta bir eksik satır değil, bir tasarım kalemi. Ethereum'un
-   danksharding'i aynı soruyla karşılaştı ve iki yol tanımladı: hile kanıtı
-   (fraud proof), yani baytları indiren bir tarafın yanlış kodlamayı
-   ispatlaması; ya da polinom taahhüdü (KZG) / FRI, yani kodlamanın doğruluğunu
-   veriyi indirmeden ispatlayan bir kanıt. B.U.D.'un mevcut challenge
-   mekanizması birinciye yakın duruyor: `RetrievalChallenge` zaten bir bayt
-   aralığı isteyip hash'ini doğruluyor.
+   The repair side was measured and the arithmetic is right: `objects_needing_repair` takes the
+   distinct shard count as the denominator, not the replica count, and puts objects that have
+   fallen below `k` on the alarm list rather than the repair queue. But there is not yet a
+   production path or an RPC endpoint calling these functions.
 
-   Onarım tarafı ölçüldü ve hesap doğru: `objects_needing_repair` payda olarak
-   ayrı shard sayısını alıyor, replika sayısını değil, ve `k`'nin altına düşmüş
-   nesneleri onarım kuyruğuna değil alarm listesine koyuyor. Ancak bu
-   fonksiyonları çağıran bir üretim yolu ve bir RPC ucu henüz yok.
+6. **A missed challenge costs two things.** Burning the bond is a one-off cost and an operator
+   can price it in: fail, pay, re-register, fail again. Hence a second cost:
+   `MISSED_CHALLENGE_COOLDOWN_SECS`, six hours. During that period the operator cannot open new
+   deals. Existing deals are not cut; cutting them would immediately leave those shards
+   under-replicated and the penalty would hit the user rather than the operator.
 
-6. **Kaçırılan meydan okumanın bedeli iki parçalıdır.** Teminatın yanması bir
-   kereye mahsus bir maliyettir ve operatör onu fiyatlayabilir: başarısız ol,
-   öde, yeniden kaydol, yine başarısız ol. Bu yüzden ikinci bir bedel var:
-   `MISSED_CHALLENGE_COOLDOWN_SECS`, altı saat. Bu süre boyunca operatör yeni
-   anlaşma açamaz. Mevcut anlaşmaları kesilmez; kesilseydi o shard'lar anında
-   yetersiz yedekli hale gelir ve ceza operatörü değil kullanıcıyı vururdu.
+   The duration is written in seconds, not epochs. An epoch means
+   `slot_duration_secs * epoch_length_slots` and both are governance
+   parameters; a penalty written as "67 epochs" would silently become four hours or twelve when
+   either of those two dials is adjusted.
 
-   Süre saniye cinsinden yazılıdır, epoch cinsinden değil. Bir epoch
-   `slot_duration_secs * epoch_length_slots` demek ve ikisi de yönetişim
-   parametresi; "67 epoch" diye yazılmış bir ceza, o iki düğmeden biri
-   ayarlandığında sessizce dört saate ya da on ikiye dönerdi.
+   The penalty is extended by `begin_operator_cooldown`, never shortened. A second failure does
+   not reset the clock; the later of the two dates is taken, because that is the only ordering
+   that cannot be gamed by failing again on purpose.
 
-   Ceza `begin_operator_cooldown` ile uzatılır, asla kısaltılmaz. İkinci bir
-   başarısızlık süreyi sıfırlamaz; iki tarihten geç olanı alınır, çünkü bu
-   kasten tekrar başarısız olarak oynanamayan tek sıralamadır.
+   The chain cannot reach into a machine's disk and delete anything. What it can do is state,
+   somewhere the operator's own software reads, which shards no longer belong to it:
+   `stale_shards_for`. A node returning from an outage asks this and deletes what it finds. The
+   same shape as Storj's bloom filter: the network says what should stop, the node removes the rest.
 
-   Zincir bir makinenin diskine uzanıp hiçbir şey silemez. Yapabildiği şey,
-   operatörün kendi yazılımının okuduğu bir yerde, artık ona ait olmayan
-   shard'ları söylemektir: `stale_shards_for`. Bir düğüm kesintiden döndüğünde
-   bunu sorar ve bulduğunu siler. Storj'un bloom filtresiyle aynı biçim: ağ
-   neyin durması gerektiğini söyler, düğüm gerisini kaldırır.
+7. **A phone cannot hold a primary copy.** `OperatorClass` takes two values,
+   `AlwaysOn` (default) and `Mobile`. Only the first may take
+   `replica_index = 0`. The primary is the copy a reader reaches first and the one a repair
+   sources from when rebuilding; a device that is online while its owner is awake cannot be that.
 
-7. **Telefon birincil kopya tutamaz.** `OperatorClass` iki değer alır,
-   `AlwaysOn` (varsayılan) ve `Mobile`. Yalnızca birincisi
-   `replica_index = 0` alabilir. Birincil, bir okuyucunun ilk uzandığı ve bir
-   onarımın yeniden kurarken kaynak aldığı kopyadır; sahibi uyanıkken çevrimiçi
-   olan bir cihaz bu olamaz.
+   The class is the operator's own declaration and the chain cannot verify it. Nor does it try:
+   what it does is bind the operator to their declaration. A phone that says `AlwaysOn` and
+   reaches for the primary replica has accepted a primary's obligations and loses its bond the
+   first time it sleeps.
 
-   Sınıf operatörün kendi beyanıdır ve zincir bunu doğrulayamaz. Doğrulamaya
-   çalışmıyor da: yaptığı şey operatörü beyanına bağlamak. `AlwaysOn` diyerek
-   birincil replikaya uzanan bir telefon, bir birincilin yükümlülüklerini kabul
-   etmiş olur ve ilk uyuduğunda teminatını kaybeder.
-
-8. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
-   erişim için ödediği "tüketici erişim" ekonomisi ayrı bir katman
-   olarak tasarlanır.
-9. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
+8. **The economic direction is provider-side:** operators are paid for storing; the "consumer
+   access" economics where AI pays for access is designed as a separate layer.
+9. **Slashed-bond flow:** in devnet interim accounting, after a missed challenge
    `slashedBondDisposition = "burn_from_operator_liquid_balance_best_effort"`
-   olarak RPC'de görünür; bu final mainnet tokenomics kararı değildir.
+   appears in RPC; this is not the final mainnet tokenomics decision.
 
 ## Test suite
 
-- **Kapı:** `B.U.D. E2E Invariants (9/9 isim-kilitli)` CI job'u (`ci.yml`) -
-  `cargo test --lib bud_e2e` + `scripts/check-bud-e2e.sh` isim kanaryası
-  (vacuous-gate koruması: bir invariant silinir/yeniden adlandırılırsa kapı FAIL).
-- **Kapsam:** 9 modül-bağımsızlık invariantı + 4 E2E akış (13 zorunlu test),
-  buna entropy-seçilmiş challenge aralığına karşı kötü niyetli cached-range
-  operatör senaryosu dahildir. Registry unit testleri ayrıca `Slashed →
-  ReallocationPending → ActiveReplacement` ve `UnderReplicated` repair-state
-  geçişlerini kilitler.
-- Birim testleri (manifest doğrulama, chunk params, prune/slash idempotensi)
-  Core lib suite içinde koşar (`cargo test --lib`; toplam sayı rozeti 755 lib,
+- **Gate:** the `B.U.D. E2E Invariants (9/9 name-locked)` CI job (`ci.yml`) -
+  `cargo test --lib bud_e2e` + the `scripts/check-bud-e2e.sh` name canary
+  (vacuous-gate protection: if an invariant is deleted or renamed the gate FAILs).
+- **Coverage:** 9 module-independence invariants + 4 E2E flows (13 required tests),
+  including a malicious cached-range operator scenario against an entropy-chosen challenge
+  range. Registry unit tests additionally lock the `Slashed ->
+  ReallocationPending -> ActiveReplacement` and `UnderReplicated` repair-state
+  transitions.
+- Unit tests (manifest validation, chunk params, prune/slash idempotence)
+  run inside the Core lib suite (`cargo test --lib`; total count badge 755 lib,
   2026-07-18).
 
-## İçerik şifrelemesi: beyan var, zorlama yok
+## Content encryption: declared, not enforced
 
-`ContentManifest.encryption` yükleyicinin baytları parçalamadan önce ne
-yaptığını **beyan eder** ve beyan `manifest_id` içindedir, yani sabit bir
-kimlik altında yeniden yazılamaz. Varsayılan `Plaintext`, çünkü bu alandan
-önce yazılmış manifestler içinde hiç şifreleme bulunmayan bir ağaç tarafından
-yazıldı.
+`ContentManifest.encryption` **declares** what the uploader did before splitting the
+bytes, and the declaration is inside `manifest_id`, so it cannot be rewritten under a fixed
+identity. The default is `Plaintext`, because manifests written before this field
+were written by a tree that contained no encryption at all.
 
-Zincir bayt görmediği için hiçbir şeyin gerçekten şifrelendiğini
-doğrulayamaz. Doğrulayabildiği tek şey aritmetiktir: adlandırılan üç AEAD de
-16 baytlık etiket ekler, o yüzden `ClientSide` ilan edip 16 bayttan kısa olan
-bir nesne reddedilir. Bu dikkatsiz istemciyi yakalar, kararlı yalancıyı
-değil.
+Because the chain sees no bytes it cannot verify that anything is really
+encrypted. The only thing it can verify is arithmetic: all three named AEADs
+add a 16-byte tag, so an object declaring `ClientSide` and shorter than 16 bytes
+is refused. This catches the careless client, not the
+determined liar.
 
-Ayrıntı, neyin iddia edilmediği ve nedenleri: `docs/BUD_CONTENT_ENCRYPTION.md`.
-Kapı: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 kanarya).
-## Kodlama denetimi: parity gerçekten parity mi
+Detail, what is not claimed, and why: `docs/BUD_CONTENT_ENCRYPTION.md`.
+Gate: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 canaries).
 
-Erişim challenge'ı "bu baytlar hâlâ sende mi" diye sorar. "Bu baytlar doğru
-parity mi" diye SORAMAZ, çünkü zincir shard içeriğini hiç görmez. Parity
-shard'ı için ödeme alan bir operatör o `ContentId` altında ne isterse
-saklayabilir ve her erişim challenge'ını geçer. Fark, o parity'ye ihtiyaç
-duyulan onarımda ortaya çıkar, yani nesnenin en kaldıramayacağı anda.
+## Coding audit: is the parity really parity
 
-Reed-Solomon sembol bazlı çalıştığı için tek bir bayt sütunu ilişkinin
-eksiksiz bir örneğidir. `derive_coding_audit` blok entropisinden bir parity
-indeksi ve sütun türetir, `verify_coding_audit` cevabı kodlayıcının kendi
-üreteciyle karşılaştırır. Maliyet `k` data baytı + 1 parity baytı, nesne ne
-kadar büyük olursa olsun.
+A retrieval challenge asks "do you still have these bytes". It CANNOT ask "are these bytes
+correct parity", because the chain never sees shard content. An operator being paid for a parity
+shard can store anything under that `ContentId` and will pass every retrieval challenge. The
+difference surfaces during the repair that needs that parity, which is the moment the object can
+least afford it.
 
-Geçmek, ilişkinin O SÜTUNDA tuttuğunu söyler, daha fazlasını değil.
-Sütunların `f` oranını bozan bir operatör her turda `f` olasılıkla yakalanır,
-`r` tur sonra ayakta kalma olasılığı `(1 - f)^r`. Bu olasılıksal bir araçtır
-ve başka türlü anlatmak yanlış olur.
+Because Reed-Solomon works symbol by symbol, a single byte column is a complete instance of the
+relationship. `derive_coding_audit` derives a parity index and a column from block entropy, and
+`verify_coding_audit` compares the answer against the encoder's own generator. The cost is `k`
+data bytes + 1 parity byte, however large the object is.
 
-Neyi kanıtlamaz: operatörün bir şey SAKLADIĞINI. Parity elinde hiçbir şey
-tutmayan biri tarafından anlık hesaplanabilir. Replikasyonlu nesneler
-denetlenmez, reddedilir: her shard data ise `i` yoktur ve "geçti" demek hiç
-yapılmamış bir denetimi rapor etmek olur.
+Passing says the relationship holds IN THAT COLUMN, and no more.
+An operator corrupting a fraction `f` of the columns is caught with probability `f` each round,
+so their survival probability after `r` rounds is `(1 - f)^r`. This is a probabilistic tool
+and describing it any other way would be wrong.
 
-Ayrıntı ve olasılık tablosu: `docs/BUD_STORAGE_ROADMAP.md` Gap 3b.
-Kapı: `scripts/check-coding-audit-samples-the-relationship.sh` (13 kanarya).
+What it does not prove: that the operator STORES anything. Parity can be computed on the fly by
+someone holding nothing. Replicated objects are not audited but refused: if every shard is data
+there is no `i`, and saying "passed" would report a check that was never performed.
 
-## Yol haritası işaretleri
+Detail and probability table: `docs/BUD_STORAGE_ROADMAP.md` Gap 3b.
+Gate: `scripts/check-coding-audit-samples-the-relationship.sh` (13 canaries).
 
-- İzin katmanı: `AccessGrant` + `AccessRevocation` + sahip-imzalı provenance
-  (`StorageCommitment`) + -2 key-wrapping (hard enforcement).
-- Zorunlu entegrasyon: `AiInferenceRequest.input_ref` bir
-  `DataAsset`'e işaret ediyorsa AiVerifier grant kontrolü OLMADAN hesaplayamaz.
-- Tam-PoS (Merkle-64) gate'i kapanmadan "veri bütünlüğü kanıtlandı" iddiası
-  kurulamaz, sahte-yeşil uyarısı o güne kadar bu README'de kalır.
+## Roadmap markers
+
+- Permission layer: `AccessGrant` + `AccessRevocation` + owner-signed provenance
+  (`StorageCommitment`) + -2 key wrapping (hard enforcement).
+- Mandatory integration: if `AiInferenceRequest.input_ref` points at a
+  `DataAsset`, the AiVerifier cannot compute WITHOUT a grant check.
+- Until the full-PoS (Merkle-64) gate closes, no claim of "data integrity proved" can be made,
+  and the false-green warning stays in this README until that day.
