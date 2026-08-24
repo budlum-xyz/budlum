@@ -110,7 +110,6 @@ crates/budscan/src/content_id.rs	12
 crates/budscan/src/ens.rs	25
 crates/budscan/src/lib.rs	22
 crates/budscan/src/punycode.rs	16
-crates/budscan/src/query.rs	27
 crates/lubot/Cargo.toml	5
 crates/lubot/NOTICE.md	18
 crates/lubot/config/datasets.toml	7
@@ -138,7 +137,6 @@ crates/lubot/crates/lubot-knowledge/src/context.rs	21
 crates/lubot/crates/lubot-knowledge/src/embed.rs	18
 crates/lubot/crates/lubot-knowledge/src/lib.rs	12
 crates/lubot/crates/lubot-knowledge/src/memory.rs	25
-crates/lubot/crates/lubot-knowledge/src/redact.rs	27
 crates/lubot/crates/lubot-ops/Cargo.toml	1
 crates/lubot/crates/lubot-ops/src/cli.rs	23
 crates/lubot/crates/lubot-ops/src/main.rs	17

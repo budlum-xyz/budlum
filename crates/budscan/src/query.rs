@@ -1,72 +1,71 @@
-//! Arama kutusuna yazilan sey ne?
+//! What is the thing typed into the search box?
 //!
-//! "Cuzdan adresleri, NFT'ler, web siteleri hepsi burada aratilir" tek bir
-//! kutu demek, ve tek bir kutu bir **ayristirma sirasi** demek. Tarayici
-//! tarihinin en eski hata sinifi tam olarak burada yasiyor: bir dizginin ad mi
-//! sema mi sayilacagi, hangi kontrolun once calistigina bakar.
+//! "Wallet addresses, NFTs, web sites are all searched here" means one single
+//! box, and one single box means a **parsing order**. The oldest class of bug in
+//! browser history lives exactly here: whether a string counts as a name or as a
+//! scheme depends on which check runs first.
 //!
-//! # Kural: siniflandirma once, cozum sonra
+//! # Rule: classify first, resolve later
 //!
-//! Bu modul **hicbir sey cozmez**. Yalniz yazilan seyin hangi sinifa
-//! girdigini soyler ve karar verilemiyorsa [`Query::Ambiguous`] doner.
-//! Belirsizligi kendi basina cozmek, kullanicinin yazdigi seyi kullanicinin
-//! kastetmedigi bir seye cevirmektir; belirsiz bir girdi kullaniciya sorulur.
+//! This module **resolves nothing**. It only says which class the typed thing
+//! falls into, and returns [`Query::Ambiguous`] when it cannot decide. Resolving
+//! the ambiguity on its own would turn what the user typed into something the
+//! user did not mean; an ambiguous input is put back to the user.
 //!
-//! # Sema hicbir zaman tahmin edilmez
+//! # A scheme is never guessed
 //!
-//! `javascript:alert(1)` bir sema gibi gorunuyor ve gercekten oyle. Bu modul
-//! onu bir ad diye okumaz; [`Query::RefusedScheme`] doner ve neden
-//! reddedildigini soyler. Ad kurali ayrica ayni girdiyi reddeder
-//! ([`crate::name_rule`]); iki katmanin da reddetmesi kasitli, cunku birinin
-//! gevsemesi digerinin susmasi anlamina gelmemeli.
+//! `javascript:alert(1)` looks like a scheme and truly is one. This module does
+//! not read it as a name; it returns [`Query::RefusedScheme`] and states why it
+//! was refused. The name rule refuses the same input separately
+//! ([`crate::name_rule`]); both layers refusing is deliberate, because one of
+//! them relaxing must not mean the other one goes quiet.
 
 use crate::name_rule::{self, NameRejection};
 
-/// Yazilan seyin sinifi.
+/// The class of the typed thing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Query {
-    /// Cozulebilir bir ad: `ayaz.bud`, `x1.eth`.
+    /// A resolvable name: `ayaz.bud`, `x1.eth`.
     Name { name: String, suffix: String },
-    /// 32 baytlik Budlum adresi (0x + 64 hex).
+    /// A 32-byte Budlum address (0x + 64 hex).
     BudAddress([u8; 32]),
-    /// 20 baytlik EVM adresi (0x + 40 hex).
+    /// A 20-byte EVM address (0x + 40 hex).
     EvmAddress([u8; 20]),
-    /// B.U.D. icerik kimligi (0x + 64 hex, `bud://` ya da `cid:` onekiyle
-    /// acikca isaretlenmis).
+    /// A B.U.D. content id (0x + 64 hex, explicitly marked with a `bud://` or
+    /// `cid:` prefix).
     ContentId([u8; 32]),
     /// IPFS CID.
     Cid(String),
-    /// NFT kimligi: `nft:12` ya da cikplak bir tam sayi.
+    /// An NFT id: `nft:12` or a bare integer.
     NftId(u64),
-    /// Blok yuksekligi: `blok:1200`.
+    /// A block height: `block:1200`.
     BlockHeight(u64),
-    /// Islem hash'i: `tx:0x...`.
+    /// A transaction hash: `tx:0x...`.
     TxHash([u8; 32]),
-    /// Bir HTTPS adresi. Acikca yazilmis olmali; tahmin edilmez.
+    /// An HTTPS URL. It must be written out; it is never guessed.
     HttpsUrl(String),
-    /// Serbest metin: hicbir sinifa girmiyor. Bir arama terimi olabilir.
+    /// Free text: it fits no class. It may be a search term.
     FreeText(String),
-    /// Ayni girdi iki sinifa da uyuyor ve tahmin edilmiyor.
+    /// The same input fits two classes and is not guessed.
     Ambiguous {
         input: String,
         candidates: Vec<String>,
     },
-    /// Bir sema yazilmis ve o sema acilmayacak.
+    /// A scheme was written and that scheme will not be opened.
     RefusedScheme { input: String, scheme: String },
-    /// Bir ad gibi duruyor ama ad kuralindan gecmiyor.
+    /// It looks like a name but does not pass the name rule.
     RefusedName {
         input: String,
         rejection: NameRejection,
     },
 }
 
-/// Adres cubuguna hicbir kosulda ad diye girmeyecek semalar.
+/// Schemes that will under no condition enter the address bar as a name.
 ///
-/// Liste bir **red** listesi, bir izin listesi degil, ve bu bilincli: izin
-/// listesi, listede olmayan her yeni semayi sessizce kabul eder. Bu liste
-/// bilinen zararlilari isimlendiriyor; geri kalan her sema
-/// [`Query::RefusedScheme`] ile zaten reddediliyor cunku `is_scheme_like`
-/// iki nokta gorunce durur.
+/// The list is a **refusal** list, not an allow list, and that is deliberate: an
+/// allow list silently accepts every new scheme that is not on it. This list
+/// names the known harmful ones; every remaining scheme is already refused with
+/// [`Query::RefusedScheme`] because `scheme_of` stops at the colon.
 pub const NEVER_OPENED_SCHEMES: &[&str] = &[
     "javascript",
     "data",
@@ -78,10 +77,10 @@ pub const NEVER_OPENED_SCHEMES: &[&str] = &[
     "about",
 ];
 
-/// Bir dizgi "sema:" ile mi basliyor?
+/// Does a string start with "scheme:"?
 ///
-/// `https://` de bir semadir ve o ayrica ele aliniyor. Buradaki soru sadece
-/// "iki noktadan once bir sema etiketi var mi".
+/// `https://` is a scheme too and is handled separately. The question here is
+/// only "is there a scheme label before the colon".
 fn scheme_of(input: &str) -> Option<&str> {
     let idx = input.find(':')?;
     let scheme = &input[..idx];
@@ -106,7 +105,7 @@ fn hex_bytes(s: &str) -> Option<Vec<u8>> {
     hex::decode(s).ok()
 }
 
-/// Yazilan seyi siniflandir. Hicbir sey cozulmez, hicbir ag cagrisi yapilmaz.
+/// Classify the typed thing. Nothing is resolved, no network call is made.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn classify(raw: &str) -> Query {
@@ -116,17 +115,14 @@ pub fn classify(raw: &str) -> Query {
         return Query::FreeText(String::new());
     }
 
-    // 1. Acik onekler. Kullanici ne istedigini soylediyse tahmin yok.
+    // 1. Explicit prefixes. If the user said what they wanted, there is no guessing.
     if let Some(rest) = input.strip_prefix("nft:") {
         if let Ok(id) = rest.trim().parse::<u64>() {
             return Query::NftId(id);
         }
         return Query::FreeText(input.to_string());
     }
-    if let Some(rest) = input
-        .strip_prefix("blok:")
-        .or_else(|| input.strip_prefix("block:"))
-    {
+    if let Some(rest) = input.strip_prefix("block:") {
         if let Ok(h) = rest.trim().parse::<u64>() {
             return Query::BlockHeight(h);
         }
@@ -150,31 +146,31 @@ pub fn classify(raw: &str) -> Query {
                 return Query::ContentId(arr);
             }
         }
-        // `bud://ayaz.bud` da gecerli bir yazim: sema bir adi isaret ediyor.
+        // `bud://ayaz.bud` is a valid spelling too: the scheme points at a name.
         return classify_name(rest);
     }
     if let Some(rest) = input.strip_prefix("ipfs://") {
         return Query::Cid(rest.trim().to_string());
     }
 
-    // 2. HTTPS acikca yazilmis olmali. `evil.com` yazan biri HTTPS istemis
-    //    olabilir ama `evil.com` ayni zamanda bir ad gibi durur; tahmin
-    //    etmiyoruz, `Ambiguous` donuyoruz (asagida).
+    // 2. HTTPS must be written out. Someone typing `evil.com` may have wanted
+    //    HTTPS, but `evil.com` also looks like a name; we do not guess, we
+    //    return `Ambiguous` (below).
     if input.starts_with("https://") {
         return Query::HttpsUrl(input.to_string());
     }
     if input.starts_with("http://") {
-        // Duz HTTP: ne icerik dogrulanir ne tasima. Reddedilmiyor ama
-        // ne oldugu soyleniyor; karar `Target::Https` degil, cunku o bile
-        // TLS varsayar.
+        // Plain HTTP: neither the content nor the transport is verified. It is
+        // not refused outright, but it is named for what it is; the verdict is
+        // not `Target::Https`, because even that assumes TLS.
         return Query::RefusedScheme {
             input: input.to_string(),
             scheme: String::from("http"),
         };
     }
 
-    // 3. Geri kalan her sema reddedilir. Once bu, cunku `javascript:alert(1)`
-    //    ayni zamanda bir "ad gibi" gorunebilir ve sira burada belirleyici.
+    // 3. Every remaining scheme is refused. This comes first, because
+    //    `javascript:alert(1)` can also look "name-like" and the order decides.
     if let Some(scheme) = scheme_of(input) {
         return Query::RefusedScheme {
             input: input.to_string(),
@@ -182,39 +178,39 @@ pub fn classify(raw: &str) -> Query {
         };
     }
 
-    // 4. Hex adresler.
+    // 4. Hex addresses.
     if let Some(bytes) = hex_bytes(input) {
         if input.starts_with("0x") {
             if let Ok(arr) = <[u8; 20]>::try_from(bytes.as_slice()) {
                 return Query::EvmAddress(arr);
             }
             if bytes.len() == 32 {
-                // 32 bayt hem bir Budlum adresi hem bir ContentId hem bir tx
-                // hash olabilir. Uctur belirsizlik ve tahmin edilmiyor.
+                // 32 bytes can be a Budlum address, a ContentId or a
+                // transaction hash. The ambiguity is threefold and not guessed.
                 return Query::Ambiguous {
                     input: input.to_string(),
                     candidates: vec![
-                        String::from("cuzdan adresi (Address)"),
-                        String::from("icerik kimligi (ContentId) - bud:// ile yazin"),
-                        String::from("islem hash'i - tx: ile yazin"),
+                        String::from("wallet address (Address)"),
+                        String::from("content id (ContentId) - write it with bud://"),
+                        String::from("transaction hash - write it with tx:"),
                     ],
                 };
             }
         }
     }
 
-    // 5. Cikplak tam sayi: NFT mi blok mu? Tahmin yok.
+    // 5. A bare integer: NFT or block? No guessing.
     if input.parse::<u64>().is_ok() {
         return Query::Ambiguous {
             input: input.to_string(),
             candidates: vec![
-                String::from("NFT kimligi - nft: ile yazin"),
-                String::from("blok yuksekligi - blok: ile yazin"),
+                String::from("NFT id - write it with nft:"),
+                String::from("block height - write it with block:"),
             ],
         };
     }
 
-    // 6. IPFS CID gibi duruyor mu? (`Qm...` ya da `bafy.../bafk...`)
+    // 6. Does it look like an IPFS CID? (`Qm...` or `bafy.../bafk...`)
     if (input.len() == 46 && input.starts_with("Qm"))
         || (input.starts_with("baf")
             && input.len() > 20
@@ -223,7 +219,7 @@ pub fn classify(raw: &str) -> Query {
         return Query::Cid(input.to_string());
     }
 
-    // 7. Noktali bir sey: ad mi, alan adi mi?
+    // 7. Something with a dot: a name, or a domain?
     if input.contains('.') {
         return classify_name(input);
     }
@@ -231,7 +227,7 @@ pub fn classify(raw: &str) -> Query {
     Query::FreeText(input.to_string())
 }
 
-/// Noktali bir girdiyi ad kuralindan gecir.
+/// Run a dotted input through the name rule.
 fn classify_name(input: &str) -> Query {
     match name_rule::check_name(input) {
         Ok(()) => {
@@ -242,14 +238,14 @@ fn classify_name(input: &str) -> Query {
                     suffix,
                 }
             } else {
-                // `evil.com` gecerli bir ad sekli ama cozumleyicisi yok.
-                // HTTPS'e dusurmek, kullanicinin yazmadigi bir semayi
-                // varsaymaktir; belirsiz diyoruz.
+                // `evil.com` is a valid name shape but has no resolver.
+                // Falling back to HTTPS would assume a scheme the user did not
+                // write; we call it ambiguous.
                 Query::Ambiguous {
                     input: input.to_string(),
                     candidates: vec![
-                        format!(".{suffix} icin bir ad cozumleyicisi yok"),
-                        String::from("siradan web sitesi - https:// ile yazin"),
+                        format!("there is no name resolver for .{suffix}"),
+                        String::from("ordinary web site - write it with https://"),
                     ],
                 }
             }
@@ -287,13 +283,13 @@ mod tests {
     fn javascript_is_a_refused_scheme_not_a_name() {
         match classify("javascript:alert(1)") {
             Query::RefusedScheme { scheme, .. } => assert_eq!(scheme, "javascript"),
-            other => panic!("sema reddi beklendi, {other:?} geldi"),
+            other => panic!("expected a scheme refusal, got {other:?}"),
         }
         for s in NEVER_OPENED_SCHEMES {
             let input = format!("{s}:whatever");
             assert!(
                 matches!(classify(&input), Query::RefusedScheme { .. }),
-                "{input} kabul edildi"
+                "{input} was accepted"
             );
         }
     }
@@ -312,7 +308,7 @@ mod tests {
             classify("https://example.com/x"),
             Query::HttpsUrl(String::from("https://example.com/x"))
         );
-        // Cikplak alan adi tahmin edilmez.
+        // A bare domain is not guessed.
         assert!(matches!(classify("example.com"), Query::Ambiguous { .. }));
     }
 
@@ -342,7 +338,7 @@ mod tests {
             Query::TxHash(_)
         ));
         assert_eq!(classify("nft:12"), Query::NftId(12));
-        assert_eq!(classify("blok:1200"), Query::BlockHeight(1200));
+        assert_eq!(classify("block:1200"), Query::BlockHeight(1200));
     }
 
     #[test]
@@ -399,8 +395,8 @@ mod tests {
     #[test]
     fn free_text_stays_free_text() {
         assert_eq!(
-            classify("egitim iceriği"),
-            Query::FreeText(String::from("egitim iceriği"))
+            classify("learning material"),
+            Query::FreeText(String::from("learning material"))
         );
     }
 
