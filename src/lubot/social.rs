@@ -1,15 +1,17 @@
-//! SocialFi ↔ Lubot runtime entegrasyonu.
+//! The SocialFi and Lubot runtime integration.
 //!
-//! Lubot AI çıktısı SocialFi'da **gerçek NFT** olarak yayımlanır (`NftRegistry::mint`);
-//! Sosyal NFT içeriği Lubot için kapalı-devre veri kaynağına dönüştürülür
-//! (`SocialDataRef`). İki yön de çalışır: Lubot → sosyal (NFT), sosyal → Lubot
-//! (`Pollen` `DataAsset` köprüsü: çıktı `register_data_asset` ile kaydedilir ve
-//! mevcut `AiDataInputRef`/`validate_ai_read_ref` grant yoluyla okunur).
+//! A Lubot AI output is published on SocialFi as a **real NFT**
+//! (`NftRegistry::mint`), and social NFT content is turned into a
+//! closed-circuit data source for Lubot (`SocialDataRef`). Both directions
+//! work: Lubot to social (an NFT) and social to Lubot (the `Pollen`
+//! `DataAsset` bridge: the output is recorded with `register_data_asset` and
+//! read through the existing `AiDataInputRef`/`validate_ai_read_ref` grant
+//! path).
 //!
-//! WIRING: wired - `lubot_output_to_nft` artık executor'ün `AiInferenceResult`
-//! finalization yolundan çağrılır (src/execution/executor.rs); kesinleşmiş
-//! çıktı istek sahibine "lubot-ai" NFT'si olarak basılır ve aynı blokta
-//! `Pollen` `DataAsset` kaydı yapılır (best-effort).
+//! WIRING: wired - `lubot_output_to_nft` is now called from the executor's
+//! `AiInferenceResult` finalization path (src/execution/executor.rs); the
+//! finalised output is minted to the requester as a "lubot-ai" NFT, and the
+//! `Pollen` `DataAsset` record is written in the same block (best-effort).
 
 use crate::core::address::Address;
 use crate::socialfi::NftRegistry;
@@ -17,8 +19,9 @@ use crate::storage::content_id::ContentId;
 
 use super::SocialDataRef;
 
-/// Lubot AI çıktısını SocialFi'da NFT olarak mint et (gerçek `NftRegistry::mint`).
-/// `output` = Lubot çıkarım yanıtının baytları; ContentId = `ContentId::of(output)`.
+/// Mint a Lubot AI output as an NFT on SocialFi (the real
+/// `NftRegistry::mint`). `output` is the bytes of the Lubot inference
+/// response; the ContentId is `ContentId::of(output)`.
 /// # Errors
 ///
 /// Whatever `NftRegistry::mint` refuses, which today is a duplicate id: the
@@ -36,14 +39,15 @@ pub fn lubot_output_to_nft(
     Ok((nft_id, cid))
 }
 
-/// Bir sosyal NFT içeriğini Lubot kapalı-devre veri kaynağına dönüştür.
-/// (Lubot bu içeriği yalnızca bir Pollen grant ile okur - `validate_inference_grant`.)
+/// Turn social NFT content into a Lubot closed-circuit data source.
+/// (Lubot reads that content only with a Pollen grant -
+/// `validate_inference_grant`.)
 #[must_use]
 pub fn social_nft_to_data_ref(nft_id: u64, content_id: ContentId, owner: Address) -> SocialDataRef {
     SocialDataRef::from_social(nft_id, content_id.0, owner)
 }
 
-/// Lubot NFT'sine etiket ekle (örn. "#lubot-ai", "#ai-output").
+/// Add a tag to a Lubot NFT (for example "#lubot-ai" or "#ai-output").
 pub fn tag_lubot_nft(registry: &mut NftRegistry, nft_id: u64, tag: &str) -> Result<(), String> {
     registry
         .add_tag(nft_id, tag.to_string())
@@ -65,13 +69,13 @@ mod tests {
         let owner = addr(1);
         let (nft_id, cid) = lubot_output_to_nft(&mut registry, owner, b"lubot-ai-output", 10)
             .expect("a fresh registry has no id to collide with");
-        // NftRegistry ilk mint id 0'dan başlar (next_id=0).
+        // The NftRegistry starts its first mint id at 0 (next_id=0).
         let first = nft_id;
 
-        // Etiket ekle (gerçek add_tag).
+        // Add a tag (the real add_tag).
         assert!(tag_lubot_nft(&mut registry, nft_id, "#lubot-ai").is_ok());
 
-        // Sosyal NFT → Lubot veri kaynağı.
+        // A social NFT becomes a Lubot data source.
         let data_ref = social_nft_to_data_ref(nft_id, cid, owner);
         assert_eq!(data_ref.nft_id, first);
         assert_eq!(data_ref.owner, owner);
