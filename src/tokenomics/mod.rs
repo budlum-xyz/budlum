@@ -475,22 +475,22 @@ mod tests {
         assert_eq!(params.epoch_at_timestamp(params.seconds_per_epoch() * 7), 7);
     }
 
-    // === ZORUNLU TESTLER ===
+    // === MANDATORY TESTS ===
 
     #[test]
     fn calculate_epoch_reward_regression_equivalence() {
         let params = TokenomicsParams::default();
 
-        // Eski hardcoded değerlerle birebir aynı sonucu üretmeli
-        // (slot=10sn, epoch=32, %5 APY)
+        // It has to produce exactly the same result as the old hardcoded
+        // values (slot=10s, epoch=32, 5 percent APY).
         let test_stakes = [0u64, 1_000_000, 50_000_000_000];
 
         for stake in test_stakes {
             let result = params.calculate_epoch_reward(stake);
-            // Default parametrelerle eski mantıkla aynı olmalı
+            // With the default parameters it has to match the old logic.
             assert!(
                 result > 0 || stake == 0,
-                "Stake {} için ödül 0 olmamalı",
+                "the reward for stake {} must not be 0",
                 stake
             );
         }
@@ -503,38 +503,38 @@ mod tests {
         let base_stake: u64 = 10_000_000_000; // 10B stake
         let base_reward = params.calculate_epoch_reward(base_stake);
 
-        // 1. slot_duration_secs'i değiştir
-        params.slot_duration_secs = 5; // yarıya indir
+        // 1. Change slot_duration_secs.
+        params.slot_duration_secs = 5; // halve it
         let faster_slot_reward = params.calculate_epoch_reward(base_stake);
         assert!(
             faster_slot_reward > base_reward,
-            "Daha kısa slot süresi daha yüksek ödül vermeli"
+            "a shorter slot duration has to give a higher reward"
         );
 
-        // 2. epoch_length_slots'i değiştir
+        // 2. Change epoch_length_slots.
         params = TokenomicsParams::default();
-        params.epoch_length_slots = 64; // 2 katına çıkar
+        params.epoch_length_slots = 64; // double it
         let longer_epoch_reward = params.calculate_epoch_reward(base_stake);
         assert!(
             longer_epoch_reward > base_reward,
-            "Daha uzun epoch daha yüksek ödül vermeli"
+            "a longer epoch has to give a higher reward"
         );
 
-        // 3. validator_annual_yield_ratio_fixed'i 2 katına çıkar
+        // 3. Double validator_annual_yield_ratio_fixed.
         params = TokenomicsParams::default();
         params.validator_annual_yield_ratio_fixed *= 2;
         let double_yield_reward = params.calculate_epoch_reward(base_stake);
         assert!(
             double_yield_reward >= base_reward * 2 - 10,
-            "2x APY yaklaşık 2x ödül vermeli"
+            "2x APY has to give roughly 2x the reward"
         );
     }
 
     #[test]
     fn calculate_epoch_reward_uses_fixed_point_scale() {
-        // FIXED_POINT_SCALE gerçekten kullanılıyor mu kontrolü.
-        // This is a smoke test: the function must not panic for any
-        // Positive stake and must respect the fixed-point scale.
+        // A check that FIXED_POINT_SCALE really is being used.
+        // This is a smoke test: the function must not panic for any positive
+        // stake and must respect the fixed-point scale.
         let params = TokenomicsParams::default();
         for stake in [0u64, 1, 1_000, 1_000_000, 1_000_000_000] {
             let reward = params.calculate_epoch_reward(stake);
@@ -564,10 +564,10 @@ mod tests {
         assert_eq!(v.unlocked_at(5), 0);
         // During cliff (start + cliff = 60)
         assert_eq!(v.unlocked_at(59), 0);
-        // Cliff aninda (start+cliff=60): linear-from-start tasarimi
-        // (bkz. unlocked_at doc) - birikmis pay total*50/200 acilir.
-        // (fix 2026-07-17: onceki "0" beklentisi yanlis model
-        // Varsayimiydi; mod.rs:82-96 belgelenmis davranis kilidi.)
+        // At the cliff (start+cliff=60): the linear-from-start design (see the
+        // unlocked_at doc) unlocks the accrued share, total*50/200.
+        // (fix 2026-07-17: the earlier "0" expectation was a wrong model
+        // assumption; mod.rs:82-96 is the lock on the documented behaviour.)
         assert_eq!(v.unlocked_at(60), bud(1_000_000) / 4);
         // Mid duration
         assert!(v.unlocked_at(160) > 0);
@@ -584,9 +584,9 @@ mod tests {
             DEFAULT_VALIDATION_REWARD_POOL,
         };
 
-        // ADR-001: sabit 100M arz, emisyon YOK. Genesis dağılımı tam olarak
-        // BUD_TOTAL_SUPPLY'i tüketir; ödüller ÖN-TAHSİSLİ havuzdan ödenir,
-        // Yeni arz yaratılmaz.
+        // ADR-001: a fixed 100M supply, NO emission. The genesis distribution
+        // consumes exactly BUD_TOTAL_SUPPLY; rewards are paid from a
+        // PRE-ALLOCATED pool and no new supply is created.
         let p = TokenomicsParams::default();
         assert!(
             p.is_balanced(),

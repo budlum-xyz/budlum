@@ -102,13 +102,11 @@ crates/lubot/crates/lubot-data/src/source.rs	16
 crates/lubot/crates/lubot-data/src/template.rs	8
 crates/lubot/crates/lubot-data/src/verify.rs	11
 crates/lubot/crates/lubot-integrations/Cargo.toml	1
-crates/lubot/crates/lubot-integrations/src/lib.rs	17
 crates/lubot/crates/lubot-integrations/src/rest.rs	11
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/embed.rs	3
 crates/lubot/crates/lubot-knowledge/src/lib.rs	12
 crates/lubot/crates/lubot-ops/Cargo.toml	1
-crates/lubot/crates/lubot-ops/src/main.rs	17
 crates/lubot/crates/lubot-serve/Cargo.toml	1
 crates/lubot/crates/lubot-serve/src/chain.rs	15
 crates/lubot/crates/lubot-serve/src/config.rs	4
@@ -170,7 +168,6 @@ src/registry/evidence.rs	1
 src/registry/invalid_vote.rs	1
 src/registry/poa_compliance.rs	11
 src/registry/role.rs	1
-src/rpc/api.rs	17
 src/rpc/tests.rs	1
 src/settlement/global_block.rs	2
 src/socialfi/README.md	14
@@ -213,7 +210,6 @@ src/tests/snapshot_chaos.rs	51
 src/tests/socialfi.rs	27
 src/tests/tokenomics_proptest.rs	33
 src/tests/v95_v98_canaries.rs	10
-src/tokenomics/mod.rs	17
 supply-chain/config.toml	1
 xtask/gates/src/gates/accumulators_pinned.rs	2
 xtask/gates/src/gates/binding_claims.rs	1

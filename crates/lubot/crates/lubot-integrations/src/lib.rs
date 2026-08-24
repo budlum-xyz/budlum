@@ -1,25 +1,25 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
 // derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
 #![forbid(unsafe_code)]
-//! # lubot-integrations - dış veri adaptör iskeleti
+//! # lubot-integrations - the external data adapter skeleton
 //!
-//! Kapalı-devre ilkesiyle dış servislere bağlanmak için yeniden
-//! kullanılabilir desenler: WebSocket bağlantı yönetimi, REST istek/yanıt
-//! modelleri, toplu mesaj ayrıştırma ve kapatma (kill) sinyali.
+//! Reusable patterns for connecting to external services under the
+//! closed-circuit principle: WebSocket connection management, REST
+//! request/response models, batched message parsing and the kill signal.
 //!
-//! Bu crate bağlantıyı kendisi kurmaz; taşıyıcıyı (tokio-tungstenite,
-//! reqwest vb.) çağıran taraf seçer. Böylece testler ve farklı çalışma
-//! zamanları için bağımlılıksız kalır.
+//! This crate does not open the connection itself; the caller picks the
+//! transport (tokio-tungstenite, reqwest and so on). That keeps it
+//! dependency-free for tests and for different runtimes.
 
 pub mod rest;
 pub mod ws;
 
-/// Toplu mesaj ayrıştırma yardımcısı: gelen bir JSON değerini, tek bir
-/// nesne ya da nesne dizisi olmasına bakmadan vektöre çevirir.
+/// The batched message parsing helper: it turns an incoming JSON value into a
+/// vector whether it is a single object or an array of objects.
 ///
 /// # Errors
 ///
-/// Değer ne dizi ne de nesne ise.
+/// When the value is neither an array nor an object.
 pub fn as_items(value: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
     match value {
         serde_json::Value::Array(items) => Ok(items),
@@ -28,9 +28,9 @@ pub fn as_items(value: serde_json::Value) -> Result<Vec<serde_json::Value>, Stri
     }
 }
 
-/// Durum iletisini denetler: `{"T":"success","msg":"connected"}` veya
-/// `{"T":"success","msg":"authenticated"}` biçimindeki bağlantı/oturum
-/// bildirimlerini tanır.
+/// Inspects a status message: it recognises the connection and session
+/// notifications shaped as `{"T":"success","msg":"connected"}` or
+/// `{"T":"success","msg":"authenticated"}`.
 #[must_use]
 pub fn is_success_connected_or_authed(item: &serde_json::Value) -> bool {
     let is_success = item.get("T").and_then(serde_json::Value::as_str) == Some("success");
@@ -41,9 +41,10 @@ pub fn is_success_connected_or_authed(item: &serde_json::Value) -> bool {
     is_success && matches!(msg, "connected" | "authenticated")
 }
 
-/// Kanonik sembol eşleme: verilen sembolü yapılandırılmış listede büyük
-/// harfle arar; tam eşleşme yoksa son karakteri atılmış halini dener
-/// (bazı sağlayıcılar `BTC` yerine `BTCUSD`/`BTCUSDT` gönderir).
+/// Canonical symbol mapping: it looks the given symbol up in the configured
+/// list in uppercase; when there is no exact match it tries the form with the
+/// last character dropped (some providers send `BTCUSD`/`BTCUSDT` instead of
+/// `BTC`).
 #[must_use]
 pub fn canonical_symbol(symbol: &str, known: &std::collections::BTreeSet<String>) -> String {
     let s = symbol.trim().to_uppercase();
@@ -101,6 +102,6 @@ mod tests {
         assert_eq!(canonical_symbol(" btc ", &known), "BTC");
         assert_eq!(canonical_symbol("BTCUSD", &known), "BTC");
         assert_eq!(canonical_symbol("ETHUSDT", &known), "ETH");
-        assert_eq!(canonical_symbol("SOL", &known), "SOL"); // bilinmeyen -> olduğu gibi
+        assert_eq!(canonical_symbol("SOL", &known), "SOL"); // unknown -> as it is
     }
 }
