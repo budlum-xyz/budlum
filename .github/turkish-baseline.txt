@@ -62,7 +62,6 @@ bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_media.rs	38
 bud/src/bud_format_model.rs	36
-bud/src/bud_format_msr.rs	42
 bud/src/bud_format_nvc.rs	27
 bud/src/bud_format_office.rs	29
 bud/src/bud_format_optical.rs	3
@@ -234,7 +233,6 @@ src/domain/finality_adapter.rs	7
 src/domain/plugin.rs	1
 src/domain/plugin_registry.rs	35
 src/domain/registry.rs	7
-src/domain/sovereign.rs	42
 src/domain/storage_deal.rs	2
 src/domain/types.rs	11
 src/execution/executor.rs	3
