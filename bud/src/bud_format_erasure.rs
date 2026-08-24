@@ -1,18 +1,24 @@
-//! B.U.D. 2.0 - Cauchy MDS Erasure (budlum erasure.rs deseni) (2026-08-16)
+//! B.U.D. 2.0 - Cauchy MDS erasure, in the budlum `erasure.rs` pattern,
+//! 2026-08-16.
 //!
-//! Ana repodan (budlum src/storage/erasure.rs) esinlenen, bağımsız, no-unsafe uygulama:
-//! GF(2^8) mod 0x11D üzerinde Cauchy MDS kodu. Sistematik: veri shard'ları byte-for-byte
-//! geçer, Cauchy bloğu parity shard'ları üretir. MDS garantisi: herhangi k shard hayatta
-//! kalırsa yeniden kurulur (Vandermonde'un singular alt-matris sorunu yok - Cauchy'nin
-//! her kare alt-matrisi tersinir, Blomer et al. Theorem 2.2).
+//! An independent, unsafe-free implementation inspired by the main repository's
+//! `src/storage/erasure.rs`: a Cauchy MDS code over GF(2^8) mod 0x11D. It is
+//! systematic, so data shards pass through byte for byte and the Cauchy block
+//! produces the parity shards. The MDS guarantee is that the data is rebuilt if
+//! any k shards survive. Vandermonde's singular-submatrix problem does not
+//! arise, because every square submatrix of a Cauchy matrix is invertible
+//! (Blomer et al., Theorem 2.2).
 //!
-//! Alan: GF(2^8) mod 0x11D - Intel ISA-L, Backblaze, QR Reed-Solomon ile aynı.
-//! Çarpma log/exp tablolarından; ters alma exp[255 - log[a]].
+//! The field is GF(2^8) mod 0x11D, the same one Intel ISA-L, Backblaze and QR
+//! Reed-Solomon use. Multiplication comes from log and exp tables, and
+//! inversion is `exp[255 - log[a]]`.
 //!
-//! B.U.D. kullanımı: konteyner parçalarına erasure shard üretimi (V7 EVENODD 1.286x
-//! alternatifi - LRC 1.031x ile birlikte fiyat düşürür). Kodlama/çözme deterministik.
+//! How B.U.D. uses it: producing erasure shards for container chunks. It is the
+//! alternative to V7 EVENODD at 1.286x, and together with LRC at 1.031x it
+//! lowers the price. Encoding and decoding are deterministic.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, panik'siz, tavanlı (bomba koruması).
+//! The code is `#![forbid(unsafe_code)]`, panic-free and capped, as a bomb
+//! guard.
 
 #![forbid(unsafe_code)]
 
@@ -20,10 +26,10 @@ use sha3::{Digest, Sha3_256};
 
 pub const ERASURE_MAGIC: [u8; 8] = *b"\xB5ERAS\0\0\0";
 pub const ERASURE_VERSION: u8 = 1;
-pub const MAX_SHARDS: usize = 256; // GF(2^8) sınırı
+pub const MAX_SHARDS: usize = 256; // the GF(2^8) bound
 pub const MAX_SHARD_BYTES: usize = 64 * 1024 * 1024; // 64MB tek shard
 
-/// GF(2^8) mod 0x11D - log/exp tabloları (bir kez kurulur, deterministik).
+/// GF(2^8) mod 0x11D: the log and exp tables, built once, deterministically.
 struct Gf8 {
     log: [u8; 256],
     exp: [u8; 512],
@@ -42,7 +48,7 @@ impl Gf8 {
             x &= 0xFF;
             i += 1;
         }
-        // exp[255..510] = exp[i+255] = exp[i] (döngü)
+        // exp[255..510] = exp[i+255] = exp[i], wrapping around.
         let mut j = 255;
         while j < 510 {
             exp[j as usize] = exp[(j - 255) as usize];
@@ -67,7 +73,8 @@ impl Gf8 {
     }
 }
 
-/// Cauchy MDS kodlayıcı: k veri shard + p parity shard (toplam k+p ≤ 255).
+/// The Cauchy MDS encoder: k data shards plus p parity shards, with
+/// k + p <= 255 in total.
 pub struct CauchyMds {
     k: usize,
     p: usize,
@@ -86,16 +93,21 @@ impl CauchyMds {
         })
     }
 
-    /// Cauchy matrisi elemanı: C[i][j] = 1 / (x_i + y_j), x/y kümeleri ayrık.
-    /// x = 0..p-1, y = p..p+k-1 (deterministik seçim).
+    /// A Cauchy matrix element: `C[i][j] = 1 / (x_i + y_j)`, with the x and y
+    /// sets disjoint.
+    ///
+    /// x runs 0..p-1 and y runs p..p+k-1, a deterministic choice.
     fn cauchy(&self, i: usize, j: usize) -> Option<u8> {
-        // x_i = i, y_j = k + j (GF toplama = XOR)
+        // x_i = i, y_j = k + j; addition in GF is XOR.
         let denom = (i as u8) ^ ((self.k + j) as u8);
         self.gf.inv(denom)
     }
 
-    /// Kodla: k veri shard → (k + p) shard (veri aynen + p parity).
-    /// Tüm shard'lar eşit boyutlu; bomba korumalı (MAX_SHARD_BYTES).
+    /// Encode k data shards into k + p shards: the data unchanged, plus p
+    /// parity shards.
+    ///
+    /// All shards are the same size, and the length is bomb-guarded by
+    /// `MAX_SHARD_BYTES`.
     pub fn encode(&self, data_shards: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
         if data_shards.len() != self.k {
             return None;
@@ -106,7 +118,7 @@ impl CauchyMds {
         }
         for d in data_shards {
             if d.len() != shard_len {
-                return None; // eşit boyut şart
+                return None; // equal sizes are required
             }
         }
         let mut out: Vec<Vec<u8>> = data_shards.to_vec();
@@ -125,12 +137,13 @@ impl CauchyMds {
         Some(out)
     }
 
-    /// Çöz: hayatta kalan herhangi k shard'dan veriyi yeniden kur (MDS).
-    /// `survivors`: (shard_indeks, shard_bayt) çiftleri - indeksler 0..k-1 veri,
-    /// k..k+p-1 parity. En az k hayatta kalan olmalı.
+    /// Decode: rebuild the data from any k surviving shards, the MDS property.
+    ///
+    /// `survivors` holds `(shard index, shard bytes)` pairs, where indices
+    /// 0..k-1 are data and k..k+p-1 are parity. At least k must survive.
     pub fn decode(&self, survivors: &[(usize, Vec<u8>)]) -> Option<Vec<Vec<u8>>> {
         if survivors.len() < self.k {
-            return None; // MDS: k'dan az hayatta kalan → kurtarılamaz
+            return None; // MDS: fewer than k survivors cannot be recovered
         }
         let shard_len = survivors[0].1.len();
         for (_, s) in survivors {
@@ -138,14 +151,16 @@ impl CauchyMds {
                 return None;
             }
         }
-        // k hayatta kalan seç (ilk k - MDS herhangi k alt-kümeyle çalışır)
+        // Choose k survivors, the first k, since MDS works with any k-subset.
         let chosen: Vec<(usize, &Vec<u8>)> = survivors
             .iter()
             .take(self.k)
             .map(|(i, s)| (*i, s))
             .collect();
-        // k x k katsayı matrisini kur: satır = hayatta kalan shard'ın veri shard'larına
-        // katkısı. Veri shard'ı j için: shard i veri ise (i==j → 1), parity ise C[i-k][j].
+        // Build the k by k coefficient matrix: each row is a surviving shard's
+        // contribution to the data shards. For data shard j: if shard i is data
+        // the entry is 1 when i == j, and if it is parity the entry is
+        // C[i-k][j].
         // A_ij = (i < k) ? (i == j) : C[i-k][j]
         let mut a = vec![vec![0u8; self.k]; self.k];
         for (r, &(si, _)) in chosen.iter().enumerate() {
@@ -161,9 +176,11 @@ impl CauchyMds {
                 };
             }
         }
-        // matrisi tersine çevir (Gauss-Jordan GF(2^8)) - tekil değil (MDS)
+        // Invert the matrix by Gauss-Jordan over GF(2^8); MDS guarantees it is
+        // not singular.
         let inv = self.invert_matrix(&a)?;
-        // veri shard'larını kur: data[c] = Σ_r inv[c][r] * shard[chosen[r]]
+        // Rebuild the data shards:
+        // data[c] = sum over r of inv[c][r] * shard[chosen[r]].
         let mut data: Vec<Vec<u8>> = vec![vec![0u8; shard_len]; self.k];
         for c in 0..self.k {
             for r in 0..self.k {
@@ -190,7 +207,7 @@ impl CauchyMds {
             aug[i][n + i] = 1;
         }
         for col in 0..n {
-            // pivot bul (sıfır değil)
+            // Find a non-zero pivot.
             let mut pivot = None;
             for r in col..n {
                 if aug[r][col] != 0 {
@@ -198,7 +215,7 @@ impl CauchyMds {
                     break;
                 }
             }
-            let pivot = pivot?; // tekil
+            let pivot = pivot?; // singular
             aug.swap(col, pivot);
             let inv = self.gf.inv(aug[col][col])?;
             for j in 0..2 * n {
@@ -216,7 +233,7 @@ impl CauchyMds {
         Some(aug.iter().map(|row| row[n..].to_vec()).collect())
     }
 
-    /// Erasure kaydı (deterministik blob - zincire yazılabilir).
+    /// The erasure record, a deterministic blob that can be written on chain.
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_ERASURE_V1");
@@ -237,13 +254,13 @@ mod tests {
     #[test]
     fn gf8_arithmetic() {
         let gf = Gf8::new();
-        // 1 * x = x
+        // 1 * x = x.
         assert_eq!(gf.mul(1, 5), 5);
-        // x * 0 = 0
+        // x * 0 = 0.
         assert_eq!(gf.mul(9, 0), 0);
-        // ters: a * inv(a) = 1
+        // Inverse: a * inv(a) = 1.
         for a in [3u8, 7, 100, 200, 255] {
-            let inv = gf.inv(a).expect("sıfır değil");
+            let inv = gf.inv(a).expect("non-zero");
             assert_eq!(gf.mul(a, inv), 1, "a={a}");
         }
         assert!(gf.inv(0).is_none());
@@ -251,16 +268,16 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip() {
-        // 4 veri + 2 parity; tüm tek-kayıp senaryolarında kurtar
-        let mds = CauchyMds::new(4, 2).expect("geçerli");
+        // 4 data plus 2 parity, recovering in every single-loss scenario.
+        let mds = CauchyMds::new(4, 2).expect("valid");
         let data: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 64]).collect();
         let encoded = mds.encode(&data).expect("encode");
         assert_eq!(encoded.len(), 6);
-        // veri shard'ları aynen
+        // The data shards pass through unchanged.
         for i in 0..4 {
             assert_eq!(encoded[i], data[i]);
         }
-        // herhangi 4 hayatta kalan → kurtar
+        // Any 4 survivors recover the data.
         for drop in 0..6 {
             let survivors: Vec<(usize, Vec<u8>)> = encoded
                 .iter()
@@ -268,10 +285,10 @@ mod tests {
                 .filter(|(i, _)| *i != drop)
                 .map(|(i, s)| (i, s.clone()))
                 .collect();
-            let recovered = mds.decode(&survivors).expect("kurtar");
-            assert_eq!(recovered, data, "shard {drop} kaybı kurtarıldı");
+            let recovered = mds.decode(&survivors).expect("recover");
+            assert_eq!(recovered, data, "the loss of shard {drop} was recovered");
         }
-        // 2 kayıp → 4 hayatta → kurtar
+        // 2 lost leaves 4 alive, which recovers.
         let survivors: Vec<(usize, Vec<u8>)> = encoded
             .iter()
             .enumerate()
@@ -279,7 +296,7 @@ mod tests {
             .map(|(i, s)| (i, s.clone()))
             .collect();
         assert_eq!(mds.decode(&survivors).unwrap(), data);
-        // 3 kayıp (3 hayatta < 4) → None
+        // 3 lost leaves 3 alive, below 4, so the result is None.
         let too_few: Vec<(usize, Vec<u8>)> = encoded
             .iter()
             .enumerate()
@@ -294,15 +311,19 @@ mod tests {
         assert!(CauchyMds::new(0, 1).is_none());
         assert!(CauchyMds::new(1, 0).is_none());
         assert!(CauchyMds::new(255, 1).is_none(), "255+1 > 256");
-        // eşit olmayan shard boyutu → None
+        // Unequal shard sizes yield None.
         let mds = CauchyMds::new(2, 1).unwrap();
         assert!(mds.encode(&[vec![1u8; 4], vec![2u8; 5]]).is_none());
-        assert!(mds.encode(&[vec![1u8; 4]]).is_none(), "k adedi şart");
+        assert!(
+            mds.encode(&[vec![1u8; 4]]).is_none(),
+            "exactly k shards are required"
+        );
     }
 
     #[test]
     fn multiplier_vs_v7() {
-        // RS(4,2) = 1.5x; LRC 1.031x ile birlikte V7 EVENODD 1.286x'ten düşük
+        // RS(4,2) is 1.5x; together with LRC at 1.031x that is below V7 EVENODD
+        // at 1.286x.
         let mds = CauchyMds::new(4, 2).unwrap();
         assert!((mds.multiplier() - 1.5).abs() < 0.001);
         assert!((CauchyMds::new(20, 2).unwrap().multiplier() - 1.1).abs() < 0.001);
@@ -311,7 +332,7 @@ mod tests {
         assert_eq!(
             mds.record_hash(),
             CauchyMds::new(4, 2).unwrap().record_hash(),
-            "deterministik"
+            "deterministic"
         );
     }
 }
