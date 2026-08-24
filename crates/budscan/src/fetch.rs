@@ -116,13 +116,13 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
         Target::Bud(manifest_id) => {
             if bytes_match(*manifest_id, &bytes) {
                 Evidence::new().with(Claim::new(
-                    "bud-getirici",
+                    "bud-fetcher",
                     Strength::Verified,
                     "baytlarin ContentId'si manifest_id'ye esit",
                 ))
             } else {
                 Evidence::new().with(Claim::new(
-                    "bud-getirici",
+                    "bud-fetcher",
                     Strength::Refused,
                     &format!(
                         "baytlarin ContentId'si {} ama manifest_id {manifest_id}",
