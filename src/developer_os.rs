@@ -118,27 +118,26 @@ impl ProofFixture {
         Ok(())
     }
 
-    /// Kaydın `Verified` demeye hakkı olduğunu, doğrulanmış bir kanıt zarfına
-    /// bağlayarak kanıtla.
+    /// Prove that the record has the right to say `Verified`, by binding it to
+    /// a verified proof envelope.
     ///
-    /// # Bu neden ayrı bir fonksiyon
+    /// # Why this is a separate function
     ///
-    /// `validate` bir şekil denetimidir: adlar düzgün mü, `proof_hash` sıfır
-    /// değil mi. Bir kaydın kendini `Verified` ilan etmesi için bu kadarı
-    /// yetiyordu ve bu, adın vaat ettiği şey değil: "doğrulandı" bir
-    /// doğrulayıcının çalıştığı anlamına gelir, bir alanın sıfırdan farklı
-    /// olduğu değil.
+    /// `validate` is a shape check: are the names well formed, is `proof_hash`
+    /// non-zero. That was enough for a record to declare itself `Verified`, and
+    /// that is not what the name promises: "verified" means a verifier ran, not
+    /// that a field differs from zero.
     ///
-    /// Doğrulamanın kendisi buradan çağrılmıyor, çünkü manifest bir kayıt
-    /// katmanı: bir kaydı okumak STARK doğrulaması maliyeti doğurmamalı.
-    /// Bunun yerine çağıran, doğrulaması geçmiş zarfın hash'ini buraya
-    /// getirir. Kaydın taşıdığı hash ondan farklıysa kayıt başka bir
-    /// kanıttan söz ediyordur.
+    /// Verification itself is not called from here, because the manifest is a
+    /// record layer: reading a record must not cost a STARK verification.
+    /// Instead the caller brings in the hash of the envelope that passed
+    /// verification. If the hash the record carries differs from it, the record
+    /// is talking about some other proof.
     ///
     /// # Errors
     ///
-    /// Kayıt `Verified` değilse, ya da taşıdığı `proof_hash` doğrulanan
-    /// zarfınkiyle eşleşmiyorsa hata döner.
+    /// When the record is not `Verified`, or when the `proof_hash` it carries
+    /// does not match the verified envelope's.
     pub fn bind_verified(&self, verified_proof_hash: [u8; 32]) -> Result<(), DeveloperOsError> {
         self.validate()?;
         if self.status != ProofFixtureStatus::Verified {
@@ -332,31 +331,32 @@ pub enum DeveloperOsError {
     ZeroRelayerPolicyHash,
     ExternalNetworkAccessNotAllowed,
     NoSdkFeatures,
-    /// Derleyici profili gerçek ISA profil kümesinde değil.
+    /// The compiler profile is not in the real ISA profile set.
     UnknownCompilerProfile {
         value: String,
     },
-    /// `Verified` olmayan bir kayıt doğrulanmış kanıta bağlanmaya çalışıldı.
+    /// A record that is not `Verified` was bound to a verified proof.
     ProofFixtureNotVerified {
         name: String,
     },
-    /// Kaydın taşıdığı kanıt hash'i, doğrulanan zarfınkiyle eşleşmiyor.
+    /// The proof hash the record carries does not match the verified
+    /// envelope's.
     ProofFixtureHashMismatch {
         name: String,
     },
 }
 
-/// Derleyici profili gerçekten var olan bir profili adlandırmalı.
+/// A compiler profile has to name a profile that really exists.
 ///
-/// `validate_label` yalnızca karakter kümesine bakar: boş değil, 64 baytı
-/// aşmıyor, `..` içermiyor. Bu, bir yazım hatasını ya da uydurma bir adı
-/// geçirirdi. Manifest bu alanı `project_id`'ye karıştırdığı için, aynı
-/// paketin doğru yazılmış ve harfleri devrik iki kaydı farklı iki proje
-/// kimliği üretir; ikisi de geçerli görünür ve hangisinin gerçek profille
-/// derlendiği kayıttan anlaşılamaz.
+/// `validate_label` looks only at the character set: not empty, no longer than
+/// 64 bytes, no `..`. That would let a typo or an invented name through. Since
+/// the manifest folds this field into `project_id`, a correctly spelled record
+/// and one with transposed letters produce two different project identities for
+/// the same package; both look valid, and which one was compiled with the real
+/// profile cannot be told from the record.
 ///
-/// Küme `bud_isa::IsaProfile`'in kendisinden geliyor; oraya yeni bir profil
-/// eklendiğinde burada da karşılığı olmalı.
+/// The set comes from `bud_isa::IsaProfile` itself, so a new profile added
+/// there has to have a counterpart here.
 fn validate_compiler_profile(value: &str) -> Result<(), DeveloperOsError> {
     const KNOWN: [&str; 3] = ["production", "experimental", "testing"];
     if KNOWN.contains(&value) {
@@ -445,17 +445,17 @@ mod tests {
         ));
     }
 
-    /// Uydurma bir derleyici profili reddedilmeli.
+    /// An invented compiler profile must be refused.
     ///
-    /// `validate_label` yalnızca karakter kümesine bakıyordu, bu yüzden
-    /// harfleri devrik bir profil adı geçiyordu. Profil `project_id`
-    /// karışımına giriyor: iki farklı yazım, aynı paket için iki farklı
-    /// proje kimliği üretir ve ikisi de geçerli görünür.
+    /// `validate_label` looked only at the character set, so a profile name with
+    /// transposed letters passed. The profile enters the `project_id` mix: two
+    /// spellings produce two different project identities for the same package,
+    /// and both look valid.
     #[test]
     fn a_compiler_profile_outside_the_isa_set_is_refused() {
-        let mut manifest = DeveloperOsManifest::local_standard("proje", [7u8; 32]);
-        // Yazım denetimi kaynak metni tarar, bu yüzden devrik ad burada
-        // harflerden kuruluyor: kapıyı zayıflatmadan hatalı girdi üretmek.
+        let mut manifest = DeveloperOsManifest::local_standard("project", [7u8; 32]);
+        // The spelling gate scans source text, so the transposed name is built
+        // from letters here: producing bad input without weakening the gate.
         let typo = format!("prod{}ution", "c");
         manifest.budl_package.compiler_profile = typo;
         assert!(matches!(
@@ -464,17 +464,17 @@ mod tests {
         ));
 
         for good in ["production", "experimental", "testing"] {
-            let mut ok = DeveloperOsManifest::local_standard("proje", [7u8; 32]);
+            let mut ok = DeveloperOsManifest::local_standard("project", [7u8; 32]);
             ok.budl_package.compiler_profile = good.into();
             ok.validate()
-                .unwrap_or_else(|e| panic!("{good} gecerli bir profil olmali: {e:?}"));
+                .unwrap_or_else(|e| panic!("{good} should be a valid profile: {e:?}"));
         }
     }
 
-    /// Kabul edilen profil kümesi gerçek ISA kümesiyle aynı olmalı.
+    /// The accepted profile set has to equal the real ISA set.
     ///
-    /// Liste elle yazıldığı için `IsaProfile`'a yeni bir varyant eklendiğinde
-    /// burası sessizce eskir. Bu test o anda düşer.
+    /// Because the list is written by hand, it goes stale silently when a new
+    /// variant is added to `IsaProfile`. This test fails at that moment.
     #[test]
     fn the_accepted_profiles_match_the_isa_profiles() {
         for profile in [
@@ -485,7 +485,7 @@ mod tests {
             let name = format!("{profile:?}").to_lowercase();
             assert!(
                 validate_compiler_profile(&name).is_ok(),
-                "ISA profili '{name}' manifest tarafindan taninmiyor"
+                "the ISA profile '{name}' is not recognised by the manifest"
             );
         }
     }
@@ -500,23 +500,23 @@ mod tests {
         }
     }
 
-    /// "Verified" demek, doğrulanmış bir kanıta bağlanabilmek demek olmalı.
+    /// Saying "Verified" should mean being bindable to a verified proof.
     ///
-    /// `validate` yalnızca `proof_hash != 0` bakıyordu, yani bir kayıt hiçbir
-    /// doğrulayıcı çalışmadan kendini doğrulanmış ilan edebiliyordu.
+    /// `validate` looked only at `proof_hash != 0`, so a record could declare
+    /// itself verified without any verifier having run.
     #[test]
     fn a_fixture_bound_to_another_proof_is_refused() {
         let fixture = verified_fixture([9u8; 32]);
         fixture
             .bind_verified([9u8; 32])
-            .expect("kendi kanitina baglanmali");
+            .expect("it should bind to its own proof");
         assert!(matches!(
             fixture.bind_verified([8u8; 32]).unwrap_err(),
             DeveloperOsError::ProofFixtureHashMismatch { .. }
         ));
     }
 
-    /// Beklemedeki bir kayıt doğrulanmış gibi bağlanamaz.
+    /// A pending record cannot be bound as verified.
     #[test]
     fn a_pending_fixture_cannot_be_bound_as_verified() {
         let mut fixture = verified_fixture([9u8; 32]);
