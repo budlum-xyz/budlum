@@ -1,40 +1,40 @@
-# BudL: Dil Spesifikasyonu (v0.1)
+# BudL: Language Specification (v0.1)
 
-> BudZKVM üzerinde çalışan akıllı kontrat dili. STARK-provable, deterministik,
-> gas-metered. Bu doküman dilin gramerini, tiplerini, opcode mapping'ini ve
-> gas modelini tanımlar.
+> The smart contract language running on BudZKVM. STARK-provable, deterministic,
+> gas-metered. This document defines the grammar of the language, its types, the
+> opcode mapping and the gas model.
 >
-> **Sürüm:** v0.1 (2026-07-19) · **Durum:** Draft
-> **Uygulama:** `budzero/bud-compiler/` (lexer + parser + sema + codegen)
+> **Version:** v0.1 (2026-07-19) · **Status:** Draft
+> **Implementation:** `budzero/bud-compiler/` (lexer + parser + sema + codegen)
 
 ---
 
-## 1. Genel Bakış
+## 1. Overview
 
-BudL, BudZKVM (Budlum'un zero-knowledge sanal makinesi) için tasarlanmış bir
-akıllı kontrat dilidir. Özellikleri:
+BudL is a smart contract language designed for BudZKVM (Budlum's zero-knowledge
+virtual machine). Its properties:
 
-- **Deterministik:** Aynı giriş her zaman aynı çıktı (konsensüs gereği).
-- **STARK-provable:** Her BudL programı bir BudZKVM execution trace üretir;
-  bu trace Plonky3 STARK prover tarafından prove edilir.
-- **Gas-metered:** Her opcode'un sabit gas maliyeti vardır.
-- **Storage:** Kalıcı durum (`sread`/`swrite` opcode'ları).
+- **Deterministic:** the same input always gives the same output (a consensus requirement).
+- **STARK-provable:** every BudL program produces a BudZKVM execution trace;
+  that trace is proven by the Plonky3 STARK prover.
+- **Gas-metered:** every opcode has a fixed gas cost.
+- **Storage:** persistent state (the `sread`/`swrite` opcodes).
 - **Cryptography:** Poseidon hash, VerifyMerkle (64-depth SMT, mainnet-gated,
   see "VerifyMerkle soundness" below).
 
 ---
 
-## 2. Dil Graumeri (BNF)
+## 2. Language Grammar (BNF)
 
 ```
 contract     := 'contract' ident '{' contract_body '}'
-             // Her kontrat bir `main` fonksiyonu ICERMELIDIR: codegen
-             // giristeki jump'i ona yamalar. Yoksa derleme
-             // `Codegen error: main function not found` ile durur.
+             // Every contract MUST CONTAIN a `main` function: codegen
+             // patches the entry jump to it. Without one, compilation stops
+             // with `Codegen error: main function not found`.
 contract_body := (struct_decl | fn_decl | storage_decl)*
 
 struct_decl  := 'struct' ident '{' (field_decl)+ '}'
-field_decl   := ident ':' type ','          // trailing comma zorunlu
+field_decl   := ident ':' type ','          // trailing comma required
 
 fn_decl      := 'pub'? 'fn' ident '(' params? ')' ('->' type)? block
 params       := param (',' param)*
@@ -68,38 +68,38 @@ member_access := expr '.' ident
 
 ---
 
-## 3. Tipler
+## 3. Types
 
-| BudL Tipi | Boyut | Açıklama |
+| BudL type | Size | Description |
 |-----------|-------|----------|
-| `u64` | Goldilocks alan elemanı | Tek tamsayı tipi. Aşağıdaki uyarıyı oku |
-| `field` | Goldilocks alan elemanı | `u64` ile aynı temsil, niyeti açık yazar |
+| `u64` | Goldilocks field element | The only integer type. Read the warning below |
+| `field` | Goldilocks field element | Same representation as `u64`, states the intent explicitly |
 | `bool` | 1-bit | Boolean (`true`/`false`) |
-| `Address` | 32-byte, opak | Budlum adresi. Kopyalanır, karşılaştırılır, hash'lenir |
-| `Hash32` | 32-byte, opak | Poseidon/SHA-256 hash. `Address` ile değiştirilemez |
-| `struct` | değişken | Kullanıcı tanımlı kompozit tip |
+| `Address` | 32-byte, opaque | A Budlum address. Copied, compared, hashed |
+| `Hash32` | 32-byte, opaque | A Poseidon/SHA-256 hash. Not interchangeable with `Address` |
+| `struct` | variable | A user-defined composite type |
 
 > [!WARNING]
-> **`u64` bir makine tamsayısı değildir.** BudZKVM Goldilocks cisminde
-> çalışır, yani modül `P = 2^64 - 2^32 + 1`. `u64::MAX` ile `P` arasında
-> yaklaşık 4.29e9 değer vardır ve orada aritmetik sarmaz, **mod P'ye düşer**.
-> Para tutan bir alanda bu fark sessizdir. VM bunu kendi testlerinde
-> kilitliyor (`add_is_goldilocks_field_not_wrapping`).
+> **`u64` is not a machine integer.** BudZKVM works in the Goldilocks field,
+> so the modulus is `P = 2^64 - 2^32 + 1`. There are roughly 4.29e9 values
+> between `u64::MAX` and `P`, and arithmetic there does not wrap, it **falls
+> to mod P**. In a field holding money that difference is silent. The VM locks
+> this down in its own tests (`add_is_goldilocks_field_not_wrapping`).
 
 > [!NOTE]
-> `u32`, `u128` ve işaretli tipler **yok**, ve eksiklik değil kısıt.
-> Bir değerin 32 bite sığdığını kanıtlamak AIR'de range-check sütunları
-> ister, o sütunlar yok; range-check olmadan `u32` yazmak 64-bit bir
-> register'a etiket yapıştırmaktır. Derleyici bu adları kullanan bir
-> programı, nedenini söyleyerek reddeder.
+> `u32`, `u128` and the signed types **do not exist**, and that is a constraint
+> rather than an omission. Proving that a value fits in 32 bits asks for
+> range-check columns in the AIR, and those columns do not exist; writing `u32`
+> without a range check is sticking a label on a 64-bit register. The compiler
+> rejects a program that uses those names, and says why.
 
 > [!NOTE]
-> `Address` ve `Hash32` **opaktır**: `==`, atama ve hash girdisi olmak
-> dışında bir şey yapamazlar. VM register'ı 8 byte, bu değerler 32 byte;
-> aritmetiğe izin vermek dört limb'den birinde işlem yapıp hiçbir şeyin
-> toplamı olmayan bir sayı üretirdi. Derleme hatası verir.
+> `Address` and `Hash32` are **opaque**: they can do nothing beyond `==`,
+> assignment and being a hash input. A VM register is 8 bytes and these values
+> are 32 bytes; allowing arithmetic would operate on one of four limbs and
+> produce a number that is the sum of nothing. It is a compile error.
 
-### Struct Örneği
+### Struct example
 
 ```budl
 contract Token {
@@ -109,10 +109,10 @@ contract Token {
         nonce: u64,
     }
 
-    // `owner` bir `Address`; bir Address degeri BUGUN yalnizca parametre
-    // olarak gelebilir. `msg::sender()` `u64` doner (bkz. bolum 6), ve
-    // struct alan tipleri denetlendigi icin onu dogrudan `owner`'a vermek
-    // derleme hatasidir. Sinir burasi ve ornek onu gizlemiyor.
+    // `owner` is an `Address`; TODAY an Address value can only arrive as a
+    // parameter. `msg::sender()` returns `u64` (see section 6), and because
+    // struct field types are checked, handing it straight to `owner` is a
+    // compile error. That is the boundary, and the example does not hide it.
     fn record(owner: Address, amount: u64) -> u64 {
         let entry = UserData { owner: owner, amount: amount, nonce: 0 };
         return entry.amount;
@@ -125,147 +125,148 @@ contract Token {
 }
 ```
 
-Bu örnek derlenir ve `every_example_in_the_specification_compiles` testi
-bunu her koşuda doğrular. Önceki sürümü derlenmiyordu: `caller()`,
-`sread_u64()` ve `swrite_u64()` diye fonksiyonlar yok, `[u8; 32]` diye bir
-tip yok, ve struct'lar `contract` gövdesinin içinde tanımlanır.
+This example compiles, and the `every_example_in_the_specification_compiles`
+test verifies that on every run. The previous version did not compile: there
+are no functions called `caller()`, `sread_u64()` or `swrite_u64()`, there is
+no type called `[u8; 32]`, and structs are defined inside the `contract` body.
 
 ---
 
 ## 4. Opcode Mapping
 
-BudL ifadeleri BudZKVM ISA opcode'larına derlenir:
+BudL expressions compile to BudZKVM ISA opcodes:
 
-### Aritmetik
+### Arithmetic
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
-| `a + b` | `Add (0x01)` | 1 | Toplama |
-| `a - b` | `Sub (0x02)` | 1 | Çıkarma |
-| `a * b` | `Mul (0x03)` | 3 | Çarpma |
-| `a / b` | `Div (0x04)` | 10 | Bölme |
-| `1 / a` | `Inv (0x05)` | 50 | Çarpımsal ters (field inversion) |
+| `a + b` | `Add (0x01)` | 1 | Addition |
+| `a - b` | `Sub (0x02)` | 1 | Subtraction |
+| `a * b` | `Mul (0x03)` | 3 | Multiplication |
+| `a / b` | `Div (0x04)` | 10 | Division |
+| `1 / a` | `Inv (0x05)` | 50 | Multiplicative inverse (field inversion) |
 
-### Mantık & Karşılaştırma
+### Logic and comparison
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
-| `a && b` | `And (0x06)` | 1 | VE |
-| `a \|\| b` | `Or (0x07)` | 1 | VEYA |
+| `a && b` | `And (0x06)` | 1 | AND |
+| `a \|\| b` | `Or (0x07)` | 1 | OR |
 | `a ^ b` | `Xor (0x08)` | 1 | XOR |
-| `!a` | `Not (0x09)` | 1 | DEĞİL |
-| `a == b` | `Eq (0x0A)` | 1 | Eşit |
-| `a != b` | `Neq (0x0B)` | 1 | Eşit değil |
-| `a < b` | `Lt (0x0C)` | 1 | Küçük |
-| `a > b` | `Gt (0x0D)` | 1 | Büyük |
-| `a <= b` | `Lte (0x0E)` | 1 | Küçük eşit |
-| `a >= b` | `Gte (0x0F)` | 1 | Büyük eşit |
+| `!a` | `Not (0x09)` | 1 | NOT |
+| `a == b` | `Eq (0x0A)` | 1 | Equal |
+| `a != b` | `Neq (0x0B)` | 1 | Not equal |
+| `a < b` | `Lt (0x0C)` | 1 | Less than |
+| `a > b` | `Gt (0x0D)` | 1 | Greater than |
+| `a <= b` | `Lte (0x0E)` | 1 | Less or equal |
+| `a >= b` | `Gte (0x0F)` | 1 | Greater or equal |
 
-### Kontrol Akışı
+### Control flow
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
 | `if/else` | `Jnz (0x11)` | 2 | Jump-if-nonzero |
-| `while` | `Jmp (0x10)` + `Jnz` | 2/iter | Döngü |
-| `fn()` | `Call (0x12)` + `Ret (0x13)` | 5 | Fonksiyon çağrısı |
+| `while` | `Jmp (0x10)` + `Jnz` | 2/iter | Loop |
+| `fn()` | `Call (0x12)` + `Ret (0x13)` | 5 | Function call |
 
-### Bellek & Stack
+### Memory and stack
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
-| `let x = val` | `Push (0x16)` | 1 | Stack'e push |
-| `x` (read) | `Load (0x14)` | 1 | Memory'den load |
-| `x = val` (write) | `Store (0x15)` | 1 | Memory'ye store |
-| `_` (discard) | `Pop (0x17)` | 1 | Stack'ten pop |
+| `let x = val` | `Push (0x16)` | 1 | Push onto the stack |
+| `x` (read) | `Load (0x14)` | 1 | Load from memory |
+| `x = val` (write) | `Store (0x15)` | 1 | Store to memory |
+| `_` (discard) | `Pop (0x17)` | 1 | Pop from the stack |
 
-### Kriptografi
+### Cryptography
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
 | `hash(data)` | `Poseidon (0x19)` | 100 | Poseidon hash |
 | `assert!(cond)` | `Assert (0x18)` | 1 | Assertion (fail = revert) |
 | `verify_merkle(...)` | `VerifyMerkle (0x1E)` | 5000 | 64-depth SMT verification |
 | `verify_inference(...)` | `VerifyInference (0x1F)` | 10000 | AI inference proof verify |
 
-### Depolama
+### Storage
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
-| `sread(key)` | `SRead (0x1B)` | 100 | Storage okuma |
-| `swrite(key, val)` | `SWrite (0x1C)` | 500 | Storage yazma |
+| `sread(key)` | `SRead (0x1B)` | 100 | Storage read |
+| `swrite(key, val)` | `SWrite (0x1C)` | 500 | Storage write |
 
-### Sistem
+### System
 
-| BudL | Opcode | Gas | Açıklama |
+| BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
-| `emit Event(...)` | `Log (0x1A)` | 10 | Event yayını |
-| `syscall(imm)` | `Syscall (0x1D)` | değişken | Host-call (AI request vb.) |
-| `halt` | `Halt (0x00)` | 0 | Program sonu |
+| `emit Event(...)` | `Log (0x1A)` | 10 | Event emission |
+| `syscall(imm)` | `Syscall (0x1D)` | variable | Host call (AI request and so on) |
+| `halt` | `Halt (0x00)` | 0 | End of program |
 
 ---
 
-## 5. Gas Modeli
+## 5. Gas Model
 
-Her opcode'un sabit gas maliyeti vardır (yukarıdaki tablo). Toplam gas =
-tüm opcode'ların gas toplamı. `gas_limit` aşılırsa program revert eder.
+Every opcode has a fixed gas cost (the table above). Total gas = the sum of the
+gas of all opcodes. If `gas_limit` is exceeded the program reverts.
 
 ```
 total_gas = sum(opcode_gas for each executed opcode)
-if total_gas > gas_limit → revert (Out Of Gas)
+if total_gas > gas_limit -> revert (Out Of Gas)
 ```
 
-### Gas Maliyet Kategorileri
+### Gas cost categories
 
-| Kategori | Gas | Örnek |
+| Category | Gas | Example |
 |----------|-----|-------|
-| Arithmetic basit | 1 | Add, Sub, Eq |
-| Arithmetic orta | 3-10 | Mul, Div |
+| Arithmetic, simple | 1 | Add, Sub, Eq |
+| Arithmetic, medium | 3-10 | Mul, Div |
 | Field inversion | 50 | Inv |
 | Hash | 100 | Poseidon |
-| Storage okuma | 100 | SRead |
-| Storage yazma | 500 | SWrite |
+| Storage read | 100 | SRead |
+| Storage write | 500 | SWrite |
 | Merkle verify | 5000 | VerifyMerkle |
 | AI inference | 10000 | VerifyInference |
 
 ---
 
-## 6. Stdlib (Planlanan)
+## 6. Stdlib (planned)
 
-### Bugün çağrılabilen fonksiyonlar
+### Functions callable today
 
-Bu liste derleyicinin gerçekten tanıdığı adlardır. Kaynak:
-`bud-compiler/src/sema.rs` (tip imzası) ve `codegen.rs` (opcode).
+This list is the set of names the compiler actually knows. Sources:
+`bud-compiler/src/sema.rs` (the type signature) and `codegen.rs` (the opcode).
 
-| Fonksiyon | Opcode Mapping | Açıklama |
+| Function | Opcode mapping | Description |
 |-----------|---------------|----------|
-| `poseidon(a: u64, b: u64) -> u64` | Poseidon | İki alan elemanını hash'ler |
-| `msg::sender() -> u64` | Syscall(imm=1) | Çağıran |
-| `msg::nonce() -> u64` | Syscall(imm=3) | Çağıranın nonce'u |
-| `block::number() -> u64` | Syscall(imm=2) | Blok yüksekliği |
-| `verify_merkle_proof(root, leaf, path) -> u64` | VerifyMerkle | 64-derinlik SMT, mainnet'te kapalı |
-| `emit Event(...)` | Log | Event yayını (fonksiyon değil, deyim) |
+| `poseidon(a: u64, b: u64) -> u64` | Poseidon | Hashes two field elements |
+| `msg::sender() -> u64` | Syscall(imm=1) | The caller |
+| `msg::nonce() -> u64` | Syscall(imm=3) | The caller's nonce |
+| `block::number() -> u64` | Syscall(imm=2) | Block height |
+| `verify_merkle_proof(root, leaf, path) -> u64` | VerifyMerkle | 64-depth SMT, gated off on mainnet |
+| `emit Event(...)` | Log | Event emission (a statement, not a function) |
 
-### Planlanan, henüz yok
+### Planned, not there yet
 
-Aşağıdakiler **çağrılamaz**; bir öncekiyle karıştırılmasın diye ayrı tabloda.
-Önceki sürümde ikisi aynı tablodaydı ve spec'in kendi örnekleri olmayan
-fonksiyonları çağırıyordu.
+The following **cannot be called**; they sit in a separate table so they are
+not confused with the previous one. In an earlier version the two were in the
+same table and the spec's own examples called functions that did not exist.
 
-| Fonksiyon | Neden yok |
+| Function | Why it is missing |
 |-----------|-----------|
-| `sread(key)` / `swrite(key, val)` | Opcode var, dilde yüzeyi yok |
-| `timestamp()` | Syscall numarası ayrılmadı |
-| `chain_id()` | Syscall numarası ayrılmadı |
-| `verify_sig(msg, sig, pk)` | Ed25519 doğrulama devresi yok |
-| `hash(bytes)` | Değişken uzunluklu girdi yok (`poseidon` iki alan elemanı alır) |
+| `sread(key)` / `swrite(key, val)` | The opcode exists, the language has no surface for it |
+| `timestamp()` | No syscall number reserved |
+| `chain_id()` | No syscall number reserved |
+| `verify_sig(msg, sig, pk)` | No Ed25519 verification circuit |
+| `hash(bytes)` | No variable-length input (`poseidon` takes two field elements) |
 
-`msg::sender()` bugün `u64` döner, `Address` değil. Adres 32 byte, register
-8 byte; syscall'ın dört limb döndürmesi ve çağrı yerinin bunu bir `Address`
-olarak bağlaması gerekir. O iş yapılana kadar imza dürüst tutuluyor.
+`msg::sender()` returns `u64` today, not `Address`. An address is 32 bytes and
+a register is 8; the syscall would have to return four limbs and the call site
+would have to bind them as an `Address`. Until that work is done the signature
+is kept honest.
 
 ---
 
-## 7. Örnek Program
+## 7. Example program
 
 ```budl
 contract SimpleToken {
@@ -287,17 +288,17 @@ contract SimpleToken {
 }
 ```
 
-Depolama (`sread`/`swrite`) opcode seviyesinde vardır ama **dilde henüz
-yüzeyi yoktur**: `sread_u64` diye bir fonksiyon çağıramazsın. Yukarıdaki
-örnek bu yüzden depolamaya dokunmuyor. §6'daki tablo hangi çağrının gerçek
-olduğunu söyler.
+Storage (`sread`/`swrite`) exists at the opcode level but **has no surface in
+the language yet**: you cannot call a function named `sread_u64`. That is why
+the example above does not touch storage. The table in section 6 says which
+call is real.
 
 ---
 
-## 8. Derleme Akışı
+## 8. Compilation flow
 
 ```
-.bud source → Lexer (tokens) → Parser (AST) → Sema (type check) → Codegen (ISA bytecode)
+.bud source -> Lexer (tokens) -> Parser (AST) -> Sema (type check) -> Codegen (ISA bytecode)
 ```
 
 - **Lexer:** `budzero/bud-compiler/src/lexer.rs`
@@ -306,103 +307,105 @@ olduğunu söyler.
 - **Sema:** `budzero/bud-compiler/src/sema.rs`
 - **Codegen:** `budzero/bud-compiler/src/codegen.rs`
 
-Derlenen bytecode BudZKVM'de çalışır → execution trace → Plonky3 STARK proof.
+The compiled bytecode runs on BudZKVM -> execution trace -> Plonky3 STARK proof.
 
 ---
-## 9. Dallanan Programlar: Program CTL Çokluğu
+## 9. Branching programs: Program CTL multiplicity
 
-`bud-proof` içindeki AIR, bir Program CTL (LogUp) ile CPU satırlarını
-ön-işlenmiş program satırlarına bağlar (`plonky3_air.rs`,
-`preprocessed_trace()` ve Program CTL bloğu).
+The AIR in `bud-proof` links CPU rows to preprocessed program rows with a
+Program CTL (LogUp) (`plonky3_air.rs`, `preprocessed_trace()` and the Program
+CTL block).
 
-Bu eşleme başlangıçta bir **permütasyon** olarak yazılmıştı: ROM tarafı her
-program satırına sabit `1` ağırlık veriyordu, dolayısıyla her komutun tam bir
-kez çalıştırılması gerekiyordu. Dallanma bu varsayımı tanım gereği bozar --
-atlanan dalın komutu hiç çalışmaz, döngü gövdesi ise defalarca çalışır -- ve
-dürüst prover `InvalidProof` alırdı.
+That mapping was originally written as a **permutation**: the ROM side gave
+every program row a fixed weight of `1`, so every instruction had to be
+executed exactly once. Branching breaks that assumption by definition -- the
+instruction on the skipped branch never runs, while a loop body runs many
+times -- and an honest prover would get `InvalidProof`.
 
-Eşleme artık gerçek bir **lookup**'tır. `COL_PROG_MULT` (sütun 753) her ROM
-satırı için o pc'nin trace'te kaç kez çalıştırıldığını taşır; ROM tarafının
-LogUp ağırlığı bu sayıdır. Sıfır çokluk atlanan komuttur, `N` çokluk `N` kez
-dönen döngü gövdesidir, ikisi de dengeyi bozmaz.
+The mapping is now a real **lookup**. `COL_PROG_MULT` (column 753) carries, for
+each ROM row, how many times that pc was executed in the trace; the LogUp
+weight of the ROM side is that count. A zero multiplicity is a skipped
+instruction, a multiplicity of `N` is a loop body that went round `N` times,
+and neither unbalances the argument.
 
-Sağlamlık: çokluk taahhüt edilen ana trace'te durur (doğrulayıcı trace'i
-görmediği için ön-işlenmiş tabloya konamaz) ve
-`prog_mult * (1 - pre_active) = 0` kısıtı programda olmayan bir pc'ye ağırlık
-yazılmasını engeller.
+Soundness: the multiplicity lives in the committed main trace (it cannot be
+put in the preprocessed table because the verifier does not see the trace) and
+the `prog_mult * (1 - pre_active) = 0` constraint prevents weight being written
+to a pc that is not in the program.
 
-| Program şekli | Derleme | Yürütme | Kanıt | Doğrulama |
+| Program shape | Compile | Execute | Prove | Verify |
 |---|---|---|---|---|
-| Düz kod, `emit` dahil | OK | OK | OK | OK |
-| Her komutu çalıştıran sıçrama (`Jmp +1`) | OK | OK | OK | OK |
-| Komut atlayan dal (`if`/`else`) | OK | OK | OK | OK |
-| Döngü (`while`/`for`) | OK | OK | OK | OK |
+| Straight-line code, `emit` included | OK | OK | OK | OK |
+| A jump that executes every instruction (`Jmp +1`) | OK | OK | OK | OK |
+| A branch that skips instructions (`if`/`else`) | OK | OK | OK | OK |
+| A loop (`while`/`for`) | OK | OK | OK | OK |
 
-Kilit testler: `bud-proof/tests/derlenmis_dallanma.rs` derleyicinin ürettiği
-`if` ve `while` çıktısını uçtan uca kanıtlar; `bud-cli/tests/toolchain_end_to_end.rs`
-içindeki `PROVABLE_PROGRAMS` listesi `example_loop.bud` ve `control_flow.bud`
-programlarını içerir.
-
----
-
-## 10. Genel Girdi Sözleşmesi: `event_digest`
-
-`ExecutionPublicInputs::event_digest` bir **hash değildir.** AIR, sekiz adet
-küçük-endian `u32` limb taşıyan toplamsal bir akümülatör bağlar
-(`COL_EVENT_DIGEST_0..8`): her `Log` satırı `rs1` işleneninin düşük 32 bitini
-limb 0'a ekler, limb 1..8 sıfır kalır.
-
-Bu alanı `bud_proof::event_digest_from_events()` ile üretin. `keccak256(events)`
-yazmak, doğrulaması her zaman `OodEvaluationMismatch` ile başarısız olan bir
-kanıt üretir: `bud-cli` tam olarak bunu yapıyordu ve `prove`/`run` komutları
-hiç çalışmıyordu.
+Locking tests: `bud-proof/tests/compiled_branching.rs` proves the compiler's
+`if` and `while` output end to end; the `PROVABLE_PROGRAMS` list in
+`bud-cli/tests/toolchain_end_to_end.rs` includes the `example_loop.bud` and
+`control_flow.bud` programs.
 
 ---
-## 11. Struct Bellek Yerleşimi ve Host Bellek Tabanı
 
-Derleyici prologu heap işaretçisini (`r31`) `bud_compiler::HEAP_BASE`
-(**4096**) adresine kurar; struct literal'leri bu adresin üzerine tahsis edilir.
+## 10. The public input contract: `event_digest`
 
-Bu yüzden BudZKVM'i barındıran her host, VM belleğini en az
-`bud_compiler::MIN_VM_MEMORY_BYTES` (**8192**) olarak açmalıdır. Daha küçük bir
-bellek, struct kullanan **her** sözleşmede ilk tahsiste `InvalidMemoryAccess`
-verir.
+`ExecutionPublicInputs::event_digest` is **not a hash.** The AIR binds an
+additive accumulator carrying eight little-endian `u32` limbs
+(`COL_EVENT_DIGEST_0..8`): every `Log` row adds the low 32 bits of its `rs1`
+operand to limb 0, and limbs 1..8 stay zero.
 
-`bud-cli` bu değeri `1024` olarak kullanıyordu; derleyicinin kendi testleri
-`8192` kullandığı için hata yalnızca CLI üzerinden görülüyordu. Üretim yolu
-(`src/execution/zkvm.rs`) zaten `8192` kullanıyor.
-
-Sınır `bud-cli/tests/toolchain_end_to_end.rs` içindeki üç testle kilitlidir:
-struct sözleşmesi derlenip **çalıştırılır** (doğru sonucu üretir), taban
-ilişkisi (`MIN > HEAP_BASE`) doğrulanır ve `1024` baytlık bir VM'in hâlâ hata
-vermesi kanarya olarak tutulur.
-
-**Not:** struct kullanan sözleşmeler bir yardımcı fonksiyon + prolog üretir ve
-`Call`/`Ret` şekli en az bir komutu yürütülmeden bırakır. §9'daki Program CTL
-çokluk sütunu bu durumu artık karşıladığı için atlanan komut kanıtlamayı
-engellemez.
+Produce this field with `bud_proof::event_digest_from_events()`. Writing
+`keccak256(events)` produces a proof whose verification always fails with
+`OodEvaluationMismatch`: `bud-cli` was doing exactly that, and its `prove`/`run`
+commands never worked.
 
 ---
-## 12. AIR Kanıt Kapsamı: Opcode Matrisi
+## 11. Struct memory layout and the host memory base
 
-`bud-proof` içindeki AIR tüm opcode'ları kısıtlar, ancak **kısıtlanmış olmak
-kanıtlanmış olmak değildir.** Ölçüm sırasında dört opcode'un hiçbir prover
-testinde geçmediği bulundu:
+The compiler prologue sets the heap pointer (`r31`) to the address
+`bud_compiler::HEAP_BASE` (**4096**); struct literals are allocated above that
+address.
 
-| Opcode | Önceki durum | Neden önemli |
+Therefore every host that embeds BudZKVM must open the VM memory to at least
+`bud_compiler::MIN_VM_MEMORY_BYTES` (**8192**). A smaller memory gives
+`InvalidMemoryAccess` on the first allocation in **every** contract that uses a
+struct.
+
+`bud-cli` was using `1024` for this value; because the compiler's own tests use
+`8192`, the bug was only visible through the CLI. The production path
+(`src/execution/zkvm.rs`) already uses `8192`.
+
+The boundary is locked by three tests in
+`bud-cli/tests/toolchain_end_to_end.rs`: a struct contract is compiled and
+**executed** (it produces the right result), the base relationship
+(`MIN > HEAP_BASE`) is verified, and a `1024`-byte VM still erroring is kept as
+a canary.
+
+**Note:** contracts that use structs emit a helper function plus a prologue,
+and the `Call`/`Ret` shape leaves at least one instruction unexecuted. Because
+the Program CTL multiplicity column in section 9 now covers that case, a
+skipped instruction does not block proving.
+
+---
+## 12. AIR proof coverage: the opcode matrix
+
+The AIR in `bud-proof` constrains every opcode, but **being constrained is not
+the same as being proven.** During measurement four opcodes were found to
+appear in no prover test:
+
+| Opcode | Previous state | Why it matters |
 |---|---|---|
-| `Store` (0x15) | kanıt testi yok | struct alan yazımı buraya iner |
-| `Assert` (0x18) | kanıt testi yok | `constrain(...)` buraya iner |
-| `Jmp` (0x10) | kanıt testi yok | tüm kontrol akışının temeli |
-| `Syscall` (0x1D) | kanıt testi yok | `caller()`, `block_height()` buraya iner |
+| `Store` (0x15) | no proof test | struct field writes land here |
+| `Assert` (0x18) | no proof test | `constrain(...)` lands here |
+| `Jmp` (0x10) | no proof test | the basis of all control flow |
+| `Syscall` (0x1D) | no proof test | `caller()`, `block_height()` land here |
 
-Dördü de artık `plonky3_prover.rs` içinde prove→verify round-trip ile
-kapsanmıştır. Yeni bir opcode eklendiğinde aynı şey yapılmalıdır: AIR kısıtı
-yazmak yeterli değil, o opcode'u içeren bir programın kanıtı üretilip
-doğrulanmalıdır.
+All four are now covered by a prove-verify round trip in `plonky3_prover.rs`.
+The same must be done when a new opcode is added: writing an AIR constraint is
+not enough, a proof of a program containing that opcode must be produced and
+verified.
 
 ---
-
 
 ## VerifyMerkle soundness
 

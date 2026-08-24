@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 
 use crate::bud_format_r3fix::{Codec, R3Tarif};
-use crate::bud_format_tarif::TarifKaydi;
+use crate::bud_format_recipe_record::TarifKaydi;
 
 /// K4 kapısı: üretim tarifi kaydı 120 B sınırındadır (şartname §K4).
 pub fn tarif_kaydi_120b_k4(t: &TarifKaydi) -> bool {
@@ -114,13 +114,13 @@ pub struct UcSayacK14b {
 
 /// K14b hesabı: tarif kirası + step tabanı + commitment digesti tek yerde.
 pub fn uc_sayac_k14b(t: &TarifKaydi, erasure: f64, compression_ratio: f64) -> UcSayacK14b {
-    let kira = crate::bud_format_tarif::kira(t, erasure, compression_ratio);
+    let kira = crate::bud_format_recipe_record::kira(t, erasure, compression_ratio);
     let gen = match t {
         TarifKaydi::Uretim { generator, .. } => *generator,
         TarifKaydi::Govdeli { .. } => 99, // gövde tarifinde step tavanı (K14b)
     };
-    let step = crate::bud_format_tarif::step_tabani(gen);
-    let commitment = crate::bud_format_tarif::tarif_digest(t);
+    let step = crate::bud_format_recipe_record::step_tabani(gen);
+    let commitment = crate::bud_format_recipe_record::tarif_digest(t);
     UcSayacK14b {
         depocu_kira_usd: kira,
         validatur_step_usd: step,
@@ -147,7 +147,7 @@ pub fn qr_turev_buyume_siniri(turev_len: usize, orijinal_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bud_format_tarif::TarifKaydi;
+    use crate::bud_format_recipe_record::TarifKaydi;
 
     #[test]
     fn k4_tarif_kaydi_120b_sinirinda() {

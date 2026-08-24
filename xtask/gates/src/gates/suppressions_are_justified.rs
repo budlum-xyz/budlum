@@ -147,13 +147,13 @@ const BUDGETS: &[Budget] = &[
         reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
     },
     Budget {
-        file: "budzero/bud-proof/tests/derlenmis_dallanma.rs",
+        file: "budzero/bud-proof/tests/compiled_branching.rs",
         lint: "clippy::unwrap_used",
         count: 1,
         reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
     },
     Budget {
-        file: "budzero/bud-proof/tests/derlenmis_dallanma.rs",
+        file: "budzero/bud-proof/tests/compiled_branching.rs",
         lint: "clippy::expect_used",
         count: 1,
         reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
