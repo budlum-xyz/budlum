@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   sbom-attestation:
-    name: SBOM + imzali beyan
+    name: SBOM + a signed attestation
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -82,7 +82,7 @@ jobs:
           print(f"canary OK: CycloneDX, {len(comps)} components.")
           PY
 
-      - name: SBOM'u imzala (Sigstore uzerinden beyan)
+      - name: Sign the SBOM (an attestation through Sigstore)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: sbom.cdx.json

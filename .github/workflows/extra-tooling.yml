@@ -218,7 +218,7 @@ jobs:
           echo "cargo machete: $scanned manifest tarandi."
           exit "$fail"
 
-      - name: Shear raporu (ikinci sezgi)
+      - name: Shear report (a second opinion)
         continue-on-error: true
         run: cargo shear
 
@@ -351,7 +351,7 @@ jobs:
     # sits on a `#[kani::proof]`: otherwise the marker lowers the expected count
     # without excluding any harness.
     #
-    # `--harness-timeout` denendi ve geri alindi: `-Z unstable-options`
+    # `--harness-timeout` was tried and reverted: `-Z unstable-options`
     # istiyor. Bir kapiyi kararsiz bir bayraga baglamak, Kani'nin bir sonraki
     # would mean the gate breaking silently in the next version.
     timeout-minutes: 25
@@ -385,7 +385,7 @@ jobs:
       # `--output-format terse` gives one VERIFICATION result per line; the gate
       # counts them and compares against the harness count in the source.
       # Which harnesses run is read from the source rather than repeated here,
-      # yazilmaz: iki liste birbirinden sessizce ayrilabilir. Kani 0.67'de
+      # is not written down: the two lists can drift apart silently. The evidence is at 0.67
       # `--exclude-harness` yok, `--harness` var ve tekrarlanabiliyor, o
       # so the selection is by inclusion rather than exclusion.
       #

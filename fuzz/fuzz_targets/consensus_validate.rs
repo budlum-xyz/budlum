@@ -1,9 +1,9 @@
 #![no_main]
 
-// NOT: BlockHeader struct'ına yeni alan eklendiğinde bu hedef E0063 ile
-// Derlenemez. Alanlar burada TAM olarak doldurulmalıdır, CI'daki
-// "Fuzz Quick" kapısı bunu yakalar. (2026-07-16'da
-// Chain_id/nonce/epoch/slot/vrf_* eklendiğinde hedef çürümüştü.)
+// NOTE: when a new field is added to the BlockHeader struct this target fails
+// to compile with E0063. The fields must be filled in COMPLETELY here, and the
+// "Fuzz Quick" gate in CI catches it. (The target had rotted on 2026-07-16 when
+// chain_id/nonce/epoch/slot/vrf_* were added.)
 
 use budlum_core::core::address::Address;
 use budlum_core::core::block::BlockHeader;

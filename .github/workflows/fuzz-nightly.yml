@@ -57,7 +57,7 @@ jobs:
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
           toolchain: nightly
-      - name: Override rust-toolchain.toml pin (nightly zorunlu)
+      - name: Override the rust-toolchain.toml pin (nightly is required)
         run: rustup override set nightly
       # Install protoc from the runner's package index rather than
       # arduino/setup-protoc. That action resolves the release through an
