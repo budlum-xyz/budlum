@@ -1,32 +1,31 @@
-//! Depolama PACT baglamasi: tarif + rezidüel taahhüdü ve kayit koku.
+//! Storage PACT binding: recipe + residual commitment and the registry root.
 //!
-//! # Nereden cagriliyor
+//! # Where it is called from
 //!
-//! `QuantumAccountRegistry::register_with_pacts` bir hesabin `pact_root`
-//! alanini buradaki kayit defterinin koküyle karsilastirir
-//! (`src/account_abstraction/registry.rs`). Uzun sure oyle degildi: hesap
-//! bir `pact_root` tasiyordu ama o kokün gercek bir pact kumesini
-//! adlandirdigini hicbir sey denetlemiyordu, dolayisiyla alan bir iddiaydi,
-//! bir baglama degil.
+//! `QuantumAccountRegistry::register_with_pacts` compares an account's
+//! `pact_root` field against the root of the registry defined here
+//! (`src/account_abstraction/registry.rs`). For a long time it did not: an
+//! account carried a `pact_root`, but nothing checked that the root named a
+//! real set of pacts, so the field was a claim rather than a binding.
 //!
-//! # Ne dogrulanir
+//! # What is verified
 //!
-//! Bir pact'in taahhüdü kendi yükünün hash'i olmali (`verify_commitment`),
-//! ve kayit defterinin koku icindeki pact'lerden yeniden hesaplanabilmeli
-//! (`verify_root`). Ikincisi olmadan bir kok, hicbir pact icermeyen bir
-//! kumeyle de eslesebilirdi.
+//! A pact's commitment must be the hash of its own payload
+//! (`verify_commitment`), and the registry root must be recomputable from the
+//! pacts it contains (`verify_root`). Without the second one a root could also
+//! match a set that contains no pacts at all.
 
 use sha3::{Digest, Sha3_256};
 
 #[derive(Debug, Clone)]
 pub struct Pact {
     pub id: [u8; 32],
-    pub tarif_hash: [u8; 32],
-    pub tohum: [u8; 32],
+    pub recipe_hash: [u8; 32],
+    pub seed: [u8; 32],
     pub commitment: [u8; 32],
-    pub reziduel_commitment: [u8; 32],
-    pub bayt_butcesi: u64,
-    pub mod_flag: u8, // 0=saf üretim, 1=tarif+rezidüel, 2=rezidüel-yalnız
+    pub residual_commitment: [u8; 32],
+    pub byte_budget: u64,
+    pub mode_flag: u8, // 0=pure production, 1=recipe+residual, 2=residual-only
 }
 
 impl Pact {
@@ -39,27 +38,27 @@ impl Pact {
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(
         id: [u8; 32],
-        tarif_hash: [u8; 32],
-        tohum: [u8; 32],
+        recipe_hash: [u8; 32],
+        seed: [u8; 32],
         commitment: [u8; 32],
-        reziduel: [u8; 32],
-        butce: u64,
-        mod_flag: u8,
+        residual: [u8; 32],
+        budget: u64,
+        mode_flag: u8,
     ) -> Result<Self, &'static str> {
-        if butce > 128 {
-            return Err("KQ-STORAGE-PACT: bayt_butcesi >128");
+        if budget > 128 {
+            return Err("KQ-STORAGE-PACT: byte_budget >128");
         }
-        if mod_flag > 2 {
-            return Err("KQ-STORAGE-PACT: mod_flag >2");
+        if mode_flag > 2 {
+            return Err("KQ-STORAGE-PACT: mode_flag >2");
         }
         Ok(Self {
             id,
-            tarif_hash,
-            tohum,
+            recipe_hash,
+            seed,
             commitment,
-            reziduel_commitment: reziduel,
-            bayt_butcesi: butce,
-            mod_flag,
+            residual_commitment: residual,
+            byte_budget: budget,
+            mode_flag,
         })
     }
 
@@ -78,14 +77,14 @@ impl Pact {
 
     #[must_use]
     pub fn is_pure_production(&self) -> bool {
-        self.mod_flag == 0 && self.reziduel_commitment == [0u8; 32]
+        self.mode_flag == 0 && self.residual_commitment == [0u8; 32]
     }
     #[must_use]
     // Not const: the nightly jobs (udeps, determinism) reject trait calls in
     // const fns with E0658; this fn was reverted from const in c72b911.
     #[allow(clippy::missing_const_for_fn)]
     pub fn is_residual_only(&self) -> bool {
-        self.mod_flag == 2
+        self.mode_flag == 2
     }
 }
 
@@ -122,14 +121,15 @@ impl PactRegistry {
         self.root = self.computed_root();
     }
 
-    /// Kayittaki pact'lerden kökü hesapla, saklanan kökü okumadan.
+    /// Compute the root from the pacts in the registry, without reading the
+    /// stored root.
     ///
-    /// Boş küme sıfıra taahhüt eder. `new()` sıfır kök ile başlıyordu ama
-    /// hesap `H(etiket)` veriyordu: taze bir kayıt kendi `verify_root`'undan
-    /// geçemiyordu. İki cevaptan sıfır seçildi, çünkü hesap tarafında sıfır
-    /// `pact_root` zaten "pact yok" demek (`kq_storage_bound` onu böyle
-    /// okuyor); boş kümeye ayrı bir etiket hash'i vermek aynı durumu iki
-    /// farklı bayt dizisiyle anlatırdı.
+    /// The empty set commits to zero. `new()` started from a zero root while
+    /// the computation returned `H(label)`: a fresh registry could not pass its
+    /// own `verify_root`. Zero was chosen out of the two answers because on the
+    /// account side a zero `pact_root` already means "no pacts"
+    /// (`kq_storage_bound` reads it that way); giving the empty set a separate
+    /// label hash would describe one state with two different byte strings.
     #[must_use]
     pub fn computed_root(&self) -> [u8; 32] {
         if self.pacts.is_empty() {
@@ -199,10 +199,10 @@ mod tests {
         assert!(pact.verify_commitment(payload).is_ok());
         assert!(pact.is_pure_production());
     }
-    /// Taze bir kayit kendi kokuyle tutarli olmali.
+    /// A fresh registry has to agree with its own root.
     ///
-    /// `new()` sifir kok ile basliyor; hesap ondan farkli bir deger
-    /// donseydi bos bir kayit kendi `verify_root`'undan gecemezdi.
+    /// `new()` starts from a zero root; if the computation returned anything
+    /// else, an empty registry could not pass its own `verify_root`.
     #[test]
     fn an_empty_registry_agrees_with_its_own_root() {
         let reg = PactRegistry::new();
@@ -210,28 +210,28 @@ mod tests {
         assert!(reg.verify_root().is_ok());
     }
 
-    /// Bir pact eklenince kok sifirdan cikmali.
+    /// Adding a pact has to move the root off zero.
     #[test]
     fn adding_a_pact_moves_the_root_off_zero() {
         let mut reg = PactRegistry::new();
         reg.add_pact(
             Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
-                .expect("gecerli pact"),
+                .expect("valid pact"),
         );
         assert_ne!(
             reg.root, [0u8; 32],
-            "dolu kume bos kumeyle ayni kokte olamaz"
+            "a non-empty set cannot share a root with the empty set"
         );
         assert!(reg.verify_root().is_ok());
     }
 
-    /// Elle bozulmus bir kok reddedilmeli.
+    /// A hand-edited root has to be refused.
     #[test]
     fn a_hand_edited_root_is_refused() {
         let mut reg = PactRegistry::new();
         reg.add_pact(
             Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
-                .expect("gecerli pact"),
+                .expect("valid pact"),
         );
         reg.root = [0xAA; 32];
         assert!(reg.verify_root().is_err());
