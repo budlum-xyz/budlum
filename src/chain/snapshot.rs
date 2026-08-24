@@ -264,10 +264,10 @@ impl PruningManager {
         snapshots.sort_by_key(|entry| {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
-        // Onarımı (2026-07-19,): tek-şans yüklemesi kaldırıldı -
-        // Bozuk aday karantinaya gider ve bir SONRAKİ eski aday denenir; V2-şema
-        // Dosyalar ("schema_version") v1 probe'unda karantinasız ISKART edilir
-        // (çapraz-şema gölgeleme giderildi: geçerli V2 artık imha edilmiyor).
+        // Repair (2026-07-19): single-shot loading removed -
+        // a corrupt candidate goes to quarantine and the NEXT older candidate is tried; V2-schema
+        // files ("schema_version") are DISCARDED without quarantine in the v1 probe
+        // (cross-schema shadowing fixed: a valid V2 is no longer destroyed).
         let mut quarantined_any = false;
         for entry in &snapshots {
             let path = entry.path();
@@ -277,7 +277,7 @@ impl PruningManager {
             };
             if data.contains("\"schema_version\"") {
                 tracing::warn!(
-                    "V1 loader V2-schema dosyasini atliyor (karantina YOK): {}",
+                    "V1 loader skips a V2-schema file (NO quarantine): {}",
                     path.display()
                 );
                 continue;
@@ -311,7 +311,7 @@ impl PruningManager {
             return Ok(Some(snapshot));
         }
         if quarantined_any {
-            return Err("Tum V1 snapshot adaylari bozuk (karantinalandi)".to_string());
+            return Err("All V1 snapshot candidates are corrupt (quarantined)".to_string());
         }
         Ok(None)
     }
@@ -361,8 +361,8 @@ impl PruningManager {
         snapshots.sort_by_key(|entry| {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
-        // Onarımı (2026-07-19,): tek-şans yüklemesi kaldırıldı -
-        // Bozuk aday karantinaya gider ve bir sonraki eski aday denenir.
+        // Repair (2026-07-19): single-shot loading removed -
+        // a corrupt candidate goes to quarantine and the next older candidate is tried.
         let mut quarantined_any = false;
         for entry in &snapshots {
             let path = entry.path();
@@ -399,7 +399,7 @@ impl PruningManager {
             return Ok(Some(snapshot));
         }
         if quarantined_any {
-            return Err("Tum V2 snapshot adaylari bozuk (karantinalandi)".to_string());
+            return Err("All V2 snapshot candidates are corrupt (quarantined)".to_string());
         }
         Ok(None)
     }
@@ -549,36 +549,36 @@ pub struct StateSnapshotV2 {
     pub proof_market: Option<crate::settlement::ProofMarketState>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
-    // RFC_GAP1 §7 (: Ed25519 tek-imza + trust-list + AllowUnsigned geçişi).
-    // `#[serde(default)]` → legacy schema-3 snapshot'lar (alan yok) None ile yüklenir.
-    /// Snapshot'ı imzalayan party'nin Ed25519 pubkey'i (trust-list'ten). None =
-    /// AllowUnsigned (devnet / legacy-import geçiş penceresi).
+    // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
+    // `#[serde(default)]` -> legacy schema-3 snapshots (no field) load as None.
+    /// Ed25519 public key of the party signing the snapshot (from the trust list). None =
+    /// AllowUnsigned (devnet / legacy-import transition window).
     #[serde(default)]
     pub manifest_signer: Option<[u8; 32]>,
-    /// `sign(calculate_digest)` Ed25519 imzası (64 byte). None = AllowUnsigned.
+    /// `sign(calculate_digest)` Ed25519 signature (64 bytes). None = AllowUnsigned.
     #[serde(default)]
     pub manifest_signature: Option<Vec<u8>>,
-    /// Trust policy: AllowUnsigned (devnet/geçiş) | RequireSigned (production).
-    /// Default AllowUnsigned → backward-compat (legacy snapshot'lar yüklenir).
+    /// Trust policy: AllowUnsigned (devnet/transition) | RequireSigned (production).
+    /// Default AllowUnsigned -> backward compatible (legacy snapshots load).
     #[serde(default)]
     pub trust_policy: SnapshotTrustPolicy,
 
     pub snapshot_hash: String,
 }
 
-/// C4 trust policy (RFC_GAP1 §7.1: C-hibrit Görev-1 trust modeli).
+/// C4 trust policy (RFC_GAP1 section 7.1: C-hybrid Task-1 trust model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SnapshotTrustPolicy {
-    /// İmza opsiyonel: digest eşleşiyorsa OK (devnet / legacy-import penceresi).
-    /// Mainnet build'inde derleme-uyarısı (production'da RequireSigned).
+    /// Signature optional: OK if the digest matches (devnet / legacy-import window).
+    /// Compile warning in a mainnet build (RequireSigned in production).
     #[default]
     AllowUnsigned,
-    /// İmza ZORUNLU: manifest_signer trust-list'te + Ed25519 verify geçmeli.
-    /// İmzasız/bozuk snapshot → `verify_authentic` Err → loader karantina.
+    /// Signature REQUIRED: manifest_signer in the trust list + Ed25519 verify must pass.
+    /// Unsigned/corrupt snapshot -> `verify_authentic` Err -> loader quarantine.
     RequireSigned,
 }
 
-/// C4 manifest-authenticity hatası (loader karantina sınıfı).
+/// C4 manifest authenticity error (loader quarantine class).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotAuthError {
     DigestMismatch,
@@ -639,7 +639,7 @@ fn hash_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, val: 
 }
 
 /// C3 helper: `Option<T>` → tag (0=None / 1=Some) + serialize.
-/// None ve Some(default) farklı hash verir (forgery yüzeyi kapalı).
+/// None and Some(default) hash differently (the forgery surface is closed).
 fn hash_opt_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, opt: &Option<T>) {
     match opt {
         None => hasher.update([0u8]),
@@ -722,7 +722,7 @@ impl StateSnapshotV2 {
             liveness: Some(account_state.liveness.clone()),
             invalid_votes: Some(account_state.invalid_votes.clone()),
             // C4: default AllowUnsigned (devnet). Production loader signer
-            // Enjekte eder + trust_policy=RequireSigned set eder.
+            // injects it and sets trust_policy=RequireSigned.
             manifest_signer: None,
             manifest_signature: None,
             trust_policy: SnapshotTrustPolicy::AllowUnsigned,
@@ -732,15 +732,15 @@ impl StateSnapshotV2 {
         snapshot
     }
 
-    /// (P2 schema-4) ham digest. schema_version'a göre dallanır:
-    /// - `< 4`: legacy digest (backward-compat - eski disk snapshot'ları verify).
-    /// - `>= 4`: genişletilmiş digest (`budlum.snapshot.v4` prefix + 15
-    ///   Önce-hash'lenmemiş alan). Forgery surface kapanması (RFC_GAP1 §"Ek eksik").
+    /// (P2 schema-4) raw digest. Branches on schema_version:
+    /// - `< 4`: legacy digest (backward compatible - verifies old on-disk snapshots).
+    /// - `>= 4`: extended digest (`budlum.snapshot.v4` prefix + 15
+    ///   previously unhashed fields). Closes the forgery surface (RFC_GAP1, "remaining gaps").
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4, f40f5f6 dersi:
-        // Tek-taraflı root değişikliği YASAK - prefix ile koordineli bump).
+        // A one-sided root change is FORBIDDEN - bump it together with the prefix).
         if self.schema_version >= 4 {
             hasher.update(b"budlum.snapshot.v4");
         }
@@ -816,8 +816,8 @@ impl StateSnapshotV2 {
         hasher.update(self.settlement_root);
         hasher.update(self.global_header_summary);
 
-        // --- C3: schema-4'te önce-hash'lenmemiş 15 alan (forgery surface
-        //     Kapanması). Legacy (schema<4) bu bloğu atlar → backward-compat. ---
+        // --- C3: the 15 previously unhashed fields in schema-4 (closing the
+        //     forgery surface). Legacy (schema<4) skips this block -> backward compatible. ---
         if self.schema_version >= 4 {
             hash_serializable(&mut hasher, &self.tokenomics);
             hash_opt_serializable(&mut hasher, &self.tokenomics_burn);
@@ -874,7 +874,7 @@ impl StateSnapshotV2 {
             // peer can edit without invalidating the snapshot, which for this
             // one means reassigning work or rewriting what is owed.
             hash_opt_serializable(&mut hasher, &self.proof_market);
-            // Finality_certificates: Vec - len-prefix + her elem serialize.
+            // finality_certificates: Vec - length prefix + serialize each element.
             let fc_bytes = bincode::serialize(&self.finality_certificates)
                 .unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec());
             hasher.update((fc_bytes.len() as u64).to_le_bytes());
@@ -905,14 +905,14 @@ impl StateSnapshotV2 {
         self.snapshot_hash == self.calculate_hash()
     }
 
-    /// C4: manifest-authenticity doğrulaması (RFC_GAP1 §7.1 Görev-1).
+    /// C4: manifest authenticity verification (RFC_GAP1 section 7.1, Task-1).
     ///
-    /// - `AllowUnsigned` → `verify` (digest) geçiyorsa OK (signer/sig yok kabul).
-    /// - `RequireSigned` → `manifest_signer` set + `manifest_signature` geçerli
-    ///   Ed25519(`calculate_digest`, signer) + signer trust-list'te olmalı.
+    /// - `AllowUnsigned` -> OK if `verify` (digest) passes (missing signer/sig accepted).
+    /// - `RequireSigned` -> `manifest_signer` set + a valid `manifest_signature`
+    ///   Ed25519(`calculate_digest`, signer) + the signer must be in the trust list.
     ///
     /// `trust_list` = None → herhangi bir signer kabul (test/devnet); production'da
-    /// Loader config'ten trust-list verir (genesis bundle + CLI override, §7.2).
+    /// The loader supplies the trust list from config (genesis bundle + CLI override, section 7.2).
     pub fn verify_authentic(
         &self,
         trust_list: Option<&[[u8; 32]]>,
@@ -1009,10 +1009,10 @@ impl StateSnapshotV2 {
         let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
-        // C6 legacy-import (RFC_GAP1 §7.3 AllowUnsigned geçiş penceresi):
+        // C6 legacy import (RFC_GAP1 section 7.3, AllowUnsigned transition window):
         // Schema<4 snapshot'lar eski digest ile geldi; yeni kod schema-4 digest
-        // Verir. snapshot_hash'i recompute + AllowUnsigned (devnet geçişi).
-        // RequireSigned production loader imza bekler (sign_manifest).
+        // recomputes snapshot_hash + AllowUnsigned (devnet transition).
+        // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
@@ -1020,7 +1020,7 @@ impl StateSnapshotV2 {
         Ok(snapshot)
     }
 
-    /// C4: snapshot'ı imzala (production loader/HSM signer).
+    /// C4: sign the snapshot (production loader / HSM signer).
     ///
     /// Order matters here, and it is the reason this function is not three
     /// lines. `trust_policy` is inside the digest, so setting it after
@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn test_gap2_schema4_digest_includes_bns_field() {
         // Pin: schema-4 digest bns_registry'yi kapsar. None vs Some(default)
-        // Farklı tag (0 vs 1) → farklı digest (forgery surface kapalı).
+        // A different tag (0 vs 1) -> a different digest (forgery surface closed).
         let account_state = AccountState::new();
         let mut s1 = StateSnapshotV2::from_state(
             &account_state,
@@ -1409,7 +1409,7 @@ mod tests {
         );
         s1.schema_version = 4;
         let s2 = s1.clone();
-        s1.bns_registry = None; // None vs Some(default) → farklı tag
+        s1.bns_registry = None; // None vs Some(default) -> a different tag
         assert_ne!(s1.calculate_digest(), s2.calculate_digest());
     }
 
@@ -1704,15 +1704,15 @@ mod tests {
     }
     // --- Borc G: gercek eski-blob goc testleri (schema 2 -> 4 ve 3 -> 4) ---
     //
-    // Buraya kadarki goc testleri schema-4 uretimini alip surum numarasini
-    // elle geri sariyordu: blob her yeni alani TASIYORDU, yani
+    // The migration tests so far took a schema-4 production and rewound the version
+    // number by hand: the blob CARRIED every new field, so
     // `serde(default)` dolgusu hic sinanmiyordu. Gercek bir schema-2/3 disk
-    // kaydinda bu alanlar bayt olarak yoktur; gocun vaat ettigi sey tam olarak
+    // in a real record those fields are not present as bytes; what migration promises is exactly
     // o yokluga karsi davranistir. Iki test blobu bu yuzden `serde_json`
     // ameliyatiyla kurar: kaynak blobda alan anahtari HIC yok.
-    // Kirmizi kaniti izole kasada alindi (pd kasasi): bump satirsiz ice
-    // aktarici "goc yapildi" raporu verirken surumu 2'de birakti ve test
-    // dustu; bump'li varyant ayni testi gecirdi.
+    // The red evidence was taken in an isolated vault (the pd vault): an importer without the bump line
+    // reported "migration done" while leaving the version at 2 and the test
+    // failed; the variant with the bump passed the same test.
 
     /// Test kurulumunda kullanilan ortak parametre paketi.
     fn legacy_params(height: u64) -> StateSnapshotV2Params {
@@ -1728,9 +1728,9 @@ mod tests {
     }
 
     /// `snapshot`'i eski bir disk blobu gibi goster: verilen anahtarlari
-    /// serilestirilmis kayittan SILER ve surum numarasini geriye sarar.
-    /// Silinen anahtar blobda bayt olarak bulunmaz; `serde(default)` dolgusu
-    /// ancak boyle bir blobla sinanir.
+    /// DELETES it from the serialized record and rewinds the version number.
+    /// The deleted key is absent from the blob as bytes; the `serde(default)` fill-in
+    /// can only be exercised with such a blob.
     fn as_legacy_blob(snapshot: &StateSnapshotV2, drop_keys: &[&str], version: u32) -> Vec<u8> {
         let mut value = serde_json::to_value(snapshot).unwrap();
         let obj = value.as_object_mut().unwrap();
@@ -1744,7 +1744,7 @@ mod tests {
         serde_json::to_vec(&value).unwrap()
     }
 
-    /// schema-3 ve schema-4 dalgasinin tum anahtarlari (blobda `hub` olarak
+    /// all keys of the schema-3 and schema-4 wave (stored in the blob as `hub`
     /// serilestirilen `budlumxyz` dahil).
     const SCHEMA3_AND_4_KEYS: &[&str] = &[
         "tokenomics",
@@ -1773,26 +1773,26 @@ mod tests {
     /// Yalniz schema-4 dalgasinin anahtarlari.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
-    /// PoA kabul kayitlari: `#[serde(default)]` ile eklenen, surum artirmayan
+    /// PoA admission records: added with `#[serde(default)]`, without a version bump
     /// bir alan.
     ///
-    /// **Neden `CURRENT_..._SCHEMA_VERSION` artmadi:** surum, eski bir
-    /// ikilinin yeni bir goruntuyu *yanlis* okuyabilecegi durumlar icin.
-    /// Burada oyle bir durum yok - alan yoksa varsayilan bos kayittir ve bos
-    /// kayit "bu alan izinli degil" demektir, ki eski goruntulerin gercegi
-    /// tam olarak budur. Surumu artirmak eski surumleri desteklenen
-    /// pencerenin disina iterdi: hicbir sey kazandirmayan bir uyumluluk
+    /// **Why `CURRENT_..._SCHEMA_VERSION` was not bumped:** the version exists for cases where an old
+    /// binary could read a new snapshot *wrongly*.
+    /// There is no such case here - if the field is absent the default is an empty record, and an empty
+    /// record means "this domain is not permissioned", which is exactly the truth of old
+    /// snapshots. Bumping the version would push old releases outside the supported
+    /// window: a compatibility break that gains nothing.
     /// kaybi.
     ///
-    /// Turetilmis kume (`poa_admitted`) BURADA YOK ve olmamali: kayitlardan
-    /// her blok kapanisinda yeniden hesaplanir. Goruntuye yazilsaydi, elle
-    /// duzenlenmis bir goruntu kendi kayitlarinin desteklemedigi bir kabul
+    /// The derived set (`poa_admitted`) is NOT HERE and must not be: it is recomputed from the records
+    /// at every block close. Had it been written to the snapshot, a hand-edited
+    /// snapshot could carry an admission set its own records do not support.
     /// kumesi tasiyabilirdi.
     const POA_ADMISSION_KEYS: &[&str] = &["poa_onboarding"];
 
-    /// schema-2 koklu alanlar: eski surumun de bildigi, gocurken tek bayt
+    /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// kaybetmemesi gereken alanlar. `snapshot_hash` bilincli disarida:
-    /// surum degistigi icin muhur yeniden hesaplanir.
+    /// the seal is recomputed because the version changed.
     const SCHEMA2_FIELDS: &[&str] = &[
         "height",
         "block_hash",
@@ -1816,8 +1816,8 @@ mod tests {
         "global_header_summary",
     ];
 
-    /// Iki snapshot'in verilen alanlarinin JSON degeri birebir esit mi.
-    /// Alan bazinda karsilastirir ki kayip varsa mesaj alani adiyla soyler.
+    /// Are the JSON values of the given fields byte-identical across two snapshots.
+    /// Compares field by field so a loss is reported by field name.
     fn assert_fields_preserved(before: &StateSnapshotV2, after: &StateSnapshotV2, fields: &[&str]) {
         let a = serde_json::to_value(before).unwrap();
         let b = serde_json::to_value(after).unwrap();
@@ -1832,8 +1832,8 @@ mod tests {
         }
     }
 
-    /// schema-2'nin bildigi her alani dolu bir durum: bos kume round-trip'i
-    /// hicbir sey kanitlamaz, cunku bos -> bos iki davranista da ayni sonuctur.
+    /// A state with every schema-2 field populated: an empty-set round trip
+    /// proves nothing, because empty -> empty is the same result under both behaviours.
     fn schema2_filled_state() -> AccountState {
         let a1 = Address::from([1u8; 32]);
         let a2 = Address::from([2u8; 32]);
@@ -1873,10 +1873,10 @@ mod tests {
     }
 
     /// Serilestirilmis alan kumesinin kilidi: `StateSnapshotV2`'ye yeni bir
-    /// alan eklendiginde bu test dusmelidir, cunku iki eski-blob testinin
-    /// "her alan" iddiasi ancak bu liste guncelse dogrudur. Alan ekleyen:
-    /// iki eski-blob testine o alanin davranisini da eklesin, sonra bu
-    /// listeyi guncellesin. (Kanarya: alan eklenince duser, cikarinca da.)
+    /// this test must fail when a field is added, because the "every field" claim of the two
+    /// old-blob tests only holds if this list is current. Whoever adds a field:
+    /// add that field's behaviour to both old-blob tests, then update
+    /// this list. (Canary: it fails when a field is added, and when one is removed.)
     #[test]
     fn the_migration_tests_cover_every_serialized_field() {
         let account_state = AccountState::new();
@@ -1932,9 +1932,9 @@ mod tests {
             "manifest_signer",
             "manifest_signature",
             "trust_policy",
-            // kabul kayitlari (surum artirmayan, serde-default alan)
+            // admission records (a serde-default field with no version bump)
             "poa_onboarding",
-            // digest'in kendisi: surum degisiminde yeniden hesaplanir
+            // the digest itself: recomputed when the version changes
             "snapshot_hash",
         ]
         .into_iter()
@@ -1947,12 +1947,12 @@ mod tests {
 
     /// schema-2 blobu: yeni alanlar HIC yok, eski alanlar dolu.
     ///
-    /// Iki ayrimi birlikte kilitler: (1) blobda OLAN her schema-2 alani
-    /// goc sonrasi birebir korunur (veri kaybi yok), (2) blobda OLMAYAN her
-    /// yeni alan bos/default doner - bu "ozellik o zaman aktif degildi"
-    /// demektir, kayip degildir. Ayrimin ikinci tarafi ancak kaynak blobun
-    /// gercekten anahtarsiz oldugu kanitlanarak anlam kazanir; test onu da
-    /// assert eder.
+    /// Locks two distinctions together: (1) every schema-2 field PRESENT in the blob
+    /// is preserved byte for byte after migration (no data loss), (2) every new field ABSENT
+    /// from the blob returns empty/default - that means "the feature was not active then",
+    /// not that data was lost. The second side of the distinction can only be measured when the source blob
+    /// is proved to genuinely lack the key; the test asserts that
+    /// as well.
     #[test]
     fn a_legacy_schema2_blob_migrates_without_losing_any_v2_field() {
         let mut account_state = schema2_filled_state();
@@ -1963,27 +1963,27 @@ mod tests {
 
         let blob = as_legacy_blob(&full, SCHEMA3_AND_4_KEYS, 2);
         // Oncul: blob gercekten bir schema-2 kaydi gibi davraniyor - yeni
-        // alan anahtarlari bayt olarak yok.
+        // the field keys are absent as bytes.
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
         for key in SCHEMA3_AND_4_KEYS {
             assert!(
                 !obj.contains_key(*key),
-                "kaynak blobda olmamasi gereken anahtar var: {key}"
+                "the source blob contains a key it must not have: {key}"
             );
         }
 
         let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
 
-        // Bump: iki surum birbirinden ayri gozlemlenebilir olmali.
+        // Bump: the two versions must be observable as distinct.
         assert_eq!(
             restored.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
             "2->4 bump yapilmadiysa 'goc yapildi' iddiasi yalandir"
         );
-        // Koruma tarafi: schema-2'nin bildigi her alan birebir hayatta.
+        // Preservation side: every field schema-2 knows survives byte for byte.
         assert_fields_preserved(&full, &restored, SCHEMA2_FIELDS);
-        // Default tarafi: blobda olmayanlar "aktif degildi" olarak doner.
+        // Default side: what is absent from the blob returns as "was not active".
         assert!(
             restored.tokenomics_burn.is_none()
                 && restored.registry.is_none()
@@ -2003,7 +2003,7 @@ mod tests {
                 && restored.proof_market.is_none()
                 && restored.manifest_signer.is_none()
                 && restored.manifest_signature.is_none(),
-            "blobda hic bulunmayan bir alan veri gibi geri geldi; bu kayip degil uydurmadir"
+            "a field never present in the blob came back as data; that is not loss, it is fabrication"
         );
         assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
         assert_eq!(
@@ -2011,16 +2011,16 @@ mod tests {
             serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
             "blobda olmayan tokenomics default'a donmeli"
         );
-        // Muhur yeniden hesaplanmis ve kendisiyle tutarli olmali.
+        // The seal must be recomputed and consistent with itself.
         assert!(
             restored.verify(),
-            "bump sonrasi snapshot kendi digest'i ile tutarsiz"
+            "after the bump the snapshot is inconsistent with its own digest"
         );
     }
 
     /// schema-3 blobu: v3 alanlari veri TASIYOR, v4 alanlari yok.
     ///
-    /// Kayip ayriminin diger yarisi: ayni `serde(default)` alani, blobda
+    /// The other half of the loss distinction: the same `serde(default)` field, when present
     /// veri tasidiginda, o veriyi birebir teslim etmek zorunda. Onceki test
     /// hic-tasinmayan tarafi, bu test dolu-tasinan tarafi kilitler.
     #[test]
@@ -2058,7 +2058,7 @@ mod tests {
         account_state
             .note_registry
             .insert_note([9u8; 32])
-            .expect("taze kayit notu kabul eder");
+            .expect("a fresh record accepts the note");
         let mut params = legacy_params(64);
         params.finality_certificates = vec![schema2_cert()];
         let full = StateSnapshotV2::from_state(&account_state, params);
@@ -2106,24 +2106,24 @@ mod tests {
         assert!(restored.manifest_signature.is_none());
         assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
         assert!(restored.verify());
-        // Zincir ustu: durum geri kuruldugunda veri hala orada olmali.
+        // On chain: when the state is restored the data must still be there.
         let rebuilt = AccountState::from_snapshot_v2(&restored);
         assert_eq!(rebuilt.tokenomics.community, 777);
         assert_eq!(rebuilt.governance.proposals.len(), 1);
         assert_eq!(rebuilt.timed_burn.years_burned, 2);
     }
 
-    /// PoA kabul kayitlari olmayan bir blob (surum artmadigi icin bu hala
-    /// gecerli bir schema-4 goruntusudur).
+    /// A blob without PoA admission records (still a valid schema-4 snapshot,
+    /// because the version was not bumped).
     ///
-    /// Bu goc yolunun kilitlemesi gereken sey bir veri tasima degil, bir
+    /// What this migration path must lock is not a data move but a
     /// **guvenlik varsayimi**: PoA kabul kaydi olmayan bir goruntu geri
     /// yuklendiginde alan **izinli sayilmamali**. Aksi halde eski bir
     /// goruntuden acilan bir zincir, kimsenin kabul edilmedigi bir izinli
     /// alan gibi gorunur ve hic blok uretemez.
     ///
     /// Turetilmis kumenin goruntude olmadigini da burada dogruluyoruz: o,
-    /// kayitlardan yeniden hesaplanir.
+    /// is recomputed from the records.
     #[test]
     fn a_snapshot_without_admission_records_does_not_look_permissioned() {
         let mut account_state = AccountState::new();
@@ -2142,7 +2142,7 @@ mod tests {
         }
         assert!(
             !obj.contains_key("poa_admitted"),
-            "turetilmis kabul kumesi goruntuye sizmis: kayitlardan hesaplanmali"
+            "the derived admission set leaked into the snapshot: it must be computed from the records"
         );
 
         let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
@@ -2152,7 +2152,7 @@ mod tests {
         );
         assert!(
             restored.poa_onboarding.is_none(),
-            "eksik kabul kaydi default'a doner"
+            "a missing admission record falls back to the default"
         );
         assert!(restored.verify());
 
@@ -2160,16 +2160,16 @@ mod tests {
         assert_eq!(rebuilt.tokenomics.community, 777);
         assert!(
             !rebuilt.poa_is_permissioned(0),
-            "kabul kaydi olmayan eski goruntu alani izinli gosterdi: zincir dogustan olur"
+            "an old snapshot without admission records showed the domain as permissioned: the chain would be born open"
         );
         assert!(rebuilt.poa_admitted_addresses(0).is_empty());
     }
 
-    /// Desteklenen pencerenin hemen disindaki surumler fail-closed.
+    /// Versions just outside the supported window are fail-closed.
     ///
-    /// Pencere `[2, 4]`; kenarin bir alti ve bir ustu icin kapanis ayni
-    /// kalmak zorunda, yoksa pencere kaydiginda reddedilmesi gereken surum
-    /// sessizce yuklenir. Reddetme mesajini da kilitler: kapali kalmanin
+    /// The window is `[2, 4]`; the closure must stay identical one below and one above
+    /// the edge, otherwise when the window shifts a version that must be refused
+    /// loads silently. It also locks the refusal message: staying closed
     /// sebebi `"staged migration hook rejected"` metnidir ve yukleyicideki
     /// karantina karari bu sinifa guvenir.
     #[test]
@@ -2184,11 +2184,11 @@ mod tests {
         ] {
             let blob = as_legacy_blob(&snapshot, &[], version);
             let Err(err) = StateSnapshotV2::from_bytes(&blob) else {
-                panic!("surum {version} reddedilmeliydi");
+                panic!("version {version} should have been refused");
             };
             assert!(
                 err.contains("staged migration hook rejected"),
-                "beklenmeyen ret sinifi (surum {version}): {err}"
+                "unexpected refusal class (version {version}): {err}"
             );
         }
     }

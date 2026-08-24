@@ -21,38 +21,38 @@ fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, Strin
 
 /// Tarife dayali bir manifest'i baytlara cevir, yoksa `None`.
 ///
-/// `Ok(None)` "bu manifest bir tarif degil" demektir ve cagirani saklanmis
+/// `Ok(None)` means "this manifest is not a recipe" and leaves the caller to the
 /// bayt yollarina birakir. `Err` ise tarif var ama uretim guvenilmez
 /// demektir; bu durumda sonraki yollara **dusulmez**. Duserek devam etmek,
-/// dogrulanamayan bir uretimin ardindan baska bir kaynaktan gelen baytlari
-/// ayni isim altinda sunmak olurdu.
+/// after an unverifiable generation it would serve bytes from another source
+/// under the same name.
 fn render_from_recipe(
     manifest: &crate::storage::ContentManifest,
 ) -> Result<Option<Vec<u8>>, String> {
     use crate::storage::generated::ContentSource;
     let spec = match &manifest.source {
         ContentSource::Generated(spec) => spec,
-        // `Hybrid` ve `Derived` yalniz tariften uretilemez: ilki yeniden
+        // `Hybrid` and `Derived` cannot be produced from the recipe alone: the first carries a
         // uretilemeyen bir onek tasir, ikincisi master'in baytlarina
         // bagimlidir. Ikisi de saklanmis bayt yollarina birakilir.
         _ => return Ok(None),
     };
     let bytes = crate::storage::generated::generate_content(spec)
         .map_err(|e| format!("recipe did not produce its bytes: {e:?}"))?;
-    // Uretilen seyin istenen sey oldugunu dogrula. Tarif zincirde, ama
-    // uretici kodun o tarifi dogru okudugunu soyleyen tek sey kimligin
+    // Verify that what was produced is what was requested. The recipe is on chain, but
+    // the only thing saying the generator read it correctly is that the identity
     // tutmasidir.
     //
     // Iki ayrinti kimligi belirler ve ikisi de manifest'ten okunur.
     //
-    // Kaynak: manifest kimligi kaynagi **taahhut eder** (bkz. §66),
-    // `with_source` kimligi yeniden hesaplar. Kaynaksiz karsilastirmak,
-    // ayni baytlarin kaynaksiz halinin kimligiyle kiyaslamak olurdu ve
-    // dogru bir uretim bile reddedilirdi.
+    // Source: the manifest identity **commits to** the source (see section 66),
+    // `with_source` recomputes the identity. Comparing without the source
+    // would compare against the identity of the same bytes without a source, and
+    // even a correct generation would be refused.
     //
     // Dilim boyu: kimlik shard listesi uzerinden kurulur, dolayisiyla
-    // baytlar orijinaliyle ayni boyda dilimlenmelidir. Tek parca varsaymak
-    // cok parcali her nesneyi reddederdi.
+    // the bytes must be sliced at the same size as the original. Assuming a single part
+    // would refuse every multi-part object.
     let chunk_size = manifest
         .shards
         .first()
@@ -76,36 +76,36 @@ fn render_from_recipe(
 
 /// Uretim onbelleginde tutulacak en fazla nesne.
 ///
-/// Sayi, bayt degil: her girdi zaten [`MAX_GATEWAY_CONTENT_BYTES`] ile
-/// sinirli, ve iki sinirin carpimi en kotu durumdaki bellegi verir. Sayiyi
-/// baglamak, bayt saymaktan daha az kod ve ayni garantidir.
+/// A count, not bytes: each entry is already bounded by [`MAX_GATEWAY_CONTENT_BYTES`],
+/// and the product of the two bounds gives worst-case memory. Bounding the count
+/// is less code than counting bytes and gives the same guarantee.
 pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 
-/// Tarifi tekrar tekrar kosmamak icin sinirli bir onbellek.
+/// A bounded cache so the recipe is not run over and over.
 ///
-/// # Ne degistirir, ne degistirmez
+/// # What it changes and what it does not
 ///
-/// Uretilebilir icerikte baytlar hicbir yerde **saklanmaz**; zincirde olan
-/// tariftir ve dogrulayici disk yuku bu sinifta sifirdir. Bu onbellek o
-/// iddiaya dokunmaz: gecici, tek dugume ait, yeniden kurulabilir bir
-/// performans katmanidir. Silinse sistem dogru calismaya devam eder, yalnizca
+/// For generatable content the bytes are **stored** nowhere; what is on chain is
+/// the recipe, and validator disk load is zero in this class. This cache does not touch
+/// that claim: it is an ephemeral, node-local, rebuildable
+/// performance layer. Delete it and the system still works correctly, only
 /// yavaslar - depolamanin tanimi bu degildir.
 ///
-/// # Neden gerekli
+/// # Why it is needed
 ///
-/// Onbelleksiz her istek tarifi bastan kosuyordu. Sicak bir icerik icin bu,
-/// istek sayisiyla dogru orantili CPU demektir ve maliyeti isteyen degil
-/// **gecidi isleten** karsilar. Uretim belirlenimli oldugu icin ayni tarif her
-/// zaman ayni baytlari verir; ayni hesabi tekrar yapmanin bir karsiligi yok.
+/// Without a cache every request ran the recipe from scratch. For hot content that means
+/// CPU proportional to the request count, and the cost is borne not by the requester
+/// but by **whoever runs the gateway**. Because generation is deterministic the same recipe always
+/// yields the same bytes; redoing the same computation buys nothing.
 ///
-/// # Neden sinirli
+/// # Why it is bounded
 ///
-/// Sinirsiz bir onbellek, sinirsiz bir kuyruktur: farkli isimler isteyen bir
-/// saldirgan gecidi bellekten dusurur. Tahliye politikasi **en eski girdi**
-/// (FIFO): gercek bir LRU erisim sirasini guncellemek icin okuma yolunda da
-/// yazma kilidi ister; buradaki amac sicak icerigi tutmak degil, ayni
-/// icerigin arka arkaya gelen isteklerini ucuzlatmak, ve FIFO bunu ayni
-/// maliyetle yapar.
+/// An unbounded cache is an unbounded queue: an attacker requesting distinct names
+/// drives the gateway out of memory. The eviction policy is **oldest entry**
+/// (FIFO): a true LRU needs a write lock on the read path as well in order to
+/// update access order; the aim here is not to keep hot content but to make
+/// back-to-back requests for the same content cheap, and FIFO does that at the same
+/// cost.
 #[derive(Default)]
 struct GenerationCache {
     /// Ekleme sirasinda tutulan girdiler.
@@ -137,10 +137,10 @@ pub struct BudGateway {
     storage: Option<Storage>,
     /// Uretilmis icerigin gecici onbellegi.
     ///
-    /// `Mutex` cunku gecit paylasilan bir referans uzerinden okunuyor ve
-    /// onbellege yazmak okuma yolunda oluyor. Kilit yalnizca arama ve ekleme
-    /// suresince tutulur; uretim kilidin **disinda** yapilir, yoksa yavas bir
-    /// tarif tum gecidi bekletirdi.
+    /// `Mutex` because the gateway is read through a shared reference and
+    /// writing to the cache happens on the read path. The lock is held only for lookup and insert;
+    /// generation happens **outside** the lock, otherwise a slow
+    /// recipe would stall the whole gateway.
     generation_cache: std::sync::Mutex<GenerationCache>,
 }
 
@@ -173,25 +173,25 @@ impl BudGateway {
             .storage_root
             .ok_or_else(|| format!("BNS name '{name}' has no storage binding"))?;
 
-        // Storage_root zaten 32-bayt content anahtarı, ContentId tuple-wrap yeterli.
+        // storage_root is already a 32-byte content key; a ContentId tuple wrap is enough.
         let cid = ContentId(storage_root);
 
-        // 3. Tariften dogan icerik: baytlar hicbir yerde saklanmaz.
+        // 3. Recipe-born content: the bytes are stored nowhere.
         //
-        // Bu dal en basta gelir cunku digerlerinin arayacagi sey yoktur.
+        // This branch comes first because there is nothing for the others to look for.
         // `Generated` bir manifest'in baytlari zincirde de, yerel depoda da,
         // uzak eslerde de yoktur; zincirde olan **tariftir**. Dort getirme
-        // yolu da saklanmis bayt aradigi icin, uretilmis her icerik bu
+        // because that path also looks for stored bytes, every generated content
         // gecitten "bulunamadi" diye donuyordu: kaydi kabul edilen, ucreti
         // hesaplanan, kopya hedefi belirlenen bir nesne okunamiyordu.
         //
         // `generate_content` tarifi baytlara cevirir ve
-        // `ContentManifest::from_bytes_sliced` ile yeniden hash'lenerek
-        // manifest kimligine karsi dogrulanir. Yani gecit urettigi seyi
-        // dogrular: yanlis bir tarif yanlis bayt uretirse kimlik tutmaz ve
-        // istek reddedilir.
-        // Onbellek once: ayni tarifi ayni baytlar icin tekrar kosmanin
-        // karsiligi yok. Kilit yalnizca arama suresince tutuluyor.
+        // is rehashed with `ContentManifest::from_bytes_sliced` and verified
+        // against the manifest identity. So the gateway verifies what it produces:
+        // if a wrong recipe produces wrong bytes the identity does not hold and
+        // the request is refused.
+        // Cache first: rerunning the same recipe for the same bytes buys
+        // nothing. The lock is held only for the lookup.
         if let Ok(cache) = self.generation_cache.lock() {
             if let Some(bytes) = cache.get(&cid) {
                 return checked_gateway_content("generation cache", bytes);
@@ -199,7 +199,7 @@ impl BudGateway {
         }
 
         if let Some(manifest) = self.chain.get_storage_manifest(cid).await {
-            // Uretim kilidin disinda: yavas bir tarif tum gecidi bekletmemeli.
+            // Generation outside the lock: a slow recipe must not stall the whole gateway.
             if let Some(bytes) = render_from_recipe(&manifest)? {
                 if let Ok(mut cache) = self.generation_cache.lock() {
                     cache.insert(cid, bytes.clone());
@@ -209,8 +209,8 @@ impl BudGateway {
         }
 
         // 4. Local storage lookup (cached content). NOT: Storage::get_content
-        //    Bugün stub (kapsamı: blob store henüz yok), bu dal
-        //    Doğal olarak ıskalar, NotFound dönüşü P2P hatasına düşer.
+        //    Currently a stub (scope: no blob store yet), so this branch
+        //    naturally misses and the NotFound return falls through to a P2P error.
         if let Some(ref storage) = self.storage {
             if let Ok(chunk) = storage.get_content(&cid) {
                 return checked_gateway_content("local sled storage", chunk);
@@ -245,27 +245,27 @@ impl BudGateway {
         ))
     }
 
-    /// Ayni tarifi, okuyanin istedigi bicimde uret.
+    /// Produce the same recipe in the format the reader asks for.
     ///
     /// `fetch_name_content` tarifin ham ciktisini doner: uretici ne
-    /// uretiyorsa o. Bir tarayici SVG ister, bir cuzdan kucuk bir PNG, bir
-    /// galeri baska bir olcu. Uretilmis bir nesne icin bunlarin hepsi **ayni
-    /// tariften** dogar; hicbiri saklanmaz.
+    /// whatever it produces. A browser wants SVG, a wallet a small PNG, a
+    /// gallery another size. For a generated object all of these are born from the **same
+    /// recipe**; none of them are stored.
     ///
-    /// Bicim taahhudun parcasidir. PNG olarak uretilen bir tarif, ayni
+    /// Format is part of the commitment. A recipe produced as PNG gets a different
     /// tarifin SVG'sinden **baska bir nesnedir** ve `render_id` ikisine ayri
-    /// kimlik verir. Bu yuzden burada donen kimlik manifest kimligi degil,
-    /// bicime bagli render kimligidir; cagiran ikisini karistiramaz cunku
-    /// fonksiyon ikisini birlikte doner.
+    /// identity. So the identity returned here is not the manifest identity but the
+    /// format-dependent render identity; the caller cannot confuse the two because
+    /// the function returns both together.
     ///
-    /// Yalniz tariften dogan icerik icin calisir. Saklanan baytlarin bicimi
-    /// zaten baytlarin kendisidir; onlari yeniden bicimlendirmek bir gecidin
-    /// isi degil.
+    /// Works only for recipe-born content. The format of stored bytes
+    /// is already the bytes themselves; reformatting them is not a gateway's
+    /// job.
     ///
     /// # Errors
     ///
-    /// Isim cozulmezse, icerik tarifli degilse, ya da uretim bicimin
-    /// sinirlarini asarsa.
+    /// If the name does not resolve, the content is not recipe-bearing, or generation exceeds
+    /// the format's bounds.
     pub async fn render_name_content(
         &self,
         name: &str,
@@ -329,24 +329,24 @@ mod tests {
             .with_source(ContentSource::Generated(spec))
     }
 
-    /// Tariften dogan icerik gecitten okunabilir.
+    /// Recipe-born content is readable through the gateway.
     ///
-    /// Baytlar hicbir yerde saklanmaz; dort getirme yolu da saklanmis bayt
-    /// arar. Bu dal olmadan uretilmis her nesne "bulunamadi" donuyordu:
+    /// The bytes are stored nowhere; all four fetch paths look for stored
+    /// bytes. Without this branch every generated object returned "not found":
     /// kaydi kabul edilen, kopya hedefi belirlenen bir nesne okunamiyordu.
     #[test]
     fn a_recipe_is_rendered_on_demand() {
         let manifest = generated_manifest();
         let bytes = render_from_recipe(&manifest)
             .expect("tarif uretilebilmeli")
-            .expect("uretilmis icerik bayt dondurmeli");
+            .expect("generated content must return bytes");
         assert_eq!(bytes.len(), 32 * 32);
-        // Ve uretilen sey istenen sey: kimlik tutar.
+        // And what was produced is what was requested: the identity holds.
         //
-        // Kaynak geri konur. Manifest kimligi kaynagi taahhut eder (§66), yani
-        // ayni baytlarin kaynaksiz hali **baska bir kimlik** verir. Onu
-        // beklemek, uretim dogru calisirken bile duser - testin ilk hali tam
-        // olarak bunu yapiyordu ve olctugu sey uretim degil kendi kurgusuydu.
+        // The source is restored. The manifest identity commits to the source (section 66), so
+        // the same bytes without a source give **a different identity**. Expecting that
+        // fails even when generation works correctly - the first version of the test did
+        // exactly that, and what it measured was its own setup, not generation.
         let len = u32::try_from(bytes.len()).expect("boyut");
         let rebuilt = ContentManifest::from_bytes_sliced(&bytes, len)
             .expect("manifest")
@@ -354,43 +354,43 @@ mod tests {
         assert_eq!(rebuilt.manifest_id, manifest.manifest_id);
     }
 
-    /// Uretilen baytlar manifest kimligini tutmuyorsa istek reddedilir.
+    /// If the produced bytes do not hold the manifest identity the request is refused.
     ///
-    /// Tarif zincirde, ama uretici kodun o tarifi dogru okudugunu soyleyen
-    /// tek sey kimligin tutmasidir. Bu denetim olmasa gecit, tarifin
+    /// The recipe is on chain, but the only thing saying the generator read it correctly
+    /// is that the identity holds. Without this check the gateway would serve
     /// uretmedigi baytlari tarifin adiyla sunardi.
     #[test]
     fn bytes_that_do_not_match_the_id_are_refused() {
         let mut manifest = generated_manifest();
-        // Kimlik degistirilir, tarif ayni kalir: uretim artik uyusmaz.
+        // The identity is changed, the recipe stays: generation no longer matches.
         manifest.manifest_id = crate::storage::ContentId([0xAAu8; 32]);
-        let err = render_from_recipe(&manifest).expect_err("uyusmayan kimlik reddedilmeli");
+        let err = render_from_recipe(&manifest).expect_err("a mismatched identity must be refused");
         assert!(
             err.contains("do not hash to the manifest id"),
-            "gerekce kimlik uyusmazligini soylemeli: {err}"
+            "the reason must state the identity mismatch: {err}"
         );
     }
 
-    /// Tarife dayanmayan icerik bu dala girmez.
+    /// Content not backed by a recipe does not enter this branch.
     ///
-    /// `Ok(None)` "bu bir tarif degil" demektir ve cagirani saklanmis bayt
-    /// yollarina birakir; `Err` olsaydi sakli icerik hic okunamazdi.
+    /// `Ok(None)` means "this is not a recipe" and leaves the caller to the stored-byte
+    /// paths; had it been `Err`, stored content could never be read.
     #[test]
     fn stored_content_falls_through_to_the_byte_paths() {
-        let bytes = b"siradan tutulan icerik".to_vec();
+        let bytes = b"ordinary stored content".to_vec();
         let len = u32::try_from(bytes.len()).expect("boyut");
         let manifest = ContentManifest::from_bytes_sliced(&bytes, len).expect("manifest");
         assert!(
             render_from_recipe(&manifest)
-                .expect("tutulan icerik hata degil")
+                .expect("stored content is not an error")
                 .is_none(),
-            "tutulan icerik uretim dalina girmemeli"
+            "stored content must not enter the generation branch"
         );
     }
 
     /// `Hybrid` ve `Derived` de saklanmis bayt yollarina birakilir.
     ///
-    /// Ikisi de yalniz tariften uretilemez: ilki yeniden uretilemeyen bir
+    /// Neither can be produced from the recipe alone: the first carries a non-regenerable
     /// onek tasir, ikincisi master'in baytlarina bagimlidir. Bunlari
     /// uretmeye kalkmak, elde olmayan baytlari varmis gibi gostermek olurdu.
     #[test]
@@ -405,67 +405,71 @@ mod tests {
             });
         assert!(
             render_from_recipe(&manifest)
-                .expect("hybrid hata degil")
+                .expect("hybrid is not an error")
                 .is_none(),
             "hybrid yalniz tariften uretilemez"
         );
     }
 
-    /// Uretim onbellegi sinirini asmaz ve dogru baytlari verir.
+    /// The generation cache does not exceed its bound and returns the right bytes.
     ///
-    /// Sinirsiz bir onbellek sinirsiz bir kuyruktur: farkli isimler isteyen
-    /// bir saldirgan gecidi bellekten dusurur. Sinirin isi bunu engellemek,
-    /// ve engellenirken dogru cevabin bozulmamasi.
+    /// An unbounded cache is an unbounded queue: an attacker requesting distinct names
+    /// drives the gateway out of memory. The bound's job is to prevent that
+    /// without corrupting the correct answer.
     #[test]
     fn the_generation_cache_stays_within_its_bound() {
         let mut cache = GenerationCache::default();
 
-        // Sinira kadar her girdi tutulur.
+        // Every entry up to the bound is kept.
         for i in 0..MAX_GENERATION_CACHE_ENTRIES {
             let id = ContentId([u8::try_from(i % 256).expect("mod 256"); 32]);
             cache.insert(id, vec![u8::try_from(i % 256).expect("mod 256")]);
         }
         assert_eq!(cache.entries.len(), MAX_GENERATION_CACHE_ENTRIES);
 
-        // Ilk giren hala orada - tahliye henuz gerekmedi.
+        // The first one in is still there - no eviction was needed yet.
         let first = ContentId([0u8; 32]);
         assert_eq!(cache.get(&first), Some(vec![0u8]));
 
-        // Sinirin ustundeki girdi eskisini disari atar, boyut sabit kalir.
+        // An entry above the bound evicts the oldest; the size stays fixed.
         let fresh = ContentId([200u8; 32]);
         cache.insert(fresh, vec![9u8]);
         assert_eq!(
             cache.entries.len(),
             MAX_GENERATION_CACHE_ENTRIES,
-            "onbellek sinirin ustune cikmamali"
+            "the cache must not grow past the bound"
         );
-        assert_eq!(cache.get(&fresh), Some(vec![9u8]), "yeni girdi tutulmali");
+        assert_eq!(
+            cache.get(&fresh),
+            Some(vec![9u8]),
+            "the new entry must be kept"
+        );
         assert_eq!(
             cache.get(&first),
             None,
-            "en eski girdi tahliye edilmis olmali"
+            "the oldest entry must have been evicted"
         );
 
-        // Ayni kimlik onbellekte **bir kez** durur. Yinelenme denetimi
-        // olmasaydi ayni nesne her istekte bir slot daha yerdi: onbellegin
-        // ilan ettigi kapasite 64 nesne, ama gercekte tuttugu farkli nesne
-        // sayisi bir tek sicak icerigin tekrarlariyla bire kadar duserdi.
-        // Sinir tutmaya devam ederdi - ise yaramayan bir sinir olarak.
+        // The same identity sits in the cache **once**. Without the duplicate check
+        // the same object would eat another slot per request: the cache's
+        // declared capacity is 64 objects, but the number of distinct objects it actually holds
+        // could fall to one through repeats of a single hot item.
+        // The bound would still hold - as a bound that does nothing.
         cache.insert(fresh, vec![9u8]);
         let copies = cache
             .entries
             .iter()
             .filter(|(key, _)| key == &fresh)
             .count();
-        assert_eq!(copies, 1, "ayni kimlik onbellekte bir kez durmali");
+        assert_eq!(copies, 1, "the same identity must sit in the cache once");
         assert_eq!(
             cache.get(&fresh),
             Some(vec![9u8]),
-            "yinelenen girdi bozulmamali"
+            "a duplicate entry must not be corrupted"
         );
 
-        // Onbellekte olmayan bir kimlik icin cevap yok - eski bir girdiyi
-        // yanlis kimlikle dondurmek, gecidin sundugu her seyi supheli yapardi.
+        // No answer for an identity that is not cached - returning an old entry
+        // under the wrong identity would make everything the gateway serves suspect.
         assert_eq!(cache.get(&ContentId([255u8; 32])), None);
     }
 }
