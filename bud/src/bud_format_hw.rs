@@ -1,10 +1,12 @@
-//! B.U.D. 2.0 - FİZİKSEL MEDYA KATMANI KAYDI (F303-F330 + SMR/HAMR/Silica)
+//! B.U.D. 2.0 - THE PHYSICAL MEDIA TIER RECORD (F303-F330 plus SMR/HAMR/
+//! Silica).
 //!
-//! Kalan iş #14: SMR/zoned + HAMR + Silica fiziksel katman evrimi - donanım modeli.
-//! Her medya türü: $/TB/ay, dayanıklılık, güç, uygun içerik sınıfı.
-//! `tier_for(usd_ceiling)` bir $ bütçesi için en ucuz uygun katmanı seçer
-//! (F16 hizmet sınıflarıyla birlikte; tek kullanıcı fiyatı 0.016 korunur,
-//! iç maliyet katmanlaması buna göre döner).
+//! Remaining work item #14: the SMR/zoned, HAMR and Silica physical tier
+//! evolution - the hardware model. For each media kind: $/TB/month, endurance,
+//! power and the suitable content class. `tier_for(usd_ceiling)` picks the
+//! cheapest suitable tier for a dollar budget (together with the F16 service
+//! classes; the single user price of 0.016 is preserved and the internal cost
+//! tiering turns underneath it).
 
 #![forbid(unsafe_code)]
 
@@ -29,7 +31,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 5,
         idle_w_per_tb: 7.0,
         write_once: false,
-        note: "price.rs zemini (sıcak/ılık)",
+        note: "the price.rs floor (hot/warm)",
     },
     MediaTier {
         name: "HDD-SMR",
@@ -37,7 +39,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 5,
         idle_w_per_tb: 6.0,
         write_once: false,
-        note: "F303: $30-45/TB; zoned+append-only soğuk katman",
+        note: "F303: $30-45/TB; a zoned, append-only cold tier",
     },
     MediaTier {
         name: "HAMR",
@@ -45,7 +47,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 6,
         idle_w_per_tb: 6.0,
         write_once: false,
-        note: "F305: 36-44TB, 2029 $4/TB; yoğunluk",
+        note: "F305: 36-44TB, $4/TB by 2029; density",
     },
     MediaTier {
         name: "QLC-SSD",
@@ -53,7 +55,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 4,
         idle_w_per_tb: 2.0,
         write_once: false,
-        note: "F311: sıcak tier; DWPD 0.1-0.3 soğuk okuma",
+        note: "F311: a hot tier; DWPD 0.1-0.3 for cold reads",
     },
     MediaTier {
         name: "LTO-tape",
@@ -61,7 +63,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 30,
         idle_w_per_tb: 0.0,
         write_once: true,
-        note: "F3/F307: derin soğuk, 0W idle (tape sınıfı kodlu)",
+        note: "F3/F307: deep cold, 0W idle (coded as the tape class)",
     },
     MediaTier {
         name: "M-Disc",
@@ -69,7 +71,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 1000,
         idle_w_per_tb: 0.0,
         write_once: true,
-        note: "optik arşiv; yaz-oku cihazı gerekli",
+        note: "an optical archive; a read-write drive is required",
     },
     MediaTier {
         name: "Silica-glass",
@@ -77,7 +79,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 10_000,
         idle_w_per_tb: 0.0,
         write_once: true,
-        note: "F256: 7TB/plaka, Azure AI okuma - gelecek ultra-arşiv",
+        note: "F256: 7TB per plate, Azure AI reading - a future ultra-archive",
     },
     MediaTier {
         name: "DNA",
@@ -85,7 +87,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 1000,
         idle_w_per_tb: 0.0,
         write_once: true,
-        note: "F168: $800M/TB - REDDEDİLDİ (ekonomik değil)",
+        note: "F168: $800M/TB - REFUSED (not economical)",
     },
 ];
 
@@ -93,17 +95,18 @@ pub fn tier_get(name: &str) -> Option<&'static MediaTier> {
     MEDIA_TIERS.iter().find(|t| t.name == name)
 }
 
-/// $ bütçesi için en ucuz uygun katman (write-once kısıtı opsiyonel).
+/// The cheapest suitable tier for a dollar budget (the write-once constraint
+/// is optional).
 pub fn cheapest_tier(usd_ceiling: f64, allow_write_once: bool) -> Option<&'static MediaTier> {
     MEDIA_TIERS
         .iter()
         .filter(|t| t.usd_per_tb_month <= usd_ceiling && (allow_write_once || !t.write_once))
-        // `partial_cmp().unwrap()` NaN bir fiyatta panikler. `total_cmp` NaN'i
-        // sirali kabul eder ve panik yerine belirlenimli bir siralama verir.
+        // `partial_cmp().unwrap()` panics on a NaN price. `total_cmp` accepts
+        // NaN as ordered and gives a determinate ordering instead of a panic.
         .min_by(|a, b| a.usd_per_tb_month.total_cmp(&b.usd_per_tb_month))
 }
 
-/// 0.016 tek-fiyat hedefi: hangi medya doğrudan tutar?
+/// The 0.016 single-price target: which media holds it directly?
 pub fn media_holds_ceiling(usd: f64, ceiling: f64) -> bool {
     usd <= ceiling
 }
@@ -123,7 +126,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tape_0_016_tavaninda() {
+    fn tape_is_under_the_0_016_ceiling() {
         assert!(media_holds_ceiling(
             tier_get("LTO-tape").unwrap().usd_per_tb_month,
             0.016
@@ -135,8 +138,9 @@ mod tests {
     }
 
     #[test]
-    fn ucuz_katman_secimi_dogru() {
-        // 0.016 bütçe, write-once serbest → tape; yasak → yok
+    fn the_cheapest_tier_is_chosen_correctly() {
+        // With a 0.016 budget: write-once allowed gives tape, write-once
+        // forbidden gives nothing.
         assert_eq!(cheapest_tier(0.016, true).unwrap().name, "LTO-tape");
         assert!(
             cheapest_tier(0.016, false).is_none()
@@ -145,13 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn dna_reddedildi() {
+    fn dna_is_refused() {
         let dna = tier_get("DNA").unwrap();
         assert!(dna.usd_per_tb_month > 100.0);
     }
 
     #[test]
-    fn hw_digest_deterministik() {
+    fn the_hw_digest_is_deterministic() {
         assert_eq!(hw_digest(), hw_digest());
     }
 }
