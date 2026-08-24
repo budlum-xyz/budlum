@@ -89,7 +89,7 @@ impl Codec {
 pub struct R3Recipe {
     pub commitment: [u8; 32], // the original content identity (K3)
     pub codec: Codec,
-    pub body: Vec<u8>,            // the codec-compressed body (WHAT IS HELD)
+    pub body: Vec<u8>,                  // the codec-compressed body (WHAT IS HELD)
     pub qr_derivative_commit: [u8; 32], // the commitment of the QR video derivative (not kept)
 }
 
@@ -256,7 +256,10 @@ fn the_real_r3_rent_measurements() {
     assert!(k_avif <= 0.016, "AVIF is within 0.016: {k_avif}");
     // FLAC 6.04x -> 0.0638 (outside the ceiling - the audio class needs scaling)
     let k_flac = r3_real_rent(&Codec::Flac, 1.031);
-    assert!(k_flac > 0.016, "FLAC is outside the ceiling (honestly): {k_flac}");
+    assert!(
+        k_flac > 0.016,
+        "FLAC is outside the ceiling (honestly): {k_flac}"
+    );
     // Raw video H.264 3393x -> very low
     let k_vid = r3_real_rent(&Codec::Av1, 1.031);
     assert!(k_vid < 0.001, "raw video is very cheap: {k_vid}");

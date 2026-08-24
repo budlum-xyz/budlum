@@ -1,16 +1,22 @@
-//! B.U.D. 2.0 Icat - Gerçek Kayıpsız Huffman Codec (2026-08-16)
+//! B.U.D. 2.0 Invention - A Real Lossless Huffman Codec (2026-08-16)
 //!
-//! Sıfır dış bağımlılıkla GERÇEK bir kayıpsız sıkıştırıcı: kanonik Huffman.
-//! (Önceki "RealCompressor" zstd/xz magic taklidi + ilk 100 bayt döndüren STUB'ti -
-//! gerçek sıkıştırma değildi ve sahte zarf üretiyordu; bu modül onu değiştirir.)
+//! A REAL lossless compressor with zero external dependencies: canonical
+//! Huffman. (The previous "RealCompressor" was a STUB that imitated the
+//! zstd/xz magic and returned the first 100 bytes - it was not real
+//! compression and produced a fake envelope; this module replaces it.)
 //!
-//! Tasarım:
-//! - Magic: `\xB5` öncülü yüksek-bit (file(1)/ASCII karışmasın, S.47) + "HFM1".
-//! - Kompakt tablo: kullanılan sembol sayısı (u16) + (sym, len) çiftleri (2 bayt/sembol).
-//! - Kanonik kod ataması: (uzunluk, sembol) sırası - DEFLATE benzeri, deterministik.
-//! - Gövde: MSB-önce bit-paketli kodlar.
-//! - Sınır güvenli: original_len tavanı (bomba), Kraft eşitsizliği, geçersiz önek → None.
-//! - Kayıpsızlık: compress → decompress = orijinal (mülkiyet testi). Panik yok.
+//! Design:
+//! - Magic: a high-bit `\xB5` prefix (so file(1)/ASCII do not mix it up, S.47)
+//!   plus "HFM1".
+//! - Compact table: the used symbol count (u16) plus (sym, len) pairs
+//!   (2 bytes per symbol).
+//! - Canonical code assignment: (length, symbol) order - DEFLATE-like,
+//!   deterministic.
+//! - Body: MSB-first bit-packed codes.
+//! - Bounds safe: an original_len ceiling (bomb), the Kraft inequality, an
+//!   invalid prefix -> None.
+//! - Losslessness: compress -> decompress = the original (property test).
+//!   No panics.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, no unsafe.
 
@@ -18,14 +24,14 @@
 
 pub const BUD_HFM_MAGIC: [u8; 8] = *b"\xB5HFM1\0\0\0";
 pub const BUD_HFM_VERSION: u8 = 1;
-pub const MAX_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB bomba tavanı
-pub const MAX_CODE_LEN: usize = 32; // tablo bozulmasına karşı kod uzunluğu sınırı
+pub const MAX_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB bomb ceiling
+pub const MAX_CODE_LEN: usize = 32; // code length bound against table corruption
 
 #[derive(Debug, Clone)]
 pub struct HuffmanCoder;
 
 impl HuffmanCoder {
-    /// Sıkıştır: BUD-HFM1 zarfı (magic + sürüm + uzunluk + kompakt tablo + gövde).
+    /// Compress: a BUD-HFM1 envelope (magic + version + length + compact table + body).
     pub fn compress(data: &[u8]) -> Vec<u8> {
         let mut freq = [0u64; 256];
         for &b in data {
@@ -36,7 +42,7 @@ impl HuffmanCoder {
         out.extend_from_slice(&BUD_HFM_MAGIC);
         out.push(BUD_HFM_VERSION);
         out.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        // kompakt tablo: kullanılan sembol sayısı + (sym, len) çiftleri
+        // compact table: the used symbol count plus (sym, len) pairs
         let used: Vec<(u8, u8)> = lens
             .iter()
             .enumerate()
@@ -48,7 +54,7 @@ impl HuffmanCoder {
             out.push(*s);
             out.push(*l);
         }
-        // kanonik kod tablosunu önceden kur (uzunluk, sembol) sırasına göre
+        // build the canonical code table up front, in (length, symbol) order
         let mut codes = [0u64; 256];
         let mut order: Vec<usize> = (0..256).filter(|&s| lens[s] > 0).collect();
         order.sort_by_key(|&s| (lens[s], s));
@@ -62,7 +68,7 @@ impl HuffmanCoder {
             codes[s] = code;
             prev_len = l;
         }
-        // gövde: kodları bit-paketle (MSB-önce)
+        // body: bit-pack the codes (MSB-first)
         let mut bit_buf: u64 = 0;
         let mut bit_cnt: u32 = 0;
         for &b in data {
@@ -84,9 +90,9 @@ impl HuffmanCoder {
         out
     }
 
-    /// Aç: sıkı doğrula (magic, sürüm, uzunluk tavanı, Kraft, kod geçerliliği) → orijinal.
+    /// Decompress: verify strictly (magic, version, length ceiling, Kraft, code validity) -> the original.
     pub fn decompress(bytes: &[u8]) -> Option<Vec<u8>> {
-        const FIXED: usize = 8 + 1 + 8 + 2; // magic + sürüm + len + tablo sayısı
+        const FIXED: usize = 8 + 1 + 8 + 2; // magic + version + len + table count
         if bytes.len() < FIXED {
             return None;
         }
@@ -109,13 +115,13 @@ impl HuffmanCoder {
             let sym = bytes[FIXED + i * 2] as usize;
             let l = bytes[FIXED + i * 2 + 1];
             if lens[sym] != 0 {
-                return None; // yinelenen sembol → bozuk tablo
+                return None; // duplicate symbol -> corrupt table
             }
             lens[sym] = l;
         }
         let body = &bytes[FIXED + sym_count * 2..];
         if orig_len == 0 {
-            // boş girdi: sembol olmamalı, gövde boş olmalı
+            // empty input: there must be no symbols and the body must be empty
             if sym_count != 0 || !body.is_empty() {
                 return None;
             }
@@ -123,9 +129,9 @@ impl HuffmanCoder {
         }
         let lens_usize: Vec<usize> = lens.iter().map(|&l| l as usize).collect();
         if sym_count == 0 {
-            return None; // orijinal var ama sembol yok - tutarsız
+            return None; // there is an original but no symbols - inconsistent
         }
-        // Kraft eşitsizliği: bozuk tablo → red
+        // Kraft inequality: a corrupt table -> refuse
         if !Self::kraft_ok(&lens_usize) {
             return None;
         }
@@ -133,7 +139,7 @@ impl HuffmanCoder {
         if max_len == 0 || max_len > MAX_CODE_LEN {
             return None;
         }
-        // kanonik yapı: count[len], ilk_kod[len], semboller
+        // canonical construction: count[len], first_code[len], symbols
         let mut count = [0usize; MAX_CODE_LEN + 1];
         let mut syms_by_len: Vec<Vec<usize>> = vec![Vec::new(); MAX_CODE_LEN + 1];
         for (sym, &l) in lens_usize.iter().enumerate() {
@@ -148,9 +154,10 @@ impl HuffmanCoder {
             first[l] = c;
             c = (c + count[l] as u64) << 1;
         }
-        // gövde bitleri üzerinde gezin - K38: orig_len GÜVENİLMEZ başlıktan gelir;
-        // with_capacity(orig_len) küçük dosyada devasa ayırım (OOM DoS) yapardı.
-        // Lazy büyüme: gerçek büyük açma zaten gövde boyutuyla sınırlıdır.
+        // walk the body bits - K38: orig_len comes from an UNTRUSTED header;
+        // with_capacity(orig_len) would make a huge allocation for a small file
+        // (OOM DoS). Lazy growth: a genuinely large decompression is already
+        // bounded by the body size.
         let mut out: Vec<u8> = Vec::new();
         let mut bit_pos = 0usize;
         let total_bits = body.len() * 8;
@@ -158,7 +165,7 @@ impl HuffmanCoder {
         let mut cur_len = 0usize;
         while (out.len() as u64) < orig_len {
             if bit_pos >= total_bits {
-                return None; // gövde erken bitti
+                return None; // the body ended early
             }
             let byte = body[bit_pos / 8];
             let bit = (byte >> (7 - (bit_pos % 8))) & 1;
@@ -166,7 +173,7 @@ impl HuffmanCoder {
             code = (code << 1) | bit as u64;
             cur_len += 1;
             if cur_len > max_len {
-                return None; // geçersiz önek (bozuk gövde)
+                return None; // invalid prefix (corrupt body)
             }
             let cnt = count[cur_len];
             if cnt > 0 && code >= first[cur_len] && code < first[cur_len] + cnt as u64 {
@@ -176,12 +183,13 @@ impl HuffmanCoder {
                 cur_len = 0;
             }
         }
-        // Son bayttaki padding bitleri serbesttir (DEFLATE benzeri). Kayıpsızlık tam.
+        // The padding bits in the last byte are free (DEFLATE-like). Losslessness is exact.
         Some(out)
     }
 
-    /// Kod uzunlukları: her adımda iki en küçük (freq, sonra indis) düğüm birleştirilir,
-    /// kökten DFS ile yaprak derinlikleri = kod uzunlukları. Deterministik.
+    /// Code lengths: at every step the two smallest nodes (by freq, then by
+    /// index) are merged; a DFS from the root gives leaf depths = code lengths.
+    /// Deterministic.
     fn lengths_by_freq(freq: &[u64; 256]) -> [u8; 256] {
         let mut fs: Vec<(u64, Option<usize>, Option<usize>, Option<usize>)> = Vec::new();
         let mut used: Vec<bool> = Vec::new();
@@ -196,8 +204,8 @@ impl HuffmanCoder {
         }
         if fs.len() == 1 {
             let mut lens = [0u8; 256];
-            // Tek yapraga sahip agac: yaprak her zaman bir sembol tasir, ama
-            // bunu `unwrap` ile degil desen eslemesiyle soyluyoruz.
+            // A tree with a single leaf: the leaf always carries a symbol, but
+            // we say so with pattern matching rather than with `unwrap`.
             if let Some(sym) = fs[0].3 {
                 lens[sym] = 1;
             }
@@ -207,9 +215,10 @@ impl HuffmanCoder {
         while internal > 1 {
             let mut best1: Option<usize> = None;
             let mut best2: Option<usize> = None;
-            // Ayni karsilastirma, `unwrap` yerine desen eslemesiyle. Siralama
-            // olcutu degismedi: once frekans, esitlikte kucuk indeks - Huffman
-            // agacinin belirlenimli kalmasi buna bagli.
+            // The same comparison, with pattern matching instead of `unwrap`.
+            // The ordering criterion did not change: frequency first, then the
+            // smaller index on a tie - the Huffman tree stays deterministic
+            // because of it.
             let better = |cand: usize, cur: Option<usize>| -> bool {
                 match cur {
                     None => true,
@@ -227,8 +236,8 @@ impl HuffmanCoder {
                     best2 = Some(i);
                 }
             }
-            // Dongu kosulu (`internal > 1`) kullanilmamis en az iki dugum
-            // birakir; yine de eksiklikte panik yerine agaci oldugu gibi
+            // The loop condition (`internal > 1`) leaves at least two unused
+            // nodes; even so, on a shortfall we return the tree as it is
             // birakip cikiyoruz.
             let (Some(i1), Some(i2)) = (best1, best2) else {
                 break;
@@ -267,7 +276,7 @@ impl HuffmanCoder {
     }
 
     fn kraft_ok(lens: &[usize]) -> bool {
-        // Kraft: sum 2^(-len) <= 1 - tamsayı aritmetiğiyle
+        // Kraft: sum 2^(-len) <= 1 - with integer arithmetic
         let mut maxl = 0usize;
         for &l in lens {
             maxl = maxl.max(l);
@@ -291,8 +300,9 @@ mod tests {
 
     #[test]
     fn roundtrip_basic() {
-        // Küçük girdilerde başlık gideri amortize olmaz (dürüst Huffman davranışı);
-        // tekrarlı YETERLİ uzunlukta girdi ile gerçek sıkışma kanıtlanır.
+        // On small inputs the header cost does not amortise (honest Huffman
+        // behaviour); real compression is shown with a repetitive input of
+        // SUFFICIENT length.
         let line = b"2026-08-16 INFO req=123 /api/a s=200 b=42 reg=tr\n";
         let mut data = Vec::new();
         for _ in 0..40 {
@@ -301,7 +311,7 @@ mod tests {
         let c = HuffmanCoder::compress(&data);
         assert!(
             c.len() < data.len(),
-            "tekrarlı veri sıkışmalı: {} -> {}",
+            "repetitive data must compress: {} -> {}",
             data.len(),
             c.len()
         );
@@ -313,10 +323,10 @@ mod tests {
     fn roundtrip_uniform() {
         let data = vec![b'a'; 20_000];
         let c = HuffmanCoder::compress(&data);
-        // tek sembol → ~1 bit/sembol; tablo/başlık sabiti ile ~7x civarı
+        // one symbol -> ~1 bit/symbol; with the table/header constant around ~7x
         assert!(
             c.len() * 7 < data.len(),
-            "tek sembol ~7x olmalı: {} -> {}",
+            "one symbol must be about 7x: {} -> {}",
             data.len(),
             c.len()
         );
@@ -331,7 +341,7 @@ mod tests {
 
     #[test]
     fn roundtrip_all_bytes_random() {
-        // deterministik PRNG - 300 farklı girdi, her boyut
+        // deterministic PRNG - 300 different inputs, every size
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -360,7 +370,7 @@ mod tests {
             let c = HuffmanCoder::compress(&data);
             let d =
                 HuffmanCoder::decompress(&c).unwrap_or_else(|| panic!("round {round} decompress"));
-            assert_eq!(d, data, "round {round} kayıpsız");
+            assert_eq!(d, data, "round {round} lossless");
         }
     }
 
@@ -377,22 +387,22 @@ mod tests {
         let mut t2 = c.clone();
         t2[0] = 0x00;
         assert!(HuffmanCoder::decompress(&t2).is_none());
-        // kısa girdi
+        // short input
         assert!(HuffmanCoder::decompress(&[]).is_none());
         assert!(HuffmanCoder::decompress(&c[..20]).is_none());
-        // boyut bombası: original_len = 1 GiB (MAX altı ama gövde yok → hızlı red)
+        // size bomb: original_len = 1 GiB (under MAX but with no body -> fast refusal)
         let mut b = BUD_HFM_MAGIC.to_vec();
         b.push(BUD_HFM_VERSION);
         b.extend_from_slice(&(1u64 << 30).to_le_bytes());
         b.extend_from_slice(&0u16.to_le_bytes());
-        assert!(HuffmanCoder::decompress(&b).is_none(), "boyut bombası red");
-        // alloc-bomb: 3.9 GiB orig_len + tek sembol tablo + küçük gövde → OOM OLMADAN hızlı red
+        assert!(HuffmanCoder::decompress(&b).is_none(), "size bomb refused");
+        // alloc bomb: 3.9 GiB orig_len + one-symbol table + small body -> fast refusal WITHOUT OOM
         let mut bomb = BUD_HFM_MAGIC.to_vec();
         bomb.push(BUD_HFM_VERSION);
-        bomb.extend_from_slice(&((4u64 << 30) - 1).to_le_bytes()); // MAX altı
+        bomb.extend_from_slice(&((4u64 << 30) - 1).to_le_bytes()); // under MAX
         bomb.extend_from_slice(&1u16.to_le_bytes());
-        bomb.extend_from_slice(&[65, 1]); // tek sembol 'A', uzunluk 1
-        bomb.extend_from_slice(&[0u8; 64]); // küçük gövde
+        bomb.extend_from_slice(&[65, 1]); // one symbol 'A', length 1
+        bomb.extend_from_slice(&[0u8; 64]); // small body
         let start = std::time::Instant::now();
         for _ in 0..100 {
             assert!(HuffmanCoder::decompress(&bomb).is_none());
@@ -402,7 +412,7 @@ mod tests {
             "alloc-bomb yok: {:?}",
             start.elapsed()
         );
-        // geçersiz tablo (Kraft bozuk): 256 sembol, hepsi uzunluk 32
+        // invalid table (Kraft broken): 256 symbols, all of length 32
         let mut b2 = BUD_HFM_MAGIC.to_vec();
         b2.push(BUD_HFM_VERSION);
         b2.extend_from_slice(&64u64.to_le_bytes());
@@ -413,24 +423,24 @@ mod tests {
         }
         assert!(
             HuffmanCoder::decompress(&b2).is_none(),
-            "Kraft bozuk tablo red"
+            "a Kraft-broken table is refused"
         );
-        // yinelenen sembol → bozuk tablo red
+        // duplicate symbol -> corrupt table is refused
         let mut b3 = BUD_HFM_MAGIC.to_vec();
         b3.push(BUD_HFM_VERSION);
         b3.extend_from_slice(&8u64.to_le_bytes());
         b3.extend_from_slice(&2u16.to_le_bytes());
-        b3.extend_from_slice(&[65, 3, 65, 3]); // aynı sembol iki kez
+        b3.extend_from_slice(&[65, 3, 65, 3]); // the same symbol twice
         assert!(
             HuffmanCoder::decompress(&b3).is_none(),
             "yinelenen sembol red"
         );
-        // çöp gövde (panik yok)
+        // garbage body (no panic)
         let mut b4 = BUD_HFM_MAGIC.to_vec();
         b4.push(BUD_HFM_VERSION);
         b4.extend_from_slice(&16u64.to_le_bytes());
         b4.extend_from_slice(&1u16.to_le_bytes());
-        b4.extend_from_slice(&[65, 8]); // tek sembol, uzunluk 8
+        b4.extend_from_slice(&[65, 8]); // one symbol, length 8
         b4.extend_from_slice(&[0b1010_1010]);
         let _ = HuffmanCoder::decompress(&b4);
     }

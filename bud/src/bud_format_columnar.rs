@@ -529,10 +529,7 @@ mod tests {
             "a mixed numeric type falls back to Str"
         );
         let back = columnar_decode(&col).unwrap();
-        assert_eq!(
-            back, d,
-            "lossless (the stringified value returns to JSON)"
-        );
+        assert_eq!(back, d, "lossless (the stringified value returns to JSON)");
     }
 
     #[test]
