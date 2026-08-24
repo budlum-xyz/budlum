@@ -48,8 +48,8 @@ pub fn register_lubot_model(
 /// an opaque value).
 ///
 /// `grant` = the requester's authority to read that data. It is a mandatory
-/// argument, because letting an unauthorized inference request be built at all
-/// - even if it is rejected later - turns the authority from an admission
+/// argument, because letting an unauthorized inference request be built at all,
+/// even if it is rejected later, turns the authority from an admission
 /// condition into a check that depends on the next layer remembering it. This
 /// file's own comment used to say verification was "done separately", while
 /// [`crate::lubot::validate_inference_grant`] was called from nowhere in
