@@ -278,7 +278,6 @@ src/registry/poa_compliance.rs	11
 src/registry/role.rs	1
 src/rpc/api.rs	17
 src/rpc/tests.rs	1
-src/sdk/mod.rs	50
 src/settlement/global_block.rs	2
 src/socialfi/README.md	14
 src/socialfi/mod.rs	6
