@@ -2,15 +2,15 @@
 //!
 //! `scripts/generate_zkvm_seed_corpus.sh` yerine gecer.
 //!
-//! # Shell surumunun sessiz hatasi
+//! # The silent failure of the shell version
 //!
 //! Betik tohumlari `printf "\x01\x01..."` ile yaziyordu. `printf`'in kacis
 //! dizisi yorumu **kabuga ve yapiya gore degisir**: bash'in yerlesik
 //! `printf`'i `\x` anlar, `/usr/bin/printf` (coreutils) `\x`'i anlar ama
-//! dash'in yerlesigi anlamaz ve dizgiyi harfi harfine yazar. Yani ayni
+//! dash's builtin does not understand it and writes the string literally. So the same
 //! betik `bash` ile calistiginda 8 baytlik bir ikili dosya, `sh` ile
 //! calistiginda 32 baytlik bir metin dosyasi uretiyordu ve **ikisi de
-//! sessizce basariliydi**.
+//! silently succeeded**.
 //!
 //! Rust'ta tohum bir `&[u8]` sabiti; yorumlanacak bir kacis dizisi yok.
 //!
@@ -28,9 +28,9 @@ struct Seed {
     bytes: &'static [u8],
 }
 
-/// Bes tohum. Opcode degerleri `bud-isa` ile ayni olmali; bir opcode
-/// degisirse buradaki tohum bayatlar ama fuzz'i bozmaz (fuzzer gecersiz
-/// programi da besler), o yuzden bu bir kapi degil bir kolaylik.
+/// Five seeds. The opcode values must match `bud-isa`; if an opcode
+/// changes the seed here goes stale but does not break fuzzing (the fuzzer feeds
+/// invalid programs too), so this is a convenience, not a gate.
 const SEEDS: &[Seed] = &[
     Seed {
         name: "01_simple_add.bud",
@@ -78,14 +78,14 @@ pub fn generate(out_dir: &Path) -> Result<String, String> {
         std::fs::write(&path, seed.bytes)
             .map_err(|e| format!("{} yazilamadi: {e}", path.display()))?;
 
-        // Yazdiktan sonra geri oku. Bu bir titizlik degil: shell surumunun
-        // hatasi tam olarak "yazdim sandi, baska sey yazdi" idi ve kimse
+        // Read back after writing. This is not pedantry: the failure of the shell
+        // version was exactly "it thought it wrote, it wrote something else" and nobody
         // bakmadi.
         let back =
             std::fs::read(&path).map_err(|e| format!("{} okunamadi: {e}", path.display()))?;
         if back != seed.bytes {
             return Err(format!(
-                "{}: {} bayt yazildi, {} bayt geri okundu",
+                "{}: {} bytes written, {} bytes read back",
                 path.display(),
                 seed.bytes.len(),
                 back.len()
@@ -96,7 +96,7 @@ pub fn generate(out_dir: &Path) -> Result<String, String> {
     }
 
     Ok(format!(
-        "BudZero ZKVM tohum korpusu: {} dosya, {} bayt -> {}\n{}",
+        "BudZero ZKVM seed corpus: {} files, {} bytes -> {}\n{}",
         written.len(),
         total_bytes,
         out_dir.display(),
@@ -114,7 +114,7 @@ pub fn default_out_dir(root: &Path) -> PathBuf {
 ///
 /// Shell surumunun hatasi ikili yerine metin yazmakti ve bu disaridan
 /// gorunmuyordu. Burada tohumlarin ikili oldugu (yazdirilabilir ASCII
-/// olmadigi) ve geri okundugunda birebir esit oldugu dogrulanir.
+/// not) and that reading it back gives a byte-for-byte equal result.
 ///
 /// # Errors
 ///
@@ -129,14 +129,14 @@ pub fn self_test() -> Result<String, String> {
         let bytes =
             std::fs::read(&path).map_err(|e| format!("{} okunamadi: {e}", path.display()))?;
         if bytes != seed.bytes {
-            return Err(format!("{}: geri okuma esit degil", seed.name));
+            return Err(format!("{}: the read-back is not equal", seed.name));
         }
         // Shell'in `\x01`'i harfi harfine yazdigi durumda dosya tamamen
-        // yazdirilabilir ASCII olurdu. En az bir kontrol baytı bekliyoruz.
+        // it would be printable ASCII. We expect at least one control byte.
         if !bytes.iter().any(|b| *b < 0x20) {
             return Err(format!(
-                "{}: hicbir kontrol bayti yok, bu bir metin dosyasi; \
-                 shell surumunun `printf \\x` hatasi geri gelmis olabilir",
+                "{}: there is no control byte at all, this is a text file; \
+                 the `printf \\x` failure of the shell version may be back",
                 seed.name
             ));
         }
@@ -154,7 +154,7 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
     Ok(format!(
-        "tohum korpusu kanaryasi OK: {count} dosya ikili yazildi ve geri okundu"
+        "seed corpus canary OK: {count} files were written as binary and read back"
     ))
 }
 
@@ -179,14 +179,14 @@ mod tests {
         names.sort_unstable();
         let before = names.len();
         names.dedup();
-        assert_eq!(before, names.len(), "tohum adlari benzersiz olmali");
+        assert_eq!(before, names.len(), "seed names must be unique");
     }
 
     #[test]
     fn generate_writes_exactly_the_declared_bytes() {
         let tmp = std::env::temp_dir().join("budlum-seed-unit-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        generate(&tmp).expect("uretim basarili olmali");
+        generate(&tmp).expect("generation must succeed");
         for seed in SEEDS {
             let got = std::fs::read(tmp.join(seed.name)).expect("tohum okunmali");
             assert_eq!(got, seed.bytes, "{}", seed.name);
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn self_test_passes_on_a_clean_run() {
-        let msg = self_test().expect("kanarya gecmeli");
+        let msg = self_test().expect("the canary must pass");
         assert!(msg.contains("OK"), "{msg}");
     }
 

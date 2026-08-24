@@ -1,47 +1,46 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// Unsafe lock: this crate currently has 0 unsafe. The moment an `unsafe` block
+// enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
-//! Depo araclari, Rust'ta.
+//! Repository tools, in Rust.
 //!
-//! # Bu crate neden var
+//! # Why this crate exists
 //!
-//! `xtask/gates` kapilari shell'den Rust'a tasidi ve gerekcesini kendi
-//! basliginda yaziyor. Ayni gerekce **kapi olmayan** betikler icin de
-//! gecerli, hatta bir noktada daha guclu: bir kapi dustugunde CI kirmizi
-//! olur ve birisi bakar; bir aracin sessizce yanlis is yapmasi kimseye
-//! gorunmez.
+//! `xtask/gates` moved the gates from shell to Rust and states its reasoning in
+//! its own header. The same reasoning holds for scripts that are **not gates**,
+//! and at one point it holds more strongly: when a gate falls CI turns red and
+//! somebody looks; a tool silently doing the wrong thing is visible to nobody.
 //!
-//! Shell'in bu agacta olculmus uc hatasi:
+//! Three shell failures measured in this tree:
 //!
-//!   * `set -u` **atanmamis** degiskeni yakalar, **bos** degiskeni
-//!     yakalamaz. `VAR=""` iken `rm -rf "$VAR/"` calisir. `ShellCheck` bu
-//!     sinif icin acik bir ozellik istegi tasiyor ve kapatilmadi.
-//!   * `grep -q` "bu metin geciyor mu" diye sorar; dogru soru cogu zaman
-//!     "bu deger ne" olur. Bu agacta iki ayri kapiyi yanlis olceklenmis bir
-//!     oran ve bayat bir carpan tam bu yuzden gecti.
-//!   * Bir yol, bir sayi ve bir etiket arasinda tur yoktur; yanlis iki seyi
-//!     karsilastiran bir betik derlenir ve calisir.
+//!   * `set -u` catches an **unassigned** variable, it does not catch an
+//!     **empty** one. With `VAR=""`, `rm -rf "$VAR/"` runs. `ShellCheck`
+//!     carries an open feature request for this class and it was not closed.
+//!   * `grep -q` asks "does this text occur"; the right question is usually
+//!     "what is this value". In this tree a wrongly scaled ratio and a stale
+//!     factor passed two separate gates for exactly this reason.
+//!   * There is no type between a path, a number and a label; a script that
+//!     compares the wrong two things compiles and runs.
 //!
-//! # Bicim
+//! # Shape
 //!
-//! Her arac bir modul, her modul bir `run` fonksiyonu ve
-//! `Result<String, String>` donuyor. `Ok` tarafi basarili ciktinin
-//! kendisi, `Err` tarafi bulgu. Hicbir arac icinden `process::exit`
-//! cagrilmiyor, boylece her biri bir testten cagrilabilir.
+//! Every tool is a module, every module has a `run` function returning
+//! `Result<String, String>`. The `Ok` side is the successful output itself,
+//! the `Err` side is the finding. No tool calls `process::exit` from inside,
+//! so each of them can be called from a test.
 //!
-//! # Tasima sirasi
+//! # Migration order
 //!
-//! Betikler tek seferde degil, teker teker tasiniyor. Ilk turda **hicbir
-//! workflow'un cagirmadigi** dordu geciyor: `run_nodes.sh`,
-//! `pre-push-check.sh`, `generate_zkvm_seed_corpus.sh` ve
-//! `backup_restore_drill.sh`. Bunlarin donusumu CI'i kiramaz, cunku CI
-//! onlari zaten cagirmiyor.
+//! The scripts are moved one by one, not in a single step. In the first round
+//! the four that **no workflow calls** go over: `run_nodes.sh`,
+//! `pre-push-check.sh`, `generate_zkvm_seed_corpus.sh` and
+//! `backup_restore_drill.sh`. Converting these cannot break CI, because CI
+//! does not call them anyway.
 //!
-//! Ikinci turda tasinacaklar: workflow'lardan cagrilan bes betik
+//! To be moved in the second round: the five scripts called from workflows
 //! (`audit-deps`, `generate-sbom`, `smoke_rpc`, `docker-smoke-mainnet`,
-//! `devnet-multinode-smoke`), her biri kendi workflow degisikligiyle
-//! birlikte; ve `coverage-report.sh`, ki o cagrilmiyor ama `cargo llvm-cov`
-//! ciktisini ayristirdigi icin karsiligi bir arac degil bir cozumleyici.
+//! `devnet-multinode-smoke`), each together with its own workflow change; and
+//! `coverage-report.sh`, which is not called but parses `cargo llvm-cov`
+//! output, so its counterpart is not a tool but a parser.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,8 +52,8 @@ pub mod seed_corpus;
 
 /// Depo kokunu bul.
 ///
-/// `CARGO_MANIFEST_DIR` bu crate'i (`xtask/tools`) gosterir; kok iki ust
-/// dizin. Ortam degiskeni yoksa calisma dizininden yukari yurunur.
+/// `CARGO_MANIFEST_DIR` points at this crate (`xtask/tools`); the root is two
+/// directories up. If the environment variable is absent, walk up from the working directory.
 ///
 /// # Panics
 ///
@@ -84,14 +83,14 @@ pub fn repo_root() -> PathBuf {
 /// Bir komutu calistir, cikis kodunu **kaybetmeden** don.
 ///
 /// Shell'de bunun karsiligi `cmd || true` ya da `cmd; RC=$?` idi ve ikisi de
-/// kolayca yanlis yaziliyor: ilki hatayi yutar, ikincisi araya bir komut
+/// is easily written wrongly: the first swallows the error, the second inserts a command
 /// girdiginde `$?`'i kaybeder. Burada cikis kodu bir donus degeri, bir yan
-/// etki degil.
+/// not an effect.
 ///
 /// # Errors
 ///
-/// Surec baslatilamazsa (`ENOENT` dahil) hata doner. Sureç calisip sifirdan
-/// farkli donerse bu **hata degildir**: cikis kodu `Ok` icinde doner ve
+/// Returns an error if the process cannot be started (including `ENOENT`). If the process runs and
+/// returns non-zero that is **not an error**: the exit code is returned inside `Ok` and
 /// karari cagiran verir.
 pub fn run_capturing_status(program: &str, args: &[&str], cwd: &Path) -> Result<i32, String> {
     let status = Command::new(program)
@@ -100,15 +99,15 @@ pub fn run_capturing_status(program: &str, args: &[&str], cwd: &Path) -> Result<
         .status()
         .map_err(|e| format!("`{program}` calistirilamadi: {e}"))?;
     // 128+signal, bir sinyalle olen surecin kabuk karsiligi. Kod yoksa
-    // sureci bir sinyal oldurmustur ve bunu 0 saymak yanlis olur.
+    // a signal killed the process and counting that as 0 would be wrong.
     Ok(status.code().unwrap_or(-1))
 }
 
-/// Bir komutu calistir; sifirdan farkli cikis bir hatadir.
+/// Run a command; a non-zero exit is an error.
 ///
 /// # Errors
 ///
-/// Surec baslatilamazsa ya da sifirdan farkli donerse.
+/// If the process cannot be started or returns non-zero.
 pub fn run_checked(program: &str, args: &[&str], cwd: &Path) -> Result<(), String> {
     let code = run_capturing_status(program, args, cwd)?;
     if code == 0 {
