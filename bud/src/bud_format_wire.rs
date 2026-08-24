@@ -1,16 +1,23 @@
-//! B.U.D. 2.0 - WIRE FORMAT SÜRÜMLEME + GOLDEN VECTORS (optik transfer codec'i)
+//! B.U.D. 2.0 - wire format versioning plus golden vectors, the optical
+//! transfer codec.
 //!
-//! Alınan desen (2026-08-16, optik aktarım codec incelemesi):
-//! - Wire format version byte: her .bud, format sürümünü taşır.
-//! - must-understand / ignorable bayraklar: eski okuyucu yeni bir alan gördüğünde
-//!   "anlamak zorunda" alanı görürse RED (kayıpsızlık/doğruluk korunur), "yok sayılabilir"
-//!   alanı görürse güvenle atlar (geriye uyumluluk).
-//! - GOLDEN VECTORS: deterministik girdi→çıktı sabitleri; sürüm değişimi golden'ı kırarsa
-//!   bilinçli karar istenir (uydurma değil, kanıtlı).
-//! - CONFORMANCE: aynı girdi, aynı codec, aynı sürüm → AYNI baytlar (determinizm kapısı).
+//! The pattern taken over, from the 2026-08-16 review of an optical transfer
+//! codec:
 //!
-//! B.U.D. etkisi: .bud konteyner formatı EVRİLEBİLİR ama kayıpsızlık/determinizm korunur;
-//! eski cihaz yeni .bud'u ya reddeder (must) ya da güvenle okur (ignorable).
+//! - A wire format version byte: every `.bud` carries its format version.
+//! - Must-understand and ignorable flags: when an old reader meets a new field,
+//!   a "must understand" field is REFUSED, which preserves losslessness and
+//!   correctness, while an "ignorable" field is safely skipped, which preserves
+//!   backward compatibility.
+//! - GOLDEN VECTORS: deterministic input-to-output constants. If a version
+//!   change breaks a golden vector, a deliberate decision is required; nothing
+//!   is invented, everything is evidenced.
+//! - CONFORMANCE: the same input, the same codec and the same version yield THE
+//!   SAME bytes. That is the determinism gate.
+//!
+//! The effect on B.U.D.: the `.bud` container format CAN EVOLVE while
+//! losslessness and determinism are preserved, and an old device either refuses
+//! a new `.bud`, on a must-understand field, or reads it safely.
 
 #![forbid(unsafe_code)]
 
@@ -19,14 +26,14 @@ use sha3::{Digest, Sha3_256};
 pub const WIRE_MAGIC: [u8; 8] = *b"\xB5WIRE\0\0\0";
 pub const WIRE_VERSION: u8 = 1;
 
-/// Alan anlama gereksinimi (wire v3 deseni).
+/// How strictly a field must be understood, in the wire v3 pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldPolicy {
-    MustUnderstand, // eski okuyucu görürse RED - doğruluk/kayıpsızlık kritik
-    Ignorable,      // eski okuyucu güvenle atlar - geriye uyumluluk
+    MustUnderstand, // an old reader that sees it REFUSES; correctness and losslessness depend on it
+    Ignorable,      // an old reader safely skips it, for backward compatibility
 }
 
-/// Format alanı tanımı (sürümleme sözleşmesi).
+/// A format field definition, part of the versioning contract.
 #[derive(Debug, Clone)]
 pub struct WireField {
     pub id: u8,
@@ -34,7 +41,7 @@ pub struct WireField {
     pub since_version: u8,
 }
 
-/// Wire format sürüm sözleşmesi: hangi alan hangi sürümden itibaren var.
+/// The wire format version contract: which field exists from which version on.
 pub const WIRE_CONTRACT: &[WireField] = &[
     WireField {
         id: 0x01,
@@ -55,12 +62,12 @@ pub const WIRE_CONTRACT: &[WireField] = &[
         id: 0x04,
         policy: FieldPolicy::Ignorable,
         since_version: 1,
-    }, // mime (kayıpsızlık dışı)
+    }, // mime, outside losslessness
     WireField {
         id: 0x05,
         policy: FieldPolicy::Ignorable,
         since_version: 1,
-    }, // width/height (KF2 meta)
+    }, // width and height, KF2 metadata
     WireField {
         id: 0x06,
         policy: FieldPolicy::Ignorable,
@@ -70,37 +77,44 @@ pub const WIRE_CONTRACT: &[WireField] = &[
         id: 0x07,
         policy: FieldPolicy::MustUnderstand,
         since_version: 3,
-    }, // future: pq_signature (güvenlik)
+    }, // future: pq_signature, a security field
 ];
 
-/// Okuyucu sürümü verilen bir alanı anlayabilir mi?
-/// - alan sürümü okuyucu sürümüne eşit/küçükse → anlar.
-/// - alan daha yeni ve MustUnderstand ise → RED (güvenli red).
-/// - alan daha yeni ve Ignorable ise → atla (uyumlu).
+/// Can a reader of the given version understand a field?
+///
+/// If the field's version is at or below the reader's version, it understands
+/// it. If the field is newer and must be understood, the answer is a safe
+/// refusal. If the field is newer and ignorable, it is skipped, which stays
+/// compatible.
 pub fn field_verdict(field: &WireField, reader_version: u8) -> Result<FieldPolicy, &'static str> {
     if field.since_version <= reader_version {
-        Ok(field.policy) // anlıyor - kural çağıranda
+        Ok(field.policy) // understood; the rule itself belongs to the caller
     } else if field.policy == FieldPolicy::MustUnderstand {
-        Err("K-WIRE: bilinmeyen zorunlu alan - sürüm yükselt")
+        Err("K-WIRE: unknown must-understand field, upgrade the version")
     } else {
-        Ok(FieldPolicy::Ignorable) // atlanabilir
+        Ok(FieldPolicy::Ignorable) // skippable
     }
 }
 
-/// Konteyner sürüm denetimi: `.bud` başlığındaki sürüm, codec'in desteklediğiyle uyumlu mu?
+/// The container version check: is the version in the `.bud` header compatible
+/// with what the codec supports?
 pub fn version_compatible(container_version: u8, codec_version: u8) -> bool {
     container_version <= codec_version
 }
 
-/// GOLDEN VECTOR: deterministik girdi → sabit özet (sürüm sabitlemesi).
-/// Bu sabitler "aynı girdi + aynı sürüm → AYNI çıktı"yı kanıtlar (İ5).
+/// A GOLDEN VECTOR: a deterministic input mapped to a fixed digest, pinning the
+/// version.
+///
+/// These constants prove that the same input under the same version gives the
+/// same output (I5).
 pub struct GoldenVector {
     pub name: &'static str,
     pub input: &'static [u8],
     pub expected_digest: [u8; 32],
 }
 
-/// Golden vectors tablosu (deterministik; sürüm değişimi bilinçli günceller).
+/// The golden vector table. It is deterministic, and a version change updates
+/// it deliberately.
 pub const GOLDEN_VECTORS: &[GoldenVector] = &[
     GoldenVector {
         name: "empty-content-v1",
@@ -139,16 +153,18 @@ fn golden(input: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Conformance: golden vector hâlâ doğru mu? (determinizm kapısı)
+/// Conformance: are the golden vectors still correct? This is the determinism
+/// gate.
 pub fn conformance_pass() -> bool {
     GOLDEN_VECTORS
         .iter()
         .all(|g| golden(g.input) == g.expected_digest)
 }
 
-/// Yeni alan ekleme kuralı: sürüm contract'ına uymalı (test ile zorlanır).
+/// The rule for adding a new field: it must obey the version contract, which a
+/// test enforces.
 pub fn contract_ok(fields: &[WireField]) -> bool {
-    // id benzersiz + since_version >= 1
+    // The ids are unique and since_version is at least 1.
     let mut ids: Vec<u8> = fields.iter().map(|f| f.id).collect();
     ids.sort_unstable();
     ids.windows(2).all(|w| w[0] != w[1]) && fields.iter().all(|f| f.since_version >= 1)
@@ -174,56 +190,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn must_understand_yeni_alan_reddedilir() {
-        // okuyucu v1, alan v3 (pq_signature, MustUnderstand) → RED
+    fn a_new_must_understand_field_is_refused() {
+        // A v1 reader against a v3 field, pq_signature, which must be
+        // understood: REFUSED.
         let pq = WIRE_CONTRACT.iter().find(|f| f.id == 0x07).unwrap();
         assert!(
             field_verdict(pq, 1).is_err(),
-            "v1 okuyucu pq alanını anlamaz → RED"
+            "a v1 reader does not understand the pq field, so it is refused"
         );
-        // okuyucu v3 → anlar (Ok döner)
+        // A v3 reader understands it and gets an Ok.
         assert!(field_verdict(pq, 3).is_ok());
     }
 
     #[test]
-    fn ignorable_yeni_alan_atlanir() {
-        // okuyucu v1, alan v2 (culling_plan, Ignorable) → Ok(Ignorable) = atla
+    fn a_new_ignorable_field_is_skipped() {
+        // A v1 reader against a v2 field, culling_plan, which is ignorable: the
+        // verdict is Ok(Ignorable), meaning skip it.
         let cull = WIRE_CONTRACT.iter().find(|f| f.id == 0x06).unwrap();
         assert_eq!(field_verdict(cull, 1).unwrap(), FieldPolicy::Ignorable);
     }
 
     #[test]
-    fn eski_alan_her_zaman_anlasilir() {
+    fn an_old_field_is_always_understood() {
         let cid = WIRE_CONTRACT.iter().find(|f| f.id == 0x01).unwrap();
         assert!(field_verdict(cid, 1).is_ok());
         assert!(field_verdict(cid, 3).is_ok());
     }
 
     #[test]
-    fn sürüm_uyumluluğu() {
+    fn version_compatibility() {
         assert!(version_compatible(1, 3));
         assert!(
             !version_compatible(4, 3),
-            "container sürümü codec'ten büyük → RED"
+            "a container version above the codec version is refused"
         );
         assert!(version_compatible(3, 3));
     }
 
     #[test]
-    fn golden_vectors_deterministik() {
+    fn golden_vectors_are_deterministic() {
         assert!(
             conformance_pass(),
-            "golden vector kırıldı - sürüm değişimi bilinçli olmalı"
+            "a golden vector broke; a version change must be deliberate"
         );
-        // aynı girdi → aynı özet
+        // The same input gives the same digest.
         assert_eq!(golden(b"hello budlum"), golden(b"hello budlum"));
         assert_ne!(golden(b"hello budlum"), golden(b"hello budlumX"));
     }
 
     #[test]
-    fn contract_benzersiz_id() {
+    fn the_contract_has_unique_ids() {
         assert!(contract_ok(WIRE_CONTRACT));
-        let bozuk = vec![
+        let duplicated = vec![
             WireField {
                 id: 1,
                 policy: FieldPolicy::MustUnderstand,
@@ -233,19 +251,22 @@ mod tests {
                 id: 1,
                 policy: FieldPolicy::Ignorable,
                 since_version: 2,
-            }, // çift id
+            }, // a duplicated id
         ];
-        assert!(!contract_ok(&bozuk));
-        let sifir = vec![WireField {
+        assert!(!contract_ok(&duplicated));
+        let zero_version = vec![WireField {
             id: 2,
             policy: FieldPolicy::Ignorable,
             since_version: 0,
         }];
-        assert!(!contract_ok(&sifir), "since_version >= 1 olmalı");
+        assert!(
+            !contract_ok(&zero_version),
+            "since_version must be at least 1"
+        );
     }
 
     #[test]
-    fn wire_digest_deterministik() {
+    fn the_wire_digest_is_deterministic() {
         assert_eq!(wire_digest(), wire_digest());
     }
 }

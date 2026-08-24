@@ -1,17 +1,20 @@
-//! B.U.D. 2.0 - DAS Parça Tutma (F25 DTDL deseni) (2026-08-16)
+//! B.U.D. 2.0 - DAS chunk holding, in the F25 DTDL pattern, 2026-08-16.
 //!
-//! F25: validatörler 3x aynı veriyi tutmak yerine YALNIZ BİRER PARÇA tutar;
-//! erişim/doğrulama verifiable tree + data-availability-sampling (DAS) ile.
+//! F25: rather than three validators each holding the same data, each holds
+//! ONLY ONE CHUNK; access and verification then run over a verifiable tree plus
+//! data availability sampling (DAS).
 //!
-//! Bu modül: bir blok/dosya parçalarını (chunk) tek tek doğrulamak için
-//! **Merkle kökü** (domain-etiketli, K38) + **DAS örneklemesi**: az sayıda parça
-//! çekilip köke karşı doğrulanırsa verinin tamamının mevcut olduğuna yüksek
-//! olasılıkla güvenilir (Celestia/Avail deseni).
+//! This module verifies the chunks of a block or file one at a time with a
+//! **Merkle root** that is domain-tagged (K38), plus **DAS sampling**: if a
+//! small number of chunks are pulled and verified against the root, the whole
+//! of the data can be trusted to be present with high probability. That is the
+//! Celestia and Avail pattern.
 //!
-//! Ayrıca **parça sahipliği kaydı**: her validatör hangi parçayı tuttuğunu
-//! imzalanmış kayıtla beyan eder; eksik parça → DAS sınavı RED (itibar).
+//! It also carries a **chunk ownership record**: each validator declares which
+//! chunk it holds in a signed record, and a missing chunk fails the DAS exam,
+//! which costs reputation.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -20,9 +23,9 @@ use sha3::{Digest, Sha3_256};
 pub const DAS_MAGIC: [u8; 8] = *b"\xB5DASS\0\0\0";
 pub const DAS_VERSION: u8 = 1;
 
-/// Merkle kökü (parça listesinden - domain-etiketli, K38).
+/// The Merkle root over a chunk list, domain-tagged (K38).
 pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
-    // yaprak hash'leri
+    // The leaf hashes.
     let leaves: Vec<[u8; 32]> = chunks
         .iter()
         .map(|c| {
@@ -33,7 +36,7 @@ pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
             h.finalize().into()
         })
         .collect();
-    // ikili merkle (tek sayıda → son yaprak çoğaltılır)
+    // A binary Merkle tree; on an odd count the last leaf is duplicated.
     let mut level = leaves;
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
@@ -44,7 +47,7 @@ pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
             if let Some(r) = pair.get(1) {
                 h.update(*r);
             } else {
-                h.update(pair[0]); // tek → çoğalt
+                h.update(pair[0]); // odd one out, so duplicate it
             }
             next.push(h.finalize().into());
         }
@@ -53,8 +56,9 @@ pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
     level[0]
 }
 
-/// Tek parça kanıtı: (yaprak + yol) → köke karşı doğrula.
-/// `path`: her seviyede kardeş hash (sağdaki None = solda değil).
+/// A single chunk proof: a leaf plus a path, verified against the root.
+///
+/// `path` holds the sibling hash at each level.
 #[derive(Debug, Clone)]
 pub struct DasProof {
     pub leaf_index: usize,
@@ -62,12 +66,12 @@ pub struct DasProof {
 }
 
 impl DasProof {
-    /// Kanıt üret (deterministik - veriden yeniden hesaplanır).
+    /// Produce a proof; it is deterministic and recomputed from the data.
     pub fn prove(chunks: &[Vec<u8>], leaf_index: usize) -> Option<DasProof> {
         if chunks.is_empty() || leaf_index >= chunks.len() {
             return None;
         }
-        // yaprak hash'i
+        // The leaf hash.
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_DAS_LEAF_V1");
         h.update((chunks[leaf_index].len() as u64).to_le_bytes());
@@ -97,7 +101,7 @@ impl DasProof {
                 level[idx]
             };
             path.push(sibling);
-            // üst seviyeye geç
+            // Move up one level.
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for pair in level.chunks(2) {
                 let mut h = Sha3_256::new();
@@ -117,7 +121,7 @@ impl DasProof {
         Some(DasProof { leaf_index, path })
     }
 
-    /// Kanıt doğrula: leaf + path → root (panik'siz).
+    /// Verify a proof: the leaf plus the path must reach the root. Panic-free.
     pub fn verify(&self, leaf: &[u8], root: &[u8; 32]) -> bool {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_DAS_LEAF_V1");
@@ -142,12 +146,13 @@ impl DasProof {
     }
 }
 
-/// DAS örneklemesi: rastgele (deterministik tohumla) k parça çek, hepsi köke
-/// doğrulanırsa veri büyük olasılıkla tam mevcut (eksik oran düşükse).
+/// DAS sampling: pull k chunks at random, from a deterministic seed, and if
+/// they all verify against the root the data is very likely to be fully
+/// present, as long as the missing fraction is low.
 pub struct DasSampler;
 
 impl DasSampler {
-    /// Deterministik örnekleme: tohumdan k indeks üret (çakışmasız).
+    /// Deterministic sampling: produce k distinct indices from the seed.
     pub fn sample_indices(count: usize, k: usize, seed: u64) -> Vec<usize> {
         if count == 0 || k == 0 {
             return vec![];
@@ -169,7 +174,7 @@ impl DasSampler {
         out
     }
 
-    /// Örneklenen parçaların hepsi köke doğrulanıyor mu?
+    /// Do all of the sampled chunks verify against the root?
     pub fn verify_sample(chunks: &[Vec<u8>], root: &[u8; 32], seed: u64, k: usize) -> bool {
         let root_computed = das_root(chunks);
         if root_computed != *root {
@@ -188,7 +193,7 @@ impl DasSampler {
     }
 }
 
-/// Parça sahipliği kaydı (validatör beyanı - zincire yazılabilir).
+/// A chunk ownership record: a validator's declaration, writable on chain.
 #[derive(Debug, Clone)]
 pub struct DasOwnership {
     pub validator_id: String,
@@ -224,7 +229,7 @@ impl DasOwnership {
         h.finalize().into()
     }
 
-    /// Validatör, beyan ettiği parçayı gerçekten tutuyor mu?
+    /// Does the validator really hold the chunk it declared?
     pub fn verify_hold(&self, chunk: &[u8]) -> bool {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_DAS_LEAF_V1");
@@ -248,14 +253,14 @@ mod tests {
         let chunks = gen_chunks(8);
         let root = das_root(&chunks);
         assert_ne!(root, [0u8; 32]);
-        // her yaprak için kanıt doğrulanır
+        // The proof verifies for every leaf.
         for i in 0..8 {
-            let proof = DasProof::prove(&chunks, i).expect("kanıt");
-            assert!(proof.verify(&chunks[i], &root), "yaprak {i} doğrulanır");
-            // yanlış yaprak → RED
+            let proof = DasProof::prove(&chunks, i).expect("proof");
+            assert!(proof.verify(&chunks[i], &root), "leaf {i} verifies");
+            // The wrong leaf is REFUSED.
             assert!(!proof.verify(&chunks[(i + 1) % 8], &root));
         }
-        // tek sayıda yaprak (çoğaltma)
+        // An odd number of leaves, exercising the duplication.
         let chunks5 = gen_chunks(5);
         let root5 = das_root(&chunks5);
         for i in 0..5 {
@@ -268,35 +273,39 @@ mod tests {
     fn das_sampling_verifies_full_data() {
         let chunks = gen_chunks(100);
         let root = das_root(&chunks);
-        // 10 örnek yeterli
+        // Ten samples are enough.
         assert!(DasSampler::verify_sample(&chunks, &root, 42, 10));
-        // kurcalanmış parça → örnekleme RED
+        // A tampered chunk makes the sampling REFUSE.
         let mut bad = chunks.clone();
         bad[50][0] ^= 0xFF;
         assert!(
             !DasSampler::verify_sample(&bad, &root, 42, 10),
-            "bozuk parça yakalanır"
+            "the corrupt chunk is caught"
         );
-        // farklı kök → RED
+        // A different root is REFUSED.
         assert!(!DasSampler::verify_sample(&chunks, &[0u8; 32], 42, 10));
-        // indeksler deterministik + çakışmasız
+        // The indices are deterministic and distinct.
         let a = DasSampler::sample_indices(100, 10, 7);
         let b = DasSampler::sample_indices(100, 10, 7);
-        assert_eq!(a, b, "deterministik");
+        assert_eq!(a, b, "deterministic");
         let uniq: std::collections::HashSet<usize> = a.iter().cloned().collect();
-        assert_eq!(uniq.len(), a.len(), "çakışmasız");
+        assert_eq!(uniq.len(), a.len(), "no collisions");
     }
 
     #[test]
     fn ownership_record() {
-        let chunk = b"parca icerigi 1234";
+        let chunk = b"chunk contents 1234";
         let rec = DasOwnership::new("validator-1", 3, chunk, 1_768_000_000);
-        assert!(rec.verify_hold(chunk), "beyan edilen parça tutuluyor");
-        assert!(!rec.verify_hold(b"farkli"), "farklı parça RED");
-        // deterministik kayıt
+        assert!(rec.verify_hold(chunk), "the declared chunk is held");
+        assert!(
+            !rec.verify_hold(b"different"),
+            "a different chunk is REFUSED"
+        );
+        // The record is deterministic.
         let rec2 = DasOwnership::new("validator-1", 3, chunk, 1_768_000_000);
         assert_eq!(rec.record_hash(), rec2.record_hash());
         assert_ne!(rec.record_hash(), [0u8; 32]);
-        // blob roundtrip yok (kayıt basit alanlar) - hash doğrulaması yeterli
+        // There is no blob roundtrip, since the record is plain fields; the hash
+        // check is enough.
     }
 }
