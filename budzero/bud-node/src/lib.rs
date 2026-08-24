@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 //! B.U.D. (Broad Universal Database) - P2P Storage Node
 //!
@@ -30,9 +30,9 @@
 //!
 //! # B.U.D. Vision Reference
 //!
-//! - B.U.D. merkeziyetsiz depolama vizyonu §2 (mantık örtüşmesi)
-//! - §7 (bugün kodda OLMAYANLAR - Bitswap, içerik routing)
-//! - (içerik adresleme)
+//! - The B.U.D. decentralised storage vision, section 2 (a logical overlap)
+//! - Section 7 (what is NOT in the code today - Bitswap, content routing)
+//! - (content addressing)
 
 pub mod bitswap;
 pub mod discovery;

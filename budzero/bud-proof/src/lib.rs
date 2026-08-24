@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 pub mod adapter;
 pub mod bud_stark;
