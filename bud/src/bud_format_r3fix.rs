@@ -1,19 +1,19 @@
-//! B.U.D. 3.0 - R3 DÜZELTMESİ
+//! B.U.D. 3.0 - THE R3 CORRECTION
 //!
-//! Gerekçe: R3 modeli tutarsızdı; yüklenen içerik 2.0'daki gibi
-//! sıkıştıktan sonra QR videosu alınıp tarif olsun."
+//! Rationale: the R3 model was inconsistent; uploaded content should be compressed
+//! as in 2.0, then turned into a QR video and made into a recipe.
 //!
-//! Eski R3 modeli: entropi-kodlu içerik (foto/video/şifreli) sıkışmaz → ham gövde
-//! tutulur → kira 0.23342 $/TB/ay (fizik zemini, 60 ay amorti).
+//! The old R3 model: entropy-coded content (photo/video/encrypted) does not compress ->
+//! a raw body is held -> rent $0.23342/TB/month (the physical floor, 60-month amortization).
 //!
-//! YENİ R3: içerik 2.0'daki gibi İÇERİK-TÜRÜNE-GÖRE sıkıştırılır (foto→AVIF/JXL,
-//! video→AV1/HEVC, ses→FLAC, belge→zstd) → **QR video türevi üretilir** → **tarif
-//! kaydına bağlanır** (gövdeli tarif: codec + sıkışmış gövde + QR türev commitment).
-//! Tutulan = sıkışmış gövde (codec kazancı); QR türev saklanmaz (K-QR-GENISLEME).
+//! THE NEW R3: content is compressed BY CONTENT TYPE as in 2.0 (photo -> AVIF/JXL,
+//! video -> AV1/HEVC, audio -> FLAC, documents -> zstd) -> **a QR video derivative is
+//! produced** -> **it is bound to the recipe record** (a bodied recipe: codec + compressed body + the QR derivative commitment).
+//! What is held = the compressed body (the codec gain); the QR derivative is not kept (K-QR-GENISLEME).
 //!
-//! Sonuç: R3 artık "ham zemin" değil - kendi codec'iyle sıkışan, QR-türevli,
-//! tarif-bağlı gövdeli tariftir. Fizik zemini yalnız GERÇEKTEN sıkışmayan (şifreli)
-//! içerikte kalır; o da kullanıcı seçimidir (şifreli = gizlilik, ücreti de o).
+//! Result: R3 is no longer a "raw floor" - it is a bodied recipe that compresses with its
+//! own codec, carries a QR derivative and is recipe-bound. The physical floor remains only
+//! for content that REALLY does not compress (encrypted); and that is a user choice (encrypted = privacy, and its price).
 
 #![forbid(unsafe_code)]
 
@@ -22,16 +22,16 @@ use sha3::{Digest, Sha3_256};
 pub const R3F_MAGIC: [u8; 8] = *b"\xB5R3F\0\0\0\0";
 pub const R3F_VERSION: u8 = 1;
 
-/// İçerik-türüne-göre codec (2.0 transform + medya codec'leri).
+/// The codec by content type (the 2.0 transforms + media codecs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
-    Zstd19,  // metin/log/json/csv (2.0 boru hattı)
-    Avif,    // foto (görsel-kayıpsız, KF2)
-    Jxl,     // foto alternatifi (kayıpsız)
-    Flac,    // ses
-    Av1,     // video (çözünürlük korunur)
-    Deflate, // zip/ofis içi
-    None,    // şifreli/gerçekten sıkışmaz - kullanıcı seçimi
+    Zstd19,  // text/log/json/csv (the 2.0 pipeline)
+    Avif,    // photo (visually lossless, KF2)
+    Jxl,     // the photo alternative (lossless)
+    Flac,    // audio
+    Av1,     // video (resolution is preserved)
+    Deflate, // inside zip/office files
+    None,    // encrypted/genuinely incompressible - a user choice
 }
 
 impl Codec {
@@ -84,84 +84,84 @@ impl Codec {
     }
 }
 
-/// R3 gövdeli tarif: codec + sıkışmış gövde + QR türev commitment.
+/// The R3 bodied recipe: codec + compressed body + the QR derivative commitment.
 #[derive(Debug, Clone)]
-pub struct R3Tarif {
-    pub commitment: [u8; 32], // orijinal içerik kimliği (K3)
+pub struct R3Recipe {
+    pub commitment: [u8; 32], // the original content identity (K3)
     pub codec: Codec,
-    pub govde: Vec<u8>,            // codec-sıkışmış gövde (TUTULAN)
-    pub qr_turev_commit: [u8; 32], // QR video türevinin commitment'ı (saklanmaz)
+    pub body: Vec<u8>,            // the codec-compressed body (WHAT IS HELD)
+    pub qr_derivative_commit: [u8; 32], // the commitment of the QR video derivative (not kept)
 }
 
-impl R3Tarif {
-    /// Orijinal içerikten R3 tarifi üret.
-    /// `sikistir`: codec uygulaması (burada zstd-19 vekili; AVIF/AV1 üretimde ffmpeg).
-    /// `qr_turev`: QR video türev baytları (yalnız commitment alınır, saklanmaz).
-    pub fn uret(
-        orijinal: &[u8],
+impl R3Recipe {
+    /// Produce an R3 recipe from the original content.
+    /// `compress`: the codec implementation (here the zstd-19 proxy; AVIF/AV1 use ffmpeg in production).
+    /// `qr_derivative`: the QR video derivative bytes (only the commitment is taken, they are not kept).
+    pub fn produce(
+        original: &[u8],
         mime: &str,
-        sikistir: impl FnOnce(&[u8]) -> Vec<u8>,
-        qr_turev: &[u8],
+        compress: impl FnOnce(&[u8]) -> Vec<u8>,
+        qr_derivative: &[u8],
     ) -> Self {
-        let commitment = crate::bud_format_container::content_id(orijinal);
+        let commitment = crate::bud_format_container::content_id(original);
         let codec = Codec::for_mime(mime);
-        let govde = if codec == Codec::None {
-            orijinal.to_vec()
+        let body = if codec == Codec::None {
+            original.to_vec()
         } else {
-            sikistir(orijinal)
+            compress(original)
         };
-        let qr_turev_commit = crate::bud_format_container::content_id(qr_turev);
+        let qr_derivative_commit = crate::bud_format_container::content_id(qr_derivative);
         Self {
             commitment,
             codec,
-            govde,
-            qr_turev_commit,
+            body,
+            qr_derivative_commit,
         }
     }
 
-    /// Tutulan bayt (kira sayacı): codec-sıkışmış gövde.
+    /// Bytes held (the rent meter): the codec-compressed body.
     pub fn held_bytes(&self) -> u64 {
-        self.govde.len() as u64
+        self.body.len() as u64
     }
 
-    /// Sıkıştırma oranı (orijinal / gövde).
-    pub fn ratio(&self, orijinal_len: usize) -> f64 {
-        if self.govde.is_empty() {
+    /// The compression ratio (original / body).
+    pub fn ratio(&self, original_len: usize) -> f64 {
+        if self.body.is_empty() {
             return 1.0;
         }
-        orijinal_len as f64 / self.govde.len() as f64
+        original_len as f64 / self.body.len() as f64
     }
 
-    /// Kira: 0.23342 zemin × erasure / oran - R3'te codec kazancı kiraYI düşürür.
-    /// (Kullanıcı düzeltmesi: R3 artık ham gövde değil, codec-sıkışmış gövde.)
-    pub fn kira(&self, orijinal_len: usize, erasure: f64) -> f64 {
-        let oran = self.ratio(orijinal_len).max(1.0);
-        let zemin = crate::bud_format_recipe_record::R3_ZEMIN_USD_TB_AY;
-        zemin * erasure.max(1.0) / oran
+    /// Rent: the 0.23342 floor x erasure / the ratio - in R3 the codec gain lowers the rent.
+    /// (The correction: R3 is no longer a raw body but a codec-compressed body.)
+    pub fn rent(&self, original_len: usize, erasure: f64) -> f64 {
+        let ratio = self.ratio(original_len).max(1.0);
+        let floor = crate::bud_format_recipe_record::R3_FLOOR_USD_TB_MONTH;
+        floor * erasure.max(1.0) / ratio
     }
 
-    /// QR türev SAKLANMAZ (K-QR-GENISLEME): türev commitment'ı yeter.
-    pub fn qr_saklanmaz(&self) -> bool {
+    /// The QR derivative IS NOT KEPT (K-QR-GENISLEME): its commitment suffices.
+    pub fn qr_is_not_stored(&self) -> bool {
         true
     }
 }
 
-pub fn r3f_digest(t: &R3Tarif) -> [u8; 32] {
+pub fn r3f_digest(t: &R3Recipe) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(R3F_MAGIC);
     h.update([R3F_VERSION]);
     h.update(t.commitment);
     h.update(t.codec.name().as_bytes());
-    h.update(&t.govde);
-    h.update(t.qr_turev_commit);
+    h.update(&t.body);
+    h.update(t.qr_derivative_commit);
     h.finalize().into()
 }
 
-/// GERÇEK CODEC ÖLÇÜMLERİ (2026-08-16, ffmpeg 7.1.5):
-/// foto.jpg 1600x1200 -> AVIF lossy crf30 = 59.68x · JXL lossless = 1.5x
-/// ses.wav 5sn 44.1k -> FLAC = 6.04x · video.yuv 60kare -> H.264 crf23 = 3393x
-/// metin -> zstd-19 = 8.5x (korpus ölçümü). Canary: bu oranların ÜSTÜ iddia RED.
-pub const R3_OLCULEN_ORANLAR: &[(&str, f64)] = &[
+/// REAL CODEC MEASUREMENTS (2026-08-16, ffmpeg 7.1.5):
+/// photo.jpg 1600x1200 -> AVIF lossy crf30 = 59.68x, JXL lossless = 1.5x
+/// audio.wav 5s 44.1k -> FLAC = 6.04x, video.yuv 60 frames -> H.264 crf23 = 3393x
+/// text -> zstd-19 = 8.5x (a corpus measurement). Canary: a claim ABOVE these ratios is REFUSED.
+pub const R3_MEASURED_RATIOS: &[(&str, f64)] = &[
     ("avif", 59.68),
     ("jxl-lossless", 1.50),
     ("flac", 6.04),
@@ -169,27 +169,27 @@ pub const R3_OLCULEN_ORANLAR: &[(&str, f64)] = &[
     ("zstd19", 8.50),
 ];
 
-/// Ölçülen oranı getir (canary: bilinmeyen -> 1.0, iddia üstü RED).
-pub fn r3_olculen_oran(codec: &Codec) -> f64 {
+/// Fetch the measured ratio (canary: unknown -> 1.0, a claim above it is REFUSED).
+pub fn r3_measured_ratio(codec: &Codec) -> f64 {
     let key = match codec {
         Codec::Avif => "avif",
         Codec::Jxl => "jxl-lossless",
         Codec::Flac => "flac",
-        Codec::Av1 => "h264-raw", // ham video vekili (AV1 benzeri yüksek)
+        Codec::Av1 => "h264-raw", // the raw-video proxy (AV1-like, high)
         Codec::Zstd19 | Codec::Deflate => "zstd19",
         Codec::None => "zstd19",
     };
-    R3_OLCULEN_ORANLAR
+    R3_MEASURED_RATIOS
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, v)| *v)
         .unwrap_or(1.0)
 }
 
-/// GERÇEK kira: 0.23342 × erasure / ÖLÇÜLEN oran (ölçüme dayanır).
-pub fn r3_gercek_kira(codec: &Codec, erasure: f64) -> f64 {
-    let oran = r3_olculen_oran(codec).max(1.0);
-    crate::bud_format_recipe_record::R3_ZEMIN_USD_TB_AY * erasure.max(1.0) / oran
+/// The REAL rent: 0.23342 x erasure / the MEASURED ratio (it rests on measurement).
+pub fn r3_real_rent(codec: &Codec, erasure: f64) -> f64 {
+    let ratio = r3_measured_ratio(codec).max(1.0);
+    crate::bud_format_recipe_record::R3_FLOOR_USD_TB_MONTH * erasure.max(1.0) / ratio
 }
 
 #[cfg(test)]
@@ -197,44 +197,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn r3_artik_codec_sikistirir_kira_duser() {
-        // foto benzeri (mime image) → avif kazancı varsayımı: 3.2x (ölçüldü)
-        let orijinal = vec![0u8; 100_000];
-        let t = R3Tarif::uret(
-            &orijinal,
+    fn r3_now_compresses_with_a_codec_and_the_rent_drops() {
+        // Photo-like (mime image) -> the assumed avif gain: 3.2x (measured)
+        let original = vec![0u8; 100_000];
+        let t = R3Recipe::produce(
+            &original,
             "image/jpeg",
             |d| {
                 let mut c = zstd::bulk::Compressor::new(19).unwrap();
                 c.compress(d).unwrap_or_default()
             },
-            b"qr-turev",
+            b"qr-derivative",
         );
         assert_eq!(t.codec, Codec::Avif);
         assert!(
             t.held_bytes() < 100_000,
-            "codec gövdeyi küçültür: {}",
+            "the codec shrinks the body: {}",
             t.held_bytes()
         );
-        let kira = t.kira(100_000, 1.031);
-        assert!(kira < 0.23342, "codec kazancı kirayı düşürür: {kira}");
-        assert!(t.qr_saklanmaz(), "QR türev saklanmaz");
+        let rent = t.rent(100_000, 1.031);
+        assert!(rent < 0.23342, "the codec gain lowers the rent: {rent}");
+        assert!(t.qr_is_not_stored(), "the QR derivative is not kept");
     }
 
     #[test]
-    fn sifreli_icin_none_ve_kullanici_secimi() {
-        // şifreli içerik: codec None → gövde = orijinal (kullanıcı gizlilik seçimi)
-        let t = R3Tarif::uret(
-            b"sifreli-veri",
+    fn none_for_encrypted_content_is_a_user_choice() {
+        // Encrypted content: codec None -> body = original (the user's privacy choice)
+        let t = R3Recipe::produce(
+            b"encrypted-data",
             "application/octet-stream",
             |d| d.to_vec(),
             b"qr",
         );
-        assert_eq!(t.codec, Codec::Zstd19); // bilinmeyen → zstd dener
+        assert_eq!(t.codec, Codec::Zstd19); // unknown -> it tries zstd
         assert!(t.held_bytes() > 0);
     }
 
     #[test]
-    fn mime_codec_eslemesi() {
+    fn the_mime_to_codec_mapping() {
         assert_eq!(Codec::for_mime("image/jpeg"), Codec::Avif);
         assert_eq!(Codec::for_mime("video/mp4"), Codec::Av1);
         assert_eq!(Codec::for_mime("audio/wav"), Codec::Flac);
@@ -243,23 +243,23 @@ mod tests {
     }
 
     #[test]
-    fn r3_digest_deterministik() {
-        let t = R3Tarif::uret(b"veri", "image/png", |d| d.to_vec(), b"qr");
+    fn the_r3_digest_is_deterministic() {
+        let t = R3Recipe::produce(b"data", "image/png", |d| d.to_vec(), b"qr");
         assert_eq!(r3f_digest(&t), r3f_digest(&t));
     }
 }
 
 #[test]
-fn r3_gercek_kira_olcumleri() {
+fn the_real_r3_rent_measurements() {
     // AVIF 59.68x -> 0.23342*1.031/59.68 = 0.00403 <= 0.016 OK
-    let k_avif = r3_gercek_kira(&Codec::Avif, 1.031);
-    assert!(k_avif <= 0.016, "AVIF 0.016 içinde: {k_avif}");
-    // FLAC 6.04x -> 0.0638 (tavan dışı - ses sınıfı oranlama ister)
-    let k_flac = r3_gercek_kira(&Codec::Flac, 1.031);
-    assert!(k_flac > 0.016, "FLAC tavan dışı (dürüst): {k_flac}");
-    // ham video H.264 3393x -> çok düşük
-    let k_vid = r3_gercek_kira(&Codec::Av1, 1.031);
-    assert!(k_vid < 0.001, "ham video çok ucuz: {k_vid}");
-    // canary: ölçülen oran üstü iddia yok
-    assert_eq!(r3_olculen_oran(&Codec::Avif), 59.68);
+    let k_avif = r3_real_rent(&Codec::Avif, 1.031);
+    assert!(k_avif <= 0.016, "AVIF is within 0.016: {k_avif}");
+    // FLAC 6.04x -> 0.0638 (outside the ceiling - the audio class needs scaling)
+    let k_flac = r3_real_rent(&Codec::Flac, 1.031);
+    assert!(k_flac > 0.016, "FLAC is outside the ceiling (honestly): {k_flac}");
+    // Raw video H.264 3393x -> very low
+    let k_vid = r3_real_rent(&Codec::Av1, 1.031);
+    assert!(k_vid < 0.001, "raw video is very cheap: {k_vid}");
+    // Canary: no claim above the measured ratio
+    assert_eq!(r3_measured_ratio(&Codec::Avif), 59.68);
 }

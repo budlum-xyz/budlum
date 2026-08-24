@@ -1,14 +1,14 @@
-//! B.U.D. 3.0 - QR-VIDEO TÜREV KATMANI (şartname §1 boru hattı; bağımsız türetme)
+//! B.U.D. 3.0 - QR-VIDEO DERIVATIVE LAYER (spec section 1 pipeline; independent derivation)
 //!
-//! Kullanıcı sorusu: "içerik sıkıştırıldıktan sonra QR video olup gönderilse?"
-//! Şartname ölçümü (K5/K10/K13): QR video KAYIPSIZ TAŞIR ama DEPOLAMA DEĞİLDİR -
-//! her rejimde sıkışmış baytı 12-18× büyütür; türevdir, saklanmaz, talep anında üretilir.
+//! The question behind it: "what if the content, once compressed, were sent as a QR video?"
+//! Spec measurement (K5/K10/K13): QR video CARRIES LOSSLESSLY but IS NOT STORAGE -
+//! in every regime it grows the compressed bytes 12-18x; it is a derivative, it is not kept, it is produced on demand.
 //!
-//! Bu modül boru hattını kodlar:
-//!   payload → zlib-9 (SADECE küçültüyorsa) → konteyner (magic·version·flags·orig_len·sha256)
-//!   → sistematik karusel (önce sıralı bloklar, sonra onarım damlaları) → kare paketleme
-//!   → QR byte-mode kare → video kare. ALIM: kare çöz → damla havuzu → örme → aç → SHA doğrula.
-//! Kapı: K-QR-GENISLEME - QR-video türü kalıcı depoya yazılamaz (türev, türev kalır).
+//! This module encodes the pipeline:
+//!   payload -> zlib-9 (ONLY if it shrinks) -> container (magic, version, flags, orig_len, sha256)
+//!   -> systematic carousel (ordered blocks first, then repair drops) -> frame packing
+//!   -> QR byte-mode frame -> video frame. RECEIVE: decode frame -> drop pool -> peel -> decompress -> verify SHA.
+//! Gate: K-QR-GENISLEME - a QR-video kind cannot be written to persistent storage (a derivative stays a derivative).
 
 #![forbid(unsafe_code)]
 
@@ -17,26 +17,26 @@ use sha3::{Digest, Sha3_256};
 pub const QRV_MAGIC: [u8; 8] = *b"\xB5QRV1\0\0\0";
 pub const QRV_VERSION: u8 = 1;
 
-/// Damla (kare) başlığı - 20 B (şartname §2).
+/// Drop (frame) header - 20 B (spec section 2).
 #[derive(Debug, Clone, Copy)]
 pub struct DamlaHdr {
-    pub seq: u32,   // damla sırası
-    pub block: u16, // blok indeksi (karusel turu)
-    pub flags: u8,  // 0x01=onarım, 0x02=sıkıştırılmış, 0x04=son
-    pub len: u16,   // yük baytı (≤ BLOCK)
+    pub seq: u32,   // drop sequence
+    pub block: u16, // block index (carousel turn)
+    pub flags: u8,  // 0x01=repair, 0x02=compressed, 0x04=last
+    pub len: u16,   // payload bytes (<= BLOCK)
 }
 
 pub const DAMLA_HDR_LEN: usize = 20;
-pub const BLOCK: usize = 200; // şartname §6
+pub const BLOCK: usize = 200; // spec section 6
 
-/// Sistematik karusel (şartname §3-yeni): önce k blok sıralı (damla = tek blok),
-/// sonra k adet tekdüze derece 4-24 onarım damlası; döngü sonsuz.
-/// K6 kanıtı: sıfır kayıpta fazlalık 1.00 + sıralı varış (akışlı oynatma).
+/// The systematic carousel (spec section 3-new): first k blocks in order (a drop = a single block),
+/// then k repair drops of uniform degree 4-24; the loop is endless.
+/// K6 proof: with zero loss the overhead is 1.00 and arrival is ordered (streaming playback).
 #[derive(Debug, Clone)]
 pub struct Karusel {
-    pub blocks: Vec<Vec<u8>>, // içerik blokları (BLOCK boyutlu, sonuncu kısa)
+    pub blocks: Vec<Vec<u8>>, // content blocks (BLOCK sized, the last one short)
     pub k: usize,
-    pub turn: u64, // mevcut tur
+    pub turn: u64, // the current turn
 }
 
 impl Karusel {
@@ -52,23 +52,23 @@ impl Karusel {
         Some(Self { blocks, k, turn: 0 })
     }
 
-    /// Sıralı (sistematik) damla: tur 0'da blok i olduğu gibi gelir (akışlı açılma).
+    /// The ordered (systematic) drop: in turn 0 block i arrives as it is (streaming decode).
     pub fn systematic_drop(&self, index: usize) -> Option<(u32, Vec<u8>)> {
         let b = self.blocks.get(index)?;
         Some((index as u32, b.clone()))
     }
 
-    /// Onarım damlası: tekdüze derece 4..=24, deterministik tohum.
-    /// DÜZELTME (tur denetimi kanaryası): tohum MUTLAK damla sırasından gelir
-    /// (şartname §3-yeni). Önceki sürüm yalnız TUR'dan tohumluyordu; uret_turev
-    /// döngüsü bir turda k adet BİREBİR AYNI onarım damlası üretiyordu
-    /// (kanıt: repair_drop(0) == repair_drop(0), k kopya) - kayıp direnci boştu.
+    /// A repair drop: uniform degree 4..=24, deterministic seed.
+    /// FIX (the turn-audit canary): the seed comes from the ABSOLUTE drop sequence
+    /// (spec section 3-new). The previous version seeded only from the TURN; the
+    /// `derive_stream` loop produced k EXACTLY IDENTICAL repair drops in one turn
+    /// (proof: repair_drop(0) == repair_drop(0), k copies) - loss resistance was empty.
     pub fn repair_drop(&self, abs_seq: u64) -> (u32, Vec<u8>) {
         let k = self.k as u64;
         let mut rng = LcRng::new(0x9E3779B97F4A7C15u64.wrapping_mul(abs_seq).wrapping_add(1));
-        // DÜZELTME 2 (kanarya yakaladı): derece tavanı k-1 - tekdüze 4..=24 küçük
-        // k'de çoğunlukla k'ye kırpılıyordu ve "tüm blokların XOR'u" damlası
-        // defalarca kopyalanıyordu (k=11'de 11 damlanın 6'sı benzersizdi).
+        // FIX 2 (caught by the canary): the degree ceiling is k-1 - uniform 4..=24 was
+        // mostly clamped to k for small k, and the "XOR of all blocks" drop was
+        // duplicated repeatedly (at k=11 only 6 of 11 drops were unique).
         let min_d = 2.min(self.k);
         let max_d = self.k.saturating_sub(1).clamp(min_d, 24).max(min_d);
         let span = (max_d - min_d + 1) as u64;
@@ -81,9 +81,9 @@ impl Karusel {
             }
         }
         chosen.sort_unstable();
-        // DÜZELTME 3: sym uzunluğu SEÇİLENLERİN EN UZUNU - önceki sürüm
-        // blocks[chosen[0]].len() kullanıyordu; kısa son blok ilk seçilirse
-        // diğer bloklar zip'te SESSİZCE kırpılıyordu (veri bozulması).
+        // FIX 3: the sym length is the LONGEST OF THE CHOSEN - the previous version
+        // used blocks[chosen[0]].len(); if the short last block was chosen first the
+        // other blocks were SILENTLY truncated in the zip (data corruption).
         let sym_len = chosen
             .iter()
             .map(|&i| self.blocks[i].len())
@@ -95,15 +95,15 @@ impl Karusel {
                 *a ^= b;
             }
         }
-        // DÜZELTME 4 (tur denetimi): önceki sürüm indeksleri 65537-hash'le seq'e
-        // paketliyordu - KAYIPLI; çözücü maskeyi geri türetemezdi. Şartname §3:
-        // başlık MUTLAK seq taşır, iki uç kompozisyonu AYNI kuraldan türetir
-        // Gönderici ve alıcı aynı girdilerden bağımsız olarak türetir.
+        // FIX 4 (turn audit): the previous version packed the indices into seq with a
+        // 65537 hash - LOSSY; the decoder could not re-derive the mask. Spec section 3:
+        // the header carries the ABSOLUTE seq and both ends derive the composition
+        // from the SAME rule. Sender and receiver derive it independently from the same inputs.
         (abs_seq as u32, sym)
     }
 
-    /// Damla kompozisyonu - gönderen ve çözücü AYNI kuralı koşar (wire sözleşmesi).
-    /// flags 0x01 yoksa: sistematik, seq = blok indeksi. Varsa: onarım, seq = abs_seq.
+    /// Drop composition - the sender and the decoder run the SAME rule (the wire contract).
+    /// Without flag 0x01: systematic, seq = block index. With it: repair, seq = abs_seq.
     pub fn composition(k: usize, seq: u32, is_repair: bool) -> Vec<usize> {
         if !is_repair {
             return vec![(seq as usize) % k.max(1)];
@@ -128,7 +128,7 @@ impl Karusel {
         chosen
     }
 
-    /// Kare paketleme: 20 B başlık + yük (şartname §2).
+    /// Frame packing: a 20 B header + payload (spec section 2).
     pub fn pack(&self, seq: u32, block: u16, flags: u8, payload: &[u8]) -> Option<Vec<u8>> {
         if payload.len() > BLOCK {
             return None;
@@ -137,16 +137,16 @@ impl Karusel {
         out.extend_from_slice(&seq.to_le_bytes());
         out.extend_from_slice(&block.to_le_bytes());
         out.push(flags);
-        out.push(0u8); // ayrılmış
+        out.push(0u8); // reserved
         out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-        // 20 B başlık doldur (seq4+block2+flags1+rsv1+len2 = 10; kalan 10 sabit)
+        // Fill the 20 B header (seq4+block2+flags1+rsv1+len2 = 10; the remaining 10 are constant)
         out.extend_from_slice(b"BDLMQRV1AB");
         out.extend_from_slice(payload);
         Some(out)
     }
 }
 
-/// Basit LC üreteç (deterministik).
+/// A simple LC generator (deterministic).
 struct LcRng(u64);
 impl LcRng {
     fn new(seed: u64) -> Self {
@@ -163,15 +163,15 @@ impl LcRng {
     }
 }
 
-/// Türev üretimi (talep anında; hiçbir ara ürün saklanmaz).
-/// `sikistirma`: 0=yok, 1=zlib-9 (küçültüyorsa) - burada zstd-19 vekili (kayıpsız).
-/// `turns`: üretilecek karusel turu (akış için 1 tur yeter; kayıp direnci için >1).
-pub fn uret_turev(data: &[u8], sikistirma: u8, turns: u64) -> Option<Vec<u8>> {
+/// Derivative production (on demand; no intermediate product is kept).
+/// `compression`: 0=none, 1=zlib-9 (if it shrinks) - here the zstd-19 proxy (lossless).
+/// `turns`: the carousel turns to produce (1 turn suffices for streaming; >1 for loss resistance).
+pub fn derive_stream(data: &[u8], compression: u8, turns: u64) -> Option<Vec<u8>> {
     if data.is_empty() || turns == 0 {
         return None;
     }
-    // 1) sıkıştır (küçültüyorsa)
-    let body: Vec<u8> = if sikistirma > 0 {
+    // 1) compress (if it shrinks)
+    let body: Vec<u8> = if compression > 0 {
         let comp = zstd_compress(data)?;
         if comp.len() < data.len() {
             comp
@@ -181,18 +181,18 @@ pub fn uret_turev(data: &[u8], sikistirma: u8, turns: u64) -> Option<Vec<u8>> {
     } else {
         data.to_vec()
     };
-    // 2) karusel
+    // 2) carousel
     let k = Karusel::new(&body)?;
     let mut out = Vec::new();
     for t in 0..turns {
-        // sistematik tur: t mod k blok sıralı
+        // The systematic turn: block t mod k, in order
         for i in 0..k.k {
             let (seq, b) = k.systematic_drop((t as usize + i) % k.k)?;
             out.extend_from_slice(&k.pack(seq, (t % 2) as u16, 0, &b)?);
         }
-        // onarım damlaları: her damla MUTLAK sırasından tohumlanır -
-        // aynı tur içinde k FARKLI damla, turlar arasında da tekrar yok.
-        // seq = abs_seq (çözücü kompozisyonu §3 kuralıyla yeniden türetir).
+        // Repair drops: each drop is seeded from its ABSOLUTE sequence -
+        // k DIFFERENT drops within one turn, and no repetition across turns either.
+        // seq = abs_seq (the decoder re-derives the composition with the section 3 rule).
         for i in 0..k.k {
             let abs_seq = t.wrapping_mul(k.k as u64).wrapping_add(i as u64);
             let (seq, b) = k.repair_drop(abs_seq);
@@ -202,7 +202,7 @@ pub fn uret_turev(data: &[u8], sikistirma: u8, turns: u64) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// zstd-19 vekili (Cargo'da zstd var; şartnamedeki zlib-9'un kayıpsız karşılığı).
+/// The zstd-19 proxy (zstd is in Cargo; the lossless counterpart of the spec's zlib-9).
 pub fn zstd_compress(data: &[u8]) -> Option<Vec<u8>> {
     let mut enc = zstd::bulk::Compressor::new(19).ok()?;
     enc.compress(data).ok()
@@ -215,10 +215,10 @@ pub fn zstd_decompress(data: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// ÇÖZÜCÜ (şartname §4): damla akışı → orijinal gövde.
-/// Peeling + GF(2) eliminasyonu - "peeling tek başına YETMEZ" (Bulgu-5:
-/// k=3, 11 doğru damla, kaybolan tek derece-1 damla → salt-peeling takıldı).
-/// Rank yetersizse None döner - ASLA yanlış veri üretmez.
+/// THE DECODER (spec section 4): a drop stream -> the original body.
+/// Peeling + GF(2) elimination - "peeling alone IS NOT ENOUGH" (Finding-5:
+/// k=3, 11 correct drops, the single lost degree-1 drop -> pure peeling stalled).
+/// If the rank is insufficient it returns None - it NEVER produces wrong data.
 pub struct KaruselDecoder {
     k: usize,
     total_len: usize,
@@ -245,8 +245,8 @@ impl KaruselDecoder {
         self.solved_count >= self.k
     }
 
-    /// Paketlenmiş kareyi al (pack çıktısı): başlığı ayrıştır, damlayı işle.
-    /// Bozuk/yabancı kare sessizce düşer (K1: yanlış bayt sızmaz).
+    /// Take a packed frame (the pack output): parse the header, process the drop.
+    /// A corrupt/foreign frame is dropped silently (K1: no wrong byte leaks).
     pub fn add_frame(&mut self, frame: &[u8]) -> bool {
         if frame.len() < DAMLA_HDR_LEN || &frame[10..20] != b"BDLMQRV1AB" {
             return false;
@@ -263,7 +263,7 @@ impl KaruselDecoder {
         true
     }
 
-    /// Damlayı işle: bilinenleri düş, derece-1 ise peeling kaskadı.
+    /// Process the drop: subtract the known ones, and if it is degree-1 run the peeling cascade.
     pub fn add_drop(&mut self, idx: &[usize], payload: &[u8]) {
         if self.is_complete() || idx.is_empty() || idx.iter().any(|&i| i >= self.k) {
             return;
@@ -305,7 +305,7 @@ impl KaruselDecoder {
                     if self.pending[i].0.len() == 1 {
                         let (rem, pay) = self.pending.swap_remove(i);
                         queue.push((rem[0], pay));
-                        continue; // i kaydı - swap_remove aynı i'ye yenisini koydu
+                        continue; // keep i - swap_remove put a new element at the same i
                     }
                 }
                 i += 1;
@@ -313,8 +313,8 @@ impl KaruselDecoder {
         }
     }
 
-    /// Peeling takıldıysa GF(2) eliminasyonu (Bulgu-5 düzeltmesi).
-    /// Kelime-dizisi bitset (u64 x N) - k ≤ 65535 desteklenir.
+    /// GF(2) elimination if peeling stalls (the Finding-5 fix).
+    /// A word-array bitset (u64 x N) - k <= 65535 is supported.
     fn eliminate(&mut self) -> bool {
         if self.is_complete() {
             return true;
@@ -338,7 +338,7 @@ impl KaruselDecoder {
                 .find(|(ri, (m, _))| m[w] & bit != 0 && !piv_rows.contains(ri))
             {
                 Some((ri, _)) => ri,
-                None => return false, // rank yetersiz - ÇÖZÜLEMEZ (yanlış veri yok)
+                None => return false, // insufficient rank - UNSOLVABLE (no wrong data)
             };
             piv_rows.push(piv);
             let (pm, pp) = (rows[piv].0.clone(), rows[piv].1.clone());
@@ -353,7 +353,7 @@ impl KaruselDecoder {
                 }
             }
         }
-        // her pivot artık tek bilinmeyenli olmalı
+        // Every pivot must now have a single unknown
         for (ci, &col) in unknowns.iter().enumerate() {
             let (m, p) = &rows[piv_rows[ci]];
             let ones: u32 = m.iter().map(|x| x.count_ones()).sum();
@@ -367,7 +367,7 @@ impl KaruselDecoder {
         true
     }
 
-    /// Gövdeyi birleştir: tamamsa Some(orijinal), değilse eliminasyon dener.
+    /// Reassemble the body: Some(original) if complete, otherwise it tries elimination.
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
         if !self.is_complete() && !self.eliminate() {
             return None;
@@ -385,26 +385,26 @@ impl KaruselDecoder {
     }
 }
 
-/// Türevi depoya yazma girişimi → RED (K-QR-GENISLEME kapısı).
-/// QR video bir türevdir; `held_bytes`'a giremez.
-pub fn qr_depoya_yazilamaz() -> Result<(), &'static str> {
-    Err("K-QR-GENISLEME: QR-video türevdir, kalıcı depoya yazılamaz")
+/// An attempt to write the derivative to storage -> REFUSED (the K-QR-GENISLEME gate).
+/// A QR video is a derivative; it cannot enter `held_bytes`.
+pub fn qr_cannot_be_stored() -> Result<(), &'static str> {
+    Err("K-QR-GENISLEME: a QR video is a derivative, it cannot be written to persistent storage")
 }
 
-/// Türev büyüme oranı (video/ham) - her rejimde >1 olduğu kanıtı (K13).
-pub fn turev_buyume(turev_len: usize, orijinal_len: usize) -> f64 {
-    if orijinal_len == 0 {
+/// The derivative growth ratio (video/raw) - the proof that it is >1 in every regime (K13).
+pub fn derivative_growth(derived_len: usize, original_len: usize) -> f64 {
+    if original_len == 0 {
         return 1.0;
     }
-    turev_len as f64 / orijinal_len as f64
+    derived_len as f64 / original_len as f64
 }
 
-pub fn qrv_digest(turev: &[u8]) -> [u8; 32] {
+pub fn qrv_digest(derived: &[u8]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(QRV_MAGIC);
     h.update([QRV_VERSION]);
-    h.update((turev.len() as u64).to_le_bytes());
-    h.update(turev);
+    h.update((derived.len() as u64).to_le_bytes());
+    h.update(derived);
     h.finalize().into()
 }
 
@@ -413,46 +413,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn karusel_sistematik_akislidir() {
+    fn carousel_systematic_is_streamable() {
         let data: Vec<u8> = (0u8..=255).cycle().take(10 * BLOCK + 50).collect();
         let k = Karusel::new(&data).unwrap();
-        assert_eq!(k.k, 11); // 10 tam + 1 kısa
-                             // tur 0: blok 0 doğrudan gelir → anında açılabilir (akış)
+        assert_eq!(k.k, 11); // 10 full + 1 short
+                             // Turn 0: block 0 arrives directly -> immediately decodable (streaming)
         let (seq, b) = k.systematic_drop(0).unwrap();
         assert_eq!(b, data[..BLOCK]);
         assert_eq!(seq, 0);
-        // onarım damlası deterministik (aynı mutlak sıra → aynı damla)
+        // The repair drop is deterministic (the same absolute sequence -> the same drop)
         let (s1, d1) = k.repair_drop(0);
         let (s2, d2) = k.repair_drop(0);
         assert_eq!((s1, d1.clone()), (s2, d2.clone()));
-        // farklı mutlak sıra → farklı damla (kayıp direnci)
+        // A different absolute sequence -> a different drop (loss resistance)
         let (s3, d3) = k.repair_drop(1);
         assert!((s1 != s3) || (d1 != d3));
-        // KANARYA (yakalanan bug): bir turun k onarım damlası birbirinden farklı olmalı
-        let tur0: Vec<_> = (0..k.k as u64).map(|i| k.repair_drop(i)).collect();
-        let benzersiz: std::collections::BTreeSet<_> =
-            tur0.iter().map(|(s, d)| (*s, d.clone())).collect();
-        // eşik 2/3: küçük k'de iki tohumun aynı alt kümeyi seçmesi (doğum günü)
-        // meşru ve seyrek; YAKALANAN bug ise TAMAMININ kopya olmasıydı (1/11).
+        // CANARY (the caught bug): a turn's k repair drops must differ from one another
+        let turn0: Vec<_> = (0..k.k as u64).map(|i| k.repair_drop(i)).collect();
+        let unique: std::collections::BTreeSet<_> =
+            turn0.iter().map(|(s, d)| (*s, d.clone())).collect();
+        // Threshold 2/3: at small k two seeds choosing the same subset (birthday) is
+        // legitimate and rare; the bug CAUGHT was ALL of them being copies (1/11).
         assert!(
-            benzersiz.len() * 3 >= k.k * 2,
-            "tur içi onarım damlaları çoğunlukla benzersiz olmalı: {}/{}",
-            benzersiz.len(),
+            unique.len() * 3 >= k.k * 2,
+            "the repair drops within a turn must mostly be unique: {}/{}",
+            unique.len(),
             k.k
         );
-        // KANARYA (düzeltme 3): kısa son blok seçilse de damla uzunluğu kırpılmaz -
-        // sym uzunluğu seçilenlerin en uzunu olmalı (BLOCK, kısa blok hariç)
-        for (_, d) in &tur0 {
+        // CANARY (fix 3): even if the short last block is chosen the drop length is not
+        // truncated - the sym length must be the longest of the chosen (BLOCK, except the short block)
+        for (_, d) in &turn0 {
             assert!(
                 d.len() == BLOCK || d.len() == 50,
-                "damla kırpılmış: {}",
+                "the drop was truncated: {}",
                 d.len()
             );
         }
     }
 
     #[test]
-    fn kare_paketleme_20_bayt_baslik() {
+    fn frame_packing_has_a_20_byte_header() {
         let k = Karusel::new(b"ic".repeat(100).as_slice()).unwrap();
         let p = k.pack(5, 0, 0x04, b"veri").unwrap();
         assert_eq!(p.len(), DAMLA_HDR_LEN + 4);
@@ -461,39 +461,39 @@ mod tests {
     }
 
     #[test]
-    fn zstd_vekil_kayipsiz() {
-        let data: Vec<u8> = b"sikisabilir icerik ".repeat(500);
+    fn zstd_proxy_is_lossless() {
+        let data: Vec<u8> = b"compressible content ".repeat(500);
         let c = zstd_compress(&data).unwrap();
-        assert!(c.len() < data.len(), "sıkışır");
-        assert_eq!(zstd_decompress(&c).unwrap(), data, "kayıpsız");
+        assert!(c.len() < data.len(), "it shrinks");
+        assert_eq!(zstd_decompress(&c).unwrap(), data, "lossless");
     }
 
     #[test]
-    fn turev_buyume_depolama_degil() {
-        // QR-video katmanı (sıkıştırmasız karusel) gövdeyi büyütür → türevdir (K13)
-        let data = b"sikisabilir ".repeat(300);
-        let turev = uret_turev(&data, 0, 1).unwrap();
-        let buyume = turev_buyume(turev.len(), data.len());
-        assert!(buyume > 1.0, "QR katmanı büyütür: {buyume}");
-        // kapı: depoya yazılamaz
-        assert!(qr_depoya_yazilamaz().is_err());
+    fn derivative_growth_is_not_storage() {
+        // The QR-video layer (an uncompressed carousel) grows the body -> it is a derivative (K13)
+        let data = b"compressible ".repeat(300);
+        let derived = derive_stream(&data, 0, 1).unwrap();
+        let growth = derivative_growth(derived.len(), data.len());
+        assert!(growth > 1.0, "the QR layer grows it: {growth}");
+        // The gate: it cannot be written to storage
+        assert!(qr_cannot_be_stored().is_err());
     }
 
     #[test]
-    fn uret_turev_deterministik() {
-        let data = b"deterministik turev".repeat(20);
-        let a = uret_turev(&data, 1, 2).unwrap();
-        let b = uret_turev(&data, 1, 2).unwrap();
+    fn derive_stream_is_deterministic() {
+        let data = b"deterministic derivative".repeat(20);
+        let a = derive_stream(&data, 1, 2).unwrap();
+        let b = derive_stream(&data, 1, 2).unwrap();
         assert_eq!(qrv_digest(&a), qrv_digest(&b));
     }
 
     #[test]
-    fn cozucu_uctan_uca_bit_esit() {
-        // ŞARTNAME §4 kapanışı: üret → kareler → çözücü → bayt-eşit
+    fn decoder_is_bit_equal_end_to_end() {
+        // Spec section 4 closure: produce -> frames -> decoder -> byte-equal
         let data: Vec<u8> = (0u8..=255).cycle().take(13 * BLOCK + 77).collect();
         let k = Karusel::new(&data).unwrap();
         let mut dec = KaruselDecoder::new(k.k, data.len()).unwrap();
-        // yalnız sistematik tur (kayıpsız kanal): k karede bitmeli
+        // The systematic turn only (a lossless channel): it must finish in k frames
         for i in 0..k.k {
             let (seq, b) = k.systematic_drop(i).unwrap();
             let frame = k.pack(seq, 0, 0, &b).unwrap();
@@ -501,25 +501,25 @@ mod tests {
         }
         assert!(
             dec.is_complete(),
-            "sistematik tarama k karede tamamlar (K6: fazlalık 1.00)"
+            "a systematic sweep completes in k frames (K6: overhead 1.00)"
         );
-        assert_eq!(dec.assemble().unwrap(), data, "bayt-eşit");
+        assert_eq!(dec.assemble().unwrap(), data, "byte-equal");
     }
 
     #[test]
-    fn cozucu_kayipli_kanal_onarimla_tamamlar() {
-        // %30 sistematik kare kaybı → onarım damlaları kapatır (K1 deseni)
+    fn decoder_completes_a_lossy_channel_with_repairs() {
+        // 30% systematic frame loss -> the repair drops close it (the K1 pattern)
         let data: Vec<u8> = (7u8..=200).cycle().take(11 * BLOCK).collect();
         let k = Karusel::new(&data).unwrap();
         let mut dec = KaruselDecoder::new(k.k, data.len()).unwrap();
         for i in 0..k.k {
             if i % 3 == 0 {
-                continue; // her 3. kare kayıp
+                continue; // every 3rd frame is lost
             }
             let (seq, b) = k.systematic_drop(i).unwrap();
             dec.add_frame(&k.pack(seq, 0, 0, &b).unwrap());
         }
-        assert!(!dec.is_complete(), "kayıpla eksik kalmalı");
+        assert!(!dec.is_complete(), "with loss it must stay incomplete");
         for abs_seq in 0..(3 * k.k as u64) {
             if dec.is_complete() {
                 break;
@@ -530,13 +530,13 @@ mod tests {
         assert_eq!(
             dec.assemble().unwrap(),
             data,
-            "onarım + eliminasyon bayt-eşit"
+            "repair + elimination is byte-equal"
         );
     }
 
     #[test]
-    fn cozucu_yetersiz_damla_red() {
-        // NEGATİF KANARYA: k/2 damla → assemble None (asla yanlış veri değil)
+    fn decoder_refuses_insufficient_drops() {
+        // NEGATIVE CANARY: k/2 drops -> assemble returns None (never wrong data)
         let data: Vec<u8> = (1u8..=100).cycle().take(10 * BLOCK).collect();
         let k = Karusel::new(&data).unwrap();
         let mut dec = KaruselDecoder::new(k.k, data.len()).unwrap();
@@ -546,34 +546,34 @@ mod tests {
         }
         assert!(
             dec.assemble().is_none(),
-            "yetersiz damla → None (K1 negatif kanarya)"
+            "insufficient drops -> None (the K1 negative canary)"
         );
     }
 
     #[test]
-    fn cozucu_bozuk_kare_sessiz_duser() {
+    fn decoder_drops_a_corrupt_frame_silently() {
         let data: Vec<u8> = (3u8..=90).cycle().take(5 * BLOCK).collect();
         let k = Karusel::new(&data).unwrap();
         let mut dec = KaruselDecoder::new(k.k, data.len()).unwrap();
-        // bozuk magic → red
+        // Corrupt magic -> refused
         assert!(!dec.add_frame(b"XXXXXXXXXXXXXXXXXXXXXXXX"));
-        // uzunluk tutarsız → red
+        // Inconsistent length -> refused
         let (seq, b) = k.systematic_drop(0).unwrap();
         let mut fr = k.pack(seq, 0, 0, &b).unwrap();
         fr.truncate(fr.len() - 3);
         assert!(!dec.add_frame(&fr));
-        assert_eq!(dec.solved_count, 0, "bozuk kare hiçbir blok çözmez");
+        assert_eq!(dec.solved_count, 0, "a corrupt frame solves no block");
     }
 
     #[test]
-    fn kompozisyon_iki_uc_ayni_kurali_turetir() {
-        // wire sözleşmesi: gönderen repair_drop + çözücü composition AYNI kümeyi bulur
+    fn composition_is_derived_by_both_ends_from_the_same_rule() {
+        // The wire contract: the sender's repair_drop and the decoder's composition find the SAME set
         let data: Vec<u8> = (0u8..=255).cycle().take(9 * BLOCK).collect();
         let k = Karusel::new(&data).unwrap();
         for abs_seq in 0..20u64 {
             let (seq, sym) = k.repair_drop(abs_seq);
             let idx = Karusel::composition(k.k, seq, true);
-            // aynı kümeyi XOR'layınca aynı damla çıkmalı
+            // XORing the same set must yield the same drop
             let mut expect = vec![0u8; idx.iter().map(|&i| k.blocks[i].len()).max().unwrap()];
             for &i in &idx {
                 for (a, b) in expect.iter_mut().zip(k.blocks[i].iter()) {
@@ -582,15 +582,15 @@ mod tests {
             }
             assert_eq!(
                 sym, expect,
-                "abs_seq={abs_seq}: iki uç ayrışırsa wire kırık"
+                "abs_seq={abs_seq}: if the two ends diverge the wire is broken"
             );
         }
     }
 
     #[test]
-    fn gecersiz_girdi_red() {
+    fn invalid_input_is_refused() {
         assert!(Karusel::new(b"").is_none());
-        assert!(uret_turev(b"", 1, 1).is_none());
-        assert!(uret_turev(b"veri", 1, 0).is_none());
+        assert!(derive_stream(b"", 1, 1).is_none());
+        assert!(derive_stream(b"data", 1, 0).is_none());
     }
 }

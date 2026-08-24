@@ -1,97 +1,97 @@
-//! B.U.D. 3.0 - CANLI UÇTAN UCA DENEY
+//! B.U.D. 3.0 - THE LIVE END-TO-END EXPERIMENT
 //!
-//! Zincir: orijinal → (içerik-türüne-göre codec sıkıştır) → R3Tarif (gövde + QR türev
-//! commitment) → QR türev üret (karusel) → GERİ: gövdeyi aç → SHA3 doğrula → birebir.
-//! Görsel + video + metin ile KAYIPSIZLIK + TAM ÇÖZÜNÜRLÜK kanıtı.
+//! The chain: original -> (compress with the codec for the content type) -> R3Recipe (body +
+//! the QR derivative commitment) -> produce the QR derivative (carousel) -> BACK: decompress the
+//! body -> verify SHA3 -> exact. Proof of LOSSLESSNESS + FULL RESOLUTION with an image, a video and text.
 //!
-//! Not: gerçek AVIF/AV1 ffmpeg üretimde; burada zstd-19 vekili (kayıpsız) ile
-//! zincirin DOĞRULUĞU test edilir - oranlar codec'e göre değişir, kayıpsızlık değil.
+//! Note: real AVIF/AV1 use ffmpeg in production; here the CORRECTNESS of the chain is tested
+//! with the zstd-19 proxy (lossless) - the ratios vary by codec, the losslessness does not.
 //!
-//! Veriler `tests/fixtures/` altında repo icindedir (CI'da /tmp yoktur; kanit:
-//! 2026-08-17 gorsel.png video.yuv text.log repo'ya gomuldu).
+//! The data live in the repo under `tests/fixtures/` (there is no /tmp in CI; evidence:
+//! on 2026-08-17 image.png video.yuv text.log were embedded into the repo).
 
 #![cfg(test)]
 
-use crate::bud_format_r3fix::{Codec, R3Tarif};
+use crate::bud_format_r3fix::{Codec, R3Recipe};
 
-fn fixture(ad: &str) -> Vec<u8> {
-    let yol = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+fn fixture(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join(ad);
-    std::fs::read(&yol).unwrap_or_else(|e| panic!("fixture {ad}: {e}"))
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
-/// Orijinal → R3 tarif → geri oku → birebir mi? (kayıpsızlık + tam çözünürlük)
-fn r3_roundtrip(orijinal: &[u8], mime: &str) -> bool {
-    // 1) tarif üret (codec sıkıştır + QR türev commitment)
-    let t = R3Tarif::uret(
-        orijinal,
+/// Original -> R3 recipe -> read back -> is it exact? (losslessness + full resolution)
+fn r3_roundtrip(original: &[u8], mime: &str) -> bool {
+    // 1) Produce the recipe (codec compression + the QR derivative commitment)
+    let t = R3Recipe::produce(
+        original,
         mime,
         |d| {
             let mut c = zstd::bulk::Compressor::new(19).unwrap();
             c.compress(d).unwrap_or_else(|_| d.to_vec())
         },
-        b"qr-turev-bayt",
+        b"qr-derivative-bytes",
     );
-    // 2) gövdeyi aç (zstd) → orijinal
-    let acik = zstd::bulk::Decompressor::new()
+    // 2) Decompress the body (zstd) -> the original
+    let opened = zstd::bulk::Decompressor::new()
         .ok()
-        .and_then(|mut d| d.decompress(&t.govde, 512 * 1024 * 1024).ok());
-    match acik {
-        Some(geri) => {
-            // 3) SHA3 doğrula: commitment orijinalle eşleşmeli
-            let cid = crate::bud_format_container::content_id(&geri);
-            cid == t.commitment && geri == orijinal
+        .and_then(|mut d| d.decompress(&t.body, 512 * 1024 * 1024).ok());
+    match opened {
+        Some(back) => {
+            // 3) Verify SHA3: the commitment must match the original
+            let cid = crate::bud_format_container::content_id(&back);
+            cid == t.commitment && back == original
         }
         None => {
-            // codec None (şifreli) ise gövde = orijinal
-            t.codec == Codec::None && t.govde == orijinal
+            // If the codec is None (encrypted) the body is the original
+            t.codec == Codec::None && t.body == original
         }
     }
 }
 
 #[test]
-fn gorsel_png_kayipsiz_tam_cozunurluk() {
-    // 128x128 gercek PNG (PIL ile uretildi, tests/fixtures/gorsel.png)
-    let png = fixture("gorsel.png");
+fn a_png_image_is_lossless_at_full_resolution() {
+    // A real 128x128 PNG (produced with PIL, tests/fixtures/image.png)
+    let png = fixture("image.png");
     assert!(
         r3_roundtrip(&png, "image/png"),
-        "PNG kayıpsız + tam çözünürlük"
+        "the PNG is lossless at full resolution"
     );
-    // çözünürlük: PNG header 0x10..0x14 (width), 0x14..0x18 (height)
+    // Resolution: PNG header 0x10..0x14 (width), 0x14..0x18 (height)
     let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
     let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
-    assert_eq!((w, h), (128, 128), "tam çözünürlük korunur: {w}x{h}");
+    assert_eq!((w, h), (128, 128), "full resolution is preserved: {w}x{h}");
 }
 
 #[test]
-fn video_yuv_kayipsiz_tam_cozunurluk() {
-    // 60 kare YUV420 64x48 (276480 B) - video benzeri, tests/fixtures/video.yuv
+fn a_yuv_video_is_lossless_at_full_resolution() {
+    // 60 frames of YUV420 64x48 (276480 B) - video-like, tests/fixtures/video.yuv
     let yuv = fixture("video.yuv");
-    assert!(r3_roundtrip(&yuv, "video/x-raw-yuv"), "YUV kayıpsız");
-    // kare boyutu: 64*48*1.5 = 4608 B/kare → 60 kare
-    let kare_bayt = 4608usize;
-    assert_eq!(yuv.len() % kare_bayt, 0, "kare hizası tam");
+    assert!(r3_roundtrip(&yuv, "video/x-raw-yuv"), "the YUV is lossless");
+    // Frame size: 64*48*1.5 = 4608 B/frame -> 60 frames
+    let frame_bytes = 4608usize;
+    assert_eq!(yuv.len() % frame_bytes, 0, "the frame alignment is exact");
     assert!(
-        yuv.len() / kare_bayt >= 60,
-        "kare sayısı korunur (en az 60)"
+        yuv.len() / frame_bytes >= 60,
+        "the frame count is preserved (at least 60)"
     );
 }
 
 #[test]
-fn metin_log_kayipsiz() {
+fn a_text_log_is_lossless() {
     let log = fixture("text.log");
-    assert!(r3_roundtrip(&log, "text/plain"), "log kayıpsız");
+    assert!(r3_roundtrip(&log, "text/plain"), "the log is lossless");
 }
 
 #[test]
-fn edition_her_ucu_kodda_var() {
+fn all_three_editions_exist_in_the_code() {
     use crate::bud_format_edition::{Bud1Custody, Bud1Nft, Edition};
-    // 1.0: BYO - kendi sunucu + cihaz
-    let _ext = Bud1Nft::new_external([1u8; 32], "sunucum.example".into(), "uri".into());
+    // 1.0: BYO - your own server + device
+    let _ext = Bud1Nft::new_external([1u8; 32], "myserver.example".into(), "uri".into());
     let _dev = Bud1Nft::new_device([2u8; 32], "uri".into(), true);
-    // 2.0 ve 3.0 seçilebilir
+    // 2.0 and 3.0 are selectable
     assert_eq!(Edition::from_u8(1).unwrap().name(), "B.U.D. 1.0");
     assert_eq!(Edition::from_u8(2).unwrap().name(), "B.U.D. 2.0");
     assert_eq!(Edition::from_u8(3).unwrap().name(), "B.U.D. 3.0");
