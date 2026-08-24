@@ -155,10 +155,8 @@ src/execution/executor.rs	3
 src/gateway/service.rs	15
 src/lib.rs	4
 src/lubot/effort.rs	1
-src/lubot/executor.rs	16
 src/lubot/metrics.rs	10
 src/lubot/query.rs	6
-src/lubot/social.rs	16
 src/lubot/storage.rs	8
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
