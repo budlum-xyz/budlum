@@ -1,80 +1,85 @@
-//! TEE tanikligi: bir cevrimin ureticisini imzaya baglar.
+//! TEE attestation: binds the producer of a quote to a signature.
 //!
-//! # Bu modulun onceki hali
+//! # What this module used to be
 //!
-//! `TeeRuntime::sign` bir imza uretmiyordu: mesajin SHA3-256 ozetini 4627
-//! baytlik bir tamponun ilk 32 baytina kopyalayip geri kalanini sifir
-//! birakiyordu ve buna "sig" diyordu. Bunu dogrulayan taraf yoktu; zaten
-//! `TeeAttestation::verify` yalnizca `self.signature.len() != 4627` bakiyordu
-//! ve alan `[u8; 4627]` oldugu icin bu kosul derleme zamaninda her zaman
-//! yanlisti. Yani dogrulama, hicbir seyi reddedemeyen bir dallanmaydi.
+//! `TeeRuntime::sign` did not produce a signature. It copied the SHA3-256
+//! digest of the message into the first 32 bytes of a 4627-byte buffer, left
+//! the rest zero, and called that a "sig". Nothing verified it either:
+//! `TeeAttestation::verify` only looked at `self.signature.len() != 4627`,
+//! and since the field is `[u8; 4627]` that condition was always false at
+//! compile time. Verification was a branch that could reject nothing.
 //!
-//! Bir ozet imza degildir: ozeti herkes hesaplayabilir. O tampon, taniklik
-//! anahtarini elinde tutmayan biri tarafindan da uretilebilirdi.
+//! A digest is not a signature, because anyone can compute a digest. That
+//! buffer could also be produced by somebody who does not hold the
+//! attestation key.
 //!
-//! # Simdi ne yapiyor
+//! # What it does now
 //!
-//! Taniklik, bir ML-DSA-87 acik anahtarina baglanmis bir alintidir (quote) ve
-//! imza gercekten dogrulanir. Modulun soyledigi sey sudur: "bu alintiyi, bu
-//! anahtari elinde tutan taraf imzaladi".
+//! An attestation is a quote bound to an ML-DSA-87 public key, and the
+//! signature really is verified. What the module says is: "the party holding
+//! this key signed this quote".
 //!
-//! # Ne soylemiyor
+//! # What it does not say
 //!
-//! Alintinin *icerigi* burada dogrulanmaz: satici sertifika zincirinin
-//! (Intel SGX icin PCK/QE kimligi, AWS Nitro icin ACM kok sertifikasi)
-//! denetimi bu modulun disindadir ve dugum yapilandirmasindaki bir emanet
-//! koku gerektirir. Bu yuzden [`TeeAttestation::verify_signed_by`] "bu bir gercek
-//! SGX cihazi" demez, "bu alinti bu anahtarla imzalanmis ve anahtar bekledigim
-//! anahtar" der. Ikisini karistirmamak icin tip adi `TeeAttestation`, metot
-//! adi `verify_signed_by`: dogrulanan seyin ne oldugu cagri yerinde okunuyor.
+//! The *content* of the quote is not verified here. Checking the vendor
+//! certificate chain - PCK and QE identity for Intel SGX, the ACM root
+//! certificate for AWS Nitro - is outside this module and needs a trust root
+//! in the node configuration. So [`TeeAttestation::verify_signed_by`] does not
+//! say "this is a genuine SGX device"; it says "this quote was signed with
+//! this key, and the key is the one I expected". To keep the two apart, the
+//! type is named `TeeAttestation` and the method `verify_signed_by`: what is
+//! being verified reads off the call site.
 //!
 //! # Fail-closed
 //!
-//! Arka uc yoksa imzalama basarisiz olur; sessizce imzasiz veya duz metin
-//! bir sonuc dondurulmez. Bir cagiran `Err`'i yok sayarsa taniklik hic
-//! olusmaz, bos bir taniklik olusmaz.
+//! With no backend, signing fails. No unsigned or plaintext result is returned
+//! quietly. If a caller ignores the `Err`, no attestation comes into being at
+//! all - not an empty one.
 //!
-//! WIRING: unwired - olculdu, ve onceki gerekce bayattı.
+//! WIRING: unwired - measured, and the previous rationale was stale.
 //!
-//! Eski gerekce "hesap soyutlamasi islem dogrulamasina baglanana kadar"
-//! diyordu. Hesap soyutlamasi **baglandi**: `Transaction::verify_v6`
-//! `threshold_mldsa`'yi cagiriyor ve V6 islemleri esik imzasiyla
-//! dogrulaniyor. Yani beklenen kosul gerceklesti ve bu modul yine de
-//! cagrilmiyor.
+//! The old rationale said "until account abstraction is wired to transaction
+//! verification". Account abstraction **is** wired: `Transaction::verify_v6`
+//! calls `threshold_mldsa`, and V6 transactions are verified with a threshold
+//! signature. So the expected condition happened, and this module is still not
+//! called.
 //!
-//! Gercek sebep baska: bir islem **taniklik tasimiyor**. `verify_v6` sahip
-//! kumesini, esigi ve imzalari okur; taniklik icin bir alan yok.
+//! The real reason is different: a transaction **carries no attestation**.
+//! `verify_v6` reads the owner set, the threshold and the signatures; there is
+//! no field for an attestation.
 //!
-//! Alan eklemek bir taahhut yuzeyi degisikligidir ve tek basina yapilmasi
-//! dogru olmaz. Taniklik, imzalayan anahtarin *nerede* durdugu hakkinda bir
-//! iddiadir; onu islemin icine koymak, dogrulayan tarafin o iddiayi neye
-//! karsi denetleyecegini de gerektirir. Bu modul kendi sinirini zaten
-//! soyluyor: `verify_signed_by` "bu gercek bir SGX cihazi" demez, "bu alinti
-//! bu anahtarla imzalanmis" der. Satici sertifika zincirinin denetimi bir
-//! emanet koku ister ve dugum yapilandirmasinda oyle bir kok yok.
+//! Adding a field is a change to the commitment surface, and it would be wrong
+//! to do on its own. An attestation is a claim about *where* the signing key
+//! sits, and putting it inside a transaction also requires that the verifying
+//! side have something to check that claim against. This module already states
+//! its own limit: `verify_signed_by` does not say "this is a genuine SGX
+//! device", it says "this quote was signed with this key". Checking the vendor
+//! certificate chain wants a trust root, and the node configuration has none.
 //!
-//! Yani zincire yazilabilecek tek sey, denetlenemeyen bir iddia olurdu.
-//! `TeeGates` "uretim yolundan cagrilacak tek giris noktasi" olarak duruyor
-//! ve o giris noktasi acildiginda tek satirlik bir baglama olacak; bugun
-//! acilmiyor cunku arkasinda duracak emanet koku yok.
+//! So the only thing that could be written to the chain would be an
+//! uncheckable claim. `TeeGates` stands as "the single entry point the
+//! production path will call", and when that entry point opens the wiring will
+//! be one line. It does not open today, because there is no trust root to
+//! stand behind it.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 
-/// Alintinin tasiyabilecegi en fazla bayt.
+/// The largest number of bytes a quote may carry.
 ///
-/// Alinti aga girdigi icin sinirsiz olamaz: sinir, tek bir taniklikla
-/// dugume yuklenebilecek dogrulama isini sinirlar.
+/// A quote arrives over the network, so it cannot be unbounded. The limit caps
+/// the verification work a single attestation can load onto the node.
 pub const MAX_QUOTE_LEN: usize = 16 * 1024;
 
-/// Imzanin uzerine alindigi alan ayirici.
+/// The domain separator the signature is taken over.
 ///
-/// Ayni anahtarla imzalanan baska bir yapinin (ornegin bir islem) taniklik
-/// gibi okunmasini engeller: imza her zaman bu on ekle birlikte uretilir.
+/// It stops some other structure signed with the same key - a transaction, for
+/// instance - from being read as an attestation: the signature is always
+/// produced with this prefix.
 pub const TEE_ATTESTATION_DOMAIN: &[u8] = b"BUDLUM_TEE_ATTESTATION_V1";
 
-/// Taniklik hangi arka uctan geliyor.
+/// Which backend the attestation comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeeBackendKind {
     Sgx,
@@ -82,7 +87,7 @@ pub enum TeeBackendKind {
     Unavailable,
 }
 
-/// Yerel TEE calisma zamaninin durumu.
+/// State of the local TEE runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeeRuntimeStatus {
     Available,
@@ -90,20 +95,20 @@ pub enum TeeRuntimeStatus {
     AttestationFailed,
 }
 
-/// Taniklik neden kabul edilmedi.
+/// Why an attestation was not accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TeeError {
-    /// Arka uc yok: fail-closed.
+    /// No backend: fail-closed.
     BackendUnavailable,
-    /// Calisma zamani taniklik uretemedi.
+    /// The runtime could not produce an attestation.
     AttestationFailed,
-    /// Alinti bos.
+    /// The quote is empty.
     EmptyQuote,
-    /// Alinti [`MAX_QUOTE_LEN`] ustunde.
+    /// The quote is above [`MAX_QUOTE_LEN`].
     QuoteTooLarge { len: usize },
-    /// Taniklik, beklenen anahtardan baska bir anahtara ait.
+    /// The attestation belongs to a key other than the expected one.
     UnexpectedKey,
-    /// ML-DSA-87 imzasi dogrulanmadi.
+    /// The ML-DSA-87 signature did not verify.
     InvalidSignature,
 }
 
@@ -129,11 +134,12 @@ impl core::fmt::Display for TeeError {
 
 impl std::error::Error for TeeError {}
 
-/// Imzalanan baytlar: alan ayirici + arka uc + uzunluk onekli alinti.
+/// The signed bytes: domain separator, backend tag, then a length-prefixed
+/// quote.
 ///
-/// Uzunluk oneki olmadan `quote = "ab" ++ "c"` ile `"a" ++ "bc"` ayni baytlara
-/// duserdi; arka uc etiketi de ayni alintinin iki arka uc icin yeniden
-/// kullanilmasini engeller.
+/// Without the length prefix, `quote = "ab" ++ "c"` and `"a" ++ "bc"` would
+/// land on the same bytes. The backend tag likewise stops one quote from being
+/// reused across two backends.
 #[must_use]
 pub fn attestation_signing_payload(backend: TeeBackendKind, quote: &[u8]) -> Vec<u8> {
     let tag: u8 = match backend {
@@ -149,7 +155,7 @@ pub fn attestation_signing_payload(backend: TeeBackendKind, quote: &[u8]) -> Vec
     out
 }
 
-/// Bir TEE alintisi ve onu ureten anahtarin imzasi.
+/// A TEE quote and the signature of the key that produced it.
 #[derive(Debug, Clone)]
 pub struct TeeAttestation {
     pub backend: TeeBackendKind,
@@ -159,13 +165,12 @@ pub struct TeeAttestation {
 }
 
 impl TeeAttestation {
-    /// Alintinin `expected_key` tarafindan imzalandigini dogrular.
+    /// Verifies that the quote was signed by `expected_key`.
     ///
-    /// Beklenen anahtarin cagri yerinden gelmesi kasitli: taniklik kendi
-    /// anahtarini tasiyor, dolayisiyla kendi kendini dogrulayan bir taniklik
-    /// hicbir sey kanitlamaz. Saldirgan kendi anahtar ciftini uretip kendi
-    /// alintisini imzalayabilir. Guven, dugumun onceden bildigi anahtardan
-    /// gelir.
+    /// Taking the expected key from the call site is deliberate. An attestation
+    /// carries its own key, so a self-verifying attestation proves nothing: an
+    /// attacker can generate their own key pair and sign their own quote. The
+    /// trust comes from the key the node knew beforehand.
     ///
     /// # Errors
     ///
@@ -196,7 +201,7 @@ impl TeeAttestation {
     }
 }
 
-/// Yerel TEE calisma zamani.
+/// The local TEE runtime.
 #[derive(Debug, Clone, Copy)]
 pub struct TeeRuntime {
     pub backend: TeeBackendKind,
@@ -204,7 +209,7 @@ pub struct TeeRuntime {
 }
 
 impl TeeRuntime {
-    /// Calisma zamani taniklik uretebiliyor mu.
+    /// Whether the runtime can produce an attestation.
     ///
     /// # Errors
     ///
@@ -218,13 +223,13 @@ impl TeeRuntime {
     }
 }
 
-/// KQ-* kapi yuzeyi: uretim yolundan cagrilacak tek giris noktasi.
+/// The KQ-* gate surface: the single entry point the production path calls.
 pub struct TeeGates;
 
 impl TeeGates {
     /// # Errors
     ///
-    /// [`TeeAttestation::verify_signed_by`]'nin dondurdugu her hata.
+    /// Every error [`TeeAttestation::verify_signed_by`] returns.
     pub fn kq_wallet_tee_attestation(
         att: &TeeAttestation,
         expected_key: &[u8; ML_DSA_87_PUBLIC_KEY_LEN],
@@ -234,7 +239,7 @@ impl TeeGates {
 
     /// # Errors
     ///
-    /// [`TeeRuntime::ensure_available`]'in dondurdugu her hata.
+    /// Every error [`TeeRuntime::ensure_available`] returns.
     pub fn kq_wallet_tee_runtime(runtime: &TeeRuntime) -> Result<(), TeeError> {
         runtime.ensure_available()
     }
@@ -262,8 +267,9 @@ mod tests {
         assert_eq!(att.verify_signed_by(&kp.public_key_bytes()), Ok(()));
     }
 
-    /// Iskeletin kaciridigi sey: imza yerine bir ozet konursa dogrulama
-    /// reddetmeliydi, ama yalnizca uzunluga bakan bir kontrol bunu kabul eder.
+    /// What the skeleton missed: if a digest is put in place of a signature,
+    /// verification should refuse it, yet a check that looks only at the length
+    /// accepts it.
     #[test]
     fn a_digest_in_place_of_a_signature_is_refused() {
         use sha3::{Digest, Sha3_256};
@@ -286,8 +292,8 @@ mod tests {
         );
     }
 
-    /// Saldirgan kendi anahtar ciftiyle kusursuz bir taniklik uretebilir.
-    /// Reddedilmesinin tek nedeni anahtarin beklenen anahtar olmamasidir.
+    /// An attacker can produce a flawless attestation with their own key pair.
+    /// The only reason it is refused is that the key is not the expected one.
     #[test]
     fn a_self_signed_quote_from_an_unknown_key_is_refused() {
         let honest = WalletKeyPair::generate();
@@ -299,7 +305,7 @@ mod tests {
         );
     }
 
-    /// Bir arka uc icin uretilmis imza baska arka uc icin yeniden kullanilamaz.
+    /// A signature produced for one backend cannot be reused for another.
     #[test]
     fn a_quote_signed_for_one_backend_does_not_verify_for_another() {
         let kp = WalletKeyPair::generate();
@@ -351,7 +357,8 @@ mod tests {
         assert_eq!(ok.ensure_available(), Ok(()));
     }
 
-    /// Uzunluk oneki olmadan iki farkli alinti ayni baytlara duserdi.
+    /// Without the length prefix, two different quotes would land on the same
+    /// bytes.
     #[test]
     fn quote_framing_is_unambiguous() {
         let a = attestation_signing_payload(TeeBackendKind::Sgx, b"abc");
