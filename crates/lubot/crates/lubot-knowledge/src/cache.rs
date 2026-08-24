@@ -1,24 +1,24 @@
-//! LLM çıktı önbelleği - sağlayıcı, model, görev ve içerik özetine
-//! göre anahtarlanmış JSONL önbellek. Kayıtlar yazılırken sır
-//! maskesinden geçer (kapalı-devre ilkesi).
+//! An LLM output cache - a JSONL cache keyed by provider, model, task and
+//! content digest. Records pass through the secret mask on their way out (the
+//! closed-circuit principle).
 
 use crate::redact::redact_model_strings;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Şema sürümü: format değişince anahtarlar da değişir, bayat kayıtlar
-/// yüklenmez.
+/// The schema version: when the format changes the keys change with it, so
+/// stale records are not loaded.
 pub const SCHEMA_VERSION: &str = "2026-08-15-v1";
 
-/// Önbellek satırı.
+/// One cache line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheLine {
     key: String,
     parsed: serde_json::Value,
 }
 
-/// İçerik özeti tabanlı LLM çıktı önbelleği.
+/// An LLM output cache keyed by content digest.
 #[derive(Debug, Clone)]
 pub struct LlmCache {
     path: std::path::PathBuf,
@@ -27,7 +27,7 @@ pub struct LlmCache {
 }
 
 impl LlmCache {
-    /// Önbelleği açar.
+    /// Opens the cache.
     ///
     /// # Errors
     ///
@@ -36,7 +36,7 @@ impl LlmCache {
         if enabled {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("önbellek dizini kurulamadı: {e}"))?;
+                    .map_err(|e| format!("the cache directory could not be created: {e}"))?;
             }
         }
         let mut cache = Self {
@@ -45,8 +45,8 @@ impl LlmCache {
             items: BTreeMap::new(),
         };
         if enabled && path.exists() {
-            let text =
-                std::fs::read_to_string(path).map_err(|e| format!("önbellek okunamadı: {e}"))?;
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("the cache could not be read: {e}"))?;
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
@@ -61,7 +61,7 @@ impl LlmCache {
         Ok(cache)
     }
 
-    /// Önbellek anahtarı: sürüm | sağlayıcı | model | görev | içerik-özeti.
+    /// The cache key: version | provider | model | task | content digest.
     #[must_use]
     pub fn key(provider: &str, model: &str, task: &str, content_hash: &[u8; 32]) -> String {
         let h = content_hash
@@ -79,7 +79,7 @@ impl LlmCache {
         self.items.get(key)
     }
 
-    /// Değeri maskelenmiş biçimde saklar.
+    /// Stores the value in masked form.
     pub fn set(&mut self, key: String, parsed: serde_json::Value) {
         if !self.enabled {
             return;
@@ -88,18 +88,18 @@ impl LlmCache {
         self.items.insert(key, redacted);
     }
 
-    /// Önbelleği diske yazar (anahtara göre sıralı, JSONL).
+    /// Writes the cache to disk (JSONL, sorted by key).
     ///
     /// # Errors
     ///
-    /// Yazma hatasında.
+    /// On a write failure.
     pub fn save(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
         }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("önbellek dizini kurulamadı: {e}"))?;
+                .map_err(|e| format!("the cache directory could not be created: {e}"))?;
         }
         let mut text = String::new();
         for (key, parsed) in &self.items {
@@ -108,11 +108,11 @@ impl LlmCache {
                 parsed: parsed.clone(),
             };
             let json = serde_json::to_string(&line)
-                .map_err(|e| format!("önbellek satırı kodlanamadı: {e}"))?;
+                .map_err(|e| format!("the cache line could not be encoded: {e}"))?;
             text.push_str(&json);
             text.push('\n');
         }
-        std::fs::write(&self.path, text).map_err(|e| format!("önbellek yazılamadı: {e}"))
+        std::fs::write(&self.path, text).map_err(|e| format!("the cache could not be written: {e}"))
     }
 
     #[must_use]
@@ -174,8 +174,8 @@ mod tests {
     fn schema_version_filters_stale() {
         let p = tmp_path("d.jsonl");
         let _ = std::fs::remove_file(&p);
-        // Eski sürüm anahtarıyla satır yaz.
-        std::fs::write(&p, r#"{"key":"eski|m|v|t|h","parsed":{"x":1}}"#).unwrap();
+        // Write a line keyed with an old version.
+        std::fs::write(&p, r#"{"key":"old|m|v|t|h","parsed":{"x":1}}"#).unwrap();
         let c = LlmCache::open(&p, true).unwrap();
         assert!(c.is_empty());
         let _ = std::fs::remove_file(&p);
