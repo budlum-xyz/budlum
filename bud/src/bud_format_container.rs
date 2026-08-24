@@ -750,8 +750,8 @@ mod tests {
             lossless: true,
             payload: vec![],
         };
-        let best =
-            select_best_lossless(vec![nan_cand, ok_cand]).expect("NaN is dropped, the OK candidate is chosen");
+        let best = select_best_lossless(vec![nan_cand, ok_cand])
+            .expect("NaN is dropped, the OK candidate is chosen");
         assert_eq!(best.ratio, 7.83);
         assert!(select_best_lossless(vec![]).is_none());
     }
@@ -761,9 +761,15 @@ mod tests {
         let json = br#"[{"x":1},{"x":2}]"#;
         let chunks = structural_split(StructuralKind::Json, json);
         let cands = expert_candidates(FormatCodec::Json, json, &chunks);
-        assert!(cands.len() >= 2, "the JSON expert must produce several candidates");
+        assert!(
+            cands.len() >= 2,
+            "the JSON expert must produce several candidates"
+        );
         let best = select_best_lossless(cands).unwrap();
-        assert!(best.ratio >= 7.5, "the best lossless candidate must be chosen");
+        assert!(
+            best.ratio >= 7.5,
+            "the best lossless candidate must be chosen"
+        );
         assert!(best.lossless);
     }
 
@@ -773,7 +779,10 @@ mod tests {
         let chunks = structural_split(StructuralKind::Json, json);
         let hdr = BudV2Header::new(FormatCodec::Json, &chunks);
         assert!(hdr.verify());
-        assert_ne!(hdr.magic[0], b'B', "magic has the high bit set, not ASCII (S.47)");
+        assert_ne!(
+            hdr.magic[0], b'B',
+            "magic has the high bit set, not ASCII (S.47)"
+        );
         let bytes = hdr.to_bytes();
         let dec = BudV2Header::from_bytes(&bytes).unwrap();
         assert_eq!(dec.codec, FormatCodec::Json);
@@ -1066,7 +1075,10 @@ mod tests {
         // (5) append trailing bytes -> strict refusal
         let mut t5 = enc.clone();
         t5.push(0x00);
-        assert!(BudV2File::decode(&t5).is_none(), "trailing bytes are refused");
+        assert!(
+            BudV2File::decode(&t5).is_none(),
+            "trailing bytes are refused"
+        );
         // (6) short inputs -> refuse (no panic)
         assert!(BudV2File::decode(&[]).is_none());
         assert!(BudV2File::decode(&enc[..20]).is_none());
@@ -1097,7 +1109,10 @@ mod tests {
         let mut b3 = hdr.to_bytes();
         b3.push(ChunkCodec::Raw.to_u8());
         b3.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(BudV2File::decode(&b3).is_none(), "the u32::MAX bomb is refused");
+        assert!(
+            BudV2File::decode(&b3).is_none(),
+            "the u32::MAX bomb is refused"
+        );
         // (4) an unknown piece encoder -> refuse
         let mut b4 = hdr.to_bytes();
         b4.push(0x7F);

@@ -341,9 +341,7 @@ fn run(cli: Cli) -> Result<String, String> {
             } else {
                 store(&data)
             }
-            .ok_or(
-                "v2 store failed (size/capacity limit - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)",
-            )?;
+            .ok_or("v2 store failed (size/capacity limit - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)")?;
             write_file(&output, &enc)?;
             let cc = chunk_count(&enc).unwrap_or(0);
             Ok(format!(
@@ -377,11 +375,7 @@ fn run(cli: Cli) -> Result<String, String> {
             let (enc, dec, cost) = BudCli::bench(&data);
             // K19 honesty: the ceiling is $0.016/TB/month - report whether the model passes it
             let ceiling = 0.016;
-            let gate = if cost <= ceiling {
-                "PASS"
-            } else {
-                "FAIL"
-            };
+            let gate = if cost <= ceiling { "PASS" } else { "FAIL" };
             Ok(format!(
                 "bench: {} bytes, encode {enc:.2} MB/s, decode {dec:.2} MB/s, base cost ${cost:.5}/TB/month (ceiling $0.016: {gate}) - not an unmeasured upper-bound claim, the runner measurement is separate",
                 data.len()
@@ -430,7 +424,9 @@ fn run(cli: Cli) -> Result<String, String> {
         } => {
             let bytes = read_file(&input)?;
             let file = BudV2File::decode(&bytes).ok_or("PACT is only for v2 containers")?;
-            let original = file.restore_original().ok_or("container could not be opened")?;
+            let original = file
+                .restore_original()
+                .ok_or("container could not be opened")?;
             let ts = if ts == 0 { 1_768_000_000u64 } else { ts };
             // Producer hash: the SHA3 of the producer string (deterministic)
             let mut rh = sha3::Sha3_256::new();
@@ -506,7 +502,8 @@ fn run(cli: Cli) -> Result<String, String> {
             let bytes = read_file(&input)?;
             // Input: a production proof or a PACT record -> append to the segment ledger
             let mut seg = SegmentLedger::new();
-            seg.append(&bytes).ok_or("the record is at the segment ceiling")?;
+            seg.append(&bytes)
+                .ok_or("the record is at the segment ceiling")?;
             let blob = seg.to_blob();
             write_file(&out, &blob)?;
             Ok(format!(
@@ -520,7 +517,9 @@ fn run(cli: Cli) -> Result<String, String> {
             let bytes = read_file(&input)?;
             let file =
                 BudV2File::decode(&bytes).ok_or("a production proof is only for v2 containers")?;
-            let original = file.restore_original().ok_or("container could not be opened")?;
+            let original = file
+                .restore_original()
+                .ok_or("container could not be opened")?;
             let ts = if ts == 0 { 1_768_000_000u64 } else { ts }; // deterministic test
             let rec = BudProductionRecord::new(
                 file.header.codec,
@@ -590,7 +589,9 @@ fn run(cli: Cli) -> Result<String, String> {
             let ts = 1_768_000_000u64;
             let res =
                 run_video_pipeline(&yuv_data, width, height, frames, &video_data, orig_len, ts)
-                    .ok_or("video-pipe: class detection failed (insufficient frames/corrupt input)")?;
+                    .ok_or(
+                        "video-pipe: class detection failed (insufficient frames/corrupt input)",
+                    )?;
             write_file(&out, &res.container)?;
             Ok(format!(
                 "video-pipe: class={:?} codec={:?} gop={} ratio={:.2}x container={}B proof_hash={}",
@@ -609,11 +610,7 @@ fn run(cli: Cli) -> Result<String, String> {
                 CATALOG.len()
             ));
             for e in CATALOG {
-                let lossless = if e.lossless {
-                    "lossless"
-                } else {
-                    "lossy"
-                };
+                let lossless = if e.lossless { "lossless" } else { "lossy" };
                 lines.push(format!(
                     "  {:<12} signature={:<8} pipeline={:<20} ratio {:.2}-{:.2}x ({lossless})",
                     e.name,
@@ -675,7 +672,10 @@ fn run(cli: Cli) -> Result<String, String> {
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
             {
-                return Err(format!("the output path cannot be a symlink: {}", output.display()));
+                return Err(format!(
+                    "the output path cannot be a symlink: {}",
+                    output.display()
+                ));
             }
             write_file(&output, &blob)?;
             Ok(format!(
@@ -722,8 +722,7 @@ fn run(cli: Cli) -> Result<String, String> {
                     out.len()
                 ))
             } else {
-                let file =
-                    BudFile::from_bytes(&bytes).map_err(|e| format!("v1 parse: {e}"))?;
+                let file = BudFile::from_bytes(&bytes).map_err(|e| format!("v1 parse: {e}"))?;
                 let out = file.decode().map_err(|e| format!("v1 integrity: {e}"))?;
                 BudGates::k_bud_ratio(&file, out.len())
                     .map_err(|e| format!("K-BUD-RATIO gate: {e}"))?;

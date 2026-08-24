@@ -1,8 +1,9 @@
-//! B.U.D. 2.0 - FOUNTAIN/LT KODLARI (F44/F46 - SeF: hafif düğüm doğrulama)
+//! B.U.D. 2.0 - FOUNTAIN/LT CODES (F44/F46 - SeF: light node verification)
 //!
-//! Kalan iş #11b: fountain codes. LT kod: k veri bloğu → n sembol (degree dağılımı
-//! + XOR). Alıcı herhangi ≈k sembolle TAM veriyi geri kurar (Gaussian eleme - küçük
-//!   k için belirleyici). Deterministik tohum; kayıpsız.
+//! Remaining work #11b: fountain codes. LT code: k data blocks -> n symbols
+//! (degree distribution + XOR). The receiver recovers the FULL data from any
+//! ~k symbols (Gaussian elimination - deterministic for small k). Deterministic
+//! seed; lossless.
 
 #![forbid(unsafe_code)]
 
@@ -10,7 +11,7 @@ use sha3::{Digest, Sha3_256};
 
 pub const LT_MAGIC: [u8; 8] = *b"\xB5LT01\0\0\0";
 
-/// k bloğu, n sembol üret (deterministik - tohumlu üreteç).
+/// Produce n symbols from k blocks (deterministic - seeded generator).
 pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>, Vec<usize>)>> {
     if blocks.is_empty() || n == 0 {
         return None;
@@ -19,24 +20,25 @@ pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>
     let mut rng = LcRng::new(seed);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        // Soliton-benzeri derece: 1 ağırlıklı (1/3), gerisi 2-8.
+        // Soliton-like degree: 1 is weighted (1/3), the rest are 2-8.
         //
-        // Yorum eskiden "LT'nin kalbi: degree-1 semboller zincir başlatır"
-        // diyordu. Bu, kodda karşılığı olmayan bir iddiaydı: `lt_decode` bir
-        // peeling çözücü değil, GF(2) üzerinde Gauss eliminasyonu yapıyor ve
-        // zincir başlatacak derece-1 sembole ihtiyaç duymuyor.
+        // The comment used to say "the heart of LT: degree-1 symbols start the
+        // chain". That was a claim with no counterpart in the code: `lt_decode`
+        // is not a peeling decoder, it runs Gaussian elimination over GF(2) and
+        // needs no degree-1 symbol to start a chain.
         //
-        // Derece-1'in ölçülen faydası başka: küçük dereceler satırların
-        // doğrusal bağımsız olma olasılığını artırıyor. 8 blok / 10 sembolle
-        // 50 tohum üzerinde ölçüldü - derece-1 dalı kapatılınca 24/50 başarı
-        // 18/50'ye düşüyor. Fayda gerçek, sebebi zincir değil.
+        // The measured benefit of degree-1 is a different one: small degrees
+        // raise the probability that rows are linearly independent. Measured
+        // over 50 seeds with 8 blocks / 10 symbols - closing the degree-1
+        // branch drops success from 24/50 to 18/50. The benefit is real, the
+        // reason is not a chain.
         let degree = if rng.next().is_multiple_of(3) {
             1
         } else {
             2 + (rng.next() % 7) as usize
         };
         let d = degree.min(k);
-        // d farklı blok seç (deterministik)
+        // pick d distinct blocks (deterministic)
         let mut chosen = Vec::with_capacity(d);
         let mut seen = [false; 64];
         while chosen.len() < d {
@@ -61,7 +63,7 @@ pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>
     Some(out)
 }
 
-/// Toplanan sembollerden veriyi geri kur (ileri eleme + geriye süpürme; k ≤ 16).
+/// Recover the data from the collected symbols (forward elimination + back substitution; k <= 16).
 pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<u8>>> {
     if k == 0 || k > 16 || symbols.is_empty() {
         return None;
@@ -80,7 +82,7 @@ pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<
         }
         rows.push((mask, data.clone()));
     }
-    // ileri eleme: her sütun için pivot satırı al, diğerlerinden XOR'la
+    // forward elimination: take a pivot row per column, XOR it out of the others
     let mut pivots: Vec<(usize, u64, Vec<u8>)> = Vec::new();
     for col in 0..k {
         let mut sel = None;
@@ -102,20 +104,20 @@ pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<
         }
         pivots.push((col, pm, pd));
     }
-    // Yeterli bağımsız denklem yoksa erken çık.
+    // Leave early if there are not enough independent equations.
     //
-    // Bu kapı tek başına *gerekli* değil: aşağıdaki `result.push(s?)` da
-    // çözülmemiş sütunu `None`'a çevirir, ve kapı silindiğinde hiçbir test
-    // kırılmıyor (ölçüldü). Kasıtlı olarak duruyor - eleme k sütunu
-    // gezdikten sonra hangi sütunların boş kaldığını zaten biliyoruz, o
-    // yüzden geriye süpürmeyi hiç çalıştırmadan dönmek hem daha ucuz hem de
-    // niyeti kodda okunur kılıyor. İkinci katman `s?` savunma amaçlı kalsın:
-    // buradaki sayım koşulu ile oradaki sütun kontrolü birbirinden bağımsız
-    // bozulabilir.
+    // This gate is not *required* on its own: the `result.push(s?)` below also
+    // turns an unsolved column into `None`, and no test breaks when the gate is
+    // deleted (measured). It stands on purpose - after elimination has walked k
+    // columns we already know which columns stayed empty, so returning without
+    // running back substitution at all is both cheaper and makes the intent
+    // readable in the code. Let the second layer `s?` stay as defence: the
+    // count condition here and the column check there can break independently
+    // of each other.
     if pivots.len() < k {
         return None;
     }
-    // geriye süpürme: en yüksek pivot sütunundan başla
+    // back substitution: start from the highest pivot column
     let mut solved: Vec<Option<Vec<u8>>> = vec![None; k];
     for (col, mask, mut data) in pivots.into_iter().rev() {
         for c2 in (col + 1)..k {
@@ -136,7 +138,7 @@ pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<
     Some(result)
 }
 
-/// Basit LC üreteç (deterministik, bağımlılık yok).
+/// Simple LC generator (deterministic, no dependency).
 struct LcRng(u64);
 impl LcRng {
     fn new(seed: u64) -> Self {
@@ -169,110 +171,117 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lt_roundtrip_kayipsiz() {
-        // k=8 blok, 16 sembol topla → tümü geri gelir
+    fn lt_roundtrip_is_lossless() {
+        // k=8 blocks, collect 16 symbols -> everything comes back
         let blocks: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 64]).collect();
         let sym = lt_encode(&blocks, 32, 42).unwrap();
         // ilk 24 sembolle kur (LT: k·ln(k/δ) ≈ 16-24 yeterli)
         let dec = lt_decode(&sym[..24], 8).unwrap();
         for (a, b) in blocks.iter().zip(dec.iter()) {
-            assert_eq!(a, b, "LT blok kayıpsız");
+            assert_eq!(a, b, "LT block lossless");
         }
     }
 
     #[test]
-    fn lt_deterministik() {
+    fn lt_is_deterministic() {
         let blocks: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 32]).collect();
         let a = lt_encode(&blocks, 8, 7).unwrap();
         let b = lt_encode(&blocks, 8, 7).unwrap();
         assert_eq!(lt_digest(&a), lt_digest(&b));
     }
 
-    /// Fountain kodun **asil iddiasi**: hangi sembollerin dustugu onemli
-    /// degil, yeterli sayida sembol geldiyse blok kurtarilir.
+    /// The **real claim** of a fountain code: it does not matter which symbols
+    /// were dropped, the block is recovered once enough symbols have arrived.
     ///
-    /// Mevcut roundtrip testi `&sym[..24]` ile hep ilk 24 sembolu aliyordu -
-    /// yani "kayipsiz bir kanaldan ilk gelenleri al" senaryosu. Bu, fountain
-    /// kodun cozdugu problemi hic olcmuyor: silme kanalinda dusen semboller
-    /// bastan degil, **aradan** duser.
+    /// The existing roundtrip test always took the first 24 symbols via
+    /// `&sym[..24]` - that is the "take whatever arrives first on a lossless
+    /// channel" scenario. It measures nothing of the problem a fountain code
+    /// solves: on an erasure channel the dropped symbols fall out of the
+    /// **middle**, not off the front.
     ///
-    /// Tek tohumla olcmek de yeterli degil. Cozum olasiliksal: 8 blok icin
-    /// 200 tohum uzerinde olculdu - n=12'de 143/200, n=16'da 183/200,
-    /// n=24'te 196/200, n=32'de 200/200. Tek bir tohuma dayanan bir iddia,
-    /// tohumun sansina bagli olarak yesil kalir. Bu yuzden test **her
-    /// tohumda** basari bekledigi bir butce secip tum tohumlari dolasip
-    /// iddiasini orada kuruyor: 72 sembol uretilir, her desen tam 36'sini
-    /// birakir - olculen doyma noktasi olan 32'nin uzerinde.
+    /// Measuring with a single seed is not enough either. The solution is
+    /// probabilistic: measured over 200 seeds for 8 blocks - 143/200 at n=12,
+    /// 183/200 at n=16, 196/200 at n=24, 200/200 at n=32. A claim resting on a
+    /// single seed stays green by the luck of that seed. So the test picks a
+    /// budget where it expects success at **every seed**, walks all the seeds
+    /// and makes its claim there: 72 symbols are produced and each pattern
+    /// leaves exactly 36 - above the measured saturation point of 32.
     #[test]
-    fn lt_ortadan_dusen_semboller_kurtarilir() {
+    fn symbols_dropped_from_the_middle_are_recovered() {
         let blocks: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 64]).collect();
 
-        // Uc farkli silme deseni: hepsi ayni sayida sembol birakmaz, ama her
-        // biri farkli **yerlerden** duser. Tek desenle olcmek, o desene ozel
-        // bir basariyi genel dogruluk gibi gosterirdi.
-        // Her desen **tam 36 sembol** birakiyor. Butce sabit tutulmazsa test
-        // iki seyi ayni anda degistirir (kac sembol kaldi + hangileri kaldi)
-        // ve bir basarisizlik hangisinden geldigini soylemez. Olculen doyma
-        // noktasi 8 blok icin n=32; 36 onun uzerinde.
-        let desenler: [(&str, fn(usize) -> bool); 4] = [
-            ("cift indisliler dustu", |i| i % 2 == 0),
-            ("tek indisliler dustu", |i| i % 2 == 1),
-            ("bas taraf tamamen dustu", |i| i >= 36),
-            ("son taraf tamamen dustu", |i| i < 36),
+        // Four different erasure patterns: they do not all leave the same
+        // count by accident, but each drops from different **places**.
+        // Measuring with one pattern would present a success specific to that
+        // pattern as general correctness.
+        // Every pattern leaves **exactly 36 symbols**. If the budget is not
+        // held fixed the test changes two things at once (how many symbols are
+        // left and which ones), and a failure would not say which one caused
+        // it. The measured saturation point for 8 blocks is n=32; 36 is above
+        // it.
+        let patterns: [(&str, fn(usize) -> bool); 4] = [
+            ("even indices dropped", |i| i % 2 == 0),
+            ("odd indices dropped", |i| i % 2 == 1),
+            ("the whole front dropped", |i| i >= 36),
+            ("the whole tail dropped", |i| i < 36),
         ];
 
         for seed in 0..25u64 {
-            let sym = lt_encode(&blocks, 72, seed).expect("kodlama");
-            for (ad, kalir) in desenler {
-                let kalan: Vec<_> = sym
+            let sym = lt_encode(&blocks, 72, seed).expect("encoding");
+            for (name, kept) in patterns {
+                let remaining: Vec<_> = sym
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| kalir(*i))
+                    .filter(|(i, _)| kept(*i))
                     .map(|(_, s)| s.clone())
                     .collect();
-                let dec = lt_decode(&kalan, 8).unwrap_or_else(|| {
-                    panic!("tohum {seed} / {ad}: {} sembolle cozulemedi", kalan.len())
+                let dec = lt_decode(&remaining, 8).unwrap_or_else(|| {
+                    panic!(
+                        "seed {seed} / {name}: could not decode with {} symbols",
+                        remaining.len()
+                    )
                 });
-                assert_eq!(dec, blocks, "tohum {seed} / {ad}: yanlis kurtarildi");
+                assert_eq!(dec, blocks, "seed {seed} / {name}: recovered wrongly");
             }
         }
     }
 
-    /// Yetersiz sembol **sessizce yanlis blok** degil, `None` dondurmeli.
+    /// Too few symbols must return `None`, not a **silently wrong block**.
     ///
-    /// `lt_decode` icindeki `if pivots.len() < k { return None }` kapisi
-    /// olculmemisti: kapi tamamen silindiginde hicbir test kirilmiyordu.
-    /// Kapi olmadan cozucu, k tane bagimsiz denklem toplayamadigi halde
-    /// `solved` dizisindeki `None` girdileri sifir blok gibi doldurup
-    /// **basarili gorunen bozuk cikti** uretir. Silme kanalinda bu en kotu
-    /// hata bicimidir: alici veriyi kurtaramadigini bilemez.
+    /// The `if pivots.len() < k { return None }` gate inside `lt_decode` was
+    /// never measured: no test broke when the gate was deleted entirely.
+    /// Without the gate the decoder fills the `None` entries of the `solved`
+    /// array as if they were zero blocks even though it could not collect k
+    /// independent equations, and produces **corrupt output that looks
+    /// successful**. On an erasure channel that is the worst failure shape: the
+    /// receiver cannot tell that it failed to recover the data.
     #[test]
-    fn lt_yetersiz_sembol_sessizce_bozuk_blok_uretmez() {
+    fn too_few_symbols_do_not_silently_produce_a_corrupt_block() {
         let blocks: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 32]).collect();
 
         for seed in 0..25u64 {
-            // 8 blok icin 3 sembol: k tane bagimsiz denklem hicbir tohumda
-            // toplanamaz, dolayisiyla tek dogru cevap `None`.
-            let sym = lt_encode(&blocks, 3, seed).expect("kodlama");
+            // 3 symbols for 8 blocks: k independent equations cannot be
+            // collected at any seed, so the only correct answer is `None`.
+            let sym = lt_encode(&blocks, 3, seed).expect("encoding");
             assert!(
                 lt_decode(&sym, 8).is_none(),
-                "tohum {seed}: 8 blok 3 sembolden cozuldu iddia edildi; \
-                 yetersiz denklem sessizce bozuk blok uretiyor"
+                "seed {seed}: 8 blocks were claimed decoded from 3 symbols; \
+                 too few equations silently produce a corrupt block"
             );
         }
 
-        // Tek sembol, tek blok istegi: sinirin dogru tarafi hala calismali -
-        // kapinin asiri genis olmadigini gosteren kontrol grubu.
-        let tek = lt_encode(&blocks[..1], 4, 1).expect("kodlama");
+        // One symbol, one block requested: the correct side of the boundary
+        // must still work - the control group showing the gate is not too wide.
+        let single = lt_encode(&blocks[..1], 4, 1).expect("encoding");
         assert_eq!(
-            lt_decode(&tek, 1).as_deref(),
+            lt_decode(&single, 1).as_deref(),
             Some(&blocks[..1]),
-            "tek blok tek sembolle cozulebilmeliydi; kapi asiri genis"
+            "one block should have decoded from one symbol; the gate is too wide"
         );
     }
 
     #[test]
-    fn lt_gecersiz_girdi_red() {
+    fn invalid_input_is_refused() {
         assert!(lt_encode(&[], 4, 1).is_none());
         assert!(lt_encode(&[vec![1u8]], 0, 1).is_none());
         assert!(lt_decode(&[], 0).is_none());
