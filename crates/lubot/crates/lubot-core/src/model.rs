@@ -1,59 +1,65 @@
-//! Model kimliği ve kayıt tipleri.
+//! Model identity and registration types.
 //!
-//! `ModelId`, budlum/main'deki `AiModelId(model_hash)` ile birebir aynı
-//! biçimdir: 32 bayt model hash'i. Off-chain checkpoint ile on-chain kayıt
-//! aynı digest'ten türetilir; eşleşme çapraz testle sabitlenir.
+//! `ModelId` has exactly the same shape as `AiModelId(model_hash)` in
+//! budlum/main: a 32-byte model hash. The off-chain checkpoint and the
+//! on-chain registration are derived from the same digest, and the match is
+//! pinned by a cross test.
 
 use crate::tier::ModelTier;
 
-/// 32 bayt hash.
+/// A 32-byte hash.
 pub type Hash32 = [u8; 32];
 
-/// Zincir üstü `AiModelId` ile aynı biçim (budlum/main `src/ai/types.rs`).
+/// The same shape as the on-chain `AiModelId` (budlum/main
+/// `src/ai/types.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelId(pub Hash32);
 
-/// Taban modelin lisansı. İnce ayar çıktısının atıf yükümlülükleri buna göre
-/// kurulur (bkz. `NOTICE.md`).
+/// The base model's licence. The attribution obligations of the fine-tuned
+/// output are built on it (see `NOTICE.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelLicense {
-    /// the upstream vendor V4 ağırlıkları: standart MIT.
+    /// the upstream vendor V4 weights: standard MIT.
     Mit,
-    /// Apache-2.0 (NOTICE taşıma yükümlülüğü).
+    /// Apache-2.0 (carries a NOTICE obligation).
     Apache20,
-    /// Diğer; metin saklanır ve kayıt öncesi gözden geçirme zorunludur.
+    /// Anything else; the text is stored and a review before registration is
+    /// mandatory.
     Other(String),
 }
 
-/// İnce ayarın başladığı checkpoint türü.
+/// The kind of checkpoint the fine-tuning started from.
 ///
-/// the upstream vendor V4'te Base modeller yayınlandı; bu fark SFT zeminini değiştirir.
+/// the upstream vendor V4 published Base models, and that difference changes the ground
+/// SFT stands on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FineTuneSource {
-    /// Sıfırdan SFT için uygun base checkpoint.
+    /// A base checkpoint suitable for SFT from scratch.
     BaseModel,
-    /// Yalnız instruct checkpoint var; LoRA bunun üzerine kurulur.
+    /// Only an instruct checkpoint exists; LoRA is built on top of it.
     InstructModel,
 }
 
-/// Off-chain checkpoint kaydı. Ağırlıklar repo'ya girmez; hash + kaynak izlenir.
+/// The off-chain checkpoint record. The weights do not enter the repo; the
+/// hash and the source are tracked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     pub model_id: ModelId,
-    /// Ör. `example-org/base-checkpoint-light`
+    /// For example `example-org/base-checkpoint-light`.
     pub base_repo: String,
     pub revision: Option<String>,
-    /// Checkpoint SHA-256'sı. Üretimde zorunlu; iskelette `None` kalabilir
-    /// ama `None` iken kayıt fail-closed reddedilir (bkz. lubot-data::verify).
+    /// The checkpoint SHA-256. Mandatory in production; it may stay `None` in
+    /// the skeleton, but while it is `None` the record is refused fail-closed
+    /// (see lubot-data::verify).
     pub sha256: Option<String>,
     pub license: ModelLicense,
     pub fine_tune_source: FineTuneSource,
-    /// Bu checkpoint'in desteklediği Lubot kademesi (`light` / `normal`).
+    /// The Lubot tier this checkpoint supports (`light` / `normal`).
     pub tier: ModelTier,
 }
 
 impl ModelSpec {
-    /// Yeni kayıt. `sha256` boşken bu kayıt yalnızca taslaktır.
+    /// A new record. While `sha256` is empty the record is only a draft.
     #[must_use]
     pub fn new(
         model_id: ModelId,
@@ -73,15 +79,16 @@ impl ModelSpec {
         }
     }
 
-    /// SHA-256'sız kayıt üretim kabulüne uygun değildir.
+    /// A record without a SHA-256 is not fit for production admission.
     #[must_use]
     pub fn is_production_ready(&self) -> bool {
         self.sha256.is_some()
     }
 }
 
-/// Yer tutucu digest: gerçek SHA-256 (ring/sha2) üretim fazında girer.
-/// Bu fonksiyon güvenlik amacı taşımaz; yalnızca iskelet testlerinde kullanılır.
+/// A placeholder digest: the real SHA-256 (ring/sha2) arrives in the
+/// production phase. This function carries no security purpose; it is only
+/// used in the skeleton tests.
 #[must_use]
 pub fn placeholder_digest(bytes: &[u8]) -> Hash32 {
     let mut out = [0u8; 32];
