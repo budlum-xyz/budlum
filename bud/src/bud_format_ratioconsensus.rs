@@ -1,20 +1,26 @@
-//! B.U.D. 2.0 İCAT - Çok Ajanlı Oran Konsensüsü (Multi-Agent Ratio Consensus) (2026-08-16)
+//! B.U.D. 2.0 INVENTION - Multi-Agent Ratio Consensus (2026-08-16)
 //!
-//! Not: multi-ratio consensus, bilinen literatürde eşi olmayan bir mimaridir.
-//! Bu modül, o mimariyi DERİNLEŞTİRİR: tek formatın tek boru hattı seçimi değil,
-//! **format-uzmanı ajanlar + ölçüm kanıtı + içerik-sınıfı + BFT finality** birleşimidir.
+//! Note: multi-ratio consensus is an architecture with no equal in the known
+//! literature. This module DEEPENS it: not one pipeline choice for one format,
+//! but the combination of **format-expert agents + measurement evidence +
+//! content class + BFT finality**.
 //!
-//! Mimari (başka yerde olmayan birleşim):
-//! 1. HER format için BİRDEN ÇOK uzman adayı (expert) üretir - boru hattı + ölçülen oran.
-//! 2. Her aday, ÖLÇÜM KANITI taşır (üretim kanıtı/RealBench - uydurma oran elenir, K19).
-//! 3. İçerik-sınıfı (statik/hareketli/tekrarlı...) adayları AĞIRLIKLANDIRIR (K84: codec
-//!    seçimi içeriğe bağlı - "x265 her zaman iyi değil").
-//! 4. Ağırlıklı adaylar BFT oylamasına girer (2n/3) → FINAL oran + boru hattı seçilir.
-//! 5. Seçilen oran üretim kanıtına + checkpoint'e yazılır (zincirde doğrulanabilir).
+//! The architecture (a combination found nowhere else):
+//! 1. It produces MULTIPLE expert candidates for EVERY format - a pipeline plus
+//!    a measured ratio.
+//! 2. Every candidate carries MEASUREMENT EVIDENCE (a production proof or
+//!    RealBench - an invented ratio is eliminated, K19).
+//! 3. The content class (static/moving/repetitive and so on) WEIGHTS the
+//!    candidates (K84: codec choice depends on the content - "x265 is not always
+//!    good").
+//! 4. The weighted candidates enter a BFT vote (2n/3) -> the FINAL ratio and
+//!    pipeline are chosen.
+//! 5. The chosen ratio is written into the production proof and the checkpoint
+//!    (verifiable on chain).
 //!
-//! Bu, tek-boru-hattı seçen sistemlerden (basit max-ratio) ve sabit oran tablosu
-//! kullananlardan ayrılır: adayların HEM format uzmanlığı HEM ölçüm kanıtı HEM içerik
-//! sınıfı HEM çoğunluk oyu ile finalleşmesi.
+//! This differs from systems that pick a single pipeline (a simple max ratio)
+//! and from those using a fixed ratio table: candidates are finalised by format
+//! expertise AND measurement evidence AND content class AND a majority vote.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -26,26 +32,26 @@ use sha3::{Digest, Sha3_256};
 pub const RATIO_CONS_MAGIC: [u8; 8] = *b"\xB5RCON\0\0\0";
 pub const RATIO_CONS_VERSION: u8 = 1;
 
-/// İçerik sınıfı (aday ağırlıklandırma - K84: codec seçimi içeriğe bağlı).
+/// The content class (candidate weighting - K84: codec choice depends on the content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentClass {
-    Structured, // JSON/CSV/LOG - kolonar/şablon güçlü
+    Structured, // JSON/CSV/LOG - columnar/template is strong
     Temporal,   // video - codec + GOP
-    Static,     // tekrarlı/dar - sözlük/dedup güçlü
+    Static,     // repetitive/narrow - dictionary/dedup is strong
     Arbitrary,  // bilinmiyor - genel
 }
 
-/// Format uzmanı adayı: boru hattı + ölçülen oran + kanıt (K19 kapısı).
+/// A format expert candidate: a pipeline, a measured ratio and evidence (the K19 gate).
 #[derive(Debug, Clone)]
 pub struct RatioCandidateAgent {
     pub format: FormatCodec,
     pub pipe: &'static str,
-    pub measured_ratio: f64, // ÖLÇÜLMÜŞ (RealBench/üretim kanıtı - uydurma elenir)
-    pub content_class_bonus: f64, // içerik sınıfı uyumu (0.5-2.0)
-    pub evidence: [u8; 32],  // ölçüm kanıtı hash'i (üretim kanıtı çapası)
+    pub measured_ratio: f64, // MEASURED (RealBench/production proof - invented values are eliminated)
+    pub content_class_bonus: f64, // the content class fit (0.5-2.0)
+    pub evidence: [u8; 32],  // the measurement evidence hash (the production proof anchor)
 }
 
-/// Çok ajanlı oran konsensüsü: adaylar + sınıf + BFT oyu → final seçim.
+/// Multi-agent ratio consensus: candidates + class + a BFT vote -> the final choice.
 #[derive(Debug, Clone)]
 pub struct RatioConsensus {
     pub final_pipe: String,
@@ -58,9 +64,10 @@ pub struct RatioConsensus {
 impl RatioConsensus {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_RATIOCONS_V1";
 
-    /// Aday havuzu: yalnız VERİLEN formatın uzmanları (çoklu boru hattı adayı).
-    /// Oranlar KANITLI (RealBench/measure_ratios.py seed=7 - K19). İçerik sınıfı
-    /// BONUSU o formatın boru hatları arasında seçimi belirler (K84).
+    /// The candidate pool: only the experts of the GIVEN format (multiple
+    /// pipeline candidates). The ratios carry EVIDENCE
+    /// (RealBench/measure_ratios.py seed=7 - K19). The content class BONUS
+    /// decides between the pipelines of that format (K84).
     pub fn candidate_pool(format: FormatCodec, class: ContentClass) -> Vec<RatioCandidateAgent> {
         let mut pool = match format {
             FormatCodec::Json => vec![
@@ -126,10 +133,10 @@ impl RatioConsensus {
                 evidence: [0u8; 32],
             }],
         };
-        // Sınıf bonusu: sınıfla uyumlu boru hattı öne çıkar (K84).
+        // The class bonus: a pipeline matching the class comes forward (K84).
         for c in &mut pool {
             let bonus = match class {
-                ContentClass::Structured => true, // yapılandırılmış boru hatları
+                ContentClass::Structured => true, // the structured pipelines
                 ContentClass::Temporal => c.pipe.contains("highmotion"),
                 ContentClass::Static => c.pipe.contains("static") || c.pipe.contains("orderfree"),
                 ContentClass::Arbitrary => true,
@@ -139,13 +146,14 @@ impl RatioConsensus {
         pool
     }
 
-    /// Ağırlıklı skor: ölçülen oran × sınıf bonusu (deterministik).
+    /// The weighted score: the measured ratio times the class bonus (deterministic).
     pub fn weighted_score(c: &RatioCandidateAgent) -> f64 {
         c.measured_ratio * c.content_class_bonus
     }
 
-    /// BFT oylaması: en yüksek ağırlıklı adayı n oyuncu destekler (2n/3 çoğunluk).
-    /// Seçim deterministik: skor sıralaması → en iyi aday final.
+    /// The BFT vote: n voters back the highest weighted candidate (a 2n/3
+    /// majority). The choice is deterministic: the score ordering makes the best
+    /// candidate final.
     pub fn finalize(
         pool: Vec<RatioCandidateAgent>,
         n: usize,
@@ -154,12 +162,12 @@ impl RatioConsensus {
         if pool.is_empty() || n < 1 {
             return None;
         }
-        // en iyi aday: ağırlıklı skor (total_cmp - NaN panik yok, K38)
+        // the best candidate: the weighted score (total_cmp - no NaN panic, K38)
         let best = pool
             .iter()
             .max_by(|a, b| Self::weighted_score(a).total_cmp(&Self::weighted_score(b)))?;
         let quorum = (n * 2).div_ceil(3);
-        // final: en iyi aday quorum oyu alır (deterministik simülasyon)
+        // final: the best candidate takes the quorum vote (a deterministic simulation)
         Some(RatioConsensus {
             final_pipe: best.pipe.to_string(),
             final_ratio: best.measured_ratio,
@@ -169,7 +177,7 @@ impl RatioConsensus {
         })
     }
 
-    /// Final seçim kaydı hash'i (zincire yazılabilir - checkpoint'e bağlanır).
+    /// The hash of the final selection record (writable on chain - bound to the checkpoint).
     pub fn consensus_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -232,7 +240,7 @@ impl RatioConsensus {
         Some(rec)
     }
 
-    /// KF1 kapısı: final oran, maliyet tavanını tutuyor mu? (K19 dürüstlük)
+    /// The KF1 gate: does the final ratio hold the cost ceiling? (K19 honesty)
     pub fn holds_ceiling(&self, physical: f64, erasure: f64, ceiling: f64) -> bool {
         if self.final_ratio <= 0.0 || !self.final_ratio.is_finite() {
             return false;
@@ -261,7 +269,7 @@ fn read_str<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a str> {
     Some(s)
 }
 
-/// StructuralKind → ContentClass (boru hattı sınıfı eşlemesi).
+/// StructuralKind -> ContentClass (the pipeline class mapping).
 pub fn class_of(kind: StructuralKind) -> ContentClass {
     match kind {
         StructuralKind::Json | StructuralKind::Csv | StructuralKind::Log | StructuralKind::Text => {
@@ -277,13 +285,13 @@ mod tests {
 
     #[test]
     fn structured_class_picks_best_json_pipe() {
-        // Yapılandırılmış içerik: JSON OrderFree (12.07x) sınıf bonusuyla kazanır
+        // Structured content: JSON OrderFree (12.07x) wins with the class bonus
         let pool = RatioConsensus::candidate_pool(FormatCodec::Json, ContentClass::Structured);
-        let cons = RatioConsensus::finalize(pool, 7, 1).expect("konsensüs");
+        let cons = RatioConsensus::finalize(pool, 7, 1).expect("consensus");
         assert_eq!(cons.final_pipe, "json-columnar-orderfree");
         assert!((cons.final_ratio - 12.07).abs() < 0.01);
         assert_eq!(cons.quorum, 5, "2n/3 = 5/7");
-        // final kayıt hash'lenebilir + blob roundtrip
+        // the final record can be hashed and survives a blob roundtrip
         let blob = cons.to_blob();
         let back = RatioConsensus::from_blob(&blob).expect("blob");
         assert_eq!(back.final_pipe, cons.final_pipe);
@@ -295,25 +303,25 @@ mod tests {
 
     #[test]
     fn temporal_class_picks_video_pipe() {
-        // Video içeriği: AV1 high-motion bonuslu → video boru hattı kazanır (K84)
+        // Video content: AV1 with the high-motion bonus -> the video pipeline wins (K84)
         let pool = RatioConsensus::candidate_pool(FormatCodec::Mp4, ContentClass::Temporal);
-        let cons = RatioConsensus::finalize(pool, 7, 2).expect("konsensüs");
+        let cons = RatioConsensus::finalize(pool, 7, 2).expect("consensus");
         assert!(
             cons.final_pipe.starts_with("video-"),
-            "video boru hattı: {}",
+            "the video pipeline: {}",
             cons.final_pipe
         );
     }
 
     #[test]
     fn static_class_prefers_repetition_pipes() {
-        // Tekrarlı içerik: OrderFree/statik bonuslu adaylar öne çıkar
+        // Repetitive content: the OrderFree/static bonus candidates come forward
         let pool = RatioConsensus::candidate_pool(FormatCodec::Mp4, ContentClass::Static);
-        let cons = RatioConsensus::finalize(pool, 7, 3).expect("konsensüs");
-        // 12.07 * 1.5 = 18.1 vs 1394 * 1.5 = 2091 → video-av1-static kazanır
+        let cons = RatioConsensus::finalize(pool, 7, 3).expect("consensus");
+        // 12.07 * 1.5 = 18.1 vs 1394 * 1.5 = 2091 -> video-av1-static wins
         assert_eq!(
             cons.final_pipe, "video-av1-static",
-            "statik video en yüksek"
+            "the static video is the highest"
         );
         assert!((cons.final_ratio - 1394.0).abs() < 1.0);
     }
@@ -325,7 +333,7 @@ mod tests {
         let c2 = RatioConsensus::finalize(pool, 7, 1).unwrap();
         assert_eq!(c1.consensus_hash(), c2.consensus_hash(), "deterministik");
         assert_ne!(c1.consensus_hash(), [0u8; 32]);
-        // KF1: JSON OrderFree 12.07x, EVENODD yerine LRC 1.031x → tavan tutar mı?
+        // KF1: JSON OrderFree 12.07x, LRC 1.031x instead of EVENODD -> does the ceiling hold?
         assert!(
             c1.holds_ceiling(0.23342, 1.031, 0.02),
             "LRC + 12.07x → ~0.0199"
@@ -334,7 +342,7 @@ mod tests {
             !c1.holds_ceiling(0.23342, 1.286, 0.016),
             "EVENODD 1.286x + 12.07x tutmaz"
         );
-        // boş havuz → None
+        // an empty pool -> None
         assert!(RatioConsensus::finalize(vec![], 7, 1).is_none());
         assert!(RatioConsensus::finalize(
             RatioConsensus::candidate_pool(FormatCodec::Json, ContentClass::Arbitrary),
