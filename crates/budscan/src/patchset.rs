@@ -1,45 +1,48 @@
-//! Yama kumesi araclari, Rust olarak.
+//! Patch-set tooling, written in Rust.
 //!
-//! # Neden burada
+//! # Why it is here
 //!
-//! Referans olarak incelenen Firefox turevi tarayicilarin yama duzeni iyi bir
-//! secim: motor kaynagi depoda tutulmaz, yapim sirasinda indirilir, yamalar
-//! uygulanir, sonuc derlenir. Tasinmayan sey o depolardaki arac katmani:
+//! The patch layout of the Firefox derivatives studied as references is a good
+//! choice: engine source is not kept in the repository, it is downloaded at
+//! build time, the patches are applied, and the result is compiled. What is not
+//! carried over is the tooling layer of those repositories:
 //! `check-patchfail.sh`, `fix-patch.sh`, `enable-patch.sh`, `disable-patch.sh`
-//! ve `git-patchtree.sh` -- hepsi kabuk.
+//! and `git-patchtree.sh`, all of them shell.
 //!
-//! Budlum'da kabukla yeni kapi yazmak yasak ve sebebi olculdu: yanlis yazilmis
-//! bir degisken kabukta hata degil bos dizgidir, yani bir kontrol hicbir seyi
-//! inceleyip OK diyebilir. Somut ornek, incelenen depodaki
-//! `check-patchfail.sh`: `for j in $(grep -n rej$ ../patch.tmp | awk '{print
-//! $(NF);}')` satiri, `patch` ciktisindan `.rej` dosya adlarini cikarmaya
-//! calisiyor. `grep` hicbir sey bulamazsa dongu bos calisir, `failed_patches`
-//! bos kalir ve betik **"success: All patches where applied successfully."**
-//! yazip 0 doner. Yani bir yama tamamen basarisiz olsa ve `patch` ciktisinin
-//! bicimi degisse, kontrol hicbir seyi inceleyip OK der.
+//! Writing a new gate in shell is forbidden in Budlum, and the reason was
+//! measured: a misspelt variable is not an error in a shell but an empty
+//! string, so a check can inspect nothing and report OK. The concrete example
+//! is `check-patchfail.sh` in the repository studied: the line
+//! `for j in $(grep -n rej$ ../patch.tmp | awk '{print $(NF);}')` tries to pull
+//! the `.rej` file names out of `patch` output. If `grep` finds nothing the
+//! loop runs zero times, `failed_patches` stays empty, and the script prints
+//! **"success: All patches where applied successfully."** and returns 0. So a
+//! patch could fail entirely, or the format of `patch` output could change, and
+//! the check would inspect nothing and say OK.
 //!
-//! Bu modul ayni isi tip tasiyan bir bicimde yapar: bir yama listesi bir
-//! `Vec<PatchEntry>`'dir, bir sonuc bir `enum`'dur, ve bos bir sonuc kumesi
-//! **basari degildir** -- [`Verdict::Vacuous`] ayri bir dallanmadir.
+//! This module does the same work in a shape that carries types: a patch list
+//! is a `Vec<PatchEntry>`, a result is an `enum`, and an empty result set is
+//! **not a success** - [`Verdict::Vacuous`] is a branch of its own.
 //!
-//! # Ne yapmaz
+//! # What it does not do
 //!
-//! Bu modul yama **uygulamaz** ve surec baslatmaz. Uygulamak, kaynak agacini
-//! indirmeyi ve dosya sistemine yazmayi gerektirir; ikisi de bu crate'in
-//! disinda. Burada olan sey, yama kumesinin **kendisi** hakkindaki
-//! kontroller: liste ile dosyalarin ortusmesi, adlandirma kurali, ve bir
-//! yamanin hangi dosyalara dokundugunun listeden okunabilmesi.
+//! This module **applies** no patch and starts no process. Applying requires
+//! downloading the source tree and writing to the filesystem, both outside this
+//! crate. What happens here are the checks about the patch set **itself**:
+//! whether the list and the files agree, the naming rule, and whether the files
+//! a patch touches can be read off the patch.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
-/// Yama listesindeki bir satir.
+/// One line of the patch list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PatchEntry {
-    /// Depoya gore yol: `browser/patches/bud-protocol-handler.patch`.
+    /// Path relative to the repository:
+    /// `browser/patches/bud-protocol-handler.patch`.
     pub path: String,
-    /// Etkin mi. Devre disi birakmak satiri silmek degil, isaretlemektir:
-    /// silinen bir satir, neden silindigini soylemeyen bir satirdir.
+    /// Whether it is enabled. Disabling marks the line rather than deleting
+    /// it: a deleted line is a line that does not say why it was deleted.
     pub enabled: bool,
 }
 
@@ -52,30 +55,30 @@ impl PatchEntry {
         }
     }
 
-    /// Dosya adi (yolun son parcasi).
+    /// The file name, the last segment of the path.
     #[must_use]
     pub fn file_name(&self) -> &str {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 }
 
-/// Bir kontrolun sonucu.
+/// The outcome of one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// Kontrol calisti ve gecti.
+    /// The check ran and passed.
     Pass(String),
-    /// Kontrol calisti ve dustu.
+    /// The check ran and failed.
     Fail(Vec<String>),
-    /// Kontrol **hicbir sey inceleyemedi**. Bu bir basari degil.
+    /// The check **could inspect nothing**. That is not a success.
     ///
-    /// Kabuk surumunun sessizce OK dedigi durum tam olarak burasi ve bir
-    /// enum varyanti olmasinin sebebi bu: cagiran `Pass` ile `Vacuous`'u
-    /// ayirt etmek zorunda kalir.
+    /// This is exactly the case where the shell version quietly says OK, and it
+    /// is why this is an enum variant: the caller is forced to tell `Pass` and
+    /// `Vacuous` apart.
     Vacuous(String),
 }
 
 impl Verdict {
-    /// CI icin: yalniz `Pass` gecer.
+    /// For CI: only `Pass` passes.
     #[must_use]
     pub fn is_ok(&self) -> bool {
         matches!(self, Self::Pass(_))
@@ -85,9 +88,9 @@ impl Verdict {
 impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Pass(msg) => write!(f, "GECTI: {msg}"),
+            Self::Pass(msg) => write!(f, "PASSED: {msg}"),
             Self::Fail(problems) => {
-                writeln!(f, "DUSTU:")?;
+                writeln!(f, "FAILED:")?;
                 for p in problems {
                     writeln!(f, "  {p}")?;
                 }
@@ -95,22 +98,23 @@ impl fmt::Display for Verdict {
             }
             Self::Vacuous(msg) => write!(
                 f,
-                "BOSTA: {msg} -- bir kontrol hicbir sey inceleyemediyse gecmis sayilmaz"
+                "VACUOUS: {msg} -- a check that could inspect nothing does not count \
+                 as a pass"
             ),
         }
     }
 }
 
-/// Yama listesini ayristir.
+/// Parse a patch list.
 ///
-/// Bicim: satir basi bir yol. `#` ile baslayan satir yorum, `!` oneki devre
-/// disi. Bos satirlar atlanir.
+/// The format is one path per line. A line starting with `#` is a comment, and
+/// a `!` prefix disables the entry. Empty lines are skipped.
 ///
 /// # Errors
 ///
-/// Ayni yolun iki kez gecmesi. Bir yamanin listede iki kez olmasi, iki kez mi
-/// uygulanacagi sorusunu acar ve o soruyu sessizce cevaplamak yerine
-/// reddediyoruz.
+/// When the same path appears twice. A patch listed twice raises the question
+/// of whether it is applied twice, and rather than answer that quietly we
+/// refuse.
 pub fn parse_list(text: &str) -> Result<Vec<PatchEntry>, String> {
     let mut out: Vec<PatchEntry> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -124,11 +128,12 @@ pub fn parse_list(text: &str) -> Result<Vec<PatchEntry>, String> {
             None => (true, line),
         };
         if path.is_empty() {
-            return Err(format!("{}: yol bos", lineno + 1));
+            return Err(format!("{}: the path is empty", lineno + 1));
         }
         if !seen.insert(path.to_string()) {
             return Err(format!(
-                "{}: {path} listede iki kez var; iki kez mi uygulanacagi belirsiz",
+                "{}: {path} appears twice in the list; whether it is applied twice is \
+                 unclear",
                 lineno + 1
             ));
         }
@@ -137,7 +142,7 @@ pub fn parse_list(text: &str) -> Result<Vec<PatchEntry>, String> {
     Ok(out)
 }
 
-/// Listeyi metne cevir (kanonik bicim: sirali).
+/// Render the list back to text, in the canonical sorted form.
 #[must_use]
 pub fn render_list(entries: &[PatchEntry]) -> String {
     let mut sorted = entries.to_vec();
@@ -153,18 +158,20 @@ pub fn render_list(entries: &[PatchEntry]) -> String {
     out
 }
 
-/// Liste ile diskteki dosyalar ortusuyor mu?
+/// Do the list and the files on disk agree?
 ///
-/// `present`, `browser/patches/` altinda gercekten bulunan yollar.
+/// `present` holds the paths actually found under `browser/patches/`.
 ///
-/// Uc ayri hata var ve ucu de ayri raporlaniyor: listede olup dosyasi olmayan
-/// (yapim duser), dosyasi olup listede olmayan (sessizce uygulanmaz), ve bos
-/// kesisim (kontrol hicbir sey incelemedi).
+/// There are three distinct failures and all three are reported separately:
+/// listed with no file on disk, which breaks the build; a file with no list
+/// entry, which is silently not applied; and an empty intersection, where the
+/// check inspected nothing.
 #[must_use]
 pub fn check_list_matches_disk(entries: &[PatchEntry], present: &[String]) -> Verdict {
     if entries.is_empty() && present.is_empty() {
         return Verdict::Vacuous(String::from(
-            "ne listede ne diskte yama var; kontrol hicbir sey inceleyemedi",
+            "there are no patches in the list or on disk; the check could inspect \
+             nothing",
         ));
     }
     let listed: BTreeSet<&str> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -173,27 +180,32 @@ pub fn check_list_matches_disk(entries: &[PatchEntry], present: &[String]) -> Ve
     let mut problems: Vec<String> = Vec::new();
     for missing in listed.difference(&on_disk) {
         problems.push(format!(
-            "{missing} listede ama diskte yok; yapim bu yamayi bulamayacak"
+            "{missing} is in the list but not on disk; the build will not find this \
+             patch"
         ));
     }
     for unlisted in on_disk.difference(&listed) {
         problems.push(format!(
-            "{unlisted} diskte ama listede yok; sessizce uygulanmayan bir yama, \
-             uygulandigi sanilan bir yamadir"
+            "{unlisted} is on disk but not in the list; a patch that is silently not \
+             applied is a patch believed to be applied"
         ));
     }
     if problems.is_empty() {
-        Verdict::Pass(format!("{} yama listede ve diskte ortusuyor", listed.len()))
+        Verdict::Pass(format!(
+            "{} patch(es) agree between the list and disk",
+            listed.len()
+        ))
     } else {
         Verdict::Fail(problems)
     }
 }
 
-/// Bir unified diff'in dokundugu dosyalar.
+/// The files a unified diff touches.
 ///
-/// `+++ b/path` satirlarindan okunur. Bu, incelenen depodaki
-/// `git-patchtree.sh`'in `grep '+++' | awk '{print $2}' | sed s/^b/./`
-/// borusunun yaptigi is; buradaki fark, bos sonucun bir sonuc olmasi.
+/// Read from the `+++ b/path` lines. This is the job the
+/// `grep '+++' | awk '{print $2}' | sed s/^b/./` pipeline in the studied
+/// repository's `git-patchtree.sh` does; the difference here is that an empty
+/// result is a result.
 #[must_use]
 pub fn touched_files(diff: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -213,29 +225,29 @@ pub fn touched_files(diff: &str) -> Vec<String> {
     out
 }
 
-/// Bir yamanin sekli kabul edilebilir mi?
+/// Is a patch's shape acceptable?
 ///
-/// Uc sart: en az bir dosyaya dokunmali, dokundugu dosyalarin hepsi izin
-/// verilen agacta olmali, ve marka adi tasimamali.
+/// Three conditions: it must touch at least one file, every file it touches
+/// must be in an allowed tree, and it must carry no brand name.
 ///
-/// Ucuncusu bu depo icin ozel bir sart: yama katmani baska bir projeden
-/// **fikir** olarak alindi, isim olarak degil. Bir tanimlayicida ya da yama
-/// adinda baska bir tarayicinin adinin kalmasi, o projenin bir parcasiymis
-/// gibi gorunen bir agac uretir.
+/// The third is specific to this repository: the patch layer was taken from
+/// another project as an **idea**, not as a name. Another browser's name left
+/// in an identifier or a patch name produces a tree that looks like part of
+/// that project.
 #[must_use]
 pub fn check_patch_shape(name: &str, diff: &str, allowed_roots: &[&str]) -> Verdict {
     let touched = touched_files(diff);
     if touched.is_empty() {
         return Verdict::Vacuous(format!(
-            "{name}: diff hicbir dosyaya dokunmuyor; '+++ b/...' satiri yok. \
-             Uygulanacak bir sey olmayan bir yama, uygulandigi sanilan bir yamadir"
+            "{name}: the diff touches no file; there is no '+++ b/...' line. A patch \
+             with nothing to apply is a patch believed to be applied"
         ));
     }
     let mut problems = Vec::new();
     for path in &touched {
         if !allowed_roots.iter().any(|root| path.starts_with(root)) {
             problems.push(format!(
-                "{name}: {path} izin verilen agaclarin disinda ({})",
+                "{name}: {path} is outside the allowed trees ({})",
                 allowed_roots.join(", ")
             ));
         }
@@ -243,30 +255,30 @@ pub fn check_patch_shape(name: &str, diff: &str, allowed_roots: &[&str]) -> Verd
     for banned in &forbidden_brand_tokens() {
         if name.to_ascii_lowercase().contains(banned) {
             problems.push(format!(
-                "{name}: yama adi {banned:?} tasiyor; bu depo baska bir tarayicinin \
-                 markasini tasimaz"
+                "{name}: the patch name carries {banned:?}; this repository does not \
+                 carry another browser's brand"
             ));
         }
     }
     if problems.is_empty() {
-        Verdict::Pass(format!("{name}: {} dosyaya dokunuyor", touched.len()))
+        Verdict::Pass(format!("{name}: touches {} file(s)", touched.len()))
     } else {
         Verdict::Fail(problems)
     }
 }
 
-/// Yasakli marka parcalari, hecelerine bolunmus halde.
+/// Forbidden brand fragments, split into syllables.
 ///
-/// Liste, referans alinan agactan tasinabilecek adlari isimlendiriyor. Bir
-/// izin listesi degil bir red listesi olmasi kasitli: yeni bir marka
-/// eklendiginde sessizce gecmemesi icin bu liste buyur.
+/// The list names what could be carried over from the reference tree. That it
+/// is a deny list rather than an allow list is deliberate: it grows when a new
+/// brand appears, so that the new one does not pass silently.
 ///
-/// Adlar neden bolunmus yaziliyor: bu depoda hicbir dosyada yabanci marka
-/// adinin kendisi **duz metin olarak** gecmemeli. Bir red listesi, adi tam
-/// yazdigi anda kendi yasakladigi seyi agaca sokar ve depoda "o ad geciyor
-/// mu" diye arayan her arac -- disaridaki denetci dahil -- bu satiri isabet
-/// sayar. Heceler calisma aninda birlestirilir; kontrolun gucu ayni,
-/// agactaki dizgi yok.
+/// Why the names are written split: no file in this repository should carry a
+/// foreign brand name **as plain text**. A deny list that spells the name out
+/// puts the very thing it forbids into the tree, and every tool searching the
+/// repository for "does that name appear" - an outside auditor included -
+/// counts this line as a hit. The syllables are joined at runtime; the check is
+/// just as strong, and the string is not in the tree.
 const FORBIDDEN_BRAND_SYLLABLES: &[&[&str]] = &[
     &["obs", "ide"],
     &["libre", "wolf"],
@@ -274,10 +286,10 @@ const FORBIDDEN_BRAND_SYLLABLES: &[&[&str]] = &[
     &["mull", "vad"],
 ];
 
-/// Aranacak marka parcalarini uretir.
+/// Produces the brand fragments to search for.
 ///
-/// Her cagride yeniden birlestirilir; liste dort elemanli oldugu icin bunun
-/// olculebilir bir maliyeti yok.
+/// They are rejoined on every call; with four elements that has no measurable
+/// cost.
 #[must_use]
 pub fn forbidden_brand_tokens() -> Vec<String> {
     FORBIDDEN_BRAND_SYLLABLES
@@ -286,25 +298,27 @@ pub fn forbidden_brand_tokens() -> Vec<String> {
         .collect()
 }
 
-/// Bir metinde yasakli marka parcasi var mi?
+/// Does a text carry a forbidden brand fragment?
 ///
-/// Yama govdesi, ayar dosyasi ya da yerellestirme dizgisi -- hepsi ayni
-/// kontrolden gecer.
+/// A patch body, a settings file or a localisation string all go through the
+/// same check.
 #[must_use]
 pub fn check_no_foreign_brand(label: &str, text: &str) -> Verdict {
     if text.is_empty() {
-        return Verdict::Vacuous(format!("{label}: metin bos, kontrol bir sey inceleyemedi"));
+        return Verdict::Vacuous(format!(
+            "{label}: the text is empty, the check could inspect nothing"
+        ));
     }
     let lower = text.to_ascii_lowercase();
     let mut problems = Vec::new();
     for token in &forbidden_brand_tokens() {
         if let Some(pos) = lower.find(token) {
             let line = lower[..pos].matches('\n').count() + 1;
-            problems.push(format!("{label}:{line}: {token:?} gecıyor"));
+            problems.push(format!("{label}:{line}: {token:?} appears"));
         }
     }
     if problems.is_empty() {
-        Verdict::Pass(format!("{label}: yabanci marka adi yok"))
+        Verdict::Pass(format!("{label}: no foreign brand name"))
     } else {
         Verdict::Fail(problems)
     }
@@ -316,7 +330,7 @@ mod tests {
 
     #[test]
     fn a_list_parses_with_comments_and_disabled_entries() {
-        let text = "# yorum\nbrowser/patches/a.patch\n!browser/patches/b.patch\n\n";
+        let text = "# comment\nbrowser/patches/a.patch\n!browser/patches/b.patch\n\n";
         let entries = parse_list(text).unwrap();
         assert_eq!(entries.len(), 2);
         assert!(entries[0].enabled);
@@ -328,7 +342,7 @@ mod tests {
     fn a_duplicate_entry_is_refused_not_deduplicated() {
         let text = "a.patch\na.patch\n";
         let err = parse_list(text).unwrap_err();
-        assert!(err.contains("iki kez"), "{err}");
+        assert!(err.contains("twice"), "{err}");
     }
 
     #[test]
@@ -345,10 +359,10 @@ mod tests {
 
     #[test]
     fn an_empty_check_is_vacuous_not_a_pass() {
-        // Kabuk surumunun sessizce OK dedigi durum.
+        // The case where the shell version quietly says OK.
         let v = check_list_matches_disk(&[], &[]);
         assert!(matches!(v, Verdict::Vacuous(_)));
-        assert!(!v.is_ok(), "bosta kalan bir kontrol gecmis sayilmamali");
+        assert!(!v.is_ok(), "a vacuous check must not count as a pass");
     }
 
     #[test]
@@ -368,7 +382,7 @@ mod tests {
     fn a_listed_patch_missing_from_disk_is_a_failure() {
         let entries = vec![PatchEntry::new("p/a.patch", true)];
         match check_list_matches_disk(&entries, &[]) {
-            Verdict::Fail(problems) => assert!(problems[0].contains("diskte yok")),
+            Verdict::Fail(problems) => assert!(problems[0].contains("not on disk")),
             other => panic!("{other:?}"),
         }
     }
@@ -387,22 +401,23 @@ mod tests {
 
     #[test]
     fn a_diff_that_touches_nothing_is_vacuous() {
-        let v = check_patch_shape("bos.patch", "hicbir sey", &["browser/"]);
+        let v = check_patch_shape("empty.patch", "nothing at all", &["browser/"]);
         assert!(matches!(v, Verdict::Vacuous(_)));
     }
 
     #[test]
     fn a_patch_outside_the_allowed_tree_is_refused() {
         let diff = "+++ b/etc/passwd\n";
-        match check_patch_shape("kotu.patch", diff, &["browser/"]) {
-            Verdict::Fail(problems) => assert!(problems[0].contains("izin verilen")),
+        match check_patch_shape("bad.patch", diff, &["browser/"]) {
+            Verdict::Fail(problems) => assert!(problems[0].contains("allowed trees")),
             other => panic!("{other:?}"),
         }
     }
 
     #[test]
     fn a_foreign_brand_in_a_patch_name_is_refused() {
-        // Marka adi testte de duz yazilmaz; kontrolun kendi listesinden alinir.
+        // The brand name is not spelled out in the test either; it is taken
+        // from the check's own list.
         let brand = &forbidden_brand_tokens()[0];
         let patch_name = format!("{brand}-customizations.patch");
         let diff = "+++ b/browser/x.js\n";
@@ -416,10 +431,10 @@ mod tests {
 
     #[test]
     fn a_foreign_brand_in_a_body_is_found_with_its_line() {
-        // Buyuk/kucuk harf farki gozetilmemeli: ikinci satirda bulunmali.
+        // Case must not matter: it has to be found on the second line.
         let brand = forbidden_brand_tokens()[1].to_uppercase();
-        let text = format!("birinci satir\nikinci {brand} satiri\n");
-        match check_no_foreign_brand("ayar.js", &text) {
+        let text = format!("first line\nsecond line with {brand}\n");
+        match check_no_foreign_brand("settings.js", &text) {
             Verdict::Fail(problems) => assert!(problems[0].contains(":2:"), "{problems:?}"),
             other => panic!("{other:?}"),
         }
@@ -427,7 +442,8 @@ mod tests {
 
     #[test]
     fn the_brand_list_is_assembled_and_not_empty() {
-        // Heceler birlesmezse tarama hicbir sey aramaz; bu sessiz bir gecis olurdu.
+        // If the syllables do not join, the scan searches for nothing, and
+        // that would be a silent pass.
         let tokens = forbidden_brand_tokens();
         assert_eq!(tokens.len(), FORBIDDEN_BRAND_SYLLABLES.len());
         assert!(tokens.iter().all(|t| t.len() > 4), "{tokens:?}");
