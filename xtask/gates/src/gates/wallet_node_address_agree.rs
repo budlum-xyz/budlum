@@ -352,14 +352,14 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: an unparseable derivation passed instead of failing",
+            "canary: an unparsable derivation passed instead of failing",
         ));
     }
 
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
         "wallet-node-address-agree canary OK (agreement PASSes; separator, hash, and absorb-order \
-         differences FAIL; agreeing on a trailing tag FAILs; a renamed or unparseable derivation \
+         differences FAIL; agreeing on a trailing tag FAILs; a renamed or unparsable derivation \
          FAILs).",
     ))
 }
