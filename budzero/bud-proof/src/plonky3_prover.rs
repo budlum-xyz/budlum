@@ -4133,7 +4133,7 @@ mod tests {
     /// constraint equation failing to hold at zeta) and the measurement showed
     /// something else:
     /// **when each of the 56 public input values is altered the refusal
-    /// `InvalidPowWitness` uzerinden geliyor**, yani FRI proof-of-work
+    /// through `InvalidPowWitness`**, that is the FRI proof-of-work
     /// check - before the constraint check is ever reached.
     ///
     /// The reason is good news for the proof system: the public inputs enter
@@ -4163,7 +4163,7 @@ mod tests {
     ///   transcript and not by the constraint layer.
     ///
     /// Together the two give full coverage; removing either opens a hole.
-    /// Testin her indisi ayri gezmesinin sebebi de bu: kapsama tek tip
+    /// That is also why the test walks each index separately: a single kind of coverage
     /// but comes from a different layer depending on the index.
     ///
     /// `Plonky3Adapter::verify` cannot measure this path: it screens the

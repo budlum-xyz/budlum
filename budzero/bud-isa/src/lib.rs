@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub enum IsaProfile {
 /// The corresponding flags to true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
-    /// False = mainnet'te KAPALI (staged rollout) - bool::default ile aynı,
+    /// False = OFF on mainnet (staged rollout) - the same as bool::default,
     /// clippy::derivable_impls nedeniyle derive'a indirildi.
     pub verify_merkle_enabled: bool,
     /// AI inference verification opcode gate.
@@ -128,19 +128,19 @@ impl Default for MainnetActivation {
     ///
     /// `VerifyMerkle`'in gerekcesi degisti. Uzun sure "unfinished path
     /// verification" yaziyordu ve dogruydu: 64 genisleme satiri Poseidon
-    /// zincirini satir satir dogru hesapliyor, **ulastigi sonuc hicbir seye
+    /// chain correctly row by row, but **the result it reaches was bound to nothing**.
     /// baglanmiyordu**. Kok karsilastirmasi orijinal satirin
     /// `merkle_current` hucresine bakiyordu ve o hucreye 64. turun
     /// ciktisinin yazildigini zorlayan kisit yoktu; genisleme satirlarina
-    /// hic dokunmadan oraya iddia edilen kokun kendisini yazan bir prover
-    /// dogrulanan bir kanit uretiyordu. Olculdu, uretti.
+    /// a prover that writes the claimed root itself there without touching
+    /// produced a proof that verified. Measured, and it did.
     ///
     /// O bosluk kapandi (`plonky3_air.rs`, "Son turun ciktisi ...";
     /// `rejects_verify_merkle_root_not_produced_by_the_path`). Kapi yine de
-    /// kapali: kalan kosul **dis denetim**, eksik kisit degil. Bir soundness
+    /// closed: the remaining condition is an **external check**, not a missing constraint.
     /// iddiasinin onu yazani ikna etmesi yetmez. Bu yorumun onceki surumu
     /// yol dogrulamasini "implemented" sayiyordu ve eksik olan sey tam da
-    /// kimsenin ayri madde olarak yazmadigi bagdi - ic degerlendirmenin
+    /// a binding nobody had written down as a separate item - the internal review's
     /// neyi kacirdigini gosteren orneklerden biri. Bayragi bu yorumun
     /// gucune dayanarak acmayin.
     fn default() -> Self {
