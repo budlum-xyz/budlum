@@ -1,122 +1,128 @@
 # Budscan
 
-Budlum'un merkeziyetsiz tarayicisi. Web3 uzantilarini ve merkeziyetsiz
-depolamayi acar; cuzdan adresleri, NFT'ler ve siteler ayni kutudan aratilir.
+Budlum's decentralised browser. It opens Web3 extensions and decentralised
+storage; wallet addresses, NFTs and sites are all searched from the same box.
 
 ```
 budscan/
-  src/          tarayici cekirdegi (Rust, kendi workspace'i)
-  browser/      Gecko yama katmani (yamalar + ayarlar + yerellestirme)
+  src/          browser core (Rust, its own workspace)
+  browser/      Gecko patch layer (patches, settings, localisation)
 ```
 
-## Ne yapar
+## What it does
 
-Kullanici adres cubuguna `ayaz.bud` yazar:
+The user types `ayaz.bud` into the address bar:
 
-1. **Siniflandirma** (`query.rs`) - yazilan sey ad mi, adres mi, NFT mi, sema mi.
-2. **Ad kurali** (`name_rule.rs`) - gecmeyen ad acilmaz, sebebi soylenir.
-3. **Cozum** - `.bud` ise BNS'ten (`bns_proof.rs`), `.eth` ise ENS'ten (`ens.rs`).
-4. **Getirme** (`fetch.rs`) - dort getirici, her biri kendi gucunu beyan eder.
-5. **Dogrulama** - getirilen baytlarin istenen baytlar oldugu **olculur**.
-6. **Rozet** (`resolve.rs`) - en zayif halka adres cubugunda gosterilir.
+1. **Classification** (`query.rs`): is the typed thing a name, an address, an
+   NFT, or a scheme.
+2. **Name rule** (`name_rule.rs`): a name that does not pass is not opened, and
+   the reason is stated.
+3. **Resolution**: `.bud` through BNS (`bns_proof.rs`), `.eth` through ENS
+   (`ens.rs`).
+4. **Fetching** (`fetch.rs`): four fetchers, each declaring its own strength.
+5. **Verification**: it is **measured** that the fetched bytes are the
+   requested bytes.
+6. **Badge** (`resolve.rs`): the weakest link is shown in the address bar.
 
-Besinci adim bu tarayicinin var olma sebebi. Bugunku web'de tarayici,
-sunucunun gonderdigi baytlarin dogru baytlar oldugunu bilmez: TLS yalniz
-**kimin** gonderdigini soyler, **neyin** gonderildigini degil. Icerik adresli
-bir agda `manifest_id` baytlarin hash'idir, yani dogrulama bir
-karsilastirmadir ve tarayicinin kime guvenecegine karar vermesi gerekmez.
+The fifth step is this browser's reason to exist. On today's web a browser does
+not know that the bytes the server sent are the right bytes: TLS says only
+**who** sent them, not **what** was sent. On a content-addressed network
+`manifest_id` is the hash of the bytes, so verification is a comparison and the
+browser never has to decide whom to trust.
 
-## Dogrulama gucu: dort deger
+## Verification strength: four values
 
-| deger | ne demek | ornek |
+| value | what it means | example |
 |---|---|---|
-| `dogrulandi` | baytlarin ozeti beklenen kimlige esit | B.U.D. manifest, IPFS raw CID, Arweave `data_root` |
-| `yalniz tasima` | TLS var, icerik dogrulanmadi | siradan HTTPS |
-| `yalniz beyan` | bir dugum cevap verdi, kanit dogrulanmadi | kanitsiz BNS cozumu |
-| `reddedildi` | olculdu ve tutmadi; icerik gosterilmez | hash uyusmazligi, ad kurali reddi |
+| `verified` | the digest of the bytes equals the expected identity | B.U.D. manifest, IPFS raw CID, Arweave `data_root` |
+| `transport only` | TLS is present, the content was not verified | ordinary HTTPS |
+| `claim only` | a node answered, no proof was verified | BNS resolution without a proof |
+| `refused` | it was measured and did not hold; the content is not shown | hash mismatch, name-rule refusal |
 
-Rozet **en zayif halkayi** gosterir. Baytlari hash'iyle tutan bir sayfa,
-cozumu kanitsizsa `yalniz beyan` der: baytlar kendileriyle tutarli ve
-kimse onlarin bu isme ait oldugunu kanitlamadi.
+The badge shows the **weakest link**. A page whose bytes match their hash still
+reads `claim only` when its resolution carries no proof: the bytes are
+consistent with themselves, and nobody proved they belong to this name.
 
-Dogrulanamayan icerik **yasaklanmiyor, etiketleniyor**. Yasaklamak tarayiciyi
-kullanilmaz yapar ve kullaniciyi hic dogrulama yapmayan baska bir tarayiciya
-gonderir. `reddedildi` bunun istisnasi: orada olcum yapildi ve tutmadi.
+Content that cannot be verified is **labelled, not banned**. Banning makes the
+browser unusable and sends the user to another browser that verifies nothing.
+`refused` is the exception: there a measurement was made and it did not hold.
 
-## Neyin dogrulanmadigi da yazili
+## What is not verified is written down too
 
-Bu crate'in bir kismi **yapilamayanin** kaydidir. Hicbiri sessizce
-`dogrulandi` diye etiketlenmiyor:
+Part of this crate is a record of **what cannot be done**. None of it is
+quietly labelled `verified`:
 
-* **BNS cozumu bugun isim basina kanitlanamiyor.** `BnsRegistry::root()`
-  (`src/bns/registry.rs:299`) butun kayit defterini tek bir SHA-256 akisina
-  yaziyor, Merkle agacina degil. Tek isim icin kanit uretecek yapi yok;
-  `AccountState::calculate_state_root` onu `bns_v1` etiketiyle state root'a
-  katiyor ve dogrulamak defterin tamamini gerektiriyor. Kanit bicimi
-  degistirmek bir **konsensus yuzeyi degisikligi** ve bu tarayicinin tek
-  tarafli alacagi karar degil (`bns_proof.rs`).
-* **Baslik kesinligi tarayicida dogrulanmiyor.** Yedi
-  `DomainFinalityAdapter` bicimi var (PoW header-chain, PoS, PoA, BFT, ZK,
-  depolama attestasyonu, AI cikarimi) ve hicbiri istemci tarafinda
-  uygulanmadi (`light_client.rs`).
-* **IPFS `dag-pb` coklu blok icerik dogrulanmiyor.** UnixFS DAG yurumek
-  ayri bir is; `CidVerdict::UnsupportedMultiblock` bunu soyluyor (`cid.rs`).
-* **IPNS ve Swarm icin getirici yok.** HTTPS'e dusurmek, dogrulanmamis
-  icerigi dogrulanmis gibi gostermek olurdu (`resolve.rs`).
-* **Sifreli icerikte anahtar dagitimi cozulmedi.**
-  `ContentEncryption::ClientSide` var; anahtarin tarayiciya nasil geldigi
-  erisim-izni katmaninin isi ve burada yok.
-* **Sanal alan siniri olculmedi.** Dogrulanmis icerik guvenli icerik degildir;
-  hash'i tutan bir sayfa da kotu niyetli olabilir. Gecko'nun sanal alani bu
-  isi yapiyor ve yamalarin onu zayiflatmadiginin nasil gosterilecegi
-  olculmedi.
+* **BNS resolution cannot be proven per name today.** `BnsRegistry::root()`
+  (`src/bns/registry.rs:299`) writes the whole registry into a single SHA-256
+  stream, not into a Merkle tree. There is no structure that could produce a
+  proof for one name; `AccountState::calculate_state_root` folds it into the
+  state root under the `bns_v1` tag, and verifying it needs the entire
+  registry. Changing the proof format is a **consensus surface change**, and
+  not a decision this browser takes unilaterally (`bns_proof.rs`).
+* **Header finality is not verified in the browser.** There are seven
+  `DomainFinalityAdapter` shapes (PoW header chain, PoS, PoA, BFT, ZK, storage
+  attestation, AI inference) and none is implemented client-side
+  (`light_client.rs`).
+* **IPFS `dag-pb` multi-block content is not verified.** Walking a UnixFS DAG
+  is a separate job; `CidVerdict::UnsupportedMultiblock` says so (`cid.rs`).
+* **There is no fetcher for IPNS or Swarm.** Falling back to HTTPS would mean
+  presenting unverified content as if it were verified (`resolve.rs`).
+* **Key distribution for encrypted content is unsolved.**
+  `ContentEncryption::ClientSide` exists; how the key reaches the browser is
+  the access-permission layer's job and is not here.
+* **The sandbox boundary is not measured.** Verified content is not safe
+  content; a page whose hash matches can still be malicious. Gecko's sandbox
+  does that job, and how to show that the patches do not weaken it has not been
+  measured.
 
-## Kabuk yok
+## No shell
 
-Yama araclari da dahil hicbir sey kabuk degil. Sebep olculdu: yanlis yazilmis
-bir degisken kabukta hata degil bos dizgidir, yani bir kontrol hicbir seyi
-inceleyip OK diyebilir. Somut ornek `browser/README.md` icinde.
+Nothing is shell, the patch tooling included. The reason was measured: a
+misspelt variable is not an error in a shell but an empty string, so a check
+can inspect nothing and report OK. The concrete example is inside
+`browser/README.md`.
 
-`patchset.rs`'de "hicbir sey inceleyemedim" ayri bir sonuc
-(`Verdict::Vacuous`) ve `is_ok()` false doner.
+In `patchset.rs`, "I could inspect nothing" is a separate outcome
+(`Verdict::Vacuous`) and `is_ok()` returns false.
 
-## Kopyalar ve onlari tutan kapi
+## Duplicates, and the gate that holds them together
 
-Budscan `budlum-core`'a **baglanmiyor**: baglansa libp2p, tokio, jsonrpsee ve
-sled'i de baglardi ve bir tarayicinin guven sinirinda o grafik istenmez.
-Bedeli iki kopya, ve bedel olculuyor:
+Budscan does **not** depend on `budlum-core`: doing so would pull in libp2p,
+tokio, jsonrpsee and sled, and that graph is unwanted at a browser's trust
+boundary. The price is two copies, and the price is measured:
 
-| kopya | tarayici | zincir |
+| copy | browser | chain |
 |---|---|---|
-| ad kurali | `src/name_rule.rs` | `xtask/gates/.../bns_names_are_safe_in_an_address_bar.rs` |
+| name rule | `src/name_rule.rs` | `xtask/gates/.../bns_names_are_safe_in_an_address_bar.rs` |
 | `ContentId` | `src/content_id.rs` | `src/storage/content_id.rs` |
-| boyut siniri | `src/fetch.rs` | `src/gateway/service.rs` |
+| size limit | `src/fetch.rs` | `src/gateway/service.rs` |
 | `EPOCH_LENGTH` | `src/light_client.rs` | `src/chain/blockchain.rs` |
 
-`budscan-name-rule-parity` kapisi dordunu de CI'da olcuyor. Ayrisma sessiz
-olurdu: tarayici bir adi kabul eder zincir etmez, ya da tarayici bir baytin
-dogrulandigini soyler zincir baska bir kimlik hesaplar.
+The `budscan-name-rule-parity` gate measures all four in CI. Divergence would
+be silent: the browser accepts a name the chain does not, or the browser says
+a byte is verified while the chain computes a different identity.
 
-## Belge ile olcum arasindaki fark
+## The gap between the document and the measurement
 
-Mimari notu: `аyaz.bud` (ilk harf Kiril
-U+0430) icin `xn--yaz-hlc.bud` yaziyor. **Yanlis.** RFC 3492 algoritmasi ve
-Python'un `str.encode("idna")` referansi ikisi de `xn--yaz-5cd.bud`
-uretiyor. Kod hesaplanan degeri tasiyor, belgeden kopyalanani degil
-(`punycode.rs`, `one_cyrillic_letter_in_a_latin_word` testi).
+The architecture note says `xn--yaz-hlc.bud` for `аyaz.bud`, whose first letter
+is Cyrillic U+0430. **That is wrong.** The RFC 3492 algorithm and Python's
+`str.encode("idna")` reference both produce `xn--yaz-5cd.bud`. The code carries
+the computed value, not the one copied out of the document (`punycode.rs`, the
+`one_cyrillic_letter_in_a_latin_word` test).
 
-## Calistirma
+## Running it
 
 ```
 cargo test  --manifest-path budscan/Cargo.toml
 cargo clippy --manifest-path budscan/Cargo.toml --all-targets -- -D warnings
-cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- kendini-sina
-cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- siniflandir ayaz.bud
-cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- ad-kurali "javascript:alert(1)"
+cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- self-test
+cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- classify ayaz.bud
+cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- name-rule "javascript:alert(1)"
 
 cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
 cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
 ```
 
-107 test, hepsi gecer. `browser/` altinda motor kaynagi yok ve olmayacak:
-yapim sirasinda indirilir, yamalar uygulanir, sonuc derlenir.
+107 tests, all passing. There is no engine source under `browser/` and there
+will not be: it is downloaded at build time, the patches are applied, and the
+result is compiled.

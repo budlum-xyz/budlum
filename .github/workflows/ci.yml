@@ -562,7 +562,7 @@ jobs:
       - name: budscan own canaries
         # The binary runs its own internal canaries: a schema never becomes a name, an empty
         # proof does not say `verified`, a dangling patch does not pass the check.
-        run: cargo run --manifest-path crates/budscan/Cargo.toml --bin budscan -- kendini-sina
+        run: cargo run --manifest-path crates/budscan/Cargo.toml --bin budscan -- self-test
       - name: Gate canary (proof it is not vacuous)
         run: |
           set -euo pipefail
