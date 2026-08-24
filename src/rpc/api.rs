@@ -433,6 +433,17 @@ pub trait BudlumApi {
         challenge_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Objects within `margin` shards of unrecoverable, and those already past
+    /// it. Permissionless read; no indexer is required.
+    ///
+    /// The margin is the caller's. The node's maintenance sweep judges every
+    /// object by its own erasure scheme's margin, which is correct for a sweep
+    /// and useless to an operator asking a fixed question like "what is within
+    /// two shards of trouble?". Both lists come back separately: an object
+    /// below `k` cannot be repaired at all, and must not read as one that can.
+    #[method(name = "bud_storageRepairBand")]
+    async fn storage_repair_band(&self, margin: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Query active storage operators (STORAGE_OPERATOR RoleId=5).
     /// Previously documented as ghost RPC, now implemented.
     /// Returns active `PermissionlessRegistry` members filtered by storage operator role.
