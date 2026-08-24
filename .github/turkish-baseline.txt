@@ -60,9 +60,7 @@ bud/src/bud_format_pgm.rs	28
 bud/src/bud_format_pointcloud.rs	16
 bud/src/bud_format_por.rs	22
 bud/src/bud_format_prodcost.rs	15
-bud/src/bud_format_production.rs	30
 bud/src/bud_format_qos.rs	5
-bud/src/bud_format_qrmatrix.rs	30
 bud/src/bud_format_realcorpus.rs	19
 bud/src/bud_format_recipe.rs	29
 bud/src/bud_format_registry.rs	7
