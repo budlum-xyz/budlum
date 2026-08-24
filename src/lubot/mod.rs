@@ -1,21 +1,21 @@
-//! # Lubot - Merkeziyetsiz Yapay Zeka Katmanı (: gerçek budlum-core wiring)
+//! # Lubot - the decentralized AI layer (real budlum-core wiring)
 //!
-//! Kapalı-devre AI katmanı. Bu modül Lubot'u gerçek budlum-core
-//! Primitive'lerine bağlar (mock yok):
+//! A closed-loop AI layer. This module binds Lubot to real budlum-core
+//! primitives (no mocks):
 //!
-//! **Kapsam sınırı:** buradaki "doğrulanabilir" erişim ve bond kontrollerini
-//! Anlatır, çıkarımın kriptografik doğrulamasını değil. Zincir üzerindeki
-//! Çıkarım kanıtı bugün doğrulanmıyor; işlem yolu `require_execution_proof`
-//! İsteyen modelleri fail-closed reddeder. Ayrıntı: `docs/AI_VERIFICATION_STATUS.md`.
+//! **Scope boundary:** verifiable here refers to the access and bond checks,
+//! not to cryptographic verification of the inference. On-chain inference
+//! proof is not verified today; the transaction path refuses models that request
+//! `require_execution_proof` fail-closed. Details: `docs/AI_VERIFICATION_STATUS.md`.
 //!
-//! - **Operator compute-bond** = `AiRegistry` verifier stake (AI-layer-first kararı).
-//! - **Kapalı-devre veri** = gerçek `Pollen` `AccessGrant` doğrulaması.
-//! - **Sertleştirme tipleri:** training-data grant (Pollen), AI-dataset metadata
+//! - **Operator compute bond** = `AiRegistry` verifier stake (the AI-layer-first decision).
+//! - **Closed-loop data** = real `Pollen` `AccessGrant` verification.
+//! - **Hardening types:** training-data grant (Pollen), AI-dataset metadata
 //!   (B.U.D. storage), social-data ref (SocialFi ↔ Lubot).
 //!
-//! Operator rolü: AI katmanı verifier stake'ine bağlı (PoS validator'dan bağımsız,
+//! The operator role is bound to the AI-layer verifier stake (independent of the PoS validator,
 //! Composable). Verifier-registry'de `LUBOT_OPERATOR` (RoleId(8)) mapping'i,
-//! Budlum-core verifier-registry bağımlılığı eklendikten sonra devreye girer.
+//! and comes into play once the budlum-core verifier-registry dependency is added.
 
 use crate::ai::AiRegistry;
 use crate::core::address::Address;
@@ -36,7 +36,7 @@ pub mod social;
 pub mod storage;
 pub mod verify;
 
-// Operator (validator hardening: ayrı compute-bond rolü)
+// Operator (validator hardening: a separate compute-bond role)
 
 /// Smallest compute-bond a Lubot operator may register with.
 ///
@@ -58,8 +58,8 @@ const _: () = assert!(
     "MIN_OPERATOR_BOND must exceed the zero-check it replaces"
 );
 
-/// Lubot operator'ü kaydet: compute-bond = AiRegistry verifier stake.
-/// PoS validator'dan bağımsız; aynı aktör beide olabilir (composable).
+/// Register a Lubot operator: the compute bond is the AiRegistry verifier stake.
+/// Independent of the PoS validator; the same actor may be both (composable).
 ///
 /// Bonds below [`MIN_OPERATOR_BOND`] are rejected rather than accepted at face
 /// value, so Sybil registration has a floor cost.
@@ -76,45 +76,44 @@ pub fn register_operator(
     registry.lock_verifier_stake(operator, bond)
 }
 
-/// Operator compute-bond miktarı (0 = bondsuz).
+/// The operator compute-bond amount (0 = unbonded).
 #[must_use]
 pub fn operator_bond(registry: &AiRegistry, operator: &Address) -> u64 {
     registry.verifier_stake(operator)
 }
 
-/// Operator Lubot trafiği alabilir mi (bond > 0)?
+/// Whether the operator may take Lubot traffic (bond > 0).
 #[must_use]
 pub fn operator_eligible(registry: &AiRegistry, operator: &Address) -> bool {
     registry.is_staked_verifier(operator)
 }
 
-/// Executor giriş kapısı: bir çıkarım isteği, okuma beyanı ve modelin
-/// kayıtlı modaliteleri açısından kabul edilebilir mi?
+/// The executor entry gate: is an inference request admissible with respect to its read
+/// declaration and the model's registered modalities?
 ///
-/// Fail-closed denetimler, sırayla:
-/// 1. Beyan yoksa red - ne okuduğunu söylemeyen istek, metin modele
-///    görüntü vermenin yoludur (V3 öncesi istekler).
-/// 2. Model bu modaliteyi kayıtta beyan etmemişse red. Kayıtlı olmayan
-///    model boş küme varsayılır (`ModalitySet::none`): her şey reddedilir.
-/// 3. Beyan kendi tavanlarına uymuyorsa red (`check_admissible`).
-/// 4. `input_ref` bir Pollen referansı taşıyorsa, beyandaki varlıkla aynı
-///    varlığı göstermeli - A varlığı için izin alıp B'yi okumak kapanır.
+/// Fail-closed checks, in order:
+/// 1. No declaration means refusal - a request that does not say what it reads is the way to feed
+///    an image to a text model (pre-V3 requests).
+/// 2. Refusal if the model did not declare this modality at registration. An unregistered
+///    model defaults to the empty set (`ModalitySet::none`): everything is refused.
+/// 3. Refusal if the declaration violates its own ceilings (`check_admissible`).
+/// 4. If `input_ref` carries a Pollen reference it must point at the same asset as the
+///    declaration - taking a grant for asset A and reading B is closed off.
 ///
-/// İzin KURALLARI burada kopyalanmaz: Pollen denetimi executor'un
-/// `validate_ai_read_ref` çağrısında zaten yapılır; bu kapı yalnızca
-/// okumanın NE olduğunu (modalite + varlık tutarlılığı) denetler.
+/// The grant RULES are not duplicated here: the Pollen check already happens in the executor's
+/// `validate_ai_read_ref` call; this gate only checks WHAT the read is
+/// (modality + asset consistency).
 ///
 /// # Errors
 ///
-/// İstek perception beyanı taşımıyorsa veya model kaydı yoksa hata döner.
+/// Errors if the request carries no perception declaration or the model is not registered.
 pub fn admit_inference_request(
     registry: &crate::ai::AiRegistry,
     req: &crate::ai::types::AiInferenceRequest,
 ) -> Result<(), String> {
-    let perception = req
-        .perception
-        .clone()
-        .ok_or_else(|| "çıkarım isteği perception beyanı taşımalı (V3)".to_string())?;
+    let perception = req.perception.clone().ok_or_else(|| {
+        "an inference request must carry a perception declaration (V3)".to_string()
+    })?;
     let modalities = registry
         .models
         .get(&req.model_id)
@@ -123,7 +122,7 @@ pub fn admit_inference_request(
         });
     if !modalities.declares_modality(perception.kind) {
         return Err(format!(
-            "model {} {:?} modalitesini beyan etmemiş",
+            "model {} did not declare the {:?} modality",
             req.model_id.to_hex(),
             perception.kind
         ));
@@ -135,22 +134,24 @@ pub fn admit_inference_request(
         crate::pollen::data_rights::AiDataInputRef::decode(req.input_ref.as_slice())
     {
         if data_ref.asset_id != perception.asset_id {
-            return Err("perception beyanı ile input_ref farklı varlıkları gösteriyor".to_string());
+            return Err(
+                "the perception declaration and input_ref point at different assets".to_string(),
+            );
         }
     }
-    // Kanonik commitment denetimi: input_commitment, input_ref'in kanonik
-    // ön imajı olmalı. Aksi halde aynı içerik, keyfi farklı commitment'lar
-    // altında ayrı istek kimlikleri üretir ve operatör işini ücretsiz
-    // çoğaltır (dedup/replay korumasının dayandığı değişmez).
+    // Canonical commitment check: input_commitment must be the canonical preimage of
+    // input_ref. Otherwise the same content produces distinct request ids under arbitrary
+    // commitments and an attacker multiplies operator work for free
+    // (the invariant dedup/replay protection rests on).
     if req.input_commitment
         != crate::ai::types::canonical_input_commitment(req.input_ref.as_slice())
     {
-        return Err("input_commitment kanonik ön imajla eşleşmiyor".to_string());
+        return Err("input_commitment does not match the canonical preimage".to_string());
     }
     Ok(())
 }
 
-// Pollen hardening: kapalı-devre inference grant doğrulaması
+// Pollen hardening: closed-loop inference grant verification
 
 /// Is an `AccessGrant` usable for a Lubot inference right now?
 ///
@@ -200,10 +201,10 @@ pub fn validate_inference_grant(
     Err("Lubot: grant refused by Pollen".into())
 }
 
-// Pollen hardening: training-data grant (yeni - bulk eğitim okuma)
+// Pollen hardening: training-data grant (new - bulk training reads)
 
-/// Eğitim için bulk veri erişim yetkisi (epoch-sınırlı). Pollen inference
-/// Grant'ından farklı: eğitim bir corpus'u tekrar-tekrar (epoch) okur.
+/// Bulk data access authority for training (epoch bounded). Different from a Pollen
+/// inference grant: training reads a corpus over and over (epochs).
 #[derive(Clone, Debug)]
 pub struct TrainingDataGrant {
     pub asset_id_bytes: [u8; 32],
@@ -216,7 +217,7 @@ pub struct TrainingDataGrant {
 }
 
 impl TrainingDataGrant {
-    /// Bir eğitim epoch'u tüket (fail-closed: sınır dolunca hata).
+    /// Consume one training epoch (fail-closed: errors once the limit is reached).
     pub fn consume_epoch(&mut self) -> Result<(), String> {
         if self.epochs_used >= self.max_epochs {
             return Err("Lubot: training-data grant epochs exhausted".into());
@@ -225,26 +226,26 @@ impl TrainingDataGrant {
         Ok(())
     }
 
-    /// Hâlâ geçerli mi (süre + epoch)?
+    /// Whether it is still valid (time + epochs).
     #[must_use]
     pub fn is_valid(&self, now_block: u64) -> bool {
         now_block <= self.expires_at_block && self.epochs_used < self.max_epochs
     }
 }
 
-// B.U.D. hardening: AI-dataset metadata (StorageDeal için ek)
+// B.U.D. hardening: AI-dataset metadata (an addition for StorageDeal)
 
-/// AI dataset türü.
+/// AI dataset type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AiDatasetKind {
-    /// Çıkarım önbelleği (sık sorgu yanıtları).
+    /// Inference cache (answers to frequent queries).
     #[default]
     InferenceCache,
-    /// Eğitim corpus'u.
+    /// Training corpus.
     TrainingCorpus,
 }
 
-/// Bir `StorageDeal`'a eklenecek AI-dataset metadata'sı (B.U.D. hardening).
+/// AI-dataset metadata to attach to a `StorageDeal` (B.U.D. hardening).
 #[derive(Clone, Debug, Default)]
 pub struct AiDatasetMetadata {
     pub kind: AiDatasetKind,
@@ -253,7 +254,7 @@ pub struct AiDatasetMetadata {
 }
 
 impl AiDatasetMetadata {
-    /// Eğitim corpus metadata'sı üret.
+    /// Produce training corpus metadata.
     #[must_use]
     pub fn training(model_target: [u8; 32], sample_count: u64) -> Self {
         Self {
@@ -263,7 +264,7 @@ impl AiDatasetMetadata {
         }
     }
 
-    /// Çıkarım önbelleği metadata'sı üret.
+    /// Produce inference cache metadata.
     #[must_use]
     pub fn inference_cache(model_target: [u8; 32]) -> Self {
         Self {
@@ -274,10 +275,10 @@ impl AiDatasetMetadata {
     }
 }
 
-// SocialFi hardening: sosyal içerik = Lubot veri kaynağı
+// SocialFi hardening: social content as a Lubot data source
 
-/// SocialFi NFT içeriğinden Lubot veri referansı (Pollen grant bekler).
-/// Kapalı-devre: Lubot sosyal içeriği yalnızca Pollen grant ile okur.
+/// A Lubot data reference from SocialFi NFT content (expects a Pollen grant).
+/// Closed loop: Lubot reads social content only with a Pollen grant.
 #[derive(Clone, Debug)]
 pub struct SocialDataRef {
     pub nft_id: u64,
@@ -286,7 +287,7 @@ pub struct SocialDataRef {
 }
 
 impl SocialDataRef {
-    /// Sosyal NFT içeriğinden Lubot veri referansı üret.
+    /// Produce a Lubot data reference from social NFT content.
     #[must_use]
     pub fn from_social(nft_id: u64, content_id_bytes: [u8; 32], owner: Address) -> Self {
         Self {
@@ -297,9 +298,9 @@ impl SocialDataRef {
     }
 }
 
-// Pollen grant runtime construction (kapalı-devre tam)
+// Pollen grant runtime construction (the closed loop complete)
 
-/// Bir Lubot çıkarımı için kapalı-devre Pollen AccessGrant inşa et.
+/// Build a closed-loop Pollen AccessGrant for a Lubot inference.
 ///
 /// F-12: the production AI read path (`validate_ai_read_ref`) is
 /// requester-bound. `grantee` must be the inference requester, not the
@@ -452,7 +453,7 @@ mod tests {
         assert_eq!(s.nft_id, 42);
         assert_eq!(s.owner, addr(1));
     }
-    /// E2E: model kaydı + operator bond + lubot transaction build → tx_type doğru.
+    /// E2E: model registration + operator bond + lubot transaction build -> the tx_type is correct.
     #[test]
     fn lubot_e2e_model_bond_tx_integration() {
         use crate::ai::AiRegistry;
@@ -473,7 +474,7 @@ mod tests {
         assert_eq!(bond, MIN_OPERATOR_BOND);
         assert!(super::operator_eligible(&registry, &operator));
 
-        // Lubot transaction inşa et.
+        // Build the Lubot transaction.
         let grant = AccessGrant::new_unsigned(
             crate::pollen::AssetId([9; 32]),
             Address([8; 32]),
@@ -501,7 +502,7 @@ mod tests {
         )
         .expect("build tx");
 
-        // Transaction type doğru.
+        // The transaction type is correct.
         assert!(
             matches!(tx.tx_type, TransactionType::AiInferenceRequest(_)),
             "tx must be AiInferenceRequest"
@@ -528,7 +529,7 @@ mod tests {
         );
     }
 
-    // --- admit_inference_request kapı testleri (V3) ---
+    // --- admit_inference_request gate tests (V3) ---
 
     fn text_perception() -> crate::lubot::perception::PerceptionRequest {
         crate::lubot::perception::PerceptionRequest {
@@ -596,7 +597,7 @@ mod tests {
         let model_id =
             super::inference::register_lubot_model(&mut registry, Address([1; 32]), [9u8; 32])
                 .unwrap();
-        // input_ref varlık A'yı işaret ediyor; beyan varlık B'yi.
+        // input_ref points at asset A; the declaration at asset B.
         let data_ref = crate::pollen::data_rights::AiDataInputRef {
             asset_id: crate::pollen::AssetId([7; 32]),
             grant_id: crate::pollen::AssetId([8; 32]),
@@ -612,10 +613,10 @@ mod tests {
         let model_id =
             super::inference::register_lubot_model(&mut registry, Address([1; 32]), [9u8; 32])
                 .unwrap();
-        // Kanonik commitment ile geçer.
+        // Passes with the canonical commitment.
         let mut req = text_request(model_id, Some(text_perception()));
         assert!(super::admit_inference_request(&registry, &req).is_ok());
-        // Aynı içerik, keyfi commitment → red (istek çoğaltma değişmezi).
+        // The same content with an arbitrary commitment -> refused (the request multiplication invariant).
         req.input_commitment = [1; 32];
         assert!(super::admit_inference_request(&registry, &req).is_err());
     }
@@ -645,23 +646,29 @@ mod tests {
             modalities: crate::lubot::perception::ModalitySet::text_only(),
         };
 
-        // 0 boyutlu katman red.
+        // A zero-sized layer is refused.
         let mut bad = base.clone();
         bad.execution_dims = Some(vec![0, 4]);
-        assert!(bad.validate().is_err(), "0 boyutlu katman kabul edilmemeli");
+        assert!(
+            bad.validate().is_err(),
+            "a zero-sized layer must not be accepted"
+        );
 
-        // Tek katman red.
+        // A single layer is refused.
         let mut bad = base.clone();
         bad.execution_dims = Some(vec![8]);
-        assert!(bad.validate().is_err(), "tek katman kabul edilmemeli");
+        assert!(
+            bad.validate().is_err(),
+            "a single layer must not be accepted"
+        );
 
-        // 33 katman red.
+        // 33 layers are refused.
         let mut bad = base.clone();
         bad.execution_dims = Some(vec![4; 33]);
-        assert!(bad.validate().is_err(), "33 katman kabul edilmemeli");
+        assert!(bad.validate().is_err(), "33 layers must not be accepted");
 
-        // Geçerli şekil kabul.
+        // A valid shape is accepted.
         base.execution_dims = Some(vec![8, 4, 4]);
-        assert!(base.validate().is_ok(), "geçerli dims kabul edilmeli");
+        assert!(base.validate().is_ok(), "valid dims must be accepted");
     }
 }
