@@ -129,6 +129,7 @@ Formatin = "Formatin"
 # -- Proper names / technical terms ---------------------------------------
 Canva = "Canva"     # a product name (not Canvas)
 Groth = "Groth"     # the Groth16 zk-SNARK scheme (Jens Groth)
+LOD = "LOD"         # level of detail, the graphics term the culling module borrows
 # -- A deliberate test fixture ---------------------------------------------
 # budzero/bud-compiler: the negative test that verifies the "undeclared struct type"
 # error deliberately uses a misspelled type name in the source.

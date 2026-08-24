@@ -1,21 +1,28 @@
-//! B.U.D. 2.0 - LRC Yerel Yeniden Yapılandırma Kodları (budlum deseni) (2026-08-16)
+//! B.U.D. 2.0 - LRC, local reconstruction codes, in the budlum pattern,
+//! 2026-08-16.
 //!
-//! Ana repodan (budlum src/storage/lrc.rs) esinlenen, no-unsafe, bağımsız uygulama:
-//! LRC (Local Reconstruction Code) - RS'in overhead'ini 0.6x'ten 0.03x'e indirir.
+//! An independent, unsafe-free implementation inspired by the main repository's
+//! `src/storage/lrc.rs`: a local reconstruction code, which brings the overhead
+//! of Reed-Solomon down from 0.6x to 0.03x.
 //!
-//! Ölçüm tablosu (ana repo):
-//!   RS (10,16)      → 1.600x (10 shard onarım)
-//!   RS (20,26)      → 1.300x
-//!   LRC k=500  L=25 G=10 → 1.070x
-//!   LRC k=2000 L=50 G=12 → **1.031x** (overhead %95 kesinti)
+//! The measurement table, from the main repository:
 //!
-//! Mekanizma: veri k gruba bölünür (yerel parity her grupta), G global parity tümüne;
-//! tek shard kaybı yalnız yerel grubu okur (ucuz onarım), tolerans global paritiden.
+//!   RS (10,16)             -> 1.600x, repairing from 10 shards
+//!   RS (20,26)             -> 1.300x
+//!   LRC k=500,  L=25, G=10 -> 1.070x
+//!   LRC k=2000, L=50, G=12 -> **1.031x**, a 95 percent cut in overhead
 //!
-//! B.U.D. etkisi: V7 erasure çarpanı EVENODD 1.286x idi; LRC 1.031x → fiziksel taban
-//! üzerinde doğrudan fiyat düşüşü. KF1 (maliyet ≤ 0.016) için erasure çarpanı kritik.
+//! The mechanism: the data is split into k groups, each with its own local
+//! parity, and G global parities cover all of them. Losing a single shard reads
+//! only the local group, which makes the repair cheap, while the tolerance comes
+//! from the global parity.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! The effect on B.U.D.: the V7 erasure multiplier was EVENODD at 1.286x, and
+//! LRC at 1.031x is a direct price drop over the physical floor. The erasure
+//! multiplier is critical for KF1, the requirement that cost stay at or below
+//! $0.016.
+//!
+//! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -24,40 +31,45 @@ use sha3::{Digest, Sha3_256};
 pub const LRC_MAGIC: [u8; 8] = *b"\xB5LRC0\0\0\0";
 pub const LRC_VERSION: u8 = 1;
 
-/// LRC şeması parametreleri (k, L, G) + türetilmiş çarpan.
+/// The parameters of an LRC scheme, k, L and G, plus the derived multiplier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LrcScheme {
-    pub k: usize, // toplam veri shard'ı
-    pub l: usize, // yerel grup sayısı (yerel parity = L)
-    pub g: usize, // global parity sayısı
+    pub k: usize, // the total number of data shards
+    pub l: usize, // the number of local groups; the local parity count is also L
+    pub g: usize, // the number of global parities
 }
 
 impl LrcScheme {
-    /// Parametre doğrulama + çarpan hesabı.
-    /// Toplam shard = k (veri) + l (yerel parity) + g (global parity).
+    /// Validate the parameters and compute the multiplier.
+    ///
+    /// The total shard count is k data plus l local parities plus g global
+    /// parities.
     pub fn new(k: usize, l: usize, g: usize) -> Option<Self> {
         if k == 0 || l == 0 || g == 0 || k < l {
             return None;
         }
-        // grup boyutu: k veri l gruba bölünür (en az 1)
+        // The group size: the k data shards are split into l groups, at least one
+        // each.
         if k / l < 1 {
             return None;
         }
         Some(LrcScheme { k, l, g })
     }
 
-    /// Depolama çarpanı: (k + l + g) / k.
+    /// The storage multiplier, `(k + l + g) / k`.
     pub fn multiplier(&self) -> f64 {
         (self.k + self.l + self.g) as f64 / self.k as f64
     }
 
-    /// Tek shard onarımı için okunacak shard sayısı (yerel grup boyutu).
+    /// How many shards a single-shard repair reads, which is the local group
+    /// size.
     pub fn repair_reads(&self) -> usize {
-        let group = self.k / self.l; // her grupta veri shard'ı
-        group + 1 // yerel parity ile
+        let group = self.k / self.l; // the data shards in each group
+        group + 1 // plus the local parity
     }
 
-    /// Yerel grup indeksi: shard hangi yerel gruba ait (parity shard'lar için temsil).
+    /// The local group index: which local group a shard belongs to. For parity
+    /// shards this is the group they represent.
     pub fn local_group(&self, shard: usize) -> Option<usize> {
         if shard >= self.k + self.l {
             return None; // global parity
@@ -65,14 +77,16 @@ impl LrcScheme {
         Some(shard / (self.k / self.l).max(1))
     }
 
-    /// RS(10,16) ile karşılaştırma (ana repo tablosu - kanarya).
+    /// The comparison against RS(10,16) from the main repository's table, used as
+    /// a canary.
     pub fn beats_rs_overhead(&self) -> bool {
-        // RS(10,16) = 1.6x; LRC < 1.3x olmalı
+        // RS(10,16) is 1.6x, so LRC must stay below 1.3x.
         self.multiplier() < 1.3
     }
 }
 
-/// LRC kaydı: şema + kullanım (zincire yazılabilir, deterministik).
+/// An LRC record: the scheme plus its usage. Deterministic and writable on
+/// chain.
 #[derive(Debug, Clone)]
 pub struct LrcRecord {
     pub scheme: LrcScheme,
@@ -146,38 +160,48 @@ mod tests {
 
     #[test]
     fn lrc_multiplier_beats_rs() {
-        // Ana repo ölçümü: RS(10,16)=1.6x, LRC k=2000 L=50 G=12 → 1.031x
-        let lrc = LrcScheme::new(2000, 50, 12).expect("geçerli");
+        // The main repository's measurement: RS(10,16) at 1.6x against LRC with
+        // k=2000, L=50 and G=12 at 1.031x.
+        let lrc = LrcScheme::new(2000, 50, 12).expect("valid");
         assert!(
             (lrc.multiplier() - 1.031).abs() < 0.001,
             "1.031x: {}",
             lrc.multiplier()
         );
         assert!(lrc.beats_rs_overhead());
-        // küçük şema: k=500 L=25 G=10 → 1.070x
-        let lrc2 = LrcScheme::new(500, 25, 10).expect("geçerli");
+        // A small scheme: k=500, L=25 and G=10 gives 1.070x.
+        let lrc2 = LrcScheme::new(500, 25, 10).expect("valid");
         assert!(
             (lrc2.multiplier() - 1.070).abs() < 0.001,
             "1.070x: {}",
             lrc2.multiplier()
         );
-        // RS(10,16) karşılaştırması: 1.6x vs 1.03x → %95 overhead kesintisi
+        // Against RS(10,16): 1.6x versus 1.03x, a 95 percent cut in overhead.
         let rs_overhead = 0.600;
         let lrc_overhead = lrc.multiplier() - 1.0;
-        assert!(lrc_overhead < rs_overhead * 0.1, "overhead %90+ kesildi");
+        assert!(
+            lrc_overhead < rs_overhead * 0.1,
+            "the overhead was cut by more than 90 percent"
+        );
     }
 
     #[test]
     fn local_repair_is_cheap() {
-        // tek shard kaybı → yalnız yerel grup okunur (repair_reads küçük)
-        let lrc = LrcScheme::new(2000, 50, 12).expect("geçerli");
-        // grup boyutu = 40; repair_reads = 41 (RS'de 10-20 yerine 2000'den bağımsız)
+        // Losing a single shard reads only the local group, so `repair_reads` is
+        // small.
+        let lrc = LrcScheme::new(2000, 50, 12).expect("valid");
+        // The group size is 40, so repair_reads is 41: independent of the 2000
+        // shards, where Reed-Solomon would read 10 to 20.
         assert_eq!(lrc.repair_reads(), 41);
-        assert!(lrc.repair_reads() < lrc.k / 10, "yerel onarım ucuz");
-        // yerel grup ataması
+        assert!(lrc.repair_reads() < lrc.k / 10, "the local repair is cheap");
+        // The local group assignment.
         assert_eq!(lrc.local_group(0), Some(0));
         assert_eq!(lrc.local_group(41), Some(1));
-        assert_eq!(lrc.local_group(2100), None, "global parity grubu yok");
+        assert_eq!(
+            lrc.local_group(2100),
+            None,
+            "a global parity belongs to no group"
+        );
     }
 
     #[test]
@@ -187,11 +211,11 @@ mod tests {
         let back = LrcRecord::from_blob(&blob).expect("blob");
         assert_eq!(back.record_hash(), rec.record_hash());
         assert_eq!(back.scheme.multiplier(), rec.scheme.multiplier());
-        // kurcalama red
+        // Tampering is refused.
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(LrcRecord::from_blob(&bad).is_none());
-        // geçersiz parametreler
+        // Invalid parameters.
         assert!(LrcScheme::new(0, 1, 1).is_none());
         assert!(LrcScheme::new(5, 0, 1).is_none());
         assert!(LrcScheme::new(5, 10, 1).is_none());
@@ -199,13 +223,19 @@ mod tests {
 
     #[test]
     fn lrc_price_impact_documented() {
-        // V7: EVENODD 1.286x; LRC 1.031x → fiyat düşüşü
+        // V7 used EVENODD at 1.286x; LRC at 1.031x drops the price.
         let physical = 0.23342;
-        let ratio = 12.07; // JSON OrderFree (B.U.D. ölçümü)
+        let ratio = 12.07; // JSON OrderFree, a B.U.D. measurement
         let evenodd_cost = physical * 1.286 / ratio;
         let lrc_cost = physical * 1.031 / ratio;
-        assert!(lrc_cost < evenodd_cost * 0.9, "LRC fiyatı %10+ düşük");
-        // LRC ile $0.016 tavanına yaklaşım
-        assert!(lrc_cost < 0.02, "LRC + JSON 12.07x → {lrc_cost:.4} $/TB/ay");
+        assert!(
+            lrc_cost < evenodd_cost * 0.9,
+            "the LRC price is more than 10 percent lower"
+        );
+        // With LRC the $0.016 ceiling comes into reach.
+        assert!(
+            lrc_cost < 0.02,
+            "LRC with JSON at 12.07x gives {lrc_cost:.4} $/TB/month"
+        );
     }
 }
