@@ -94,6 +94,7 @@ mod gates {
     pub mod named_tests;
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
+    pub mod no_idle_code;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_unicode_dashes;
@@ -128,6 +129,7 @@ mod gates {
     pub mod threshold_rates;
     pub mod timing_safe;
     pub mod transcript_mirrors;
+    pub mod tree_is_english;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
@@ -365,6 +367,22 @@ const GATES: &[Gate] = &[
         run: gates::no_orphan_source_files::run,
         run_args: None,
         self_test: gates::no_orphan_source_files::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-idle-code",
+        replaces: None,
+        run: gates::no_idle_code::run,
+        run_args: None,
+        self_test: gates::no_idle_code::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "tree-is-english",
+        replaces: None,
+        run: gates::tree_is_english::run,
+        run_args: None,
+        self_test: gates::tree_is_english::self_test,
         run_log: None,
     },
     Gate {
