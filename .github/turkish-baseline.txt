@@ -48,7 +48,6 @@ bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
-bud/src/bud_format_pcap.rs	26
 bud/src/bud_format_pointcloud.rs	16
 bud/src/bud_format_por.rs	22
 bud/src/bud_format_prodcost.rs	15
@@ -201,7 +200,6 @@ src/pollen/README.md	23
 src/pollen/data_rights.rs	21
 src/privacy/mod.rs	1
 src/privacy/submit.rs	11
-src/prover/mod.rs	25
 src/registry/d4_merge_tests.rs	1
 src/registry/evidence.rs	1
 src/registry/invalid_vote.rs	1
