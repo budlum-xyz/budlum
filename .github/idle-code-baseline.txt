@@ -10,7 +10,6 @@
 #
 # Format: <path>\t<kind>\t<name>
 # Recorded: 2026-08-24, 1896 entries.
-bud/src/bud_fixed_point.rs	fn	fixed_fraction
 bud/src/bud_format.rs	const	BUD_VERSION
 bud/src/bud_format.rs	const	BYTE_IDENTICAL
 bud/src/bud_format.rs	const	COLD_TIER
