@@ -1,60 +1,62 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
-#![forbid(unsafe_code)]
-//! Budscan: Budlum'un merkeziyetsiz tarayici cekirdegi.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
+// enters, compilation FAILS (a regression gate). The same policy as the main
+// crate.
+
+//! Budscan: Budlum's decentralised browser core.
 //!
-//! # Ne yapar
+//! # What the browser does
 //!
-//! Kullanici adres cubuguna `ayaz.bud` yazar. Tarayici sunu yapar:
+//! The user types `ayaz.bud` into the address bar. The browser then:
 //!
-//! 1. Yazilani siniflandirir ([`query`]): ad mi, adres mi, NFT mi, sema mi.
-//! 2. Ad kuralindan gecirir ([`name_rule`]).
-//! 3. Adi cozer: `.bud` ise BNS'ten ([`bns_proof`]), `.eth` ise ENS'ten
-//!    ([`ens`]).
-//! 4. Cozumun gosterdigi icerigi getirir ([`fetch`]).
-//! 5. **Getirdigi baytlarin istenen baytlar oldugunu dogrular.**
-//! 6. Dogrulanmis baytlari Gecko'ya bir sayfa olarak verir ([`resolve`]).
+//! 1. Classifies what was typed ([`query`]): a name, an address, an NFT or a
+//!    scheme.
+//! 2. Runs it through the name rule ([`name_rule`]).
+//! 3. Resolves the name: from BNS for `.bud` ([`bns_proof`]), from ENS for
+//!    `.eth` ([`ens`]).
+//! 4. Fetches the content ([`fetch`]).
+//! 5. **Verifies that the bytes it fetched are the bytes that were asked
+//!    for.**
+//! 6. Hands the verified bytes to Gecko as a page ([`resolve`]).
 //!
-//! Besinci adim bu tarayicinin var olma sebebi. Bugunku web'de tarayici,
-//! sunucunun gonderdigi baytlarin dogru baytlar oldugunu bilmez; TLS yalniz
-//! **kimin** gonderdigini soyler, **neyin** gonderildigini degil. Icerik
-//! adresli bir agda bu farkli: `manifest_id` baytlarin hash'idir, yani
-//! dogrulama bir karsilastirmadir.
+//! The fifth step is why this browser exists. On today's web a browser does
+//! not know that the bytes the server sent are the right bytes; TLS only says
+//! who the counterparty is, not what the content is. On a content-addressed
+//! network this is different: `manifest_id` is the hash of the bytes, so
+//! verification is a comparison.
 //!
-//! # Motor yazilmaz, yamalanir
+//! # The engine is not written, it is patched
 //!
-//! Bir tarayici motoru uc seydir: bir HTML/CSS duzenleyici, bir JavaScript
-//! motoru ve bir sanal alan. Ucu de onlarca yilin isi ve ucu de saldiri
-//! yuzeyinin tamami. Kendi motorunu yazan bir web3 tarayicisi, cozmeye
-//! calistigi problemin yanina bir de tarayici guvenligi problemi ekler.
+//! A browser engine is three things: an HTML/CSS layout engine, a JavaScript
+//! engine and a sandbox. All three are decades of work and all three are the
+//! entire attack surface. A web3 browser that writes its own engine adds a
+//! browser-security problem next to the problem it set out to solve.
 //!
-//! Budscan motor yazmaz: Gecko'yu yamalar. Bu crate o yamalarin **arkasindaki
-//! karar mercii**dir; `browser/` altindaki yama katmani `bud://` protokol
-//! isleyicisini ve adres cubugu gostergesini ekler ve butun kararlari buraya
-//! sorar.
+//! Budscan writes no engine: it patches Gecko. This crate is the **decision
+//! authority behind those patches**; the patch layer under `browser/` adds the
+//! `bud://` protocol handler and the address-bar indicator, and refers every
+//! decision back here.
 //!
-//! # Kabuk yok
+//! # No shell
 //!
-//! Yama araclari da dahil hicbir sey kabuk degil. Sebep gecmiste iki kez
-//! olculdu: yanlis yazilmis bir degisken kabukta hata degil bos dizgidir, yani
-//! bir kontrol hicbir seyi inceleyip OK diyebilir. Yama araclari
-//! [`patchset`] icinde, Rust olarak duruyor.
+//! Nothing is a shell, the patch tooling included. The reason was measured
+//! twice in the past: a misspelled variable is not an error in a shell but an
+//! empty string, so a check can inspect nothing and still say OK. The patch
+//! tooling lives inside [`patchset`], written in Rust.
 //!
-//! # Neyin dogrulanmadigi da yazilidir
+//! # What is not verified is written down too
 //!
-//! Bu crate'in bir kismi, **yapilamayanin** kaydidir:
+//! Part of this crate is a record of **what cannot be done**:
 //!
-//! * BNS cozumu bugun isim basina kanitlanamiyor, cunku
-//!   `BnsRegistry::root()` butun defteri tek bir SHA-256 akisina yaziyor
-//!   ([`bns_proof`]).
-//! * Baslik kesinligi tarayicida dogrulanmiyor; yedi `DomainFinalityAdapter`
-//!   bicimi var ve hicbiri istemci tarafinda uygulanmadi
-//!   ([`light_client`]).
-//! * IPFS `dag-pb` coklu blok icerik dogrulanmiyor ([`cid`]).
-//! * IPNS ve Swarm icin getirici yok ([`resolve`]).
+//! * BNS resolution cannot be proven per name today, because
+//!   `BnsRegistry::root()` writes the whole ledger into a single SHA-256
+//!   stream ([`bns_proof`]).
+//! * Ethereum has several light-client formats and none of them were
+//!   implemented on the client side ([`light_client`]).
+//! * IPFS `dag-pb` multi-block content is not verified ([`cid`]).
+//! * There is no fetcher for IPNS or Swarm ([`resolve`]).
 //!
-//! Bunlarin hicbiri sessizce `dogrulandi` diye etiketlenmiyor; hepsi
-//! [`evidence::Strength`] uzerinden asagi bir guce dusuyor.
+//! None of these is silently labelled `verified`; each falls to a lower
+//! strength through [`evidence::Strength`].
 
 pub mod arweave;
 pub mod bns_proof;
@@ -78,5 +80,5 @@ pub use name_rule::{check_name, NameRejection};
 pub use query::{classify, Query};
 pub use resolve::Page;
 
-/// Bu crate'in surumu; rozetlerde ve yama basliklarinda kullanilir.
+/// This crate's version; used in badges and patch headers.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
