@@ -255,6 +255,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "binding-claims kanaryasi OK (durust PASS, temelsiz iddia FAIL).",
+        "binding-claims canary OK (honest PASSes, an unfounded claim FAILs).",
     ))
 }

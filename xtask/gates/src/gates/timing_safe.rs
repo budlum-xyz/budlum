@@ -124,23 +124,23 @@ fn collect_dir(dir: &Path, out: &mut Vec<String>) {
 
 /// # Errors
 ///
-/// Returns every candidate line (the shell gate's "İHLAL ADAYLARI" report).
+/// Returns every candidate line (the shell gate's "VIOLATION CANDIDATES" report).
 pub fn run(root: &Path) -> Result<String, String> {
     let hits = collect(root);
     if hits.is_empty() {
         return Ok(String::from(
-            "[check-timing-safe] TEMİZ: gizli materyal üzerinde ham == / != yok.",
+            "[check-timing-safe] CLEAN: no raw == / != over secret material.",
         ));
     }
-    let mut msg = String::from("[check-timing-safe] İHLAL ADAYLARI BULUNDU:\n");
+    let mut msg = String::from("[check-timing-safe] VIOLATION CANDIDATES FOUND:\n");
     for h in &hits {
         msg.push_str(h);
         msg.push('\n');
     }
     msg.push_str(
-        "\n[check-timing-safe] Gizli materyal ham == / != ile karşılaştırılamaz.\n\
-         [check-timing-safe] Çözüm: subtle::ConstantTimeEq / constant_time_eq_str kullan\n\
-         [check-timing-safe] (referans: src/rpc/server.rs, B3).",
+        "\n[check-timing-safe] Secret material cannot be compared with a raw == / !=.\n\
+         [check-timing-safe] Fix: use subtle::ConstantTimeEq / constant_time_eq_str\n\
+         [check-timing-safe] (reference: src/rpc/server.rs, B3).",
     );
     Err(msg)
 }
@@ -148,7 +148,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// The shell gate's alarm canary: two deliberate violations must be caught;
 /// if the scan misses them the gate is vacuous and fails with exit 3.
 pub fn self_test() -> Result<String, String> {
-    let canary = "fn is_authorized_canary(provided: &str, expected_secret: &str) -> bool {\n    // KASITLI İHLAL: gizli materyalin ham == ile karşılaştırılması.\n    provided == expected_secret\n}\nfn pin_check(pin: &str, api_key: &str) -> bool {\n    pin != api_key\n}\n";
+    let canary = "fn is_authorized_canary(provided: &str, expected_secret: &str) -> bool {\n    // DELIBERATE VIOLATION: secret material compared with a raw ==.\n    provided == expected_secret\n}\nfn pin_check(pin: &str, api_key: &str) -> bool {\n    pin != api_key\n}\n";
     let mut hits: Vec<&str> = Vec::new();
     for line in canary.lines() {
         if has_secret(line)
@@ -161,11 +161,11 @@ pub fn self_test() -> Result<String, String> {
     }
     if hits.is_empty() {
         return Err(String::from(
-            "[check-timing-safe] HATA: kanarya ihlalleri yakalanamadı → statik kapı BOŞ (vacuous)!",
+            "[check-timing-safe] ERROR: the canary violations were not caught -> the static gate is VACUOUS!",
         ));
     }
     Ok(format!(
-        "[check-timing-safe] Kanarya YAKALANDI ({} ihlal satırı) → statik kapı ÇALIŞIYOR.",
+        "[check-timing-safe] Canary CAUGHT ({} violation lines) -> the static gate WORKS.",
         hits.len()
     ))
 }

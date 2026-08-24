@@ -175,7 +175,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: dogru agac reddedildi"));
+        return Err(String::from("canary: a correct tree was refused"));
     }
     // Direct assert_one bypass.
     let direct_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder.when(is_assert).assert_one(rs1_val.clone());\n";

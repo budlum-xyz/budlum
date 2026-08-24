@@ -190,12 +190,12 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
 
     if !good_ok {
-        return Err(String::from("canary: iyi dondurulmuş modül reddedildi"));
+        return Err(String::from("canary: a well frozen module was refused"));
     }
     if !bad_fails {
-        return Err(String::from("canary: tek uzunluklu pin geçti"));
+        return Err(String::from("canary: a single-length pin passed"));
     }
     Ok(String::from(
-        "zero-storage kanaryası OK (iyi PASS, tek-uzunluk FAIL).",
+        "zero-storage canary OK (good PASSes, single-length FAILs).",
     ))
 }
