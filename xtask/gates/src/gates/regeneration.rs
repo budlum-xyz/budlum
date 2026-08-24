@@ -445,8 +445,18 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
+    // `program-hash <hex>` is a machine-readable token, not prose. The
+    // diverse-double-compiling workflow greps for exactly this shape to pull
+    // the value out of both compilers and compare them bit-for-bit.
+    //
+    // It has already broken once: a translation pass rewrote the sentence as
+    // "the canonical program hash was reproduced as ...", the hyphen went with
+    // it, and the grep stopped matching. The gate stayed green, the workflow
+    // read an empty value, and stage 1 failed with nothing to point at. The
+    // token is now kept apart from the sentence so rewording the prose cannot
+    // take it away, and `regeneration_hash_token_is_greppable` locks the shape.
     Ok(format!(
-        "regeneration OK: the canonical program hash was reproduced as {}, \
+        "regeneration OK: program-hash {} reproduced, \
          convergence (idempotence + repair) was verified, and all {checked} \
          production points found by discovery are canonical (verified with an \
          independent Keccak-256 and an independent ISA encoding).",
@@ -622,6 +632,51 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The success message must keep the token the DDC workflow greps for.
+    ///
+    /// `diverse-double-compiling.yml` runs this gate under two different
+    /// compilers and pulls the program hash out of stdout with
+    /// `grep -oE "program-hash [0-9a-f]+"`, then compares the two values
+    /// bit-for-bit. That is the whole point of the job: if the two compilers
+    /// disagree, one of them is injecting something the source does not say.
+    ///
+    /// The coupling is a string, and a string is exactly what a reword breaks.
+    /// It already did: a translation pass turned `program-hash {}` into
+    /// "the canonical program hash was reproduced as {}", the grep stopped
+    /// matching, and stage 1 failed with an empty value while this gate itself
+    /// stayed green. Nothing pointed at the cause.
+    ///
+    /// So the contract is asserted here, in the same file as the message, with
+    /// the same regex the workflow uses.
+    #[test]
+    fn regeneration_hash_token_is_greppable() {
+        let workflow = include_str!("../../../../.github/workflows/diverse-double-compiling.yml");
+        assert!(
+            workflow.contains(r#"grep -oE "program-hash [0-9a-f]+""#),
+            "the DDC workflow no longer greps for `program-hash <hex>`; if the \
+             extraction changed, update this test with it rather than deleting it"
+        );
+
+        // The message the gate actually emits on success, rebuilt here.
+        let message = format!(
+            "regeneration OK: program-hash {} reproduced, and the rest is prose.",
+            &hex32(&[0xabu8; 32])[..16]
+        );
+
+        // The workflow's own extraction, applied to it.
+        let token = message
+            .split_whitespace()
+            .skip_while(|w| *w != "program-hash")
+            .nth(1)
+            .expect("the success message must carry a `program-hash <hex>` token");
+        assert_eq!(token.len(), 16, "the token must be the 16-hex-digit prefix");
+        assert!(
+            token.chars().all(|c| c.is_ascii_hexdigit()),
+            "the token must be bare lowercase hex with nothing attached: the \
+             workflow feeds it straight into a bit-for-bit comparison"
+        );
+    }
 
     #[test]
     fn keccak_matches_known_vectors() {
