@@ -1,33 +1,35 @@
-//! Eğitim planı.
+//! The training plan.
 //!
-//! Adaptör dtype'ı tip sistemiyle BF16/FP16'a sabitlenir: FP4 adaptörler
-//! router-collapse riski taşır (araştırma §1.5, awesome-upstream-base).
-//! Örnek aralıkları: LoRA 1K-10K, tam SFT 100K+ (aynı rehber).
+//! The adapter dtype is pinned to BF16/FP16 through the type system: FP4
+//! adapters carry a router-collapse risk (research section 1.5,
+//! awesome-upstream-base). The example ranges: 1K-10K for LoRA, 100K+ for a full
+//! SFT (from the same guide).
 
 use lubot_core::manifest::AdapterDtype;
 use lubot_core::model::{Hash32, ModelId};
 
-/// Eğitim yöntemi.
+/// The training method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuneMethod {
     Lora,
     FullSft,
 }
 
-/// Eğitim planı.
+/// The training plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunePlan {
     pub base: ModelId,
     pub method: TuneMethod,
     pub adapter_dtype: AdapterDtype,
-    /// LoRA için 1K-10K; tam SFT için 100K+.
+    /// 1K-10K for LoRA; 100K+ for a full SFT.
     pub max_examples: u32,
-    /// Eğitim setlerinin content_id listesi (B.U.D. kayıtlı).
+    /// The content_id list of the training sets (registered in B.U.D.).
     pub dataset_hashes: Vec<Hash32>,
 }
 
 impl TunePlan {
-    /// Varsayılan LoRA planı (2026-08-13 kararı: LoRA SFT, V4-Flash-Base).
+    /// The default LoRA plan (the 2026-08-13 decision: LoRA SFT on
+    /// V4-Flash-Base).
     #[must_use]
     pub fn lora(base: ModelId, max_examples: u32) -> Self {
         Self {
@@ -39,7 +41,8 @@ impl TunePlan {
         }
     }
 
-    /// Tam SFT planı (yalnız bilinçli kararla; 100K+ örnek gerektirir).
+    /// The full SFT plan (only by a deliberate decision; it requires 100K+
+    /// examples).
     #[must_use]
     pub fn full_sft(base: ModelId) -> Self {
         Self {
@@ -51,18 +54,18 @@ impl TunePlan {
         }
     }
 
-    /// LoRA örnek aralığı denetimi: 1K altı pratik değil, 10K üstü LoRA
-    /// için sinyal zayıflar. Tam SFT'de 100K+ beklenir.
+    /// The LoRA example range check: below 1K is not practical, and above 10K
+    /// the signal weakens for LoRA. A full SFT expects 100K+.
     ///
     /// # Errors
     ///
-    /// Aralık dışındaysa açıklayıcı mesaj.
+    /// An explanatory message when it is out of range.
     pub fn assert_example_range(&self) -> Result<(), String> {
         match self.method {
             TuneMethod::Lora => {
                 if !(1_000..=10_000).contains(&self.max_examples) {
                     return Err(format!(
-                        "LoRA örnek sayısı 1K-10K aralığında olmalı (şu an: {})",
+                        "the LoRA example count has to be in the 1K-10K range (currently: {})",
                         self.max_examples
                     ));
                 }
@@ -70,7 +73,7 @@ impl TunePlan {
             TuneMethod::FullSft => {
                 if self.max_examples < 100_000 {
                     return Err(format!(
-                        "tam SFT 100K+ örnek bekler (şu an: {})",
+                        "a full SFT expects 100K+ examples (currently: {})",
                         self.max_examples
                     ));
                 }
@@ -79,7 +82,7 @@ impl TunePlan {
         Ok(())
     }
 
-    /// Planın veri seti olmadan koşulamayacağı açık olsun.
+    /// Make it explicit that the plan cannot run without a dataset.
     #[must_use]
     pub fn has_datasets(&self) -> bool {
         !self.dataset_hashes.is_empty()
