@@ -196,9 +196,9 @@ impl std::fmt::Display for ContentEncryption {
 /// Id protects counted `owner` among them. What each remaining field is or is
 /// Not inside the commitment is now recorded on the field itself.
 ///
-/// `owner` alanı F01 ile eklendi - veri sahipliği zincir-üstü
-/// Kanıtlanabilir (Data Owner identity). `#[serde(default)]` ile eski
-/// Snapshot'lar/JSON'lar backward-compat (owner = zero = "belirsiz").
+/// The `owner` field arrived with F01, so that data ownership is provable on
+/// chain, as a data owner identity. `#[serde(default)]` keeps older snapshots
+/// and JSON backward compatible, where a zero owner means "unspecified".
 /// Redundancy scheme for an object: any `k` of `n` shards reconstruct it.
 ///
 /// Replication is the degenerate case `k = n = shard_count`, where losing one
@@ -318,8 +318,9 @@ impl Default for ErasureScheme {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentManifest {
     pub manifest_id: ContentId,
-    /// F01: içerik sahibinin adresi. Zero-address = eski/pre-F01
-    /// Manifest (backward-compat); yeni manifest'ler gerçek owner taşır.
+    /// F01: the address of the content owner. A zero address marks an older,
+    /// pre-F01 manifest, kept for backward compatibility; new manifests carry a
+    /// real owner.
     ///
     /// IDENTITY: excluded - the id is content-addressed on purpose. Two
     /// uploaders sharding the same bytes the same way produce one id, which
@@ -335,21 +336,22 @@ pub struct ContentManifest {
     /// not this field.
     #[serde(default)]
     pub owner: crate::core::address::Address,
-    /// Bu nesnenin cozulmesi icin gereken paylasilan sozluk.
+    /// The shared dictionary this object needs in order to decompress.
     ///
-    /// `None`: nesne kendi basina cozulur. Cogunlukla boyledir ve bu yuzden
-    /// varsayilan bu; alan eklenmeden once yazilmis her manifest de buraya
-    /// duser ve kimligi degismez.
+    /// `None` means the object decompresses on its own. That is the usual case
+    /// and therefore the default; every manifest written before this field
+    /// existed also lands here, and its id does not change.
     ///
-    /// IDENTITY: included when set. Sozluk, nesnenin **cozulebilirliginin
-    /// parcasi**: yanlis sozlukle acilan baytlar baska baytlardir. Kimlige
-    /// katilmasaydi bir manifest, kaydi bozulmadan baska bir sozluge
-    /// yonlendirilebilir ve ayni id altinda baska bir icerik cozulurdu.
+    /// IDENTITY: included when set. The dictionary is **part of the object's
+    /// decompressibility**: bytes decompressed with the wrong dictionary are
+    /// different bytes. Were it left out of the identity, a manifest could be
+    /// redirected to another dictionary without its record breaking, and
+    /// different content would decompress under the same id.
     ///
-    /// Taahhut §66'nin desenini izler: **yalnizca iddia edildiginde taahhut
-    /// edilir.** `None` on-goruntude hicbir bayt uretmez, dolayisiyla bu
-    /// alandan once kaydedilmis manifest'lerin id'si birebir ayni kalir ve
-    /// goc gerekmez.
+    /// It follows the pattern of commitment section 66: **it is committed only
+    /// when it is claimed.** A `None` produces no bytes in the preimage, so the
+    /// ids of manifests recorded before this field stay exactly the same and no
+    /// migration is needed.
     #[serde(default)]
     pub dictionary_id: Option<ContentId>,
     /// Sum of the stored shard sizes.
@@ -371,23 +373,24 @@ pub struct ContentManifest {
     /// those deserialize to replication and behave exactly as they did.
     #[serde(default)]
     pub erasure: ErasureScheme,
-    /// Bu icerigin baytlarinin nasil var oldugu: tutuluyor mu, yoksa bir
-    /// tariften mi doguyor.
+    /// How this content's bytes come to exist: are they held, or are they born
+    /// from a recipe?
     ///
-    /// **Neden manifest'te:** replikasyon hedefi (`STORAGE_REPLICATION_TARGET`
-    /// = 3) sabit bir sayiydi ve ne tuttugunu sormuyordu. Tariften dogan bir
-    /// icerik icin uc kopya tutmak, ayni deterministik ureteci uc kez
-    /// saklamaktir: kopyalar dayaniklilik EKLEMEZ, cunku icerik zaten
-    /// zincirdeki tariften yeniden uretilebilir. Manifest kaynak rejimini
-    /// soylemedigi surece anlasma katmani bu ayrimi yapamazdi.
+    /// **Why it lives in the manifest:** the replication target,
+    /// `STORAGE_REPLICATION_TARGET` = 3, was a fixed number that did not ask
+    /// what it was holding. Holding three copies of content born from a recipe
+    /// is storing the same deterministic generator three times: the copies ADD
+    /// no durability, because the content can already be regenerated from the
+    /// recipe on chain. Unless the manifest states the source regime, the deal
+    /// layer cannot make that distinction.
     ///
-    /// Varsayilan `Stored`: bu alandan once yazilmis her manifest tam olarak
-    /// bunu demek istiyordu, anlamlari degismez.
+    /// The default is `Stored`: every manifest written before this field meant
+    /// exactly that, and their meaning does not change.
     ///
-    /// IDENTITY: included - kimlige girer. Girmeseydi ayni baytlar icin biri
-    /// "tutuluyor" digeri "uretiliyor" diyen iki manifest ayni id'yi
-    /// paylasirdi ve `register_manifest` ilk-yazan-kazanir oldugu icin
-    /// birinin iddiasi digerininkini sessizce degistirirdi.
+    /// IDENTITY: included. Were it excluded, two manifests over the same bytes,
+    /// one saying "held" and the other "generated", would share an id, and
+    /// because `register_manifest` is first-writer-wins, one of the claims would
+    /// silently replace the other.
     #[serde(default)]
     pub source: crate::storage::generated::ContentSource,
     /// Length of the *object*, as opposed to `total_size`, which is the sum
@@ -441,8 +444,8 @@ impl ContentManifest {
     /// The shard list is non-empty, indices are unique, sizes are non-zero,
     /// And the total size matches the sum of shard sizes.
     ///
-    /// `owner` defaults to zero-address (F01 backward-compat: caller `with_owner`
-    /// Ile gerçek owner'ı set edebilir; manifest_id hesabı owner'ı kapsar).
+    /// `owner` defaults to the zero address, for F01 backward compatibility; a
+    /// caller can set the real owner with `with_owner`.
     pub fn from_shards(shards: Vec<ShardRef>) -> Result<Self, String> {
         if shards.is_empty() {
             return Err("ContentManifest must have at least one shard".into());
@@ -484,14 +487,16 @@ impl ContentManifest {
         })
     }
 
-    /// Bu manifest'in kaynak rejimini beyan et.
+    /// Declare this manifest's source regime.
     ///
-    /// Rejim kimlige girdigi icin id yeniden hesaplanir: iddiayi degistirmek
-    /// nesneyi degistirir. `Stored` icin hesap birebir eski deger doner.
+    /// Because the regime enters the identity, the id is recomputed: changing
+    /// the claim changes the object. For `Stored` the computation returns
+    /// exactly the old value.
     ///
-    /// Beyan bir TALEPTIR, kanit degil. Zincir tarafi kaniti
-    /// `StorageRegistry::register_manifest_with_source` icinde tarifi
-    /// kosarak arar; burada yalnizca iddia kaydedilir.
+    /// A declaration is a CLAIM, not a proof. The chain side looks for the proof
+    /// by running the recipe inside
+    /// `StorageRegistry::register_manifest_with_source`; here only the claim is
+    /// recorded.
     #[must_use]
     pub fn with_source(mut self, source: crate::storage::generated::ContentSource) -> Self {
         self.manifest_id = manifest_id_from_parts(
@@ -775,8 +780,9 @@ impl ContentManifest {
         self.encryption.is_encrypted()
     }
 
-    /// F01: gerçek owner'ı set et (from_shards sonrası). `manifest_id` owner'a
-    /// Bağlıysa yeniden hesaplanmalı; şimdilik manifest_id shards-only (F01 görev 2).
+    /// F01: set the real owner, after `from_shards`. If `manifest_id` were bound
+    /// to the owner it would have to be recomputed; for now `manifest_id` is
+    /// shards-only, which is F01 task 2.
     pub fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self
@@ -888,13 +894,13 @@ pub fn manifest_id_from_parts(
     // length, falling back to the shard total for pre-V4 manifests.
     buf.extend_from_slice(&content_size.to_le_bytes());
     buf.extend_from_slice(&total_size.to_le_bytes());
-    // Kaynak rejimi taahhude girer, ama `Stored` HICBIR bayt eklemez: bu
-    // alandan once yazilmis manifest'lerin id'si birebir ayni kalmak
-    // zorunda. Yalnizca bir sey iddia edildiginde iddia taahhut edilir.
+    // The source regime enters the commitment, but `Stored` adds NO bytes: the
+    // ids of manifests written before this field have to stay exactly the same.
+    // A claim is committed only when something is claimed.
     buf.extend_from_slice(&crate::storage::generated::source_commitment_bytes(source));
-    // Sozluk taahhudu: kaynak taahhudu ile ayni kural. Sozluk yoksa hicbir
-    // bayt yazilmaz, dolayisiyla bu alandan once kaydedilmis manifest'lerin
-    // on-goruntusu degismez ve id'leri korunur.
+    // The dictionary commitment follows the same rule as the source commitment.
+    // With no dictionary, no byte is written, so the preimage of manifests
+    // recorded before this field does not change and their ids are preserved.
     if let Some(dict) = dictionary_id {
         buf.push(1u8);
         buf.extend_from_slice(&dict.0);
@@ -902,10 +908,10 @@ pub fn manifest_id_from_parts(
     ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V4", &buf]))
 }
 
-/// Kaynak rejimi `Stored` olan icerik icin kimlik.
+/// The identity for content whose source regime is `Stored`.
 ///
-/// Bu alan eklenmeden onceki her cagiranin kastettigi sey. `Stored` taahhude
-/// **hicbir bayt eklemez**, bu yuzden burasi eski kimlikle birebir aynidir.
+/// This is what every caller meant before the field existed. `Stored` adds **no
+/// bytes** to the commitment, so this is byte for byte the old identity.
 #[must_use]
 pub fn manifest_id_from_parts_stored(
     shards: &[ShardRef],
