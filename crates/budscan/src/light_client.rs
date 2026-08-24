@@ -1,58 +1,61 @@
-//! Hafif istemci: hangi state root'un gecerli oldugunu bilmek.
+//! Light client: knowing which state root is valid.
 //!
-//! Bir tarayici bir dugume sorar ve dugum yalan soyleyebilir. Uc ayri sorunun
-//! uc ayri cevabi var ve bu modul ucuncusuyle ilgileniyor.
+//! A browser asks a node, and the node can lie. Three separate questions have
+//! three separate answers, and this module is about the third.
 //!
-//! * **Icerik baytlari** yalan soyleyemez: hash tutmuyorsa bayt atilir
-//!   ([`crate::fetch`]).
-//! * **BNS cozumu** yalan soyleyebilir: saldirganin manifest kimligini donduren
-//!   bir dugum, *dogrulanan ama yanlis* bir sayfa gosterir. Cozum bir durum
-//!   kanitina baglanmali ([`crate::bns_proof`]).
-//! * **Zincir basliklari**: hangi state root'un gecerli oldugunu bilmek icin
-//!   bir baslik zinciri takip edilir. Burasi orasi.
+//! * **Content bytes** cannot lie: if the hash does not match, the bytes are
+//!   thrown away ([`crate::fetch`]).
+//! * **BNS resolution** can lie: a node that returns the attacker's manifest ID
+//!   shows a page that is *verified and wrong*. Resolution has to be bound to a
+//!   state proof ([`crate::bns_proof`]).
+//! * **Chain headers**: knowing which state root is valid means following a
+//!   header chain. That is this module.
 //!
-//! # Olculen: her basligi takip etmek pahali
+//! # Measured: following every header is expensive
 //!
-//! `src/core/block.rs`'deki `BlockHeader` alanlari toplandiginda baslik basina
-//! yaklasik 603 bayt. Hash alanlari `String` ve `hex::encode` ile yaziliyor,
-//! yani otuz iki baytlik her kok altmis dort karakter tutuyor.
+//! Adding up the `BlockHeader` fields in `src/core/block.rs` gives roughly 603
+//! bytes per header. The hash fields are `String` written with `hex::encode`,
+//! so every thirty-two byte root occupies sixty-four characters.
 //!
-//! | takip              | 1 sn blok | 6 sn blok  | 12 sn blok |
-//! |--------------------|-----------|------------|------------|
-//! | her baslik         | 1,5 GB/ay | 248 MB/ay  | 124 MB/ay  |
-//! | yalniz epoch siniri| 149 MB/ay | 24,8 MB/ay | 12,4 MB/ay |
+//! | following           | 1s blocks | 6s blocks  | 12s blocks |
+//! |---------------------|-----------|------------|------------|
+//! | every header        | 1.5 GB/mo | 248 MB/mo  | 124 MB/mo  |
+//! | epoch boundaries    | 149 MB/mo | 24.8 MB/mo | 12.4 MB/mo |
 //!
-//! Karar buradan cikiyor: **tarayici her basligi takip etmez, yalniz
-//! kesinlesmis epoch sinirlarini takip eder.** `EPOCH_LENGTH = 10`
-//! (`src/chain/blockchain.rs:54`), yani onda bir. Bir durum kanitini
-//! dogrulamak icin gereken tek sey, kanitin bagli oldugu state root'un
-//! kesinlesmis bir baslikta olmasi; aradaki dokuz baslik o soruya cevap
-//! vermiyor.
+//! Hence the decision: **the browser does not follow every header, only
+//! finalized epoch boundaries.** `EPOCH_LENGTH = 10`
+//! (`src/chain/blockchain.rs:54`), so one in ten. Verifying a state proof needs
+//! exactly one thing, that the root the proof binds to sits in a finalized
+//! header; the nine headers in between answer nothing about that.
 //!
-//! # Ne dogrulanmiyor, acikca
+//! # What is not verified, stated plainly
 //!
-//! Bu modul bir basligin **kesinlestigini** kendi basina kanitlamaz. Budlum
-//! coklu konsensus tasiyor ve kesinlik `DomainFinalityAdapter` arkasinda yedi
-//! ayri bicimde uretiliyor (`PoW` header-chain, `PoS`, `PoA`, BFT, ZK, depolama
-//! attestasyonu, AI cikarimi). Bir tarayicinin bu yedisini de dogrulamasi
-//! ayri bir istir ve **yapilmadi**. Yapilana kadar baslik takibi bir
-//! `FinalitySource`'a soruyor ve o kaynak bir beyanda bulunuyorsa sonuc
-//! [`crate::evidence::Strength::RpcClaimOnly`] olarak etiketleniyor.
+//! This module does not prove on its own that a header is **final**. Budlum
+//! carries multiple consensus kinds and finality is produced seven different
+//! ways behind `DomainFinalityAdapter` (`PoW` header-chain, `PoS`, `PoA`, BFT,
+//! ZK, storage attestation, AI inference). A browser verifying all seven is a
+//! separate piece of work and it **has not been done**. Until it is, header
+//! following asks a `FinalitySource`, and when that source is merely asserting
+//! something the result is labelled
+//! [`crate::evidence::Strength::RpcClaimOnly`].
 //!
-//! Bunu "hafif istemci var" diye sunmak, olmayan bir garantiyi satmak olurdu.
+//! Presenting this as "there is a light client" would be selling a guarantee
+//! that does not exist.
 
 use crate::evidence::{Claim, Evidence, Strength};
 use sha2::{Digest, Sha256};
 
-/// `src/chain/blockchain.rs:54` ile ayni. Ayrisirsa epoch sinirlari kayar.
+/// Must match `src/chain/blockchain.rs:54`. If they diverge, epoch boundaries
+/// shift out from under everything that follows them.
 pub const EPOCH_LENGTH: u64 = 10;
 
-/// Takip edilen bir baslik.
+/// A followed header.
 ///
-/// `state_root` ve `hash` zincirde hex `String`; burada da oyle tutuluyor,
-/// cunku karsilastirmanin zincirin yazdigi bicimle yapilmasi gerekiyor.
-/// Ham bayta cevirmek basligi 603'ten 443 bayta indirirdi (yuzde 26) ama o
-/// bir konsensus yuzeyi degisikligi ve burada yapilmiyor.
+/// `state_root` and `hash` are hex `String`s on the chain, and are kept that
+/// way here, because the comparison has to be made in the form the chain
+/// writes. Converting to raw bytes would take a header from 603 to 443 bytes,
+/// a 26 percent saving, but that is a consensus surface change and is not made
+/// here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackedHeader {
     pub index: u64,
@@ -62,28 +65,28 @@ pub struct TrackedHeader {
 }
 
 impl TrackedHeader {
-    /// Bu baslik bir epoch siniri mi?
+    /// Is this header an epoch boundary?
     #[must_use]
     pub fn is_epoch_boundary(&self) -> bool {
         self.index.is_multiple_of(EPOCH_LENGTH)
     }
 }
 
-/// Kesinlik hakkinda kim konusuyor.
+/// Who speaks about finality.
 pub trait FinalitySource {
-    /// Bu baslik kesinlesti mi, ve bunu **nasil** biliyoruz?
+    /// Is this header final, and **how** do we know?
     ///
-    /// Donen `Claim`, kaynagin kendi gucunu beyan etmesidir. Bir kaynak
-    /// `Verified` demek istiyorsa bir kanit dogrulamis olmali; "RPC boyle
-    /// dedi" `RpcClaimOnly`'dir.
+    /// The returned `Claim` is the source declaring its own strength. A source
+    /// that wants to say `Verified` must have verified a proof; "the RPC said
+    /// so" is `RpcClaimOnly`.
     fn finality_of(&self, header: &TrackedHeader) -> Claim;
 }
 
-/// Kesinlesmis epoch sinirlarinin deposu.
+/// A store of finalized epoch boundaries.
 ///
-/// Yalniz epoch sinirlari saklanir ve depo sinirlidir: bir tarayici sonsuz
-/// zincir tutamaz. Sinira ulasildiginda **en eski** baslik dusurulur, cunku
-/// bir durum kaniti her zaman yeni bir koke baglanir.
+/// Only epoch boundaries are kept, and the store is bounded: a browser cannot
+/// hold an unbounded chain. At the limit the **oldest** header is dropped,
+/// because a state proof always binds to a recent root.
 #[derive(Debug, Clone)]
 pub struct HeaderStore {
     headers: Vec<TrackedHeader>,
@@ -91,11 +94,11 @@ pub struct HeaderStore {
 }
 
 impl HeaderStore {
-    /// Varsayilan kapasite: 1024 epoch siniri.
+    /// Default capacity: 1024 epoch boundaries.
     ///
-    /// Alti saniyelik blokta epoch basi altmis saniye, yani 1024 epoch
-    /// yaklasik on yedi saat. Bir kanitin bagli oldugu kokun bu pencerede
-    /// olmasi bekleniyor; olmuyorsa kanit eski ve reddedilmeli.
+    /// At six-second blocks an epoch is sixty seconds, so 1024 epochs is about
+    /// seventeen hours. The root a proof binds to is expected to fall inside
+    /// that window; if it does not, the proof is stale and belongs rejected.
     pub const DEFAULT_CAPACITY: usize = 1024;
 
     #[must_use]
@@ -111,18 +114,18 @@ impl HeaderStore {
         }
     }
 
-    /// Bir basligi kabul et.
+    /// Accepts a header.
     ///
     /// # Errors
     ///
-    /// Epoch siniri olmayan bir baslik, geriye giden bir indeks, ya da ayni
-    /// indekste farkli bir hash (bu bir catallanma isaretidir ve sessizce
-    /// uzerine yazilmaz).
+    /// A header that is not an epoch boundary, an index that moves backwards,
+    /// or a different hash at an index already held. The last is a sign of a
+    /// fork, and is never quietly overwritten.
     pub fn accept(&mut self, header: TrackedHeader) -> Result<(), String> {
         if !header.is_epoch_boundary() {
             return Err(format!(
-                "baslik {} bir epoch siniri degil (EPOCH_LENGTH={EPOCH_LENGTH}); \
-                 tarayici aradaki basliklari takip etmiyor",
+                "header {} is not an epoch boundary (EPOCH_LENGTH={EPOCH_LENGTH}); \
+                 the browser does not follow the headers in between",
                 header.index
             ));
         }
@@ -130,8 +133,8 @@ impl HeaderStore {
             if header.index == last.index {
                 if header.hash != last.hash {
                     return Err(format!(
-                        "indeks {} icin iki farkli hash gorundu ({} ve {}); bu bir \
-                         catallanma isareti ve sessizce cozulmez",
+                        "two different hashes appeared for index {} ({} and {}); \
+                         that is a sign of a fork and is not resolved silently",
                         header.index, last.hash, header.hash
                     ));
                 }
@@ -139,8 +142,8 @@ impl HeaderStore {
             }
             if header.index < last.index {
                 return Err(format!(
-                    "baslik {} zaten gorulen {}'den geride; geriye giden bir zincir \
-                     kabul edilmez",
+                    "header {} is behind {}, which was already seen; a chain that \
+                     moves backwards is not accepted",
                     header.index, last.index
                 ));
             }
@@ -152,13 +155,13 @@ impl HeaderStore {
         Ok(())
     }
 
-    /// En yeni kesinlesmis kok.
+    /// The most recent finalized root.
     #[must_use]
     pub fn tip(&self) -> Option<&TrackedHeader> {
         self.headers.last()
     }
 
-    /// Bu state root takip edilen bir baslikta mi?
+    /// Is this state root in a followed header?
     #[must_use]
     pub fn knows_state_root(&self, state_root: &str) -> bool {
         self.headers.iter().any(|h| h.state_root == state_root)
@@ -174,17 +177,17 @@ impl HeaderStore {
         self.headers.is_empty()
     }
 
-    /// Bir state root'a guvenmenin gucu.
+    /// How strongly a state root can be trusted.
     ///
-    /// Ucu de gerekli: kok bilinen bir baslikta olmali, o baslik kesinlesmis
-    /// olmali, ve kesinligi soyleyen kaynagin kendi gucu ne ise sonuc ondan
-    /// guclu olamaz.
+    /// All three are required: the root must sit in a known header, that header
+    /// must be final, and the result cannot be stronger than the strength of
+    /// whatever source asserted that finality.
     pub fn strength_of<S: FinalitySource>(&self, source: &S, state_root: &str) -> Evidence {
         let Some(header) = self.headers.iter().find(|h| h.state_root == state_root) else {
             return Evidence::new().with(Claim::new(
                 "light-client",
                 Strength::Refused,
-                "state root takip edilen hicbir kesinlesmis baslikta yok",
+                "the state root is in no followed finalized header",
             ));
         };
         Evidence::new().with(source.finality_of(header))
@@ -198,19 +201,19 @@ impl Default for HeaderStore {
 }
 
 // ---------------------------------------------------------------------------
-// Seyrek Merkle trie kaniti: `src/storage/merkle_trie.rs` ile ayni kural.
+// Sparse Merkle trie proof: the same rule as `src/storage/merkle_trie.rs`.
 // ---------------------------------------------------------------------------
 
 const TRIE_DEPTH: usize = 256;
 const DOMAIN_PREFIX: &[u8] = b"BDLM_MERKLE_TRIE_V1";
 
-/// Bir adres icin durum kaniti.
+/// A state proof for one address.
 ///
-/// `src/storage/merkle_trie.rs`'in urettigi kanitla ayni sekil. O modul bugun
-/// **bagli degil** (kendi dosyasi soyluyor: hesap durumu hala eski kok
-/// uzerinden hash'leniyor), yani bu dogrulayici bugun canli zincire karsi
-/// calismiyor. Burada olmasinin sebebi, trie baglandiginda tarayici tarafinin
-/// hazir olmasi ve o gun kuralin yeniden icat edilmemesi.
+/// The same shape as the proof `src/storage/merkle_trie.rs` produces. That
+/// module is **not wired** today - its own file says so: account state is still
+/// hashed through the old root - so this verifier does not run against the live
+/// chain yet. It is here so that the browser side is ready the day the trie is
+/// wired, and the rule does not get reinvented that day.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleProof {
     pub address: [u8; 32],
@@ -233,7 +236,7 @@ fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Iki bos cocuk bosa cokert: `H(0||0)` degil, sifir.
+/// Two empty children collapse to empty: zero, not `H(0||0)`.
 fn combine_nodes(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     if *left == [0u8; 32] && *right == [0u8; 32] {
         return [0u8; 32];
@@ -248,7 +251,7 @@ fn finalize_root(raw: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Bir yaprak hash'i: `SHA-256(0x01 || address || balance_le || nonce_le)`.
+/// A leaf hash: `SHA-256(0x01 || address || balance_le || nonce_le)`.
 #[must_use]
 pub fn hash_leaf(address: &[u8; 32], balance: u64, nonce: u64) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -260,13 +263,13 @@ pub fn hash_leaf(address: &[u8; 32], balance: u64, nonce: u64) -> [u8; 32] {
 }
 
 impl MerkleProof {
-    /// Kanit bu koke baglaniyor mu?
+    /// Does this proof bind to that root?
     ///
-    /// Yon bitleri adresten **turetilir ve karsilastirilir**. Karsilastirma
-    /// olmasaydi gecerli bir kanit baska bir adresin kaniti diye
-    /// etiketlenebilirdi; bu tam olarak `merkle_trie.rs`'in Strix LOW
-    /// (CWE-345) bulgusunda kapatilan sey ve burada da kapali olmali, cunku
-    /// dogrulayici tarafi acik birakmak kaniti anlamsiz kilar.
+    /// The direction bits are **derived from the address and compared**.
+    /// Without the comparison a valid proof could be labelled as a proof for a
+    /// different address, which is exactly what the Strix LOW (CWE-345) finding
+    /// closed in `merkle_trie.rs`. It has to stay closed here too: leaving the
+    /// verifier side open makes the proof meaningless.
     #[must_use]
     pub fn verify(&self, expected_root: &[u8; 32]) -> bool {
         if self.siblings.len() != TRIE_DEPTH || self.directions.len() != TRIE_DEPTH {
@@ -300,8 +303,8 @@ mod tests {
                 "finality",
                 Strength::RpcClaimOnly,
                 &format!(
-                    "epoch {} icin kesinlik bir RPC beyani; yedi DomainFinalityAdapter \
-                     bicimi tarayicida dogrulanmiyor",
+                    "finality for epoch {} is an RPC assertion; the seven \
+                     DomainFinalityAdapter forms are not verified in the browser",
                     header.epoch
                 ),
             )
@@ -322,7 +325,7 @@ mod tests {
         let mut store = HeaderStore::new();
         assert!(store.accept(header(10)).is_ok());
         let err = store.accept(header(13)).unwrap_err();
-        assert!(err.contains("epoch siniri degil"), "{err}");
+        assert!(err.contains("is not an epoch boundary"), "{err}");
     }
 
     #[test]
@@ -330,9 +333,9 @@ mod tests {
         let mut store = HeaderStore::new();
         store.accept(header(10)).unwrap();
         let mut twin = header(10);
-        twin.hash = String::from("baska");
+        twin.hash = String::from("different");
         let err = store.accept(twin).unwrap_err();
-        assert!(err.contains("catallanma"), "{err}");
+        assert!(err.contains("a sign of a fork"), "{err}");
     }
 
     #[test]
@@ -423,7 +426,7 @@ mod tests {
         };
         assert!(
             !forged.verify(&root),
-            "etiketi degistirilen kanit gecmemeli"
+            "a proof with a relabelled address must not pass"
         );
     }
 
