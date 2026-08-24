@@ -327,11 +327,12 @@ const MAINNET_DNS_SEEDS: &[&str] = &[
 ];
 const TESTNET_DNS_SEEDS: &[&str] = &[];
 
-// (kullanıcı onayı 2026-07-16) mainnet placeholder peer
-// Fail-closed guard'ı. Genesis placeholder reddiyle (cli/commands.rs Rule 4)
-// Simetrik: dummy/placeholder marker içeren bootnode veya dns seed
-// Mainnet'te DIAL EDİLMEZ - süreç startup'ta CRITICAL exit 1 ile durur.
-// Ceremony'si bu sabitleri gerçek multiaddr'lara çevirir.
+// (approved by the user on 2026-07-16) the fail-closed guard for mainnet
+// placeholder peers. It is symmetric with the genesis placeholder refusal
+// (cli/commands.rs, Rule 4): a bootnode or dns seed carrying a
+// dummy/placeholder marker IS NOT DIALLED on mainnet - the process stops at
+// startup with a CRITICAL exit 1. The launch ceremony turns these constants
+// into real multiaddrs.
 const PLACEHOLDER_PEER_MARKERS: &[&str] = &["dummy", "placeholder", "203.0.113.", ".example"];
 
 fn guarded_mainnet_peer_entries(entries: &[&str]) -> Vec<String> {
@@ -343,8 +344,8 @@ fn guarded_mainnet_peer_entries(entries: &[&str]) -> Vec<String> {
     }
 }
 
-/// Girdi listesindeki placeholder/dummy marker içeren ilk kaydı döner
-/// (küçük-büyük harf duyarsız). Temiz listede `None`.
+/// Returns the first entry in the input list carrying a placeholder/dummy
+/// marker (case-insensitive). `None` on a clean list.
 pub fn first_placeholder_peer(entries: &[String]) -> Option<String> {
     entries
         .iter()
@@ -444,20 +445,23 @@ mod tests {
         }
     }
 
-    /// Dummy bootnode/dns-seed sabitleri guard tarafından
-    /// Yakalanmalı (fail-closed), gerçek multiaddr'lar serbest kalmalı.
-    /// Guard test gücü artırıldı - derlenmiş mainnet sabitlerinin
-    /// Placeholder marker ile yakalandığını doğrular (c953049 regresyonu kapatıldı).
+    /// Dummy bootnode and dns-seed constants have to be caught by the guard
+    /// (fail-closed), while real multiaddrs stay free. The strength of this
+    /// test was raised: it verifies that the compiled mainnet constants are
+    /// caught by the placeholder marker (this closes the c953049
+    /// regression).
     #[test]
     fn test_placeholder_peer_detection_blocks_dummy_mainnet_entries() {
-        // Negatif kontroller: placeholder/dummy marker içeren kayıtlar YAKALANMALI.
+        // Negative checks: entries carrying a placeholder/dummy marker HAVE TO
+        // BE CAUGHT.
         let dummy = vec!["/ip4/203.0.113.10/tcp/4001/p2p/dummy".to_string()];
         assert!(first_placeholder_peer(&dummy).is_some());
         let dummy_dns = vec!["_dnsaddr.placeholder-seed.mainnet.budlum.network".to_string()];
         assert!(first_placeholder_peer(&dummy_dns).is_some());
 
-        // F7: Derlenmiş mainnet sabitleri placeholder içermeli ve guard tarafından yakalanmalı.
-        // Bu, c953049'daki guard bypass regresyonunun tekrarını engeller.
+        // F7: the compiled mainnet constants have to contain a placeholder and
+        // have to be caught by the guard. This prevents a repeat of the guard
+        // bypass regression in c953049.
         let compiled_bootnodes: Vec<String> =
             MAINNET_BOOTNODES.iter().map(|s| s.to_string()).collect();
         assert!(
@@ -477,7 +481,7 @@ mod tests {
         assert!(Network::Mainnet.fallback_bootnodes().is_empty());
         assert!(Network::Mainnet.dns_seeds().is_empty());
 
-        // Pozitif kontroller: gerçek görünümlü kayıtlar serbest.
+        // Positive checks: entries that look real stay free.
         let clean = vec![
             "/ip4/139.59.10.20/tcp/4001/p2p/12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
                 .to_string(),
@@ -487,7 +491,8 @@ mod tests {
         assert!(first_placeholder_peer(&clean).is_none());
         let clean_dns = vec!["_dnsaddr.seed-1.mainnet.budlum.xyz".to_string()];
         assert!(first_placeholder_peer(&clean_dns).is_none());
-        // Boş liste: guard değil, mevcut "boş bootnode" kuralı devrede.
+        // An empty list: not the guard, but the existing "empty bootnode" rule
+        // applies.
         assert!(first_placeholder_peer(&[]).is_none());
     }
 
