@@ -30,10 +30,10 @@ BudZKVM artık 31 opcode'luk **tamamen production-ready** bir ZKVM'dir. Tüm opc
   - [BudVM Trace Schema v2](vm_trace_schema.md)
 - [ZK Dostu Mimari Tasarımı](zk_friendly_architecture.md)
 - [STARK, AIR ve Plonky3 (bud-proof)](stark_ve_plonky3.md)
-- [Derleyici ve Ekosistem (bud-compiler & bud-cli)](compiler_ve_ekosistem.md)
-- [Prover Stabilizasyonu ve Testler](prover_stabilizasyonu_ve_testler.md)
-- [Üretime Hazırlık, Soundness ve Güvenlik Sertleştirmesi](production_hardening_ve_soundness.md)
-- [Gelişmiş Dil Özellikleri ve Bellek Yönetimi](gelismis_dil_ozellikleri_ve_bellek_yonetimi.md)
+- [Derleyici ve Ekosistem (bud-compiler & bud-cli)](compiler_and_ecosystem.md)
+- [Prover Stabilizasyonu ve Testler](prover_stabilization_and_tests.md)
+- [Üretime Hazırlık, Soundness ve Güvenlik Sertleştirmesi](production_hardening_and_soundness.md)
+- [Gelişmiş Dil Özellikleri ve Bellek Yönetimi](advanced_language_features_and_memory_management.md)
 - [Stabilizasyon Durumu](STABILIZATION.md)
 
 ## Geliştirici Dokümantasyonu
