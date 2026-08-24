@@ -1,22 +1,23 @@
-# Budscan yama katmani
+# The Budscan patch layer
 
-Bu dizin Budscan'in Gecko tarafidir. Motor kaynagi burada **yok** ve olmayacak:
-yapim sirasinda Mozilla kaynagi indirilir, buradaki yamalar uygulanir, sonuc
-derlenir.
+This directory is the Gecko side of Budscan. The engine source is **not** here
+and never will be: at build time the Mozilla source is downloaded, the patches
+in this directory are applied, and the result is compiled.
 
-## Neden motor yazilmiyor
+## Why no engine is written
 
-Bir tarayici motoru uc seydir: bir HTML/CSS duzenleyici, bir JavaScript motoru
-ve bir sanal alan. Ucu de onlarca yilin isi ve ucu de saldiri yuzeyinin
-tamami. Kendi motorunu yazan bir web3 tarayicisi, cozmeye calistigi problemin
-yanina bir de tarayici guvenligi problemi ekler.
+A browser engine is three things: an HTML/CSS layout engine, a JavaScript
+engine and a sandbox. Each is decades of work and each is the whole attack
+surface. A web3 browser that writes its own engine adds a browser security
+problem on top of the problem it set out to solve.
 
-Budscan Gecko'yu yamalar ve butun kararlari `budscan` crate'ine sorar.
+Budscan patches Gecko and asks the `budscan` crate for every decision.
 
-## Neden arac katmani kabuk degil
+## Why the tooling layer is not shell
 
-Referans olarak incelenen Firefox turevlerinde yama araclarinin tamami kabuk.
-Somut olarak olculen sorun, o depolardaki `check-patchfail.sh`:
+In the Firefox derivatives studied as references, the patch tooling is shell
+throughout. The concrete measured problem is `check-patchfail.sh` in those
+repositories:
 
 ```sh
 for j in $(grep -n rej$ ../patch.tmp | awk '{ print $(NF); }'); do
@@ -26,55 +27,56 @@ done
 if [ ! -z "$s" ]; then failed_patches="$failed_patches [$curpatch]"; fi
 ```
 
-`grep` hicbir sey bulamazsa dongu bos calisir, `s` bos kalir ve betik
-**"success: All patches where applied successfully."** yazip 0 doner. Yani
-`patch` ciktisinin bicimi degisirse, bir yama tamamen basarisiz olsa bile
-kontrol hicbir seyi inceleyip OK der. Bir kontrolun sessizce hicbir sey
-incelememesi, kontrolun olmamasindan kotudur: olmayan bir kontrol yaziliyor
-sanilmaz.
+If `grep` finds nothing the loop runs empty, `s` stays empty, and the script
+prints **"success: All patches where applied successfully."** and returns 0. So
+if the format of the `patch` output changes, the check inspects nothing and
+says OK even when a patch failed completely. A check that silently inspects
+nothing is worse than no check at all: nobody mistakes a missing check for a
+written one.
 
-Budscan'in yama araclari `budscan::patchset` icinde, Rust olarak. Orada
-"hicbir sey inceleyemedim" ayri bir sonuctur (`Verdict::Vacuous`) ve
-`is_ok()` false doner.
+Budscan's patch tooling lives in `budscan::patchset`, in Rust. There, "I could
+inspect nothing" is a distinct outcome (`Verdict::Vacuous`) and `is_ok()`
+returns false.
 
-Kontroller:
+The checks:
 
 ```
-cargo run -p budscan --bin budscan -- yama-listesi budscan/browser/patches.txt
+cargo run -p budscan --bin budscan -- patch-list budscan/browser/patches.txt
 cargo run --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
 ```
 
-## Dizin duzeni
+## Directory layout
 
-| yol | ne |
+| path | what |
 |---|---|
-| `patches.txt` | uygulanacak yamalarin sirali listesi; `!` oneki devre disi |
-| `patches/` | unified diff dosyalari |
-| `settings/budscan.cfg` | kilitli tercihler (`lockPref`) |
-| `settings/policies.json` | dagitim politikasi |
-| `l10n/tr-TR/`, `l10n/en-US/` | adres cubugu rozetinin metinleri |
-| `mozconfig` | yapim yapilandirmasi |
+| `patches.txt` | the ordered list of patches to apply; a `!` prefix disables one |
+| `patches/` | unified diff files |
+| `settings/budscan.cfg` | locked preferences (`lockPref`) |
+| `settings/policies.json` | the distribution policy |
+| `l10n/tr-TR/`, `l10n/en-US/` | the address-bar badge strings |
+| `mozconfig` | the build configuration |
 
-## Marka
+## Branding
 
-Bu agacta baska bir tarayicinin marka adi gecmez. Yama duzeni fikir olarak
-alindi, isim olarak degil; `budscan::patchset::FORBIDDEN_BRAND_TOKENS` listesi
-bunu bir kural haline getiriyor ve `budscan-patchset` kapisi CI'da olcuyor.
+No other browser's brand name appears in this tree. The patch arrangement was
+taken as an idea, not as a name; the `budscan::patchset::FORBIDDEN_BRAND_TOKENS`
+list turns that into a rule and the `budscan-patchset` gate measures it in CI.
 
-## Yamalar ne yapiyor
+## What the patches do
 
-**`bud-protocol-handler.patch`**: `bud://` semasini kaydeder. Sema
-`URI_DANGEROUS_TO_LOAD` degil, `URI_IS_LOCAL_RESOURCE` de degil: kendi
-kaynagini (`bud://<isim>`) tasiyan siradan bir yuklenebilir sema. Icerik
-`budscan` cekirdegi dogruladiktan **sonra** kanala yazilir; dogrulanmayan
-baytlar kanala hic girmez.
+**`bud-protocol-handler.patch`**: registers the `bud://` scheme. The scheme is
+not `URI_DANGEROUS_TO_LOAD` and not `URI_IS_LOCAL_RESOURCE` either: it is an
+ordinary loadable scheme carrying its own origin (`bud://<name>`). Content is
+written to the channel **after** the `budscan` core has verified it; unverified
+bytes never enter the channel at all.
 
-**`address-bar-verification-badge.patch`**: adres cubuguna dogrulama gucunu
-yazar. Dort deger var (`dogrulandi`, `yalniz tasima`, `yalniz beyan`,
-`reddedildi`) ve rozet **en zayif halkayi** gosterir. Bir sayfanin baytlari
-dogrulanmis olsa bile, adin cozumu kanitsizsa rozet `yalniz beyan` der.
+**`address-bar-verification-badge.patch`**: writes the verification strength
+into the address bar. There are four values (`verified`, `transport only`,
+`claim only`, `refused`) and the badge shows **the weakest link**. Even when a
+page's bytes are verified, the badge says `claim only` if the name resolution
+carries no proof.
 
-**`name-bar-punycode.patch`**: ad kuralindan gecmeyen bir ad adres cubugunda
-punycode olarak gosterilir. Gosterilen sey ile cozulen seyin ayni olmasi bu
-tarayicinin kurali; aradaki fark tam olarak homograf saldirisinin yasadigi
-bosluktur.
+**`name-bar-punycode.patch`**: a name that does not pass the name rule is
+displayed as punycode in the address bar. What is displayed being the same as
+what is resolved is this browser's rule; the gap between the two is exactly
+where the homograph attack lives.

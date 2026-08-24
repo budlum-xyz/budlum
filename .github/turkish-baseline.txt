@@ -35,7 +35,6 @@ bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
 bud/src/bud_format_encpact.rs	18
 bud/src/bud_format_engine.rs	1
-bud/src/bud_format_fidelitygate.rs	18
 bud/src/bud_format_genomic.rs	11
 bud/src/bud_format_hardening.rs	2
 bud/src/bud_format_jpegre.rs	11
@@ -80,7 +79,6 @@ clippy.toml	5
 config/fixtures/gercek-zincir.json	3
 config/mainnet-genesis.json	1
 crates/budscan/Cargo.toml	13
-crates/budscan/browser/README.md	18
 crates/budscan/browser/l10n/tr-TR/budscan.ftl	8
 crates/budscan/browser/mozconfig	9
 crates/budscan/browser/patches.txt	2
