@@ -139,11 +139,9 @@ crates/budscan/browser/patches/name-bar-punycode.patch	6
 crates/budscan/browser/settings/budscan.cfg	19
 crates/budscan/browser/settings/policies.json	10
 crates/budscan/src/arweave.rs	32
-crates/budscan/src/bin/budscan.rs	13
 crates/budscan/src/cid.rs	30
 crates/budscan/src/content_id.rs	12
 crates/budscan/src/ens.rs	25
-crates/budscan/src/evidence.rs	35
 crates/budscan/src/evm_audit.rs	30
 crates/budscan/src/fetch.rs	31
 crates/budscan/src/lib.rs	22
@@ -151,7 +149,6 @@ crates/budscan/src/name_rule.rs	45
 crates/budscan/src/patchset.rs	44
 crates/budscan/src/punycode.rs	16
 crates/budscan/src/query.rs	27
-crates/budscan/src/resolve.rs	43
 crates/budscan/src/search.rs	45
 crates/lubot/ARCHITECTURE.md	34
 crates/lubot/Cargo.toml	5
