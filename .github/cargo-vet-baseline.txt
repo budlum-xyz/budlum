@@ -1,26 +1,26 @@
 437
 # ---------------------------------------------------------------------------
-# cargo-vet ratchet baseline: denetimsiz (unvetted) bağımlılık sayısı.
-# Bu dosyanın İLK bare-sayı satırı baseline'dır
-# (scripts/check-cargo-vet.sh `grep -E '^[0-9]+$' | head -1` ile okur).
+# cargo-vet ratchet baseline: the number of unvetted dependencies.
+# The FIRST bare-number line of this file is the baseline
+# (scripts/check-cargo-vet.sh reads it with `grep -E '^[0-9]+$' | head -1`).
 #
-# 437 = cargo-vet'in bu repoda ÇALIŞTIĞI ilk gerçek ölçüm (2026-07-26).
-# Öncesinde supply-chain/config.toml uydurma anahtarlar içerdiği için araç
-# parse hatasıyla düşüyordu; dosyanın varlığı denetim yapıldığı izlenimi
-# veriyordu ama tek bir bağımlılık bile denetlenmemişti.
+# 437 = the first real measurement in which cargo-vet actually RAN in this
+# repository (2026-07-26). Before that supply-chain/config.toml contained
+# invented keys so the tool fell over with a parse error; the file's existence
+# gave the impression of auditing, but not a single dependency had been audited.
 #
-# Kural: bu sayı ARTAMAZ. Düşmesi serbesttir ve teşvik edilir - düştüğünde
-# bilinçli bir PR ile burası da düşürülür (ratchet sıkılır). Sayıyı yukarı
-# çekmek CI-softening sayılır.
+# Rule: this number MUST NOT RISE. Lowering it is free and encouraged - when it
+# drops, this file is lowered in a deliberate PR (the ratchet tightens). Raising
+# the number counts as CI softening.
 #
-# Import kapsamı ölçüldü (2026-07-26): `cargo vet regenerate imports` altı
-# güvenilir kaynaktan (Mozilla, Google, Bytecode Alliance, ISRG, Embark,
-# Zcash) 158 crate için 268 denetim kaydı çekti - imports.lock 74 KB. Buna
-# rağmen sayı 437'de sabit: imports.lock dolu ve tamamen boş halleriyle
-# ölçüm birebir aynı sonucu verdi (437 = 437, kapanan crate farkı 0).
-# Sebep, cargo-vet'in tam sürüm/delta eşleşmesi istemesi; çekilen denetimler
-# bizim kilitli sürümlerimizi kapsamıyor. Yani baseline "import'lar henüz
-# çekilmedi" diye şişkin DEĞİL, gerçek denetim borcunu gösteriyor.
+# Import coverage was measured (2026-07-26): `cargo vet regenerate imports`
+# pulled 268 audit records for 158 crates from six trusted sources (Mozilla,
+# Google, Bytecode Alliance, ISRG, Embark, Zcash) - imports.lock is 74 KB. Even
+# so the number stays at 437: the measurement gave an identical result with
+# imports.lock full and completely empty (437 = 437, zero crates closed).
+# The reason is that cargo-vet requires an exact version/delta match; the
+# fetched audits do not cover our locked versions. So the baseline is NOT
+# inflated by "imports not fetched yet", it shows the real audit debt.
 #
-# Borç eritme önceliği (kripto/FFI yüzeyi önce):
+# Debt paydown priority (the crypto/FFI surface first):
 #   ring, pqcrypto-dilithium, cryptoki, bls12_381, aes-gcm, chacha20
