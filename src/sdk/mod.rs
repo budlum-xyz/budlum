@@ -1,94 +1,99 @@
-//! Budlum proje dosyası (`budlum.toml`) şeması.
+//! The Budlum project file (`budlum.toml`) schema.
 //!
-//! # Bu modülün geçmişi
+//! # How this module got here
 //!
-//! `src/sdk/` beş dosyaydı ve `lib.rs`'ten hiç bildirilmemişti: 1871 satırın
-//! tamamı derlenmiyordu. Derlenmediği için ne clippy, ne kapılar, ne testler
-//! bakıyordu. Ölçüldü, tahmin edilmedi: dizin bildirildiğinde ortaya çıkan
-//! şey, isimlerinin vaat ettiği işi yapmayan üç dosyaydı.
+//! `src/sdk/` was five files and was never declared from `lib.rs`: all 1871
+//! lines went uncompiled. Because they did not compile, nothing looked at
+//! them - not clippy, not the gates, not the tests. This was measured, not
+//! guessed: declaring the directory surfaced three files that did not do the
+//! work their names promised.
 //!
-//! * `contracts.rs` - `compile()` bir derleyici değildi. Kaynağın boş olup
-//!   olmadığına bakıp `bytecode_hash` alanına kaynağın hash'ini koyuyordu;
-//!   kendi yorumu "şimdilik stub" diyordu. `CompiledContract` adlı tipin
-//!   içinde bytecode yoktu.
-//! * `devnet.rs` - `start_domain()` düğüm başlatmıyordu. Bir dizin oluşturup
-//!   bir alanı `Running` yapıyor ve "RPC at 127.0.0.1:port" logluyordu; o
-//!   portu dinleyen hiçbir şey yoktu, `rpc_endpoints()` bağlanılamayacak
-//!   adresler döndürüyordu.
-//! * `runner.rs` - `test()` test koşturmuyordu. Her sözleşme için iki sonuç
-//!   uyduruyordu ve `all_passed()` daima `true` dönüyordu: sözleşmesi bozuk
-//!   bir geliştiriciye yeşil gösterirdi.
+//! * `contracts.rs` - `compile()` was not a compiler. It checked whether the
+//!   source was empty and put the hash of the source into the `bytecode_hash`
+//!   field; its own comment said "stub for now". A type called
+//!   `CompiledContract` contained no bytecode.
+//! * `devnet.rs` - `start_domain()` started no node. It created a directory,
+//!   marked a domain `Running` and logged "RPC at 127.0.0.1:port"; nothing was
+//!   listening on that port, and `rpc_endpoints()` returned addresses nothing
+//!   could connect to.
+//! * `runner.rs` - `test()` ran no tests. It invented two results per contract
+//!   and `all_passed()` always returned `true`: a developer with a broken
+//!   contract would have been shown green.
 //!
-//! Üçü de silindi. Sahte bir devnet'in tutulması için bir neden de yoktu:
-//! gerçek 4 düğümlü devnet `ops/docker-compose.yml` ile zaten var, CI'da
-//! `devnet-multinode-smoke` işinde gerçek RPC'ye karşı koşuyor. İkinci ve
-//! sahte bir kopya, gerçeğinin yanında yalnızca yanıltır.
+//! All three were deleted. There was no reason to keep a fake devnet either:
+//! the real four-node devnet already exists as `ops/docker-compose.yml` and
+//! runs against real RPC in CI's `devnet-multinode-smoke` job. A second, fake
+//! copy standing next to the real one only misleads.
 //!
-//! `fixture.rs` de silindi: ürettiği `ProofFixture`, `developer_os.rs`'teki
-//! doğrulanan manifest kaydıyla aynı adı taşıyıp farklı şey ifade ediyordu.
-//! Tek tip `developer_os.rs`'te yaşıyor.
+//! `fixture.rs` went too: the `ProofFixture` it produced carried the same name
+//! as the verified manifest record in `developer_os.rs` while meaning something
+//! different. One type now lives, in `developer_os.rs`.
 //!
-//! # Geriye kalan
+//! # What remains
 //!
-//! Bir dosya biçimi şeması. İddiası yok: bir TOML dosyasını okur, yazar ve
-//! varsayılanını üretir. Yaptığı iş kadar söylüyor.
+//! A file-format schema. It claims nothing: it reads a TOML file, writes one,
+//! and produces a default. It says exactly as much as it does.
 //!
-//! # İkinci ölçüm: şema silinen araçları tarif ediyordu
+//! # A second measurement: the schema described the deleted tools
 //!
-//! Yukarıdaki üç dosya silindikten sonra şema oldukları gibi kalmıştı.
-//! `[devnet]` silinen sahte devnet'i, `[contracts]` silinen sahte derleyiciyi,
-//! `[fixtures]` silinen fixture üreticisini yapılandırıyordu. Ağaçta tek bir
-//! `budlum.toml` yok ve bu bölümleri okuyan hiçbir tip kalmamıştı (ölçüldü:
-//! `DevnetSection`, `ContractsSection`, `FixturesSection` için modül dışında
-//! sıfır kullanım).
+//! After those three files went, the schema stayed as it was. `[devnet]`
+//! configured the deleted fake devnet, `[contracts]` the deleted fake compiler,
+//! `[fixtures]` the deleted fixture generator. There is not one `budlum.toml`
+//! in the tree, and no type was left reading these sections (measured: zero
+//! uses of `DevnetSection`, `ContractsSection`, `FixturesSection` outside the
+//! module).
 //!
-//! Bir yapılandırma alanı, yapılandırdığı şey yokken daha kötüdür: dosyaya
-//! `domains = ["pow", "pos"]` yazan bir geliştirici o alanların başlatılacağını
-//! sanır. Üç bölüm silindi; geriye projenin gerçekten sahip olduğu şey kaldı:
-//! adı ve sürümü.
+//! A configuration field is worse than useless when the thing it configures is
+//! gone: a developer who writes `domains = ["pow", "pos"]` into the file
+//! believes those domains will be started. The three sections were deleted, and
+//! what is left is what the project actually has: its name and its version.
 //!
 //! WIRING: unwired - this is a file-format schema for a project file that
 //! lives outside the node. Nothing in the node reads `budlum.toml`, and
 //! nothing should: it describes a developer's project, not chain state.
 
-/// `budlum.toml` proje yapılandırma dosyası şeması.
+/// The `budlum.toml` project configuration schema.
 ///
-/// Bir Budlum projesinin kök dizinindeki `budlum.toml` dosyası projeyi
-/// Adlandırır ve sürümler. Derleme, test ve devnet bağlama alanları
-/// Kaldırıldı: o araçlar iddialarını karşılamadıkları için silindi, ve
-/// Yapılandırdığı şey olmayan bir alan, olmayan bir yeteneği vaat eder.
+/// The `budlum.toml` at the root of a Budlum project names and versions that
+/// project. The build, test and devnet binding sections were removed: those
+/// tools were deleted for not meeting their claims, and a field that
+/// configures nothing promises a capability that does not exist.
 ///
-/// # Örnek `budlum.toml`
+/// # Example `budlum.toml`
+///
+/// The keys are lowercase because that is what the fields deserialize from.
+/// This example used to be written with capitals, which would not have parsed
+/// for anyone who copied it.
 ///
 /// ```toml
 /// [project]
-/// Name = "my-budlum-dapp"
-/// Version = "0.1.0"
-/// Budlum_version = "0.1.0"
+/// name = "my-budlum-dapp"
+/// version = "0.1.0"
+/// budlum_version = "0.1.0"
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BudlumToml {
-    /// Proje meta verileri.
+    /// Project metadata.
     pub project: ProjectSection,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProjectSection {
-    /// Proje adı.
+    /// Project name.
     pub name: String,
-    /// Proje sürümü (semver).
+    /// Project version, semver.
     pub version: String,
-    /// Hedef Budlum çekirdek sürümü.
+    /// The Budlum core version this targets.
     #[serde(default)]
     pub budlum_version: Option<String>,
 }
 
 impl BudlumToml {
-    /// `budlum.toml` dosyasını okur ve parse eder.
+    /// Reads and parses a `budlum.toml`.
     ///
     /// # Errors
     ///
-    /// Dosya okunamazsa `Io`, geçerli TOML değilse `Parse` döner.
+    /// Returns `Io` when the file cannot be read, `Parse` when it is not valid TOML.
     pub fn load(path: &std::path::Path) -> Result<Self, BudlumTomlError> {
         let content = std::fs::read_to_string(path).map_err(|e| BudlumTomlError::Io {
             path: path.to_path_buf(),
@@ -100,7 +105,7 @@ impl BudlumToml {
         })
     }
 
-    /// Varsayılan proje yapılandırmasını döndürür (yeni proje iskeleti için).
+    /// Returns the default project configuration, for scaffolding a new project.
     #[must_use]
     pub fn default_template(name: &str) -> Self {
         Self {
@@ -112,11 +117,11 @@ impl BudlumToml {
         }
     }
 
-    /// Yapılandırmayı TOML olarak dosyaya yazar.
+    /// Writes the configuration to a file as TOML.
     ///
     /// # Errors
     ///
-    /// Serileştirme başarısız olursa `Serialize`, yazma başarısız olursa `Io`.
+    /// Returns `Serialize` when serialization fails, `Io` when the write fails.
     pub fn save(&self, path: &std::path::Path) -> Result<(), BudlumTomlError> {
         let content = toml::to_string_pretty(self).map_err(|e| BudlumTomlError::Serialize {
             path: path.to_path_buf(),
