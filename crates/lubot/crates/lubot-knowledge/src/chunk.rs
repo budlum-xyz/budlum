@@ -1,41 +1,41 @@
-//! Belge parçalama - bir kaynak dosyayı satır-aralıklı, örtüşmeli
-//! parçalara böler.
+//! Document chunking - splits a source file into overlapping chunks over line
+//! ranges.
 //!
-//! Her parça `start_line` / `end_line` (1-tabanlı) korur; böylece
-//! çıkarılan her bilgi, kaynağa `yol:Lx-Ly` biçiminde geri işaret
-//! edebilir (kanıt izlenebilirliği).
+//! Every chunk keeps `start_line` / `end_line` (1-based), so any extracted
+//! piece of knowledge can point back at the source as `path:Lx-Ly` (evidence
+//! traceability).
 
 use serde::{Deserialize, Serialize};
 
-/// Bir kaynak dosya parçası.
+/// One chunk of a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chunk {
     pub id: String,
     pub project_id: String,
     pub document_id: String,
-    /// Proje köküne göreli yol.
+    /// The path relative to the project root.
     pub path: String,
-    /// 1-tabanlı başlangıç satırı (dahil).
+    /// The 1-based start line (inclusive).
     pub start_line: usize,
-    /// Bitiş satırı (dahil).
+    /// The end line (inclusive).
     pub end_line: usize,
     pub content: String,
     pub content_hash: [u8; 32],
 }
 
-/// Varsayılan parçalama parametreleri.
+/// The default chunking parameters.
 pub const DEFAULT_MAX_LINES: usize = 120;
 pub const DEFAULT_OVERLAP_LINES: usize = 10;
 
-/// Bir belgeyi satır-aralıklı parçalara böler.
+/// Splits a document into chunks over line ranges.
 ///
-/// `document_id`, `project_id` ve `path` çağıran tarafından verilir;
-/// `id` her parça için `document_id:start-end` biçiminde deterministik
-/// üretilir (yeniden çalıştırmada kararlı).
+/// `document_id`, `project_id` and `path` are supplied by the caller; the `id`
+/// of each chunk is produced deterministically as `document_id:start-end`
+/// (stable across reruns).
 ///
 /// # Errors
 ///
-/// SHA-256 başlatma hatasında (pratikte imkânsız).
+/// On a SHA-256 initialisation failure (impossible in practice).
 pub fn chunk_document(
     project_id: &str,
     document_id: &str,
@@ -75,7 +75,8 @@ pub fn chunk_document(
             break;
         }
         start = end.saturating_sub(overlap);
-        // Örtüşme sonsuz döngüye girmesin: en az bir satır ilerle.
+        // Do not let the overlap turn into an infinite loop: advance by at
+        // least one line.
         if start >= end {
             start = end.saturating_sub(1).min(total - 1);
         }
@@ -83,7 +84,7 @@ pub fn chunk_document(
     Ok(chunks)
 }
 
-/// Kanıt başvurusunu `yol:Lx-Ly` biçiminde biçimler.
+/// Formats the evidence reference as `path:Lx-Ly`.
 #[must_use]
 pub fn format_evidence(path: &str, start_line: usize, end_line: usize) -> String {
     if path.is_empty() {
@@ -111,14 +112,14 @@ mod tests {
     fn chunks_cover_all_lines_with_overlap() {
         let chunks = chunk_document("p", "d", "src/a.rs", &doc(), Some(100), Some(10)).unwrap();
         assert!(!chunks.is_empty());
-        // İlk parça 1'den başlar, son parça 300'de biter.
+        // The first chunk starts at 1 and the last one ends at 300.
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks.last().unwrap().end_line, 300);
-        // Örtüşme var: ardışık parçaların aralıkları kesişir.
+        // There is overlap: the ranges of consecutive chunks intersect.
         for w in chunks.windows(2) {
             assert!(w[1].start_line <= w[0].end_line);
         }
-        // Tüm satırlar en az bir parçada.
+        // Every line appears in at least one chunk.
         let mut covered = vec![false; 300];
         for c in &chunks {
             for l in c.start_line..=c.end_line {
