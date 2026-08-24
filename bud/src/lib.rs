@@ -205,12 +205,13 @@ pub mod bud_format_spec;
 #[cfg(feature = "bud3")]
 pub mod bud_format_recipe_record;
 pub mod bud_format_wire;
-// `bud_format_sertlesme` ve `bud_format_qrvideo` 3.0 modülleridir ama
-// kapısızdı: yukarıda iki `#[cfg(feature = "bud3")]` üst üste yazılmıştı
-// (öznitelik tekrarı derleyici için tek kapıya eşdeğerdir, fazladan olanı
-// sessizce yutulur) ve bu ikisi kapının DIŞINDA kalmıştı. Sonuç: default
-// (bud2) derlemede QR-video yüzeyi de geliyordu, yani 3.0 kapalıyken 3.0 kodu
-// derleniyordu. Tekrarlar kaldırıldı, iki modül ait olduğu kapıya alındı.
+// `bud_format_hardening` and `bud_format_qrvideo` are 3.0 modules but they had
+// no gate: two `#[cfg(feature = "bud3")]` attributes were written on top of
+// each other above (a repeated attribute is equivalent to a single gate for the
+// compiler, the extra one is swallowed silently) and these two were left
+// OUTSIDE the gate. The result: the default (bud2) build also pulled in the
+// QR-video surface, so 3.0 code compiled while 3.0 was off. The duplicates were
+// removed and both modules were moved under the gate they belong to.
 #[cfg(all(test, feature = "bud3"))]
 pub mod bud3_live_test;
 pub mod bud_format_edition;
@@ -219,6 +220,6 @@ pub mod bud_format_qrvideo;
 #[cfg(feature = "bud3")]
 pub mod bud_format_r3fix;
 #[cfg(feature = "bud3")]
-pub mod bud_format_sertlesme;
+pub mod bud_format_hardening;
 #[cfg(feature = "bud3")]
 pub mod bud_format_ux;
