@@ -1,51 +1,76 @@
 # Lubot
 
-Budlum L1'in merkeziyetsiz yapay zeka katmanının **off-chain iskeleti**.
+The **off-chain skeleton** of the decentralised artificial intelligence layer
+of Budlum L1.
 
-> **Konum (2026-08-13):** Bu workspace, ayrı `budlum-xyz/lubot` reposundan
-> ana repoya taşındı. Zincir tarafı `src/lubot/` +
-> `src/ai/` içinde yaşar; off-chain iskelet bu `lubot/` dizininde, kendi
-> Cargo workspace'i olarak durur (budzero ile aynı desen). Tüm Lubot işi
-> tek PR'da toplanır.
+> **Location, 2026-08-13:** this workspace was moved into the main repository
+> from the separate `budlum-xyz/lubot` repository. The chain side lives in
+> `src/lubot/` and `src/ai/`; the off-chain skeleton stands in this `lubot/`
+> directory as its own Cargo workspace, in the same pattern as budzero. All
+> Lubot work is collected into a single pull request.
 
-- **Zincir üstü taraf** budlum/main deposundadır (`src/lubot/`): model kaydı, operator compute-bond, Pollen grant'leri, B.U.D. AI-dataset etiketleri, SocialFi köprüsü. Bu workspace ona dokunmaz; onun off-chain tamamlayıcısıdır.
-- **Kapalı-devre ilke:** Lubot yalnızca Pollen grant'li, B.U.D. StorageDeal etiketli veya SocialFi kaynaklı veriyi okur. Bu iskelette dış veri okuyan tek bir yol yoktur; dış veri setleri bile önce B.U.D.'a kaydedilir.
-- **Taban model:** DeepSeek V4 ailesi (MIT ağırlıklar; `V4-Flash-Base` varsayılan, karar ilk ince ayar öncesi yeniden onaylanır).
-- **Kademe adlandırması (2026-08-13):** DeepSeek'in varyant adları Lubot'ta kullanılmaz. Flash tabanlı kademe **`lubot-light`**, Pro tabanlı kademe **`lubot-normal`** olarak sunulur. Çarpan/kat etiketleri (0.5x, 10x vb.) Lubot'ta yoktur - denetim kodda (`lubot-serve::config::assert_served_name_is_ours`).
-- **Atıf politikası:** "DeepSeek → Lubot" isim değişikliği yalnızca kendi kodumuzda yapılır. Kopyalanan üçüncü taraf kodu ve ağırlık adları olduğu gibi kalır; MIT bildirimi ve "tabanıdır" atfı `NOTICE.md` ve model kartında yer alır.
+- **The on-chain side** is in the budlum main repository, under `src/lubot/`:
+  the model registry, the operator compute bond, Pollen grants, the B.U.D.
+  AI dataset tags and the SocialFi bridge. This workspace does not touch it; it
+  is its off-chain complement.
+- **The closed-loop principle:** Lubot reads only data that carries a Pollen
+  grant, a B.U.D. `StorageDeal` tag or a SocialFi origin. In this skeleton
+  there is not a single path that reads outside data; even open data sets are
+  registered with B.U.D. first.
+- **The base model:** the DeepSeek V4 family, with MIT weights.
+  `V4-Flash-Base` is the default, and the decision is reconfirmed before the
+  first fine-tune.
+- **Tier naming, 2026-08-13:** DeepSeek's variant names are not used in Lubot.
+  The Flash-based tier is served as **`lubot-light`** and the Pro-based tier as
+  **`lubot-normal`**. Multiplier labels such as 0.5x or 10x do not exist in
+  Lubot, and the check lives in the code, at
+  `lubot-serve::config::assert_served_name_is_ours`.
+- **Attribution policy:** the "DeepSeek to Lubot" rename is done only in our
+  own code. Copied third party code and weight names stay as they are, and the
+  MIT notice together with the "is the base of" attribution appears in
+  `NOTICE.md` and on the model card.
 
-## Durum
+## Status
 
-İskelet: derlenebilir taslaklar + yapılandırma + araştırma raporları. Hiçbir parça henüz üretim değildir; hash doğrulaması bilinçli olarak **fail-closed**'dur (`lubot-data::verify`).
+The skeleton: compilable drafts, configuration and research reports. No part of
+it is production yet, and hash verification is deliberately **fail-closed**, in
+`lubot-data::verify`.
 
-## Yapı
+## Structure
 
-| Crate | Görev |
+| Crate | Job |
 |---|---|
-| `lubot-core` | Model kimliği, dataset tipleri, LoRA manifesti (ayna tipler - K3 kararı) |
-| `lubot-data` | Kapalı-devre kaynak denetimi, kayıt formatı, fail-closed doğrulama |
-| `lubot-serve` | vLLM/SGLang köprüsü yapılandırması (ağırlık adı korunur, sunulan ad bizimdir) |
-| `lubot-tune` | Eğitim planı (LoRA BF16/FP16 - FP4 tip sisteminde yok) + çıktı hash kilidi |
-| `lubot-ops` | Operatör CLI iskeleti (register/bond/serve/tune/status) |
+| `lubot-core` | The model identity, the dataset types and the LoRA manifest; mirror types, per decision K3 |
+| `lubot-data` | Closed-loop source checking, the record format, fail-closed verification |
+| `lubot-serve` | The vLLM and SGLang bridge configuration; the weight name is preserved and the served name is ours |
+| `lubot-tune` | The training plan, LoRA in BF16 or FP16, with FP4 absent from the type system, plus the output hash lock |
+| `lubot-ops` | The operator CLI skeleton: register, bond, serve, tune, status |
 
-## Derleme
+## Building
 
 ```bash
 cargo check --workspace
 cargo test --workspace
 ```
 
-## Kararlar
+## Decisions
 
-K2 (taban model: soyut, ilk ince ayar öncesi onay), K3 (tip bağlantısı: sonraya - iskelet iki seçeneğe uygun), yöntem: LoRA SFT (2026-08-13). Ayrıntı: `docs/MIMARI_ONERISI_2026-08-13.md`.
+K2, the base model, is abstract and approved before the first fine-tune. K3,
+the type binding, is deferred, and the skeleton suits either option. The method
+is LoRA SFT, decided 2026-08-13.
 
-## Dokümanlar
+## Documents
 
-- `docs/ARASTIRMA_RAPORU_2026-08-13.md` - DeepSeek V4 araştırması
-- `docs/MIMARI_ONERISI_2026-08-13.md` - iskelet mimarisi ve K1-K8 kararları
-- `docs/EGITIM_VERISI_STRATEJISI_2026-08-13.md` - eğitim verisi stratejisi
-- `docs/ACIK_KAYNAK_VERI_ARASTIRMASI_2026-08-13.md` - açık veri setleri + en iyi senaryo
+`ARCHITECTURE.md` in this directory is the layer summary.
 
-İnce ayar koşu artefaktları (notebook, seed verisi, koşu kılavuzları, durum
-matrisi) bu depoda tutulmaz: yürütülebilir olmayan içerik kod tabanının
-dışındadır.
+The following documents were referenced by earlier versions of this README and
+**do not exist anywhere in the tree**; they are recorded here as unresolved
+references rather than repeated as though they resolved:
+`docs/ARASTIRMA_RAPORU_2026-08-13.md`, `docs/MIMARI_ONERISI_2026-08-13.md`,
+`docs/EGITIM_VERISI_STRATEJISI_2026-08-13.md` and
+`docs/ACIK_KAYNAK_VERI_ARASTIRMASI_2026-08-13.md`. There is no `docs/`
+directory under `crates/lubot/`.
+
+Fine-tuning run artefacts, meaning notebooks, seed data, run guides and the
+status matrix, are not kept in this repository: content that cannot be executed
+belongs outside the code base.
