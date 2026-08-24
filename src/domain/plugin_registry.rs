@@ -1,62 +1,62 @@
-//! Custom alanlarin konsensus eklentileri.
+//! Consensus plugins for custom domains.
 //!
-//! # Eklenti konsensus kodudur
+//! # A plugin is consensus code
 //!
-//! `ConsensusKind::Custom` bir alanin finality kararini buradaki eklentiye
-//! devreder (`blockchain.rs`, `verify_finality` dagitimi). Yani eklenti,
-//! "hangi blok kesinlesmis sayilir" sorusunun cevabini yazan koddur - bir
-//! yapilandirma degeri degil, konsensus kurallarinin kendisi.
+//! `ConsensusKind::Custom` delegates a domain's finality decision to the plugin
+//! registered here, through the `verify_finality` dispatch in `blockchain.rs`.
+//! So a plugin is the code that writes the answer to "which block counts as
+//! final": not a configuration value, but the consensus rules themselves.
 //!
-//! Bundan cikan sonuc: bir eklentiyi **degistirmek**, alanin konsensus
-//! kurallarini degistirmektir. Kayit anindaki eslesme denetimi (tur ↔ adapter
-//! adi) yalnizca ilk kayitta calisiyorsa, kayittan sonraki her degisiklik o
-//! denetimin arkasindan dolanir.
+//! What follows from that: **changing** a plugin is changing the domain's
+//! consensus rules. If the match check performed at registration time, between
+//! the kind and the adapter name, only runs on the first registration, then
+//! every change after that registration walks around behind the check.
 //!
-//! # Bu dosyada olan neydi
+//! # What was happening in this file
 //!
-//! `register` yeniden kaydi reddediyordu, ki dogru. Ama yaninda `remove`
-//! duruyordu ve ikisi birlikte tam olarak reddedilen seyi yapiyordu:
-//! `remove(d)` sonra `register(d, yeni)`. Reddedilen sey tek adimda
-//! yapilamiyordu, iki adimda serbestti - ve iki adim, bir saldirgan icin bir
-//! adimdan yalnizca bir satir fazladir.
+//! `register` refused a re-registration, which is right. But `remove` sat next
+//! to it, and together the two did exactly the thing that was refused:
+//! `remove(d)` followed by `register(d, new)`. What was refused could not be
+//! done in one step but was free in two, and two steps are only one line more
+//! than one step for an attacker.
 //!
-//! `remove` uretimde hicbir yerden cagrilmiyordu; yalnizca testler
-//! kullaniyordu. Bir yetkinin uretimde kullanilmiyor olmasi onu zararsiz
-//! yapmaz: kod tabaninda duran her yetenek, sonraki gelistiricinin
-//! kullanabilecegi bir yetenektir, ve adi (`remove`) ne yaptigini soyler ama
-//! neye mal oldugunu soylemez.
+//! `remove` was called from nowhere in production; only the tests used it. A
+//! capability not being used in production does not make it harmless: every
+//! capability standing in the code base is a capability the next developer can
+//! use, and its name, `remove`, says what it does but not what it costs.
 //!
-//! Simdi degisim mumkun, ama **kaydediliyor**: [`DomainPluginRegistry::replace`]
-//! eski eklentinin adapter adini, yenisininkini ve degisimin hangi alanda
-//! oldugunu bir denetim girdisine yazar. Kaydin kendisi degisimi engellemez -
-//! engellemek dogru olmazdi, cunku hatali bir eklentinin degistirilebilmesi
-//! gerekir. Kaydin isi, degisimin **gorunmeden** olmasini engellemek.
+//! Change is now possible, but it is **recorded**:
+//! [`DomainPluginRegistry::replace`] writes the old plugin's adapter name, the
+//! new one's, and the domain the change happened in, into an audit entry. The
+//! record itself does not prevent the change; preventing it would be wrong,
+//! because a faulty plugin has to be replaceable. The record's job is to
+//! prevent the change from happening **unseen**.
 
 use crate::domain::plugin::ConsensusDomainPlugin;
 use crate::domain::types::DomainId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Bir eklentinin degistirildigi anin kaydi.
+/// The record of the moment a plugin was replaced.
 ///
-/// Alanlar, degisimden sonra "ne olmustu" sorusunu cevaplamaya yeter: hangi
-/// alan, hangi adapter'dan hangisine. Zaman damgasi yok, cunku bu kayit
-/// zincirin kendi sirasinda tutuluyor ve duvar saati dugumden dugume
-/// degisir - denetlenebilir bir iz, her dugumde ayni olmak zorunda.
+/// The fields are enough to answer "what happened" after a change: which
+/// domain, from which adapter to which. There is no timestamp, because this
+/// record is kept in the chain's own order and a wall clock differs from node
+/// to node; an auditable trail has to be identical on every node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginReplacement {
-    /// Konsensus kurallari degisen alan.
+    /// The domain whose consensus rules changed.
     pub domain_id: DomainId,
-    /// Degisimden onceki adapter adi.
+    /// The adapter name before the change.
     pub previous_adapter: String,
-    /// Degisimden sonraki adapter adi.
+    /// The adapter name after the change.
     pub next_adapter: String,
 }
 
 #[derive(Default)]
 pub struct DomainPluginRegistry {
     plugins: BTreeMap<DomainId, Arc<dyn ConsensusDomainPlugin>>,
-    /// Yapilmis her eklenti degisiminin izi, sirasiyla.
+    /// The trail of every plugin change made, in order.
     replacements: Vec<PluginReplacement>,
 }
 
@@ -69,12 +69,12 @@ impl DomainPluginRegistry {
         }
     }
 
-    /// Bir alana ilk eklentiyi kaydeder.
+    /// Registers the first plugin for a domain.
     ///
     /// # Errors
     ///
-    /// Alanda zaten bir eklenti varsa. Degistirmek icin
-    /// [`Self::replace`] kullanilmali: ayri bir isim, cunku ayri bir karar.
+    /// If the domain already has a plugin. Changing it goes through
+    /// [`Self::replace`]: a separate name, because it is a separate decision.
     pub fn register(
         &mut self,
         domain_id: DomainId,
@@ -90,17 +90,18 @@ impl DomainPluginRegistry {
         Ok(())
     }
 
-    /// Var olan bir eklentiyi degistirir ve degisimi denetim izine yazar.
+    /// Replaces an existing plugin and writes the change into the audit trail.
     ///
-    /// Cagrildiktan sonra [`Self::replacements`] bir girdi daha tasir. Iz,
-    /// eklentinin **ne oldugunu** degil hangi adapter'i sundugunu kaydeder:
-    /// alanin konsensus davranisini disaridan gorunur kilan sey odur, ve iki
-    /// dugumde ayni degeri verir.
+    /// After the call, [`Self::replacements`] carries one more entry. The trail
+    /// records not **what** the plugin is but which adapter it offers: that is
+    /// what makes the domain's consensus behaviour visible from the outside, and
+    /// it gives the same value on two nodes.
     ///
     /// # Errors
     ///
-    /// Alanda kayitli bir eklenti yoksa. Var olmayani degistirmek, ilk kaydi
-    /// denetimsiz yapmanin baska bir yolu olurdu.
+    /// If the domain has no plugin registered. Replacing something that does not
+    /// exist would be another way of making the first registration without
+    /// audit.
     pub fn replace(
         &mut self,
         domain_id: DomainId,
@@ -122,7 +123,7 @@ impl DomainPluginRegistry {
         Ok(record)
     }
 
-    /// Bu kayit defterinde yapilmis eklenti degisimleri, sirasiyla.
+    /// The plugin changes made in this registry, in order.
     #[must_use]
     pub fn replacements(&self) -> &[PluginReplacement] {
         &self.replacements
@@ -174,40 +175,46 @@ mod tests {
         assert!(registry.register(1, plugin()).is_err());
     }
 
-    /// Bir eklentiyi degistirmek iz birakir.
+    /// Replacing a plugin leaves a trail.
     ///
-    /// Once `remove` + `register` ikilisi vardi ve bu, `register`'in
-    /// reddettigi seyi iki adimda yapiyordu - izsiz. Simdi degisim tek bir
-    /// adla yapiliyor ve o ad kayit tutuyor.
+    /// There used to be a `remove` and `register` pair, which did in two steps
+    /// what `register` refused, and left no trail. Now the change goes by a
+    /// single name, and that name keeps a record.
     #[test]
     fn replacing_a_plugin_leaves_an_audit_trail() {
         let mut registry = DomainPluginRegistry::new();
-        registry.register(7, plugin()).expect("ilk kayit");
+        registry
+            .register(7, plugin())
+            .expect("the first registration");
         assert!(
             registry.replacements().is_empty(),
-            "ilk kayit bir degisim degil"
+            "a first registration is not a change"
         );
 
         let record = registry
             .replace(7, plugin())
-            .expect("degisim kabul edilmeli");
+            .expect("the change must be accepted");
         assert_eq!(record.domain_id, 7);
-        assert_eq!(registry.replacements(), &[record], "degisim ize gecmeli");
-
-        // Iz birikir: ikinci degisim oncekini silmez, cunku silinen bir iz
-        // izin kendisini anlamsiz kilar.
-        registry.replace(7, plugin()).expect("ikinci degisim");
-        assert_eq!(registry.replacements().len(), 2);
-
-        // Kayitli olmayan bir alan degistirilemez: aksi halde `replace`,
-        // ilk kaydi denetimden kacirmanin yolu olurdu.
-        assert!(
-            registry.replace(99, plugin()).is_err(),
-            "olmayan eklenti degistirilememeli"
+        assert_eq!(
+            registry.replacements(),
+            &[record],
+            "the change must reach the trail"
         );
 
-        // Ve degisimden sonra okunan eklenti yenisi olmali - iz tutup eski
-        // davranisi surdurmek, izin yalan soylemesi olurdu.
+        // The trail accumulates: a second change does not erase the first,
+        // because an erased trail makes the trail itself meaningless.
+        registry.replace(7, plugin()).expect("the second change");
+        assert_eq!(registry.replacements().len(), 2);
+
+        // A domain that is not registered cannot be replaced; otherwise `replace`
+        // would be the way to keep the first registration out of the audit.
+        assert!(
+            registry.replace(99, plugin()).is_err(),
+            "a plugin that does not exist must not be replaceable"
+        );
+
+        // And after the change, the plugin read back must be the new one; keeping
+        // a trail while continuing the old behaviour would make the trail lie.
         assert!(registry.get(7).is_some());
     }
 }
