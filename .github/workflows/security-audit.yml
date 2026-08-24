@@ -1,24 +1,24 @@
 # Security Audit, Budlum Core
 #
-# Bu workflow, tek-authority CI yaklaşımını uygular.
-# Mevcut CI zaten şunları karşılıyor: cargo fmt/clippy (ci.yml),
+# This workflow implements the single-authority CI approach.
+# The existing CI already covers: cargo fmt/clippy (ci.yml),
 # Dependency-review (dependency-review.yml), Trivy + Miri + udeps/geiger
 # (docker-smoke.yml / miri.yml / supply-chain-extra.yml), determinism
 # (determinism.yml), semver (semver.yml), fuzz (fuzz-nightly.yml).
-# Burada EKSİK olan "Hemen" maddeleri ekleniyor:
+# The MISSING "immediate" items are added here:
 #   - actionlint (workflow YAML lint)
 #   - zizmor (GitHub Actions statik analiz)
 #   - CodeQL for Rust (SAST)
 #   - MSRV job (1.97.0)
-#   - cargo-hack özellik matrisi
+#   - the cargo-hack feature matrix
 #   - Hadolint (Dockerfile lint)
-#   - çapraz mimari (x86_64 + arm64) determinizm
-#   - OpenSSF Scorecard (zamanlanmış, bilgilendirici)
+#   - cross-architecture (x86_64 + arm64) determinism
+#   - OpenSSF Scorecard (scheduled, informational)
 #
-# TÜM action'lar Güvenlik Planı §3.1 gereği TAM commit SHA'sına pinlendi
-# (tag yerine SHA - supply-chain'a karşı koruma). SHAtar Dependabot
-# (github-actions) ile güncellenir. checkout / rust-toolchain repo'nun
-# Ci.yml'deki SHA'larla aynı pinleme disiplinine uyuyor.
+# ALL actions are pinned to a FULL commit SHA per Security Plan section 3.1
+# (SHA instead of tag - protection against supply-chain attacks). The SHAs are
+# updated by Dependabot (github-actions). checkout / rust-toolchain follow the
+# same pinning discipline as the SHAs in the repository's ci.yml.
 
 name: Security Audit
 
@@ -28,7 +28,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 3 * * 1"   # haftalık, Pazartesi 03:00 UTC
+    - cron: "0 3 * * 1"   # weekly, Monday 03:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -53,23 +53,23 @@ jobs:
   zizmor:
     name: zizmor (GitHub Actions static analysis)
     runs-on: ubuntu-latest
-    # BLOKLAR. Onceki hali `continue-on-error: true` tasiyordu, gerekce
-    # "bilgilendirici" idi. Bu gerekce olculmemisti: arac depoda varsayilan
-    # personada SIFIR bulgu veriyor, ve pedantic personadaki 73 bulgunun
-    # hicbiri medium ya da uzeri degil (44 informational, 28 low). Yani
-    # bloklamanin maliyeti su an sifir, ve yumusatma bedavaya bir kapiyi
-    # susturuyordu.
+    # BLOCKS. It used to carry `continue-on-error: true` with the justification
+    # "informational". That justification was never measured: the tool reports ZERO
+    # findings in the repository under the default persona, and none of the 73
+    # findings under the pedantic persona are medium or above (44 informational,
+    # 28 low). So blocking costs nothing today, and the softening was silencing a
+    # gate for free.
     #
-    # Denetledigi sey de bu deponun en pahali giris yuzeyi. zizmor
-    # workflow'lardaki template injection, kimlik bilgisi sizintisi, cache
-    # zehirlenmesi ve sahte commit'leri ariyor; 2026 baharindaki tedarik
-    # zinciri dalgasi tam olarak bu yuzeyden girdi. Bir zincirin CI'i
-    # yayinladigi ikiliyi imzaliyor, yani buradaki bir yanlis yapilandirma
-    # zincirin kendisine ulasir.
+    # What it inspects is also this repository's most expensive entry surface.
+    # zizmor looks for template injection, credential leakage, cache poisoning and
+    # forged commits in workflows; the spring 2026 supply-chain wave came in through
+    # exactly this surface. A chain's CI signs the binary it publishes, so a
+    # misconfiguration here reaches the chain itself.
     #
-    # `--persona=regular`: pedantic'in urettigi 73 dusuk siddetli bulgu
-    # bloklamaz. Bir gun bloklamalari istenirse once duzeltilir, sonra
-    # persona yukseltilir; sirasi tersi olursa kapi yeniden yumusatilir.
+    #
+    # `--persona=regular`: the 73 low-severity findings pedantic produces do not
+    # block. If they should block one day they get fixed first and the persona is
+    # raised second; the other order softens the gate again.
     permissions:
       contents: read
       actions: read
@@ -83,28 +83,28 @@ jobs:
       # Kabul ettigi girdiler: inputs, collect, online-audits, persona,
       # Min-severity, min-confidence, version, token, advanced-security,
       # Color, annotations, config, fail-on-no-inputs. Bilinmeyen girdiler
-      # Sessizce yok sayilir, yani ayar hicbir zaman uygulanmiyordu.
-      # Kanarya: bilerek acik bir workflow yazilir ve zizmor'un onu bulmasi
-      # beklenir. Bulmazsa temiz rapor bir sey ifade etmez, ve bu kapi tam
-      # olarak temiz rapor uzerine kuruldugu icin kanarya olmadan
-      # bloklamasinin anlami olmazdi.
+      # Unknown inputs are ignored silently, so the setting never applied.
+      # Canary: a deliberately vulnerable workflow is written and zizmor is expected
+      # to find it. If it does not, a clean report means nothing, and because this
+      # gate is built precisely on a clean report, blocking would be meaningless
+      # without the canary.
       #
-      # Secilen acik `template-injection`: bir issue basligi dogrudan `run:`
-      # icine genisletiliyor, ki bu saldirganin runner'da komut calistirmasina
-      # yol acar. zizmor'un amiral kuralidir.
+      # The chosen vulnerability is `template-injection`: an issue title expands
+      # directly into `run:`, which lets an attacker run commands on the runner.
+      # It is zizmor's flagship rule.
       #
-      # Acik ifade CALISMA ANINDA birlestiriliyor, dosyaya duz yazilmiyor.
-      # Sebebi olculdu: heredoc tirnakli olsa bile GitHub `${{ ... }}` ifadesini
+      # The vulnerable expression is assembled AT RUN TIME, not written plainly into
+      # the file. The reason was measured: even with a quoted heredoc, GitHub expands
       # `run` blogunu kabuga VERMEDEN once genisletir, ve `issues` tetikleyicisi
-      # olmayan bir kosuda `github.event.issue.title` bos dizgeye genisler. Yani
-      # kanarya dosyaya `echo ""` yaziyordu: icinde hicbir acik olmayan bir
-      # workflow. zizmor dogru cevabi veriyordu, "No findings to report", ve
-      # kanarya bunu "arac calismiyor" diye okuyordu. Kanaryanin kendisi
-      # olcmek istedigi seyi yok ediyordu.
+      # run without an `issues` trigger. So the canary was writing `echo ""` into the
+      # file: a workflow with no vulnerability in it at all. zizmor gave the right
+      # answer, "No findings to report", and the canary read that as "the tool is not
+      # working". The canary was destroying the very thing it wanted to measure.
+      #
       #
       # `printf '%s%s%s'` ile parcalar kabukta birlesince GitHub'in gorecegi bir
-      # ifade kalmiyor ve dosyaya gercek acik dusuyor.
-      - name: zizmor kanaryasi (arac gercekten bulgu buluyor mu)
+      # so no expression remains for GitHub to see and a real vulnerability lands in the file.
+      - name: zizmor canary (does the tool really find findings)
         run: |
           set -euo pipefail
           pipx install zizmor==1.29.0
@@ -120,12 +120,12 @@ jobs:
               runs-on: ubuntu-latest
               steps:
           EOF
-          # Ifade karakter karakter kuruluyor. Suslu parantez `printf` bicim
-          # dizgesinde bile durmuyor, cunku shellcheck tek tirnak icindeki
+          # The expression is built character by character. A brace does not survive
+          # even in a `printf` format string, because shellcheck mistakes the `${`
           # `${` dizisini genisletilmesi unutulmus bir degisken sanip SC2016
-          # veriyor, ve o uyari burada dogru degil: bu dizginin kabukta
-          # genislememesi zaten istenen sey. Uyariyi bastirmak yerine
-          # bastirilacak bir sey birakmiyoruz.
+          # sequence inside single quotes for a variable forgotten to expand and emits
+          # SC2016, and that warning is wrong here: not expanding this string in the
+          # shell is exactly the intent. Rather than suppressing the warning, we leave nothing to suppress.
           dollar="$(printf '\044')"   # $
           ob="$(printf '\173')"       # {
           cb="$(printf '\175')"       # }
@@ -133,33 +133,33 @@ jobs:
           printf '      - run: echo "%s%s%s %s %s%s"\n' \
             "$dollar" "$ob" "$ob" "$expr_body" "$cb" "$cb" \
             >> /tmp/zizmor-canary/.github/workflows/bad.yml
-          # Kanaryanin kanaryasi: dosyada ifadenin GERCEKTEN durdugunu dogrula.
-          # Bu satir olmadan bir sonraki genisletme kazasi yine sessizce
-          # "arac bozuk" diye raporlanirdi.
+          # The canary's canary: verify the expression is REALLY in the file.
+          # Without this line the next expansion accident would again be silently
+          # reported as "the tool is broken".
           if ! grep -q 'github.event.issue.title' /tmp/zizmor-canary/.github/workflows/bad.yml; then
-            echo "KANARYA KURULAMADI: acik ifade dosyaya yazilmadi, yani asagidaki" >&2
-            echo "olcum zizmor hakkinda degil bu adim hakkinda bir sey soylerdi." >&2
+            echo "CANARY NOT SET UP: the vulnerable expression was not written to the file, so the" >&2
+            echo "measurement below would say something about this step, not about zizmor." >&2
             cat /tmp/zizmor-canary/.github/workflows/bad.yml >&2
             exit 1
           fi
-          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda bir boru
-          # hattinda program sifirdan farkli cikarsa grep hic kosmaz ve
-          # kanarya kendi kabugunu olcer. Bu dalda ASan kanaryasi tam olarak
-          # boyle yanlis "temiz" raporlamisti.
+          # Capture the output into a file first: under `set -euo pipefail`, if a
+          # program in a pipeline exits non-zero, grep never runs and the canary
+          # measures its own shell. On this branch the ASan canary reported a false
+          # "clean" in exactly this way.
           set +e
           zizmor --no-progress /tmp/zizmor-canary > /tmp/zizmor-canary.log 2>&1
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "KANARYA DUSTU: zizmor bilerek yazilmis template injection'i" >&2
-            echo "bulamadi, yani temiz bir rapor hicbir sey kanitlamaz." >&2
+            echo "CANARY FAILED: zizmor did not find a deliberately written template injection," >&2
+            echo "so a clean report proves nothing." >&2
             cat /tmp/zizmor-canary.log >&2
             exit 1
           fi
           if grep -q "template-injection" /tmp/zizmor-canary.log; then
-            echo "kanarya OK: zizmor bilerek yazilmis enjeksiyonu yakaladi."
+            echo "canary OK: zizmor caught the deliberately written injection."
           else
-            echo "KANARYA DUSTU: zizmor dustu ama sebep template-injection degil." >&2
+            echo "CANARY FAILED: zizmor failed but the reason is not template-injection." >&2
             cat /tmp/zizmor-canary.log >&2
             exit 1
           fi
@@ -241,21 +241,21 @@ jobs:
   cargo-hack:
     name: cargo-hack feature matrix
     runs-on: ubuntu-latest
-    # BLOKLAR. Gerekce "bilgilendirici; yavas/yogun olabilir" idi ve iki
-    # yaninda da olculmemisti. Olculdu: is son uc kosuda GECTI ve 1 dakika
-    # 58 saniye surdu, ayni workflow'daki CodeQL'in yarisindan az. Yani
+    # BLOCKS. The justification was "informational; may be slow/heavy" and neither
+    # half had been measured. Measured: the job PASSED on the last three runs and
+    # took 1 minute 58 seconds, less than half of CodeQL in the same workflow. So
     # yumusatma ne bir kirmizilik sakliyordu ne bir zaman kazandiriyordu;
-    # sadece kapiyi susturuyordu.
+    # the softening was only silencing the gate.
     #
-    # Denetledigi sey de ucuz degil. `--each-feature` bir ozelligin TEK
-    # BASINA derlendigini dogrular. Ozellikler yalnizca hep birlikte
-    # denenirse, bir `#[cfg]` arkasindaki kod kaybolur ve agac yine derlenir:
-    # kusur ancak o ozellik yalniz acildiginda ortaya cikar. `pq-ml-dsa`
-    # tam olarak boyle bir ozellik, PQ imza arka ucunun alternatifi, ve
-    # `p2p-mdns` uretim disi bir yetenek. Ikisi de gunluk derlemede acik
-    # degil, yani onlari yalniz bu is deniyor.
+    # What it inspects is not cheap either. `--each-feature` verifies a feature
+    # compiles ON ITS OWN. If features are only ever tried together, code behind a
+    # `#[cfg]` disappears and the tree still builds: the defect only shows up when
+    # that feature is enabled alone. `pq-ml-dsa` is exactly such a feature, the
+    # alternative PQ signature backend, and `p2p-mdns` is a non-production
+    # capability. Neither is enabled in the everyday build, so only this job tries
+    # them alone.
     #
-    # Kirmizi verirse anlami acik: bir ozellik kombinasyonu derlenmiyor,
+    # If it goes red the meaning is clear: a feature combination does not compile,
     # ki bu main'e girmemesi gereken tek sey.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -270,10 +270,10 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      # Surum pinsizdi: `cargo install cargo-hack --locked` her kosuda o anki
-      # en yeni surumu kaynaktan derliyordu, yani hem yavas hem tekrarlanamaz.
+      # The version was unpinned: `cargo install cargo-hack --locked` built the
+      # then-latest version from source on every run, which is both slow and irreproducible.
       # sha256 indirilip hesaplandi.
-      - name: Install cargo-hack (sürüm + sha256 pinli)
+      - name: Install cargo-hack (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/cargo-hack.tar.gz \
@@ -282,12 +282,12 @@ jobs:
           tar -xzf /tmp/cargo-hack.tar.gz -C /tmp
           install -m755 /tmp/cargo-hack /usr/local/bin/cargo-hack
           cargo hack --version
-      # Kanarya: bilerek TEK BASINA derlenmeyen bir ozellik yazilir ve
+      # Canary: a feature that deliberately does not compile ON ITS OWN is written
       # `--each-feature`in onu bulmasi beklenir. Duz `cargo check` bu kusuru
-      # goremez, cunku ozellikler birlikte acildiginda eksik parca baska bir
-      # ozellikten gelir. Kanarya olmadan yesil bir matris, matrisin
-      # kostugunu degil, en fazla dusmedigini soylerdi.
-      - name: cargo-hack kanaryasi (matris gercekten yakaliyor mu)
+      # cannot see it, because with features enabled together the missing piece comes
+      # from another feature. Without the canary a green matrix would say not that
+      # the matrix ran, but at most that it did not fail.
+      - name: cargo-hack canary (does the matrix really catch it)
         run: |
           set -euo pipefail
           mkdir -p /tmp/hack-canary/src
@@ -302,8 +302,8 @@ jobs:
           alpha = []
           beta = []
           EOF
-          # `beta` tek basina acildiginda `helper` yok, cunku onu `alpha`
-          # tanimliyor. Ikisi birlikte acikken agac derlenir.
+          # With `beta` enabled alone there is no `helper`, because `alpha` defines
+          # it. With both enabled the tree compiles.
           cat > /tmp/hack-canary/src/lib.rs <<'EOF'
           #[cfg(feature = "alpha")]
           pub fn helper() -> u32 { 1 }
@@ -312,22 +312,22 @@ jobs:
           pub fn user() -> u32 { helper() }
           EOF
           cd /tmp/hack-canary
-          # Once duz check: ikisi birlikte acikken GECMELI. Gecmezse kanarya
-          # yanlis seyi olcuyor demektir.
+          # Plain check first: with both enabled it MUST PASS. If it does not, the
+          # canary is measuring the wrong thing.
           cargo check --features alpha,beta --quiet
-          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda boru
-          # hattinda program sifirdan farkli cikarsa grep hic kosmaz.
+          # Capture the output into a file first: under `set -euo pipefail`, if a
+          # program in a pipeline exits non-zero, grep never runs.
           set +e
           cargo hack check --each-feature > /tmp/hack-canary.log 2>&1
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
-            echo "KANARYA DUSTU: --each-feature tek basina derlenmeyen bir" >&2
-            echo "ozelligi yakalamadi, yani yesil matris bir sey kanitlamaz." >&2
+            echo "CANARY FAILED: --each-feature did not catch a feature that does not compile" >&2
+            echo "on its own, so a green matrix proves nothing." >&2
             tail -20 /tmp/hack-canary.log >&2
             exit 1
           fi
-          echo "kanarya OK: matris yalniz acildiginda kirilan ozelligi yakaladi."
+          echo "canary OK: the matrix caught the feature that breaks when enabled alone."
       - name: Feature matrix check
         run: cargo hack check --each-feature --exclude-no-default-features --exclude-features pq-ml-dsa --locked
 
@@ -363,7 +363,7 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Determinism test (genesis reproducibility)
-        # Aynı determinizm testi her iki mimaride de geçmeli (chain-split riski).
+        # The same determinism test must pass on both architectures (chain-split risk).
         run: cargo test --lib --locked -- genesis_hash_deterministic
 
   scorecard:
