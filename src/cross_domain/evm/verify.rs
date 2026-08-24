@@ -1,19 +1,25 @@
-//! F10.2 güvenlik çekirdeği - `verify_evm_receipt` deterministik orchestrator.
+//! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
-//! RFC §4.1 (ETH → Budlum mint akışı) adımlarını tek doğrulama yüzeyinde birleştirir.
-//! **On-chain (Budlum konsensüsünde) çalışır** - network'süz, deterministik. Relayer
-//! Proof üretir, Budlum burada verify eder.
+//! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
+//! single verification surface. It **runs on-chain, inside Budlum consensus**,
+//! so it is deterministic and touches no network. The relayer produces the
+//! proof; Budlum verifies it here.
 //!
-//! # Doğrulama akışı
+//! # Verification flow
 //!
-//! 1. `header_chain` - target + confirmations, N-confirmation finality (RFC Q2 N-conf).
-//! 2. `proof_nodes` + `target_header.receipts_root` - MPT verify → receipt bytes.
-//! 3. `receipt` RLP decode (F10.2 receipt.rs) → `{status, logs}`.
-//! 4. `status == true` (işlem başarılı).
-//! 5. Deposit log match: `find_log(emitter, topic0)` → expected payload eşleşmesi.
-//! 6. Replay protection: `(tx_hash, log_index)` daha önce işlendi mi (caller domain).
+//! 1. `header_chain`: target plus confirmations, N-confirmation finality
+//!    (RFC Q2, N-conf).
+//! 2. `proof_nodes` plus `target_header.receipts_root`: MPT verify yields the
+//!    receipt bytes.
+//! 3. `receipt` RLP decode (F10.2 `receipt.rs`) yields `{status, logs}`.
+//! 4. `status == true`, meaning the transaction succeeded.
+//! 5. Deposit log match: `find_log(emitter, topic0)` against the expected
+//!    payload.
+//! 6. Replay protection: has `(tx_hash, log_index)` been processed before, in
+//!    the caller's domain.
 //!
-//! Başarı → `VerifiedDeposit` (mint için gerekli tüm kanıtlanmış alanlar).
+//! On success the result is a `VerifiedDeposit`, carrying every proven field
+//! the mint needs.
 
 use crate::cross_domain::evm::header::{verify_chain, EthHeader};
 use crate::cross_domain::evm::mpt::{self, MptError};
@@ -21,20 +27,22 @@ use crate::cross_domain::evm::receipt::{self, EthReceipt, ReceiptError};
 use crate::cross_domain::evm::sync_committee::{
     verify_sync_aggregate, SyncAggregate, SyncCommitteeError, SyncCommitteeState,
 };
-/// `verify_evm_receipt` hatası (her alt-adımın hatası sarmalanır).
+/// A `verify_evm_receipt` failure; every sub-step's error is wrapped here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
-    /// Header chain doğrulaması başarısız (N-conf / chain link kırık).
+    /// Header chain verification failed: too few confirmations, or a broken
+    /// chain link.
     Header(String),
-    /// MPT kanıtı geçersiz (receipt trie'ye karşı).
+    /// The MPT proof is invalid against the receipt trie.
     Mpt(MptError),
-    /// Receipt decode başarısız.
+    /// Receipt decoding failed.
     Receipt(ReceiptError),
-    /// İşlem başarısız (`status == false`).
+    /// The transaction itself failed (`status == false`).
     TxFailed,
-    /// Deposit log bulunamadı (emitter/topic0 uyuşmazlığı).
+    /// No deposit log was found: the emitter or topic0 did not match.
     LogNotFound,
-    /// Deposit payload beklene ile eşleşmedi (amount/asset/recipient).
+    /// The deposit payload did not match what was expected: amount, asset or
+    /// recipient.
     PayloadMismatch,
     /// Sync-committee attestation over the target header failed.
     ///
@@ -76,36 +84,40 @@ impl From<SyncCommitteeError> for VerifyError {
     }
 }
 
-/// Kanıtlanmış Ethereum deposit (mint için tüm alanlar doğrulanmış).
+/// A proven Ethereum deposit: every field the mint needs has been verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedDeposit {
-    /// Ethereum tx hash (replay koruması anahtarı; caller log_index ile birleştirir).
+    /// Ethereum transaction hash, the replay-protection key. The caller
+    /// combines it with the log index.
     pub tx_hash: String,
-    /// Bridge kontratından çıkarılan log (data alanı = deposit payload).
+    /// The log extracted from the bridge contract; its data field is the
+    /// deposit payload.
     pub deposit_log_data: Vec<u8>,
-    /// Kanıtlanmış receipt'in bulunduğu blok numarası.
+    /// Number of the block holding the proven receipt.
     pub block_number: u64,
 }
 
-/// Relayer'ın ürettiği Ethereum deposit kanıtı (wire format).
+/// The Ethereum deposit proof the relayer produces, in wire format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmDepositProof<'a> {
-    /// Hedef (deposit'i içeren) bloğun RLP-encoded header'ı.
+    /// RLP-encoded header of the target block, the one holding the deposit.
     pub target_header: &'a [u8],
-    /// Target'ın üstündeki onay header'ları (en az `confirmations` adet; her biri
-    /// Parent_hash → öncekinin hash'i, number+1). RFC Q2 N-conf.
+    /// Confirmation headers stacked above the target: at least
+    /// `confirmations` of them, each with `parent_hash` equal to the previous
+    /// header's hash and `number` one higher. RFC Q2, N-conf.
     pub confirmation_headers: &'a [&'a [u8]],
-    /// Gerekli onay sayısı (reorg penceresi; mainnet ≈64, governance ile ayarlanır).
+    /// Required confirmation count, the reorg window. Mainnet uses roughly
+    /// 64, and governance tunes it.
     pub required_confirmations: u32,
-    /// MPT proof node'ları (receiptsRoot → target receipt).
+    /// MPT proof nodes, from `receiptsRoot` down to the target receipt.
     pub proof_nodes: &'a [Vec<u8>],
-    /// Trie'deki key (RLP(tx_index) - receipt'in bulunduğu sıra).
+    /// Key in the trie: `RLP(tx_index)`, the receipt's position.
     pub receipt_key: &'a [u8],
-    /// Ethereum tx hash (replay koruması + log arama için).
+    /// Ethereum transaction hash, used for replay protection and log lookup.
     pub tx_hash: &'a str,
-    /// Bridge kontrat adresi (deposit event emitter).
+    /// Bridge contract address, the deposit event emitter.
     pub emitter_address: &'a [u8],
-    /// Deposit event imzas topic0 = keccak256("Deposit(...)").
+    /// Deposit event signature: `topic0 = keccak256("Deposit(...)")`.
     pub deposit_topic0: &'a [u8; 32],
     /// Ethereum PoS attestation over the target header, when the relayer has
     /// one.
@@ -116,7 +128,7 @@ pub struct EvmDepositProof<'a> {
     /// `None`, so nothing that verified before stops verifying now.
     ///
     /// `Some` is the stronger claim, and it is checked. This module's header
-    /// and `adapter.rs` have both said "F10.3 (sync-committee) kullanır"
+    /// and `adapter.rs` have both said "F10.3 (sync-committee) is used"
     /// since they were written, and neither did: `verify_sync_aggregate`
     /// existed, was tested six ways, and no production path reached it. A
     /// bridge whose documentation claims PoS finality and whose code counts
@@ -149,10 +161,11 @@ pub struct SyncAttestation<'a> {
     pub signing_message: &'a [u8],
 }
 
-/// Ethereum deposit kanıtını baştan sona doğrular. Deterministik, network'süz.
+/// Verifies an Ethereum deposit proof end to end. Deterministic, no network.
 ///
-/// Başarı → `VerifiedDeposit` (mint için caller'a tüm kanıtlanmış alanlar).
-/// Başarısız → kanıtın hangi adımda geçersiz olduğu (`VerifyError`).
+/// On success the caller gets a `VerifiedDeposit` holding every proven field
+/// the mint needs. On failure it gets a `VerifyError` naming the step at which
+/// the proof turned out to be invalid.
 pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {
     // 1. Header decode + N-confirmation finality.
     let target = decode_header_or_err(proof.target_header)?;
@@ -171,7 +184,7 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
     // 3. Receipt RLP decode.
     let receipt: EthReceipt = receipt::decode_receipt(&receipt_bytes)?;
 
-    // 4. Status kontrolü.
+    // 4. Status check.
     if !receipt.status {
         return Err(VerifyError::TxFailed);
     }
@@ -201,7 +214,8 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
         )?;
     }
 
-    // 6. (Replay koruması caller domain'inde - tx_hash döner.)
+    // 6. Replay protection lives in the caller's domain; the tx hash is
+    //    returned for it.
     Ok(VerifiedDeposit {
         tx_hash: proof.tx_hash.to_string(),
         deposit_log_data: log.data.clone(),
@@ -267,8 +281,9 @@ mod tests {
         ])
     }
 
-    /// Tam bir kanıt fixture'ı üretir: target header + N conf + receipt proof +
-    /// Deposit log. `(emitter, topic0, log_data, success, n_conf)`.
+    /// Builds a complete proof fixture: target header, N confirmations,
+    /// receipt proof and deposit log, from
+    /// `(emitter, topic0, log_data, success, n_conf)`.
     struct Fixture {
         target_header: Vec<u8>,
         conf_headers: Vec<Vec<u8>>,
@@ -284,7 +299,8 @@ mod tests {
         success: bool,
         n_conf: u32,
     ) -> Fixture {
-        // Tek-leaf trie: key = RLP(tx_index=0); leaf value = receipt.
+        // Single-leaf trie: the key is RLP(tx_index=0), the leaf value is the
+        // receipt.
         let receipt_bytes = receipt_rlp(success, vec![log_item(emitter, topic0, log_data)]);
         // MPT key = keccak256(rlp(0)) nibbles; leaf path = full 64 nibbles.
         let key_bytes = encode(&Item::String(vec![])); // rlp(0) = 0x80
@@ -350,7 +366,7 @@ mod tests {
         assert_eq!(verified.block_number, 100);
     }
 
-    // ---- Negatif: tx başarısız ----
+    // ---- Negative: the transaction failed ----
 
     #[test]
     fn verify_rejects_failed_tx_status() {
@@ -374,7 +390,7 @@ mod tests {
         );
     }
 
-    // ---- Negatif: yetersiz onay ----
+    // ---- Negative: too few confirmations ----
 
     #[test]
     fn verify_rejects_insufficient_confirmations() {
@@ -396,14 +412,14 @@ mod tests {
         assert!(matches!(err, VerifyError::Header(_)));
     }
 
-    // ---- Negatif: chain kırık ----
+    // ---- Negative: broken chain ----
 
     #[test]
     fn verify_rejects_broken_chain() {
         let emitter = vec![0xcc; 20];
         let topic0 = [0xab; 32];
         let f = build_fixture(&emitter, topic0, b"data", true, 3);
-        // Kırık confirmation: yanlış parent.
+        // Broken confirmation: wrong parent.
         let bad_conf = header_rlp([0xff; 32], 101, f.receipts_root);
         let conf_refs = vec![bad_conf.as_slice()];
         let proof = EvmDepositProof {
@@ -421,7 +437,7 @@ mod tests {
         assert!(matches!(err, VerifyError::Header(_)));
     }
 
-    // ---- Negatif: deposit log yok (yanlış emitter) ----
+    // ---- Negative: no deposit log, because the emitter is wrong ----
 
     #[test]
     fn verify_rejects_wrong_emitter() {
@@ -446,7 +462,7 @@ mod tests {
         );
     }
 
-    // ---- Negatif: deposit topic0 uyuşmaz ----
+    // ---- Negative: the deposit topic0 does not match ----
 
     #[test]
     fn verify_rejects_wrong_topic0() {
@@ -471,7 +487,7 @@ mod tests {
         );
     }
 
-    // ---- Negatif: MPT kanıtı bozuk (eksik node) ----
+    // ---- Negative: the MPT proof is broken, a node is missing ----
 
     #[test]
     fn verify_rejects_missing_mpt_node() {
@@ -482,7 +498,7 @@ mod tests {
             target_header: &f.target_header,
             confirmation_headers: &conf_refs(&f),
             required_confirmations: 3,
-            proof_nodes: &[], // boş → kök node eksik
+            proof_nodes: &[], // empty, so the root node is missing
             receipt_key: &f.receipt_key,
             tx_hash: "0x1",
             emitter_address: &emitter,
@@ -493,12 +509,14 @@ mod tests {
         assert!(matches!(err, VerifyError::Mpt(_)));
     }
 
-    // ---- Negatif: yanlış root (target header'ın receiptsRoot proof'tan farklı) ----
-    // Bu durum MPT verify'nin MissingNode'una düşer (proof kök node'unu bulamaz).
+    // ---- Negative: wrong root, the target header's receiptsRoot differs
+    // from the proof's ----
+    // This lands on the MPT verifier's `MissingNode`, because the proof's root
+    // node cannot be found.
 
     #[test]
     fn verify_does_not_panic_on_garbage() {
-        // DoS güvenliği: tamamen çöp kanıt → Err, panic YOK.
+        // DoS safety: a wholly garbage proof yields an Err, never a panic.
         let garbage = vec![vec![0xff; 50]; 3];
         let proof = EvmDepositProof {
             target_header: &garbage[0],
@@ -583,7 +601,7 @@ mod tests {
     ///
     /// This is the defect. `sync_committee.rs` implements Altair verification
     /// and is tested six ways; `adapter.rs` said "F10.3 (sync-committee)
-    /// kullanır" in two places, and no production path called
+    /// is used" in two places, and no production path called
     /// `verify_sync_aggregate`. A bridge whose documentation claims proof of
     /// stake finality and whose code counts confirmations is claiming a
     /// guarantee it does not have: confirmations are a bet that no reorg goes
