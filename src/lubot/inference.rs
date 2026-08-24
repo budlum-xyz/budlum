@@ -1,9 +1,10 @@
-//! Runtime - Lubot çıkarım akışı (gerçek `AiRegistry` üzerinde).
+//! Runtime - the Lubot inference flow (over the real `AiRegistry`).
 //!
-//! Lubot sorgusunun gerçek budlum-core AI katmanında uçtan-uca akışı:
-//! Model kaydı → operator compute-bond → kapalı-devre input_ref ile request
-//! Inşası (canonical request_id) → `submit_request` → `AiInferenceResult` → `submit_result`.
-//! Mock yok; gerçek tipler + gerçek registry metotları.
+//! The end-to-end flow of a Lubot query through the real budlum-core AI layer:
+//! model registration -> operator compute bond -> building the request with a
+//! closed-circuit input_ref (canonical request_id) -> `submit_request` ->
+//! `AiInferenceResult` -> `submit_result`.
+//! No mocks; real types and real registry methods.
 
 use crate::ai::types::{
     AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, BoundedBytes,
@@ -13,7 +14,7 @@ use crate::core::address::Address;
 use crate::pollen::data_rights::AccessGrant;
 use sha2::{Digest, Sha256};
 
-/// Bir Lubot modelini on-chain kaydet (AiModelSpec + register_model).
+/// Register a Lubot model on chain (AiModelSpec + register_model).
 pub fn register_lubot_model(
     registry: &mut AiRegistry,
     owner: Address,
@@ -41,22 +42,23 @@ pub fn register_lubot_model(
     registry.register_model(spec)
 }
 
-/// Kapalı-devre Lubot çıkarım talebini inşa et (canonical request_id ile).
+/// Build a closed-circuit Lubot inference request (with a canonical request_id).
 ///
-/// `input_ref` = kullanılan veri referansı (AiDataInputRef encode'u veya opaque).
+/// `input_ref` = the reference to the data used (an AiDataInputRef encoding or
+/// an opaque value).
 ///
-/// `grant` = isteği yapanın o veriyi okuma yetkisi. Zorunlu bir argüman,
-/// çünkü izinsiz bir çıkarım isteğinin inşa edilebilmesi, sonradan
-/// reddedilse bile, yetkiyi bir kabul koşulu olmaktan çıkarıp bir sonraki
-/// katmanın hatırlamasına bağlı bir denetime çevirir. Bu dosyanın kendi
-/// yorumu doğrulamanın "ayrıca yapıldığını" söylüyordu ve
-/// [`crate::lubot::validate_inference_grant`] üretimde hiçbir yerden
-/// çağrılmıyordu; söylenen ile yapılan arasındaki fark buydu.
+/// `grant` = the requester's authority to read that data. It is a mandatory
+/// argument, because letting an unauthorized inference request be built at all
+/// - even if it is rejected later - turns the authority from an admission
+/// condition into a check that depends on the next layer remembering it. This
+/// file's own comment used to say verification was "done separately", while
+/// [`crate::lubot::validate_inference_grant`] was called from nowhere in
+/// production; that was the gap between what was said and what was done.
 ///
 /// # Errors
 ///
-/// Yetki geçerli değilse hangi koşulun düştüğünü söyleyen bir mesaj, ya da
-/// `input_ref` sınırı aşıyorsa `BoundedBytes`'ın reddi.
+/// A message naming the condition that failed if the authority is not valid, or
+/// the rejection from `BoundedBytes` if `input_ref` exceeds the bound.
 #[allow(clippy::too_many_arguments)]
 pub fn build_lubot_request(
     requester: Address,
@@ -68,13 +70,13 @@ pub fn build_lubot_request(
     grant: &AccessGrant,
     perception: Option<crate::lubot::perception::PerceptionRequest>,
 ) -> Result<AiInferenceRequest, String> {
-    // Yetki önce. Sınır kontrolünden de önce, çünkü izni olmayan birinin
-    // isteğinin neden reddedildiğini öğrenmesi, isteğin biçimi hakkında bilgi
-    // vermemeli.
+    // Authority first. Even before the bound check, because someone without
+    // permission learning why their request was rejected must not reveal
+    // information about the shape of the request.
     crate::lubot::validate_inference_grant(grant, &requester, submitted_at_block)?;
     let bounded = BoundedBytes::try_new(input_ref.clone())?;
-    // Kanonik commitment: admission kapısı aynı fonksiyonla doğrular
-    // (bkz. crate::ai::types::canonical_input_commitment).
+    // The canonical commitment: the admission gate verifies with the same
+    // function (see crate::ai::types::canonical_input_commitment).
     let input_commitment = crate::ai::types::canonical_input_commitment(&input_ref);
     let mut req = AiInferenceRequest {
         request_id: AiRequestId([0; 32]),
@@ -89,12 +91,12 @@ pub fn build_lubot_request(
         effort: crate::lubot::effort::EffortTier::default(),
         perception,
     };
-    // Canonical request_id'yi hesapla → verify_id geçer.
+    // Compute the canonical request_id -> verify_id passes.
     req.request_id = req.calculate_id();
     Ok(req)
 }
 
-/// Lubot çıkarım sonucunu inşa et (operator'ün yanıtı).
+/// Build a Lubot inference result (the operator's answer).
 pub fn build_lubot_result(
     request_id: AiRequestId,
     verifier: Address,
@@ -127,7 +129,7 @@ mod tests {
         Address([b; 32])
     }
 
-    /// Gerçek AiRegistry üzerinde uçtan-uca Lubot çıkarım akışı.
+    /// The end-to-end Lubot inference flow over the real AiRegistry.
     #[test]
     fn lubot_full_inference_flow_on_real_registry() {
         let mut registry = AiRegistry::new();
@@ -136,7 +138,7 @@ mod tests {
         let requester = addr(3);
         let model_hash = [9u8; 32];
 
-        // (1) Modeli on-chain kaydet.
+        // (1) Register the model on chain.
         let model_id =
             register_lubot_model(&mut registry, owner, model_hash).expect("model register");
 
@@ -145,7 +147,7 @@ mod tests {
         assert!(operator_eligible(&registry, &operator));
         assert_eq!(operator_bond(&registry, &operator), MIN_OPERATOR_BOND);
 
-        // (3) Kapalı-devre request inşa + submit.
+        // (3) Build the closed-circuit request and submit it.
         let grant = test_grant(requester, 1);
         let req = build_lubot_request(
             requester,
@@ -159,11 +161,11 @@ mod tests {
         )
         .expect("build request");
         assert!(req.verify_id(), "canonical request_id must verify");
-        // (Strix #359 sonrasi verifier stake'i zorunlu)
+        // (after Strix #359 the verifier stake is mandatory)
         let _ = registry.lock_verifier_stake(&operator, crate::ai::registry::MIN_VERIFIER_STAKE);
         let req_id = registry.submit_request(req, 1).expect("submit request");
 
-        // (4) Result inşa + submit.
+        // (4) Build the result and submit it.
         let res = build_lubot_result(req_id, operator, b"lubot-output".to_vec(), 1, 2)
             .expect("build result");
         let outcome = registry.submit_result(res, 2);
