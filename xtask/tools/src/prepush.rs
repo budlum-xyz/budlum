@@ -1,23 +1,23 @@
-//! Push oncesi yerel dogrulama.
+//! Local verification before a push.
 //!
-//! `scripts/pre-push-check.sh` yerine gecer.
+//! Replaces `scripts/pre-push-check.sh`.
 //!
-//! # Shell surumunun iki sorunu
+//! # Two problems with the shell version
 //!
-//! 1. `set -e` altinda ilk hata betigi durduruyordu, yani `cargo fmt`
-//!    dustugunde clippy **hic kosmuyordu**. Gelistirici bir hatayi
-//!    duzeltip tekrar kosuyor, ikinciyi goruyor, tekrar kosuyordu. Burada
-//!    her kontrol kosuyor ve hepsi birden raporlaniyor.
-//! 2. Betik hangi toolchain'le kostugunu soylemiyordu. `rust-toolchain.toml`
-//!    1.97.0'i pinliyor ama gelistiricinin varsayilani baska olabilir; o
-//!    zaman yerel `cargo fmt` gecer, CI kirmizi doner. Bu, gecmis notlarda
-//!    kayitli "toolchain drift" sinifi. Burada surum once yazdiriliyor.
+//! 1. Under `set -e` the first error stopped the script, so when `cargo fmt`
+//!    fell clippy **never ran**. The developer fixed one error,
+//!    ran again, saw the second, ran again. Here
+//!    every check runs and all of them are reported at once.
+//! 2. The script did not say which toolchain it ran with. `rust-toolchain.toml`
+//!    pins 1.97.0 but the developer's default may be another; then
+//!    the local `cargo fmt` passes and CI comes back red. This is the
+//!    "toolchain drift" class recorded in past notes. Here the version is printed first.
 
 use std::path::Path;
 
 use crate::{run_capturing_status, run_checked};
 
-/// Bir kontrolun sonucu.
+/// The result of one check.
 struct Outcome {
     name: &'static str,
     code: i32,
@@ -34,8 +34,8 @@ struct Outcome {
 pub fn run(root: &Path) -> Result<String, String> {
     let mut lines = Vec::new();
 
-    // Once toolchain: yerel ile CI ayni degilse fmt/clippy farkli karar
-    // verir ve bu, gecmiste yesil yerel + kirmizi CI olarak goruldu.
+    // Toolchain first: if local and CI differ, fmt/clippy decide differently
+    // and that was seen in the past as green locally plus red in CI.
     match std::process::Command::new("cargo")
         .arg("--version")
         .current_dir(root)
@@ -83,72 +83,72 @@ pub fn run(root: &Path) -> Result<String, String> {
         .collect();
 
     if failed.is_empty() {
-        lines.push("Tum kontroller gecti; push guvenli.".to_string());
+        lines.push("All checks passed; the push is safe.".to_string());
         Ok(lines.join("\n"))
     } else {
         Err(format!(
-            "{}\nDusen kontrol(ler): {}. \
-             Ikisi de kosuldu, yani listedeki her sey gercek bir bulgu.",
+            "{}\nFailing check(s): {}. \
+             Both were run, so everything on the list is a real finding.",
             lines.join("\n"),
             failed.join(", ")
         ))
     }
 }
 
-/// Kanarya: `cargo fmt`'in bozuk bicimli bir dosyayi gercekten reddettigini
-/// kanitlar.
+/// Canary: proves that `cargo fmt` really refuses a badly formatted file.
 ///
-/// Bu bos bir titizlik degil. Kontrol "kostu ve 0 dondu" ile "hic kosmadi ve
-/// 0 dondu" disaridan ayni gorunur; shell surumunde tam olarak bu risk
-/// vardi. Burada bilerek bozuk bir dosya uretilip reddedildigi gosteriliyor.
+///
+/// This is not empty pedantry. A check that "ran and returned 0" and one that "never ran and
+/// returned 0" look the same from outside; the shell version carried exactly this
+/// risk. Here a deliberately broken file is produced and shown to be refused.
 ///
 /// # Errors
 ///
-/// `cargo fmt` bozuk bir dosyayi kabul ederse.
+/// If `cargo fmt` accepts a broken file.
 pub fn self_test() -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("budlum-prepush-canary-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(tmp.join("src")).map_err(|e| format!("kanarya dizini: {e}"))?;
+    std::fs::create_dir_all(tmp.join("src")).map_err(|e| format!("canary directory: {e}"))?;
 
     std::fs::write(
         tmp.join("Cargo.toml"),
         "[package]\nname = \"fmt-canary\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
-    .map_err(|e| format!("kanarya manifesti: {e}"))?;
+    .map_err(|e| format!("canary manifest: {e}"))?;
 
-    // Bilerek bozuk bicim: rustfmt bunu kesin degistirir.
+    // Deliberately broken formatting: rustfmt will certainly change this.
     std::fs::write(
         tmp.join("src").join("main.rs"),
         "fn main(){let x=1;let y=2;println!(\"{}\",x+y);}\n",
     )
-    .map_err(|e| format!("kanarya kaynagi: {e}"))?;
+    .map_err(|e| format!("canary source: {e}"))?;
 
     let code = run_capturing_status("cargo", &["fmt", "--", "--check"], &tmp)?;
     let _ = std::fs::remove_dir_all(&tmp);
 
     if code == 0 {
         return Err(
-            "KANARYA DUSTU: `cargo fmt --check` bilerek bozulmus bir dosyayi kabul etti; \
-             bu kontrol hicbir seye bakmiyor."
+            "CANARY FELL: `cargo fmt --check` accepted a deliberately broken file; \
+             this check is looking at nothing."
                 .to_string(),
         );
     }
     Ok("pre-push kanaryasi OK: bozuk bicim reddedildi, kontrol gercekten kosuyor".to_string())
 }
 
-/// Git `pre-push` kancasini kur.
+/// Install the git `pre-push` hook.
 ///
-/// Shell surumunde bu adim yoktu: betik vardi ama onu kimse cagirmiyordu,
-/// yani bir kapinin degil bir onerinin karsiligiydi.
+/// The shell version had no such step: the script existed but nobody called it,
+/// so it was the counterpart of a suggestion, not a gate.
 ///
 /// # Errors
 ///
-/// `.git/hooks` yoksa ya da kanca yazilamazsa.
+/// If `.git/hooks` is absent or the hook cannot be written.
 pub fn install_hook(root: &Path) -> Result<String, String> {
     let hooks = root.join(".git").join("hooks");
     if !hooks.is_dir() {
         return Err(format!(
-            "{} yok; bu bir git calisma agaci degil",
+            "{} is absent; this is not a git working tree",
             hooks.display()
         ));
     }
@@ -193,8 +193,8 @@ mod tests {
     fn install_hook_refuses_a_non_git_tree() {
         let tmp = std::env::temp_dir().join("budlum-prepush-nogit");
         let _ = std::fs::create_dir_all(&tmp);
-        let err = install_hook(&tmp).expect_err("git olmayan agac reddedilmeli");
-        assert!(err.contains("git calisma agaci degil"), "{err}");
+        let err = install_hook(&tmp).expect_err("a non-git tree must be refused");
+        assert!(err.contains("not a git working tree"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -207,7 +207,7 @@ mod tests {
         assert!(msg.contains("pre-push"), "{msg}");
 
         let hook = tmp.join(".git").join("hooks").join("pre-push");
-        assert!(hook.is_file(), "kanca dosyasi olmali");
+        assert!(hook.is_file(), "the hook file must exist");
         let body = std::fs::read_to_string(&hook).expect("kanca okunmali");
         assert!(
             body.contains("budlum-tools"),
@@ -221,7 +221,7 @@ mod tests {
                 .expect("metadata")
                 .permissions()
                 .mode();
-            assert_eq!(mode & 0o111, 0o111, "kanca calistirilabilir olmali");
+            assert_eq!(mode & 0o111, 0o111, "the hook must be executable");
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
