@@ -1,12 +1,15 @@
-//! B.U.D. 3.0 - GERÇEK QR KARE ÜRETİMİ (şartname §7)
+//! B.U.D. 3.0 - REAL QR FRAME GENERATION, specification section 7.
 //!
-//! QR byte-mode (EC=L) kare üretimi: damla baytları → QR versiyon seçimi → modül
-//! matrisi (finder/alignment/timing desenleri + data modülleri). Deterministik
-//! (maske sabit, versiyon içerikten). Bu, "içerik → QR video" hattının kare katmanıdır.
+//! QR byte-mode frame generation at error correction level L: the drop bytes
+//! choose a QR version, and the module matrix is built from the finder,
+//! alignment and timing patterns plus the data modules. It is deterministic:
+//! the mask is fixed and the version follows from the content. This is the
+//! frame layer of the "content to QR video" line.
 //!
-//! NOT: tam Reed-Solomon EC + mask optimizasyonu üretim işi; burada byte-mode veriyi
-//! QR matrisine yerleştiren + doğrulayan çekirdek (format bilgisi korunur). Boyut
-//! modül = 17 + 4·version (şartname §7 ile aynı).
+//! NOTE: full Reed-Solomon error correction and mask optimisation are
+//! production work; what is here is the core that places byte-mode data into a
+//! QR matrix and verifies it, with the format information preserved. The size
+//! in modules is `17 + 4 * version`, the same as in specification section 7.
 
 #![forbid(unsafe_code)]
 
@@ -15,17 +18,18 @@ use sha3::{Digest, Sha3_256};
 pub const QRM_MAGIC: [u8; 8] = *b"\xB5QRM0\0\0\0";
 pub const QRM_VERSION: u8 = 1;
 
-/// QR modül matrisi (deterministik; 0=koyu, 1=açık).
+/// The QR module matrix. It is deterministic, with 0 for dark and 1 for light.
 #[derive(Debug, Clone)]
 pub struct QrMatrix {
     pub version: u32,
-    pub dim: usize,          // 17 + 4·version
-    pub modules: Vec<u8>,    // dim×dim satır-major
-    pub data_bytes: Vec<u8>, // yerleştirilen byte-mode veri
+    pub dim: usize,          // 17 + 4 * version
+    pub modules: Vec<u8>,    // dim by dim, row-major
+    pub data_bytes: Vec<u8>, // the byte-mode data that was placed
 }
 
 impl QrMatrix {
-    /// Byte-mode veri için uygun versiyon (EC=L kapasitesinden - ux.rs tablosu).
+    /// The version that fits byte-mode data, from the capacity at error
+    /// correction level L; the table lives in `bud_format_ux`.
     pub fn version_for(data_len: usize) -> u32 {
         let cap = crate::bud_format_ux::qr_capacity_bytes;
         let mut v = 1;
@@ -35,7 +39,8 @@ impl QrMatrix {
         v
     }
 
-    /// Kare üret: versiyon seç → matris kur → veriyi yerleştir (deterministik).
+    /// Generates a frame: choose the version, build the matrix and place the
+    /// data. Deterministic.
     pub fn encode(data: &[u8]) -> Option<Self> {
         if data.is_empty() {
             return None;
@@ -43,13 +48,13 @@ impl QrMatrix {
         let version = Self::version_for(data.len());
         let cap = crate::bud_format_ux::qr_capacity_bytes(version);
         if data.len() > cap {
-            return None; // sığmaz
+            return None; // it does not fit
         }
         let dim = 17 + 4 * version as usize;
         let mut m = Self {
             version,
             dim,
-            modules: vec![1u8; dim * dim], // başlangıç: açık
+            modules: vec![1u8; dim * dim], // the initial state is light
             data_bytes: data.to_vec(),
         };
         m.place_finders();
@@ -58,7 +63,7 @@ impl QrMatrix {
         Some(m)
     }
 
-    /// Finder desenleri (3 köşe) + separatörler.
+    /// The finder patterns in three corners, plus the separators.
     fn place_finders(&mut self) {
         let d = self.dim;
         for (cx, cy) in [(3usize, 3usize), (d - 4, 3), (3, d - 4)] {
@@ -77,7 +82,7 @@ impl QrMatrix {
         }
     }
 
-    /// Timing desenleri (6. satır + 6. sütun).
+    /// The timing patterns, in row 6 and column 6.
     fn place_timing(&mut self) {
         let d = self.dim;
         for i in 8..d - 8 {
@@ -87,7 +92,8 @@ impl QrMatrix {
         }
     }
 
-    /// Byte-mode veriyi zigzag yerleştir (sağdan sola, 2 sütun adım).
+    /// Places the byte-mode data in a zigzag, right to left, two columns at a
+    /// time.
     fn place_data(&mut self, data: &[u8]) {
         let d = self.dim;
         let mut col = d - 1;
@@ -96,7 +102,7 @@ impl QrMatrix {
         let total_bits = data.len() * 8;
         while col > 0 {
             if col == 6 {
-                col -= 1; // timing sütununu atla
+                col -= 1; // skip the timing column
             }
             let cols = [col, col - 1];
             let mut row = if upward { d - 1 } else { 0 };
@@ -105,9 +111,9 @@ impl QrMatrix {
                     let bit = if bit_idx < total_bits {
                         (data[bit_idx / 8] >> (7 - (bit_idx % 8))) & 1
                     } else {
-                        1 // dolgu
+                        1 // padding
                     };
-                    // fonksiyon modüllerini ezme
+                    // Do not overwrite the function modules.
                     if !self.is_function(row, c) {
                         self.modules[row * d + c] = bit;
                     }
@@ -130,7 +136,7 @@ impl QrMatrix {
         }
     }
 
-    /// Fonksiyon modülü mü? (finder/timing/ayraç)
+    /// Is this a function module: a finder, a timing pattern or a separator?
     fn is_function(&self, row: usize, col: usize) -> bool {
         let d = self.dim;
         let in_finder = |r: usize, c: usize| -> bool {
@@ -139,7 +145,7 @@ impl QrMatrix {
         in_finder(row, col) || row == 6 || col == 6
     }
 
-    /// Özet (deterministik - kare kimliği).
+    /// The digest: deterministic, and the identity of the frame.
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(QRM_MAGIC);
@@ -150,12 +156,12 @@ impl QrMatrix {
     }
 }
 
-/// Damla → QR kare akışı (içerik → kareler; deterministik).
-pub fn damladan_kareler(damla_basina_bayt: usize, toplam_bayt: usize) -> usize {
-    if damla_basina_bayt == 0 || toplam_bayt == 0 {
+/// The drop-to-QR-frame flow: content into frames, deterministically.
+pub fn frames_from_drops(bytes_per_drop: usize, total_bytes: usize) -> usize {
+    if bytes_per_drop == 0 || total_bytes == 0 {
         return 0;
     }
-    toplam_bayt.div_ceil(damla_basina_bayt)
+    total_bytes.div_ceil(bytes_per_drop)
 }
 
 #[cfg(test)]
@@ -163,51 +169,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qr_matris_uretim_deterministik() {
-        let data = b"BUD 3.0 QR kare test verisi";
+    fn qr_matrix_generation_is_deterministic() {
+        let data = b"BUD 3.0 QR frame test data";
         let a = QrMatrix::encode(data).unwrap();
         let b = QrMatrix::encode(data).unwrap();
-        assert_eq!(a.digest(), b.digest(), "aynı veri → aynı kare");
+        assert_eq!(a.digest(), b.digest(), "the same data gives the same frame");
         assert_eq!(a.dim, b.dim);
-        // boyut formülü: 17 + 4·version
+        // The size formula: 17 + 4 * version.
         assert_eq!(a.dim, 17 + 4 * a.version as usize);
     }
 
     #[test]
-    fn versiyon_secim_kapasiteye_uyar() {
-        // 100 bayt → v4 (78) yetmez, v5 (106) yeter
+    fn the_version_choice_matches_the_capacity() {
+        // For 100 bytes, v4 at 78 is not enough and v5 at 106 is.
         let data = [0u8; 100];
         let v = QrMatrix::version_for(data.len());
         assert!(crate::bud_format_ux::qr_capacity_bytes(v) >= 100);
-        assert!(v > 4, "100B → v5+: {v}");
-        // 20 bayt → v2 (32) yeter
+        assert!(v > 4, "100B needs v5 or above: {v}");
+        // For 20 bytes, v2 at 32 is enough.
         assert!(crate::bud_format_ux::qr_capacity_bytes(QrMatrix::version_for(20)) >= 20);
     }
 
     #[test]
-    fn kapasite_asilirsa_red() {
-        let data = vec![0u8; 5000]; // v40 2953'ü aşar
+    fn exceeding_the_capacity_is_refused() {
+        let data = vec![0u8; 5000]; // above v40's 2953
         assert!(QrMatrix::encode(&data).is_none());
         assert!(QrMatrix::encode(b"").is_none());
     }
 
     #[test]
-    fn finder_timing_desenleri_var() {
-        let data = b"finder testi";
+    fn the_finder_and_timing_patterns_are_present() {
+        let data = b"finder test";
         let m = QrMatrix::encode(data).unwrap();
-        // üst-sol finder: (3,3) çekirdek koyu (0)
+        // The top-left finder: the core at (3,3) is dark, a 0.
         assert_eq!(m.modules[3 * m.dim + 3], 0);
-        // timing: (6, 10) satırda - 10 çift → 0
+        // Timing: at (6, 10), and 10 is even, so it is 0.
         assert_eq!(m.modules[6 * m.dim + 10], 0);
-        // veri modülleri dolu (koyu/açık karışık)
-        let koyu = m.modules.iter().filter(|&&x| x == 0).count();
-        assert!(koyu > 10, "koyu modül sayısı: {koyu}");
+        // The data modules are filled, mixing dark and light.
+        let dark = m.modules.iter().filter(|&&x| x == 0).count();
+        assert!(dark > 10, "the dark module count: {dark}");
     }
 
     #[test]
-    fn damla_kare_sayisi() {
-        // 2800 bayt, 200 B/damla → 14 damla → 1 kare (v40)
-        assert_eq!(damladan_kareler(200, 2800), 14);
-        assert_eq!(damladan_kareler(0, 100), 0);
+    fn the_frame_count_from_drops() {
+        // 2800 bytes at 200 bytes per drop gives 14 drops, which is one v40 frame.
+        assert_eq!(frames_from_drops(200, 2800), 14);
+        assert_eq!(frames_from_drops(0, 100), 0);
     }
 }
