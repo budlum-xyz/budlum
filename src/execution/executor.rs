@@ -232,12 +232,12 @@ impl Executor {
                     .map_err(|e| {
                         BudlumError::validation("lubot_operator_bond_failed", e.to_string())
                     })?;
-                // Güvenlik denetimi: Lubot operator'lari AI inference result
-                // submit edebilir (RoleId=8, asagida dogrulanir); AI verifier
-                // stake'i de bond ile birlikte kurulur, boylece registry
+                // Security audit: Lubot operators may submit AI inference results
+                // (RoleId=8, verified below); the AI verifier
+                // stake is established together with the bond, so the registry
                 // katmanindaki verifier yetki kontrolu bu operatorleri
                 // reddetmez. Bond miktari MIN_VERIFIER_STAKE'in uzerindedir
-                // (network floor), dolayisiyla kilit basarili olur.
+                // (the network floor), so the lock succeeds.
                 let _ = state
                     .ai_registry
                     .lock_verifier_stake(&tx.from, crate::ai::registry::MIN_VERIFIER_STAKE);
@@ -460,10 +460,10 @@ impl Executor {
                         perception: None,
                     };
                     req.request_id = req.calculate_id();
-                    // Kapalı-devre okuma beyanı (V3): kontrat yolu da aynı
-                    // kapıdan geçer. Beyan taşımayan eski kontrat çağrıları
-                    // fail-closed reddedilir - ne okuduğunu söylemeyen bir
-                    // istek, metin modele görüntü vermenin yoludur.
+                    // The closed-loop read declaration (V3): the contract path passes through the
+                    // same gate. Old contract calls carrying no declaration are
+                    // refused fail-closed - a request that does not say what it reads
+                    // is the way to feed an image to a text model.
                     crate::lubot::admit_inference_request(&state.ai_registry, &req)
                         .map_err(|e| BudlumError::validation("ai_perception_rejected", e))?;
                     let current_block = state.current_block_height;
@@ -667,7 +667,7 @@ impl Executor {
                     .burn(id, &tx.from)
                     .map_err(|e| BudlumError::validation("nft_burn_failed", e.to_string()))?;
 
-                // Constitution §1: "NFT yakılırsa veri B.U.D. storage'dan fiziksel silinir."
+                // Constitution section 1: when an NFT is burned the data is physically deleted from B.U.D. storage.
                 // Physical pruning is handled at Blockchain level (storage_registry.prune_content);
                 // Here we record the CID for the post-block prune hook.
                 tracing::info!(%cid, "NftBurn recorded - storage content pruning delegated to blockchain");
@@ -865,12 +865,12 @@ impl Executor {
                         ));
                     }
                 }
-                // / gerçek kriptografik doğrulama.
+                // / real cryptographic verification.
                 // Receipt_proof = bincode(MerkleProof); leaf'in
-                // BDLM_RELAYER_RESULT_V1 result-fact leaf'i olduğu ve path'in
-                // External_state_root'a çıktığı kanıtlanır. (Kökün harici
-                // Finalize commitment'a anchor'ı = EVM light-client →;
-                // Bu kapı kanıt zincirinin kendisini sound şekilde doğrular.)
+                // it is proved that the leaf is a BDLM_RELAYER_RESULT_V1 result fact and that the path
+                // reaches external_state_root. (Anchoring the root to the external
+                // finalize commitment is the EVM light-client job;
+                // this gate soundly verifies the proof chain itself.)
                 let proof: crate::cross_domain::event_tree::MerkleProof =
                     bincode::deserialize(&res.receipt_proof).map_err(|e| {
                         BudlumError::validation("relayer_proof_malformed", e.to_string())
@@ -1093,8 +1093,8 @@ impl Executor {
                 website_url,
                 manifest_id,
             } => {
-                // / M5: anti-sybil kayıt ücreti. BNS kolundaki
-                // H1 deseniyle simetrik: tam minimum ücret zorunlu + tam düşüm.
+                // / M5: an anti-sybil registration fee. Symmetric with the H1 pattern
+                // in the BNS branch: the exact minimum fee is required and fully deducted.
                 if tx.amount < crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE {
                     return Err(BudlumError::validation(
                         "hub_insufficient_fee",
@@ -1173,10 +1173,10 @@ impl Executor {
                 if spec.owner != tx.from {
                     spec.owner = tx.from;
                 }
-                // Anti-sybil kayıt ücreti (yönetişimle ayarlanabilir,
-                // RegistryParams::ai_model_register_fee). Exact-cost: azı
-                // reddedilir; tamamı ücret üstüne eklenir. Tier 2 kararı
-                // (kullanıcı 2026-08-14): ekonomik parametre, yönetişimce
+                // The anti-sybil registration fee (governance adjustable,
+                // RegistryParams::ai_model_register_fee). Exact cost: less is
+                // refused; the whole amount is added on top of the fee. A tier 2 decision
+                // (2026-08-14): an economic parameter, set by
                 // ayarlanabilir - sabit kodlanmaz.
                 let reg_fee = state.registry.params().ai_model_register_fee;
                 if reg_fee > 0 && tx.amount < reg_fee {
@@ -1215,10 +1215,10 @@ impl Executor {
                     req.requester = tx.from;
                 }
                 {
-                    // Güvenlik denetimi (MEDIUM): doğrudan AI çıkarım yolu
-                    // vesting spendable kapısını atlıyordu. Escrow bir harcamadır;
-                    // vesting kilitli bakiye escrow'a giremez (LubotOperatorBond
-                    // ile aynı kapı).
+                    // Security audit (MEDIUM): the direct AI inference path was bypassing
+                    // the vesting spendable gate. Escrow is a spend;
+                    // a vesting-locked balance cannot enter escrow (the same gate as
+                    // LubotOperatorBond).
                     let sender_balance = state.spendable_balance(&tx.from);
                     if sender_balance
                         < req.max_fee.checked_add(tx.fee).ok_or_else(|| {
@@ -1233,8 +1233,8 @@ impl Executor {
                 }
                 // Executor-layer deadline enforcement (defense-in-depth):
                 let current_block = state.current_block_height;
-                // Kapalı-devre okuma beyanı (V3): beyansız istekler
-                // fail-closed reddedilir (bkz. lubot::admit_inference_request).
+                // The closed-loop read declaration (V3): requests without a declaration are
+                // refused fail-closed (see lubot::admit_inference_request).
                 crate::lubot::admit_inference_request(&state.ai_registry, &req)
                     .map_err(|e| BudlumError::validation("ai_perception_rejected", e))?;
                 let pollen_grant = state
@@ -1251,12 +1251,12 @@ impl Executor {
                         .consume_ai_read_grant(&grant_id, &tx.from, current_block)
                         .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
                 }
-                // Balance check before deduction (spendable: vesting kapısı -
-                // Strix #356; kesinti harcanabilir kısımdan yapılır, kilit
-                // bozulmaz çünkü ilk kapı spendable'ı zaten doğrulamıştır).
-                // Spendable, `get_or_create`'nin mutable ödüncünden ÖNCE
-                // okunur (E0502): hesap yoksa spendable 0'dır, yaratılsa da
-                // 0'dır - sıra değişimi davranışı değiştirmez.
+                // Balance check before deduction (spendable: the vesting gate -
+                // Strix #356; the deduction comes from the spendable part and the lock
+                // is not broken because the first gate already verified spendable).
+                // spendable is read BEFORE the mutable borrow of `get_or_create`
+                // (E0502): if the account does not exist spendable is 0, and it is 0 after
+                // creation too - reordering does not change behaviour.
                 let ai_total = tx.fee.checked_add(req.max_fee).ok_or_else(|| {
                     BudlumError::validation("cost_overflow", "AI total cost overflow")
                 })?;
@@ -1328,9 +1328,9 @@ impl Executor {
                 if let Some(finalized) = outcome {
                     let req = state.ai_registry.requests.get(&finalized.request_id);
                     if let Some(req) = req {
-                        // `req` borrow'u burada biter; köprü, kopyalanan
-                        // `requester` ve yerel `res` üzerinden çalışır - ödül
-                        // döngüsünün mutable `state` erişimiyle çakışmaz.
+                        // The `req` borrow ends here; the bridge works through the copied
+                        // `requester` and the local `res` - it does not clash with the mutable
+                        // `state` access of the reward loop.
                         let requester = req.requester;
                         if !finalized.agreeing_verifiers.is_empty() {
                             // Integer division remainder protection.
@@ -1355,14 +1355,14 @@ impl Executor {
                                 })?;
                             }
                         }
-                        // SocialFi köprüsü (best-effort): kesinleşmiş Lubot
-                        // çıktısı, istek sahibine "lubot-ai" NFT'si olarak
-                        // basılır. Hata blok reddi DEĞİLDİR - çıkarım sonucu
-                        // zaten kesinleşmiştir; köprü ürün yüzeyidir, consensus
-                        // koşulu değil. Duplicate ContentId (aynı çıktı iki
-                        // istekte) yalnızca loglanır.
-                        // Tier 1 çünkü NFT hattının blok reddetmesi,
-                        // kesinleşmiş bir çıkarım sonucunu geri alırdı.
+                        // The SocialFi bridge (best effort): a finalized Lubot
+                        // output is minted to the requester as a "lubot-ai" NFT.
+                        // A failure is NOT a block refusal - the inference result
+                        // is already final; the bridge is a product surface, not a consensus
+                        // condition. A duplicate ContentId (the same output in two
+                        // requests) is only logged.
+                        // Tier 1 because letting the NFT path refuse a block would
+                        // roll back a finalized inference result.
                         let output_bytes = res.output_ref.as_slice().to_vec();
                         let content_id = crate::storage::content_id::ContentId::of(&output_bytes);
                         if let Err(e) = crate::lubot::social::lubot_output_to_nft(
@@ -1373,14 +1373,14 @@ impl Executor {
                         ) {
                             tracing::warn!(%e, "lubot output NFT mint skipped (best-effort)");
                         }
-                        // Pollen köprüsü (ters yön, aynı best-effort bloğu):
-                        // çıktı aynı zamanda DataAsset olarak kaydedilir -
+                        // The Pollen bridge (the reverse direction, the same best-effort block):
+                        // the output is also recorded as a DataAsset -
                         // manifest_id = NFT'nin ContentId'si, metadata
-                        // commitment = kesinleşmiş çıktı commitment'i. Böylece
-                        // NFT sahibi (istek sahibi) kendi çıktısını Pollen
-                        // grant mekanizması üzerinden yeniden okuyabilir;
-                        // kapalı-devre yeni bir yol açılmaz, mevcut
-                        // AiDataInputRef + validate_ai_read_ref yolu kullanılır.
+                        // the commitment is the finalized output commitment. That way
+                        // the NFT owner (the requester) can read their own output again through the
+                        // Pollen grant mechanism;
+                        // no new closed-loop path is opened, the existing
+                        // AiDataInputRef + validate_ai_read_ref path is used.
                         let asset = crate::pollen::data_rights::DataAsset::new(
                             requester,
                             content_id,
@@ -1780,20 +1780,20 @@ impl Executor {
                         "public_digest does not match nullifiers/outputs",
                     ));
                 }
-                // Yetkilendirme: imza `public_digest` uzerinde, islemi
-                // gonderen hesabin anahtariyla dogrulanmali.
+                // Authorization: the signature is over `public_digest` and must verify
+                // against the key of the account sending the transaction.
                 //
-                // Dogrulayici, islemin imza surumune gore secilir. Eskiden
-                // kosulsuz Ed25519 kullaniliyor ve acik anahtar olarak
-                // `tx.from` veriliyordu; bu yalnizca V4'te dogrudur, cunku
+                // The verifier is chosen by the transaction signature version. It used to
+                // use Ed25519 unconditionally and pass `tx.from` as the public
+                // key; that is only correct in V4, because
                 // orada 32 baytlik adres anahtarin **kendisidir**. V5'te
-                // adres anahtarin hash'idir, dolayisiyla ayni cagri hicbir
-                // gecerli imzayi kabul edemezdi: ML-DSA-87 cuzdanli bir
+                // the address is the hash of the key, so the same call could accept no
+                // valid signature at all: a wallet with ML-DSA-87
                 // hesap gizli transfer yapamiyordu.
                 //
-                // V5 yolunda anahtar islemin `signer_public_key` alanindan
-                // gelir; `Transaction::verify` o anahtarin `from` adresini
-                // turettigini zaten dogrulamistir, yani buradaki imza da
+                // On the V5 path the key comes from the transaction's `signer_public_key`
+                // field; `Transaction::verify` has already verified that this key derives
+                // the `from` address, so the signature here is also
                 // gonderen hesaba baglidir.
                 let authorized = match tx.signature_version {
                     crate::core::transaction::SIGNATURE_VERSION_V5 => {
@@ -1918,13 +1918,13 @@ impl Executor {
                             "execution proof attests to a failed run",
                         ));
                     }
-                    // Genel girdiler kanitlayicinin iddiasidir; `program_hash`
+                    // The public inputs are the prover's claim; `program_hash`
                     // gibi `chain_id` de baglanmali. Baglanmazsa baska bir
-                    // zincir icin uretilmis, orada tamamen gecerli bir kanit
-                    // burada da dogrulanir: AIR `chain_id`'yi trace'e baglar
-                    // ama hangi zincirin dogru oldugunu bilemez, o karar
-                    // dogrulayiciya aittir. `tx.chain_id` islemin imzasina
-                    // dahil oldugu icin gonderen bunu serbestce secemez.
+                    // a proof produced for one chain and entirely valid there
+                    // would verify here too: the AIR binds `chain_id` to the trace
+                    // but cannot know which chain is the right one; that decision
+                    // belongs to the verifier. Because `tx.chain_id` is part of the transaction
+                    // signature the sender cannot choose it freely.
                     if claimed_inputs.chain_id != tx.chain_id {
                         return Err(BudlumError::validation(
                             "ai_exec_chain_id",
