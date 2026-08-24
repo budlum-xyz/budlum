@@ -766,7 +766,8 @@ mod tests {
         // payload gives a different digest.
         let mut other_payload = payload;
         other_payload[0] = 0x00;
-        let c = super::render_qr_stream_frame(&one, &other_payload, 0, 64).expect("different payload");
+        let c =
+            super::render_qr_stream_frame(&one, &other_payload, 0, 64).expect("different payload");
         assert_ne!(
             a.get(12..16),
             c.get(12..16),

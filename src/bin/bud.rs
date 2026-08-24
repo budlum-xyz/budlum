@@ -209,7 +209,8 @@ fn rpc_call(
         "params": params,
         "id": 1,
     });
-    let body_str = serde_json::to_string(&body).map_err(|e| format!("request serialization: {e}"))?;
+    let body_str =
+        serde_json::to_string(&body).map_err(|e| format!("request serialization: {e}"))?;
     let resp_text = http_post_json(&host, port, &body_str)?;
     let v: serde_json::Value =
         serde_json::from_str(&resp_text).map_err(|e| format!("RPC response parse: {e}"))?;
@@ -239,8 +240,7 @@ fn parse_rpc_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> 
     if let Some(hex) = s.strip_prefix("0x") {
         u64::from_str_radix(hex, 16).map_err(|e| format!("{field} hex parse: {e}"))
     } else {
-        s.parse::<u64>()
-            .map_err(|e| format!("{field} parse: {e}"))
+        s.parse::<u64>().map_err(|e| format!("{field} parse: {e}"))
     }
 }
 
@@ -500,14 +500,16 @@ mod tests {
     #[test]
     fn a_zero_source_hash_is_refused() {
         let zero = "0".repeat(64);
-        let err = build_manifest("demo-app", &zero).expect_err("a zero source hash must be refused");
+        let err =
+            build_manifest("demo-app", &zero).expect_err("a zero source hash must be refused");
         assert!(err.contains("manifest refused"), "{err}");
     }
 
     /// A short digest must not be silently padded.
     #[test]
     fn a_short_digest_is_refused() {
-        let err = parse_digest("--source-hash", "0x0909").expect_err("a short digest must be refused");
+        let err =
+            parse_digest("--source-hash", "0x0909").expect_err("a short digest must be refused");
         assert!(err.contains("must be 32 bytes"), "{err}");
     }
 

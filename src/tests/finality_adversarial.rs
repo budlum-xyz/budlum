@@ -272,7 +272,11 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
 
     // The cert is produced AND verifies - the honest subset finalized despite the bad actor.
     let cert = agg.try_produce_cert().expect("honest subset cert produced");
-    assert_eq!(cert.signer_count(4), 3, "only the 3 honest signatures must count");
+    assert_eq!(
+        cert.signer_count(4),
+        3,
+        "only the 3 honest signatures must count"
+    );
     cert.verify(&snap)
         .expect("the honest subset certificate must verify");
 }
@@ -647,7 +651,11 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
 
     // The record survives and is byte-identical.
     let history_after = restored_state.registry.slashing_history_for(&equivocator);
-    assert_eq!(history_after.len(), 1, "the record must not be lost after restore");
+    assert_eq!(
+        history_after.len(),
+        1,
+        "the record must not be lost after restore"
+    );
     assert_eq!(history_after[0].report.offender, equivocator);
     assert_eq!(history_after[0].penalty, rec_penalty);
     assert_eq!(history_after[0].remaining_stake, rec_remaining);
