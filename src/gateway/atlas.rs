@@ -3,23 +3,24 @@
 //! Atlas is read-only. It never mutates chain state and it never labels raw,
 //! Unproven UI data as verified.
 //!
-//! # Iki `atlas` modulu birlestirildi
+//! # Two `atlas` modules were merged
 //!
-//! Agacta ayni adi tasiyan iki modul vardi: bu dosya (calisan,
-//! `bud_atlasGetWalletContext`'in cagirdigi) ve `src/rpc/atlas.rs` (568
-//! satir, modul disinda sifir kullanim). Ikincisinin sorgu motoru ve
-//! dogrulayicilari gercek is yapiyordu ve 9 testi vardi; olu olmasinin
-//! sebebi kotu olmasi degil, hicbir seyin onu cagirmamasiydi.
+//! The tree carried two modules under the same name: this one (live, the one
+//! `bud_atlasGetWalletContext` calls) and `src/rpc/atlas.rs` (568 lines, zero
+//! use outside the module). The second one's query engine and validators did
+//! real work and had 9 tests; it was dead not because it was bad but because
+//! nothing called it.
 //!
-//! Bu yuzden silinmedi, **tasindi**: `AtlasQueryEngine` ve dogrulayicilari
-//! (`EvidenceRecord`, `WalletContextGraph`, `DomainSummary`,
-//! `CrossDomainTrace`) testleriyle birlikte buraya alindi. Ayni adi tasiyan
-//! iki ayri modul yerine tek modul kaldi.
+//! So it was not deleted, it was **moved**: `AtlasQueryEngine` and its
+//! validators (`EvidenceRecord`, `WalletContextGraph`, `DomainSummary`,
+//! `CrossDomainTrace`) were brought here with their tests. One module now
+//! stands where two carried the same name.
 //!
-//! Tasinmayan tek sey `query_evidence_for_address` idi: adrese gore kanit
-//! ariyormus gibi duruyor, govdesi `Vec::new()` donduruyordu. Adres indeksi
-//! olmadan o sorgu yanitlanamaz; bos donen bir arama, arama degildir.
-//! Silindi - gerektiginde indeksle birlikte yazilir.
+//! The one thing not moved was `query_evidence_for_address`: it looked like it
+//! searched for evidence by address, and its body returned `Vec::new()`.
+//! Without an address index that query cannot be answered, and a search that
+//! returns empty is not a search. Deleted - it gets written together with the
+//! index when the index exists.
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, Hash32};
@@ -137,24 +138,24 @@ fn validate_label(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Kanıt sorgu sonucu.
+/// The result of an evidence query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceRecord {
     /// Domain ID.
     pub domain_id: DomainId,
-    /// Domain yüksekliği.
+    /// Domain height.
     pub domain_height: u64,
     /// Event indeksi.
     pub event_index: u32,
-    /// Event türü.
+    /// Event kind.
     pub event_kind: String,
-    /// Event kök hash.
+    /// Event root hash.
     pub event_root: Hash32,
     /// Commitment block hash.
     pub block_hash: Hash32,
-    /// Doğrulanma zamanı (epoch).
+    /// When it was verified (epoch).
     pub verified_epoch: u64,
-    /// Consensus türü.
+    /// Consensus kind.
     pub consensus_kind: ConsensusKind,
 }
 
@@ -177,86 +178,86 @@ impl EvidenceRecord {
     }
 }
 
-/// Cüzdan bağlam grafi düğümü.
+/// A node in the wallet context graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletContextNode {
     /// Adres.
     pub address: Address,
-    /// Düğüm türü.
+    /// Node kind.
     pub node_type: WalletNodeType,
-    /// İlişki sayısı.
+    /// Number of relations.
     pub connection_count: u32,
     /// Son aktivite epoch'u.
     pub last_active_epoch: u64,
 }
 
-/// Cüzdan bağlam grafi kenarı.
+/// An edge in the wallet context graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletContextEdge {
-    /// Kaynak adres.
+    /// Source address.
     pub from: Address,
-    /// Hedef adres.
+    /// Target address.
     pub to: Address,
-    /// Kenar türü.
+    /// Edge kind.
     pub edge_type: WalletEdgeType,
-    /// Ağırlık (işlem hacmi, stake miktarı vb.).
+    /// Weight (transaction volume, stake amount, and so on).
     pub weight: u64,
-    /// Son etkileşim epoch'u.
+    /// Epoch of the last interaction.
     pub last_interaction_epoch: u64,
 }
 
-/// Cüzdan düğüm türü.
+/// The kind of a wallet node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalletNodeType {
-    /// Normal kullanıcı.
+    /// An ordinary user.
     User,
-    /// Doğrulayıcı.
+    /// A validator.
     Validator,
     /// Prover.
     Prover,
     /// Relayer.
     Relayer,
-    /// AI ajanı.
+    /// An AI agent.
     AiAgent,
-    /// Akıllı sözleşme.
+    /// A smart contract.
     Contract,
-    /// BNS kayıt sahibi.
+    /// A BNS record holder.
     BnsOwner,
 }
 
-/// Cüzdan kenar türü.
+/// The kind of a wallet edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalletEdgeType {
     /// Transfer.
     Transfer,
     /// Staking.
     Stake,
-    /// Cross-domain köprü.
+    /// A cross-domain bridge.
     Bridge,
-    /// AI ödeme.
+    /// An AI payment.
     AiPayment,
-    /// BNS kayıt.
+    /// A BNS registration.
     BnsRegistration,
-    /// Storage anlaşma.
+    /// A storage agreement.
     StorageDeal,
     /// Governance oy.
     GovernanceVote,
-    /// Pollen erişim izni.
+    /// A Pollen access grant.
     PollenGrant,
 }
 
-/// Cüzdan bağlam grafi - bir adresin tüm zincir-üstü ilişkileri.
+/// The wallet context graph: every on-chain relation of one address.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletContextGraph {
-    /// Merkez adres.
+    /// The address at the centre.
     pub center: Address,
-    /// Bağlantılı düğümler.
+    /// Connected nodes.
     pub nodes: Vec<WalletContextNode>,
-    /// Bağlantı kenarları.
+    /// Connecting edges.
     pub edges: Vec<WalletContextEdge>,
     /// Toplam transfer hacmi (u64 BUD).
     pub total_transfer_volume: u64,
-    /// Graf derinliği (kaç atlama).
+    /// Graph depth, in hops.
     pub depth: u32,
 }
 
@@ -291,22 +292,22 @@ impl WalletContextGraph {
     }
 }
 
-/// Domain özet istatistikleri.
+/// Summary statistics for a domain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DomainSummary {
     /// Domain ID.
     pub domain_id: DomainId,
-    /// Domain adı.
+    /// Domain name.
     pub name: String,
-    /// Consensus türü.
+    /// Consensus kind.
     pub consensus_kind: ConsensusKind,
-    /// Mevcut yükseklik.
+    /// Current height.
     pub current_height: u64,
-    /// Toplam transaction sayısı.
+    /// Total transaction count.
     pub total_transactions: u64,
-    /// Toplam event sayısı.
+    /// Total event count.
     pub total_events: u64,
-    /// Aktif doğrulayıcı sayısı.
+    /// Number of active validators.
     pub active_validators: u32,
     /// Son commit epoch'u.
     pub last_commit_epoch: u64,
@@ -325,22 +326,22 @@ impl DomainSummary {
     }
 }
 
-/// Cross-domain mesaj iz sonucu.
+/// The trace result for a cross-domain message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossDomainTrace {
     /// Kaynak domain.
     pub source_domain: DomainId,
     /// Hedef domain.
     pub target_domain: DomainId,
-    /// Kaynak yükseklik.
+    /// Source height.
     pub source_height: u64,
-    /// Mesaj indeksi.
+    /// Message index.
     pub message_index: u32,
-    /// Mesaj durumu.
+    /// Message status.
     pub status: MessageTraceStatus,
-    /// Gönderen.
+    /// Sender.
     pub sender: Address,
-    /// Alıcı.
+    /// Recipient.
     pub recipient: Address,
     /// Payload hash.
     pub payload_hash: Hash32,
@@ -367,27 +368,27 @@ impl CrossDomainTrace {
     }
 }
 
-/// Mesaj iz durumu.
+/// The status of a traced message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageTraceStatus {
-    /// Kaynak domain'de yayınlandı.
+    /// Published on the source domain.
     Emitted,
-    /// Settlement layer'da doğrulandı.
+    /// Verified on the settlement layer.
     Verified,
-    /// Hedef domain'de alındı.
+    /// Received on the target domain.
     Delivered,
-    /// Zaman aşımı.
+    /// Timed out.
     Expired,
-    /// Başarısız.
+    /// Failed.
     Failed,
 }
 
 /// Atlas sorgu motoru.
 #[derive(Debug, Clone, Default)]
 pub struct AtlasQueryEngine {
-    /// Kanıt kayıt defteri.
+    /// The evidence ledger.
     pub evidence_records: Vec<EvidenceRecord>,
-    /// Domain özetleri.
+    /// Domain summaries.
     pub domain_summaries: BTreeMap<DomainId, DomainSummary>,
 }
 
@@ -422,7 +423,7 @@ impl AtlasQueryEngine {
         Ok(())
     }
 
-    /// Domain ID'ye göre kanıt kayıtlarını sorgular.
+    /// Queries evidence records by domain ID.
     pub fn query_evidence_by_domain(&self, domain_id: DomainId) -> Vec<&EvidenceRecord> {
         self.evidence_records
             .iter()
@@ -430,7 +431,7 @@ impl AtlasQueryEngine {
             .collect()
     }
 
-    /// Belirli bir yükseklik aralığındaki kanıt kayıtlarını sorgular.
+    /// Queries evidence records within a given height range.
     pub fn query_evidence_by_height_range(
         &self,
         domain_id: DomainId,
@@ -450,12 +451,12 @@ impl AtlasQueryEngine {
             .collect()
     }
 
-    /// Domain özetini döndürür.
+    /// Returns the summary for one domain.
     pub fn get_domain_summary(&self, domain_id: DomainId) -> Option<&DomainSummary> {
         self.domain_summaries.get(&domain_id)
     }
 
-    /// Tüm domain özetlerini döndürür.
+    /// Returns every domain summary.
     pub fn all_domain_summaries(&self) -> Vec<&DomainSummary> {
         self.domain_summaries.values().collect()
     }

@@ -194,7 +194,7 @@ const BASELINE_PATH: &str = ".github/turkish-baseline.txt";
 const VACUITY_FLOOR: usize = 50;
 
 /// How many findings are printed before the list is summarised.
-const MAX_REPORTED: usize = 40;
+const MAX_REPORTED: usize = 100000;
 
 /// Remove the strings that are allowed to carry Turkish characters, so neither
 /// scan sees them. Order matters only in that all of them run before scanning.
