@@ -1,134 +1,138 @@
-//! B.U.D. 2.0 değişmez testleri.
+//! B.U.D. 2.0 invariant tests.
 //!
-//! Bu dosya `#[test] fn placeholder() { assert!(true); }` idi: hiçbir şey
-//! doğrulamayan, ama yeşil görünen bir kayıt. `assert!(true)` clippy'nin
-//! `assertions_on_constants` kapısına takılıyordu ve takılması doğruydu: boş
-//! bir test, testi olmayan koddan daha kötüdür, çünkü kapsama varmış izlenimi
-//! bırakır.
+//! This file used to be `#[test] fn placeholder() { assert!(true); }`: a record
+//! that verified nothing yet looked green. `assert!(true)` tripped clippy's
+//! `assertions_on_constants` gate, and tripping it was correct: an empty test
+//! is worse than untested code, because it leaves the impression of coverage.
 //!
-//! Yerine 2.0 şartnamesinin **1. değişmezi** koşuluyor: KAYIPSIZLIK, yani orijinal
-//! baytlar birebir geri üretilir. Testler `engine_store`/`engine_restore_container`
-//! turunu farklı içerik sınıflarında sürer, çünkü boru hattı sınıfa göre farklı
-//! transform seçer (columnar / logfield / none) ve kayıpsızlık kırılacaksa
-//! transform sınırında kırılır.
+//! In its place the **1st invariant** of the 2.0 specification is exercised:
+//! LOSSLESSNESS, that is, the original bytes are reproduced byte for byte. The
+//! tests drive the `engine_store`/`engine_restore_container` round trip over
+//! different content classes, because the pipeline picks a different transform
+//! per class (columnar / logfield / none) and if losslessness breaks it breaks
+//! at a transform boundary.
 
 use bud_core::bud_format_engine::{engine_restore_container, engine_store};
 
-/// Sabit bir zaman damgası: PACT kaydı zamana bağlı, test belirleyici olmalı.
+/// A fixed timestamp: the PACT record depends on time, and the test must be deterministic.
 const TS: u64 = 1_768_000_000;
 
-/// Turu sürer ve orijinal baytların birebir döndüğünü doğrular.
-fn roundtrip_bayt_esit(data: &[u8], etiket: &str) {
+/// Drives the round trip and verifies the original bytes come back byte for byte.
+fn roundtrip_bytes_equal(data: &[u8], label: &str) {
     let res = engine_store(data, false, TS)
-        .unwrap_or_else(|| panic!("{etiket}: engine_store None döndürdü"));
+        .unwrap_or_else(|| panic!("{label}: engine_store returned None"));
 
-    // `res.container` KONTEYNER baytlarıdır (engine blob'u değil), bu yüzden
-    // `engine_restore_container` kullanılır; `bud` CLI de aynısını çağırır.
-    let geri = engine_restore_container(&res.container, res.transform_kind as u8, false)
-        .unwrap_or_else(|| panic!("{etiket}: engine_restore_container None döndürdü"));
+    // `res.container` holds the CONTAINER bytes (not the engine blob), which is
+    // why `engine_restore_container` is used; the `bud` CLI calls the same one.
+    let back = engine_restore_container(&res.container, res.transform_kind as u8, false)
+        .unwrap_or_else(|| panic!("{label}: engine_restore_container returned None"));
 
     assert_eq!(
-        geri.len(),
+        back.len(),
         data.len(),
-        "{etiket}: uzunluk değişti ({} -> {})",
+        "{label}: length changed ({} -> {})",
         data.len(),
-        geri.len()
+        back.len()
     );
     assert!(
-        geri == data,
-        "{etiket}: baytlar birebir dönmedi (format={}, transform={:?})",
+        back == data,
+        "{label}: bytes did not come back byte for byte (format={}, transform={:?})",
         res.format_name,
         res.transform_kind
     );
     assert_eq!(
         res.original_len,
         data.len() as u64,
-        "{etiket}: kayıtlı original_len girdiyle uyuşmuyor"
+        "{label}: recorded original_len does not match the input"
     );
 }
 
 #[test]
-fn json_kayipsiz_doner() {
-    // Columnar transform yolu: tekrarlı anahtarlar sütunlara ayrılır.
-    let mut satirlar = Vec::new();
+fn json_returns_losslessly() {
+    // Columnar transform path: repeated keys are split into columns.
+    let mut rows = Vec::new();
     for i in 0..200 {
-        satirlar.push(format!(
-            r#"{{"kullanici":"u{}","gun":"2026-08-{:02}","deger":{},"durum":{}}}"#,
+        rows.push(format!(
+            r#"{{"user":"u{}","day":"2026-08-{:02}","value":{},"status":{}}}"#,
             i % 40,
             (i % 28) + 1,
             i,
             [200, 201, 404, 500][i % 4]
         ));
     }
-    let json = format!("[{}]", satirlar.join(",")).into_bytes();
-    roundtrip_bayt_esit(&json, "json");
+    let json = format!("[{}]", rows.join(",")).into_bytes();
+    roundtrip_bytes_equal(&json, "json");
 }
 
 #[test]
-fn duz_metin_kayipsiz_doner() {
-    let metin = "B.U.D. 2.0 kayıpsızlık değişmezi.\n\
-                 Türkçe karakterler de birebir dönmeli: çğıöşü ÇĞİÖŞÜ.\n"
+fn plain_text_returns_losslessly() {
+    // The second line is written with escapes on purpose: multi-byte UTF-8 must
+    // survive the round trip, and the source file itself stays ASCII.
+    let text = "B.U.D. 2.0 losslessness invariant.\n\
+                 multi-byte characters must return byte for byte: \
+                 \u{e7}\u{11f}\u{131}\u{f6}\u{15f}\u{fc} \u{c7}\u{11e}\u{130}\u{d6}\u{15e}\u{dc}.\n"
         .repeat(80)
         .into_bytes();
-    roundtrip_bayt_esit(&metin, "metin");
+    roundtrip_bytes_equal(&text, "text");
 }
 
 #[test]
-fn sikismayan_veri_kayipsiz_doner() {
-    // Entropi-kodlu/rastgele sınıfın taklidi: sıkışmaz, boru hattı sıkıştırmayı
-    // ATLAMALI ve yine de baytları birebir döndürmeli. Sıkıştırma atlanınca
-    // konteyner yolunun bozulması klasik hatadır; kapı burada.
-    let mut veri = Vec::with_capacity(8192);
+fn incompressible_data_returns_losslessly() {
+    // Imitation of the entropy-coded/random class: it does not compress, the
+    // pipeline MUST SKIP compression and still return the bytes byte for byte.
+    // Corrupting the container path once compression is skipped is a classic
+    // bug; the gate sits here.
+    let mut data = Vec::with_capacity(8192);
     let mut x: u32 = 0x1234_5678;
     for _ in 0..8192 {
-        // xorshift: deterministik ama sıkışmayan
+        // xorshift: deterministic but incompressible
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
-        veri.push((x & 0xFF) as u8);
+        data.push((x & 0xFF) as u8);
     }
-    roundtrip_bayt_esit(&veri, "rastgele");
+    roundtrip_bytes_equal(&data, "random");
 }
 
 #[test]
-fn tek_bayt_ve_kucuk_girdi_kayipsiz_doner() {
-    // Sınır: parça boyutunun çok altındaki girdiler.
-    roundtrip_bayt_esit(b"x", "tek bayt");
-    roundtrip_bayt_esit(b"kisa girdi", "kisa");
+fn single_byte_and_small_input_return_losslessly() {
+    // Boundary: inputs far below the chunk size.
+    roundtrip_bytes_equal(b"x", "single byte");
+    roundtrip_bytes_equal(b"short input", "short");
 }
 
 #[test]
-fn bos_girdi_reddedilir_sessizce_bozulmaz() {
-    // Boş girdi depolanamaz; önemli olan panik değil, açık ret.
+fn empty_input_is_rejected_not_silently_corrupted() {
+    // An empty input cannot be stored; what matters is a clear rejection, not a panic.
     assert!(
         engine_store(b"", false, TS).is_none(),
-        "boş girdi kabul edilmemeli"
+        "an empty input must not be accepted"
     );
 }
 
 #[test]
-fn olculen_oran_boyutlardan_tutarlidir() {
-    // K19: oran İDDİA edilmez, boyutlardan ÖLÇÜLÜR. Kayıtlı oranın gerçekten
-    // original_len/stored_len olduğunu doğrula, ölçüm üstü iddia kapısının
-    // dayandığı sayı bu.
-    let mut satirlar = Vec::new();
+fn measured_ratio_is_consistent_with_the_sizes() {
+    // K19: the ratio is not CLAIMED, it is MEASURED from the sizes. Verify that
+    // the recorded ratio really is original_len/stored_len; this is the number
+    // the claim-above-measurement gate rests on.
+    let mut rows = Vec::new();
     for i in 0..300 {
-        satirlar.push(format!(
-            "2026-08-21T00:00:{:02}Z seviye=bilgi kod={}",
+        rows.push(format!(
+            "2026-08-21T00:00:{:02}Z level=info code={}",
             i % 60,
             i
         ));
     }
-    let log = satirlar.join("\n").into_bytes();
+    let log = rows.join("\n").into_bytes();
 
     let res = engine_store(&log, false, TS).expect("engine_store");
-    assert!(res.stored_len > 0, "stored_len sıfır olamaz");
+    assert!(res.stored_len > 0, "stored_len cannot be zero");
 
-    let beklenen = res.original_len as f64 / res.stored_len as f64;
+    let expected = res.original_len as f64 / res.stored_len as f64;
     assert!(
-        (res.measured_ratio - beklenen).abs() < 1e-9,
-        "measured_ratio ({}) boyut oranıyla ({}) uyuşmuyor",
+        (res.measured_ratio - expected).abs() < 1e-9,
+        "measured_ratio ({}) does not match the size ratio ({})",
         res.measured_ratio,
-        beklenen
+        expected
     );
 }
