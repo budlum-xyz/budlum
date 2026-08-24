@@ -1,11 +1,16 @@
-//! B.U.D. 2.0 - OFİS (OPC) YENİDEN PAKETLEME (100-web bulgusu: "OPC/XML-içi %10-60")
+//! B.U.D. 2.0 - OFFICE (OPC) REPACKING; the 100-web finding of "10 to 60
+//! percent inside OPC/XML".
 //!
-//! Kalan iş #8b: Ofis OPC - DOCX/XLSX/PPTX = ZIP içi XML. ZIP zaten deflate kullanır;
-//! kazanç, girdileri DETERMİNİSTİK sırayla açıp XML katmanını ortak-prefix düzeninde
-//! birleştirmek (zstd'nin tekrarı görmesi) ve yeniden paketlerken ZORUNSUZ
-//! (STORE) kullanmaktır - açık XML byte'ları .bud konteynerinde zstd-19 ile
-//! sıkışır. KAYIPSIZ: `office_restore` orijinal ZIP'i (girdi sırası + STORE) geri üretir;
-//! içerik byte-birebir (deflate seviyesi içerikten bağımsız).
+//! Remaining work item 8b: Office OPC, meaning DOCX, XLSX and PPTX, is XML
+//! inside a ZIP. The ZIP already uses deflate; the gain comes from unpacking
+//! the entries in a DETERMINISTIC order, joining the XML layer in a
+//! common-prefix arrangement so that zstd can see the repetition, and using
+//! STORE, no compression, when repacking. The plain XML bytes then compress
+//! under zstd-19 inside the `.bud` container.
+//!
+//! It is LOSSLESS: `office_restore` reproduces the original ZIP, in entry order
+//! and with STORE, and the content is byte for byte identical, since the
+//! deflate level is independent of the content.
 
 #![forbid(unsafe_code)]
 
@@ -23,7 +28,8 @@ pub struct OfficeEntry {
     pub data: Vec<u8>,
 }
 
-/// ZIP'i açar (yalnız yerel başlıklar; STORE+DEFLATE desteklenir) → girdiler.
+/// Unpacks a ZIP into its entries, reading local headers only; STORE and
+/// DEFLATE are supported.
 pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
     let mut entries = Vec::new();
     let mut pos = 0usize;
@@ -45,8 +51,8 @@ pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
             &data[pos + 30 + name_len + extra_len..pos + 30 + name_len + extra_len + comp_len];
         let raw = match method {
             0 => comp.to_vec(),                  // STORE
-            8 => inflate_raw(comp, uncomp_len)?, // DEFLATE (zlib-sız ham)
-            _ => return None,                    // desteklenmeyen yöntem
+            8 => inflate_raw(comp, uncomp_len)?, // DEFLATE, raw, without zlib
+            _ => return None,                    // an unsupported method
         };
         entries.push(OfficeEntry { name, data: raw });
         pos += 30 + name_len + extra_len + comp_len;
@@ -57,18 +63,23 @@ pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
     Some(entries)
 }
 
-/// Ham DEFLATE açma (küçük girdiler için basit bit okuyucu + sabit/literal Huffman).
-/// Panik'siz; bozuk akışta None döner. Yalnız ofis XML'leri için yeterli (küçük).
+/// Raw DEFLATE decompression: a simple bit reader with fixed and literal
+/// Huffman, for small entries.
+///
+/// It is panic-free and returns `None` on a corrupt stream. It is only meant to
+/// suffice for office XML, which is small.
 fn inflate_raw(data: &[u8], expected: usize) -> Option<Vec<u8>> {
-    // Bu sürümde gerçek bir DEFLATE açıcı yok - zlib yoksa başarısız döner ve
-    // çağıran STORE-only ZIP'leri işler. Gerçek açıcı: miniz_oxide benzeri bir
-    // bağımlılık eklenebilir; sandbox'ta ofis korpusumuz STORE üretilir (aşağıya bak).
+    // This version has no real DEFLATE decompressor: without zlib it fails, and
+    // the caller handles STORE-only ZIPs. A real decompressor would mean adding
+    // a dependency such as miniz_oxide; in the sandbox our office corpus is
+    // produced with STORE, as the tests below show.
     let _ = (data, expected);
     None
 }
 
-/// OPC repack: girdileri (a) isme göre deterministik sırala, (b) XML/tekrar ayrı
-/// bloklarda birleştir → zstd'nin ortak-prefix kazancı. STORE-only zip üretir.
+/// The OPC repack: sort the entries deterministically by name, then join the XML
+/// and its repetitions into separate blocks so that zstd gains from the common
+/// prefix. It produces a STORE-only ZIP.
 pub fn office_transform(zip: &[u8]) -> Option<Vec<u8>> {
     let mut entries = zip_read(zip)?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -81,38 +92,40 @@ pub fn office_transform(zip: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(e.name.as_bytes());
         out.extend_from_slice(&(e.data.len() as u32).to_le_bytes());
         out.extend_from_slice(&e.data);
-        body.extend_from_slice(&e.data); // ortak-prefix havuzu (zstd için)
+        body.extend_from_slice(&e.data); // the common-prefix pool, for zstd
     }
     out.push(0xFF);
     out.extend_from_slice(&body);
     Some(out)
 }
 
-/// Transform'dan ORİJİNAL ZIP'i üret (STORE, girdi sırası korunur → byte-birebir içerik).
+/// Rebuilds the ORIGINAL ZIP from the transform, using STORE and preserving the
+/// entry order, so the content is byte for byte identical.
 pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     if !transformed.starts_with(b"OFC1|") {
         return None;
     }
     let mut pos = 5usize;
-    // STRIX FIX: truncate/bozuk girdide PANİK yok - .get() ile sınır kontrolü.
+    // STRIX FIX: no PANIC on truncated or corrupt input; the bounds are checked
+    // with .get().
     let n = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
     if n > 1_000_000 {
-        return None; // dev girdi → RED (alloc-bomb koruması, K38)
+        return None; // a huge entry count is refused, an alloc-bomb guard (K38)
     }
     let mut entries = Vec::with_capacity(n.min(1024));
     for _ in 0..n {
         let nl = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
         pos += 4;
         if nl > 64 * 1024 {
-            return None; // dev isim → RED
+            return None; // a huge name is refused
         }
         let name = String::from_utf8_lossy(transformed.get(pos..pos + nl)?).to_string();
         pos += nl;
         let dl = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
         pos += 4;
         if dl > 512 * 1024 * 1024 {
-            return None; // dev veri → RED
+            return None; // huge data is refused
         }
         let data = transformed.get(pos..pos + dl)?.to_vec();
         pos += dl;
@@ -121,7 +134,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     if transformed.get(pos) != Some(&0xFF) {
         return None;
     }
-    // STORE-only ZIP üret
+    // Produce the STORE-only ZIP.
     let mut local = Vec::new();
     let mut central = Vec::new();
     let mut offset = 0u32;
@@ -185,8 +198,9 @@ pub fn office_digest(transformed: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    /// STORE-only ZIP üretici (test korpusu - docx/xlsx benzeri XML girdiler).
-    fn ornek_opc() -> Vec<u8> {
+    /// A STORE-only ZIP builder, the test corpus of docx- and xlsx-like XML
+    /// entries.
+    fn sample_opc() -> Vec<u8> {
         let entries = vec![
             (
                 "[Content_Types].xml".to_string(),
@@ -196,7 +210,7 @@ mod tests {
                 "word/document.xml".to_string(),
                 format!(
                     "<w:document>{}</w:document>",
-                    "<w:p>Paragraf metni.</w:p>".repeat(200)
+                    "<w:p>Paragraph text.</w:p>".repeat(200)
                 )
                 .into_bytes(),
             ),
@@ -205,16 +219,16 @@ mod tests {
                 b"<w:styles><w:style/></w:styles>".to_vec(),
             ),
         ];
-        // elle STORE zip (ofis_transform'un restore'u gibi)
+        // A STORE zip built by hand, in the same shape office_restore produces.
         let mut local = Vec::new();
         let mut central = Vec::new();
         let mut offset = 0u32;
         for (name, data) in &entries {
             let nb = name.as_bytes();
             local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
-            local.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // version(2)+flags(2)
+            local.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // version(2) plus flags(2)
             local.extend_from_slice(&0u16.to_le_bytes()); // method=STORE
-            local.extend_from_slice(&0u32.to_le_bytes()); // time(2)+date(2)
+            local.extend_from_slice(&0u32.to_le_bytes()); // time(2) plus date(2)
             local.extend_from_slice(&0u32.to_le_bytes()); // crc
             local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
             local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
@@ -243,8 +257,8 @@ mod tests {
     }
 
     #[test]
-    fn zip_okur_ve_transform_uretir() {
-        let z = ornek_opc();
+    fn it_reads_a_zip_and_produces_a_transform() {
+        let z = sample_opc();
         let entries = zip_read(&z).expect("zip_read");
         assert_eq!(entries.len(), 3);
         let t = office_transform(&z).expect("transform");
@@ -252,42 +266,47 @@ mod tests {
     }
 
     #[test]
-    fn office_roundtrip_icerik_birebir() {
-        let z = ornek_opc();
+    fn the_office_round_trip_is_byte_identical() {
+        let z = sample_opc();
         let t = office_transform(&z).unwrap();
         let r = office_restore(&t).unwrap();
-        // STORE repack → açılmış byte'lar aynı (isim + veri)
+        // After the STORE repack the unpacked bytes are the same, in name and
+        // data.
         let a = zip_read(&z).unwrap();
         let b = zip_read(&r).unwrap();
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.name, y.name);
-            assert_eq!(x.data, y.data, "içerik birebir: {}", x.name);
+            assert_eq!(x.data, y.data, "the content is identical: {}", x.name);
         }
     }
 
     #[test]
-    fn strix_truncate_panik_yok() {
-        // STRIX: kırpılmış/bozuk transform girdisi None dönmeli, PANİK olmamalı.
-        let z = ornek_opc();
+    fn strix_truncation_does_not_panic() {
+        // STRIX: a truncated or corrupt transform input must return None and must
+        // not PANIC.
+        let z = sample_opc();
         let t = office_transform(&z).unwrap();
-        // her kesim noktasında panik yok
+        // No panic at any cut point.
         for cut in 0..t.len() {
             let _ = office_restore(&t[..cut]);
         }
-        // bozuk baytlar (uzunluk alanları çürük)
-        let mut bozuk = t.clone();
-        for i in 0..bozuk.len() {
-            bozuk[i] = bozuk[i].wrapping_add(0x5A);
+        // Corrupt bytes, with the length fields rotted.
+        let mut corrupt = t.clone();
+        for i in 0..corrupt.len() {
+            corrupt[i] = corrupt[i].wrapping_add(0x5A);
         }
-        let _ = office_restore(&bozuk);
-        assert!(office_restore(b"OFC1|").is_none(), "kısa girdi → None");
-        assert!(office_restore(b"bozuk").is_none());
+        let _ = office_restore(&corrupt);
+        assert!(
+            office_restore(b"OFC1|").is_none(),
+            "a short input gives None"
+        );
+        assert!(office_restore(b"corrupt").is_none());
     }
 
     #[test]
-    fn office_digest_deterministik() {
-        let z = ornek_opc();
+    fn the_office_digest_is_deterministic() {
+        let z = sample_opc();
         let t = office_transform(&z).unwrap();
         assert_eq!(office_digest(&t), office_digest(&t));
     }
