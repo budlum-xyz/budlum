@@ -17,13 +17,13 @@
 //!
 //! Bytecode karsilastirmasi ayrimi kesinlestirdi: basarisiz programlarin
 //! opcode kumesinde `Jnz` ve `Jmp` var, gecenlerde ikisi de yok. Yani sorun
-//! trace uzunlugu degil, dallanmanin kendisi -- 19 adimlik duz program
+//! not the trace length but branching itself -- a straight 19 step program
 //! gecerken 2 turluk dongu dusuyor.
 //!
 //! Mevcut 106 prover testi bu bosluga dusmustu: hepsi ELLE kurulmus komut
 //! dizileri kanitliyor (`inst(Opcode::Jnz, ...)`), derleyicinin gercek
 //! ciktisini hicbiri kanitlamiyor. Elle kurulan Jnz gecerken derlenmis Jnz
-//! dusuyorsa fark, komutun kendisinde degil, derleyicinin urettigi
+//! fails, the difference is not in the instruction itself but in the
 //! cevresinde (pc hedefi, cagri cercevesi, register tahsisi) demektir.
 //!
 //! Bu test o boslugu kapatir: kaynak koddan baslar, derleyiciyi calistirir,
@@ -36,13 +36,13 @@ use bud_proof::DefaultAdapter as Prover;
 use bud_vm::Vm;
 use tiny_keccak::{Hasher, Keccak};
 
-/// Kaynagi derler, yurutur, kanitlar ve dogrular. `Ok(())` = kanit gecerli.
+/// Compiles, executes, proves and verifies the source. `Ok(())` = the proof is valid.
 ///
 /// Public input'lar `bud-cli`'nin `run` yolundaki ile AYNI sekilde kurulur:
-/// `initial_state_root` state agacinin koku degil, AIR'in trace'ten kendi
+/// `initial_state_root` is not the root of the state tree but the value the AIR
 /// katladigi bellek+register goruntusudur; elle sabit vermek
 /// `PublicInputsMismatch` uretir.
-fn derle_yurut_kanitla(kaynak: &str) -> Result<(), String> {
+fn compile_run_prove(kaynak: &str) -> Result<(), String> {
     let bytecode =
         compile(kaynak, IsaProfile::Experimental).map_err(|e| format!("derleme hatasi: {e:?}"))?;
 
@@ -82,16 +82,17 @@ fn derle_yurut_kanitla(kaynak: &str) -> Result<(), String> {
     };
 
     let envelope = Prover::prove(&vm.trace, &pi, &bytecode)
-        .map_err(|e| format!("kanit uretilemedi: {e:?}"))?;
-    Prover::verify(&envelope, &pi, &bytecode).map_err(|e| format!("kanit gecersiz: {e:?}"))?;
+        .map_err(|e| format!("the proof could not be produced: {e:?}"))?;
+    Prover::verify(&envelope, &pi, &bytecode)
+        .map_err(|e| format!("the proof is invalid: {e:?}"))?;
     Ok(())
 }
 
-/// Kontrol: dallanmasiz program kanitlanabiliyor. Bu test YESIL olmali;
-/// kirmizi donerse sorun dallanmada degil, boru hattinin tamaminda demektir
+/// Control: a branchless program can be proven. This test must be GREEN;
+/// if it turns red the problem is not branching but the whole pipeline
 /// ve asagidaki testin teshisi yaniltici olur.
 #[test]
-fn dallanmasiz_program_kanitlanir() {
+fn a_branchless_program_is_proven() {
     let kaynak = r#"
 contract Duz {
     pub fn main() {
@@ -102,12 +103,12 @@ contract Duz {
     }
 }
 "#;
-    derle_yurut_kanitla(kaynak).expect("dallanmasiz program kanitlanabilmeli");
+    compile_run_prove(kaynak).expect("dallanmasiz program kanitlanabilmeli");
 }
 
 /// BULGU: tek bir `if` iceren program kanitlanamiyor.
 #[test]
-fn derlenmis_if_kanitlanir() {
+fn a_compiled_if_is_proven() {
     let kaynak = r#"
 contract SadeceIf {
     pub fn main() {
@@ -120,12 +121,12 @@ contract SadeceIf {
     }
 }
 "#;
-    derle_yurut_kanitla(kaynak).expect("derleyicinin urettigi kosullu dallanma kanitlanabilmeli");
+    compile_run_prove(kaynak).expect("derleyicinin urettigi kosullu dallanma kanitlanabilmeli");
 }
 
 /// BULGU: `while` dongusu iceren program kanitlanamiyor.
 #[test]
-fn derlenmis_while_dongusu_kanitlanir() {
+fn a_compiled_while_loop_is_proven() {
     let kaynak = r#"
 contract KisaDongu {
     pub fn main() {
@@ -137,5 +138,5 @@ contract KisaDongu {
     }
 }
 "#;
-    derle_yurut_kanitla(kaynak).expect("derleyicinin urettigi dongu kanitlanabilmeli");
+    compile_run_prove(kaynak).expect("derleyicinin urettigi dongu kanitlanabilmeli");
 }

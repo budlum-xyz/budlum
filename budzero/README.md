@@ -66,7 +66,7 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` yeşil. VerifyMerkle **mainnet-gated** (`MainnetActivation`, default off), staged ceremony rollout; eski experimental-ISA kilidiyle aynı değil.
+This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` is green. VerifyMerkle is **mainnet-gated** (`MainnetActivation`, default off) with a staged ceremony rollout; this is not the same as the old experimental-ISA lock.
 
 | Item | Status |
 | --- | --- |

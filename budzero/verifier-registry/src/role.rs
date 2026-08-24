@@ -75,7 +75,7 @@ pub mod roles {
     /// Uses the same registry primitive as all other roles.
     pub const ATTESTER: RoleId = RoleId(7);
 
-    /// Lubot decentralized AI operator (compute-bond, PoS'tan bağımsız).
+    /// A Lubot decentralized AI operator (compute-bond, independent of PoS).
     pub const LUBOT_OPERATOR: RoleId = RoleId(8);
 
     /// SocialFi content validator - validates D-Web content authenticity.

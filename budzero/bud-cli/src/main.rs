@@ -187,15 +187,15 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
 
     // Strix HIGH (2026-08-17): Vm::new mainnet_mode=false birakir; gated
     // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
-    // calisir. CLI varsayilani mainnet-guvenli olmali: mainnet_mode=true.
+    // runs. The CLI default must be mainnet safe: mainnet_mode=true.
     let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, true);
     if let Some(s) = config.sender {
         vm.context.sender = s;
-        // Güvenlik denetimi (MEDIUM): kayitli olmayan bir sender icin
-        // otomatik fonlu hesap olusturmak, calistiricinin kontrol ettigi
-        // sender degerini ag yapisina yansitir ve "sahip olunmayan"
-        // hesaptan islem basilmis gibi davranir. Fail-closed: sender
-        // state'te yoksa islem reddedilir.
+        // Security review (MEDIUM): creating an automatically funded account for
+        // an unregistered sender reflects the sender value the runner controls into
+        // the network structure and behaves as if a transaction had been issued from
+        // an "unowned" account. Fail-closed: if the sender is not in the state the
+        // transaction is refused.
         let acc = state.get_account(s).ok_or_else(|| {
             format!("sender account {s} does not exist in {state_file}; refusing to fund a new account implicitly")
         })?;
@@ -233,7 +233,7 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     // that omits those writes would let a storage-backed contract prove and
     // commit while the persisted state excludes its transition, breaking
     // state integrity and enabling replay of one-time logic (Strix HIGH,
-    // güvenlik denetimi). Until storage persistence lands in bud-state,
+    // security review). Until storage persistence lands in bud-state,
     // refuse to commit a run whose storage writes are non-empty.
     if config.commit_state {
         if receipt.state_writes_digest != [0u8; 32] {
@@ -298,15 +298,15 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         exit_code: 0,
         trace_len: vm.trace.len() as u64,
         event_digest,
-        // Depolama yazma ozeti VM'den gelir, sabit sifirdan degil.
+        // The storage write digest comes from the VM, not from a hardcoded zero.
         //
         // Burada `[0u8; 32]` yaziliydi. Depolamaya dokunmayan programlarda
-        // bu doğru cevaptı ve hicbir sey bozulmuyordu; tek bir
-        // `storage::x = 5;` iceren program ise kanit uretip **kendi
-        // dogrulayicisinda** dusuyordu, cunku AIR bu alani gercek SWrite
+        // that was the right answer and nothing broke; a program containing a single
+        // `storage::x = 5;` produced a proof and then failed **in its own
+        // verifier**, because the AIR binds this field to the real SWrite
         // zincirine bagliyor (Strix HIGH CWE-345) ve kamu girdisi sifir
         // kaliyordu. Kusur gorunmez kalmisti: sema `storage` alanlarini
-        // ortama hic koymadigi icin depolama kullanan bir program zaten
+        // into the environment at all, a program using storage was already
         // derlenemiyordu.
         state_writes_digest: receipt.state_writes_digest,
     };
@@ -643,25 +643,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    /// CLI'in kurdugu VM **mainnet kipinde** olmali.
+    /// The VM the CLI constructs must be **in mainnet mode**.
     ///
     /// `Vm::new` varsayilani `mainnet_mode: false` birakir ve o kipte
     /// `decode_instruction` kapili opcode'lari (VerifyMerkle, VerifyInference)
     /// cozer. CLI mainnet-guvenli varsayilan tasimazsa kapili bir opcode
     /// yerel calistirmada gecer, zincirde reddedilir - tek bir bytecode iki
-    /// farkli anlam tasir.
+    /// carries a different meaning.
     ///
     /// Test `run_pipeline`'i **gercekten kosuyor** ve dondurdugu VM'in kipine
     /// bakiyor. Ilk yazimi bunun yerine `Vm::with_mainnet_mode(.., true)`
     /// cagirip sonucu olcuyordu; o test `with_mainnet_mode`'un kendisini
-    /// dogruluyordu, CLI'i degil - mutasyonla olculdu: `run_pipeline` icindeki
+    /// verified, not the CLI - measured by mutation: turning the flag inside
     /// cagri `Vm::new`'e dondurulunce test yesil kaliyordu.
     #[test]
     fn cli_vm_mainnet_kipinde_kurulur() {
         let varsayilan = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
         assert!(
             !varsayilan.mainnet_mode,
-            "Vm::new artik mainnet kipinde geliyor; CLI'in ayrica kip \
+            "Vm::new now arrives in mainnet mode; the CLI no longer needs to set the \
              secmesinin gerekcesi bu testin dayandigi varsayimdi"
         );
 
@@ -698,14 +698,14 @@ mod tests {
         std::fs::remove_file(&yol).ok();
     }
 
-    /// State'te bulunmayan bir sender icin islem **reddedilmeli**.
+    /// A transaction for a sender absent from the state must be **refused**.
     ///
-    /// Eksik hesabi ortulu olarak olusturmak, calistiricinin verdigi sender
-    /// degerini ag durumuna yansitir ve sahip olunmayan bir hesaptan islem
-    /// basilmis gibi davranir. Fail-closed olmali.
+    /// Creating the missing account implicitly reflects the sender value the runner
+    /// gave into the network state and behaves as if a transaction had been issued
+    /// from an unowned account. It must be fail-closed.
     #[test]
-    fn kayitsiz_sender_reddedilir() {
-        // `State::load` var olmayan yolu bos state olarak acar (olculdu,
+    fn an_unregistered_sender_is_refused() {
+        // `State::load` opens a non-existent path as empty state (measured,
         // `bud-state/src/lib.rs:158`), dolayisiyla dosya olusturmak gerekmiyor
         // - onemli olan hesabin state'te BULUNMAMASI.
         let yol = std::env::temp_dir().join(format!(
@@ -724,7 +724,7 @@ mod tests {
                 imm: 0,
             }
             .encode()],
-            // State bos, dolayisiyla bu hesap yok.
+            // The state is empty, so this account does not exist.
             sender: Some(0xDEAD_BEEF),
             nonce: None,
             block_height: None,
@@ -734,14 +734,16 @@ mod tests {
             commit_state: false,
         };
 
-        let sonuc = run_pipeline(config);
-        let hata = match sonuc {
-            Ok(_) => panic!("kayitsiz sender kabul edildi; ortulu hesap olusturuluyor"),
+        let result = run_pipeline(config);
+        let error = match result {
+            Ok(_) => {
+                panic!("an unregistered sender was accepted; an implicit account is being created")
+            }
             Err(e) => e.to_string(),
         };
         assert!(
-            hata.contains("does not exist"),
-            "reddedildi ama baska sebeple: {hata}"
+            error.contains("does not exist"),
+            "refused but for another reason: {error}"
         );
     }
 }

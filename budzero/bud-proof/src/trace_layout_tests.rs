@@ -294,7 +294,7 @@ fn all_ranges() -> Vec<ColRange> {
             start: COL_STATE_WRITES_0,
             end: COL_STATE_WRITES_0 + 8,
         },
-        // Program CTL cokluk taniki: satir i, pc=i'nin calistirilma sayisi.
+        // The Program CTL multiplicity witness: row i is the execution count of pc=i.
         ColRange {
             name: "prog_mult",
             start: COL_PROG_MULT,
