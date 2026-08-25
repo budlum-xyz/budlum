@@ -1,21 +1,24 @@
-//! (security audit §4) `import_qc_blob` minimum imza sayısı
+//! (security audit, section 4) The minimum signature count of `import_qc_blob`
 //! (2/3 quorum) test'leri. Yeterli imza olmadan QcBlob insert
-//! Edilmemeli; tam eşik kabul edilmeli; boş imza seti reddedilmeli.
+//! must not be accepted below the threshold; exactly the threshold must be
+//! accepted; an empty signature set must be refused.
 //!
-//! Bu dosya bir kez yeniden yazıldı. Önceki hâli `import_qc_blob`'u **hiç
-//! çağırmıyordu**: dört test de quorum aritmetiğini kendi içinde tekrar
-//! hesaplayıp `blob.pq_signatures.len()` ile karşılaştırıyordu. Ölçtükleri şey
-//! üretim kodunun davranışı değil, testin kendi iki satırıydı -
-//! `import_qc_blob` tamamen silinse dördü de yeşil kalırdı.
+//! This file was rewritten once. Its earlier form **never called**
+//! `import_qc_blob`: all four tests recomputed the quorum arithmetic inside
+//! themselves and compared it against `blob.pq_signatures.len()`. What they
+//! measured was not the behaviour of the production code but their own two
+//! lines - had `import_qc_blob` been deleted entirely, all four would have
+//! stayed green.
 //!
-//! Daha kötüsü, saydıkları şey **ham girdi sayısıydı**. Üretim kodu tam da bu
-//! yüzden düzeltilmişti: aynı validator'ın imzası tekrarlanarak ham sayı
-//! quorum'un üstüne itilebiliyordu. Düzeltme quorum'u
-//! `verify_against_snapshot`'ın döndürdüğü **tekil doğrulanmış imzacı**
-//! kümesine karşı uyguluyor. Testler ise ham sayıyı doğru kabul ederek
-//! düzeltilen açığın mantığını koruyordu.
+//! Worse, what they counted was the **raw input count**. That is exactly why the
+//! production code had been fixed: repeating the same validator's signature
+//! could push the raw count over the quorum. The fix applies the quorum against
+//! the set of **distinct verified signers** returned by
+//! `verify_against_snapshot`. The tests, by treating the raw count as correct,
+//! preserved the logic of the very hole that had been closed.
 //!
-//! Hepsi artık `Blockchain::import_qc_blob`'u çağırıp dönen `Result`'a bakıyor.
+//! All of them now call `Blockchain::import_qc_blob` and look at the `Result` it
+//! returns.
 
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::ValidatorEntry;

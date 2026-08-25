@@ -20,15 +20,11 @@ crates/lubot/crates/lubot-tune/src/schema.rs	4
 src/tests/blockchair_fixture_locks.rs	57
 src/tests/chaos.rs	43
 src/tests/consensus_digest.rs	41
-src/tests/disaster_recovery.rs	19
-src/tests/f20_oncelikli_bulgular.rs	15
 src/tests/finality_live_path.rs	54
 src/tests/genesis_repro.rs	35
 src/tests/hardening.rs	52
 src/tests/lubot_runtime.rs	36
-src/tests/mod.rs	18
 src/tests/poa_onboarding_matrix.rs	33
-src/tests/qcblob_quorum.rs	14
 src/tests/relayer_gates.rs	20
 src/tests/snapshot_chaos.rs	51
 src/tests/socialfi.rs	27
