@@ -11,9 +11,10 @@ pub struct BnsRegistry {
 }
 
 impl BnsRegistry {
-    /// F14: isim expire olduktan sonra eski owner'ın yenileme
-    /// Penceresi (epoch sayısı). Bu süre içinde 3. taraf register edemez
-    /// (squatting/front-running koruması). ~30 günlük epoch (~100 epoch/gün).
+    /// F14: the renewal window, in epochs, that the previous owner keeps after
+    /// a name expires. During that window no third party can register the name,
+    /// which protects against squatting and front-running. It is roughly a
+    /// 30-day window, at about 100 epochs per day.
     pub const GRACE_PERIOD: u64 = 3000;
 
     /// Maximum number of BNS names in the registry.
@@ -76,10 +77,11 @@ impl BnsRegistry {
             if record.expires_at > current_epoch {
                 return Err(BnsError::NameTaken);
             }
-            // F14: grace-period - expire olmuş isim, eski owner'a
-            // Yenileme penceresi tanır. `current_epoch < expires_at + GRACE_PERIOD`
-            // Içinde yalnızca eski owner register/renew yapabilir; böylece
-            // Front-running squatting (3. tarafın expired ismi kapması) engellenir.
+            // F14: the grace period. An expired name still grants its previous
+            // owner a renewal window. While
+            // `current_epoch < expires_at + GRACE_PERIOD` holds, only the
+            // previous owner can register or renew, which blocks front-running
+            // squatters from seizing an expired name.
             let grace_until = record.expires_at.saturating_add(Self::GRACE_PERIOD);
             if current_epoch < grace_until && record.owner != owner {
                 return Err(BnsError::NameTaken);

@@ -1,18 +1,20 @@
-//! Kanit sisteminin bagimliliklari tam surumle sabitlenir.
+//! The dependencies of the proof system are fixed at an exact version.
 //!
 //! The `p3-*` crates carry the **soundness** of the proof: challenge derivation,
 //! FRI, the commitment scheme. In this family a patch release usually means not a
 //! "bug fix" but a **security boundary** moving. A concrete example:
-//! CVE-2026-46654, `MultiField32Challenger`'da transcript malleability -
-//! `< 0.4.3` ve `>= 0.5.0, < 0.5.3` etkilenmis, yama 0.4.3 ve 0.5.3.
+//! CVE-2026-46654, transcript malleability in `MultiField32Challenger` -
+//! `< 0.4.3` and `>= 0.5.0, < 0.5.3` are affected, and the patches are 0.4.3
+//! and 0.5.3.
 //!
-//! Writing a caret (`"0.6"`) means "any member of the 0.6.x family". A lock
-//! dosyasi bugun 0.6.3'u tutuyor, ama lock'un yenilendigi her an - bir
-//! `cargo update`, bir bagimlilik cakismasi, CI'da lock'suz bir kurulum -
-//! the selected version drifts **silently**. Where it drifts is a newer release and
-//! usually good; the problem is that "usually" is not a sufficient guarantee at a
-//! olmamasi. Kanit sisteminin surumu, kanitin ne kanitladiginin parcasidir:
-//! which code produced and verified it, we do not know what was verified.
+//! Writing a caret (`"0.6"`) means "any member of the 0.6.x family". The lock
+//! file holds 0.6.3 today, but at every moment the lock is refreshed - a
+//! `cargo update`, a dependency conflict, a lock-free install in CI - the
+//! selected version drifts **silently**. Where it drifts is a newer release and
+//! usually good; the problem is that "usually" is not a sufficient guarantee at
+//! a soundness boundary. The version of the proof system is part of what the
+//! proof proves: without knowing which code produced and verified it, we do not
+//! know what was verified.
 //!
 //! The gate looks for an exact pin of the form `=x.y.z`. Upgrading is not forbidden - the upgrade
 //! must be **visible**: a single line change in the manifest, a line read in code
@@ -24,14 +26,14 @@ use std::path::Path;
 /// The manifests where the proof system's version is bound.
 const MANIFESTS: &[&str] = &["budzero/bud-proof/Cargo.toml"];
 
-/// Tam pin gerektiren bagimlilik onekleri.
+/// The dependency prefixes that require an exact pin.
 ///
 /// `p3-*`: the Plonky3 family, for the reason above. The list is kept as a prefix so that
 /// when a new crate joins the family the gate covers it on its own -
 /// adding an exemption takes a deliberate edit, forgetting is not enough.
 const PINNED_PREFIXES: &[(&str, &str)] = &[(
     "p3-",
-    "kanitin soundness'ini tasiyan Plonky3 crate'i (CVE-2026-46654 bu ailede)",
+    "a Plonky3 crate carrying the soundness of the proof (CVE-2026-46654 is in this family)",
 )];
 
 /// Extract `(name, version expression)` from a manifest line.
@@ -65,7 +67,7 @@ fn dependency(line: &str) -> Option<(&str, &str)> {
 
 /// # Errors
 ///
-/// Kapsanan bir bagimlilik tam surumle sabitlenmemisse.
+/// If a covered dependency is not fixed at an exact version.
 pub fn run(root: &Path) -> Result<String, String> {
     let mut checked = 0usize;
     let mut problems = String::new();
@@ -103,8 +105,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if checked == 0 {
         return Err(
-            "proof-deps-are-exactly-pinned: kapsanan bagimlilik bulunamadi. \
-             Kapi korlesmis - manifest tasindiysa MANIFESTS guncellenmeli."
+            "proof-deps-are-exactly-pinned: no covered dependency was found. \
+             The gate has gone blind - if the manifest moved, MANIFESTS must be updated."
                 .into(),
         );
     }

@@ -64,11 +64,12 @@ pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
 /// Default number of epochs that unbonded stake stays locked.
 pub const UNBONDING_EPOCHS: u64 = 7;
 
-/// The cap for slashing records: in live state the newest records are kept,
-/// eskileri arsiv katmanina (blok gecmisi) aittir. Ana agactaki ikiz
-/// the same value as (`src/registry/permissionless.rs::MAX_SLASHING_HISTORY`);
-/// if the two registries had different caps they would answer the same report
-/// `slashing_history` cevabi verirdi.
+/// The cap for slashing records: the newest records are kept in live state and
+/// the older ones belong to the archive layer, the block history. This is the
+/// same value as its twin in the main tree
+/// (`src/registry/permissionless.rs::MAX_SLASHING_HISTORY`); if the two
+/// registries had different caps they would answer the same report sequence
+/// with different `slashing_history` contents.
 pub const MAX_SLASHING_HISTORY: usize = 4096;
 
 /// Reasons a registered member can be slashed.
@@ -571,12 +572,12 @@ impl VerifierRegistry {
         }
     }
 
-    /// Kesme kaydini ekle; tavan asilinca en eskiyi dusur.
+    /// Adds a slashing record, dropping the oldest once the cap is exceeded.
     ///
     /// The same behaviour as `src/registry/permissionless.rs::record_slash`:
-    /// en yeni kayitlar canli durumda kalir. Tavansiz buyuyen bir gecmis,
-    /// for the memory and serialization of every process keeping this record alive
-    /// sinirsiz yuk demektir.
+    /// the newest records stay in live state. A history growing without a cap
+    /// is an unbounded load on the memory and serialisation of every process
+    /// keeping this record alive.
     fn record_slash(&mut self, record: SlashingRecord) {
         self.slashing_history.push(record);
         if self.slashing_history.len() > MAX_SLASHING_HISTORY {
@@ -836,9 +837,9 @@ mod tests {
     /// `src/registry/permissionless.rs`. The two registries state the same lifecycle
     /// of the same roles; giving different answers to the same input silently misleads
     /// a caller that does not know which one is being read. The difference was measured
-    /// kapatildi: burada `Unbonding` reddediliyordu, cekirdekte kabul
-    /// ediliyordu. 2026-08-22 G0 karari: yardimcilar iki tarafta da
-    /// `is_active`'e cekildi - cikmakta olan uye yeni gorev alamaz,
+    /// and closed: `Unbonding` was refused here and accepted in the core. The
+    /// G0 decision of 2026-08-22: the helpers were pulled onto `is_active` on
+    /// both sides - a departing member takes no new work, while its
     /// slashability continues under the separate `is_slashable` question.
     #[test]
     fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
@@ -1059,10 +1060,11 @@ mod tests {
 
     /// The slashing history stops at the cap: the newest are kept, the oldest dropped.
     ///
-    /// Ana agactaki karsi testin (`the_slashing_history_stops_growing_at_the_cap`)
-    /// the two registries must answer the same report sequence with the same length
-    /// cevap vermek zorundadir, yoksa hangisine bakildigini bilmeyen bir
-    /// and the same order, otherwise a caller is silently misanswered.
+    /// The counterpart test in the main tree carries the same name
+    /// (`the_slashing_history_stops_growing_at_the_cap`): the two registries
+    /// have to answer the same report sequence with the same length and the same
+    /// order, otherwise a caller that does not know which one it is reading is
+    /// silently misanswered.
     #[test]
     fn the_slashing_history_stops_growing_at_the_cap() {
         use crate::evidence::{ProofProvenance, SlashingProof};
