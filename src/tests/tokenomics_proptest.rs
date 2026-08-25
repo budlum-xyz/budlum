@@ -1,9 +1,10 @@
-//! Tokenomics property-based test seti - CI Genişletme Madde 8.
+//! The tokenomics property-based test set - CI expansion, item 8.
 //!
-//! $BUD tokenomics invariant'larını binlerce rastgele senaryoda sınar:
-//! 1. Toplam arz 100M'ı hiçbir zaman geçmez
-//! 2. Hiçbir burn işlemi negatif bakiye yaratmaz
-//! 3. Burn + mint toplamı her zaman tutarlı
+//! It exercises the $BUD tokenomics invariants across thousands of random
+//! scenarios:
+//! 1. The total supply never exceeds 100M.
+//! 2. No burn operation creates a negative balance.
+//! 3. The sum of burns and mints is always consistent.
 
 #[cfg(test)]
 mod tests {
@@ -13,21 +14,21 @@ mod tests {
     use crate::tokenomics::{TokenomicsParams, BUD_TOTAL_SUPPLY};
     use proptest::prelude::*;
 
-    /// Adres üretici - rastgele 32 byte.
+    /// The address generator - a random 32 bytes.
     fn arb_address() -> impl Strategy<Value = Address> {
         any::<[u8; 32]>().prop_map(Address::from)
     }
 
-    /// Bakiye üretici - 0 ile 10M arasında.
+    /// The balance generator - between 0 and 10M.
     fn arb_balance() -> impl Strategy<Value = u64> {
         0..10_000_000u64
     }
 
     proptest! {
-        /// INVARIANT 1: Toplam arz hiçbir zaman 100M'ı geçmez.
+        /// INVARIANT 1: the total supply never exceeds 100M.
         ///
-        /// Rastgele bakiye dağılımları ile genesis state'in toplam arzı
-        /// BUD_TOTAL_SUPPLY'yi aşmamalı.
+        /// Across random balance distributions, the total supply of the genesis
+        /// state must not exceed BUD_TOTAL_SUPPLY.
         #[test]
         fn total_supply_never_exceeds_100m(
             balances in prop::collection::vec((arb_address(), arb_balance()), 1..50)
@@ -35,21 +36,21 @@ mod tests {
             let mut state = AccountState::new();
             let params = TokenomicsParams::default();
 
-            // Genesis allocations toplamı = BUD_TOTAL_SUPPLY
+            // The sum of the genesis allocations equals BUD_TOTAL_SUPPLY.
             assert_eq!(params.total(), BUD_TOTAL_SUPPLY);
 
-            // Rastgele bakiye ekleme - toplam arzı aşmamalı
+            // Adding random balances must not exceed the total supply.
             let mut total_added: u64 = 0;
             for (addr, balance) in &balances {
                 state.add_balance(addr, *balance);
                 total_added = total_added.saturating_add(*balance);
             }
 
-            // Kritik invariant: genesis dağıtımının kendisi 100M'ı aşmamalı ve
-            // Circulating_supply, genesis + test'in eklediği bakiyelere eşit
-            // Olmalı. Değer daha önce hesaplanıp hiç assert edilmiyordu; bu
-            // Testi vacuous (her zaman geçen) hale getiriyordu.
-            // (Gerçek ağda sadece genesis bloğunda mint yapılır.)
+            // The critical invariant: the genesis distribution itself must not
+            // exceed 100M, and circulating_supply has to equal genesis plus the
+            // balances the test added. The value used to be computed and never
+            // asserted, which made this test vacuous - it always passed. (On a
+            // real network minting happens only in the genesis block.)
             // `state` bos bir AccountState olarak basliyor (genesis burada
             // Uygulanmiyor), dolayisiyla circulating_supply tam olarak test'in
             // Ekledigi bakiyelerin toplamidir.
@@ -57,7 +58,7 @@ mod tests {
             assert_eq!(
                 supply,
                 u128::from(total_added),
-                "circulating_supply eklenen bakiyelerin toplamina esit olmali"
+                "circulating_supply has to equal the sum of the added balances"
             );
             assert!(
                 supply <= u128::from(BUD_TOTAL_SUPPLY),
@@ -65,10 +66,10 @@ mod tests {
             );
         }
 
-        /// INVARIANT 2: Hiçbir burn işlemi negatif bakiye yaratmaz.
+        /// INVARIANT 2: no burn operation creates a negative balance.
         ///
-        /// Burn = bakiyeden düşme, hiçbir yere ekleme.
-        /// Bakiye 0'ın altına düşmemeli.
+        /// A burn deducts from a balance and adds to nothing.
+        /// The balance must not fall below 0.
         #[test]
         fn burn_never_creates_negative_balance(
             initial_balance in 1..10_000_000u64,
@@ -78,22 +79,23 @@ mod tests {
             let addr = Address::from([0xAA; 32]);
             state.add_balance(&addr, initial_balance);
 
-            // Burn işlemi
+            // The burn operation.
             let _ = state.burn_from(&addr, burn_amount);
 
-            // Bakiye 0'ın altına düşmemeli
+            // The balance must not fall below 0.
             let final_balance = state.get_balance(&addr);
             assert!(
                 final_balance <= initial_balance,
                 "Balance should not increase after burn"
             );
-            // Saturating_sub kullanıldığı için 0'ın altına düşmez
+            // Because saturating_sub is used, it cannot fall below 0.
         }
 
-        /// INVARIANT 3: Burn + mint tutarlılığı.
+        /// INVARIANT 3: burn and mint consistency.
         ///
-        /// Timed burn (yıllık yakım) ve metabolic burn (tx fee yakımı)
-        /// Birlikte çalıştığında toplam arz tutarlı olmalı.
+        /// When the timed burn (the annual burn) and the metabolic burn (the
+        /// transaction fee burn) run together, the total supply has to stay
+        /// consistent.
         #[test]
         fn burn_mint_consistency(
             fee in 1..100_000u64,
@@ -103,7 +105,7 @@ mod tests {
             // Metabolic burn = fee * tx_fee_burn_ratio / FIXED_POINT_SCALE
             let metabolic_burn = params.metabolic_burn(fee);
 
-            // Burn fee'den büyük olmamalı
+            // The burn must not exceed the fee.
             assert!(
                 metabolic_burn <= fee,
                 "Metabolic burn ({}) should not exceed fee ({})",
@@ -121,9 +123,9 @@ mod tests {
             );
         }
 
-        /// INVARIANT 4: Vesting schedule tutarlılığı.
+        /// INVARIANT 4: vesting schedule consistency.
         ///
-        /// Vesting hiçbir zaman total'dan görevla unlock etmemeli.
+        /// Vesting must never unlock more than the total.
         #[test]
         fn vesting_never_exceeds_total(
             total in 1..10_000_000u64,
@@ -154,7 +156,7 @@ mod tests {
                 total
             );
 
-            // Unlocked hiçbir zaman total'ı aşmamalı
+            // Unlocked must never exceed the total.
             assert!(
                 unlocked <= total,
                 "Unlocked ({}) should not exceed total ({})",
@@ -162,7 +164,7 @@ mod tests {
                 total
             );
 
-            // Locked hiçbir zaman negatif olmamalı (u64, zaten olamaz ama doğrula)
+            // Locked must never be negative - it is a u64 so it cannot be, but verify it.
             assert!(
                 locked <= total,
                 "Locked ({}) should not exceed total ({})",
@@ -171,9 +173,10 @@ mod tests {
             );
         }
 
-        /// INVARIANT 5: Validator reward tutarlılığı.
+        /// INVARIANT 5: validator reward consistency.
         ///
-        /// calculate_epoch_reward(0) = trivial, pozitif stake → pozitif reward.
+        /// calculate_epoch_reward(0) is trivial, and a positive stake gives a
+        /// positive reward.
         #[test]
         fn epoch_reward_consistency(
             stake in 0..100_000_000_000u64,

@@ -1,12 +1,14 @@
-//! PoA katılımcı onboarding test matrisi -.
+//! The PoA participant onboarding test matrix.
 //!
-//! [`crate::registry::poa_onboarding::PoAOnboarding`] modülünün tam yaşam
-//! Döngüsünü, whitelist zorunluluğunu, KYC son kullanma (expiry) davranışını
+//! It covers the full lifecycle of the
+//! [`crate::registry::poa_onboarding::PoAOnboarding`] module, the whitelist
+//! requirement, the KYC expiry behaviour
 //! Ve karar denetim (audit) izini kapsar.
 //!
-//! Bu testler `cargo test --lib poa_isolation` kapısının parçası DEĞİLDİR
-//! (adları `poa_isolation` içermiyor); genel lib test takımında çalışır.
-//! İzolasyon "mührü" `src/tests/poa_isolation.rs` içindeki 8. teste eklenmiştir.
+//! These tests are NOT part of the `cargo test --lib poa_isolation` gate,
+//! because their names do not contain `poa_isolation`; they run in the general
+//! lib test suite. The isolation seal was added to the eighth test in
+//! `src/tests/poa_isolation.rs`.
 
 #[cfg(test)]
 mod tests {
@@ -24,7 +26,8 @@ mod tests {
         [b; 32]
     }
 
-    /// Mutlak yardım: bir admin + tek üyelik onayı kurulmuş onboarding döndürür.
+    /// A helper: it returns an onboarding set up with one admin and a single
+    /// approved membership.
     fn onboarded(admin: Address, member: Address, horizon: u64) -> PoAOnboarding {
         let mut poa = PoAOnboarding::new();
         poa.add_admin(DOMAIN, admin);
@@ -33,8 +36,9 @@ mod tests {
         poa
     }
 
-    /// 1. Tam yaşam döngüsü: başvuru (yetki YOK) → onay (whitelist'te) → iptal
-    ///    (whitelist'ten düştü). Karar audit izi 3 olay içerir.
+    /// 1. The full lifecycle: application (NOT authorized), approval (on the
+    ///    whitelist), revocation (off the whitelist). The decision audit trail
+    ///    carries 3 events.
     #[test]
     fn full_onboarding_lifecycle_and_audit() {
         let admin = addr(0xAD);
@@ -42,7 +46,7 @@ mod tests {
         let mut poa = PoAOnboarding::new();
         poa.add_admin(DOMAIN, admin);
 
-        // Başvuru: henüz yetkili değil
+        // The application: not authorized yet.
         poa.submit_application(DOMAIN, member, kyc(1), 10).unwrap();
         assert!(!poa.whitelist(DOMAIN, 10).contains(&member));
 
@@ -50,12 +54,12 @@ mod tests {
         poa.approve(DOMAIN, admin, member, 20, 1_000).unwrap();
         assert!(poa.whitelist(DOMAIN, 20).contains(&member));
 
-        // İptal: whitelist'ten çıktı
+        // Revocation: off the whitelist.
         poa.revoke(DOMAIN, admin, member, 30, "offboarding")
             .unwrap();
         assert!(!poa.whitelist(DOMAIN, 30).contains(&member));
 
-        // Audit izi: Submitted + Approved + Revoked (sıralı)
+        // The audit trail: Submitted, Approved and Revoked, in order.
         let log = poa.audit_log();
         assert_eq!(log.len(), 3);
         assert!(matches!(
@@ -70,13 +74,13 @@ mod tests {
             log[2].decision,
             OnboardingDecision::Revoked { .. }
         ));
-        assert_eq!(log[0].actor, member); // başvuruyu yapan aday
+        assert_eq!(log[0].actor, member); // the candidate who applied
         assert_eq!(log[1].actor, admin);
         assert_eq!(log[2].actor, admin);
     }
 
-    /// 2. Whitelist yalnızca Approved üyeleri içerir; Pending/Rejected/Revoked
-    ///    Hariç tutulur.
+    /// 2. The whitelist contains only Approved members; Pending, Rejected and
+    ///    Revoked are excluded.
     #[test]
     fn whitelist_excludes_pending_rejected_revoked() {
         let admin = addr(0xAD);
@@ -104,8 +108,8 @@ mod tests {
         assert!(!wl.contains(&revoked));
     }
 
-    /// 3. KYC son kullanma: horizon geçince üye whitelist'ten düşer ve audit
-    ///    Izine bir kez KycExpired olayı eklenir.
+    /// 3. KYC expiry: once the horizon passes, the member drops off the
+    ///    whitelist and a KycExpired event is added to the audit trail once.
     #[test]
     fn kyc_expiry_drops_member_from_whitelist() {
         let admin = addr(0xAD);
@@ -114,10 +118,10 @@ mod tests {
 
         // Horizon=100 → blok 100'de hâlâ yetkili (now_block > expiry reddeder)
         assert!(poa.whitelist(DOMAIN, 100).contains(&member));
-        // Blok 101'de süresi doldu → düştü
+        // It expired at block 101 and dropped off.
         assert!(!poa.whitelist(DOMAIN, 101).contains(&member));
 
-        // Expiry audit izine bir kez işlendi
+        // The expiry was written into the audit trail once.
         let expired_count = poa
             .audit_log()
             .iter()
@@ -125,11 +129,12 @@ mod tests {
             .count();
         assert_eq!(expired_count, 1, "expiry should be logged exactly once");
 
-        // Alt katman registry durumu hâlâ Approved (idari durum değişmedi)
+        // The underlying registry state is still Approved: the administrative
+        // state did not change.
         assert!(poa.registry().is_authorized(DOMAIN, &member));
     }
 
-    /// 4. Süre dolduktan sonra KYC yenileme whitelist'e geri koyar.
+    /// 4. Renewing the KYC after expiry puts the member back on the whitelist.
     #[test]
     fn renew_kyc_restores_membership() {
         let admin = addr(0xAD);
@@ -139,13 +144,13 @@ mod tests {
         assert!(poa.whitelist(DOMAIN, 100).contains(&member));
         assert!(!poa.whitelist(DOMAIN, 101).contains(&member));
 
-        // Yeniden KYC → yeni horizon
+        // A fresh KYC gives a new horizon.
         poa.renew_kyc(DOMAIN, admin, member, kyc(2), 200, 100)
             .unwrap();
         assert!(poa.whitelist(DOMAIN, 250).contains(&member));
         assert!(!poa.whitelist(DOMAIN, 301).contains(&member));
 
-        // RenewedKyc audit olayı var
+        // The RenewedKyc audit event is present.
         let renewed = poa
             .audit_log()
             .iter()
@@ -153,7 +158,8 @@ mod tests {
         assert!(renewed);
     }
 
-    /// 5. Konsensus-tarzı zorunluluk kapısı: contains yanlışsa işlem reddedilir.
+    /// 5. The consensus-style requirement gate: if contains is false the
+    ///    operation is refused.
     #[test]
     fn whitelist_enforcement_gate_rejects_unauthorized() {
         let admin = addr(0xAD);
@@ -163,7 +169,7 @@ mod tests {
 
         let wl = poa.whitelist(DOMAIN, 5);
 
-        // Kapı: whiteliste üye işlem yapabilir, izinsiz olamaz
+        // The gate: a whitelisted member may act, an unpermitted one may not.
         fn consensus_gate(
             wl: &crate::registry::poa_onboarding::PoAWhitelist,
             who: &Address,
@@ -183,7 +189,8 @@ mod tests {
         );
     }
 
-    /// 6. Audit izi ekle-only ve blok sıralı; her olay kendi alanlarını taşır.
+    /// 6. The audit trail is append-only and ordered by block, and every event
+    ///    carries its own fields.
     #[test]
     fn audit_trail_is_append_only_and_ordered() {
         let admin = addr(0xAD);
@@ -199,15 +206,15 @@ mod tests {
 
         let log = poa.audit_log();
         assert_eq!(log.len(), 4);
-        // Blok numaraları monotop artan
+        // The block numbers increase monotonically.
         let blocks: Vec<u64> = log.iter().map(|e| e.at_block).collect();
         assert_eq!(blocks, vec![1, 2, 3, 4]);
-        // Alan/domain her olayda aynı
+        // The domain is the same in every event.
         assert!(log.iter().all(|e| e.domain == DOMAIN));
     }
 
-    /// 7. Yetkisiz (admin olmayan) bir çağrı yapan tüm onboarding eylemleri
-    ///    Hata döndürmeli VE audit izine hiçbir şey eklememeli.
+    /// 7. Every onboarding action by an unauthorized (non-admin) caller has to
+    ///    return an error AND add nothing to the audit trail.
     #[test]
     fn non_admin_actions_fail_and_leave_no_audit_trace() {
         let admin = addr(0xAD);
@@ -224,14 +231,14 @@ mod tests {
         assert!(poa.reject(DOMAIN, nobody, member, 0, "x").is_err());
         assert!(poa.revoke(DOMAIN, nobody, member, 0, "y").is_err());
 
-        // Hiçbir audit olayı eklenmedi
+        // No audit event was added.
         assert_eq!(poa.audit_log().len(), baseline);
         // Hâlâ yetkisiz
         assert!(!poa.whitelist(DOMAIN, 0).contains(&member));
     }
 
-    /// 8. Varsayılan horizon sonludur - açık-sonlu onay re-KYC disiplinini
-    ///    Bozmaz (modül içi testi burada bir kez daha teyit ediyoruz).
+    /// 8. The default horizon is finite, so an open-ended approval cannot break
+    ///    the re-KYC discipline. We confirm the in-module test once more here.
     #[test]
     fn default_horizon_is_finite_and_positive() {
         const _: () = assert!(DEFAULT_KYC_HORIZON > 0 && DEFAULT_KYC_HORIZON < u64::MAX);
