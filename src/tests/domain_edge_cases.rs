@@ -1,7 +1,7 @@
 //!: Domain edge-case test suite'leri.
 //!
 //! BFT view-change/leader election, PoS slashing triggers, PoW difficulty
-//! Adjustment için ayrı edge-case testleri.
+//! Separate edge-case tests for adjustment.
 
 #[cfg(test)]
 mod tests {
@@ -215,13 +215,15 @@ mod tests {
         );
     }
 
-    // ─── Egemen alan sablonu: uzlasma alanina baglama ───
+    // --- The sovereign domain template: binding it to a consensus domain ---
 
-    /// Zincir uzerinden kaydedilen sablon, gercek alanla ayni turu gostermeli.
+    /// A template registered through the chain has to declare the same kind as
+    /// the real domain.
     ///
-    /// `Blockchain::register_sovereign_template` iki kaydi birbirine baglar.
-    /// Bag olmadan sablon kendi basina gecerli olurdu ve PoS calisan bir alan
-    /// denetime "izinli ve KYC'li" diye sunulabilirdi.
+    /// `Blockchain::register_sovereign_template` binds the two records
+    /// together. Without that binding a template would be valid on its own, and
+    /// a domain actually running PoS could be presented to an audit as
+    /// "permissioned and KYC'd".
     #[test]
     fn a_sovereign_template_must_match_the_registered_domain() {
         use crate::domain::sovereign::{
@@ -238,7 +240,8 @@ mod tests {
             0,
         );
         let operator = domain.operator.expect("varsayilan alan operator tasir");
-        bc.register_consensus_domain(domain).expect("alan kaydi");
+        bc.register_consensus_domain(domain)
+            .expect("the domain registers");
 
         let evidence = ComplianceEvidence {
             policy_hash: [1u8; 32],
@@ -247,7 +250,7 @@ mod tests {
             audit_commitment: [4u8; 32],
         };
 
-        // Yanlis tur: alan PoA, sablon PoS diyor.
+        // The wrong kind: the domain is PoA and the template says PoS.
         let mismatched = SovereignDomainTemplate::new(
             77,
             SovereignDomainClass::Cbdc,
@@ -259,10 +262,10 @@ mod tests {
         );
         assert!(
             bc.register_sovereign_template(mismatched).is_err(),
-            "tur uyusmazligi reddedilmeli"
+            "a kind mismatch has to be refused"
         );
 
-        // Dogru tur ve operator: kabul.
+        // The right kind and operator: accepted.
         let matching = SovereignDomainTemplate::new(
             77,
             SovereignDomainClass::Cbdc,
@@ -274,7 +277,7 @@ mod tests {
         );
         let root_before = bc.sovereign_template_root();
         bc.register_sovereign_template(matching)
-            .expect("eslesen sablon kabul edilmeli");
+            .expect("a matching template has to be accepted");
         assert_ne!(
             bc.sovereign_template_root(),
             root_before,

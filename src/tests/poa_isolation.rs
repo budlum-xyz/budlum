@@ -320,15 +320,17 @@ mod poa_compliance_gate {
 
     /// Freezing in a permissionless domain is REFUSED.
     ///
-    /// Egemenlik iddiasi tasiyan bir agda, izinsiz bir alanin hesabini
-    /// merkezi bir yonetici donduramamali. Alanin turu **kaydindan** okunur;
+    /// On a network that claims sovereignty, a central administrator must not be
+    /// able to freeze the account of a permissionless domain. The kind of the
+    /// domain is read **from its record**;
     /// a caller cannot declare their own domain to be PoA and manufacture this authority.
     #[test]
     fn a_permissionless_domain_account_cannot_be_frozen() {
         let mut bc = chain();
-        // PoA olmayan herhangi bir alan: uyum defteri yalniz PoA'ya bakar.
+        // Any non-PoA domain: the compliance ledger only looks at PoA.
         let d = default_domain(7, ConsensusKind::PoW, 907, "pow-header-chain-v1", 0);
-        bc.register_consensus_domain(d).expect("alan kaydi");
+        bc.register_consensus_domain(d)
+            .expect("the domain registers");
 
         let err = bc
             .freeze_poa_account(7, true, addr(0x42), [9u8; 32])
@@ -342,12 +344,12 @@ mod poa_compliance_gate {
             .is_frozen(ComplianceDomainKind::PoA, &addr(0x42)));
     }
 
-    /// Yetkisiz cagiran donduramaz.
+    /// An unauthorized caller cannot freeze.
     #[test]
     fn an_unauthorized_admin_cannot_freeze() {
         let mut bc = chain();
         bc.register_consensus_domain(poa_domain(8))
-            .expect("alan kaydi");
+            .expect("the domain registers");
 
         bc.freeze_poa_account(8, false, addr(0x43), [9u8; 32])
             .expect_err("an unauthorized freeze must be refused");
@@ -361,7 +363,7 @@ mod poa_compliance_gate {
     fn a_freeze_without_evidence_is_refused() {
         let mut bc = chain();
         bc.register_consensus_domain(poa_domain(9))
-            .expect("alan kaydi");
+            .expect("the domain registers");
 
         bc.freeze_poa_account(9, true, addr(0x44), [0u8; 32])
             .expect_err("a zero reason digest must be refused");
@@ -392,7 +394,7 @@ mod poa_compliance_gate {
 
         let mut bc = chain();
         bc.register_consensus_domain(poa_domain(11))
-            .expect("alan kaydi");
+            .expect("the domain registers");
         // The operator is read from the domain RECORD. Had the test invented its own address,
         // it would bypass the gate that verifies the record is consistent with the template; the record
         // already says the template operator must equal the domain operator.
@@ -420,7 +422,7 @@ mod poa_compliance_gate {
         let template_id = template.template_id;
         let compliance_root = template.compliance.root();
         bc.register_sovereign_template(template)
-            .expect("sablon kaydi");
+            .expect("the template registers");
 
         let bundle = AuditExportBundle {
             template_id,
@@ -453,7 +455,7 @@ mod poa_compliance_gate {
     fn a_poa_freeze_is_recorded_with_its_evidence() {
         let mut bc = chain();
         bc.register_consensus_domain(poa_domain(10))
-            .expect("alan kaydi");
+            .expect("the domain registers");
         let target = addr(0x46);
 
         bc.freeze_poa_account(10, true, target, [7u8; 32])
