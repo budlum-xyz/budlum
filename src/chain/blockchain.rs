@@ -184,6 +184,10 @@ impl Blockchain {
             m.finality_lag
                 .set((height as u64).saturating_sub(self.finalized_height) as i64);
             m.mempool_size.set(self.mempool.len() as i64);
+            // Exported alongside the count because the count does not bound
+            // memory. See `mempool::pool::DEFAULT_MAX_POOL_BYTES`.
+            m.mempool_bytes
+                .set(i64::try_from(self.mempool.resident_bytes()).unwrap_or(i64::MAX));
         }
     }
 
@@ -3352,6 +3356,13 @@ impl Blockchain {
             if let Err(err) = probe.add_transaction(tx.clone()) {
                 let reason = match err {
                     crate::mempool::pool::MempoolError::PoolFull => "pool_full",
+                    // Reported separately from `pool_full` on purpose: the two
+                    // ask the operator for opposite responses. A pool full by
+                    // count wants a larger `max_size`; a pool full by bytes is
+                    // being fed large bodies, and raising `max_size` makes it
+                    // worse. Collapsing them into one string would send the
+                    // reader the wrong way.
+                    crate::mempool::pool::MempoolError::PoolBytesFull => "pool_bytes_full",
                     crate::mempool::pool::MempoolError::DuplicateTransaction => {
                         "duplicate_transaction"
                     }
