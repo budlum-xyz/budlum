@@ -327,7 +327,7 @@ const TESTNET_FALLBACK_BOOTNODES: &[&str] = &[];
 // Fail-closed onarim: hedef ceremony domain'leri
 // `_dnsaddr.bootstrap-{1,2}.mainnet.budlum.network` - operatorler ceremony'de
 // GERCEK TXT publish edene kadar "placeholder" marker'i bilinclidir; guard
-// Mainnet boot'unu bloke etmeye devam eder (4129861 regresyonu kapatildi).
+// keeps blocking the mainnet boot (regression 4129861 closed).
 const MAINNET_DNS_SEEDS: &[&str] = &[
     "_dnsaddr.placeholder-seed-1.mainnet.budlum.network",
     "_dnsaddr.placeholder-seed-2.mainnet.budlum.network",

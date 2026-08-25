@@ -178,7 +178,7 @@ impl Pkcs11Signer {
         let mech_id = id;
         let mech_type = MechanismType::new_vendor_defined(mech_id).map_err(|e| {
             CryptoError::Signing(format!(
-                "PKCS#11 vendor mechanism id 0x{id:08X} CKM_VENDOR_DEFINED tabaninin altinda: {e}"
+                "PKCS#11 vendor mechanism id 0x{id:08X} is below the CKM_VENDOR_DEFINED base: {e}"
             ))
         })?;
         Ok(cryptoki::mechanism::Mechanism::VendorDefined(

@@ -643,7 +643,7 @@ pub trait BudlumApi {
 
     /// Prepare an authorization-backed Pollen purchase without mutating state.
     ///
-    /// `buyer_signature`: buyer'in satin alma parametrelerinin tamamina
+    /// `buyer_signature`: the buyer signs the whole set of purchase
     /// (authorization, fiyat, sure, max_reads, payment_commitment, expiry)
     /// baglanmis ed25519 imzasi - Strix #358: imzasiz purchase kabul
     /// edilmez.

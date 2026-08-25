@@ -1,12 +1,12 @@
 //! Provider soyutlamasi - B.U.D. 2.0 final kararlari
-//! no_social: SocialOpen iptal, sadece DeviceClosed + NetworkFull
+//! no_social: SocialOpen is cancelled; DeviceClosed + NetworkFull only
 //! When the device is offline: its own content stays indefinitely, while a
 //! replica of somebody else's gets a 10-minute grace period.
 //! cost zero_model, Pollen strict, storage_only, manual class, byte_identical + transcode_replace
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderClass {
-    SocialOpen,   // iptal edildi no_social karari (kodda var ama kullanim yok)
+    SocialOpen,   // cancelled by the no_social decision (present in code, unused)
     DeviceClosed, // mobile_self, encrypted, kendi suresiz
     NetworkFull,  // Quad-Ring EVENODD p=7
 }

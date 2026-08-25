@@ -2790,7 +2790,7 @@ impl Node {
                                                request_response::Message::Response { response, .. } => {
                                                    let response_cid = response.cid;
                                                    let is_not_found = response.not_found;
-                                                   // Strix MEDIUM (CWE-345): yanit, istenen blok icin gelmeli.
+                                                   // Strix MEDIUM (CWE-345): the response must be for the requested block.
                                                    // Yanitin cid'i, istegini karsiladigi cid'dir (bitswap protokolu).
                                                    if let Err(e) = bitswap.handle_response(response_cid, response) {
                                                        warn!("Bitswap response from {peer} failed: {e}");

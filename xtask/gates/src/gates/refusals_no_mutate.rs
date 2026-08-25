@@ -353,7 +353,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/lib.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: remove sonrasi Err gecti"));
+        return Err(String::from("canary: Err after remove passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -1,6 +1,6 @@
 //! .bud V8 Ultra - a diffusion prompt at 50000x, a code recipe at 1000x, a
 //! four-layer log at 14000x and global dedup at 50x.
-//! Devrimsel oranlar, sunum yapmadan devam
+//! Revolutionary ratios, carrying on without a pitch
 
 #![forbid(unsafe_code)]
 

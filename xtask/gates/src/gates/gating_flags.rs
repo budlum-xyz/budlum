@@ -163,7 +163,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: pinsiz bayrak gecti"));
+        return Err(String::from("canary: an unpinned flag passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(

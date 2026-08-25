@@ -296,7 +296,7 @@ pub struct NatTraversalStatus {
     pub using_relay: bool,
     /// Relay sunucusu adresi.
     pub relay_address: Option<String>,
-    /// STUN sunucusu ile NAT tipi tespit edildi mi?
+    /// Was the NAT type detected via the STUN server?
     pub nat_detected: bool,
     /// Did punch-through succeed?
     pub hole_punched: bool,

@@ -130,7 +130,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(String::from(
             "there is no patch in the list nor on disk; this gate could inspect nothing. A \
              check that silently inspects nothing is worse than no check \
-             kotudur: olmayan bir kontrol yaziliyor sanilmaz",
+             is worse: nobody assumes a check that does not exist is being written",
         ));
     }
 
@@ -171,7 +171,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         if touched.is_empty() {
             problems.push(format!(
                 "{rel}: the diff touches no file (there is no '+++ b/...' line). \
-                 Uygulanacak bir sey olmayan bir yama, uygulandigi sanilan bir yamadir"
+                 A patch with nothing to apply is a patch believed to have been applied"
             ));
         }
         for file in &touched {

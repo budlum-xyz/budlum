@@ -4933,7 +4933,7 @@ mod render_format_tests {
     /// An unparsable numeric parameter is an error, not a zero.
     #[test]
     fn a_bad_number_is_an_error() {
-        assert!(parse_render_format("png:buyuk").is_err());
+        assert!(parse_render_format("png:large").is_err());
         assert!(parse_render_format("png:-1").is_err());
         // A u16 overflow is an error too: clamping quietly would produce a
         // different object.

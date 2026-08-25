@@ -214,8 +214,8 @@ mod tests {
     fn deterministic_embeddings() {
         let mut e = TfIdfEmbedder::new(32);
         e.fit(&[
-            "budlum depolama katmani".to_string(),
-            "lubot cikarim".to_string(),
+            "budlum storage layer".to_string(),
+            "lubot inference".to_string(),
         ]);
         assert_eq!(e.embed("budlum depolama"), e.embed("budlum depolama"));
     }
