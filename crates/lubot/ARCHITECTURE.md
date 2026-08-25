@@ -85,6 +85,51 @@ measurements behind it. That is deliberate. An unexplained boundary reads as a
 missing feature and gets removed by the next contributor who thinks they are
 adding symmetry.
 
+### Promises traced to an implementation
+
+A prompt makes two kinds of statement, and only one of them is a number. The
+ceiling checks above cover the numeric kind. The other kind is behavioural -
+"if your hardware cannot serve the declared tier, say so", "masking happens
+before storage, not after" - and a sentence like that is true only while some
+function somewhere makes it true.
+
+`lubot-prompt-is-true` therefore carries a table of (sentence, file, symbol)
+triples and checks both halves are present. The two failures are not symmetric.
+A sentence that disappears while its implementation stays is a documentation
+problem: the runtime still behaves correctly and has stopped saying so. A symbol
+that disappears while its sentence stays is the dangerous direction, because
+nothing announces it - the prompt still reads correctly to a reviewer, and the
+product it describes has quietly stopped keeping the promise.
+
+This crate learned the shape of that failure before the gate existed.
+`tier_is_servable` was written, documented in its module header as the rule
+governing effort, and called from nowhere for a full release. Prose beside an
+unwired implementation is worse than no prose, because the prose is what an
+auditor reads.
+
+The symbol check matches a definition, not a substring. The first version used
+a plain `contains`, and a mutation walked straight past it: renaming
+`unservable_reason` to `unservable_reason_RENAMED` leaves the old name as a
+prefix, so the gate stayed green while the promise had lost its implementation.
+Matching requires `fn ` on the left - so a mention in a doc comment or at a call
+site does not count as an implementation - and a non-identifier character on the
+right.
+
+### Names of products read during research
+
+Some of the designs here were reached by reading other projects. No code was
+copied and no dependency was added, and the names of those projects do not
+appear in the tree either. This is not etiquette. A variant called after another
+product tells a reader the tree depends on it: they check its licence against
+ours and reason about upgrades to something we never link. Naming the same
+variant for what it selects - an engine that pages experts off disk - describes
+our own system instead of someone else's, and loses nothing.
+
+The `no-upstream-brands` gate keeps it that way, and exempts `LICENSE.md`,
+`NOTICE.md` and `THIRD-PARTY.md`. A gate that forbade attribution would push the
+project toward a licence violation in order to stay green; if a dependency is
+ever genuinely added, its name belongs in exactly those files.
+
 ## On-device residency, 2026-08-25
 
 `lubot-serve/src/residency.rs` plans where each part of a model lives on the
