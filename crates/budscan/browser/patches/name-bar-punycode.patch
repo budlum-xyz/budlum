@@ -1,18 +1,20 @@
-Adres cubugunda punycode gosterimi.
+Punycode display in the address bar.
 
-Ad kuralindan gecmeyen bir ad **acilmaz**, ama gosterilmesi gerekebilir:
-gecmiste duran, bir baglantinin ustunde beliren, bir hata satirinda yazilan
-ad. O anda ASCII disi baytlari oldugu gibi cizmek, homograf saldirisinin
-yasadigi bosluktur.
+A name that does not pass the name rule is **not opened**, but it may still
+need to be displayed: a name sitting in history, appearing over a link, or
+written in an error line. Drawing its non-ASCII bytes as they are at that
+moment is the gap a homograph attack lives in.
 
-Kural: bir ad tek bir yazi sistemi kullanmali. Yasaklamak degil, gostermek.
-Latin olmayan alfabelerdeki isimleri yasaklamak bir tarayicinin alacagi karar
-degil; `аyaz.bud` (bir Kiril harf, dordu Latin) `xn--yaz-5cd.bud` gorunur, ki
-bu tam olarak oldugu sey. Tamamen Kiril bir isim tamamen Kiril gorunur.
+The rule: a name has to use a single writing system. This shows rather than
+bans. Banning names in non-Latin alphabets is not a decision for a browser to
+make; `аyaz.bud` (one Cyrillic letter and four Latin ones) is displayed as
+`xn--yaz-5cd.bud`, which is exactly what it is. A fully Cyrillic name is
+displayed fully in Cyrillic.
 
-Not: bu deger olculdu. `budscan::punycode` RFC 3492'yi uyguluyor ve
-`xn--yaz-5cd` uretiyor; Python'un `str.encode("idna")` referansi ayni sonucu
-veriyor. Mimari belgesinde yazan `xn--yaz-hlc` yanlisti ve duzeltildi.
+Note: this value was measured. `budscan::punycode` implements RFC 3492 and
+produces `xn--yaz-5cd`; Python's `str.encode("idna")` reference gives the same
+result. The `xn--yaz-hlc` written in the architecture document was wrong and
+has been corrected.
 
 --- a/browser/components/urlbar/UrlbarInput.sys.mjs
 +++ b/browser/components/urlbar/UrlbarInput.sys.mjs

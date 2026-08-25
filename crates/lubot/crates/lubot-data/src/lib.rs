@@ -1,14 +1,15 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
 // derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
 #![forbid(unsafe_code)]
-//! # lubot-data - kapalı-devre veri katmanı
+//! # lubot-data - the closed-circuit data layer
 //!
-//! Lubot yalnızca Pollen grant'li, B.U.D. StorageDeal etiketli veya
-//! SocialFi kaynaklı veriyi okur. Bu crate dış veri okuyan tek bir yol
-//! içermez: dış veri setleri bile önce B.U.D.'a kaydedilir.
+//! Lubot only reads data that carries a Pollen grant, is labelled as a B.U.D.
+//! StorageDeal, or comes from SocialFi. This crate contains not a single path
+//! that reads external data: even external datasets are recorded into B.U.D.
+//! first.
 //!
-//! Derinleştirme (2026-08-13): içerik doğrulaması gerçek SHA-256'dır;
-//! uyuşmazlık `HashMismatch` üretir ve veri akmaz.
+//! Deepening (2026-08-13): content verification is a real SHA-256; a mismatch
+//! produces `HashMismatch` and no data flows.
 
 pub mod jsonl;
 pub mod source;

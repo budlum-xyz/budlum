@@ -1,8 +1,8 @@
-//! Sağlık sayaçları (bağımlılıksız; atomik).
+//! Health counters - dependency-free and atomic.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Çalışma zamanı sayaçları.
+/// The runtime counters.
 #[derive(Debug, Default)]
 pub struct Health {
     requests: AtomicU64,
@@ -10,8 +10,8 @@ pub struct Health {
     hash_failures: AtomicU64,
 }
 
-/// Anlık görüntü (RPC/CLI özeti için; budlum `LubotMetricsSnapshot`
-/// ruhunda ama zincir katmanından bağımsız).
+/// A snapshot, for an RPC or CLI summary. It follows the spirit of budlum's
+/// `LubotMetricsSnapshot` but stays independent of the chain layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HealthSnapshot {
     pub requests: u64,
@@ -29,12 +29,12 @@ impl Health {
         self.requests.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Kapalı-devre dışı kaynak reddedildiğinde say.
+    /// Counted when a source outside the closed circuit is refused.
     pub fn record_rejected_closed_loop(&self) {
         self.rejected_closed_loop.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Hash doğrulaması fail-closed tetiklendiğinde say.
+    /// Counted when hash verification fires fail-closed.
     pub fn record_hash_failure(&self) {
         self.hash_failures.fetch_add(1, Ordering::Relaxed);
     }
