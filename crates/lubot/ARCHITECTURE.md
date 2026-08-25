@@ -121,3 +121,67 @@ commitment would then describe something other than what ran.
 Deliberately absent: prefetch policy, learned hot-sets, eviction heuristics.
 Those have to be measured on real hardware before they are believed, and an
 unmeasured policy written into the tree reads as a decision when it is a guess.
+
+## Bringing a bridge up, 2026-08-25
+
+The serving crate had four modules, each answering one question correctly, and
+nothing that put them in an order. A set of checks that is never run in sequence
+is a set of checks an operator runs in whichever order suits them - and the
+order is not a matter of taste, because each answer changes what the next
+question means.
+
+`bridge.rs` is that order, and `Bridge` cannot be constructed any other way. A
+value of the type is evidence that every check ran before the first request:
+
+```mermaid
+flowchart TD
+  S["start"] --> A{"served name is ours?"}
+  A -->|"no"| RA["Attribution"]
+  A -->|"yes"| D{"any per-token shard?"}
+  D -->|"no"| RD["NoPerTokenWeights"]
+  D -->|"yes"| P{"prompt, determinism, residency"}
+  P -->|"refuses"| RP["NotReadyOnDevice"]
+  P -->|"plan"| C{"chain: model registered?"}
+  C -->|"error"| RC["Chain - fail closed"]
+  C -->|"no"| RN["ModelNotRegistered"]
+  C -->|"yes"| B["Bridge"]
+```
+
+Cheapest first, and not only for speed. Naming costs nothing and no later check
+would notice it. The dense-part question comes before planning because a model
+built only from routed experts has no attention and no output head, while the
+planner would place all of it happily - "nothing is needed on every token" is
+trivially satisfiable, so the malformed model would arrive as a valid plan. The
+chain is last because it is the only step that leaves the machine, and an
+operator whose device cannot hold the model has no reason to be told about their
+registration.
+
+The composite step is where residency stopped being a module nobody called. The
+configuration check can see the engine and the sampling settings; it cannot see
+the machine. A bridge configured correctly and then run on a device that cannot
+hold the weights answers requests either way, so the fault surfaces as timeouts -
+which is exactly the shape of failure the determinism check exists to prevent.
+So the plan is part of the decision, and it adds two conditions: a plan must
+exist at all, and it must not stream from disk.
+
+Streaming is not a defect. It is why the disk tier exists, and it is how a small
+device runs a large model. But read time is a property of the storage, not of the
+model: two operators with different disks return the same bytes and disagree
+about when. The consensus path groups on `output_commitment`, so the bytes still
+match - what does not match is the deadline. A streaming bridge serves locally
+and is refused for consensus, which is a narrower statement than "streaming is
+slow" and the only one that is true.
+
+The prompt is resolved once, at startup, and held. Re-reading it per request
+would let a bridge pass the check at boot and serve something else afterwards.
+What is checked is that every generation phrase in it is a refusal rather than an
+offer, and that each declared limit still appears as its exact integer - the
+limits are prose in the prompt and numbers in the source, and prose and numbers
+drift apart quietly. A prompt claiming a megabyte while the runtime enforces
+something else is a lie told to the user in our name.
+
+Refusals are counted. A supervisor restarting a failing bridge turns a permanent
+misconfiguration into a quiet loop: every attempt refuses correctly, nothing is
+served, and the only evidence sits in logs nobody reads. The counter takes the
+refusal itself rather than being a bare increment, so it cannot be raised by a
+caller that was not actually refused.
