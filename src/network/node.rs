@@ -1510,6 +1510,22 @@ impl Node {
                                        }
                                        c
                                    };
+                                   // The peer is back: take its score record
+                                   // out of the eviction queue so a connected
+                                   // peer is never dropped while an idle
+                                   // record survives.
+                                   {
+                                       let mut dedup = self.gossip_dedup.lock().unwrap_or_else(
+                                           |poisoned| {
+                                               tracing::error!(
+                                                   "GossipDedup lock was poisoned by an earlier \
+                                                    panic; continuing with the recovered state"
+                                               );
+                                               poisoned.into_inner()
+                                           },
+                                       );
+                                       dedup.note_peer_connected(&peer_id);
+                                   }
                                    let count = if newly_connected {
                                        self.peer_count.fetch_add(1, Ordering::SeqCst) + 1
                                    } else {
@@ -1605,9 +1621,43 @@ impl Node {
                                            )
                                            .ok();
                                    }
+                                   // Mark the gossip score record evictable.
+                                   // It is NOT deleted: a peer one message
+                                   // from the ban threshold would otherwise
+                                   // clear its record by reconnecting. The
+                                   // record survives and is the first thing
+                                   // dropped when the table hits
+                                   // `MAX_SCORED_PEERS`. Before this call the
+                                   // table had no eviction path at all and
+                                   // grew once per distinct `PeerId` seen,
+                                   // which costs an attacker one key
+                                   // generation each.
+                                   {
+                                       let mut dedup = self.gossip_dedup.lock().unwrap_or_else(
+                                           |poisoned| {
+                                               tracing::error!(
+                                                   "GossipDedup lock was poisoned by an earlier \
+                                                    panic; continuing with the recovered state"
+                                               );
+                                               poisoned.into_inner()
+                                           },
+                                       );
+                                       dedup.note_peer_disconnected(&peer_id);
+                                   }
                                    if let Some(ref m) = self.metrics {
                                        m.p2p_peers_connected
                                            .set(self.peer_count.load(Ordering::SeqCst) as i64);
+                                       m.gossip_scored_peers.set(
+                                           i64::try_from(
+                                               self.gossip_dedup
+                                                   .lock()
+                                                   .map(|d| d.scored_peer_count())
+                                                   .unwrap_or_else(|p| {
+                                                       p.into_inner().scored_peer_count()
+                                                   }),
+                                           )
+                                           .unwrap_or(i64::MAX),
+                                       );
                                    }
                                    warn!(
                                        "Disconnected from {}, Peers: {}",
