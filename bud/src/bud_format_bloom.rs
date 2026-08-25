@@ -1,11 +1,15 @@
-//! B.U.D. 2.0 - BLOOM DEDUP İNDEKSİ (F84/F117/F127-F130 - index RAM ekonomisi)
+//! B.U.D. 2.0 - THE BLOOM DEDUP INDEX (F84/F117/F127-F130 - the RAM economics
+//! of the index).
 //!
-//! Kalan iş #10: Bloom/learned dedup index. Chunk SHA3-256'ları tam set yerine
-//! Bloom filtresinde tutulur (1-2 bayt/chunk vs 32 bayt) → RAM ~%94-97 az.
-//! `BloomDedupIndex`: k hash (SHA3-256 deterministik bölümleme), çift amaçlı:
-//! (1) kesin olamama → `verify` tam hash setiyle doğrular (iki-aşamalı, F159),
-//! (2) yanlış-pozitif oranı parametreyle.
-//! KAYIPSIZ dedup: filtre yalnız "var olabilir" der; kesin karar hash setinden.
+//! Remaining work item #10: a Bloom/learned dedup index. Chunk SHA3-256 hashes
+//! are held in a Bloom filter instead of a full set (1-2 bytes per chunk versus
+//! 32), which cuts RAM by roughly 94-97 percent.
+//! `BloomDedupIndex`: k hashes (deterministic partitioning of the SHA3-256),
+//! serving two purposes: (1) it cannot be certain, so `verify` confirms against
+//! the full hash set (two-stage, F159), and (2) the false-positive rate is a
+//! parameter.
+//! Dedup stays LOSSLESS: the filter only says "it may exist"; the definite
+//! answer comes from the hash set.
 
 #![forbid(unsafe_code)]
 
@@ -17,13 +21,14 @@ pub const BLOOM_MAGIC: [u8; 8] = *b"\xB5BLM1\0\0\0";
 pub struct BloomDedupIndex {
     bits: Vec<u64>, // bit dizisi
     num_bits: usize,
-    k: usize,             // hash sayısı
-    inserted: usize,      // eklenen chunk sayısı
-    exact: Vec<[u8; 32]>, // kesin doğrulama seti (iki-aşamalı)
+    k: usize,             // the number of hashes
+    inserted: usize,      // the number of chunks inserted
+    exact: Vec<[u8; 32]>, // the exact verification set (the second stage)
 }
 
 impl BloomDedupIndex {
-    /// `expected` chunk için, `bits_per_entry` bit ile (varsayılan 14 → %1 FP).
+    /// For `expected` chunks, with `bits_per_entry` bits (the default 14 gives
+    /// a 1 percent false-positive rate).
     pub fn new(expected: usize, bits_per_entry: usize) -> Option<Self> {
         if expected == 0 || bits_per_entry == 0 {
             return None;
@@ -65,7 +70,8 @@ impl BloomDedupIndex {
         self.inserted += 1;
     }
 
-    /// "Var olabilir mi?" (Bloom - yanlış-pozitif olabilir, yanlış-negatif ASLA).
+    /// "Might it exist?" (Bloom - a false positive is possible, a false
+    /// negative NEVER).
     pub fn might_contain(&self, h: &[u8; 32]) -> bool {
         for p in self.hash_positions(h) {
             if self.bits[p / 64] & (1u64 << (p % 64)) == 0 {
@@ -75,12 +81,14 @@ impl BloomDedupIndex {
         true
     }
 
-    /// Kesin karar (iki-aşamalı: Bloom filtresi + exact set - F159).
+    /// The definite answer (two-stage: the Bloom filter plus the exact set -
+    /// F159).
     pub fn contains_exact(&self, h: &[u8; 32]) -> bool {
         self.might_contain(h) && self.exact.contains(h)
     }
 
-    /// Bellek: bit dizisi bayt (exact set hariç - üretimde exact Bloom'a indirgenir).
+    /// Memory: the bit array in bytes (excluding the exact set - in production
+    /// the exact set is reduced into the Bloom filter).
     pub fn filter_bytes(&self) -> usize {
         self.bits.len() * 8
     }
@@ -118,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn bloom_yanlis_negatif_asla() {
+    fn the_bloom_filter_never_gives_a_false_negative() {
         let mut b = BloomDedupIndex::new(1000, 14).unwrap();
         let mut hashes = Vec::new();
         for i in 0..500u64 {
@@ -127,24 +135,24 @@ mod tests {
             hashes.push(h);
         }
         for h in &hashes {
-            assert!(b.might_contain(h), "eklenen her zaman bulunur");
+            assert!(b.might_contain(h), "what was inserted is always found");
             assert!(b.contains_exact(h));
         }
     }
 
     #[test]
-    fn bloom_ram_tasarrufu_buyuk() {
+    fn the_bloom_ram_saving_is_large() {
         let mut b = BloomDedupIndex::new(1000, 14).unwrap();
         for i in 0..500u64 {
             b.insert(hof(&i.to_le_bytes()));
         }
         let saving = b.ram_saving_vs_full();
-        assert!(saving > 0.5, "RAM tasarrufu: {:.2}", saving);
+        assert!(saving > 0.5, "the RAM saving is {:.2}", saving);
         assert!(b.filter_bytes() < 500 * 32);
     }
 
     #[test]
-    fn bloom_deterministik() {
+    fn the_bloom_filter_is_deterministic() {
         let mut a = BloomDedupIndex::new(100, 14).unwrap();
         let mut b = BloomDedupIndex::new(100, 14).unwrap();
         for i in 0..50u64 {

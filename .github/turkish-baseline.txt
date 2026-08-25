@@ -26,7 +26,6 @@ bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
 bud/src/bud_format.rs	3
 bud/src/bud_format_autozstd.rs	12
-bud/src/bud_format_bloom.rs	15
 bud/src/bud_format_checkpoint.rs	13
 bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
@@ -39,7 +38,6 @@ bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
-bud/src/bud_format_prodcost.rs	15
 bud/src/bud_format_qos.rs	5
 bud/src/bud_format_registry.rs	7
 bud/src/bud_format_repairband.rs	14
@@ -49,7 +47,6 @@ bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
-bud/src/bud_format_wal.rs	15
 bud/src/churn.rs	6
 bud/src/cli.rs	11
 bud/src/fidelity.rs	8
@@ -93,7 +90,6 @@ crates/lubot/crates/lubot-integrations/src/rest.rs	11
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/embed.rs	3
 crates/lubot/crates/lubot-knowledge/src/lib.rs	12
-crates/lubot/crates/lubot-serve/src/chain.rs	15
 crates/lubot/crates/lubot-serve/src/config.rs	4
 crates/lubot/crates/lubot-serve/src/health.rs	6
 crates/lubot/crates/lubot-serve/src/lib.rs	5
