@@ -1,6 +1,10 @@
-//! .bud Optical Context Compression - optik bağlam ve günlük şablonu sıkıştırması
-//! Görüntü 5MB -> istem 100B 50000x, Log 20GB -> şablon 0.4GB 50x
-//! Kapı K-BUD-OPTICAL, K-BUD-LOG-TEMPLATE
+//! .bud optical context compression - optical context and log template
+//! compression.
+//!
+//! An image of 5 MB becomes a 100-byte prompt, a factor of 50000; a 20 GB log
+//! becomes a 0.4 GB template, a factor of 50.
+//!
+//! Gates: K-BUD-OPTICAL, K-BUD-LOG-TEMPLATE.
 
 #![forbid(unsafe_code)]
 

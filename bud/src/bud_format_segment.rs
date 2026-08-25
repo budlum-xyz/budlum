@@ -105,12 +105,12 @@ impl SegmentLedger {
         }
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
-        // `count` saldirgan kontrollu; dogrudan ayirmak 45 baytlik blobla
-        // It used to request 103 GB (measured: "memory allocation of
+        // `count` is attacker-controlled; allocating on it directly used to
+        // request 103 GB from a 45-byte blob (measured: "memory allocation of
         // 103079215080 bytes failed" -> SIGABRT, which kills the node under
         // panic="abort").
-        // Ustteki SHA3 kontrolu korumaz: anahtarsiz ozet + public DOMAIN
-        // the constant; producing a valid blob stays free.
+        // The SHA3 check above does not protect: the digest is keyless and
+        // DOMAIN is a public constant, so producing a valid blob stays free.
         //
         // Every record consumes at least 4 bytes of length plus a 32 byte
         // digest = 36 bytes; since the ceiling is derived from the length of
@@ -199,8 +199,8 @@ mod tests {
     #[test]
     fn append_and_roundtrip() {
         let mut seg = SegmentLedger::new();
-        seg.append(b"pact kaydi 1").expect("ekle");
-        seg.append(b"rejenerasyon sinavi kaydi").expect("ekle");
+        seg.append(b"pact record 1").expect("append");
+        seg.append(b"regeneration exam record").expect("append");
         seg.append(b"checkpoint").expect("ekle");
         assert_eq!(seg.entries.len(), 3);
         assert!(seg.total_bytes > 0);

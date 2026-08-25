@@ -15,25 +15,19 @@
 # Format: <path>\t<remaining Turkish lines>
 # Recorded: 2026-08-24. 347 files, 5742 lines.
 .github/workflows/docker-smoke.yml	1
-.github/workflows/extra-tooling.yml	3
 .github/workflows/osv-scanner.yml	1
 .github/workflows/security-audit.yml	1
 .gitignore	1
 README.md	1
 bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
-bud/src/bud_format.rs	3
 bud/src/bud_format_engine.rs	1
 bud/src/bud_format_hardening.rs	2
 bud/src/bud_format_matrix.rs	1
-bud/src/bud_format_optical.rs	3
 bud/src/bud_format_secure_db.rs	2
-bud/src/bud_format_segment.rs	3
 bud/src/bud_format_ultra.rs	1
-bud/tests/test_integration.rs	3
 budzero/bud-node/src/bitswap.rs	1
 budzero/bud-proof/src/plonky3_prover.rs	1
-budzero/bud-proof/tests/fiat_shamir_binding.rs	3
 budzero/bud-vm/src/lib.rs	1
 config/mainnet-genesis.json	1
 crates/budscan/browser/patches.txt	2
@@ -51,11 +45,8 @@ ops/scripts/check_genesis_schema.py	1
 ops/scripts/generate-sbom.sh	1
 src/ai/mod.rs	2
 src/bin/bud.rs	2
-src/budlumxyz/mod.rs	3
-src/crypto/mainnet_policy.rs	3
 src/domain/plugin.rs	1
 src/domain/storage_deal.rs	2
-src/execution/executor.rs	3
 src/lubot/effort.rs	1
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
@@ -115,4 +106,3 @@ xtask/gates/src/gates/logup_multipliers.rs	1
 xtask/gates/src/gates/regeneration.rs	2
 xtask/gates/src/gates/required_tests.rs	2
 xtask/gates/src/gates/source_reading.rs	2
-xtask/gates/src/gates/zero_tests_witness.rs	2

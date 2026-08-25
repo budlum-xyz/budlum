@@ -5,9 +5,10 @@ use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// / M5: anti-sybil minimum app kayıt ücreti (BNS `base_cost` ile uyumlu).
-/// Executor, `BudlumxyzRegisterApp` tx'lerinde bu tutarı `tx.amount` üzerinden ZORUNLU
-/// Tutar ve tam olarak bu kadarını düşer (H1 "exact cost" deseniyle simetrik).
+/// M5: the anti-sybil minimum app registration fee, consistent with the BNS
+/// `base_cost`. On `BudlumxyzRegisterApp` transactions the executor REQUIRES
+/// this amount through `tx.amount` and deducts exactly this much, symmetrically
+/// with the H1 "exact cost" pattern.
 pub const BUDLUMXYZ_REGISTER_MIN_FEE: u64 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

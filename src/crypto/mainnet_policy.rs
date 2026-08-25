@@ -116,9 +116,9 @@ pub fn check_mainnet_validator_key_policy(
     if module.is_empty() {
         return Err(MainnetKeyPolicyViolation::MissingPkcs11ModulePath);
     }
-    // Güvenlik denetimi (HIGH): SoftHSM modül YOLU (libsofthsm2.so)
-    // `pkcs11` backend'iyle geçebiliyordu; "softhsm" backend reddi tek
-    // başına yetersizdi. Yolda softhsm geçiyorsa aynı ihlaldir.
+    // Security review (HIGH): a SoftHSM module PATH (libsofthsm2.so) could pass
+    // under the `pkcs11` backend; refusing the "softhsm" backend alone was not
+    // enough. If softhsm appears in the path, it is the same violation.
     if module.to_ascii_lowercase().contains("softhsm") {
         return Err(MainnetKeyPolicyViolation::SoftwareHsmBackend);
     }

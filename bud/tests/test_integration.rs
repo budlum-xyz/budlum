@@ -37,11 +37,11 @@ fn gen_log(n: usize) -> Vec<u8> {
 }
 
 #[test]
-fn tam_entegrasyon_senaryosu() {
+fn the_full_integration_scenario() {
     // 1) The lossless pipeline: store -> restore = the original
     let log = gen_log(5000);
-    let bud = store(&log).expect("log store edilmeli");
-    let back = restore(&bud).expect("log restore edilmeli");
+    let bud = store(&log).expect("the log has to store");
+    let back = restore(&bud).expect("the log has to restore");
     assert_eq!(back, log, "the pipeline must be lossless (K38)");
 
     // 2) Decode the BudV2File root (the anchor for the chain and PoR)
@@ -482,7 +482,7 @@ fn rejenerasyon_zinciri_uctan_uca() {
 }
 
 #[test]
-fn engine_kanit_zincire_baglanir() {
+fn the_engine_proof_binds_to_the_chain() {
     // K103+K89: the engine output (PACT + production proof) -> segment ledger -> regeneration block
     use bud_core::bud_format_block::RegenerationBlock;
     use bud_core::bud_format_engine::engine_store;

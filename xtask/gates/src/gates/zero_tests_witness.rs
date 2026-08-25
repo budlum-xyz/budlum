@@ -183,10 +183,10 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: dogrudan assert_one gecti"));
+        return Err(String::from("canary: a direct assert_one passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "zero-test kanaryasi OK (witness PASS, dogrudan FAIL).",
+        "zero-test canary OK: the witness form PASSes and the direct form FAILs.",
     ))
 }

@@ -234,9 +234,9 @@ impl Executor {
                     })?;
                 // Security audit: Lubot operators may submit AI inference results
                 // (RoleId=8, verified below); the AI verifier
-                // stake is established together with the bond, so the registry
-                // katmanindaki verifier yetki kontrolu bu operatorleri
-                // reddetmez. Bond miktari MIN_VERIFIER_STAKE'in uzerindedir
+                // stake is established together with the bond, so the verifier
+                // authority check in the registry layer does not refuse these
+                // operators. The bond amount is above MIN_VERIFIER_STAKE
                 // (the network floor), so the lock succeeds.
                 let _ = state
                     .ai_registry
@@ -1785,11 +1785,11 @@ impl Executor {
                 //
                 // The verifier is chosen by the transaction signature version. It used to
                 // use Ed25519 unconditionally and pass `tx.from` as the public
-                // key; that is only correct in V4, because
-                // orada 32 baytlik adres anahtarin **kendisidir**. V5'te
-                // the address is the hash of the key, so the same call could accept no
-                // valid signature at all: a wallet with ML-DSA-87
-                // hesap gizli transfer yapamiyordu.
+                // key; that is only correct in V4, because there the 32-byte
+                // address **is** the key itself. In V5 the address is the hash of
+                // the key, so the same call could accept no valid signature at
+                // all: an account with an ML-DSA-87 wallet could not make a
+                // confidential transfer.
                 //
                 // On the V5 path the key comes from the transaction's `signer_public_key`
                 // field; `Transaction::verify` has already verified that this key derives
@@ -1918,8 +1918,8 @@ impl Executor {
                             "execution proof attests to a failed run",
                         ));
                     }
-                    // The public inputs are the prover's claim; `program_hash`
-                    // gibi `chain_id` de baglanmali. Baglanmazsa baska bir
+                    // The public inputs are the prover's claim; `chain_id` has
+                    // to be bound just as `program_hash` is. Without that binding,
                     // a proof produced for one chain and entirely valid there
                     // would verify here too: the AIR binds `chain_id` to the trace
                     // but cannot know which chain is the right one; that decision

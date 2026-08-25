@@ -322,7 +322,7 @@ impl BudFile {
         msg.extend_from_slice(&self.header.content_id);
         use ml_dsa::signature::Verifier as _;
         vk87.verify(&msg, &sig87)
-            .map_err(|_| "KQ-BUD-PQ: imza dogrulanamadi")
+            .map_err(|_| "KQ-BUD-PQ: the signature did not verify")
     }
 
     /// Producing a PQ-signed .bud (test/production): sign with ML-DSA-87.
@@ -945,7 +945,7 @@ mod tests {
         let err = f.decode_streaming(|_| Ok(())).unwrap_err();
         assert!(
             err.contains("K-BUD-STREAM"),
-            "16MB+1 chunk reddedilmeli: {}",
+            "a 16 MB + 1 chunk has to be refused: {}",
             err
         );
     }
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn pq_imza_dogrulanir_ve_sahte_reddedilir() {
+    fn a_pq_signature_verifies_and_a_forged_one_is_refused() {
         use ml_dsa::SigningKey as Msk;
         // produce: encode -> sign with ML-DSA-87 -> verify on decode
         // ml-dsa 0.1: there is no generate - use from_seed with a deterministic

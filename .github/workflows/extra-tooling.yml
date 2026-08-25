@@ -163,7 +163,7 @@ jobs:
           cargo-shear --version
 
       # Canary: it verifies the tool really runs, even in report mode.
-      # Bilerek kullanilmayan bir bagimlilik iceren sentetik crate uretip
+      # It builds a synthetic crate carrying a deliberately unused dependency.
       # It proves machete catches it; if it cannot, the report below passes empty
       # with "0 findings" and nobody notices.
       - name: Canary - evidence that the machete alarm works
@@ -258,7 +258,7 @@ jobs:
             echo '```'
             echo "### The crates taking the most space"
             echo '```'
-            cargo bloat --release --crates -n 20 2>/dev/null || echo "(cargo bloat calistirilamadi)"
+            cargo bloat --release --crates -n 20 2>/dev/null || echo "(cargo bloat could not be run)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -340,12 +340,12 @@ jobs:
     #     penalty_is_monotonic_in_the_ratio               >22dk
     #     penalty_is_monotonic_for_full_stakes            >22dk
     #
-    # Yavas ucu `penalty_for`'u iki kez cagirip sonuclari iliskilendiriyor.
+    # The slow three call `penalty_for` twice and relate the results.
     # A clamp binds a single call to its own input; it gives the solver nothing for
     # comparing two independent divisions. Splitting the asserts does not solve it
     # either, measured: `ratio == 0` is free, `ratio == SCALE` still times out.
     #
-    # Bu yuzden PR kapisi 9 hizli harness'i kosturur, ucu `kani-slow-proofs`
+    # So the PR gate runs the 9 fast harnesses, and the three run under `kani-slow-proofs`
     # runs on the nightly schedule. The split is read from the `// SLOW:` marker in
     # the source, not from a hand-kept name list, and the gate verifies the marker
     # sits on a `#[kani::proof]`: otherwise the marker lowers the expected count
