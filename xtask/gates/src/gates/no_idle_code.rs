@@ -443,6 +443,19 @@ struct Scan {
     idle: Vec<Item>,
     total_items: usize,
     ambiguous: usize,
+    /// Ambiguous names that no file outside their own definitions mentions.
+    ///
+    /// Skipping every ambiguous name left 1267 items - over a quarter of the
+    /// public surface - checked by nothing at all. Most of that skip is
+    /// justified: when two files define `is_valid`, a mention of `is_valid`
+    /// somewhere else does not say which one it reached, so calling either idle
+    /// would be a guess.
+    ///
+    /// But one case needs no guess. If *no* file outside the defining set
+    /// mentions the name at all, then no definition under it was reached,
+    /// whichever one a mention would have meant. Ambiguity stops mattering when
+    /// the count of mentions is zero.
+    unreached_ambiguous: Vec<Item>,
 }
 
 fn scan(root: &Path) -> Scan {
@@ -485,9 +498,20 @@ fn scan(root: &Path) -> Scan {
 
     let mut idle = Vec::new();
     let mut ambiguous = 0usize;
+    let mut unreached_ambiguous = Vec::new();
     for (name, items) in &by_name {
         if items.len() > 1 {
             ambiguous += items.len();
+            // Ambiguity is only a reason to skip while there is something to
+            // be ambiguous *about*. With no outside mention there is nothing
+            // to attribute, so every definition under the name is unreached.
+            let owners: BTreeSet<&String> = items.iter().map(|i| &i.file).collect();
+            let mentioned = refs
+                .iter()
+                .any(|(rel, ids)| !owners.contains(*rel) && ids.contains(name));
+            if !mentioned {
+                unreached_ambiguous.extend(items.iter().cloned());
+            }
             continue;
         }
         let item = &items[0];
@@ -499,10 +523,12 @@ fn scan(root: &Path) -> Scan {
         }
     }
     idle.sort();
+    unreached_ambiguous.sort();
     Scan {
         idle,
         total_items,
         ambiguous,
+        unreached_ambiguous,
     }
 }
 
@@ -536,11 +562,20 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     let baseline = read_baseline(root);
-    let current: BTreeSet<String> = scan_result.idle.iter().map(Item::key).collect();
-
-    let new_idle: Vec<&Item> = scan_result
+    // Unreached ambiguous items are the same finding as an idle item and ride
+    // the same baseline. They are folded in here rather than reported
+    // separately because a reader does not care why the scan was unsure of the
+    // name; they care that nothing calls it.
+    let all_idle: Vec<&Item> = scan_result
         .idle
         .iter()
+        .chain(scan_result.unreached_ambiguous.iter())
+        .collect();
+    let current: BTreeSet<String> = all_idle.iter().map(|i| i.key()).collect();
+
+    let new_idle: Vec<&Item> = all_idle
+        .iter()
+        .copied()
         .filter(|i| !baseline.contains(&i.key()))
         .collect();
 
@@ -585,10 +620,15 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     Ok(format!(
-        "No new idle code: {} public items, {} idle on the baseline, {} ambiguous names skipped.",
+        "No new idle code: {} public items, {} idle on the baseline ({} of them \
+         under a name more than one file defines), {} ambiguous items skipped as \
+         genuinely undecidable.",
         scan_result.total_items,
         current.len(),
-        scan_result.ambiguous
+        scan_result.unreached_ambiguous.len(),
+        scan_result
+            .ambiguous
+            .saturating_sub(scan_result.unreached_ambiguous.len())
     ))
 }
 
@@ -836,6 +876,48 @@ pub fn self_test() -> Result<String, String> {
 
     baseline_canaries(&clean, &tmp)?;
 
+    // Two files defining the same name, and nothing mentioning it: this used
+    // to be skipped as ambiguous, which left over a quarter of the public
+    // surface checked by nothing.
+    if accepts_with(
+        &clean,
+        &tmp,
+        "amb_unreached",
+        &[
+            ("src/amb_a.rs", "pub fn shared_name() -> u32 { 1 }\n"),
+            ("src/amb_b.rs", "pub fn shared_name() -> u32 { 2 }\n"),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: two definitions of one name, mentioned by no other file, \
+             were accepted. Ambiguity is a reason to skip only while there is \
+             something to be ambiguous about; with zero outside mentions, no \
+             definition under the name was reached whichever one a mention \
+             would have meant.",
+        ));
+    }
+
+    // The same pair, with one outside mention, must pass: now the scan really
+    // cannot say which definition was meant, and guessing would be worse than
+    // skipping.
+    if !accepts_with(
+        &clean,
+        &tmp,
+        "amb_reached",
+        &[
+            ("src/amb_a.rs", "pub fn shared_name() -> u32 { 1 }\n"),
+            ("src/amb_b.rs", "pub fn shared_name() -> u32 { 2 }\n"),
+            ("src/amb_use.rs", "fn c() { let _ = shared_name(); }\n"),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: an ambiguous name with a real outside mention was reported \
+             as idle. That attribution is a guess, and the gate must not make it.",
+        ));
+    }
+
     // The vacuity floor must fire on a near-empty tree.
     let empty = tmp.join("empty");
     fs::create_dir_all(empty.join("src")).map_err(|e| format!("cannot create empty tree: {e}"))?;
@@ -852,6 +934,6 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "no-idle-code canary OK (wired PASSes, idle fn/struct/enum/const FAIL, re-export and \
          test-only and prose FAIL, a real caller PASSes, baseline exempts, stale baseline FAILs, \
-         empty tree FAILs).",
+         an unmentioned ambiguous name FAILs, a mentioned one PASSes, empty tree FAILs).",
     ))
 }
