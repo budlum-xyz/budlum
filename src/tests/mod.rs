@@ -22,9 +22,9 @@ pub mod bns;
 pub mod deed;
 #[cfg(test)]
 pub mod sharding_e2e;
-// +: B.U.D. E2E test + modül-bağımsızlık invariantları.
-// 3-aktör (operatör A + operatör B + izleyici C) senaryosu + 9 adet
-// Permissionless/whitelist/data-sovereignty invariantı (plan §0.5
+// Plus: the B.U.D. end-to-end test and the module-independence invariants.
+// A three-actor scenario (operator A, operator B and observer C) with 9
+// permissionless, whitelist and data-sovereignty invariants (plan section 0.5
 // + §4 kabul kriterleri).
 #[cfg(test)]
 pub mod bud_e2e;
@@ -97,11 +97,12 @@ pub mod tokenomics;
 pub mod tokenomics_proptest;
 #[cfg(test)]
 pub mod zkvm;
-// / F4 mühürü (2026-07-17): SocialFi boost %4 B.U.D. operatör
-// Dağıtımı + remainder determinizmi + operatörsüz burn fallback regresyonları.
+// The F4 seal (2026-07-17): the SocialFi boost 4 percent B.U.D. operator
+// distribution, remainder determinism, and the operator-less burn fallback
+// regressions.
 #[cfg(test)]
 pub mod adversarial_p2p;
-// / F1 mühürü (2026-07-17): NftBurn -> storage manifest hard
+// The F1 seal (2026-07-17): NftBurn -> storage manifest hard
 // Prune zincir-seviyesi regresyon kilidi (produce_block yolu).
 #[cfg(test)]
 pub mod bns_expanded;
@@ -128,25 +129,26 @@ pub mod security_auditor;
 pub mod socialfi;
 #[cfg(test)]
 pub mod target_700;
-// P0 mainnet-gap (2026-07-18): bridge negatif süiti - forgery /
+// A P0 mainnet gap (2026-07-18): the bridge negative suite - forgery,
 // Replay / anchor-substitution / inactive-relayer / unknown-message reddi.
-// Yalnızca mevcut tanımlı red yollarını doğrular; protokol davranışı değişmez.
+// It verifies only the refusal paths already defined; protocol behaviour does
+// not change.
 #[cfg(test)]
 pub mod bridge_negatives;
 pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod encryption_dao;
-//: PoA katılımcı onboarding yaşam-döngüsü + whitelist
-// Zorunluluğu + KYC expiry test matrisi. İzolasyon mührü poa_isolation.rs'de.
+// The PoA participant onboarding lifecycle, the whitelist requirement and the
+// KYC expiry test matrix. The isolation seal lives in poa_isolation.rs.
 pub mod poa_onboarding_matrix;
 // P0 mainnet-gap 3/3 (2026-07-19): snapshot-corruption +
-// Crash-recovery kaos süiti. İki _gap pini bilinçli olarak bugünkü davranışı
-// Mühürler (snapshot authenticity yok + v1/v2 çapraz-gölgeleme + boot
-// Sessiz-rollback); ürün düzeltmesi emirle geldiğinde ters çevrilir.
+// The crash-recovery chaos suite. Two _gap pins deliberately seal today's
+// behaviour (no snapshot authenticity, v1/v2 cross-shadowing and a silent boot
+// rollback); they are inverted when the product fix is ordered.
 #[cfg(test)]
 pub mod snapshot_chaos;
 // P5 regresyon kilidi (2026-07-19): ZK finality fail-open +
-// Relayer escrow silent-failure CI kırıcı güvenlik mühürleri.
+// The relayer escrow silent-failure security seals, which break CI.
 // Reachability premises behind the accepted dependency advisories. These fail
 // when a routine dependency change makes a carried CVE live again.
 // External review pass: locks for the findings that were real, plus the ones
@@ -157,7 +159,7 @@ pub mod advisory_reachability;
 pub mod ai_verification_status_locks;
 pub mod audit_findings_locks;
 #[cfg(test)]
-pub mod f20_oncelikli_bulgular;
+pub mod f20_priority_findings;
 #[cfg(test)]
 pub mod hardening_h2_locks;
 #[cfg(test)]
@@ -172,11 +174,11 @@ pub mod network_hardening_locks;
 pub mod regression_lock;
 pub mod slashing_matrix;
 // (2026-07-21) cross-platform consensus determinism digest'i.
-// Determinism.yml bu modüldeki testten üretilen CONSENSUS_DIGEST satırını üç
-// Işletim sisteminde toplayıp byte-eşitlik ister.
+// determinism.yml collects the CONSENSUS_DIGEST line produced by the test in
+// this module across three operating systems and requires byte equality.
 pub mod consensus_digest;
-// (2026-07-21) CI Genişletme Madde 1 - genesis
-// Reproducibility sondası (`genesis_hash_deterministic`, bkz. determinism.yml).
+// (2026-07-21) CI expansion item 1 - the genesis reproducibility probe
+// (`genesis_hash_deterministic`, see determinism.yml).
 #[cfg(test)]
 pub mod genesis_repro;
 // A serialize failure must not fold into empty bytes on a path that feeds a

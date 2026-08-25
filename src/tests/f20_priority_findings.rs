@@ -247,16 +247,18 @@ fn f05_readiness_does_not_claim_stark_verification() {
     assert!(src.contains("full_execution_proof_verification"));
 }
 
-/// Kaydedilen program hash'i, kaydedilen boyutlarin urettigi program ile ayni olmali.
+/// The recorded program hash has to match the program the recorded dimensions
+/// produce.
 ///
-/// `execution_program_hash` ile `execution_dims` ayri ayri veriliyor. Dogrulama
-/// zamaninda program **dims'ten yeniden kuruluyor** ve kanit kaydedilen hash'e
-/// karsi olculuyor; ikisi ayrisirsa hicbir gecerli kanit o modeli gecemez.
+/// `execution_program_hash` and `execution_dims` are supplied separately. At
+/// verification time the program is **rebuilt from the dims** and the proof is
+/// measured against the recorded hash; if the two disagree, no valid proof can
+/// ever pass for that model.
 ///
-/// Bu bir sahtecilik acigi degildir - AI yolu programi gonderenden degil
-/// kayittan alir, dolayisiyla fail-closed. Sessiz bir tuzaktir: hatayi
-/// kaydin kendisinde degil, cok sonra dogrulamada gosterir. Kaynaginda
-/// reddedilmesi gerekir.
+/// This is not a forgery hole - the AI path takes the program from the record
+/// rather than from the submitter, so it is fail-closed. It is a silent trap: it
+/// surfaces the mistake not at the record itself but much later, at
+/// verification. It has to be refused at its source.
 #[test]
 fn a_model_hash_that_contradicts_its_dims_is_refused() {
     let mut reg = AiRegistry::new();
@@ -274,24 +276,26 @@ fn a_model_hash_that_contradicts_its_dims_is_refused() {
             result_deadline_blocks: 10,
             version: 1,
             active: true,
-            // Kanit zorunlu DEGIL: F-04 kapisina takilmadan bu kapiya gelinsin.
+            // A proof is NOT required here: the point is to reach this gate
+            // without getting caught on the F-04 gate.
             require_execution_proof: false,
-            // Bu hash, asagidaki boyutlarin urettigi programin hash'i degil.
+            // This hash is not the hash of the program the dimensions below produce.
             execution_program_hash: Some([4u8; 32]),
             execution_class: 1,
             execution_weights_digest: Some([5u8; 32]),
             execution_dims: Some(vec![2, 1]),
         })
-        .expect_err("tutarsiz hash/dims cifti reddedilmeli");
+        .expect_err("an inconsistent hash/dims pair has to be refused");
     assert!(
         err.contains("does not match the program execution_dims build"),
-        "gerekce hash ile dims'in ayristigini soylemeli, gelen: {err}"
+        "the reason has to say that the hash and the dims disagree, got: {err}"
     );
 }
 
 /// Kontrol: tutarli cift kabul edilir.
 ///
-/// Kapinin yalnizca yanlisi reddettigini, dogruyu da reddetmedigini gosterir -
+/// It shows that the gate refuses only the wrong case and does not also refuse
+/// the right one -
 /// yoksa "her seyi reddet" de bir kapi sayilirdi.
 #[test]
 fn a_model_hash_that_matches_its_dims_registers() {
@@ -302,7 +306,7 @@ fn a_model_hash_that_matches_its_dims_registers() {
         biases: vec![0i32; 1],
     };
     let expected = crate::ai::execution::matmul_program_hash(&spec_for_hash)
-        .expect("program hash uretilebilmeli");
+        .expect("the program hash has to be producible");
 
     let mut reg = AiRegistry::new();
     reg.register_model(AiModelSpec {
@@ -324,5 +328,5 @@ fn a_model_hash_that_matches_its_dims_registers() {
         execution_weights_digest: Some([5u8; 32]),
         execution_dims: Some(dims),
     })
-    .expect("tutarli cift kabul edilmeli");
+    .expect("a consistent pair has to be accepted");
 }

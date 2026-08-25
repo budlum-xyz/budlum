@@ -340,31 +340,33 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
     }
 }
 
-/// Chaos v2: CHAIN-HALT - tam sessizlik sonrası kurtarma.
+/// Chaos v2: CHAIN-HALT - recovery after complete silence.
 ///
-/// Mevcut 4 senaryo crash/fork/byzantine/restart kapsar; bu mühür ağın HİÇ
-/// Üretim yapmadığı sessiz dönemin dayanıklılığını kilitler: sessizlikte
-/// Hiçbir sayaç kımıldamaz, üretici geri dönünce zincir deterministik olarak
-/// Kaldığı height'tan devam etmelidir.
+/// The four existing scenarios cover crash, fork, byzantine and restart; this
+/// seal locks the resilience of a silent period in which the network produces
+/// NOTHING: during the silence no counter moves, and once the producer returns
+/// the chain has to continue deterministically from the height it stopped at.
 ///
-/// Buradaki eski gerekçe iki kez düzeltildi. Önce ölçüldü: sayaçların
-/// Sessizlikte kımıldamaması, kancanın hiç bağlı olmamasının yan etkisiydi.
-/// Sonra o boşluk kapandı; canlılık epoch kapanışını `apply_epoch_close_liveness`
-/// Yürütüyor ve blok üretilmeyen bir dönemde epoch sınırı da geçilmediği için
-/// Sayaç yine kımıldamıyor, ama bu sefer sebebi doğru: kapanacak bir epoch yok.
-/// Test resume determinizmini kilitler; canlılık davranışı
+/// The old rationale here was corrected twice. First it was measured: the
+/// counters not moving during the silence was a side effect of the hook never
+/// having been wired at all. Then that gap was closed; liveness runs the epoch
+/// close through `apply_epoch_close_liveness`, and because no epoch boundary is
+/// crossed in a period with no blocks, the counter still does not move - but
+/// this time for the right reason: there is no epoch to close. The test locks
+/// resume determinism; the liveness behaviour
 /// `liveness_consensus.rs`'te sabitlenir.
 #[tokio::test]
 async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
-    // NOT: devnet_genesis özel adreslerinden (0x01/0x02) uzak durulur.
+    // NOTE: the special devnet_genesis addresses (0x01 and 0x02) are avoided.
     let producer = Address::from([0x61; 32]);
     let silent = Address::from([0x62; 32]);
     bc.state.add_validator(producer, 10_000);
     bc.state.add_validator(silent, 10_000);
 
-    // 1) Baseline: bir tam epoch üret - silent ilk miss'ini alır.
+    // 1) Baseline: produce one full epoch, so the silent validator takes its
+    //    first miss.
     for _ in 0..EPOCH_LENGTH {
         bc.produce_block(producer).expect("produce must succeed");
     }
@@ -372,16 +374,18 @@ async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     let height_before_halt = bc.chain.len() as u64;
     let missed_before = bc.state.liveness.missed_count(&silent);
 
-    // 2) CHAIN-HALT: tam sessizlik (hiçbir produce_block çağrısı). Epoch ancak
-    //    Blok üretimiyle kapanır; dolayısıyla sessizlikte liveness sayaçları
-    //    Da state de kımıldamamalıdır. Burada çağrı YOK, doğrudan mühür:
+    // 2) CHAIN-HALT: complete silence, with no produce_block call at all. An
+    //    epoch only closes through block production, so during the silence
+    //    neither the liveness counters nor the state may move. There is NO call
+    //    here, just the seal:
     assert_eq!(
         bc.state.liveness.missed_count(&silent),
         missed_before,
         "halt sirasinda epoch-close hook'u kosmaz, sayac sabit kalmali"
     );
 
-    // 3) Kurtarma: üretici geri döner; zincir kaldığı height'tan uzamaya devam.
+    // 3) Recovery: the producer returns and the chain keeps growing from the
+    //    height it stopped at.
     for _ in 0..EPOCH_LENGTH * 2 {
         let _ = bc
             .produce_block(producer)
@@ -389,9 +393,11 @@ async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     }
     let expected = height_before_halt + EPOCH_LENGTH * 2;
     assert_eq!(bc.chain.len() as u64, expected);
-    // Resume'un iki epoch'unda silent hâlâ yok -> sayaç deterministik: 1 + 2 = 3.
+    // Across the two epochs of the resume the silent validator is still absent,
+    // so the counter is deterministic: 1 + 2 = 3.
     assert_eq!(bc.state.liveness.missed_count(&silent), 3);
-    // Üreticinin streak'i temiz; sessiz validator observe-mode'da slash EDİLMEZ.
+    // The producer's streak is clean, and the silent validator is NOT slashed in
+    // observe mode.
     assert_eq!(bc.state.liveness.missed_count(&producer), 0);
     assert!(bc.state.registry.is_active(&silent, roles::VALIDATOR));
 }
