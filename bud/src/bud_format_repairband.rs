@@ -1,9 +1,13 @@
-//! B.U.D. 2.0 - ONARIM BANDI MODELLERİ (F41/F293-F297 - MSR/MBR/LRC karşılaştırması)
+//! B.U.D. 2.0 - REPAIR BANDWIDTH MODELS (F41/F293-F297 - comparing MSR, MBR
+//! and LRC).
 //!
-//! Kalan iş #11c: MSR regenerating codes için onarım bandı hesabı (kod GF(2^8) ayrı
-//! iş; burada KARAR girdisi: hangi kod ailesi hangi onarım bandını verir).
-//! Formüller (yayınlanan, işaretli): tam EC onarım = k·α; MSR = (n-1)·α/... ile
-//! daha az; MBR minimum bant. Dürüstlük: sayılar model girdisi, ölçüm değil.
+//! Remaining work item #11c: the repair bandwidth calculation for MSR
+//! regenerating codes (the GF(2^8) code itself is separate work; what is here
+//! is the DECISION input: which code family gives which repair bandwidth).
+//! The formulas (published, cited): a full EC repair is k times alpha; MSR is
+//! less, at (n-1) times alpha over ...; MBR is the minimum bandwidth.
+//!
+//! Honesty: these numbers are model inputs, not measurements.
 
 #![forbid(unsafe_code)]
 
@@ -11,16 +15,17 @@ use sha3::{Digest, Sha3_256};
 
 pub const REPAIRBAND_MAGIC: [u8; 8] = *b"\xB5RBND\0\0\0";
 
-/// Onarım bandı modelleri.
+/// The repair bandwidth models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepairModel {
-    PlainErasure, // k shard indir, yeniden kodla (mevcut Cauchy MDS)
-    Lrc,          // yerel grup onarımı (1 kayıp → grup içi ~1/2)
+    PlainErasure, // download k shards and re-encode (the current Cauchy MDS)
+    Lrc,          // local group repair (one loss costs about half a group)
     Msr,          // minimum-storage regenerating
     Mbr,          // minimum-band regenerating
 }
 
-/// (n,k) ve shard boyutu α için tek kaybın onarım bandı (α birimi).
+/// The repair bandwidth of a single loss for (n,k) and shard size alpha, in
+/// units of alpha.
 pub fn repair_band(n: usize, k: usize, model: RepairModel) -> Option<f64> {
     if k == 0 || k > n {
         return None;
@@ -33,17 +38,18 @@ pub fn repair_band(n: usize, k: usize, model: RepairModel) -> Option<f64> {
             Some((grup as f64).min(k as f64))
         }
         RepairModel::Msr => {
-            // MSR: α(n-1)/(n-k) formunda; basitleştirme: ≈ k/(n-k)
+            // MSR has the form alpha(n-1)/(n-k); simplified to about k/(n-k).
             Some(k as f64 / (n - k) as f64)
         }
         RepairModel::Mbr => {
-            // MBR: minimum bant = k (bilgi-teorik alt sınır ~)
+            // MBR: the minimum bandwidth is k (approximately the
+            // information-theoretic lower bound).
             Some((k as f64) * 0.75)
         }
     }
 }
 
-/// Hangi model en az bandı verir (karar).
+/// Which model gives the least bandwidth (the decision).
 pub fn best_repair_model(n: usize, k: usize) -> Option<(RepairModel, f64)> {
     [
         RepairModel::PlainErasure,
@@ -76,21 +82,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn msr_plainden_ucuz() {
+    fn msr_is_cheaper_than_plain() {
         let plain = repair_band(6, 4, RepairModel::PlainErasure).unwrap();
         let msr = repair_band(6, 4, RepairModel::Msr).unwrap();
-        assert!(msr < plain, "MSR bandı az olmalı: msr={msr} plain={plain}");
+        assert!(
+            msr < plain,
+            "the MSR bandwidth has to be lower: msr={msr} plain={plain}"
+        );
     }
 
     #[test]
-    fn best_model_donulur() {
+    fn the_best_model_is_returned() {
         let (m, b) = best_repair_model(6, 4).unwrap();
         assert!(b > 0.0);
         let _ = m;
     }
 
     #[test]
-    fn gecersiz_parametre_red() {
+    fn invalid_parameters_are_refused() {
         assert!(repair_band(0, 1, RepairModel::Msr).is_none());
         assert!(repair_band(3, 4, RepairModel::Msr).is_none());
     }
