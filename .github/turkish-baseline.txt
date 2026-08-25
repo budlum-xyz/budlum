@@ -40,7 +40,6 @@ bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_qos.rs	5
 bud/src/bud_format_registry.rs	7
-bud/src/bud_format_repairband.rs	14
 bud/src/bud_format_revolutionary.rs	8
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
@@ -107,7 +106,6 @@ src/ai/mod.rs	2
 src/bin/bud.rs	2
 src/bns/registry.rs	7
 src/budlumxyz/mod.rs	3
-src/chain/genesis.rs	14
 src/chain/snapshot.rs	9
 src/chain/storage_economics_tests.rs	4
 src/core/governance.rs	6
