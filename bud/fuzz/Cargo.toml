@@ -1,5 +1,6 @@
-# cargo-fuzz hedefi (cargo +nightly fuzz check/run ile çalıştırılır)
-# CI'da ayrı turda koşulur (bud2-ci.yml notu: "fuzz/kani ayri CI turu icin acik kalem")
+# The cargo-fuzz target (run with cargo +nightly fuzz check/run).
+# It runs in a separate CI round (the bud2-ci.yml note: "fuzz and kani are an
+# open item for a separate CI round").
 [package]
 name = "bud-core-fuzz"
 version = "0.0.0"
