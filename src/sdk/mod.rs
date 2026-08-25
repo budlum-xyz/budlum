@@ -93,9 +93,17 @@ impl BudlumToml {
     ///
     /// # Errors
     ///
-    /// Returns `Io` when the file cannot be read, `Parse` when it is not valid TOML.
+    /// Returns `Io` when the file cannot be read or is over the ceiling for a
+    /// control file, `Parse` when it is not valid TOML.
     pub fn load(path: &std::path::Path) -> Result<Self, BudlumTomlError> {
-        let content = std::fs::read_to_string(path).map_err(|e| BudlumTomlError::Io {
+        // Bounded: a `budlum.toml` is hand-written configuration. The path
+        // comes from the developer's working directory, so the size of this
+        // allocation is not the node's to choose.
+        let content = crate::core::bounded_read::read_to_string_bounded(
+            path,
+            crate::core::bounded_read::MAX_CONTROL_FILE_BYTES,
+        )
+        .map_err(|e| BudlumTomlError::Read {
             path: path.to_path_buf(),
             source: e,
         })?;
@@ -141,6 +149,18 @@ pub enum BudlumTomlError {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
+    /// The file could not be read within the ceiling for a control file.
+    ///
+    /// Kept separate from [`Self::Io`] because "this file is too big to read"
+    /// and "this file could not be opened" send the developer to different
+    /// places, and flattening the first into an `io::Error` string would throw
+    /// away the limit and the measured size that the reader worked out.
+    Read {
+        /// The path that was being read.
+        path: std::path::PathBuf,
+        /// Why the bounded read refused.
+        source: crate::core::bounded_read::BoundedReadError,
+    },
     Parse {
         path: std::path::PathBuf,
         source: toml::de::Error,
@@ -156,6 +176,9 @@ impl std::fmt::Display for BudlumTomlError {
         match self {
             Self::Io { path, source } => {
                 write!(f, "budlum.toml I/O error at {}: {}", path.display(), source)
+            }
+            Self::Read { path, source } => {
+                write!(f, "budlum.toml unreadable at {}: {source}", path.display())
             }
             Self::Parse { path, source } => {
                 write!(
@@ -181,6 +204,7 @@ impl std::error::Error for BudlumTomlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Read { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
             Self::Serialize { source, .. } => Some(source),
         }
@@ -214,7 +238,7 @@ mod tests {
     #[test]
     fn budlum_toml_missing_file_returns_io_error() {
         let result = BudlumToml::load(std::path::Path::new("/nonexistent/budlum.toml"));
-        assert!(matches!(result, Err(BudlumTomlError::Io { .. })));
+        assert!(matches!(result, Err(BudlumTomlError::Read { .. })));
     }
 
     #[test]

@@ -935,7 +935,13 @@ impl Node {
         let Some(ref path) = self.vote_history_db else {
             return;
         };
-        match std::fs::read_to_string(path) {
+        // Bounded: the vote history is two integers. Anything larger is not
+        // a vote history, and reading it would be an allocation chosen by
+        // whatever wrote the file rather than by this node.
+        match crate::core::bounded_read::read_to_string_bounded(
+            path,
+            crate::core::bounded_read::MAX_CONTROL_FILE_BYTES,
+        ) {
             Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
                 Ok(v) => {
                     self.last_prevote_height = v.last_prevote_height;
@@ -949,7 +955,7 @@ impl Node {
                 Err(e) => warn!(error = %e, path = %path.display(),
                     "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)"),
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.is_not_found() => {}
             Err(e) => warn!(error = %e, path = %path.display(), "Vote history could not be read"),
         }
     }
@@ -983,7 +989,12 @@ impl Node {
         let Some(ref db_path) = self.banned_peer_db else {
             return;
         };
-        match std::fs::read_to_string(db_path) {
+        // Bounded: the ban list grows with the peer set, so it gets the
+        // larger ceiling - but it still gets one.
+        match crate::core::bounded_read::read_to_string_bounded(
+            db_path,
+            crate::core::bounded_read::MAX_BAN_LIST_BYTES,
+        ) {
             Ok(data) => {
                 // Prefer absolute-expiry records; accept legacy
                 // String-only lists for one-version migration.
@@ -1021,7 +1032,7 @@ impl Node {
                 }
             }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
+                if !e.is_not_found() {
                     warn!("Failed to read banned peer DB: {e}");
                 }
             }

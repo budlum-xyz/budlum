@@ -123,7 +123,11 @@ impl RelayerWorker {
     /// before the file existed.
     fn load_cursor(&self) -> Option<u64> {
         let path = self.cursor_path.as_ref()?;
-        match std::fs::read_to_string(path) {
+        // Bounded: the cursor is a single decimal height.
+        match crate::core::bounded_read::read_to_string_bounded(
+            path,
+            crate::core::bounded_read::MAX_CONTROL_FILE_BYTES,
+        ) {
             Ok(text) => match text.trim().parse::<u64>() {
                 Ok(height) => {
                     info!(height, path = %path.display(), "Relayer: resuming from persisted cursor");
@@ -135,7 +139,7 @@ impl RelayerWorker {
                     None
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) if e.is_not_found() => None,
             Err(e) => {
                 warn!(error = %e, path = %path.display(),
                       "Relayer: cursor unreadable; resuming from the chain tip");
