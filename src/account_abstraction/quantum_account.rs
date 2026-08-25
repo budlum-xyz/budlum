@@ -1,7 +1,7 @@
-//! Kuantum-guvenli hesap soyutlama V2: adres turetme, koruyucu politikasi,
-//! depolama bagi.
+//! Quantum-safe account abstraction V2: address derivation, the guardian
+//! policy and the storage binding.
 //!
-//! # Boyut sabitleri
+//! # Size constants
 //!
 //! This file used to redefine the ML-DSA-87 lengths as its own `pub const`s
 //! and used the `[u8; ML_DSA_87_PUBLIC_KEY_LEN]` / `[u8; ML_DSA_87_SIGNATURE_LEN]`cipliak
@@ -36,7 +36,7 @@ pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
 /// on [`QuantumAccount::seed_from_entropy`].
 pub const MIN_SEED_ENTROPY_BYTES: usize = 32;
 
-/// Tohum turetiminin reddettigi durum.
+/// The condition seed derivation refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedError {
     /// The input is shorter than [`MIN_SEED_ENTROPY_BYTES`] bytes.
@@ -48,9 +48,9 @@ impl std::fmt::Display for SeedError {
         match self {
             Self::InsufficientEntropy { given, required } => write!(
                 f,
-                "KQ-SEED-ENTROPY: tohum girdisi {given} bayt, en az {required} bayt gerekli. \
-                 The derived seed claims to carry 256 bits; deriving it from a shorter input \
-                 turetilirse iddia yanlistir ve adresler onceden hesaplanabilir. \
+                "KQ-SEED-ENTROPY: the seed input is {given} bytes, at least {required} are required. \
+                 The derived seed claims to carry 256 bits; if it is derived from a shorter input \
+                 that claim is false and the addresses can be precomputed. \
                  The input must come from the operating system randomness source - \
                  the length is checked, the quality cannot be."
             ),
@@ -92,16 +92,18 @@ impl QuantumAccount {
     ///
     /// This function always returns 32 bytes, whatever its input.
     /// The output **always looks high entropy**: the output of SHA3-256 is
-    /// baytlik bir girdiden de rastgele bir bit dizisi gibi okunur. Bu
-    /// that appearance misleads, because what breaks a seed is not the shape of the output but
+    /// It reads like a random bit string even when it comes from a two-byte
+    /// input, and that appearance misleads, because what breaks a seed is not
+    /// the shape of the output but
     /// **the search space of the input**. If the input comes from 2 bytes the seed is one of
-    /// 65 536 possibilities; an attacker tries them all and reads the address of
-    /// onceden hesaplar, kamuya acilan adresi tabloda arar ve ozel anahtari
-    /// each one. The strength of the hash does nothing here - it has already
-    /// found the right answer, it just does not know which one it is.
+    /// 65 536 possibilities; an attacker precomputes them all, looks the
+    /// published address up in that table and recovers the private key. The
+    /// strength of the hash does nothing here - it has already found the right
+    /// answer, it just does not know which one it is.
     ///
-    /// Bu, "adi entropi olan ama entropiyi hic olcmeyen fonksiyon" durumuydu:
-    /// the signature took `&[u8]` and an empty slice was valid too. Returning `Result`
+    /// This was the case of "a function named after entropy that never
+    /// measured any": the signature took `&[u8]` and an empty slice was valid
+    /// too. Returning `Result`
     /// makes it impossible for the caller to **skip** this decision; `#[must_use]`
     /// makes ignoring a value harder, but an `Err` cannot be ignored.
     ///
@@ -109,17 +111,17 @@ impl QuantumAccount {
     ///
     /// What is derived is a 256-bit seed. If the input is shorter, the output is
     /// only as strong as the bits it carries and the rest is decoration. Setting the lower
-    /// bound equal to the output width makes the seed actually carry the security level it
-    /// **declares**. A longer input
-    /// serbesttir: fazlasi zarar vermez.
+    /// bound equal to the output width makes the seed actually carry the
+    /// security level it **declares**. A longer input is allowed: the excess
+    /// does no harm.
     ///
-    /// What is measured is length, not Shannon entropy. A caller can pass 32 bytes
-    /// sifir gonderebilir ve kapi susar. Bunun nedeni, bir baytin gercekten
-    /// rastgele olup olmadiginin bu katmandan **olculemez** olmasi: 32 sifir
-    /// bayt ile bir CSPRNG'nin urettigi 32 bayt burada ayirt edilemez.
-    /// Length is the part that is measurable and on the right side; entropy
-    /// kaynaginin kalitesi cagiranin sorumlulugudur ve `SeedError`'in metni
-    /// says so.
+    /// What is measured is length, not Shannon entropy. A caller can pass 32
+    /// zero bytes and the gate stays silent. The reason is that whether a byte
+    /// is genuinely random **cannot be measured** from this layer: 32 zero
+    /// bytes and 32 bytes from a CSPRNG are indistinguishable here. Length is
+    /// the part that is measurable and on the right side; the quality of the
+    /// entropy source is the caller's responsibility, and the text of
+    /// `SeedError` says so.
     ///
     /// # Errors
     ///
@@ -454,13 +456,13 @@ mod tests {
         assert!(BftGuardianFinality::finalize(vec![vote(1)], 4, 2).is_err());
     }
 
-    /// Kisa girdiden tohum turetilemez.
+    /// A seed cannot be derived from a short input.
     ///
     /// What the gate measures is not the shape of the output but the search space of the input.
-    /// Before the gate this function accepted any length and derived a valid-looking seed
-    /// bile 32 baytlik, rastgele gorunen bir tohum uretiyordu; bu tohumun
-    /// tek bir olasiligi vardi ve tureyen adres herkesce onceden
-    /// hesaplanabilirdi.
+    /// Before the gate this function accepted any length: even from a single
+    /// byte it produced a 32-byte, random-looking seed. That seed had exactly
+    /// one possible value, and the address derived from it could be precomputed
+    /// by anyone.
     #[test]
     fn a_seed_cannot_be_derived_from_thin_entropy() {
         // Every length below the bound is refused - including the empty slice.
@@ -475,14 +477,17 @@ mod tests {
                 },
                 "the given/required values must be reported for {len} bytes"
             );
-            // Mesaj cagirana ne yapmasi gerektigini soylemeli: sayilar ve
+            // The message has to tell the caller what to do: the numbers and
             // the text must say where the entropy has to come from.
             let text = err.to_string();
             assert!(
                 text.contains(&len.to_string()),
-                "mesaj verilen uzunlugu yazmali"
+                "the message has to state the given length"
             );
-            assert!(text.contains("32"), "mesaj gereken uzunlugu yazmali");
+            assert!(
+                text.contains("32"),
+                "the message has to state the required length"
+            );
         }
 
         // Input at and above the bound passes.
@@ -491,9 +496,9 @@ mod tests {
         let over = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES + 48])
             .expect("longer input must be accepted");
 
-        // Extra input is not decoration: it enters the derivation, otherwise checking the length
-        // artirmak guvenligi artirmazdi.
-        assert_ne!(at, over, "girdinin tamami tohuma girmeli");
+        // Extra input is not decoration: it enters the derivation, otherwise
+        // raising the length would not raise the security.
+        assert_ne!(at, over, "the whole input has to enter the seed");
 
         // The derivation is deterministic: the same input gives the same seed.
         assert_eq!(
@@ -507,6 +512,9 @@ mod tests {
         let mut raw = sha3::Sha3_256::new();
         raw.update([7u8; MIN_SEED_ENTROPY_BYTES]);
         let undomained: [u8; 32] = raw.finalize().into();
-        assert_ne!(at, undomained, "alan ayirici turetime girmeli");
+        assert_ne!(
+            at, undomained,
+            "the domain separator has to enter the derivation"
+        );
     }
 }
