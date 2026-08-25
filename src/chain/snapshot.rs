@@ -271,9 +271,20 @@ impl PruningManager {
         let mut quarantined_any = false;
         for entry in &snapshots {
             let path = entry.path();
-            let data = match fs::read_to_string(&path) {
+            // Bounded: a snapshot directory is a directory, so the size of
+            // this allocation is decided by whatever placed the file there.
+            // An oversized candidate is skipped like an unreadable one - the
+            // next older snapshot is tried, which is what this loop already
+            // does for corruption.
+            let data = match crate::core::bounded_read::read_to_string_bounded(
+                &path,
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES,
+            ) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("V1 snapshot candidate skipped: {e}");
+                    continue;
+                }
             };
             if data.contains("\"schema_version\"") {
                 tracing::warn!(
@@ -366,9 +377,16 @@ impl PruningManager {
         let mut quarantined_any = false;
         for entry in &snapshots {
             let path = entry.path();
-            let data = match fs::read_to_string(&path) {
+            // Bounded, for the same reason as the V1 probe above.
+            let data = match crate::core::bounded_read::read_to_string_bounded(
+                &path,
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES,
+            ) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("V2 snapshot candidate skipped: {e}");
+                    continue;
+                }
             };
             let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
                 Ok(s) => s,

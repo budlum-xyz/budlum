@@ -90,6 +90,7 @@
 - [80. Which arithmetic the division sign describes](#80-which-arithmetic-the-division-sign-describes)
 - [81. The product of two defensible limits](#81-the-product-of-two-defensible-limits)
 - [82. A disconnect is not an amnesty](#82-a-disconnect-is-not-an-amnesty)
+- [83. Who chooses the size of the allocation](#83-who-chooses-the-size-of-the-allocation)
 
 ## 1. Overall system architecture
 
@@ -3567,3 +3568,47 @@ eviction-priority test red. The third one did not hold at first. The eviction te
 churn, and with equal scores the fallback path happened to spare it by the id tie-break, so deleting the queue left the
 suite green. Scoring the resident deliberately *above* the churn makes it the fallback's first victim - and only then
 does the test measure the queue instead of a coincidence.
+
+## 83. Who chooses the size of the allocation
+
+A node reads five files it did not receive over the network: a state snapshot, the vote history, the persisted ban list,
+the relayer cursor, and `budlum.toml`. Each was read with `fs::read_to_string`, and each read looked safe for the same
+reason: the node wrote the file itself, so the size is the node's own.
+
+That reasoning is about provenance, and provenance is not what the allocator uses. `read_to_string` allocates whatever
+is in the file *now*. A snapshot directory is a directory; anything that can place a file in it has chosen the size of
+an allocation inside the process. On a 1 984 MB host a four-gigabyte candidate is not a parse error - it is an abort,
+and it happens *before* the parser that every one of these call sites already guards with.
+
+```mermaid
+flowchart TD
+  P["operator-supplied path"] --> M{"metadata length > limit?"}
+  M -->|"yes"| R1["TooLarge - nothing read"]
+  M -->|"no, or length unavailable"| T["read, bounded to limit + 1 bytes"]
+  T --> C{"bytes read > limit?"}
+  C -->|"yes"| R2["TooLarge - allocation stopped at limit + 1"]
+  C -->|"no"| U{"valid UTF-8?"}
+  U -->|"no"| R3["NotUtf8"]
+  U -->|"yes"| Ok["contents"]
+```
+
+Two checks, because neither is sufficient. The metadata length is a hint that can be raced and, on `/proc`, is simply
+false - those files report zero and then produce content. So metadata is a fast rejection and `Read::take` is the
+enforcement. The bound is `limit + 1` rather than `limit`: a read that stops exactly at the ceiling cannot distinguish a
+file that fits from one that was truncated to fit, and a silently truncated snapshot is worse than a refused one,
+because the parser then reports a syntax error and sends the operator to look at the wrong thing.
+
+The ceilings are per kind rather than global - 512 MiB for a snapshot, 16 MiB for the ban list, 1 MiB for the small
+control files - and they are ordered by what they carry, which a test asserts. None of them is tight. Tightness is not
+the property being bought: the property is that a number exists and that exceeding it produces a named refusal instead
+of an abort.
+
+The refusal also has to keep a distinction the callers already made. An absent vote history, ban list or cursor is the
+normal state of a first boot and is silent; a file that exists and cannot be used is an operator problem and is logged.
+So the error answers `is_not_found()`, and an oversized file answers **false** to it - it is present and wrong, which is
+the case this exists to make visible. The compiler found the three call sites that depended on this by refusing to
+compile `e.kind()`; a bare `io::Error` would have let all three keep compiling while quietly reclassifying an oversized
+file as a clean first boot.
+
+This is the same shape as the mempool ceiling (§81) and the score table (§82): a quantity that is small in every real
+run is still unbounded until something states the bound.
