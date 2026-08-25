@@ -29,10 +29,10 @@ budlum-note-packing = { path = "../note-packing" }
 # Key derivation is ML-DSA-87 seed-based (FIPS 204) hardened only.
 
 [package.metadata.cargo-machete]
-# wasm-bindgen `wasm` feature'i ile aktiflesen opsiyonel bir bagimliliktir
-# (asagidaki [features] bolumune bakin). cargo-machete feature-gated opsiyonel
-# dep'leri varsayilan derlemede goremedigi icin "kullanilmiyor" sanir; bu bir
-# yanlis pozitiftir, bagimlilik `--features wasm` ile derlendiginde kullanilir.
+# wasm-bindgen is an optional dependency activated by the `wasm` feature (see
+# the [features] section below). cargo-machete cannot see feature-gated optional
+# deps in a default build and therefore thinks it is "unused"; that is a false
+# positive, and the dependency is used when built with `--features wasm`.
 ignored = ["wasm-bindgen"]
 
 [features]

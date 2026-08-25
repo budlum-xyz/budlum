@@ -1,9 +1,9 @@
 {
  "provenance": {
   "source": "api.blockchair.com v2.0.95-ie; 2026-08-14 canli cekim",
-  "cross_checked": "BTC yukseklik mempool.space ile, ETH yukseklik blockcypher ile dogrulandi",
-  "role": "test/denetim fixture'lari; production runtime verisi DEGILDIR",
-  "note": "hex alanlar onsuz saklanir; sayisal alanlar ondalik. Guncelleme icin kaynak: blockchair (v3: 3xpl.com) + kendi dugumlerimiz"
+  "cross_checked": "the BTC height was verified against mempool.space and the ETH height against blockcypher",
+  "role": "test and audit fixtures; this is NOT production runtime data",
+  "note": "hex fields are stored without a prefix and numeric fields are decimal. Update source: blockchair (v3: 3xpl.com) plus our own nodes"
  },
  "btc_merkle_blocks": [
   {

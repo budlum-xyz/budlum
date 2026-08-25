@@ -188,8 +188,8 @@ pub mod blockchair_fixture_locks;
 #[cfg(test)]
 pub mod chain_id_registry_locks;
 pub mod consensus_bypass_locks;
-// Gerçek zincir fixture'larıyla differential testler (merkle/RLP/halving).
-// Fixture tek kaynaktır: config/fixtures/gercek-zincir.json; aynı dosyayı
-// xtask `fixture-integrity` gate'i de doğrular.
+// Differential tests against real chain fixtures (merkle, RLP, halving).
+// The fixture is the single source: config/fixtures/real-chain.json, and the
+// xtask `fixture-integrity` gate verifies the same file.
 #[cfg(test)]
-pub mod gercek_zincir_fixtures;
+pub mod real_chain_fixtures;

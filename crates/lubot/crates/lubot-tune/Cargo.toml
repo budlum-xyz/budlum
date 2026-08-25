@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Eğitim planı (LoRA BF16/FP16 - FP4 tip sisteminde yok) ve çıktı hash kilidi"
+description = "The training plan (LoRA BF16/FP16 - FP4 does not exist in the type system) and the output hash lock"
 
 [dependencies]
 lubot-core = { path = "../lubot-core" }
