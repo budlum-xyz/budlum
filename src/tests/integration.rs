@@ -395,9 +395,9 @@ mod integration_tests {
 
         validator.vrf_public_key = vrf_public_key;
         validator.bls_public_key = bls_pk.clone();
-        // Gerçek bir BLS PoP üret (önceden sahte sıfır vektör
-        // Kullanılıyordu - bu, güvenlik denetimi Madde 3 kapsamında
-        // Kapatılan rogue-key saldırısına açıktı). IETF PoP = sk · H(bls_pk)
+        // Produce a real BLS PoP. A fake zero vector used to be used here, which
+        // was open to the rogue-key attack closed under item 3 of the security
+        // review. The IETF PoP is sk * H(bls_pk).
         // Under the dedicated BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_ DST.
         let pop_msg = crate::chain::finality::pop_signing_message(
             crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -655,7 +655,7 @@ mod integration_tests {
         let bls_sk = bls12_381::Scalar::from_bytes_wide(&sk_bytes);
         let bls_pk_point = bls12_381::G2Affine::from(bls12_381::G2Projective::generator() * bls_sk);
         validator.bls_public_key = bls_pk_point.to_compressed().to_vec();
-        // Gerçek BLS PoP üret (önceden sahte sıfır vektör).
+        // Produce a real BLS PoP (a fake zero vector was used before).
         let pop_msg = crate::chain::finality::pop_signing_message(
             crate::core::transaction::DEFAULT_CHAIN_ID,
             &pubkey,
@@ -1666,17 +1666,19 @@ mod integration_tests {
         assert_eq!(metrics.blocks_produced.get(), 1);
     }
 
-    /// Sayac gercek uretim yolunda artmali, yalnizca elle cagrildiginda degil.
+    /// The counter has to rise on the real production path, not only when it is
+    /// called by hand.
     ///
-    /// BULGU: `emit_tx_processed` agacta yalnizca bu dosyadaki testten
-    /// cagriliyordu; `produce_block` ve `validate_and_add_block` onu hic
-    /// cagirmiyordu, yani `budlum_transactions_processed` calisan bir dugumde
-    /// her zaman 0 kaliyordu. Yanindaki `emit_chain_metrics` iki gercek
-    /// noktadan cagrildigi icin bu fark gozden kacmisti.
+    /// FINDING: in the whole tree `emit_tx_processed` was called only from a test
+    /// in this file; `produce_block` and `validate_and_add_block` never called
+    /// it, so `budlum_transactions_processed` stayed at 0 forever on a running
+    /// node. The difference went unnoticed because its neighbour
+    /// `emit_chain_metrics` was called from two real places.
     ///
-    /// Asagidaki test yayimciyi elle cagirmaz: bir islem gonderir, blok
-    /// urettirir ve sayaci okur. Metrigi olcen tek test bu; digeri yayimcinin
-    /// kendisini olcuyor ve o gecerken bu dusuyordu.
+    /// The test below does not call the emitter by hand: it submits a
+    /// transaction, has a block produced and reads the counter. It is the only
+    /// test measuring the metric; the other one measures the emitter itself, and
+    /// it passed while this one failed.
     #[test]
     fn transactions_processed_counts_a_block_produced_through_the_normal_path() {
         use crate::chain::blockchain::Blockchain;
