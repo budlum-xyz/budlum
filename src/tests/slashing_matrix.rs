@@ -1,7 +1,7 @@
 //!: Slashing test matrisi.
 //!
-//! Ayrı ayrı test senaryoları: double-sign, downtime/liveness, invalid
-//! Attestation. Verifier Registry üstünde, her slashing koşulu için
+//! Separate test scenarios: double-sign, downtime and liveness, and an invalid
+//! attestation. On top of the verifier registry, for each slashing condition
 //! Pozitif (slash tetiklenir) ve negatif (honest validator slash'lanmaz).
 
 #[cfg(test)]
