@@ -1,11 +1,12 @@
 // (Q-A 2026-07-16) L1 relayer proof
-// Kriptografik doğrulama + M5 budlumxyz anti-sybil ücret + M4 BNS ücret regresyonu.
+// Cryptographic verification, the M5 budlumxyz anti-sybil fee and the M4 BNS fee
+// regression.
 //
-// Bu dosya, "boş kontrol yeterli" döneminin bittiğini kodlar:
-// - RelayerResult artık bincode(MerkleProof) + result-fact leaf + root
+// This file encodes the end of the era in which "an emptiness check is enough":
+// - RelayerResult now carries bincode(MerkleProof) plus a result-fact leaf and a root
 //   Anchoring gerektirir (executor::TransactionType::RelayerResult kolu).
-// - BudlumxyzRegisterApp artık BUDLUMXYZ_REGISTER_MIN_FEE zorunluluğu taşır.
-// - BnsRegister ücret kontrolü (H1/executor) regresyon olarak mühürlenir.
+// - BudlumxyzRegisterApp now carries the BUDLUMXYZ_REGISTER_MIN_FEE requirement.
+// - The BnsRegister fee check (H1, executor) is sealed as a regression.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -33,7 +34,8 @@ fn make_result(tx_hash: &str) -> RelayerExternalResult {
     }
 }
 
-/// Tek-yaprak ağaç: leaf == root, boş siblings - executor kapısıyla aynı şema.
+/// A single-leaf tree: leaf equals root with empty siblings - the same schema as
+/// the executor gate.
 fn seal_single_leaf(res: &mut RelayerExternalResult) {
     let leaf = res.result_leaf();
     let proof = MerkleProof {
@@ -85,8 +87,8 @@ fn test_relayer_result_tampered_facts_leaf_mismatch_rejected() {
     state
         .external_roots
         .insert(ExternalChain::Ethereum.domain_id(), res.external_state_root);
-    // Proof başka olgular için üretildi - tx_hash'i sonradan değiştirirsek
-    // Leaf uyuşmazlığı çıkmalı.
+    // The proof was produced for other facts, so changing tx_hash afterwards has
+    // to produce a leaf mismatch.
     res.tx_hash = "0xFORGED_HASH".to_string();
     let tx = relayer_tx(res, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
@@ -116,13 +118,13 @@ fn test_relayer_result_malformed_proof_rejected() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
     let mut res = make_result("0xREAL_HASH");
-    res.receipt_proof = vec![1, 2, 3]; // bincode(MerkleProof) değil
+    res.receipt_proof = vec![1, 2, 3]; // not a bincode(MerkleProof)
     res.external_state_root = [0x11; 32];
     let tx = relayer_tx(res, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
-    // Bincode hata metni sürüme göre değişir - reddedildiği ve bakiyenin
-    // Dokunulmadığı doğrulanır.
-    assert!(!err.is_empty(), "hata metni boş olmamalı");
+    // The bincode error text varies by version, so what is verified is that it
+    // was refused and that the balance was left untouched.
+    assert!(!err.is_empty(), "the error text must not be empty");
     assert_eq!(state.get_balance(&relayer_addr()), 1_000);
 }
 
@@ -130,12 +132,12 @@ fn test_relayer_result_malformed_proof_rejected() {
 fn test_relayer_result_empty_proof_and_zero_root_regressions() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
-    // Boş proof (C4 öncesi tek kontroldü - regresyon kalmalı).
+    // An empty proof: before C4 this was the only check, and it stays as a regression.
     let empty_proof = make_result("0xH");
     let tx = relayer_tx(empty_proof, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("empty must reject");
     assert!(err.contains("Receipt proof cannot be empty"));
-    // Sıfır root.
+    // A zero root.
     let mut zero_root = make_result("0xH2");
     zero_root.receipt_proof = vec![9];
     let tx = relayer_tx(zero_root, 1);
@@ -170,7 +172,7 @@ fn test_hub_register_app_below_min_fee_rejected() {
     assert!(err.contains("App registration requires"));
     assert!(
         state.budlumxyz.apps.is_empty(),
-        "reddedilen kayıt düşmemeli"
+        "a refused record must not be deducted"
     );
 }
 
@@ -180,16 +182,20 @@ fn test_hub_register_app_exact_min_fee_deducted_and_registered() {
     state.add_balance(&relayer_addr(), 1_000);
     let tx = budlumxyz_tx(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE, 1);
     Executor::apply_transaction(&mut state, &tx).expect("min fee must pass");
-    assert_eq!(state.budlumxyz.apps.len(), 1, "app kaydedilmeli");
-    // H1 deseni: tam fee + tam registration cost, görevlası değil.
+    assert_eq!(
+        state.budlumxyz.apps.len(),
+        1,
+        "the app has to be registered"
+    );
+    // The H1 pattern: the exact fee plus the exact registration cost, not an approximation.
     let expected = 1_000 - 1 - crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE;
     assert_eq!(state.get_balance(&relayer_addr()), expected);
 }
 
 #[test]
 fn test_bns_register_fee_enforced_regression_m4() {
-    // M4 kaydı executor H1 fix'iyle zaten kapalıydı, burada
-    // Regresyon olarak mühürlenir: 4-harfli isim, duration 1 → cost > amount.
+    // The M4 record was already closed by the executor H1 fix; it is sealed here
+    // as a regression: a four-letter name with duration 1 gives cost > amount.
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 10_000);
     let name = "abcd".to_string();
@@ -199,7 +205,7 @@ fn test_bns_register_fee_enforced_regression_m4() {
     let tx = Transaction::new_with_chain_id(
         relayer_addr(),
         Address::zero(),
-        cost - 1, // bir eksik ödeme
+        cost - 1, // one short of the payment
         1,
         0,
         data,
@@ -213,6 +219,6 @@ fn test_bns_register_fee_enforced_regression_m4() {
             .bns_registry
             .resolve(&name, state.epoch_index)
             .is_none(),
-        "eksik ödemeli isim kaydedilmemeli"
+        "a name with an underpayment must not be registered"
     );
 }
