@@ -230,7 +230,7 @@ fn extract_markers(prompt_source: &str) -> Result<Vec<String>, String> {
                 if s.contains(' ') {
                     out.push(s.to_lowercase());
                 }
-                for _ in 0..close + 1 {
+                for _ in 0..=close {
                     chars.next();
                 }
             }
