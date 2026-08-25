@@ -572,9 +572,9 @@ fn finalized_lubot_output_is_bridged_to_socialfi_nft() {
     let (spec, request) = model_and_request(requester);
     state.ai_registry.register_model(spec).expect("model");
 
-    // Operatörler: LUBOT_OPERATOR bond (sonuç imzalama yetkisi).
-    // Kayıt, doğrulayıcı başına tek sonuç kabul eder (anti-dup /
-    // anti-equivocation) - eşik 2 için iki AYRI operatör gerekir.
+    // The operators: a LUBOT_OPERATOR bond, granting the authority to sign
+    // results. The registry accepts one result per verifier (anti-duplication and
+    // anti-equivocation), so a threshold of 2 needs two SEPARATE operators.
     let operator2 = Address::from([0x53; 32]);
     let bond_amount = state.required_lubot_bond(DEFAULT_CHAIN_ID);
     for op in [operator, operator2] {
@@ -583,7 +583,7 @@ fn finalized_lubot_output_is_bridged_to_socialfi_nft() {
         Executor::apply_transaction(&mut state, &bond).expect("bond");
     }
 
-    // İstek: executor yolu (perception kabul kapısı dahil).
+    // The request: the executor path, including the perception acceptance gate.
     state.add_balance(&requester, request.max_fee + fee);
     let req_tx = Transaction::new_with_chain_id(
         requester,
@@ -597,8 +597,8 @@ fn finalized_lubot_output_is_bridged_to_socialfi_nft() {
     );
     Executor::apply_transaction(&mut state, &req_tx).expect("request");
 
-    // İki uyuşan sonuç (threshold=2, iki ayrı operatör) → finalize →
-    // NFT köprüsü.
+    // Two matching results (threshold=2, two separate operators) lead to
+    // finalization and the NFT bridge.
     let output = b"lubot-finalized-output".to_vec();
     let commitment = [0xC3; 32];
     for (tx_nonce, op) in [(1u64, operator), (2u64, operator2)] {
@@ -624,8 +624,8 @@ fn finalized_lubot_output_is_bridged_to_socialfi_nft() {
         Executor::apply_transaction(&mut state, &tx).expect("result");
     }
 
-    // Köprü kanıtı: çıktının ContentId'si, istek sahibine ait NFT olarak
-    // kayıtlı (WIRING: wired).
+    // Proof of the bridge: the ContentId of the output is registered as an NFT
+    // belonging to the requester (WIRING: wired).
     let cid = crate::storage::content_id::ContentId::of(&output);
     let bridged = state
         .nft_registry
@@ -637,8 +637,9 @@ fn finalized_lubot_output_is_bridged_to_socialfi_nft() {
         "finalized output must be bridged as a requester-owned NFT"
     );
 
-    // Ters yön (Pollen köprüsü) kanıtı: aynı çıktı, sahibinin manifest'i
-    // olarak DataAsset kayıtlı - grant mekanizmasından okunabilir.
+    // Proof of the reverse direction (the Pollen bridge): the same output is
+    // registered as a DataAsset, the manifest of its owner, readable through the
+    // grant mechanism.
     let asset_id = crate::pollen::data_rights::DataAsset::derive_id(&requester, &cid, &commitment);
     assert!(
         state.marketplace.data_assets.contains_key(&asset_id),
@@ -652,17 +653,14 @@ fn ai_model_register_charges_governance_fee_exactly() {
     let owner = Address::from([0x61; 32]);
     let fee = state.base_fee.max(1);
     let reg_fee = state.registry.params().ai_model_register_fee;
-    assert!(
-        reg_fee > 0,
-        "test, ücretin varsayılanda açık olduğunu varsayar"
-    );
+    assert!(reg_fee > 0, "the test assumes the fee is on by default");
     state.add_balance(&owner, reg_fee + fee);
 
     let (spec, _request) = model_and_request(owner);
     let tx = Transaction::new_with_chain_id(
         owner,
         Address::zero(),
-        reg_fee, // exact-cost: tam ücret
+        reg_fee, // exact cost: the full fee
         fee,
         0,
         vec![],
@@ -672,7 +670,7 @@ fn ai_model_register_charges_governance_fee_exactly() {
     Executor::apply_transaction(&mut state, &tx).expect("paid registration must apply");
 
     assert!(state.ai_registry.models.contains_key(&spec.model_id));
-    // Exact-cost: reg_fee + tx.fee düşülür; başka hiçbir şey değil.
+    // Exact cost: reg_fee plus tx.fee is deducted, and nothing else.
     assert_eq!(state.get_balance(&owner), 0);
 }
 
@@ -690,7 +688,7 @@ fn ai_model_register_below_fee_is_rejected_atomically() {
     let tx = Transaction::new_with_chain_id(
         owner,
         Address::zero(),
-        reg_fee - 1, // reg_fee'den az; bakiye yeterli, spesifik kapı tetiklenir
+        reg_fee - 1, // below reg_fee; the balance suffices, so the specific gate fires
         fee,
         0,
         vec![],
@@ -707,16 +705,16 @@ fn ai_model_register_below_fee_is_rejected_atomically() {
     assert_eq!(
         state.get_balance(&owner),
         balance,
-        "atomic: hiçbir kesinti olmamalı"
+        "atomic: no deduction may happen"
     );
 }
 
-// ── effort.rs Kural 2: ilan edilen kapasite uygunluğu kapılar ────────────
+// -- effort.rs rule 2: the declared capacity governs what is servable --
 //
-// `tier_is_servable` yazılmıştı ama hiçbir yerden çağrılmıyordu, çünkü
-// operatörün tavanını ilan edecek bir yer yoktu. `verifier_effort_ceilings`
-// o yer; aşağıdaki testler kapının hem çalıştığını hem de boş (vacuous)
-// olmadığını sabitler.
+// `tier_is_servable` had been written but was called from nowhere, because
+// there was no place for an operator to declare its ceiling.
+// `verifier_effort_ceilings` is that place; the tests below pin down both that
+// the gate works and that it is not vacuous.
 
 #[test]
 fn tavan_ilan_edilmeden_varsayilan_baseline() {
@@ -736,7 +734,7 @@ fn stakesiz_operator_tavan_ilan_edemez() {
 
     let mut reg = AiRegistry::new();
     let operator = Address::from([0x12; 32]);
-    // Stake yok -> yetkisiz -> ilan reddedilmeli.
+    // No stake means no authority, so the declaration has to be refused.
     assert!(reg
         .declare_effort_ceiling(&operator, EffortTier::DEEPEST)
         .is_err());
@@ -744,7 +742,7 @@ fn stakesiz_operator_tavan_ilan_edemez() {
 }
 
 #[test]
-fn tavan_ustundeki_istek_fail_closed_reddedilir() {
+fn a_request_above_the_ceiling_is_refused_fail_closed() {
     use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
     use crate::lubot::effort::EffortTier;
 
@@ -752,18 +750,18 @@ fn tavan_ustundeki_istek_fail_closed_reddedilir() {
     let operator = Address::from([0x13; 32]);
     reg.lock_verifier_stake(&operator, MIN_VERIFIER_STAKE)
         .unwrap();
-    // Operatör 2.0x'e kadar hizmet verebildiğini ilan ediyor.
+    // The operator declares it can serve up to 2.0x.
     let ceiling = EffortTier::from_tenths(20).unwrap();
     reg.declare_effort_ceiling(&operator, ceiling).unwrap();
 
-    // Tavanın altı ve tam tavan servis edilebilir.
+    // Below the ceiling and exactly at it are servable.
     assert!(reg.unservable_reason(EffortTier::BASELINE).is_none());
     assert!(reg.unservable_reason(ceiling).is_none());
 
-    // Tavanın üstü fail-closed: sessizce ucuzlatılmaz.
+    // Above the ceiling is fail-closed: it is not silently downgraded.
     let reason = reg
         .unservable_reason(EffortTier::DEEPEST)
-        .expect("10.0x, 2.0x tavanının üstünde: reddedilmeliydi");
+        .expect("10.0x is above the 2.0x ceiling and should have been refused");
     assert!(
         reason.contains("exceeds every declared operator ceiling"),
         "{reason}"
@@ -771,7 +769,7 @@ fn tavan_ustundeki_istek_fail_closed_reddedilir() {
 }
 
 #[test]
-fn tavan_ustundeki_istek_submit_request_tarafindan_reddedilir() {
+fn a_request_above_the_ceiling_is_refused_by_submit_request() {
     use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
     use crate::lubot::effort::EffortTier;
 
@@ -787,25 +785,26 @@ fn tavan_ustundeki_istek_submit_request_tarafindan_reddedilir() {
     reg.declare_effort_ceiling(&operator, EffortTier::BASELINE)
         .unwrap();
 
-    // Baseline istek kabul edilir (kapı boş değil: bu taraf geçmeli).
+    // The baseline request is accepted - the gate is not vacuous, so this side
+    // has to pass.
     assert!(reg.submit_request(request.clone(), 0).is_ok());
 
-    // 10.0x istek reddedilir.
+    // The 10.0x request is refused.
     request.effort = EffortTier::DEEPEST;
     request.request_id = request.calculate_id();
     let err = reg
         .submit_request(request, 0)
-        .expect_err("tavan üstü istek admission'da reddedilmeliydi");
+        .expect_err("a request above the ceiling should have been refused at admission");
     assert!(err.contains("unservable"), "{err}");
 }
 
 #[test]
-fn operator_yokken_istek_reddedilmez() {
+fn a_request_is_not_refused_when_no_operator_is_present() {
     use crate::ai::registry::AiRegistry;
     use crate::lubot::effort::EffortTier;
 
-    // Operatör yokluğu bir canlılık sorunudur, admission sorunu değil:
-    // operatörler istekten sonra da katılabilir.
+    // The absence of an operator is a liveness problem, not an admission one:
+    // operators may join after the request.
     let reg = AiRegistry::new();
     assert!(reg.unservable_reason(EffortTier::DEEPEST).is_none());
 }
@@ -826,8 +825,8 @@ fn tavan_state_root_a_girer() {
     b.declare_effort_ceiling(&operator, EffortTier::DEEPEST)
         .unwrap();
 
-    // Tavan admission kararını değiştiriyor; state_root'a girmezse iki düğüm
-    // aynı isteği farklı sonuçlandırır ve bunu fark etmez.
+    // The ceiling changes the admission decision; if it does not enter the
+    // state_root, two nodes resolve the same request differently and never notice.
     assert_ne!(a.state_root(), b.state_root());
 }
 
@@ -844,7 +843,7 @@ fn slash_tavani_da_kaldirir() {
         .unwrap();
     assert_eq!(reg.effort_ceiling(&operator), EffortTier::DEEPEST);
 
-    // Stake tamamen çekilince ilan da düşer.
+    // Once the stake is fully withdrawn, the declaration falls with it.
     reg.withdraw_verifier_stake(&operator, MIN_VERIFIER_STAKE, 0)
         .unwrap();
     assert_eq!(reg.effort_ceiling(&operator), EffortTier::BASELINE);

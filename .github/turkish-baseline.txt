@@ -21,7 +21,5 @@ src/tests/blockchair_fixture_locks.rs	57
 src/tests/chaos.rs	43
 src/tests/consensus_digest.rs	41
 src/tests/finality_live_path.rs	54
-src/tests/genesis_repro.rs	35
 src/tests/hardening.rs	52
-src/tests/lubot_runtime.rs	36
 src/tests/snapshot_chaos.rs	51
