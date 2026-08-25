@@ -56,7 +56,7 @@ jobs:
       - name: Install Rust (stable pin)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
-          toolchain: "1.97.0"
+          toolchain: "1.97.1"
       - name: Install pinned nightly (rustdoc-json backend for semver-checks)
         # On nightly 'rustdoc' is NOT a separate component, it is part of the rustc
         # component (rustup: exit 1 with "did you mean 'rust-docs'?", 2026-07-21 CI evidence).
@@ -70,7 +70,7 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Install cargo-semver-checks (locked)
-        run: cargo +1.97.0 install cargo-semver-checks --locked
+        run: cargo +1.97.1 install cargo-semver-checks --locked
       - name: Gate canary (vacuous-gate protection)
         run: BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver --self-test
       - name: Diagnosis (permanent evidence step) - rustdoc-json directly

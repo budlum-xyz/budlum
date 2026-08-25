@@ -58,7 +58,7 @@ jobs:
         include:
           # The canonical compiler: the version the repository pins.
           - label: pinned
-            toolchain: "1.97.0"
+            toolchain: "1.97.1"
           # The independent compiler: a different version, hence a different binary
           # and a different build history. For it to carry the same backdoor, both would
           # have to have been compromised in the same way.

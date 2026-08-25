@@ -222,7 +222,7 @@ fn collect_workflows(root: &Path) -> Vec<PathBuf> {
 /// for this repository without it. Every one of those four checks was already
 /// running from the root `budzero` job, so nothing was unprotected, but a
 /// reader had no way to tell which of the two files was the live one, and the
-/// dead copy pinned no toolchain where the live one pins 1.97.0.
+/// dead copy pinned no toolchain where the live one pins 1.97.1.
 ///
 /// A vendored subtree keeping its upstream workflow is the ordinary way this
 /// appears, and it is worth catching precisely because it looks so normal.

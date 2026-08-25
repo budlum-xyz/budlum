@@ -2,7 +2,7 @@
 name = "budlum-core"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.97.0"
+rust-version = "1.97.1"
 # Required so the root cargo-deny `unlicensed = "deny"` rule does not refuse
 # our own crate. The same as LICENSE.md (PolyForm Shield 1.0.0) at the repository root.
 license = "LicenseRef-PolyForm-Shield-1.0.0"

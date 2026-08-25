@@ -1485,7 +1485,7 @@ mod tests {
 
     /// The Kani harnesses in `kani/src/lib.rs` prove properties about a copy of
     /// this function's arithmetic, because `cargo kani` cannot build this crate
-    /// (it ships rustc 1.93.0-nightly; `rust-version` here is 1.97.0) and
+    /// (it ships rustc 1.93.0-nightly; `rust-version` here is 1.97.1) and
     /// because unrolling a populated `BTreeMap` of registrations is not what is
     /// under proof.
     ///

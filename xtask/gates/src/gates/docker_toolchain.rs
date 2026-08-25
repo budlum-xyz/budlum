@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-/// `channel = "1.97.0"` -> `1.97.0`.
+/// `channel = "1.97.1"` -> `1.97.1`.
 fn pinned_channel(root: &Path) -> Result<String, String> {
     let f = root.join("rust-toolchain.toml");
     if !f.is_file() {
@@ -33,7 +33,7 @@ fn pinned_channel(root: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("could not parse channel from {}", f.display()))
 }
 
-/// `FROM rust:1.97.0-bookworm@sha256:...` -> `1.97.0`.
+/// `FROM rust:1.97.1-bookworm@sha256:...` -> `1.97.1`.
 fn dockerfile_tag_version(root: &Path) -> Result<String, String> {
     let f = root.join("ops/Dockerfile");
     if !f.is_file() {
@@ -174,7 +174,7 @@ fn build_fixture(
     std::fs::create_dir_all(dir.join(".github/workflows")).map_err(|e| e.to_string())?;
     std::fs::write(
         dir.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"1.97.0\"\n",
+        "[toolchain]\nchannel = \"1.97.1\"\n",
     )
     .map_err(|e| e.to_string())?;
     let mut docker = format!("FROM {from} AS builder\n{copyline}\n");
@@ -207,26 +207,26 @@ pub fn self_test() -> Result<String, String> {
     ));
     let _ = std::fs::create_dir_all(&tmp);
 
-    let good_from = "rust:1.97.0-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let good_from = "rust:1.97.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000";
     let good_copy = "COPY Cargo.toml rust-toolchain.toml ./";
     let good_check = "RUN rustc --version";
 
     let drift = tmp.join("drift");
-    build_fixture(&drift, "rust:1.97.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000", good_copy, good_check, "1.97.0")?;
+    build_fixture(&drift, "rust:1.97.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000", good_copy, good_check, "1.97.1")?;
     if run(&drift).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: 1.97.1 build vs 1.97.0 pin kabul edildi",
+            "canary: 1.97.1 build vs 1.97.1 pin kabul edildi",
         ));
     }
 
     let nodigest = tmp.join("nodigest");
     build_fixture(
         &nodigest,
-        "rust:1.97.0-bookworm",
+        "rust:1.97.1-bookworm",
         good_copy,
         good_check,
-        "1.97.0",
+        "1.97.1",
     )?;
     if run(&nodigest).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -248,7 +248,7 @@ pub fn self_test() -> Result<String, String> {
         good_from,
         "COPY Cargo.toml ./",
         good_check,
-        "1.97.0",
+        "1.97.1",
     )?;
     if run(&nocopy).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -258,7 +258,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     let nocheck = tmp.join("nocheck");
-    build_fixture(&nocheck, good_from, good_copy, "", "1.97.0")?;
+    build_fixture(&nocheck, good_from, good_copy, "", "1.97.1")?;
     if run(&nocheck).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
@@ -270,7 +270,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::create_dir_all(empty.join(".github/workflows"));
     std::fs::write(
         empty.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"1.97.0\"\n",
+        "[toolchain]\nchannel = \"1.97.1\"\n",
     )
     .map_err(|e| e.to_string())?;
     if run(&empty).is_ok() {
@@ -281,7 +281,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     let good = tmp.join("good");
-    build_fixture(&good, good_from, good_copy, good_check, "1.97.0")?;
+    build_fixture(&good, good_from, good_copy, good_check, "1.97.1")?;
     if run(&good).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from("canary: a consistent tree was refused"));
@@ -303,13 +303,13 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(
             dir.join("rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"1.97.0\"\n",
+            "[toolchain]\nchannel = \"1.97.1\"\n",
         )
         .unwrap();
         std::fs::create_dir_all(dir.join("ops")).unwrap();
-        std::fs::write(dir.join("ops/Dockerfile"), "FROM rust:1.97.0-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS builder\n").unwrap();
-        assert_eq!(pinned_channel(&dir).unwrap(), "1.97.0");
-        assert_eq!(dockerfile_tag_version(&dir).unwrap(), "1.97.0");
+        std::fs::write(dir.join("ops/Dockerfile"), "FROM rust:1.97.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS builder\n").unwrap();
+        assert_eq!(pinned_channel(&dir).unwrap(), "1.97.1");
+        assert_eq!(dockerfile_tag_version(&dir).unwrap(), "1.97.1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

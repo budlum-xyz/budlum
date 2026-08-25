@@ -2,7 +2,7 @@
 # Multi-stage build: builder → runtime
 
 # ── Stage 1: Builder ────────────────────────────────────────
-# The toolchain MUST be THE SAME as rust-toolchain.toml (channel = "1.97.0") and
+# The toolchain MUST be THE SAME as rust-toolchain.toml (channel = "1.97.1") and
 # the dtolnay/rust-toolchain pin in CI. It used to be 1.97.1:
 # the image was built with a different compiler from CI, which invalidated the
 # "reproducible build" claim (codegen and MIR optimisations change between
@@ -10,13 +10,13 @@
 #
 #
 # The digest was verified from the registry: the config blob of this image carries
-# RUST_VERSION=1.97.0. A tag name is not evidence -- the previous shape was
+# RUST_VERSION=1.97.1. A tag name is not evidence -- the previous shape was
 # `rust:1.97.1-bookworm@sha256:77fac8b9...` idi ve o digest'in icindeki
 # and the RUST_VERSION inside that digest really was 1.97.1, even though the comment
-# said "verified for 1.94.0". Turning only the tag into 1.97.0 would let the digest
+# said "verified for 1.94.0". Turning only the tag into 1.97.1 would let the digest
 # override it; the two must change together. `check-docker-toolchain-matches-pin.sh`
 # verifies on every PR that these two and rust-toolchain.toml point at the same version.
-FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \

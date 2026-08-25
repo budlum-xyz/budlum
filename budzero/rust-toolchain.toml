@@ -11,5 +11,5 @@
 # different compiler than the chain it produces proofs for is a difference
 # nobody wants to debug from a failed verification.
 [toolchain]
-channel = "1.97.0"
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
