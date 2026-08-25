@@ -78,7 +78,6 @@ crates/lubot/crates/lubot-serve/src/config.rs	4
 crates/lubot/crates/lubot-serve/src/health.rs	6
 crates/lubot/crates/lubot-serve/src/lib.rs	5
 crates/lubot/crates/lubot-tune/src/lib.rs	5
-crates/lubot/crates/lubot-tune/src/lock.rs	9
 crates/lubot/crates/lubot-tune/src/schema.rs	4
 crates/wallet-core/src/lib.rs	1
 crates/wallet-core/src/tee.rs	2
@@ -86,12 +85,10 @@ ops/Dockerfile	2
 ops/scripts/check_genesis_schema.py	1
 ops/scripts/generate-sbom.sh	1
 src/account_abstraction/mod.rs	8
-src/account_abstraction/quantum_account.rs	9
 src/ai/mod.rs	2
 src/bin/bud.rs	2
 src/bns/registry.rs	7
 src/budlumxyz/mod.rs	3
-src/chain/snapshot.rs	9
 src/chain/storage_economics_tests.rs	4
 src/core/governance.rs	6
 src/core/transaction.rs	6
@@ -166,5 +163,4 @@ xtask/gates/src/gates/proof_deps_are_exactly_pinned.rs	7
 xtask/gates/src/gates/regeneration.rs	2
 xtask/gates/src/gates/required_tests.rs	2
 xtask/gates/src/gates/source_reading.rs	2
-xtask/gates/src/gates/transcript_mirrors.rs	9
 xtask/gates/src/gates/zero_tests_witness.rs	2

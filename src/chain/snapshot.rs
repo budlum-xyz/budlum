@@ -627,8 +627,8 @@ pub struct StateSnapshotV2Params {
     pub finality_certificates: Vec<FinalityCert>,
 }
 
-/// C3 helper: herhangi bir `Serialize` tipini bincode → hasher.
-/// Deterministik (struct field order sabit; bincode canonical).
+/// C3 helper: bincode any `Serialize` type into the hasher.
+/// Deterministic - the struct field order is fixed and bincode is canonical.
 fn hash_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, val: &T) {
     // A serialize failure used to fold into empty bytes, which makes two
     // different states hash the same - the state root is what nodes compare,
@@ -911,7 +911,7 @@ impl StateSnapshotV2 {
     /// - `RequireSigned` -> `manifest_signer` set + a valid `manifest_signature`
     ///   Ed25519(`calculate_digest`, signer) + the signer must be in the trust list.
     ///
-    /// `trust_list` = None → herhangi bir signer kabul (test/devnet); production'da
+    /// `trust_list` = None accepts any signer, for tests and devnet; in production
     /// The loader supplies the trust list from config (genesis bundle + CLI override, section 7.2).
     pub fn verify_authentic(
         &self,
@@ -1770,7 +1770,7 @@ mod tests {
         "poa_onboarding",
     ];
 
-    /// Yalniz schema-4 dalgasinin anahtarlari.
+    /// Only the keys of the schema-4 wave.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
     /// PoA admission records: added with `#[serde(default)]`, without a version bump
@@ -1941,11 +1941,12 @@ mod tests {
         .collect();
         assert_eq!(
             keys, expected,
-            "StateSnapshotV2 alan kumesi degisti: iki eski-blob testini bu degisiklikle genislet"
+            "the StateSnapshotV2 field set changed: extend both legacy-blob tests in the same edit"
         );
     }
 
-    /// schema-2 blobu: yeni alanlar HIC yok, eski alanlar dolu.
+    /// A schema-2 blob: the new fields are entirely absent and the old ones are
+    /// filled.
     ///
     /// Locks two distinctions together: (1) every schema-2 field PRESENT in the blob
     /// is preserved byte for byte after migration (no data loss), (2) every new field ABSENT
@@ -1962,8 +1963,8 @@ mod tests {
         let full = StateSnapshotV2::from_state(&account_state, params);
 
         let blob = as_legacy_blob(&full, SCHEMA3_AND_4_KEYS, 2);
-        // Oncul: blob gercekten bir schema-2 kaydi gibi davraniyor - yeni
-        // the field keys are absent as bytes.
+        // Premise: the blob really behaves like a schema-2 record - the new
+        // field keys are absent as bytes.
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
@@ -1979,7 +1980,7 @@ mod tests {
         // Bump: the two versions must be observable as distinct.
         assert_eq!(
             restored.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
-            "2->4 bump yapilmadiysa 'goc yapildi' iddiasi yalandir"
+            "without the 2->4 bump, the claim that a migration happened is a lie"
         );
         // Preservation side: every field schema-2 knows survives byte for byte.
         assert_fields_preserved(&full, &restored, SCHEMA2_FIELDS);
@@ -2117,12 +2118,12 @@ mod tests {
     /// because the version was not bumped).
     ///
     /// What this migration path must lock is not a data move but a
-    /// **guvenlik varsayimi**: PoA kabul kaydi olmayan bir goruntu geri
-    /// yuklendiginde alan **izinli sayilmamali**. Aksi halde eski bir
-    /// goruntuden acilan bir zincir, kimsenin kabul edilmedigi bir izinli
-    /// alan gibi gorunur ve hic blok uretemez.
+    /// **security assumption**: when a snapshot carrying no PoA admission
+    /// record is restored, the domain **must not be treated as permissioned**.
+    /// Otherwise a chain opened from an old snapshot looks like a permissioned
+    /// domain where nobody has been admitted, and can never produce a block.
     ///
-    /// Turetilmis kumenin goruntude olmadigini da burada dogruluyoruz: o,
+    /// We also verify here that the derived set is absent from the snapshot: it
     /// is recomputed from the records.
     #[test]
     fn a_snapshot_without_admission_records_does_not_look_permissioned() {
