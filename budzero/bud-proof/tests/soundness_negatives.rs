@@ -19,30 +19,30 @@ fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
     .encode()
 }
 
-// ── Gercek soundness olcumu (2026-08-23) ─────────────────────────────────
+// -- The real soundness measurement (2026-08-23) --------------------------
 //
-// Buradaki testler bir `tampered_check_fails` harness'inin yerini aldi. O
-// the harness was measured and it **never measured a constraint**: `p3_air::check_constraints`
+// The tests here replaced a `tampered_check_fails` harness. That harness was
+// measured and it **never measured a constraint**: `p3_air::check_constraints`
 // panics on the very first row for this AIR for two reasons -
 //
-//   1. `num_public_values()` 56 dondururken harness 48 uzunlukta bir dizi
-//      veriyordu -> "index out of bounds: the len is 48 but the index is 48".
+//   1. `num_public_values()` returned 56 while the harness passed an array of
+//      length 48 -> "index out of bounds: the len is 48 but the index is 48".
 //   2. even after that is fixed the AIR wants permutation (lookup) data ->
 //      "permutation() called on a builder created without permutation data".
 //
-// `catch_unwind(...).is_err()` bu panikleri bir kisit ihlalinden ayirt
-// etmiyordu, dolayisiyla **tamper hic uygulanmadan da** `true` donuyordu
-// (measured). All five negative tests were therefore green for the wrong reason and
-// provided no assurance about the AIR.
+// `catch_unwind(...).is_err()` did not tell those panics apart from a
+// constraint violation, so it returned `true` **even when no tampering had been
+// applied at all** (measured). All five negative tests were therefore green for
+// the wrong reason and provided no assurance about the AIR.
 //
-// `bud_stark::prover` had already reached the same conclusion: the `check_constraints`
-// cagrisi hem `#[cfg(debug_assertions)]` hem `if !has_aux_trace` ardinda
-// there stands - that API is not enough for this AIR.
+// `bud_stark::prover` had already reached the same conclusion: the
+// `check_constraints` call there stands behind both `#[cfg(debug_assertions)]`
+// and `if !has_aux_trace` - that API is not enough for this AIR.
 //
 // So the tests below measure through **prove + verify** rather than the AIR
-// directly: a valid proof is produced, then a single thing is changed and
-// dogrulayicinin reddetmesi beklenir. Bu, zincirin gercekten maruz kaldigi
-// attack surface - the claim presented to the verifier.
+// directly: a valid proof is produced, then a single thing is changed and the
+// verifier is expected to refuse it. That is the attack surface the chain is
+// really exposed to - the claim presented to the verifier.
 
 /// A valid proof and everything needed to verify it.
 type WorkingProof = (
@@ -115,7 +115,7 @@ fn an_untampered_proof_is_accepted() {
 /// A proof must be valid only for the program it was produced for.
 ///
 /// Being able to present the same proof as the output of a different program
-/// calistirdim" iddiasini tamamen degersiz kilardi.
+/// would make the claim "I ran this program" entirely worthless.
 #[test]
 fn a_proof_presented_for_another_program_is_refused() {
     let (envelope, pi, _) = working_proof();
@@ -133,9 +133,9 @@ fn a_proof_presented_for_another_program_is_refused() {
 ///
 /// Each field is asserted **separately**: a single bulk `assert` would hide one field
 /// being unbound under the success of the others. This is exactly the class of the
-/// SP1'in `committed_value_digest` kisitsizligi ve Aleo/snarkVM'in eksik
-/// absorb finding - the verifier must check in its own code the areas the proof
-/// system does not constrain in its own code.
+/// SP1 `committed_value_digest` under-constraint and the Aleo/snarkVM missing
+/// absorb finding - the verifier has to check, in its own code, the areas the
+/// proof system does not constrain.
 #[test]
 fn a_tampered_public_input_is_refused() {
     let (envelope, clean, bytecode) = working_proof();
