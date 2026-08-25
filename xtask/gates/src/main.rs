@@ -99,6 +99,7 @@ mod gates {
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_unicode_dashes;
+    pub mod no_upstream_brands;
     pub mod node_classification_gate;
     pub mod paid_content;
     pub mod pinned_downloads;
@@ -393,6 +394,14 @@ const GATES: &[Gate] = &[
         run: gates::lubot_prompt_is_true::run,
         run_args: None,
         self_test: gates::lubot_prompt_is_true::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-upstream-brands",
+        replaces: None,
+        run: gates::no_upstream_brands::run,
+        run_args: None,
+        self_test: gates::no_upstream_brands::self_test,
         run_log: None,
     },
     Gate {

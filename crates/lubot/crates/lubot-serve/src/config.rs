@@ -15,41 +15,44 @@ pub enum ServeEngine {
     Vllm,
     Sglang,
     LlamaCpp,
-    /// Colibri (Apache-2.0): a MoE engine that streams weights from disk.
+    /// A mixture-of-experts engine that streams weights from disk.
     ///
-    /// vLLM and SGLang require the whole model to be resident in VRAM, which
+    /// The other three require the whole model to be resident in VRAM, which
     /// forces the operator to own a data-center class GPU and contradicts the
-    /// principle of `src/lubot/effort.rs`: "A Lubot operator answers
-    /// with the machine it actually owns." Colibrì VRAM/RAM/NVMe'yi tek bir
-    /// as a placement hierarchy, consumer hardware can be an
-    /// operator too.
+    /// principle of `src/lubot/effort.rs`: "A Lubot operator answers with the
+    /// machine it actually owns." An engine that treats VRAM, RAM and NVMe as
+    /// one placement hierarchy - the arrangement `residency.rs` plans - lets
+    /// consumer hardware be an operator too.
     ///
-    /// It is spoken to as a separate process over an OpenAI-compatible endpoint; no code
-    /// is copied and no crate dependency is added. Attribution goes into `NOTICE.md`.
-    Colibri,
+    /// It is spoken to as a separate process over an HTTP endpoint. No code is
+    /// copied and no crate dependency is added, so this variant names a shape
+    /// of engine rather than one product: any engine that pages experts off
+    /// disk belongs here, and the consensus answer below is the same for all
+    /// of them.
+    StreamingMoe,
 }
 
 impl ServeEngine {
-    /// Whether this engine is guaranteed to produce bit-identical output for the same
-    /// edilebilir mi?
+    /// Whether this engine is guaranteed to produce bit-identical output for
+    /// the same input.
     ///
     /// **Why it matters:** `AiRegistry::try_finalize_with_proofs` groups results by
     /// `output_commitment: [u8; 32]`. If two operators differ by a single
     /// bit they fall into separate groups and `agreement_threshold` is never
     /// reached -- the request silently fails to finalize.
     ///
-    /// Colibri supports the CPU/CUDA/Metal backends at the same time, and floating point
-    /// summation order changes across hardware; even greedy sampling
-    /// does not fix it, because the problem is in the summation, not the sampling. So
-    /// a multi-backend engine is not sufficient on its own for the consensus path:
-    /// it must be used together with a `DeterminismProfile`.
+    /// A streaming engine drives several backends at once, and floating point
+    /// summation order changes across hardware; even greedy sampling does not
+    /// fix it, because the problem is in the summation, not the sampling. So a
+    /// multi-backend engine is not sufficient on its own for the consensus
+    /// path: it must be used together with a `DeterminismProfile`.
     #[must_use]
     pub const fn is_bitwise_reproducible(self) -> bool {
         match self {
             // A single backend plus fixed kernels: same binary, same result.
             ServeEngine::Vllm | ServeEngine::Sglang | ServeEngine::LlamaCpp => true,
             // Heterogeneous execution is the point of the engine; it cannot be guaranteed alone.
-            ServeEngine::Colibri => false,
+            ServeEngine::StreamingMoe => false,
         }
     }
 }
@@ -386,12 +389,12 @@ mod tests {
     }
 
     #[test]
-    fn colibri_alone_cannot_enter_consensus() {
-        // Colibri supports CPU/CUDA/Metal at the same time: bit-identical equality
+    fn streaming_engine_alone_cannot_enter_consensus() {
+        // Several backends live at once: bit-identical equality
         // is not a guarantee the engine itself makes.
-        assert!(!ServeEngine::Colibri.is_bitwise_reproducible());
+        assert!(!ServeEngine::StreamingMoe.is_bitwise_reproducible());
         let cfg = ServeConfig {
-            engine: ServeEngine::Colibri,
+            engine: ServeEngine::StreamingMoe,
             determinism: None,
             ..Default::default()
         };
@@ -401,9 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn a_determinism_profile_makes_colibri_fit_for_consensus() {
+    fn a_determinism_profile_makes_a_streaming_engine_fit_for_consensus() {
         let cfg = ServeConfig {
-            engine: ServeEngine::Colibri,
+            engine: ServeEngine::StreamingMoe,
             determinism: Some(DeterminismProfile::for_consensus(42)),
             ..Default::default()
         };
@@ -426,7 +429,7 @@ mod tests {
             },
         ] {
             let cfg = ServeConfig {
-                engine: ServeEngine::Colibri,
+                engine: ServeEngine::StreamingMoe,
                 determinism: Some(bad),
                 ..Default::default()
             };
