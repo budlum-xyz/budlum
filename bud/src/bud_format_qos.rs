@@ -1,7 +1,9 @@
-//! B.U.D. 2.0 - ÇOK KİRACILI QoS (F226/F227 - Pisces 0.99 MMR, quota/rate-limit)
+//! B.U.D. 2.0 - MULTI-TENANT QoS (F226/F227 - Pisces 0.99 MMR, quotas and rate
+//! limits).
 //!
-//! Kalan iş: multi-tenant QoS + gürültülü komşu önleme. Kiracı başına kota +
-//! hız sınırı kararları (deterministik); aşımda RED/geciktir.
+//! Remaining work: multi-tenant QoS plus noisy-neighbour prevention. The
+//! per-tenant quota and rate-limit decisions are deterministic; going over
+//! means REFUSE or throttle.
 
 #![forbid(unsafe_code)]
 
@@ -16,9 +18,10 @@ pub enum QosVerdict {
     Denied,
 }
 
-/// Kiracı isteği kararı.
+/// The decision on a tenant request.
 /// `used_bytes` + `request_bytes` ≤ `quota` → Allow; ≤ quota*1.5 → Throttled;
-/// aşarsa Denied. `rate_budget` (istek/sn) altındaysa da Throttled.
+/// Going over the quota gives Denied, and staying under `rate_budget`
+/// (requests per second) gives Throttled.
 pub fn decide_qos(
     used_bytes: u64,
     request_bytes: u64,
