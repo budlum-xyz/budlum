@@ -491,9 +491,9 @@ fn a_valid_proof_over_an_unauthorized_program_is_refused() {
 
 /// An empty allowlist is a closed gate.
 ///
-/// Varsayilanin yonu onemli: yeni ya da goc etmis bir alan, kimse ona program
-/// vermeden zk ile ilerletilememeli. Fail-open bir varsayilan bu alani sussuz
-/// birakirdi.
+/// The direction of the default matters: a new or migrated domain must not be
+/// advanceable by zk until somebody has granted it a program. A fail-open
+/// default would leave that domain unguarded.
 #[test]
 fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
     let mut bc = fresh_chain();
@@ -575,11 +575,11 @@ fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
     let d = bc.domain_registry.get(1).expect("the domain is registered");
     assert_eq!(
         d.last_committed_height, 10,
-        "kabul, alanin ilerlemesini tasimali"
+        "acceptance has to carry the domain forward"
     );
     assert_eq!(
         d.last_committed_hash, pi.final_state_root,
-        "final kok alana baglanmali"
+        "the final root has to bind to the domain"
     );
 
     // The same proof claimed at an earlier height: refused at gate 1e without burning a fee.

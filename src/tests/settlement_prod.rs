@@ -1,5 +1,5 @@
-// Devnet eski FinalityProof API bekliyor, upstream ile uyumsuz.
-// Yeni API ile yeniden yazılacak.
+// Devnet expects the old FinalityProof API and is incompatible with upstream.
+// To be rewritten against the new API.
 #![cfg(false)]
 #[cfg(test)]
 mod settlement_prod_tests {
@@ -1721,12 +1721,12 @@ mod settlement_prod_tests {
         );
     }
 
-    /// Eklenti degisimi kayitsiz yapilamaz.
+    /// A plugin cannot be replaced without a record.
     ///
-    /// Test eskiden `remove` sonrasi `get(1).is_none()` bekliyordu, yani
-    /// eklentinin izsiz kaldirilabilmesini **dogruluyordu**. Eklenti bir
-    /// Custom alanin finality kararini yazan koddur; onu degistirmek
-    /// konsensus degisikligidir ve konsensus degisikligi gorunur olmalidir.
+    /// The test used to expect `get(1).is_none()` after `remove`, which
+    /// **verified** that a plugin could be removed without a trace. A plugin is
+    /// the code that writes the finality decision of a Custom domain; changing
+    /// it is a consensus change, and a consensus change has to be visible.
     #[test]
     fn plugin_registry_prevents_duplicate_and_records_replacement() {
         use crate::domain::{DomainPluginRegistry, PoWDomainPlugin};
@@ -1739,11 +1739,16 @@ mod settlement_prod_tests {
         assert!(reg.register(1, p2.clone()).is_err());
         assert!(reg.get(1).is_some());
 
-        // Degisim mumkun ama iz birakiyor.
-        let record = reg.replace(1, p2).expect("degisim kabul edilmeli");
+        // Replacement is possible, but it leaves a trace.
+        let record = reg
+            .replace(1, p2)
+            .expect("the replacement has to be accepted");
         assert_eq!(record.domain_id, 1);
         assert_eq!(reg.replacements().len(), 1);
-        assert!(reg.get(1).is_some(), "degisimden sonra eklenti duruyor");
+        assert!(
+            reg.get(1).is_some(),
+            "the plugin is still there after the replacement"
+        );
     }
 
     #[test]

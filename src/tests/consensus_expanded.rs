@@ -55,7 +55,7 @@ fn test_blockchain_future_timestamp_buffer() {
     // Block far in the future (e.g., 1 hour) - most protocols reject.
     block.timestamp = bc.chain[0].timestamp + 3600 * 1000 + 1000;
     let res = bc.validate_and_add_block(block).map(|_| ());
-    // Future-timestamp block reddedilmeli (timestamp drift koruması).
+    // A block with a future timestamp has to be refused - timestamp drift protection.
     assert!(
         res.is_err(),
         "future-timestamp block must be rejected (timestamp drift protection)"
