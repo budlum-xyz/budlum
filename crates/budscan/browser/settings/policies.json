@@ -1,8 +1,8 @@
 {
-  "//": "BUDSCAN DAGITIM POLITIKASI. budscan.cfg kilitli tercihleri belirler; bu dosya kurumsal politika katmanidir ve tercihlerden once uygulanir. Ikisi ayni seyi soylemek zorunda: bir ayarin iki katmanda farkli olmasi, hangisinin kazandigini okunamaz yapar.",
+  "//": "THE BUDSCAN DISTRIBUTION POLICY. budscan.cfg sets the locked preferences; this file is the enterprise policy layer and is applied before the preferences. The two have to say the same thing: a setting that differs between the two layers makes it unreadable which one wins.",
 
   "policies": {
-    "//_telemetri": "Tarayicinin ne gorduğunu bildirmesi, kacindigi seyi yapmasidir. Politika katmaninda da kapali; budscan.cfg'deki lockPref ile ayni yonde.",
+    "//_telemetry": "A browser reporting what it sees is doing the very thing it avoids. It is off in the policy layer too, in the same direction as the lockPref in budscan.cfg.",
     "DisableTelemetry": true,
     "DisableFirefoxStudies": true,
     "DisablePocket": true,
@@ -11,38 +11,38 @@
     "DisableProfileImport": true,
     "DisableFormHistory": true,
 
-    "//_kaza": "Kaza raporu bir bellek dokumudur; dogrulanmis icerigin baytlarini disari tasiyabilir.",
+    "//_crash": "A crash report is a memory dump; it can carry the bytes of verified content out.",
     "DisableFirefoxScreenshots": true,
 
-    "//_guncelleme": "Guncelleme acik kalir. Guncellenmeyen bir tarayici, dogrulama iddiasini surduremez.",
+    "//_update": "Updates stay on. A browser that is not updated cannot sustain its verification claim.",
     "AppAutoUpdate": true,
     "DisableAppUpdate": false,
 
-    "//_imza": "Imzasiz eklenti yuklenemez. Ayricalikli baglamda dogrulanmamis kod calismasi, rozetin olctugu her seyi anlamsiz kilar.",
+    "//_signature": "An unsigned extension cannot be loaded. Unverified code running in a privileged context would make everything the badge measures meaningless.",
     "ExtensionUpdate": true,
     "InstallAddonsPermission": {
       "Default": false
     },
 
-    "//_ilkcalistirma": "Ilk calistirmada disari hicbir istek gitmez.",
+    "//_firstrun": "No request goes out on the first run.",
     "OverrideFirstRunPage": "",
     "OverridePostUpdatePage": "",
     "DontCheckDefaultBrowser": true,
     "NoDefaultBookmarks": true,
 
-    "//_arama": "Arama onerileri her tus vurusunu bir sunucuya gonderir.",
+    "//_search": "Arama onerileri her tus vurusunu bir sunucuya gonderir.",
     "SearchSuggestEnabled": false,
 
-    "//_dns": "DNS-over-HTTPS kapali birakiliyor: bud:// adlarinin cozumu budscan cekirdegine ait ve bir DoH saglayicisina devredilmesi, cozumun kanitini ucuncu tarafa tasir.",
+    "//_dns": "DNS-over-HTTPS is left off: resolving bud:// names belongs to the budscan core, and handing that to a DoH provider would move the proof of resolution to a third party.",
     "DNSOverHTTPS": {
       "Enabled": false,
       "Locked": true
     },
 
-    "//_sifreler": "Yerlesik parola yoneticisi kapali; dogrulama tarayicisinin kimlik deposu olmasi ayri bir saldiri yuzeyi.",
+    "//_passwords": "The built-in password manager is off; a verification browser doubling as a credential store is a separate attack surface.",
     "OfferToSaveLogins": false,
 
-    "//_izleme": "Sikı izleyici korumasi, kullanicinin degistirebilecegi bir varsayilan olarak degil politika olarak.",
+    "//_tracking": "Strict tracker protection as policy, not as a default the user can change.",
     "EnableTrackingProtection": {
       "Value": true,
       "Locked": false,
@@ -50,7 +50,7 @@
       "Fingerprinting": true
     },
 
-    "//_temizlik": "Kapanista oturum verisi silinmez: kullanicinin kendi tercihi, dogrulama iddiasini bozmuyor. Serbest birakilmasi bilincli.",
+    "//_cleanup": "Session data is not cleared on shutdown: that is the user's own preference and it does not break the verification claim. Leaving it free is deliberate.",
     "SanitizeOnShutdown": false
   }
 }
