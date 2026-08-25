@@ -1,7 +1,7 @@
-// Unsafe kilidi - src/ şu an 0 unsafe temiz taban;
-// Bir `unsafe` blok girdiği an derleme FAIL eder (regresyon kapısı).
+// The unsafe lock: src/ is a clean base with zero unsafe today, and the moment
+// an `unsafe` block enters, the build FAILS. This is a regression gate.
 #![forbid(unsafe_code)]
-/// Kuantum-guvenli hesap soyutlama. Imza dogrulamasi ML-DSA-87'ye bagli
+/// Quantum-safe account abstraction. Signature verification is bound to ML-DSA-87
 /// oldugu icin `wallet-ml-dsa` ozelligini gerektirir.
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod account_abstraction;
@@ -30,7 +30,7 @@ pub mod prover;
 pub mod registry;
 pub mod relayer;
 pub mod rpc;
-/// Budlum proje dosyası şeması (`budlum.toml`).
+/// The Budlum project file schema (`budlum.toml`).
 pub mod sdk;
 pub mod settlement;
 pub mod sharding;

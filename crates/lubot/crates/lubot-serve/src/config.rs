@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn colibri_tek_basina_uzlasmaya_giremez() {
+    fn colibri_alone_cannot_enter_consensus() {
         // Colibri supports CPU/CUDA/Metal at the same time: bit-identical equality
         // is not a guarantee the engine itself makes.
         assert!(!ServeEngine::Colibri.is_bitwise_reproducible());
@@ -259,12 +259,13 @@ mod tests {
             determinism: None,
             ..Default::default()
         };
-        let err = assert_consensus_ready(&cfg).expect_err("profilsiz kabul edilmemeliydi");
+        let err =
+            assert_consensus_ready(&cfg).expect_err("it should not be accepted without a profile");
         assert!(err.contains("multi-backend"), "{err}");
     }
 
     #[test]
-    fn belirlenimlilik_profili_colibriyi_uzlasmaya_uygun_kilar() {
+    fn a_determinism_profile_makes_colibri_fit_for_consensus() {
         let cfg = ServeConfig {
             engine: ServeEngine::Colibri,
             determinism: Some(DeterminismProfile::for_consensus(42)),
@@ -274,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn eksik_profil_reddedilir() {
+    fn an_insufficient_profile_is_refused() {
         // The gate is not vacuous: an insufficient profile must be refused too.
         for bad in [
             DeterminismProfile {
@@ -301,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn varsayilan_kopru_uzlasmaya_hazir_degildir() {
+    fn the_default_bridge_is_not_consensus_ready() {
         // The default configuration is for local use; putting it into consensus
         // must be an explicit decision.
         assert!(assert_consensus_ready(&ServeConfig::default()).is_err());

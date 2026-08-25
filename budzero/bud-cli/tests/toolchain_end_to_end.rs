@@ -51,9 +51,9 @@ fn public_inputs_for(vm: &Vm, bytecode: &[u64], events: &[u64]) -> ExecutionPubl
 
 /// The public inputs for a program that writes storage.
 ///
-/// `state_writes_digest` AIR tarafindan gercek SWrite zincirine baglanir;
-/// sabit sifir vermek, depolamaya dokunan her programin dogrulamasini
-/// dusurur.
+/// The AIR binds `state_writes_digest` to the real SWrite chain; passing a
+/// hardcoded zero makes verification fail for every program that touches
+/// storage.
 fn public_inputs_with_writes(
     vm: &Vm,
     bytecode: &[u64],
@@ -272,16 +272,16 @@ fn a_declared_storage_field_can_be_read_and_written() {
     assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
     assert_ne!(
         receipt.state_writes_digest, [0u8; 32],
-        "depolamaya yazan bir kosum bos olmayan bir yazma ozeti uretmeli"
+        "a run that writes storage has to produce a non-empty write digest"
     );
 }
 
-/// Depolamaya yazan bir program kanitlanabilmeli.
+/// A program that writes storage has to be provable.
 ///
-/// AIR `state_writes_digest`'i gercek SWrite zincirine baglar (Strix HIGH
-/// CWE-345). When the caller put a hardcoded zero there a proof was produced but
-/// **kendi dogrulayicisinda** dusuyordu. Depolamaya dokunmayan programlarda
-/// the defect stayed invisible because zero was the right answer.
+/// The AIR binds `state_writes_digest` to the real SWrite chain (Strix HIGH,
+/// CWE-345). When the caller put a hardcoded zero there, a proof was produced
+/// but failed in **its own verifier**. For programs that never touch storage
+/// the defect stayed invisible, because zero was the right answer.
 #[test]
 fn a_storage_writing_program_proves_and_verifies() {
     let source = "contract W {\n\
@@ -305,12 +305,12 @@ fn a_storage_writing_program_proves_and_verifies() {
     bud_proof::Plonky3Adapter::verify(&envelope, &pi, &bytecode)
         .expect("the produced proof must verify");
 
-    // Kirmizi taraf: eski davranis (sabit sifir) reddedilmeli.
+    // The red side: the old behaviour, a hardcoded zero, has to be refused.
     let zeroed = public_inputs_with_writes(&vm, &bytecode, &receipt.events, [0u8; 32]);
     assert!(
         bud_proof::Plonky3Adapter::verify(&envelope, &zeroed, &bytecode).is_err(),
         "a public input carrying a zero write digest must not be accepted - this is exactly \
-         duzeltilen kusurdur"
+         the defect that was fixed"
     );
 }
 
@@ -331,11 +331,11 @@ fn a_storage_field_with_an_unknown_type_is_refused() {
                       }\n\
                   }\n";
     let err = bud_compiler::compile(source, IsaProfile::Production)
-        .expect_err("bilinmeyen bir storage tipi reddedilmeli");
+        .expect_err("an unknown storage type has to be refused");
     let text = format!("{err:?}");
     assert!(
         text.contains("Uint644") && text.contains("storage field"),
-        "hata alani ve tipi adlandirmali: {text}"
+        "the error has to name the field and the type: {text}"
     );
 
     // Yesil taraf: gercek tip gecmeli.
