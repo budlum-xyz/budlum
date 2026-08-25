@@ -1,19 +1,20 @@
-# BUDSCAN YAPIM YAPILANDIRMASI
+# BUDSCAN BUILD CONFIGURATION
 #
-# Bu dosya Mozilla kaynagi indirilip yamalar uygulandiktan sonra derleyiciye
-# verilir. Buradaki her satir bir karar; sebebi yaninda yazili degilse satir
-# buraya girmemeli.
+# This file is handed to the build after the Mozilla source has been fetched
+# and the patches applied. Every line here is a decision; if the reason is not
+# written next to it, the line does not belong here.
 #
-# README'nin dizin duzeni tablosu bu dosyayi ilan ediyor. Ilan edilen bir
-# dosyanin agacta bulunmamasi, okuyanin var sandigi bir seyin olmamasi
-# demektir; bu, eksik dosyadan daha kotudur.
+# The directory-layout table in the README declares this file. A declared file
+# missing from the tree means the reader believes something exists that does
+# not, and that is worse than a missing file.
 
 ac_add_options --enable-application=browser
 
-# ── OLMAYAN OZELLIKLER ────────────────────────────────────────────────
+# -- FEATURES THAT DO NOT EXIST ---------------------------------------
 #
-# Bunlar kapali cunku her biri, tarayicinin disari veri gonderdigi bir yol.
-# Bir dogrulama tarayicisinin kendi kacindigi seyi yapmasi olurdu.
+# These are off because each one is a path along which the browser sends data
+# out. A verification browser doing that would be doing the very thing it
+# tells others to avoid.
 
 ac_add_options --disable-crashreporter
 ac_add_options --disable-default-browser-agent
@@ -25,17 +26,17 @@ mk_add_options MOZ_DATA_REPORTING=0
 mk_add_options MOZ_SERVICES_HEALTHREPORT=0
 mk_add_options MOZ_TELEMETRY_REPORTING=0
 
-# ── SERTLESTIRME ──────────────────────────────────────────────────────
+# -- HARDENING --------------------------------------------------------
 
 ac_add_options --enable-hardening
 ac_add_options --enable-stl-hardening
 
-# Ilklenmemis degisken okumasi sifir okur. Bir bilgi sizintisini kullanilabilir
-# olmaktan cikarir; okunan deger artik onceki tahsisin kalintisi degil.
+# Reading an uninitialised variable reads zero. That makes an information leak
+# unusable: the value read is no longer the remains of an earlier allocation.
 export CFLAGS="-ftrivial-auto-var-init=zero -fwrapv $CFLAGS"
 export CXXFLAGS="-ftrivial-auto-var-init=zero -fwrapv $CXXFLAGS"
 
-# ── DERLEME ───────────────────────────────────────────────────────────
+# -- BUILD ------------------------------------------------------------
 
 ac_add_options --enable-optimize
 ac_add_options --enable-release
@@ -46,10 +47,11 @@ ac_add_options --enable-bootstrap
 ac_add_options --enable-replace-malloc
 ac_add_options --enable-jemalloc
 
-# ── MARKA ─────────────────────────────────────────────────────────────
+# -- BRANDING ---------------------------------------------------------
 #
-# Uygulama adi ve marka dizini budscan. Bu agacta baska bir tarayicinin
-# marka adi gecmez; `budscan-patchset` kapisi bunu CI'da olcuyor.
+# The application name and the branding directory are budscan. No other
+# browser's brand name appears in this tree; the `budscan-patchset` gate
+# measures that in CI.
 
 ac_add_options --with-app-name=budscan
 ac_add_options --with-app-basename=Budscan
@@ -57,11 +59,11 @@ ac_add_options --with-branding=browser/branding/budscan
 
 ac_add_options --with-l10n-base=$PWD/budscan/browser/l10n
 
-# ── GUNCELLEME ────────────────────────────────────────────────────────
+# -- UPDATES ----------------------------------------------------------
 #
-# Guncelleme kanali imzali. `MOZ_REQUIRE_SIGNING` bos birakilmiyor: imzasiz
-# eklenti yuklenebilmesi, dogrulama iddiasi olan bir tarayicida dogrulanmamis
-# kodun ayricalikli baglamda calismasi demek.
+# The update channel is signed. `MOZ_REQUIRE_SIGNING` is not left empty: being
+# able to load an unsigned add-on would mean unverified code running in a
+# privileged context inside a browser that claims to verify.
 
 ac_add_options --enable-updater
 ac_add_options --enable-update-channel=release
