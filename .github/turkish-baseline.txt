@@ -25,7 +25,6 @@ README.md	1
 bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
 bud/src/bud_format.rs	3
-bud/src/bud_format_autozstd.rs	12
 bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
@@ -60,7 +59,6 @@ budzero/bud-isa/src/lib.rs	6
 budzero/bud-node/src/bitswap.rs	1
 budzero/bud-proof/src/plonky3_air.rs	5
 budzero/bud-proof/src/plonky3_prover.rs	1
-budzero/bud-proof/tests/compiled_branching.rs	12
 budzero/bud-proof/tests/fiat_shamir_binding.rs	3
 budzero/bud-proof/tests/soundness_negatives.rs	6
 budzero/bud-vm/src/lib.rs	1
@@ -124,7 +122,6 @@ src/privacy/submit.rs	11
 src/registry/d4_merge_tests.rs	1
 src/registry/evidence.rs	1
 src/registry/invalid_vote.rs	1
-src/registry/poa_compliance.rs	11
 src/registry/role.rs	1
 src/rpc/tests.rs	1
 src/settlement/global_block.rs	2
@@ -177,7 +174,6 @@ xtask/gates/src/gates/git_deps_audited.rs	2
 xtask/gates/src/gates/guards_reachable.rs	2
 xtask/gates/src/gates/lock_failures.rs	2
 xtask/gates/src/gates/logup_multipliers.rs	1
-xtask/gates/src/gates/minting_paths_are_counted.rs	11
 xtask/gates/src/gates/proof_deps_are_exactly_pinned.rs	7
 xtask/gates/src/gates/regeneration.rs	2
 xtask/gates/src/gates/required_tests.rs	2
