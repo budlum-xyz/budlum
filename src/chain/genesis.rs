@@ -14,28 +14,31 @@ pub const GENESIS_ALLOCATION: u64 = 1_000_000_000;
 
 pub const GENESIS_TIMESTAMP: u128 = 0;
 
-/// Genesis'te bootstrap edilecek domain konfigürasyonu.
-/// Serialization-safe (serde), ceremony'de placeholder adreslerle başlar.
+/// The domain configuration bootstrapped at genesis.
+/// Serialisation-safe (serde); it starts with placeholder addresses and the
+/// launch ceremony replaces them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootstrapDomainConfig {
     /// Domain ID (1=PoW, 2=PoS, 3=BFT, 4=PoA).
     pub id: u32,
-    /// Consensus türü ("pow", "pos", "bft", "poa").
+    /// The consensus kind ("pow", "pos", "bft", "poa").
     pub kind: String,
-    /// Finality adapter adı (örn "pow-header-chain-v1", "pos-qc-finality").
+    /// The finality adapter name (for example "pow-header-chain-v1" or
+    /// "pos-qc-finality").
     pub finality_adapter: String,
-    /// Bridge enabled (köprü lifecycle'a katılım).
+    /// Bridge enabled (participation in the bridge lifecycle).
     pub bridge_enabled: bool,
-    /// Min confirmation (PoW için header-chain depth).
+    /// The minimum confirmation count (the header-chain depth for PoW).
     pub min_confirmations: u64,
-    /// PoA authority placeholder adresleri (yalnızca PoA domain için).
-    /// Ceremony'de gerçek kurum adresleriyle değiştirilir.
+    /// The PoA authority placeholder addresses (only for a PoA domain).
+    /// The launch ceremony replaces them with real institutional addresses.
     #[serde(default)]
     pub poa_authorities: Vec<String>,
 }
 
 impl BootstrapDomainConfig {
-    /// Mainnet için 4 domain bootstrap listesi (PoW/PoS/BFT/PoA placeholder).
+    /// The four-domain bootstrap list for mainnet (PoW, PoS, BFT and PoA
+    /// placeholders).
     pub fn mainnet_defaults() -> Vec<Self> {
         vec![
             Self {
@@ -63,12 +66,13 @@ impl BootstrapDomainConfig {
                 poa_authorities: vec![],
             },
             // PoA domain: placeholder authority adresleri (politika:
-            // Placeholder ile başla, ceremony'de gerçek adreslere dönüşür).
+            // Start with a placeholder; the launch ceremony turns these into
+            // real addresses.
             Self {
                 id: 4,
                 kind: "poa".to_string(),
                 finality_adapter: "poa-authority-quorum".to_string(),
-                bridge_enabled: false, // PoA domain bridge default kapalı
+                bridge_enabled: false, // the bridge is off by default for a PoA domain
                 min_confirmations: 1,
                 poa_authorities: vec![
                     "0x0000000000000000000000000000000000000000000000000000000000000AA1"
@@ -140,8 +144,9 @@ pub struct GenesisConfig {
     pub pq_scheme: Option<String>,
 
     /// Bootstrap domain listesi. Her domain genesis'te otomatik
-    /// Register edilir (storage boşsa = yeni chain). PoW/PoS/BFT/PoA 4 domain
-    /// Mainnet için varsayılan. Default boş (devnet/testnet backward-compat).
+    /// Registered when storage is empty, which means a new chain. The four
+    /// domains PoW, PoS, BFT and PoA are the mainnet default. The default is
+    /// empty, for devnet and testnet backward compatibility.
     #[serde(default)]
     pub bootstrap_domains: Vec<BootstrapDomainConfig>,
 }
@@ -613,7 +618,8 @@ pub fn mainnet_genesis() -> GenesisConfig {
         tokenomics_addresses: None,
 
         // 4 domain bootstrap (PoW/PoS/BFT/PoA).
-        // PoA: placeholder authorities (ceremony'de gerçek adreslere dönüşür).
+        // PoA: placeholder authorities (the launch ceremony turns these into
+        // real addresses).
         pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
     }
