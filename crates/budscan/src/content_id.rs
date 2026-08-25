@@ -1,22 +1,24 @@
-//! B.U.D. icerik adresleme, tarayici tarafi.
+//! B.U.D. content addressing, the browser side.
 //!
-//! `budlum-core`'daki `src/storage/content_id.rs` ile **ayni** tanim:
-//! `ContentId = hash_fields_bytes([b"BDLM_CONTENT_V1", chunk])`, ve
-//! `hash_fields_bytes` her alani uzunluk-onekleyerek SHA-256'ya verir.
+//! The **same** definition as `src/storage/content_id.rs` in `budlum-core`:
+//! `ContentId = hash_fields_bytes([b"BDLM_CONTENT_V1", chunk])`, where
+//! `hash_fields_bytes` length-prefixes every field before feeding it to
+//! SHA-256.
 //!
-//! # Neden kopya, neden bagimlilik degil
+//! # Why a copy and not a dependency
 //!
-//! Tarayici `budlum-core`'a baglansaydi libp2p, tokio, jsonrpsee ve sled'i de
-//! baglardi; bir tarayicinin guven sinirinda o grafik istenmez. Bunun bedeli
-//! iki kopyanin ayrisabilmesidir ve bedel odenmeden birakilmiyor:
-//! `budscan-content-id-parity` kapisi iki tanimin ayni vektoru uretmesini
-//! CI'da olcer. Kopya serbest degil, olculuyor.
+//! If the browser depended on `budlum-core` it would also pull in libp2p,
+//! tokio, jsonrpsee and sled, and that graph is unwanted inside a browser's
+//! trust boundary. The price is that the two copies can drift apart, and that
+//! price is not left unpaid: the `budscan-name-rule-parity` gate measures in CI
+//! that both definitions carry the same domain tag and the same pinned vector.
+//! The copy is not free, it is measured.
 //!
-//! # Dogrulama bir imza kontrolu degil, bir esitlik kontrolu
+//! # Verification is an equality check, not a signature check
 //!
-//! Getirilen baytlarin hash'i beklenen kimlige esitse baytlar dogrudur.
-//! Tarayicinin kime guvenecegine karar vermesi gerekmiyor: bir dugum en fazla
-//! hizmet vermeyi reddedebilir, yalan soyleyemez.
+//! If the hash of the fetched bytes equals the expected identity, the bytes are
+//! correct. The browser never has to decide whom to trust: a node can at most
+//! refuse to serve, it cannot lie.
 
 use sha2::{Digest, Sha256};
 
@@ -50,17 +52,17 @@ impl ContentId {
         &self.0
     }
 
-    /// 64 karakterlik hex'ten okur.
+    /// Reads from a 64-character hex string.
     ///
     /// # Errors
     ///
-    /// Uzunluk 64 degilse ya da hex degilse.
+    /// If the length is not 64, or the input is not hex.
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
         let arr: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| String::from("ContentId 32 bayt olmali"))?;
+            .map_err(|_| String::from("a ContentId has to be 32 bytes"))?;
         Ok(ContentId(arr))
     }
 }
@@ -73,8 +75,8 @@ impl std::fmt::Display for ContentId {
 
 /// Bir manifest'in shard'lari birlestirildikten sonra kimlik karsilastirmasi.
 ///
-/// Karsilastirma sabit zamanli degil ve olmasi gerekmiyor: iki taraf da
-/// halka acik. Gizli olan bir sey yok, yani sizacak bir sey de yok.
+/// The comparison is not constant-time and does not need to be: both sides are
+/// public. Nothing here is secret, so there is nothing to leak.
 #[must_use]
 pub fn bytes_match(expected: ContentId, bytes: &[u8]) -> bool {
     ContentId::of(bytes) == expected
@@ -109,8 +111,9 @@ mod tests {
 
     #[test]
     fn the_core_vector_is_pinned() {
-        // Bu vektor `budlum-core` ile paylasilan sozlesmedir. Degisirse iki
-        // taraftan biri ayrilmistir ve o bir hata, bir guncelleme degil.
+        // This vector is the contract shared with `budlum-core`. If it
+        // changes, one of the two sides has drifted, and that is a bug, not an
+        // update.
         let id = ContentId::of(b"budlum");
         assert_eq!(
             id.to_string(),
