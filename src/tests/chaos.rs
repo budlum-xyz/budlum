@@ -916,8 +916,8 @@ mod chaos_tests {
         }
         assert_eq!(pool.len(), 100);
 
-        // 3) The seal: the lowest fee in the pool is now 2, so a new fee=1 spam entry has no
-        //    Şeyi evict edemez -> PoolFull; fee=3 ise tam tersine evict EDER.
+        // 3) The seal: the lowest fee in the pool is now 2, so a new fee=1 spam
+        //    entry can evict nothing and gets PoolFull; at fee=3 it does evict.
         let spam = create_signed_tx(0x7E, 1);
         assert!(matches!(
             pool.add_transaction(spam),
