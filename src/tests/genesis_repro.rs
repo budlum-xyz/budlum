@@ -1,31 +1,32 @@
-//! (2026-07-21 - kullanıcı görev listesi "CI sertleştirme")
-//! **Genesis reproducibility sondası (CI Genişletme Madde 1).**
+//! (2026-07-21 - from the task list item "CI hardening")
+//! **The genesis reproducibility probe (CI expansion, item 1).**
 //!
-//! Arka plan: `.github/workflows/determinism.yml` içindeki
+//! Background: the job in `.github/workflows/determinism.yml`
 //! `Genesis Reproducibility (Madde 1)` job'u `genesis_hash_deterministic`
-//! Adlı bir testin `GENESIS_HASH=<hex>` satırını iki temiz build'de
-//! Karşılaştırıyor. sertleştirmesine kadar job boş hash'i boş
-//! Hash'le karşılaştırıyordu (vacuous-pass); çünkü bu isimde bir test
-//! Repoda YOKTU. Bu modül sondanın gerçek gövdesidir.
+//! compares the `GENESIS_HASH=<hex>` line of a test with that name across two
+//! clean builds. Until the hardening, the job was comparing an empty hash with
+//! an empty hash - a vacuous pass - because no test with that name EXISTED in
+//! the repository. This module is the real body of that probe.
 //!
-//! Ne ölçülür (platform/koşu bağımsız olması GEREKENLER):
-//!   * Üç ağ çözümlemesi (Mainnet=45260, Testnet=45261, Devnet=45262) + tanımsız
+//! What is measured (the things that MUST be independent of platform and run):
+//!   * The resolution of the three networks (Mainnet=45260, Testnet=45261,
+//!     Devnet=45262) plus an undefined
 //!     Chain_id fallback'i (`GenesisConfig::new`): genesis blok hash'i,
-//!     Timestamp, tx_root, validator_set_hash, state root, hesap sayısı,
-//!     Toplam dolaşım.
-//!   * Bloktaki `state_root` ile `build_state` root'unun eşitliği
-//!     (node'un boot'taki fail-closed genesis/DB doğrulamasının aynası -
-//!     Bkz. `Blockchain::new_with_genesis` startup kontrolü).
-//!   * Tam kurucu yolu: `Blockchain::new(...)` ile üretilen zincirin
-//!     Genesis bloğu, doğrudan `build_genesis_block` çıktısıyla birebir
-//!     Aynı olmalı.
+//!     one: the timestamp, tx_root, validator_set_hash, the state root, the
+//!     account count and the total circulation.
+//!   * The equality of the `state_root` in the block and the root of
+//!     `build_state` - a mirror of the node's fail-closed genesis and DB check
+//!     at boot; see the startup check in `Blockchain::new_with_genesis`.
+//!   * The full constructor path: the genesis block of a chain produced by
+//!     `Blockchain::new(...)` has to be byte for byte the same as the direct
+//!     output of `build_genesis_block`.
 //!
-//! Tüm gözlemler tek SHA-256 digest'e indirgenir ve
-//! `GENESIS_HASH=<64hex>` olarak stdout'a yazılır (`--nocapture`).
-//! Test içinde her gözlem iki bağımsız inşadan üretilir ve eşitlik
-//! Assert'lenir: süreç-içi nondeterminizm (HashMap iteration, duvar saati
-//! Sızıntısı vb.) yerinde kırmızı olur. Buildler-arası eşitlik CI job'unun
-//! Işi (aynı test iki `cargo clean` sonrası build'de koşar).
+//! Every observation is reduced to a single SHA-256 digest and written to
+//! stdout as `GENESIS_HASH=<64hex>` (under `--nocapture`).
+//! Inside the test every observation is produced from two independent builds and
+//! their equality is asserted: in-process nondeterminism (HashMap iteration, a
+//! wall-clock leak and the like) turns red on the spot. Equality across builds is
+//! the CI job's business - the same test runs in two builds after `cargo clean`.
 
 use crate::chain::blockchain::Blockchain;
 use crate::chain::genesis::GenesisConfig;
@@ -34,8 +35,9 @@ use crate::core::chain_config::Network;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// Bir chain_id için genesis gözlem vektörü. `Blockchain::new_with_genesis`
-/// Içindeki çözümleme yolunun aynası: network biliniyorsa `for_network`,
+/// The genesis observation vector for one chain_id. It mirrors the resolution
+/// path inside `Blockchain::new_with_genesis`: `for_network` when the network is
+/// known,
 /// Yoksa `GenesisConfig::new` fallback'i.
 fn probe_chain(chain_id: u64) -> Vec<String> {
     let config = Network::from_chain_id(chain_id)
@@ -46,16 +48,18 @@ fn probe_chain(chain_id: u64) -> Vec<String> {
     let mut rebuilt_state = config.build_state();
     let rebuilt_root = rebuilt_state.calculate_state_root();
 
-    // Boot fail-closed kontrolünün statik ikizi: blok içi state_root ile
-    // Taze build_state root'u aynı kalmalı (ayrışma = boot'ta CRITICAL
+    // The static twin of the fail-closed boot check: the state_root inside the
+    // block and a fresh build_state root have to stay identical (a divergence is
+    // CRITICAL at boot
     // Mismatch riski demektir).
     assert_eq!(
         block.state_root, rebuilt_root,
-        "genesis state_root({chain_id}) != build_state() root - boot doğrulaması kırılır"
+        "genesis state_root({chain_id}) != build_state() root - the boot check breaks"
     );
 
-    // Tam kurucu round-trip: kütüphane kurucusunun ürettiği zincirin genesis
-    // Bloğu, doğrudan build çıktısına birebir eşit olmalı.
+    // The full constructor round-trip: the genesis block of the chain produced by
+    // the library constructor has to be byte for byte equal to the direct build
+    // output.
     let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, chain_id, None);
     assert_eq!(
         chain.chain.len(),
@@ -103,9 +107,9 @@ fn digest_of(observations: &[String]) -> String {
 mod tests {
     use super::*;
 
-    /// CI Madde 1 sondası. determinism.yml bu testi iki ayrı temiz build'de
-    /// Koşup `GENESIS_HASH=` satırlarını karşılaştırır. İç assert'ler
-    /// Süreç-içi nondeterminizmi yakalar; buildler-arası eşitliği CI denetler.
+    /// The CI item 1 probe. determinism.yml runs this test in two separate clean
+    /// builds and compares the `GENESIS_HASH=` lines. The internal asserts catch
+    /// in-process nondeterminism; CI checks equality across builds.
     #[test]
     fn genesis_hash_deterministic() {
         // Mainnet=45260 (asal hedef), Testnet=45261, Devnet=45262, fallback=9999.
@@ -124,8 +128,9 @@ mod tests {
         let digest = digest_of(&observations);
         println!("GENESIS_HASH={digest}");
 
-        // Sahte-yeşil kilitleri: digest sabit uzunlukta; gözlem vektörü
-        // 4 chain x en az 10 satır olmadan sessizce geçemez.
+        // The false-green locks: the digest has a fixed length, and the
+        // observation vector cannot pass silently without 4 chains times at least
+        // 10 lines.
         assert_eq!(digest.len(), 64);
         assert!(
             observations.len() >= chain_ids.len() * 10,
