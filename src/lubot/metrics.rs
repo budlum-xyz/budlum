@@ -1,22 +1,23 @@
 //! Lubot metrikleri - sorgu/verifier/operator istatistik takibi.
 //!
-//! Lubot katmanının çalışma durumunu izler: toplam sorgu, başarılı doğrulama,
-//! Slash edilen operator, aktif model sayısı. Monitoring + dashboard için.
+//! Tracks the running state of the Lubot layer: total queries, successful
+//! verifications, slashed operators and the number of active models. Intended
+//! for monitoring and dashboards.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Lubot katmanı metrikleri (thread-safe atomic sayaçlar).
+/// The metrics of the Lubot layer, as thread-safe atomic counters.
 #[derive(Debug, Default)]
 pub struct LubotMetrics {
-    /// Toplam çıkarım sorgusu.
+    /// Total inference queries.
     pub total_queries: AtomicU64,
-    /// Başarıyla doğrulanmış çıkarım.
+    /// Inferences that verified successfully.
     pub verified_inferences: AtomicU64,
-    /// Slash edilen operator sayısı (hatalı çıkarım/eğitim).
+    /// The number of slashed operators (a faulty inference or training run).
     pub slashed_operators: AtomicU64,
-    /// Aktif (kayıtlı) model sayısı.
+    /// The number of active, registered models.
     pub active_models: AtomicU64,
-    /// Toplam çıkarım fee hacmi (token).
+    /// The total inference fee volume, in tokens.
     pub total_fee_volume: AtomicU64,
 }
 
@@ -46,7 +47,7 @@ impl LubotMetrics {
         self.total_fee_volume.fetch_add(fee, Ordering::Relaxed);
     }
 
-    /// Metrik özeti (debug/monitoring).
+    /// A summary of the metrics, for debugging and monitoring.
     #[must_use]
     pub fn summary(&self) -> LubotMetricsSnapshot {
         LubotMetricsSnapshot {
@@ -59,7 +60,7 @@ impl LubotMetrics {
     }
 }
 
-/// Metrik anlık görüntüsü (snapshot - Clone + Display).
+/// A snapshot of the metrics (Clone plus Display).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LubotMetricsSnapshot {
     pub total_queries: u64,

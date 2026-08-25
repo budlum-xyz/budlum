@@ -1,22 +1,24 @@
-//! F10 EVM ChainAdapter - Universal Relayer gerçek Ethereum köprüsü.
+//! The F10 EVM ChainAdapter - the Universal Relayer's real Ethereum bridge.
 //!
-//! Bu modül grubu Budlum'a, relayer'ın ürettiği Ethereum receipt proof'larını
-//! **bağımsız olarak** kriptografik doğrulama yeteneği kazandırır:
+//! This group of modules gives Budlum the ability to verify the Ethereum
+//! receipt proofs produced by the relayer **independently** and
+//! cryptographically:
 //!
 //! - `rlp` - in-tree Recursive Length Prefix (Ethereum Yellow Paper Appendix B).
 //! - `mpt` - in-tree Merkle-Patricia trie **verifier** (Appendix D, verify-only;
-//!   Proof üretimi relayer'da).
+//!   the proof itself is produced by the relayer).
 //! - `receipt` - Ethereum receipt RLP schema + receiptsRoot proof.
 //! - `sync_committee` - PoS light-client (BLS12-381, `blst` reuse).
-//! - `header` - Ethereum header chain + finality kararı.
+//! - `header` - the Ethereum header chain and the finality decision.
 //! - `adapter` - `EvmChainAdapter` (ChainAdapter impl).
 //!
-//! **Güvenlik sabiti:** hiçbir fonksiyon network'e bağlanmaz. Tüm doğrulama
-//! Deterministik ve on-chain (Budlum konsensüsünde). Relayer proof üretir,
-//! Budlum verify eder (relayer_produces güven modeli).
+//! **Security invariant:** no function here touches the network. All
+//! verification is deterministic and happens on chain, inside Budlum consensus.
+//! The relayer produces the proof and Budlum verifies it - the
+//! `relayer_produces` trust model.
 //!
-//! Temel katman RLP + MPT verifier + KAT vektörleridir; receipt, header ve
-//! Sync-committee doğrulaması bunun üstüne kurulur.
+//! The base layer is RLP, the MPT verifier and the KAT vectors; receipt, header
+//! and sync-committee verification are built on top of it.
 
 pub mod adapter;
 pub mod bud_to_eth;
