@@ -11,7 +11,7 @@ so value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Tests](https://img.shields.io/badge/tests-2430%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Rust](https://img.shields.io/badge/rust-1.97.0-orange?logo=rust)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
 [Architecture](docs/ARCHITECTURE.md) · [Specification](docs/SPECIFICATION.md) · [Security](docs/SECURITY.md) · [Contributing](docs/CONTRIBUTING.md) · [Website](https://github.com/budlum-xyz/budlum.com) · [Türkçe](README.tr.md)
@@ -196,7 +196,7 @@ Container and licence-notice files moved in-tree: `ops/Dockerfile`, `ops/docker-
 
 ### Prerequisites
 
-- **Rust 1.97.0**: pinned in [`rust-toolchain.toml`](rust-toolchain.toml); `rustup` selects it automatically
+- **Rust 1.97.1**: pinned in [`rust-toolchain.toml`](rust-toolchain.toml); `rustup` selects it automatically
 - **protoc** (Protocol Buffers compiler): `apt install protobuf-compiler` or `brew install protobuf`
 - Optional: [Nix](https://nixos.org), `nix develop` provisions the full toolchain from [`flake.nix`](flake.nix)
 
@@ -319,7 +319,7 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 
 **What the gates enforce, beyond the usual:**
 
-- **`fmt` and `clippy` with `-D warnings`** against the pinned 1.97.0 toolchain, plus a
+- **`fmt` and `clippy` with `-D warnings`** against the pinned 1.97.1 toolchain, plus a
   separate pedantic/nursery **ratchet**: the warning count has a checked-in baseline and may
   only go down. Raising the baseline to make a run pass is treated as a defect, not a fix.
 - **Determinism.** State roots and block hashes must be reproducible. A dedicated gate proves

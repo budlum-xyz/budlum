@@ -214,7 +214,7 @@ rather than sampled points. The existing proptests are kept alongside them.
 The harnesses live in a standalone `kani/` package, in the same way `fuzz/`
 does. Kani ships a pinned nightly, 0.67.0, the newest published release,
 bundles rustc 1.93.0-nightly, while `budlum-core` declares
-`rust-version = "1.97.0"`, so cargo refuses to build the root crate before any
+`rust-version = "1.97.1"`, so cargo refuses to build the root crate before any
 harness runs. The upstream toolchain bump is merged but unreleased
 (model-checking/kani#4645). Lowering the MSRV to suit a verification tool would
 weaken a promise made to operators in order to make a check pass, so the package
