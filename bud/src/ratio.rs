@@ -1,5 +1,6 @@
 //! Agresif oranlama - her format icin boru hatti, en buyuk oran secimi
-//! Olcumden bagimsiz sayi yok - ratio tablosu corpus/format.json + kendi olcum
+//! No number without a measurement - the ratio table comes from
+//! corpus/format.json plus our own measurement
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormatClass {
@@ -37,7 +38,7 @@ pub struct RatioResult {
     pub passes_kf: bool,
 }
 
-// En iyi borular - olculmus (model/measure-format.py benzeri)
+// The best pipelines, measured (in the manner of model/measure-format.py).
 pub const BEST_PIPES: &[(&str, FormatClass, f64)] = &[
     ("CDC16K+zstd+XZ9", FormatClass::Json, 17.191),
     ("duz akis+CDC16K+en iyi", FormatClass::Csv, 15.512),
@@ -47,7 +48,7 @@ pub const BEST_PIPES: &[(&str, FormatClass, f64)] = &[
     ("gunzip+2bit+CDC16K", FormatClass::Genomic, 5.781),
     ("zip-ac+CDC16K", FormatClass::Xlsx, 5.236),
     ("CDC16K+en iyi", FormatClass::Mp3, 4.940),
-    ("AV1 same res (fidelity)", FormatClass::Mp4, 2.8), // literature tahmini, olculmedi
+    ("AV1 same res (fidelity)", FormatClass::Mp4, 2.8), // a literature estimate, not measured
     ("JPEG XL lossless", FormatClass::Jpeg, 1.2),
     ("WebP lossless", FormatClass::Png, 1.8),
     ("zip-ac+CDC16K", FormatClass::Zip, 2.605),
@@ -57,7 +58,7 @@ impl RatioResult {
     pub fn from_best(format: FormatClass) -> Option<Self> {
         for (pipe_name, fmt, ratio) in BEST_PIPES {
             if *fmt == format {
-                let passes = *ratio >= 16.68; // Düz 7+1 (price.rs ile tutarli; KF eşiği)
+                let passes = *ratio >= 16.68; // plain 7+1 (consistent with price.rs; the KF threshold)
                 return Some(RatioResult {
                     format,
                     pipe: Pipe {
