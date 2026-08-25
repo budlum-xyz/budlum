@@ -64,6 +64,55 @@ const REQUIRED_CLAIMS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Behaviour the prompt promises, and the symbol that has to implement it.
+///
+/// A required *statement* (above) checks that a sentence survives in the
+/// prompt. This checks the other half: that the sentence is backed by
+/// something. The prompt tells a user their request will be refused if it
+/// exceeds an operator's declared depth; if the enforcing function is deleted
+/// or renamed, every sentence in the prompt still reads correctly and the
+/// product quietly stops doing what it says.
+///
+/// The tree already learned this class the expensive way. `tier_is_servable`
+/// was written, documented as the rule, and called from nowhere - the module
+/// header said so in as many words. A promise in prose next to an unwired
+/// implementation is worse than no promise, because the prose is what a reader
+/// audits.
+///
+/// Each entry is (prompt phrase, file, symbol, why).
+const BACKED_PROMISES: &[(&str, &str, &str, &str)] = &[
+    (
+        "If your hardware cannot serve the declared tier, say so",
+        "src/ai/registry.rs",
+        "unservable_reason",
+        "the prompt promises a refusal above an operator's declared ceiling. \
+         `tier_is_servable` spent a release written but uncalled; the caller is \
+         what makes the promise true.",
+    ),
+    (
+        "operators' answers by an exact 32-byte commitment",
+        "crates/lubot/crates/lubot-serve/src/config.rs",
+        "is_bitwise_reproducible",
+        "the prompt tells the model one differing bit puts it in another group. \
+         Nothing else in the tree decides whether an engine can meet that.",
+    ),
+    (
+        "Masking happens before storage, not after",
+        "crates/lubot/crates/lubot-knowledge/src/redact.rs",
+        "redact_model_strings",
+        "the prompt promises credentials never reach a cache. `cache.rs` calls \
+         the mask on its write path, and this is where the mask is defined. \
+         Delete it and `before` becomes a word with nothing under it.",
+    ),
+    (
+        "There is no fourth channel",
+        "crates/lubot/crates/lubot-data/src/source.rs",
+        "reject_unknown_source",
+        "the prompt states the closed loop is closed. An unknown source kind has \
+         to be refused somewhere, or the loop is closed only in prose.",
+    ),
+];
+
 /// Read a `pub const NAME: TYPE = EXPR;` and evaluate the arithmetic in `EXPR`.
 ///
 /// Only `*` over decimal integers, which is what the four constants use. A
@@ -168,6 +217,79 @@ pub fn check(prompt_source: &str, perception: &str) -> Result<usize, String> {
     Ok(LIMITS.len() + REQUIRED_CLAIMS.len())
 }
 
+/// Whether `source` declares a function named exactly `symbol`.
+///
+/// Written after a substring search passed a mutation it should have caught:
+/// renaming `unservable_reason` to `unservable_reason_RENAMED` left the old
+/// name as a prefix, so `contains` still found it and the gate stayed green
+/// while the promise had no implementation. A gate that a rename walks past is
+/// not a gate.
+///
+/// The boundary is checked on both sides. `fn ` on the left rules out a mention
+/// in a doc comment or a call site - the symbol has to be *defined* here, not
+/// merely spoken about - and a non-identifier character on the right rules out
+/// the longer-name case.
+fn defines(source: &str, symbol: &str) -> bool {
+    let needle = format!("fn {symbol}");
+    let mut from = 0usize;
+    while let Some(offset) = source[from..].find(&needle) {
+        let at = from + offset;
+        let after = at + needle.len();
+        let next_is_identifier = source[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !next_is_identifier {
+            return true;
+        }
+        from = after;
+    }
+    false
+}
+
+/// Check that each promise in [`BACKED_PROMISES`] has both halves present.
+///
+/// `read` resolves a repository-relative path to its text, so the canaries can
+/// supply fixtures instead of writing a fake tree to disk.
+///
+/// Both halves are required, and the two failures read differently on purpose.
+/// A missing sentence means the prompt stopped telling the user something the
+/// runtime still does - harmless to the runtime, dishonest to the reader. A
+/// missing symbol means the opposite and is the dangerous direction: the
+/// sentence still reads correctly to anyone auditing the prompt while nothing
+/// enforces it.
+///
+/// # Errors
+///
+/// Returns the first promise that is missing a half.
+pub fn check_backed_promises(
+    prompt: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<usize, String> {
+    for (phrase, path, symbol, why) in BACKED_PROMISES {
+        if !prompt.contains(phrase) {
+            return Err(format!(
+                "the prompt no longer says `{phrase}`, but {path} still carries \
+                 `{symbol}` to implement it.\n  {why}\n  Either the sentence \
+                 came out by accident, or the behaviour was dropped and the \
+                 implementation is now dead code; the gate cannot tell which, \
+                 so it asks."
+            ));
+        }
+        let source = read(path)?;
+        if !defines(&source, symbol) {
+            return Err(format!(
+                "the prompt promises `{phrase}`, and `{symbol}` is gone from \
+                 {path}.\n  {why}\n  This is the direction that does not \
+                 announce itself: the prompt still reads correctly, so a \
+                 reviewer reading it sees a product that keeps a promise \
+                 nothing in the tree keeps any more."
+            ));
+        }
+    }
+    Ok(BACKED_PROMISES.len())
+}
+
 /// Pull the prompt text itself out of the module's source.
 ///
 /// The first version of this gate scanned the whole file and reported the
@@ -262,9 +384,17 @@ pub fn run(root: &Path) -> Result<String, String> {
     let perception = std::fs::read_to_string(&perception_file)
         .map_err(|e| format!("{}: {e}", perception_file.display()))?;
     let checked = check(&prompt, &perception)?;
+    let prompt_text = extract_prompt_text(&prompt)?;
+    let read = |rel: &str| -> Result<String, String> {
+        let f = root.join(rel);
+        std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))
+    };
+    let backed = check_backed_promises(prompt_text, &read)?;
     Ok(format!(
-        "the Lubot system prompt agrees with the tree: {checked} claims checked \
-         ({} ceilings against {PERCEPTION_PATH}, {} required statements)",
+        "the Lubot system prompt agrees with the tree: {} claims checked \
+         ({} ceilings against {PERCEPTION_PATH}, {} required statements, \
+         {backed} promises traced to an implementing symbol)",
+        checked + backed,
         LIMITS.len(),
         REQUIRED_CLAIMS.len()
     ))
@@ -383,5 +513,71 @@ pub const GENERATION_CLAIM_MARKERS: &[&str] = &[\"generate images\", \"create an
         ));
     }
 
-    Ok(String::from("lubot-prompt-is-true: 10 canaries"))
+    backed_promise_canaries()?;
+
+    Ok(String::from("lubot-prompt-is-true: 14 canaries"))
+}
+
+/// Canaries 11-14: the promise/implementation pair, both directions.
+///
+/// Split out of [`self_test`] because that function had grown past the line
+/// ceiling clippy enforces. The split is not cosmetic: these four drive
+/// [`check_backed_promises`], which is a different function from [`check`],
+/// and a canary set reads better next to the thing it exercises.
+///
+/// # Errors
+///
+/// Returns the first canary that did not behave.
+fn backed_promise_canaries() -> Result<(), String> {
+    // 11-13. The promise/implementation pair, both directions.
+    let promise_prompt = "\
+When your answer is going onto the consensus path it is grouped with other
+operators' answers by an exact 32-byte commitment.
+If your hardware cannot serve the declared tier, say so.
+Masking happens before storage, not after.
+There is no fourth channel.
+";
+    let all_present = |_: &str| -> Result<String, String> {
+        Ok(String::from(
+            "pub fn unservable_reason(&self) {} \
+             pub const fn is_bitwise_reproducible(self) {} \
+             pub fn redact_model_strings(v: &Value) {} \
+             pub fn reject_unknown_source(raw: u8) {}",
+        ))
+    };
+    check_backed_promises(promise_prompt, &all_present)
+        .map_err(|e| format!("canary 11: the backed pair was rejected: {e}"))?;
+
+    let symbol_gone = |_: &str| -> Result<String, String> {
+        Ok(String::from(
+            "pub const fn is_bitwise_reproducible(self) {} \
+             pub fn redact_model_strings(v: &Value) {} \
+             pub fn reject_unknown_source(raw: u8) {}",
+        ))
+    };
+    if check_backed_promises(promise_prompt, &symbol_gone).is_ok() {
+        return Err(String::from(
+            "canary 12: a promise whose implementing symbol is gone was accepted. \
+             This is the failure the check exists for - the prompt keeps reading \
+             correctly while nothing enforces it.",
+        ));
+    }
+
+    if check_backed_promises("a prompt that promises nothing", &all_present).is_ok() {
+        return Err(String::from(
+            "canary 13: a prompt missing every promised sentence was accepted \
+             while the implementations were still present.",
+        ));
+    }
+
+    // 14. A read error is reported, not swallowed into a pass.
+    let unreadable = |rel: &str| -> Result<String, String> { Err(format!("{rel}: no such file")) };
+    if check_backed_promises(promise_prompt, &unreadable).is_ok() {
+        return Err(String::from(
+            "canary 14: an unreadable implementation file was treated as agreement. \
+             A gate that cannot read what it checks has to say so.",
+        ));
+    }
+
+    Ok(())
 }
