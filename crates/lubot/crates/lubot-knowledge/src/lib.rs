@@ -1,18 +1,17 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
 // derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
 #![forbid(unsafe_code)]
-//! # lubot-knowledge - kapalı-devre bilgi katmanı
+//! # lubot-knowledge - the closed-circuit knowledge layer
 //!
-//! Lubot'un kapalı-devre ilkesini koruyarak kaynak kod ve dokümanlardan
-//! bilgi üretir: sır maskeleme (`redact`), satır-aralıklı parçalama
-//! (`chunk`), bağımlılıksız TF-IDF gömme (`embed`), kompakt bağlam
-//! tablosu (`context`), görev hafızası (`memory`) ve LLM çıktı
-//! önbelleği (`cache`).
+//! Produces knowledge from source code and documents while keeping Lubot's
+//! closed-circuit principle: secret masking (`redact`), line-ranged chunking
+//! (`chunk`), dependency-free TF-IDF embedding (`embed`), a compact context
+//! table (`context`), task memory (`memory`) and an LLM output cache
+//! (`cache`).
 //!
-//! Tüm modüller yalnızca `std` + `serde` + `sha2` taşır; harici vektör
-//! API'si veya bulut hizmeti yoktur. Veri, bu crate'in ürettiği
-//! JSONL/SQLite dosyalarında ve Lubot'un kendi B.U.D. kayıtlarında
-//! kalır.
+//! Every module carries only `std`, `serde` and `sha2`; there is no external
+//! vector API and no cloud service. The data stays in the JSONL and SQLite
+//! files this crate produces and in Lubot's own B.U.D. records.
 
 pub mod cache;
 pub mod chunk;
@@ -21,11 +20,11 @@ pub mod embed;
 pub mod memory;
 pub mod redact;
 
-/// İçerik için sabit kararlı SHA-256 özeti.
+/// A stable SHA-256 digest of the content.
 ///
 /// # Errors
 ///
-/// Yalnızca SHA-256 başlatma hatasında (pratikte imkânsız).
+/// Only on a SHA-256 initialisation failure, which cannot happen in practice.
 pub fn content_hash(data: &[u8]) -> Result<[u8; 32], String> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
