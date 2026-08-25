@@ -12,7 +12,7 @@ olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasınd
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Tests](https://img.shields.io/badge/tests-2429%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Rust](https://img.shields.io/badge/rust-1.97.0-orange?logo=rust)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
 [Mimari](docs/ARCHITECTURE.md) · [Belirtim](docs/SPECIFICATION.md) · [Güvenlik](docs/SECURITY.md) · [Katkı](docs/CONTRIBUTING.md) · [Web sitesi](https://github.com/budlum-xyz/budlum.com) · [English](README.md)
@@ -199,7 +199,7 @@ Konteyner ve lisans bildirim dosyaları ağaç içine taşındı: `ops/Dockerfil
 
 ### Ön koşullar
 
-- **Rust 1.97.0**: [`rust-toolchain.toml`](rust-toolchain.toml) içinde sabitlenmiştir; `rustup` bunu kendiliğinden seçer
+- **Rust 1.97.1**: [`rust-toolchain.toml`](rust-toolchain.toml) içinde sabitlenmiştir; `rustup` bunu kendiliğinden seçer
 - **protoc** (Protocol Buffers derleyicisi): `apt install protobuf-compiler` veya `brew install protobuf`
 - İsteğe bağlı: [Nix](https://nixos.org), `nix develop` tüm araç zincirini [`flake.nix`](flake.nix) dosyasından kurar
 
@@ -325,7 +325,7 @@ kümesini çalıştırır.
 
 **Kapıların olağanın ötesinde zorladıkları:**
 
-- **`fmt` ve `-D warnings` ile `clippy`**, sabitlenmiş 1.97.0 araç zincirine karşı; ayrıca
+- **`fmt` ve `-D warnings` ile `clippy`**, sabitlenmiş 1.97.1 araç zincirine karşı; ayrıca
   ayrı bir pedantic/nursery **cırcırı**: uyarı sayısının depoda kayıtlı bir taban çizgisi
   vardır ve yalnızca azalabilir. Bir koşuyu geçirmek için taban çizgisini yükseltmek
   düzeltme değil, kusur sayılır.
