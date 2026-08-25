@@ -11,4 +11,5 @@
 pub mod dataset;
 pub mod manifest;
 pub mod model;
+pub mod system_prompt;
 pub mod tier;

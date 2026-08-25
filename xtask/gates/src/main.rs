@@ -87,6 +87,7 @@ mod gates {
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
+    pub mod lubot_prompt_is_true;
     pub mod lubot_reads;
     pub mod master_derivation;
     pub mod mermaid;
@@ -384,6 +385,14 @@ const GATES: &[Gate] = &[
         run: gates::no_idle_code::run,
         run_args: None,
         self_test: gates::no_idle_code::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "lubot-prompt-is-true",
+        replaces: None,
+        run: gates::lubot_prompt_is_true::run,
+        run_args: None,
+        self_test: gates::lubot_prompt_is_true::self_test,
         run_log: None,
     },
     Gate {
