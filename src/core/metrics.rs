@@ -7,6 +7,14 @@ pub struct Metrics {
     pub chain_height: IntGauge,
     pub peer_count: IntGauge,
     pub mempool_size: IntGauge,
+    /// Bytes of transaction bodies resident in the mempool.
+    ///
+    /// Exported beside the entry count rather than instead of it. The two can
+    /// diverge by four orders of magnitude - the same 20 000 entries are 20 MB
+    /// of ordinary transactions or 1.95 GB of maximum-size ones - and an
+    /// operator watching only the count cannot tell which of those is
+    /// happening until the process is killed.
+    pub mempool_bytes: IntGauge,
     pub blocks_produced: IntCounter,
     pub transactions_processed: IntCounter,
     pub reorgs_total: IntCounter,
@@ -55,6 +63,10 @@ impl Metrics {
         let chain_height = IntGauge::new("budlum_chain_height", "Current chain height")?;
         let peer_count = IntGauge::new("budlum_peer_count", "Connected peers")?;
         let mempool_size = IntGauge::new("budlum_mempool_size", "Pending transactions")?;
+        let mempool_bytes = IntGauge::new(
+            "budlum_mempool_bytes",
+            "Resident bytes of pending transaction bodies",
+        )?;
         let blocks_produced = IntCounter::new("budlum_blocks_produced", "Total blocks produced")?;
         let transactions_processed =
             IntCounter::new("budlum_transactions_processed", "Total transactions")?;
@@ -166,6 +178,7 @@ impl Metrics {
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(peer_count.clone()))?;
         registry.register(Box::new(mempool_size.clone()))?;
+        registry.register(Box::new(mempool_bytes.clone()))?;
         registry.register(Box::new(blocks_produced.clone()))?;
         registry.register(Box::new(transactions_processed.clone()))?;
         registry.register(Box::new(reorgs_total.clone()))?;
@@ -203,6 +216,7 @@ impl Metrics {
             chain_height,
             peer_count,
             mempool_size,
+            mempool_bytes,
             blocks_produced,
             transactions_processed,
             reorgs_total,
