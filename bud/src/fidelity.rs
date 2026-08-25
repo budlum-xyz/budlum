@@ -1,4 +1,5 @@
-//! Fidelity Core - cozumurluk ne olursa olsun korunur, format serbest degisebilir
+//! The fidelity core - whatever the resolution is, it is preserved; the format
+//! is free to change.
 //! ContentId = SHA3-256(domain-tag || length || kanonik baytlar) - kriptografik (K3 fix)
 //! Render deterministik, float yok, IHDR boyut birebir
 
@@ -29,14 +30,15 @@ impl std::fmt::Display for FidelityError {
 }
 impl std::error::Error for FidelityError {}
 
-/// ContentId - G2'den bagimsiz, saf hash (BLAKE3 yerine std hash placeholder)
-/// Gercekte blake3 crate kullanilir, ama iskelette bagimlilik yok, deterministik hash
+/// ContentId - independent of G2, a pure hash. In reality the blake3 crate is
+/// used; the skeleton carries no dependency and uses a deterministic hash
+/// instead.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContentId([u8; 32]);
 
 impl ContentId {
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        // K3 fix (2026-08-16): DefaultHasher/SipHash kriptografik DEGILDIR (collision forge
+        // K3 fix (2026-08-16): DefaultHasher and SipHash are NOT cryptographic (a collision can be forged
         // edilebilir). Gercek kriptografik hash: SHA3-256, domain-etiketli + uzunluk-on-ekli
         // (budlum src/storage/content_id.rs deseniyle ayni: BDLM_CONTENT_V1).
         let mut h = Sha3_256::new();
@@ -79,12 +81,12 @@ impl FidelityCore {
     }
 
     /// Render - deterministik, float yok
-    /// KF2 kapi: render sonucu ayni cozunurlukte olmali
+    /// The KF2 gate: the rendered result has to carry the same resolution.
     pub fn render(&self, fmt: &RenderFormat) -> Result<(Vec<u8>, (u32, u32)), FidelityError> {
         match fmt {
             RenderFormat::Original => Ok((self.canonical.clone(), (self.width, self.height))),
             RenderFormat::AvifSameRes | RenderFormat::WebPLossless | RenderFormat::Av1SameRes => {
-                // Format degisebilir ama cozumurluk korunur
+                // The format may change but the resolution is preserved.
                 // Iskelette ayni bayt donduruluyor, gercekte transcode
                 Ok((self.canonical.clone(), (self.width, self.height)))
             }
@@ -108,14 +110,15 @@ impl FidelityCore {
             });
         }
         let got_id = ContentId::from_bytes(rendered_bytes);
-        // Original icin hash esit olmali, turev icin degil - bu fonksiyon sadece original path
+        // For an original the hash has to match; for a derivative it need not - this function is only the original path.
         if got_id != self.content_id {
             return Err(FidelityError::HashMismatch);
         }
         Ok(())
     }
 
-    /// Turev icin ayri dogrulama - cozunurluk korunur ama hash farkli olabilir (format degisti)
+    /// A separate check for a derivative: the resolution is preserved but the
+    /// hash may differ, because the format changed.
     pub fn verify_derived_resolution(&self, derived_res: (u32, u32)) -> Result<(), FidelityError> {
         if derived_res != (self.width, self.height) {
             return Err(FidelityError::ResolutionMismatch {

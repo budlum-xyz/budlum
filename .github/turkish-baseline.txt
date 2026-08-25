@@ -34,18 +34,15 @@ bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_qos.rs	5
 bud/src/bud_format_registry.rs	7
-bud/src/bud_format_revolutionary.rs	8
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/churn.rs	6
-bud/src/fidelity.rs	8
 bud/src/gates.rs	4
 bud/src/provider.rs	4
 bud/src/ratio.rs	4
 bud/tests/test_integration.rs	3
-budzero/bud-cli/src/main.rs	8
 budzero/bud-cli/tests/toolchain_end_to_end.rs	5
 budzero/bud-compiler/src/sema.rs	4
 budzero/bud-isa/src/lib.rs	6
@@ -65,7 +62,6 @@ crates/lubot/crates/lubot-core/src/lib.rs	4
 crates/lubot/crates/lubot-data/Cargo.toml	1
 crates/lubot/crates/lubot-data/src/jsonl.rs	2
 crates/lubot/crates/lubot-data/src/lib.rs	6
-crates/lubot/crates/lubot-data/src/template.rs	8
 crates/lubot/crates/lubot-integrations/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/embed.rs	3
@@ -79,7 +75,6 @@ crates/wallet-core/src/tee.rs	2
 ops/Dockerfile	2
 ops/scripts/check_genesis_schema.py	1
 ops/scripts/generate-sbom.sh	1
-src/account_abstraction/mod.rs	8
 src/ai/mod.rs	2
 src/bin/bud.rs	2
 src/bns/registry.rs	7
@@ -96,7 +91,6 @@ src/execution/executor.rs	3
 src/lib.rs	4
 src/lubot/effort.rs	1
 src/lubot/query.rs	6
-src/lubot/storage.rs	8
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
 src/registry/d4_merge_tests.rs	1
