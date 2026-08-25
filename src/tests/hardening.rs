@@ -158,17 +158,18 @@ mod hardening_tests {
         );
     }
 
-    // === SECURITY TESTS (Güvenlik Denetimi Madde 3) ===
+    // === SECURITY TESTS (security review, item 3) ===
 
-    /// BLS PoP production çağrısı.
-    /// Güvenlik denetimi §3: `verify_pop` daha önce yalnızca unit
-    /// Test'te çağrılıyordu; production'da hiçbir yerde çağrılmıyordu
-    /// (rogue-key saldırısına açık). Bu test, public `verify_pop`
-    /// Fonksiyonunun hâlâ geçerli PoP'leri kabul ettiğini, geçersiz
-    /// Olanları reddettiğini doğrular - böylece `blockchain.rs`'in
-    /// `build_validator_snapshot_from_state` filtresi güvenle
-    /// Kullanabilir. (Filtre unit test'lerde doğrudan çağrılamaz çünkü
-    /// Private'tır; bu test public API'nin kontratını garanti eder.)
+    /// The production call of the BLS PoP.
+    ///
+    /// Security review, section 3: `verify_pop` used to be called only from a
+    /// unit test and from nowhere in production, which left the rogue-key attack
+    /// open. This test verifies that the public `verify_pop` function still
+    /// accepts valid PoPs and refuses invalid ones, so the
+    /// `build_validator_snapshot_from_state` filter in `blockchain.rs` can rely
+    /// on it. The filter itself cannot be called directly from a unit test
+    /// because it is private; this test guarantees the contract of the public
+    /// API.
     #[test]
     fn test_verify_pop_guarantee_for_production_filter() {
         use crate::chain::finality::verify_pop;
@@ -189,29 +190,30 @@ mod hardening_tests {
             crate::core::transaction::DEFAULT_CHAIN_ID,
         ));
 
-        // Geçersiz PoP (sahte) - production filtresi bunu reddetmeli
+        // An invalid, forged PoP - the production filter has to refuse it.
         let invalid = ValidatorEntry {
             address: test_addr_from_byte(1u8),
             stake: 1000,
-            bls_public_key: vec![0u8; 96], // rastgele G2 noktası (büyük ihtimalle geçersiz)
+            bls_public_key: vec![0u8; 96], // an arbitrary G2 point, most likely invalid
             pop_signature: vec![0u8; 48],
             pq_public_key: Vec::new(),
         };
-        // Sahte key/sig de verify_pop'tan false dönmeli; production
-        // Filtresi bunu snapshot'tan çıkarır (rogue-key koruması).
+        // A forged key or signature also has to return false from verify_pop;
+        // the production filter drops it from the snapshot - rogue-key
+        // protection.
         assert!(!verify_pop(
             &invalid,
             crate::core::transaction::DEFAULT_CHAIN_ID,
         ));
     }
 
-    // === SECURITY FIX (Güvenlik Denetimi §5) =========================
-    // RPC kimlik doğrulaması varsayılan olarak AÇIK. Operatörün bilinçli
-    // Olarak devre dışı bırakması (`operator_default`) log uyarısı verir.
+    // === SECURITY FIX (security review, section 5) ===================
+    // RPC authentication is ON by default. An operator disabling it deliberately
+    // (`operator_default`) produces a log warning.
 
-    /// Default config: kimlik doğrulama AÇIK (secure by default).
-    /// `auth_required=false` kullanan operatör kasıtlı olarak `operator_default`
-    /// Çağırmalı; bu test Default'ın secure olduğunu sabitler.
+    /// The default config: authentication is ON, secure by default. An operator
+    /// wanting `auth_required=false` has to call `operator_default`
+    /// deliberately; this test pins down that Default is the secure one.
     #[test]
     fn rpc_auth_required_default_true() {
         use crate::rpc::RpcSecurityConfig;
@@ -222,9 +224,10 @@ mod hardening_tests {
         );
     }
 
-    /// `operator_default` kimlik doğrulamayı kapatır ve `auth_required=false`
-    /// Döner - operatörün bilinçli olarak devre dışı bıraktığını gösterir.
-    /// (Başlangıçta GÜVENLİK uyarıları loglanır, ama davranış kontratı
+    /// `operator_default` turns authentication off and returns
+    /// `auth_required=false`, showing that the operator disabled it
+    /// deliberately. SECURITY warnings are logged at startup, but the behavioural
+    /// contract
     /// Budur.)
     #[test]
     fn rpc_operator_default_disables_auth() {
@@ -234,9 +237,9 @@ mod hardening_tests {
         assert!(config.allowed_ips.contains(&"127.0.0.1".to_string()));
     }
 
-    /// `from_env` ile `auth_required=true` ve boş api_key
-    /// (env var ayarlanmamış) geçirildiğinde hata döner, operatörün
-    /// Public bir RPC'yi boş key ile başlatması engellenir.
+    /// When `from_env` is passed `auth_required=true` with an empty api_key
+    /// (the env var is not set) it returns an error, which stops an operator from
+    /// starting a public RPC with an empty key.
     #[test]
     fn rpc_empty_api_key_rejected_when_auth_required() {
         use crate::rpc::RpcSecurityConfig;
@@ -254,13 +257,14 @@ mod hardening_tests {
         );
     }
 
-    // === SECURITY FIX (Güvenlik Denetimi §6) =========================
-    // KeyPair / ValidatorKeys `save` artık dosyayı doğrudan 0o600 ile
-    // Oluşturur (TOCTOU penceresi yok) ve izin hatalarını yutar (sessiz
-    // Hata yok). Aşağıdaki test'ler bu iki garantiyi sabitler.
+    // === SECURITY FIX (security review, section 6) ===================
+    // `save` on KeyPair and ValidatorKeys now creates the file directly with
+    // 0o600, so there is no TOCTOU window, and it no longer swallows permission
+    // errors, so there is no silent failure. The tests below pin down both
+    // guarantees.
 
-    /// `KeyPair::save` strict 0o600 ile oluşturur (TOCTOU yok) ve
-    /// `load` sonrasında aynı anahtarı geri yükler.
+    /// `KeyPair::save` creates the file with a strict 0o600 and no TOCTOU, and
+    /// `load` restores the same key afterwards.
     #[cfg(unix)]
     #[test]
     fn keypair_save_creates_with_strict_permissions() {
@@ -276,14 +280,14 @@ mod hardening_tests {
             mode, 0o600,
             "KeyPair::save must create the file with 0o600, got {mode:o}"
         );
-        // Round-trip: load sonrası aynı anahtar.
+        // Round-trip: the same key after load.
         let kp2 = KeyPair::load(&path).expect("load must succeed");
         assert_eq!(kp.private_key_bytes(), kp2.private_key_bytes());
     }
 
-    /// `ValidatorKeys::save` de strict 0o600 ile oluşturur VE önceki
-    /// `let _ = set_permissions` regresyonu yok (hata artık `?` ile
-    /// Yayılır).
+    /// `ValidatorKeys::save` also creates the file with a strict 0o600, AND the
+    /// earlier `let _ = set_permissions` regression is gone - the error is now
+    /// propagated with `?`.
     #[cfg(unix)]
     #[test]
     fn validator_keys_save_creates_with_strict_permissions() {
@@ -301,13 +305,12 @@ mod hardening_tests {
         );
     }
 
-    // === SECURITY FIX (Güvenlik Denetimi §5 wiring) ==================
-    // `NodeConfig::default` artık `rpc_auth_required: true` (secure).
-    // Bu test, default'un struct literal'ı üzerinden gerçekten `true`
-    // Olduğunu sabitler. (sadece `RpcSecurityConfig::default`'ı
-    // Düzeltmişti; CLI'nin okuduğu `NodeConfig::default`'a
-    // Dokunmamıştı - yani gerçek main başlangıcında hâlâ `false`
-    // Kalıyordu. wiring gap'i kapatıyor.)
+    // === SECURITY FIX (security review, section 5 wiring) ============
+    // `NodeConfig::default` is now `rpc_auth_required: true`, the secure value.
+    // This test pins down that the default really is `true` through the struct
+    // literal. The earlier fix had only corrected `RpcSecurityConfig::default`
+    // and never touched the `NodeConfig::default` the CLI reads, so at the real
+    // start of main it was still `false`. This closes that wiring gap.
     #[test]
     fn cli_config_default_has_rpc_auth_required_true() {
         use crate::cli::NodeConfig;
@@ -326,14 +329,14 @@ mod hardening_tests {
         );
     }
 
-    /// `main.rs`'in çözümlenmiş-değer uyarısı: `auth_required=false` olan
-    /// Bir `RpcSecurityConfig` ile bu kontrol `warn!` üretmeli.
-    /// Doğrulama: bir helper fonksiyon extract edip `tracing` subscriber
+    /// The resolved-value warning of `main.rs`: with an `RpcSecurityConfig`
+    /// carrying `auth_required=false`, this check has to produce a `warn!`. The
+    /// verification extracts a helper function and a `tracing` subscriber
     /// Ile log yakalayarak. (`tracing` global subscriber zaten
     /// Test'lerde kurulu olmayabilir; bu test pratik olarak sadece
-    /// Kod yolunun compile edildiğini + doğru koşulda çağrıldığını
-    /// Doğrular - gerçek warning davranışı entegrasyon test'lerinde
-    /// Manuel olarak doğrulanır.)
+    /// verifies that the code path compiles and is called under the right
+    /// condition; the real warning behaviour is verified manually in the
+    /// integration tests.
     #[test]
     fn main_resolved_auth_required_check_compiles() {
         // The check is inline in `main.rs:564-575`. We re-derive the
@@ -348,11 +351,11 @@ mod hardening_tests {
             auth_required: false,
             ..Default::default()
         };
-        // `from_default` artık `true` → uyarı yok.
+        // `from_default` is now `true`, so there is no warning.
         assert!(from_default.auth_required);
-        // `operator_default` kasıtlı olarak `false` → uyarı tetiklenir.
+        // `operator_default` is deliberately `false`, so the warning fires.
         assert!(!from_op.auth_required);
-        // `from_env(auth_required=false)` → uyarı tetiklenir.
+        // `from_env(auth_required=false)` fires the warning.
         assert!(!from_env_no_auth.auth_required);
     }
 }
