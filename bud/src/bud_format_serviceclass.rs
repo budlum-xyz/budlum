@@ -1,10 +1,12 @@
-//! B.U.D. 2.0 - HİZMET SINIFLARI (F16 + K71 SLA - karar katmanı)
+//! B.U.D. 2.0 - SERVICE CLASSES (F16 plus the K71 SLA - the decision layer).
 //!
-//! Ekonomi kararı: tek fiyat 0.016, CPU maliyeti validatörde. Bu modül hizmet sınıflarını
-//! İÇ yerleşim katmanı olarak tanımlar (kullanıcı fiyatı değişmez - TEK FİYAT):
-//! sınıf, erişim sıklığı + yaşa göre seçilir ve hangi medya/erasure düzeyinde
-//! tutulacağını belirler. Varsayılan eşikler ürünleşme kararına açık (yorum satırları).
-//! `ServiceClass::select` deterministiktir; karar kanıtlanabilir.
+//! The economic decision: a single price of 0.016, with the CPU cost carried by
+//! the validator. This module defines the service classes as an INTERNAL
+//! placement layer - the user-facing price does not change, there is ONE PRICE.
+//! A class is chosen from access frequency and age, and it decides which medium
+//! and erasure level the data is kept at. The default thresholds stay open to a
+//! productisation decision (see the comments). `ServiceClass::select` is
+//! deterministic, so the decision is provable.
 
 #![forbid(unsafe_code)]
 
@@ -14,14 +16,15 @@ pub const SVC_MAGIC: [u8; 8] = *b"\xB5SVC1\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServiceClass {
-    Hot = 0,         // erişim sık → HDD-CMR/QLC, çok kopya/erasure yüksek
+    Hot = 0,         // frequent access: HDD-CMR or QLC, many copies, high erasure
     Warm = 1,        // arada → HDD-CMR, erasure standart
-    Cold = 2,        // nadir → SMR/tape-hibrit, erasure düşük
+    Cold = 2,        // rare access: SMR or a tape hybrid, low erasure
     Archive = 3,     // yasal/uzun → tape/M-Disc, write-once
-    Regenerable = 4, // üretilebilir → sözleşme + commitment (bayt tutmaz, İ2)
+    Regenerable = 4, // reproducible: a contract plus a commitment, holds no bytes (I2)
 }
 
-/// Sınıf seçimi: `access_per_month` + `age_days` → sınıf (deterministik).
+/// Class selection: `access_per_month` and `age_days` give a class,
+/// deterministically.
 pub fn select_class(access_per_month: u64, age_days: u64, regenerable: bool) -> ServiceClass {
     if regenerable {
         return ServiceClass::Regenerable;
@@ -34,7 +37,7 @@ pub fn select_class(access_per_month: u64, age_days: u64, regenerable: bool) -> 
     }
 }
 
-/// Sınıfın iç yerleşim medyası (bud_format_hw eşlemesi).
+/// The internal placement medium of a class (the bud_format_hw mapping).
 pub fn placement_media(class: ServiceClass) -> &'static str {
     match class {
         ServiceClass::Hot => "HDD-CMR",
@@ -82,8 +85,9 @@ mod tests {
     }
 
     #[test]
-    fn tek_fiyat_korunur() {
-        // sınıf kararı kullanıcı fiyatını DEĞİŞTİRMEZ - iç yerleşimdir.
+    fn the_single_price_is_preserved() {
+        // The class decision does NOT change the user price; it is internal
+        // placement.
         assert!(ServiceClass::Hot as u8 <= ServiceClass::Archive as u8);
     }
 }
