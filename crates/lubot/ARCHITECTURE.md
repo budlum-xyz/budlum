@@ -115,6 +115,26 @@ Matching requires `fn ` on the left - so a mention in a doc comment or at a call
 site does not count as an implementation - and a non-identifier character on the
 right.
 
+### Numbers quoted in prose
+
+The ceiling checks compare a stated number with a constant. The effort range is
+the same class of claim with an extra step: the prompt tells a requester they
+may ask for anything from a shallow preview at 0.5x through 1.0x up to 10.0x,
+and those figures are `TIER_MIN_TENTHS`, `TIER_BASELINE_TENTHS` and
+`TIER_MAX_TENTHS` divided by `TIER_SCALE`.
+
+The gate performs the division rather than storing the three strings twice.
+Storing them would check that the prompt matches a copy of itself, which is the
+one comparison that can never fail usefully. Dividing means the scale is part of
+what is verified: changing `TIER_SCALE` from 10 to 100 makes every quoted figure
+wrong at once, and the gate says so.
+
+The check fails in both directions here too. Raising the deepest tier in code
+leaves the prompt understating what a requester may ask for, and dropping a
+bound from the prose leaves the chain enforcing a limit nobody was told about.
+Neither is visible to any other check in the tree, because nothing else reads
+the prompt.
+
 ### Names of products read during research
 
 Some of the designs here were reached by reading other projects. No code was
