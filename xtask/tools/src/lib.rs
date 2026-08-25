@@ -57,8 +57,8 @@ pub mod seed_corpus;
 ///
 /// # Panics
 ///
-/// Calisma dizini okunamazsa panikler. Bir arac calisma dizinini
-/// okuyamiyorsa yapacak isi zaten yoktur.
+/// Panics if the working directory cannot be read. A tool that cannot read its
+/// working directory has no work to do anyway.
 #[must_use]
 pub fn repo_root() -> PathBuf {
     if let Some(dir) = option_env!("CARGO_MANIFEST_DIR") {
@@ -69,37 +69,38 @@ pub fn repo_root() -> PathBuf {
             }
         }
     }
-    let mut cur = std::env::current_dir().expect("calisma dizini okunamadi");
+    let mut cur = std::env::current_dir().expect("the working directory could not be read");
     loop {
         if cur.join("Cargo.toml").is_file() && cur.join("src").is_dir() {
             return cur;
         }
         if !cur.pop() {
-            return std::env::current_dir().expect("calisma dizini okunamadi");
+            return std::env::current_dir().expect("the working directory could not be read");
         }
     }
 }
 
-/// Bir komutu calistir, cikis kodunu **kaybetmeden** don.
+/// Run a command and return **without losing** the exit code.
 ///
-/// Shell'de bunun karsiligi `cmd || true` ya da `cmd; RC=$?` idi ve ikisi de
-/// is easily written wrongly: the first swallows the error, the second inserts a command
-/// girdiginde `$?`'i kaybeder. Burada cikis kodu bir donus degeri, bir yan
-/// not an effect.
+/// The shell equivalent was `cmd || true` or `cmd; RC=$?`, and both are easily
+/// written wrongly: the first swallows the error, and the second loses `$?` the
+/// moment another command slips in between. Here the exit code is a return
+/// value, not an effect.
 ///
 /// # Errors
 ///
-/// Returns an error if the process cannot be started (including `ENOENT`). If the process runs and
-/// returns non-zero that is **not an error**: the exit code is returned inside `Ok` and
-/// karari cagiran verir.
+/// Returns an error if the process cannot be started (including `ENOENT`). If
+/// the process runs and returns non-zero that is **not an error**: the exit
+/// code is returned inside `Ok` and the caller makes the decision.
 pub fn run_capturing_status(program: &str, args: &[&str], cwd: &Path) -> Result<i32, String> {
     let status = Command::new(program)
         .args(args)
         .current_dir(cwd)
         .status()
-        .map_err(|e| format!("`{program}` calistirilamadi: {e}"))?;
-    // 128+signal, bir sinyalle olen surecin kabuk karsiligi. Kod yoksa
-    // a signal killed the process and counting that as 0 would be wrong.
+        .map_err(|e| format!("`{program}` could not be run: {e}"))?;
+    // 128+signal is the shell's convention for a process killed by a signal.
+    // If there is no code, a signal killed the process, and counting that as 0
+    // would be wrong.
     Ok(status.code().unwrap_or(-1))
 }
 
@@ -113,7 +114,10 @@ pub fn run_checked(program: &str, args: &[&str], cwd: &Path) -> Result<(), Strin
     if code == 0 {
         Ok(())
     } else {
-        Err(format!("`{program} {}` cikis kodu {code}", args.join(" ")))
+        Err(format!(
+            "`{program} {}` exited with code {code}",
+            args.join(" ")
+        ))
     }
 }
 
@@ -140,34 +144,37 @@ mod tests {
         let root = repo_root();
         assert!(
             root.join("Cargo.toml").is_file(),
-            "kok bir manifest tasimali: {}",
+            "the root has to carry a manifest: {}",
             root.display()
         );
     }
 
     #[test]
     fn a_missing_program_is_an_error_not_a_silent_zero() {
-        let err = run_capturing_status("budlum-bu-program-yok", &[], Path::new("."))
-            .expect_err("olmayan bir program hata dondurmeli");
+        let err = run_capturing_status("budlum-no-such-program", &[], Path::new("."))
+            .expect_err("a missing program has to return an error");
         assert!(
-            err.contains("calistirilamadi"),
-            "hata sebebini soylemeli: {err}"
+            err.contains("could not be run"),
+            "it has to say the reason for the error: {err}"
         );
     }
 
     #[test]
     fn a_nonzero_exit_is_returned_not_swallowed() {
-        // `false` her POSIX sisteminde 1 doner. Shell'de `false || true`
-        // yazmak bu bilgiyi kaybettiriyordu.
+        // `false` returns 1 on every POSIX system. Writing `false || true` in
+        // shell used to lose that information.
         let code =
-            run_capturing_status("false", &[], Path::new(".")).expect("`false` calistirilabilmeli");
-        assert_eq!(code, 1, "cikis kodu korunmali");
+            run_capturing_status("false", &[], Path::new(".")).expect("`false` has to be runnable");
+        assert_eq!(code, 1, "the exit code has to be preserved");
     }
 
     #[test]
     fn run_checked_refuses_a_nonzero_exit() {
-        let err = run_checked("false", &[], Path::new(".")).expect_err("1 kabul edilmemeli");
-        assert!(err.contains("cikis kodu 1"), "kodu soylemeli: {err}");
+        let err = run_checked("false", &[], Path::new(".")).expect_err("1 must not be accepted");
+        assert!(
+            err.contains("exited with code 1"),
+            "it has to say the code: {err}"
+        );
     }
 
     #[test]

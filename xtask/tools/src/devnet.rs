@@ -1,23 +1,23 @@
-//! Yerel iki-dugumlu devnet hazirligi.
+//! Preparing a local two-node devnet.
 //!
-//! `run_nodes.sh` yerine gecer.
+//! It replaces `run_nodes.sh`.
 //!
-//! # Shell surumunun gercek sorunu
+//! # The real problem with the shell version
 //!
-//! Betik `rm -rf ./data/node1.db ./data/node2.db` ile basliyordu ve
+//! The script began with `rm -rf ./data/node1.db ./data/node2.db`, which is
 //! relative to the **working directory**. Called from somewhere other than the
-//! repository root it deletes the wrong `data/` directory; there was no check at all.
-//! Burada silme hedefi depo kokune sabitlenmis ve hedefin gercekten bir
-//! devnet veri dizini oldugu dogrulaniyor.
+//! repository root it deletes the wrong `data/` directory, and there was no
+//! check at all. Here the deletion target is pinned to the repository root and
+//! the target is verified to really be a devnet data directory.
 //!
-//! Ikinci sorun: betigin son satiri kullaniciya `[y/N]` diye soruyordu ama
-//! but **never read** the answer. So the question was a lie; the script always
-//! just printed the command lines and exited. Here there is no question,
+//! The second problem: the script's last line asked the user `[y/N]` but
+//! **never read** the answer. So the question was a lie; the script always
+//! just printed the command lines and exited. Here there is no question, and
 //! the work being done is written out.
 
 use std::path::{Path, PathBuf};
 
-/// Bir devnet dugumunun tarifi.
+/// The description of one devnet node.
 pub struct NodeSpec {
     pub label: &'static str,
     pub port: u16,
@@ -43,11 +43,11 @@ pub fn prepare(root: &Path) -> Result<String, String> {
         if !data.is_dir() {
             return Err(format!("{} is not a directory", data.display()));
         }
-        // Silmeden once bak: burasi gercekten devnet verisi mi? Shell
-        // surumu bunu sormuyordu ve calisma dizinine gore siliyordu.
+        // Look before deleting: is this really devnet data? The shell version
+        // never asked and deleted relative to the working directory.
         let mut foreign: Vec<String> = Vec::new();
-        for entry in
-            std::fs::read_dir(&data).map_err(|e| format!("{} okunamadi: {e}", data.display()))?
+        for entry in std::fs::read_dir(&data)
+            .map_err(|e| format!("{} could not be read: {e}", data.display()))?
         {
             let entry = entry.map_err(|e| format!("dizin girdisi okunamadi: {e}"))?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -77,17 +77,17 @@ pub fn prepare(root: &Path) -> Result<String, String> {
     }
 
     std::fs::create_dir_all(&data)
-        .map_err(|e| format!("{} olusturulamadi: {e}", data.display()))?;
+        .map_err(|e| format!("{} could not be created: {e}", data.display()))?;
 
     let validators = data.join("validators.json");
-    // Shell surumu bu JSON'u bir heredoc'tan yaziyordu; bicimi bozuk bir
-    // a heredoc would silently produce invalid JSON. Here the string is fixed and
-    // after writing it is read back at least structurally.
+    // The shell version wrote this JSON from a heredoc; a malformed heredoc
+    // would silently produce invalid JSON. Here the string is fixed and after
+    // writing it is read back at least structurally.
     let body = "{\n  \"validators\": [\n    \"12D3KooWNode1ValidatorAddress12345\"\n  ]\n}\n";
     std::fs::write(&validators, body)
-        .map_err(|e| format!("{} yazilamadi: {e}", validators.display()))?;
+        .map_err(|e| format!("{} could not be written: {e}", validators.display()))?;
     let back = std::fs::read_to_string(&validators)
-        .map_err(|e| format!("{} okunamadi: {e}", validators.display()))?;
+        .map_err(|e| format!("{} could not be read: {e}", validators.display()))?;
     if !back.contains("validators") || !back.trim_end().ends_with('}') {
         return Err(format!("{} bozuk yazildi", validators.display()));
     }
@@ -102,13 +102,14 @@ pub fn prepare(root: &Path) -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
-/// Iki dugumun tarifi: biri validator, digeri ona baglanan gozlemci.
+/// The description of the two nodes: one validator and one observer dialling
+/// it.
 #[must_use]
 pub fn node_specs(root: &Path) -> Vec<NodeSpec> {
     let data = root.join("data");
     vec![
         NodeSpec {
-            label: "Dugum 1 (validator)",
+            label: "Node 1 (validator)",
             port: 4001,
             db: data.join("node1.db"),
             dial: None,
@@ -122,7 +123,7 @@ pub fn node_specs(root: &Path) -> Vec<NodeSpec> {
     ]
 }
 
-/// Bir dugumu baslatan komut satiri.
+/// The command line that starts one node.
 #[must_use]
 pub fn command_line(spec: &NodeSpec, validators: &Path) -> String {
     let mut s = format!(
@@ -138,18 +139,18 @@ pub fn command_line(spec: &NodeSpec, validators: &Path) -> String {
     s
 }
 
-/// Kanarya: silme korumasinin gercekten calistigini kanitlar.
+/// The canary: it proves the deletion guard really works.
 ///
 /// # Errors
 ///
-/// Yabanci bir dosya iceren bir `data/` dizini silinirse.
+/// If a `data/` directory holding a foreign file gets cleaned.
 pub fn self_test() -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("budlum-devnet-canary-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("data")).map_err(|e| format!("canary directory: {e}"))?;
 
-    // Yabanci bir dosya koy: silinmemeli.
-    let precious = tmp.join("data").join("uretim-verisi.db");
+    // Place a foreign file: it must not be deleted.
+    let precious = tmp.join("data").join("production-data.db");
     std::fs::write(&precious, b"must-not-be-deleted").map_err(|e| format!("canary file: {e}"))?;
 
     let refused = prepare(&tmp);
@@ -175,7 +176,10 @@ pub fn self_test() -> Result<String, String> {
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
-    Ok("devnet kanaryasi OK: yabanci dosya reddedildi, temiz dizin hazirlandi".to_string())
+    Ok(
+        "devnet canary OK: a foreign file was refused and a clean directory was prepared"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
