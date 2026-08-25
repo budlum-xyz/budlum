@@ -44,6 +44,26 @@ const LIMITS: &[(&str, &str, &str)] = &[
     ("video", "frames", "MAX_VIDEO_INPUT_FRAMES"),
 ];
 
+/// Where the effort tier arithmetic lives.
+const EFFORT_PATH: &str = "src/lubot/effort.rs";
+
+/// The three effort figures the prompt quotes, as (prompt text, chain constant).
+///
+/// The prompt names a range - a shallow preview, a baseline, and the deepest
+/// tier - and the numbers it quotes are the tenths in `effort.rs` divided by
+/// `TIER_SCALE`. Quoting a range in prose is exactly the kind of statement that
+/// survives a change to the code underneath it: raising `TIER_MAX_TENTHS` to
+/// 200 would make the prompt understate what a requester can ask for, and
+/// nothing else in the tree reads the prompt.
+///
+/// The division is done here rather than storing the strings twice, so the
+/// check fails if the scale itself moves.
+const EFFORT_FIGURES: &[(&str, &str)] = &[
+    ("0.5x", "TIER_MIN_TENTHS"),
+    ("1.0x", "TIER_BASELINE_TENTHS"),
+    ("10.0x", "TIER_MAX_TENTHS"),
+];
+
 /// Sentences the prompt must keep, because each one is a boundary the tree
 /// pays for elsewhere and a shortened prompt would drop first.
 const REQUIRED_CLAIMS: &[(&str, &str)] = &[
@@ -120,10 +140,25 @@ const BACKED_PROMISES: &[(&str, &str, &str, &str)] = &[
 /// gate is the wrong place to keep one; anything it cannot read is reported
 /// rather than assumed.
 fn const_value(source: &str, name: &str) -> Result<u64, String> {
-    let needle = format!("pub const {name}: u32 = ");
+    const_value_of_type(source, name, "u32", PERCEPTION_PATH)
+}
+
+/// As [`const_value`], for a constant of any integer type in any file.
+///
+/// Split out when the effort figures turned out to be `u16` while the
+/// perception ceilings are `u32`. The type is part of the search string rather
+/// than skipped, because a search that ignored the type would match a
+/// same-named constant of a different width and read a number that means
+/// something else.
+///
+/// # Errors
+///
+/// When the constant is missing, unterminated, or not a product of integers.
+fn const_value_of_type(source: &str, name: &str, ty: &str, path: &str) -> Result<u64, String> {
+    let needle = format!("pub const {name}: {ty} = ");
     let start = source
         .find(&needle)
-        .ok_or_else(|| format!("{name} is gone from {PERCEPTION_PATH}"))?
+        .ok_or_else(|| format!("{name} is gone from {path}"))?
         + needle.len();
     let rest = &source[start..];
     let end = rest
@@ -152,7 +187,53 @@ fn const_value(source: &str, name: &str) -> Result<u64, String> {
 ///
 /// Returns the first claim the pair does not support.
 pub fn check(prompt_source: &str, perception: &str) -> Result<usize, String> {
+    check_with_effort(prompt_source, perception, None)
+}
+
+/// As [`check`], additionally verifying the quoted effort figures when the
+/// `effort.rs` source is supplied.
+///
+/// `None` keeps the older two-argument checks working unchanged; [`run`]
+/// always passes the source.
+///
+/// # Errors
+///
+/// Returns the first claim the sources do not support.
+pub fn check_with_effort(
+    prompt_source: &str,
+    perception: &str,
+    effort: Option<&str>,
+) -> Result<usize, String> {
     let prompt = extract_prompt_text(prompt_source)?;
+    if let Some(effort_src) = effort {
+        let scale = const_value_of_type(effort_src, "TIER_SCALE", "u16", EFFORT_PATH)?;
+        if scale == 0 {
+            return Err(format!("TIER_SCALE is zero in {EFFORT_PATH}"));
+        }
+        for (quoted, konst) in EFFORT_FIGURES {
+            let tenths = const_value_of_type(effort_src, konst, "u16", EFFORT_PATH)?;
+            let whole = tenths / scale;
+            let frac = (tenths % scale) * 10 / scale;
+            let expected = format!("{whole}.{frac}x");
+            if &expected != quoted {
+                return Err(format!(
+                    "the prompt quotes `{quoted}` for {konst}, but {konst} is \
+                     {tenths} tenths against a scale of {scale}, which is \
+                     `{expected}`.\n  A requester reads the prompt to decide what \
+                     to ask for; a range quoted in prose is the kind of statement \
+                     that survives a change to the code underneath it."
+                ));
+            }
+            if !prompt.contains(quoted) {
+                return Err(format!(
+                    "the prompt no longer quotes `{quoted}` ({konst}).\n  The \
+                     effort range is what tells a requester the depth they may \
+                     ask for; dropping a bound from the prose leaves the chain \
+                     enforcing a limit nobody was told about."
+                ));
+            }
+        }
+    }
     for (modality, unit, konst) in LIMITS {
         let value = const_value(perception, konst)?;
         let stated = format!("- {modality}: at most {value} {unit}");
@@ -214,7 +295,7 @@ pub fn check(prompt_source: &str, perception: &str) -> Result<usize, String> {
         }
     }
 
-    Ok(LIMITS.len() + REQUIRED_CLAIMS.len())
+    Ok(LIMITS.len() + EFFORT_FIGURES.len() + REQUIRED_CLAIMS.len())
 }
 
 /// Whether `source` declares a function named exactly `symbol`.
@@ -383,7 +464,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         .map_err(|e| format!("{}: {e}", prompt_file.display()))?;
     let perception = std::fs::read_to_string(&perception_file)
         .map_err(|e| format!("{}: {e}", perception_file.display()))?;
-    let checked = check(&prompt, &perception)?;
+    let effort_file = root.join(EFFORT_PATH);
+    let effort = std::fs::read_to_string(&effort_file)
+        .map_err(|e| format!("{}: {e}", effort_file.display()))?;
+    let checked = check_with_effort(&prompt, &perception, Some(&effort))?;
     let prompt_text = extract_prompt_text(&prompt)?;
     let read = |rel: &str| -> Result<String, String> {
         let f = root.join(rel);
@@ -392,10 +476,12 @@ pub fn run(root: &Path) -> Result<String, String> {
     let backed = check_backed_promises(prompt_text, &read)?;
     Ok(format!(
         "the Lubot system prompt agrees with the tree: {} claims checked \
-         ({} ceilings against {PERCEPTION_PATH}, {} required statements, \
-         {backed} promises traced to an implementing symbol)",
+         ({} ceilings against {PERCEPTION_PATH}, {} effort figures against \
+         {EFFORT_PATH}, {} required statements, {backed} promises traced to an \
+         implementing symbol)",
         checked + backed,
         LIMITS.len(),
+        EFFORT_FIGURES.len(),
         REQUIRED_CLAIMS.len()
     ))
 }
@@ -514,8 +600,76 @@ pub const GENERATION_CLAIM_MARKERS: &[&str] = &[\"generate images\", \"create an
     }
 
     backed_promise_canaries()?;
+    effort_figure_canaries()?;
 
-    Ok(String::from("lubot-prompt-is-true: 14 canaries"))
+    Ok(String::from("lubot-prompt-is-true: 18 canaries"))
+}
+
+/// Canaries 15-18: the quoted effort range against `effort.rs`.
+///
+/// # Errors
+///
+/// Returns the first canary that did not behave.
+fn effort_figure_canaries() -> Result<(), String> {
+    let perception = "\
+pub const MAX_TEXT_INPUT_BYTES: u32 = 1024 * 1024;
+pub const MAX_IMAGE_INPUT_PIXELS: u32 = 16 * 1024 * 1024;
+pub const MAX_AUDIO_INPUT_MILLIS: u32 = 60 * 60 * 1000;
+pub const MAX_VIDEO_INPUT_FRAMES: u32 = 4096;
+";
+    let prompt = "\
+pub const LUBOT_SYSTEM_PROMPT: &str = r#\"
+- text: at most 1048576 bytes
+- still image: at most 16777216 pixels
+- audio: at most 3600000 milliseconds
+- video: at most 4096 frames
+from 0.5x for a shallow preview through 1.0x baseline up to 10.0x for hardware.
+You do not generate images.
+Pollen grant, B.U.D. storage deal, SocialFi reference.
+is not something the field can do yet
+Tiers are called light and normal.
+\"#;
+pub const GENERATION_CLAIM_MARKERS: &[&str] = &[\"generate images\"];
+";
+    let good = "\
+pub const TIER_SCALE: u16 = 10;
+pub const TIER_MIN_TENTHS: u16 = 5;
+pub const TIER_BASELINE_TENTHS: u16 = 10;
+pub const TIER_MAX_TENTHS: u16 = 100;
+";
+    // 15. The agreeing set passes.
+    check_with_effort(prompt, perception, Some(good))
+        .map_err(|e| format!("canary 15: the agreeing effort range was rejected: {e}"))?;
+
+    // 16. Raising the ceiling in code without the prompt is caught.
+    let raised = good.replace("TIER_MAX_TENTHS: u16 = 100", "TIER_MAX_TENTHS: u16 = 200");
+    if check_with_effort(prompt, perception, Some(&raised)).is_ok() {
+        return Err(String::from(
+            "canary 16: the deepest tier doubled in code and the prompt still \
+             quoted the old figure, and that was accepted",
+        ));
+    }
+
+    // 17. Moving the scale changes every figure at once.
+    let rescaled = good.replace("TIER_SCALE: u16 = 10", "TIER_SCALE: u16 = 100");
+    if check_with_effort(prompt, perception, Some(&rescaled)).is_ok() {
+        return Err(String::from(
+            "canary 17: the scale moved and the quoted figures were still accepted. \
+             Storing the strings twice would have missed this; the check divides \
+             so the scale is part of what it verifies.",
+        ));
+    }
+
+    // 18. Dropping a bound from the prose is caught.
+    let shortened = prompt.replace("from 0.5x for a shallow", "from a shallow");
+    if check_with_effort(&shortened, perception, Some(good)).is_ok() {
+        return Err(String::from(
+            "canary 18: the prompt dropped the shallowest tier and was accepted; \
+             the chain would enforce a bound nobody was told about",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Canaries 11-14: the promise/implementation pair, both directions.
