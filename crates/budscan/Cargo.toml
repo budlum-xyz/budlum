@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
-description = "Budscan - Budlum'un merkeziyetsiz tarayici cekirdegi: ad kurali, kanit dogrulamasi, icerik getiricileri ve arama."
+description = "Budscan - Budlum's decentralised browser core: the name rule, evidence verification, content fetchers and search."
 publish = false
 
-# budscan kendi workspace'idir. Sebep, kok manifest'in bagimlilik grafigi:
-# budlum-core libp2p/tokio/jsonrpsee tasiyor ve bunlarin hicbiri bir tarayici
-# cekirdeginin ihtiyaci degil. Ayri workspace, bu crate'in bagimlilik
-# yuzeyini dort kuture indiriyor ve bir tarayicinin guven sinirinda duran
-# kodun neyi cagirdigini okunabilir tutuyor.
+# budscan is its own workspace. The reason is the dependency graph of the root
+# manifest: budlum-core carries libp2p, tokio and jsonrpsee, and a browser core
+# needs none of them. A separate workspace brings this crate's dependency
+# surface down to four crates and keeps it readable what the code sitting on a
+# browser's trust boundary actually calls.
 [workspace]
 
 [lib]
@@ -23,20 +23,23 @@ name = "budscan"
 path = "src/bin/budscan.rs"
 
 [dependencies]
-# Icerik adresleme: B.U.D. `ContentId` ve IPFS sha2-256 multihash icin SHA-256,
+# Content addressing: SHA-256 for the B.U.D. `ContentId` and the IPFS sha2-256
+# multihash,
 # Arweave `data_root` icin SHA-384. Ikisi de ayni crate'ten gelir.
 sha2 = "0.10"
-# ENS namehash (EIP-137) Keccak-256'dir, SHA3-256 degil.
+# The ENS namehash (EIP-137) is Keccak-256, not SHA3-256.
 sha3 = "0.10"
 hex = "0.4"
-# `evidence.rs` kanit kayitlarini Serialize/Deserialize turetiyor. Bir
-# serilestirici (serde_json vb.) burada BAGIMLILIK DEGIL: bicimi cagiran
-# secer. budscan yalniz veri modelini tanimlar, JSON'a kendi yazmaz.
+# `evidence.rs` derives Serialize/Deserialize on the evidence records. A
+# serialiser (serde_json and friends) is NOT A DEPENDENCY here: the caller
+# picks the format. budscan only defines the data model; it does not write JSON
+# itself.
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-# Yalnızca testlerde: risk raporunun serde yuvarlak-geçiş doğrulaması.
-# Üretim bağımlılık yüzeyi değişmez (budscan kendi JSON yazmaz).
+# Tests only: the serde round-trip verification of the risk report. The
+# production dependency surface does not change (budscan does not write its own
+# JSON).
 serde_json = "1"
 
 [lints.rust]
