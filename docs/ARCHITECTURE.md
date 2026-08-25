@@ -6,7 +6,7 @@
 
 ## Contents
 
-> 80 sections, one file. The decision not to split it stands; this list is for navigation only.
+> 82 sections, one file. The decision not to split it stands; this list is for navigation only.
 
 - [1. Overall system architecture](#1-overall-system-architecture)
 - [2. Consensus-domain isolation](#2-consensus-domain-isolation)
@@ -88,6 +88,8 @@
 - [78. Where the computed thing arrives](#78-where-the-computed-thing-arrives)
 - [79. Recipe-addressed identity: binding the frame to its position](#79-recipe-addressed-identity-binding-the-frame-to-its-position)
 - [80. Which arithmetic the division sign describes](#80-which-arithmetic-the-division-sign-describes)
+- [81. The product of two defensible limits](#81-the-product-of-two-defensible-limits)
+- [82. A disconnect is not an amnesty](#82-a-disconnect-is-not-an-amnesty)
 
 ## 1. Overall system architecture
 
@@ -3492,3 +3494,76 @@ not. The VM and the AIR did not change - what had to change was which intent cou
 
 All three were measured: removing the gate turns the refusal test red, extending the gate to every type turns the `field`
 control group red. Without the control group an over-broad ban would have passed unnoticed.
+
+## 81. The product of two defensible limits
+
+The mempool had two limits and both were reasonable. `max_size` capped the number of pending transactions; `MAX_TX_SIZE`
+capped a single transaction. Neither capped the thing the machine actually has to hold. Twenty thousand slots times one
+hundred kibibytes is 1.95 GiB of resident memory reachable from the network, on a node whose whole budget is smaller than
+that. No individual admission was wrong. The product was never bounded, so it was never checked.
+
+```mermaid
+flowchart TD
+  Count["max_size: 20 000 entries - defensible"] --> Product
+  Size["MAX_TX_SIZE: 100 KiB per transaction - defensible"] --> Product
+  Product["Product: 1.95 GiB resident - never checked"] --> Budget["Node budget is smaller than the product"]
+  Budget --> Third["Third limit: max_pool_bytes"]
+  Third --> Default["Default 256 MiB, mainnet 512 MiB"]
+  Third --> Charged["charged_bytes: what the entry costs the node, not what the wire carried"]
+```
+
+The fix is a third limit that measures the quantity being defended: `max_pool_bytes`, defaulting to 256 MiB and raised to
+512 MiB for mainnet. Admission charges `charged_bytes()` - the cost of holding the entry, not the size of the wire
+encoding - against `resident_bytes`, and a pool that cannot make room refuses with `PoolBytesFull`.
+
+The ordering inside the admission path carries the security property, and it is not the obvious one:
+
+```mermaid
+sequenceDiagram
+  participant Tx as Incoming transaction
+  participant Pool as Mempool
+  participant Victim as Resident entry
+  Tx->>Pool: submit
+  Pool->>Pool: 1. count check
+  Pool->>Pool: 2. byte check - BEFORE any eviction
+  Note over Pool: a transaction that will be refused evicts nothing
+  Pool->>Victim: 3. replacement removal, only for an accepted entry
+```
+
+If eviction ran before the byte check, a transaction too large to be admitted would still have displaced a resident entry
+on its way to being refused. That is a free deletion primitive: an attacker who cannot get anything into the pool can
+still empty it. Checking bytes before evicting means the only transaction that can remove another is one that is itself
+being kept. The pool exposes `budlum_mempool_bytes` so the operator sees the quantity the limit defends, not a proxy
+for it.
+
+## 82. A disconnect is not an amnesty
+
+Peer scoring keeps a record per peer id. Peer ids are free to make, so the table that holds them is an attacker-writable
+allocation: a node that opens and drops connections under fresh identities grows the score table without limit. The table
+needs a ceiling - `MAX_SCORED_PEERS` at 4 096 - but the ceiling immediately raises a second question, which is who gets
+dropped when it is reached.
+
+The wrong answer is to drop the score when the peer disconnects. It looks like housekeeping and it is a laundering
+service: any peer that has earned a bad score reconnects clean, and the scoring system stops describing anything.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Scored: first message
+  Scored --> Scored: record_valid / record_invalid
+  Scored --> Queued: note_peer_disconnected - score KEPT, peer queued for eviction
+  Queued --> Scored: note_peer_connected - removed from the queue, record intact
+  Queued --> [*]: evicted first when the ceiling is reached
+  Scored --> [*]: evicted only after the queue is empty
+```
+
+A disconnect therefore changes eligibility for eviction, never the score itself. `enforce_score_ceiling` drains the
+disconnected queue first and only reaches connected peers when nothing else is left, so a peer that is currently talking
+to us keeps its history while churned identities pay for the churn. `budlum_gossip_scored_peers` reports the table's
+occupancy.
+
+Each of those three invariants is held by a test that a mutation kills: disabling the ceiling turns the churn test red,
+deleting the score on disconnect turns the laundering test red, and removing the disconnected-first branch turns the
+eviction-priority test red. The third one did not hold at first. The eviction test scored its resident peer like the
+churn, and with equal scores the fallback path happened to spare it by the id tie-break, so deleting the queue left the
+suite green. Scoring the resident deliberately *above* the churn makes it the fallback's first victim - and only then
+does the test measure the queue instead of a coincidence.
