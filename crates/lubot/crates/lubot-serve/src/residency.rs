@@ -1,0 +1,528 @@
+//! On-device weight residency: where each part of a model lives, and why.
+//!
+//! # The problem this solves
+//!
+//! [`crate::config::ServeEngine::Vllm`] and `Sglang` require the whole model
+//! resident in accelerator memory. That makes the operator set exactly the
+//! people who own data-centre hardware, which contradicts the rule stated in
+//! the chain's own effort module: an operator answers with the machine it
+//! actually owns. A tier a phone cannot serve is a tier a phone cannot earn
+//! from.
+//!
+//! The alternative, which this module plans for, is to stop treating fast
+//! memory as a requirement and start treating it as a *placement*. A
+//! mixture-of-experts model activates a small fraction of its parameters per
+//! token: the dense part (attention, shared experts, embeddings) is needed for
+//! every token, and the routed experts are needed one small subset at a time.
+//! The dense part earns residency; the experts can be staged from slower
+//! storage on demand.
+//!
+//! # The invariant, and why it is the whole point
+//!
+//! **Placement decides speed. It must never decide semantics.**
+//!
+//! A device short on fast memory produces the same tokens, more slowly. It does
+//! not silently drop to a smaller quantisation, a shorter context, or a
+//! different routing rule. This is not a style preference here the way it is in
+//! a standalone inference engine: on this chain an answer is grouped with other
+//! operators' answers by an exact 32-byte commitment, and one differing bit
+//! puts an operator in a different group. An engine that quietly reduced
+//! precision when memory was tight would produce an operator that silently
+//! stops agreeing - and the symptom would be a request that never finalises,
+//! which reads as a liveness fault rather than as the configuration error it
+//! is.
+//!
+//! So [`ResidencyPlan::plan`] is allowed to move weights between tiers and is
+//! not allowed to change [`SemanticProfile`]. The type carries no method that
+//! could; the planner takes it by value and returns it unchanged, and
+//! `plan_preserves_semantics` proves it for a machine with no fast memory at
+//! all.
+//!
+//! # Where the weights come from
+//!
+//! B.U.D., and nothing else. The tiers below are placements of content already
+//! addressed by [`WeightShard::content_id`]; there is no path here that fetches
+//! from a URL, a mirror or a local file the chain has not seen. That is the
+//! closed loop applied to weights rather than to training data: an operator who
+//! could stage a shard from anywhere could stage a *different* shard, and the
+//! model commitment would then describe something other than what ran.
+//!
+//! # What is deliberately not here
+//!
+//! No prefetch policy, no learned hot-set, no eviction heuristic. Those are
+//! performance policies that have to be measured on real hardware before they
+//! are believed, and an unmeasured policy written into the tree reads as a
+//! decision when it is a guess. What is here is the part that has to be right
+//! before any of them can be tried: the tier arithmetic, the fail-closed
+//! refusal when the dense part does not fit anywhere, and the invariant that
+//! none of it may touch semantics.
+
+/// A storage tier, fastest first.
+///
+/// Ordered so `Tier::Accelerator < Tier::System < Tier::Disk`, which lets the
+/// planner fill greedily without a separate speed table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Accelerator memory (VRAM, or the GPU-visible half of a unified pool).
+    Accelerator,
+    /// Host memory.
+    System,
+    /// Local storage. Always present: a device with no disk cannot hold a
+    /// model at all, so there is no plan to make.
+    Disk,
+}
+
+impl Tier {
+    /// The name used in operator-facing output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Tier::Accelerator => "accelerator",
+            Tier::System => "system",
+            Tier::Disk => "disk",
+        }
+    }
+}
+
+/// What a device has, in bytes.
+///
+/// Byte counts rather than device names: the planner has no business knowing
+/// whether the accelerator is a discrete card or a unified pool, and a plan
+/// that branched on the brand would be untestable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceBudget {
+    /// Bytes usable in accelerator memory. Zero on a CPU-only device.
+    pub accelerator_bytes: u64,
+    /// Bytes usable in host memory.
+    pub system_bytes: u64,
+}
+
+impl DeviceBudget {
+    /// A device with no accelerator.
+    #[must_use]
+    pub const fn cpu_only(system_bytes: u64) -> Self {
+        Self {
+            accelerator_bytes: 0,
+            system_bytes,
+        }
+    }
+
+    /// Bytes available in a tier.
+    #[must_use]
+    pub const fn bytes_in(self, tier: Tier) -> u64 {
+        match tier {
+            Tier::Accelerator => self.accelerator_bytes,
+            Tier::System => self.system_bytes,
+            // Disk is the overflow tier; the planner never has to ask how
+            // much of it there is, because a shard that does not fit on disk
+            // was never downloaded in the first place.
+            Tier::Disk => u64::MAX,
+        }
+    }
+}
+
+/// How often a shard is needed.
+///
+/// Two values, not a score. A score invites a threshold, a threshold invites
+/// tuning, and tuning a placement rule is how a placement rule turns into a
+/// semantic one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Demand {
+    /// Needed for every token: attention, shared experts, embeddings, the
+    /// output head. Staging these per token would mean paying the full
+    /// transfer cost on every step, which is the case streaming cannot help.
+    EveryToken,
+    /// Needed only when the router selects it.
+    WhenRouted,
+}
+
+/// One placeable piece of a model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightShard {
+    /// The B.U.D. content identifier of the bytes.
+    ///
+    /// The identity of the shard, not a file path: two operators staging the
+    /// same shard stage the same bytes, and a shard whose bytes do not hash to
+    /// this is not this shard.
+    pub content_id: [u8; 32],
+    pub bytes: u64,
+    pub demand: Demand,
+}
+
+/// The parts of a model's behaviour that placement may not alter.
+///
+/// Carried through the planner untouched. It exists so that "placement does not
+/// change semantics" is a statement about a value that can be compared, rather
+/// than a comment nobody can check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticProfile {
+    /// Bits per weight as published. A device short on memory does not get to
+    /// lower this.
+    pub weight_bits: u8,
+    /// The context length the model was registered with.
+    pub context_tokens: u32,
+    /// Experts consulted per token by the router.
+    pub experts_per_token: u16,
+}
+
+/// Why no plan could be produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    /// The per-token weights do not fit in accelerator or system memory
+    /// together.
+    ///
+    /// Fail closed rather than placing them on disk. Streaming a weight that
+    /// every token needs is not a slow plan, it is a plan that reads the same
+    /// bytes from disk on every step; reporting the shortfall lets an operator
+    /// decline the tier instead of registering a machine that will time out.
+    DensePartDoesNotFit { needed: u64, available: u64 },
+    /// A model with no shards.
+    NothingToPlace,
+}
+
+/// Where one shard was placed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub content_id: [u8; 32],
+    pub tier: Tier,
+    pub bytes: u64,
+}
+
+/// The result of planning a model onto a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidencyPlan {
+    pub placements: Vec<Placement>,
+    /// Returned unchanged from the input. See the module header.
+    pub semantics: SemanticProfile,
+}
+
+impl ResidencyPlan {
+    /// Place `shards` onto `budget`.
+    ///
+    /// The rule, in order:
+    ///
+    /// 1. Every [`Demand::EveryToken`] shard is placed in fast memory,
+    ///    accelerator first. If they do not all fit, the whole plan fails;
+    ///    there is no partial answer here, because a dense part half on disk
+    ///    pays the disk cost on every token anyway.
+    /// 2. [`Demand::WhenRouted`] shards fill whatever fast memory is left,
+    ///    largest first, and the rest go to disk. Largest first because the
+    ///    win from residency is proportional to bytes moved, and a tie broken
+    ///    by content id keeps two operators with the same device producing the
+    ///    same plan.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::NothingToPlace`] for an empty model,
+    /// [`PlanError::DensePartDoesNotFit`] when rule 1 cannot be satisfied.
+    pub fn plan(
+        shards: &[WeightShard],
+        budget: DeviceBudget,
+        semantics: SemanticProfile,
+    ) -> Result<Self, PlanError> {
+        if shards.is_empty() {
+            return Err(PlanError::NothingToPlace);
+        }
+
+        let dense_needed: u64 = shards
+            .iter()
+            .filter(|s| s.demand == Demand::EveryToken)
+            .map(|s| s.bytes)
+            .fold(0, u64::saturating_add);
+        let fast_total = budget.accelerator_bytes.saturating_add(budget.system_bytes);
+        if dense_needed > fast_total {
+            return Err(PlanError::DensePartDoesNotFit {
+                needed: dense_needed,
+                available: fast_total,
+            });
+        }
+
+        let mut free_accelerator = budget.accelerator_bytes;
+        let mut free_system = budget.system_bytes;
+        let mut placements = Vec::with_capacity(shards.len());
+
+        // Rule 1: the dense part, fastest tier first.
+        for shard in shards.iter().filter(|s| s.demand == Demand::EveryToken) {
+            let tier = if shard.bytes <= free_accelerator {
+                free_accelerator -= shard.bytes;
+                Tier::Accelerator
+            } else if shard.bytes <= free_system {
+                free_system -= shard.bytes;
+                Tier::System
+            } else {
+                // The totals fit but no single tier holds this shard: it is
+                // larger than either pool's remainder. Reported as the same
+                // shortfall rather than silently spilled to disk, because the
+                // consequence for the operator is identical - this machine
+                // cannot serve this model.
+                return Err(PlanError::DensePartDoesNotFit {
+                    needed: dense_needed,
+                    available: fast_total,
+                });
+            };
+            placements.push(Placement {
+                content_id: shard.content_id,
+                tier,
+                bytes: shard.bytes,
+            });
+        }
+
+        // Rule 2: routed experts, largest first, deterministic on ties.
+        let mut routed: Vec<&WeightShard> = shards
+            .iter()
+            .filter(|s| s.demand == Demand::WhenRouted)
+            .collect();
+        routed.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| a.content_id.cmp(&b.content_id))
+        });
+        for shard in routed {
+            let tier = if shard.bytes <= free_accelerator {
+                free_accelerator -= shard.bytes;
+                Tier::Accelerator
+            } else if shard.bytes <= free_system {
+                free_system -= shard.bytes;
+                Tier::System
+            } else {
+                Tier::Disk
+            };
+            placements.push(Placement {
+                content_id: shard.content_id,
+                tier,
+                bytes: shard.bytes,
+            });
+        }
+
+        Ok(Self {
+            placements,
+            semantics,
+        })
+    }
+
+    /// Bytes placed in a tier.
+    #[must_use]
+    pub fn bytes_in(&self, tier: Tier) -> u64 {
+        self.placements
+            .iter()
+            .filter(|p| p.tier == tier)
+            .map(|p| p.bytes)
+            .fold(0, u64::saturating_add)
+    }
+
+    /// Whether any weight is streamed from disk during decoding.
+    #[must_use]
+    pub fn streams_from_disk(&self) -> bool {
+        self.placements.iter().any(|p| p.tier == Tier::Disk)
+    }
+
+    /// A one-line operator summary.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "{} shard(s): {} B accelerator, {} B system, {} B disk; {} bit weights, {} token context",
+            self.placements.len(),
+            self.bytes_in(Tier::Accelerator),
+            self.bytes_in(Tier::System),
+            self.bytes_in(Tier::Disk),
+            self.semantics.weight_bits,
+            self.semantics.context_tokens,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
+    fn profile() -> SemanticProfile {
+        SemanticProfile {
+            weight_bits: 4,
+            context_tokens: 131_072,
+            experts_per_token: 8,
+        }
+    }
+
+    /// A dense shard plus four experts.
+    fn model() -> Vec<WeightShard> {
+        let mut v = vec![WeightShard {
+            content_id: id(0),
+            bytes: 1000,
+            demand: Demand::EveryToken,
+        }];
+        for n in 1..=4u8 {
+            v.push(WeightShard {
+                content_id: id(n),
+                bytes: 500,
+                demand: Demand::WhenRouted,
+            });
+        }
+        v
+    }
+
+    /// The invariant: a machine with no fast memory to spare returns the same
+    /// semantics as one with plenty.
+    ///
+    /// This is the test the module exists for. Everything else here is
+    /// arithmetic; this is the property that makes the arithmetic safe to
+    /// apply on a consensus path.
+    #[test]
+    fn plan_preserves_semantics() {
+        let generous = ResidencyPlan::plan(
+            &model(),
+            DeviceBudget {
+                accelerator_bytes: 1_000_000,
+                system_bytes: 1_000_000,
+            },
+            profile(),
+        )
+        .unwrap();
+
+        // Exactly enough for the dense part and not one byte more.
+        let starved =
+            ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(1000), profile()).unwrap();
+
+        assert_eq!(
+            generous.semantics, starved.semantics,
+            "placement changed the model's semantics"
+        );
+        assert!(
+            !generous.streams_from_disk(),
+            "a machine with room to spare should not be streaming"
+        );
+        assert!(
+            starved.streams_from_disk(),
+            "a machine with no spare room must stream rather than fail"
+        );
+    }
+
+    /// The dense part never lands on disk.
+    #[test]
+    fn per_token_weights_are_never_streamed() {
+        let plan = ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(1200), profile()).unwrap();
+        let dense = plan
+            .placements
+            .iter()
+            .find(|p| p.content_id == id(0))
+            .expect("the dense shard vanished from the plan");
+        assert_ne!(dense.tier, Tier::Disk);
+    }
+
+    /// A device too small for the dense part is refused, not degraded.
+    #[test]
+    fn a_device_that_cannot_hold_the_dense_part_is_refused() {
+        let err =
+            ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(999), profile()).unwrap_err();
+        assert_eq!(
+            err,
+            PlanError::DensePartDoesNotFit {
+                needed: 1000,
+                available: 999
+            }
+        );
+    }
+
+    /// Fast memory is filled before disk is used.
+    #[test]
+    fn fast_memory_is_filled_before_disk() {
+        // 1000 dense + two 500-byte experts fit; two spill.
+        let plan = ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(2000), profile()).unwrap();
+        assert_eq!(plan.bytes_in(Tier::System), 2000);
+        assert_eq!(plan.bytes_in(Tier::Disk), 1000);
+    }
+
+    /// The accelerator is filled before host memory.
+    #[test]
+    fn the_accelerator_is_preferred_over_host_memory() {
+        let plan = ResidencyPlan::plan(
+            &model(),
+            DeviceBudget {
+                accelerator_bytes: 1500,
+                system_bytes: 1500,
+            },
+            profile(),
+        )
+        .unwrap();
+        assert_eq!(plan.bytes_in(Tier::Accelerator), 1500);
+        assert_eq!(plan.bytes_in(Tier::System), 1500);
+        assert!(!plan.streams_from_disk());
+    }
+
+    /// Two operators with the same device produce the same plan.
+    ///
+    /// Not cosmetic: the plan decides which shards a node fetches from B.U.D.,
+    /// and a plan that depended on iteration order would make two identical
+    /// machines disagree about what they need.
+    #[test]
+    fn the_plan_is_deterministic_across_shard_order() {
+        let budget = DeviceBudget::cpu_only(2000);
+        let forward = ResidencyPlan::plan(&model(), budget, profile()).unwrap();
+
+        let mut reversed = model();
+        reversed.reverse();
+        let backward = ResidencyPlan::plan(&reversed, budget, profile()).unwrap();
+
+        let tier_of = |plan: &ResidencyPlan, n: u8| {
+            plan.placements
+                .iter()
+                .find(|p| p.content_id == id(n))
+                .map(|p| p.tier)
+        };
+        for n in 0..=4u8 {
+            assert_eq!(
+                tier_of(&forward, n),
+                tier_of(&backward, n),
+                "shard {n} landed in a different tier when the input order changed"
+            );
+        }
+    }
+
+    /// Every shard appears exactly once.
+    #[test]
+    fn every_shard_is_placed_exactly_once() {
+        let shards = model();
+        let plan = ResidencyPlan::plan(&shards, DeviceBudget::cpu_only(1000), profile()).unwrap();
+        assert_eq!(plan.placements.len(), shards.len());
+        let mut ids: Vec<[u8; 32]> = plan.placements.iter().map(|p| p.content_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), shards.len(), "a shard was placed twice");
+    }
+
+    /// An empty model is an error rather than an empty plan.
+    #[test]
+    fn an_empty_model_is_refused() {
+        assert_eq!(
+            ResidencyPlan::plan(&[], DeviceBudget::cpu_only(1000), profile()),
+            Err(PlanError::NothingToPlace)
+        );
+    }
+
+    /// A dense shard larger than either pool alone is refused even when the
+    /// totals would cover it.
+    ///
+    /// A shard is not divisible across tiers, so summing the pools would
+    /// report a plan the device cannot execute.
+    #[test]
+    fn a_dense_shard_larger_than_any_single_pool_is_refused() {
+        let shards = vec![WeightShard {
+            content_id: id(7),
+            bytes: 1500,
+            demand: Demand::EveryToken,
+        }];
+        let err = ResidencyPlan::plan(
+            &shards,
+            DeviceBudget {
+                accelerator_bytes: 800,
+                system_bytes: 800,
+            },
+            profile(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PlanError::DensePartDoesNotFit { .. }));
+    }
+}
