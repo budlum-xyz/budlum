@@ -1,16 +1,20 @@
-//! Hard Pruning zincir-seviyesi mühür (F1 - raporu bulgusu,
-//! Test mühürü, 2026-07-17).
+//! The chain-level seal for hard pruning (F1 - a report finding, sealed by test
+//! on 2026-07-17).
 //!
-//! Constitution §1: NFT yakılınca bağlı olduğu B.U.D. içeriği silinmelidir.
-//! Kanonik mekanizma (b65f058; 62c7509'da tek mekanizmaya indirgenmiştir):
-//! Blok commit sonrası collect_nft_burn_cids + process_nft_burn_storage_pruning
-//! -> prune_content aktif deal'leri expire eder, manifest'i registry'den
-//! Kaldırır. Bu test produce_block yolundaki zincir-seviye etkiyi kilitler.
-//! Fiziksel chunk silme (NodeCommand::StoragePrune worker) ayrı doğrulama
-//! Konusudur (bkz. STATUS_ONLINE bulgusu R1: sender wiring eksik).
+//! Constitution section 1: when an NFT is burned, the B.U.D. content bound to it
+//! has to be deleted.
+//! The canonical mechanism (b65f058; reduced to a single mechanism in 62c7509):
+//! after a block commit, collect_nft_burn_cids plus
+//! process_nft_burn_storage_pruning call prune_content, which expires the active
+//! deals and removes the manifest from the registry. This test locks the
+//! chain-level effect on the produce_block path.
+//! Physically deleting the chunks (the NodeCommand::StoragePrune worker) is a
+//! separate verification matter (see the STATUS_ONLINE finding R1: the sender
+//! wiring is missing).
 //!
-//! NOT (CI kanıtlı): mempool tx doğrulaması imza ister, tx'ler gerçek
-//! KeyPair ile imzalanır, nonce zincirden okunur, nft_id registry'den okunur.
+//! NOTE (proved in CI): mempool transaction validation requires a signature, so
+//! the transactions are signed with a real KeyPair, the nonce is read from the
+//! chain and the nft_id is read from the registry.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
@@ -36,7 +40,8 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     let alice = Address::from(alice_kp.public_key_bytes());
     bc.state.add_balance(&alice, 1000);
 
-    // Manifest zincir registry'sine kayıtlı; NFT aynı content_id'ye bağlı.
+    // The manifest is registered in the chain registry, and the NFT is bound to
+    // the same content_id.
     let manifest = ContentManifest::from_bytes_sliced(b"hard prune target", 4).unwrap();
     let cid = manifest.manifest_id;
     bc.state.storage_registry.register_manifest(&manifest);
@@ -52,7 +57,7 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     let _ = bc.produce_block(Address::zero()).unwrap();
     assert_eq!(bc.state.nft_registry.nfts.len(), 1);
 
-    // NFT id'si registry'den okunur (id sayacı varsayımı yok).
+    // The NFT id is read from the registry, with no assumption about an id counter.
     let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
 
     // Burn.
@@ -70,7 +75,7 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     bc.mempool.add_transaction(burn_tx).unwrap();
     let (_block, pruned_cids) = bc.produce_block(Address::zero()).unwrap();
 
-    // NFT yakıldı ve eşleşen manifest hard-prune ile silindi.
+    // The NFT was burned and the matching manifest was hard-pruned.
     assert_eq!(bc.state.nft_registry.nfts.len(), 0);
     assert!(bc.state.storage_registry.get_manifest(&cid).is_none());
 
