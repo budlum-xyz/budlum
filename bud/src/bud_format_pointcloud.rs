@@ -1,10 +1,13 @@
-//! B.U.D. 2.0 - NOKTA BULUTU KUANTİZASYON TOHUMU (F44/F46-3D; hata-sınırlı kuantizasyon)
+//! B.U.D. 2.0 - THE POINT CLOUD QUANTISATION SEED (F44/F46-3D; error-bounded
+//! quantisation).
 //!
-//! Kalan iş #12b (3D ayağı): nokta bulutu koordinatlarını HATA-SINIRLI kuantize
-//! eder (grid), aynı grid hücresine düşen noktalar tekilleşir; kalan delta+zstd.
-//! Kayıpsız modda kuantizasyon hatası RESIDUAL ile tam saklanır (bit-birebir);
-//! kayıplı modda FidelityGate'e bağlanır (error-bounded ≤1e-3). Dış codec seçimi
-//! ayrı bir karardır; bu modül TOHUMdur.
+//! Remaining work item #12b (the 3D leg): it quantises point cloud coordinates
+//! in an ERROR-BOUNDED way (a grid), points landing in the same grid cell are
+//! deduplicated, and the remainder goes through delta plus zstd. In lossless
+//! mode the quantisation error is stored in full as a RESIDUAL (bit for bit);
+//! in lossy mode it is bound to the FidelityGate (error-bounded at 1e-3 or
+//! better). Choosing an external codec is a separate decision; this module is
+//! the SEED.
 
 #![forbid(unsafe_code)]
 
@@ -17,9 +20,10 @@ pub struct PointCloud {
     pub coords: Vec<(f64, f64, f64)>,
 }
 
-/// Grid hücre boyutuna göre kuantize + tekilleştir (deterministik sıra).
-/// `lossy=false` → koordinatlar grid + residual olarak SAKLANIR (kayıpsız geri).
-/// `lossy=true` → yalnız grid merkezleri (error-bounded: hata ≤ grid/2).
+/// Quantise by grid cell size and deduplicate (in a deterministic order).
+/// `lossy=false` STORES the coordinates as a grid cell plus a residual (a
+/// lossless return). `lossy=true` keeps only the grid centres (error-bounded:
+/// the error is at most grid/2).
 pub fn quantize(
     pc: &PointCloud,
     grid: f64,
@@ -43,7 +47,8 @@ pub fn quantize(
             ));
         }
     }
-    // tekilleştirme (aynı hücre birden çok nokta → 1 temsil + sayı)
+    // deduplication (several points in one cell become one representative plus
+    // a count)
     if lossy {
         let mut seen: Vec<(i64, i64, i64)> = Vec::new();
         for c in &cells {
@@ -56,7 +61,8 @@ pub fn quantize(
     Some((cells, if lossy { None } else { Some(residual) }))
 }
 
-/// Kayıpsız geri çevirme: hücre + residual → birebir koordinat.
+/// The lossless inverse: a cell plus a residual gives back the exact
+/// coordinate.
 pub fn dequantize_lossless(
     cells: &[(i64, i64, i64)],
     residual: &[(f64, f64, f64)],
@@ -98,23 +104,23 @@ mod tests {
                 (1.234, 5.678, 9.012),
                 (-3.5, 2.25, 0.0),
                 (100.0, -50.0, 0.001),
-                (1.234, 5.678, 9.012), // kopya
+                (1.234, 5.678, 9.012), // a duplicate
             ],
         };
         let (cells, res) = quantize(&pc, 0.01, false).unwrap();
         let back = dequantize_lossless(&cells, &res.unwrap(), 0.01).unwrap();
-        assert_eq!(back, pc.coords, "kayıpsız birebir");
+        assert_eq!(back, pc.coords, "lossless and byte for byte");
     }
 
     #[test]
-    fn kayipli_tekillestirme_error_sinirli() {
+    fn lossy_deduplication_stays_error_bounded() {
         let pc = PointCloud {
             coords: vec![(0.1, 0.1, 0.1), (0.1001, 0.1001, 0.1001), (5.0, 5.0, 5.0)],
         };
         let (cells, _) = quantize(&pc, 0.1, true).unwrap();
-        // 3 nokta → 2 hücre (ilk ikisi aynı)
+        // 3 points become 2 cells (the first two are the same)
         assert_eq!(cells.len(), 2);
-        // hata sınırı: grid/2
+        // the error bound: grid/2
         for &(cx, cy, cz) in &cells {
             for &(x, y, z) in &pc.coords {
                 let d = ((x - cx as f64 * 0.1).abs())
@@ -128,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn gecersiz_girdi() {
+    fn invalid_input_is_refused() {
         assert!(quantize(&PointCloud { coords: vec![] }, 1.0, false).is_none());
         assert!(quantize(
             &PointCloud {

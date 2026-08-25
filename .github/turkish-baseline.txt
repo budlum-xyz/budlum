@@ -40,7 +40,6 @@ bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
-bud/src/bud_format_pointcloud.rs	16
 bud/src/bud_format_prodcost.rs	15
 bud/src/bud_format_qos.rs	5
 bud/src/bud_format_registry.rs	7
@@ -122,7 +121,6 @@ rust-toolchain.toml	2
 src/account_abstraction/mod.rs	8
 src/account_abstraction/quantum_account.rs	9
 src/ai/mod.rs	2
-src/ai/types.rs	15
 src/bin/bud.rs	2
 src/bns/README.md	15
 src/bns/registry.rs	7
@@ -131,7 +129,6 @@ src/budlumxyz/mod.rs	3
 src/chain/genesis.rs	14
 src/chain/snapshot.rs	9
 src/chain/storage_economics_tests.rs	4
-src/consensus/pow.rs	15
 src/core/governance.rs	6
 src/core/transaction.rs	6
 src/cross_domain/bridge.rs	10
@@ -145,7 +142,6 @@ src/domain/registry.rs	7
 src/domain/storage_deal.rs	2
 src/domain/types.rs	11
 src/execution/executor.rs	3
-src/gateway/service.rs	15
 src/lib.rs	4
 src/lubot/effort.rs	1
 src/lubot/metrics.rs	10

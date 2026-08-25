@@ -1,4 +1,4 @@
-//! Canonical AI Inference Layer Types (``, `Bölüm 1`).
+//! Canonical AI inference layer types (section 1).
 //!
 //! Provides deterministic model registry specifications, bounded execution reference
 //! Payloads, attestation request/result primitives, and consensus agreement outcomes.
@@ -203,21 +203,24 @@ impl AiModelSpec {
         if self.request_deadline_blocks == 0 || self.result_deadline_blocks == 0 {
             return Err("Deadlines must be >= 1 block".into());
         }
-        // execution_dims sınırları: None = eski kayıtlar (execution proof
-        // isteyemezler, yukarıda denetlenir). Some ise: en az 2 katman
-        // (girdi + çıktı), en fazla 32 katman ve hiçbir katman 0 olamaz.
-        // Sınırsız/bozuk dims vektörü kayıtta şişkinlik ve zehirli misafir
-        // program şekilleri üretirdi; misafir program yalnız mimariye bağlı
-        // olduğundan bu doğrulama kayıt anında yapılır.
+        // The execution_dims bounds: None means an old record (those cannot
+        // ask for an execution proof, which is checked above). Some means at
+        // least 2 layers (input plus output), at most 32 layers, and no layer
+        // may be 0. An unbounded or corrupt dims vector would produce record
+        // bloat and poisonous guest program shapes; because the guest program
+        // depends only on the architecture, this validation happens at
+        // registration time.
         if let Some(dims) = &self.execution_dims {
             if dims.len() < 2 {
-                return Err("execution_dims en az 2 katman (girdi + çıktı) içermeli".into());
+                return Err(
+                    "execution_dims must contain at least 2 layers (input plus output)".into(),
+                );
             }
             if dims.len() > 32 {
-                return Err("execution_dims en fazla 32 katman içerebilir".into());
+                return Err("execution_dims may contain at most 32 layers".into());
             }
             if dims.contains(&0) {
-                return Err("execution_dims katman boyutu 0 olamaz".into());
+                return Err("an execution_dims layer size may not be 0".into());
             }
         }
         Ok(())
@@ -492,9 +495,9 @@ pub struct AiVerifierStakeInfo {
 /// Verification: `verify(model_id, input_commitment, output_commitment, proof)`
 /// Returns true only if the output was produced by the model on the input.
 ///
-/// This is the "AI Execution Layer" that the whitepaper describes as mainnet
-/// Blocker #5: "Primitiflerin ötesinde AI yürütme katmanı - araştırma/
-/// Entegrasyon görevsında."
+/// This is the "AI execution layer" that the whitepaper describes as mainnet
+/// blocker #5: "an AI execution layer beyond the primitives - in the
+/// research and integration task."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiExecutionProof {
     /// The model that produced this inference. The ZKVM program_hash must
@@ -775,9 +778,9 @@ impl AiInferenceOutcome {
 /// Agent-to-Agent Payment - trustless value transfer
 /// Between AI agents in the Agentic Economy.
 ///
-/// In the paradigm shift #5 (AI + Blockchain Konverjansı), the core problem
-/// Is: "AI ajanlarının birbirleriyle ve insanlarla güvenli value transfer
-/// Yapamaması." This type enables:
+/// In paradigm shift #5 (the convergence of AI and blockchain), the core
+/// problem is: "AI agents cannot make secure value transfers with each other
+/// or with humans." This type enables:
 ///
 /// 1. **Inference-linked payments** - agent pays for inference results
 ///    (request_id binds the payment to a specific AI inference outcome)
