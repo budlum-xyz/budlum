@@ -1,23 +1,25 @@
-//! RFC 3492 Punycode kodlayicisi (yalniz kodlama yonu).
+//! The RFC 3492 Punycode encoder (the encoding direction only).
 //!
-//! # Neden burada, neden bir bagimlilik degil
+//! # Why it is here and why it is not a dependency
 //!
-//! Bir tarayicinin adres cubugu, kabul etmedigi bir adi **gostermek** zorunda
-//! kalabilir: gecmiste duran, bir baglantinin ustunde beliren, bir hatada
-//! yazilan ad. O anda ASCII disi baytlari oldugu gibi cizmek, homograf
-//! saldirisinin yasadigi bosluktur. Punycode gostermek, gosterilen sey ile
-//! cozulen seyi ayni yapar.
+//! A browser's address bar may have to **display** a name it does not accept:
+//! a name sitting in history, appearing over a link, or typed into an error.
+//! Drawing the non-ASCII bytes as they are at that moment is the gap the
+//! homograph attack lives in. Displaying punycode makes what is displayed the
+//! same as what is resolved.
 //!
-//! Cozme yonu bilerek yok. Bu tarayici punycode bir etiketi Unicode'a
-//! **cevirmez**: `xn--` ile baslayan bir ad zaten ASCII'dir, ad kuralindan
-//! gecer ve oldugu gibi cozulur. Kod cozmek yalniz onu daha guzel gostermek
-//! icin gerekirdi ve "daha guzel gosterme" bu modulun kacindigi seydir.
+//! The decoding direction is deliberately absent. This browser does not
+//! **convert** a punycode label back to Unicode: a name starting with `xn--`
+//! is already ASCII, passes the name rule and resolves as it is. Decoding
+//! would only be needed to display it more prettily, and "displaying it more
+//! prettily" is exactly what this module avoids.
 //!
-//! # Parametreler
+//! # Parameters
 //!
-//! RFC 3492 §5: `base=36`, `tmin=1`, `tmax=26`, `skew=38`, `damp=700`,
-//! `initial_bias=72`, `initial_n=128`, `delimiter='-'`. Bunlar tanimin parcasi,
-//! ayarlanabilir bir sey degil; degistirilirse cikti punycode olmaz.
+//! RFC 3492 section 5: `base=36`, `tmin=1`, `tmax=26`, `skew=38`, `damp=700`,
+//! `initial_bias=72`, `initial_n=128`, `delimiter='-'`. These are part of the
+//! definition, not something tunable; change them and the output is not
+//! punycode.
 
 const BASE: u32 = 36;
 const TMIN: u32 = 1;
@@ -40,25 +42,25 @@ fn adapt(mut delta: u32, numpoints: u32, firsttime: bool) -> u32 {
     k + (BASE - TMIN + 1) * delta / (delta + SKEW)
 }
 
-/// 0..=35 icin punycode rakami.
+/// The punycode digit for 0..=35.
 fn digit_char(d: u32) -> char {
     debug_assert!(d < BASE);
-    // `d < BASE` oldugu icin daralma imkansiz, ama `as` ile yazmak o
-    // imkansizligi derleyiciye degil okuyucuya birakir.
+    // Narrowing is impossible because `d < BASE`, but writing it with `as`
+    // would leave that impossibility to the reader rather than the compiler.
     let d = u8::try_from(d).unwrap_or(0);
     let c = if d < 26 { b'a' + d } else { b'0' + (d - 26) };
     c as char
 }
 
-/// Bir etiketi punycode'a cevirir (`xn--` oneki **dahil degil**).
+/// Converts a label to punycode (the `xn--` prefix is **not included**).
 ///
-/// Zaten tamamen ASCII olan bir etiket icin `None` doner: onun punycode
-/// karsiligi kendisidir ve `xn--` eklemek onu baska bir ad yapar.
+/// Returns `None` for a label that is already entirely ASCII: its punycode
+/// form is itself, and adding `xn--` would make it a different name.
 ///
-/// Tasma durumunda da `None` doner. RFC'nin `punycode_overflow` durumu
-/// pratikte 32 karakterle sinirli bir adda gorulemez, ama sessizce yanlis bir
-/// dizgi uretmek yerine hicbir sey uretmemek, cagiranin ne oldugunu bilmesini
-/// saglar.
+/// Also returns `None` on overflow. The RFC's `punycode_overflow` case cannot
+/// occur in practice for a name limited to 32 characters, but producing
+/// nothing rather than silently producing a wrong string lets the caller know
+/// what happened.
 #[must_use]
 pub fn encode_label(input: &str) -> Option<String> {
     if input.is_ascii() {
@@ -140,14 +142,14 @@ mod tests {
 
     #[test]
     fn rfc_3492_vectors() {
-        // RFC 3492 §7.1 ornekleri (kucuk harfe cevrilmis biciminde).
-        // Arapca: "leylimahabbetlerinincesizce..." degil, RFC'nin (A) ornegi.
+        // The RFC 3492 section 7.1 examples (in their lowercased form).
+        // Arabic: the RFC's (A) example.
         assert_eq!(
             encode_label("\u{0644}\u{064A}\u{0647}\u{0645}\u{0627}\u{0628}\u{062A}\u{0643}\u{0644}\u{0645}\u{0648}\u{0634}\u{0639}\u{0631}\u{0628}\u{064A}\u{061F}")
                 .as_deref(),
             Some("egbpdaj6bu4bxfgehfvwxn")
         );
-        // Cince (basitlestirilmis), RFC (B).
+        // Chinese (simplified), RFC (B).
         assert_eq!(
             encode_label(
                 "\u{4ED6}\u{4EEC}\u{4E3A}\u{4EC0}\u{4E48}\u{4E0D}\u{8BF4}\u{4E2D}\u{6587}"
@@ -155,7 +157,7 @@ mod tests {
             .as_deref(),
             Some("ihqwcrb4cv8a8dqg056pqjye")
         );
-        // Cekce, RFC (D): temel kod noktalari + ayirici.
+        // Czech, RFC (D): basic code points plus the delimiter.
         assert_eq!(
             encode_label("Pro\u{010D}prost\u{011B}nemluv\u{00ED}\u{010D}esky").as_deref(),
             Some("Proprostnemluvesky-uyb24dma41a")
@@ -164,13 +166,14 @@ mod tests {
 
     #[test]
     fn one_cyrillic_letter_in_a_latin_word() {
-        // Mimari belgesinin ornegi: `аyaz` (ilk harf Kiril U+0430).
+        // The example from the architecture document: `ayaz` with a Cyrillic
+        // first letter (U+0430).
         //
-        // NOT: mimari notundaki bu deger
-        // icin `xn--yaz-hlc.bud` yaziyor. Olculdu ve yanlis: RFC 3492'nin
-        // kendi algoritmasi ve Python'un `str.encode("idna")` referansi
-        // ikisi de `xn--yaz-5cd.bud` uretiyor. Belge duzeltildi; buradaki
-        // deger hesaplanan degerdir, kopyalanan degil.
+        // NOTE: the architecture note used to write `xn--yaz-hlc.bud` for this
+        // value. It was measured and it is wrong: RFC 3492's own algorithm and
+        // Python's `str.encode("idna")` reference both produce
+        // `xn--yaz-5cd.bud`. The document was corrected; the value here is the
+        // computed one, not a copied one.
         assert_eq!(encode_label("\u{0430}yaz").as_deref(), Some("yaz-5cd"));
     }
 

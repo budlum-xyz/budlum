@@ -1,30 +1,31 @@
-//! AI-dataset tipleri - budlum/main `src/lubot/mod.rs` içindeki
-//! `AiDatasetKind` / `AiDatasetMetadata` ile aynı biçim (ayna tipler).
+//! AI dataset types - the same shape as `AiDatasetKind` /
+//! `AiDatasetMetadata` in budlum/main `src/lubot/mod.rs` (mirror types).
 //!
-//! İzin kuralları burada kopyalanmaz; zincir durumundan sorgulanır (K3).
+//! The permission rules are not copied here; they are queried from the chain
+//! state (K3).
 
 use crate::model::Hash32;
 
-/// Veri seti türü. budlum'daki `AiDatasetKind` ile birebir.
+/// The dataset kind. Identical to `AiDatasetKind` in budlum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatasetKind {
-    /// Eğitim corpus'u (SFT/CPT girdisi).
+    /// A training corpus (the SFT/CPT input).
     TrainingCorpus,
-    /// Çıkarım önbelleği (kapalı-devre çıkarım yanıtları).
+    /// An inference cache (closed-circuit inference responses).
     InferenceCache,
 }
 
-/// B.U.D. StorageDeal'a bağlanan AI-dataset metadata'sı.
+/// AI dataset metadata bound to a B.U.D. StorageDeal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetMetadata {
     pub kind: DatasetKind,
-    /// Hangi modele hedeflendiği (budlum: `model_target`).
+    /// Which model it targets (budlum: `model_target`).
     pub model_target: Option<Hash32>,
     pub sample_count: u64,
 }
 
 impl DatasetMetadata {
-    /// Eğitim corpus'u etiketi.
+    /// The training corpus label.
     #[must_use]
     pub fn training(model_target: Hash32, sample_count: u64) -> Self {
         Self {
@@ -34,7 +35,7 @@ impl DatasetMetadata {
         }
     }
 
-    /// Çıkarım önbelleği etiketi.
+    /// The inference cache label.
     #[must_use]
     pub fn inference_cache(model_target: Hash32) -> Self {
         Self {
@@ -45,11 +46,12 @@ impl DatasetMetadata {
     }
 }
 
-/// Kapalı-devre kaynak türleri: Lubot'un okuyabildiği tek üç kanal.
+/// The closed-circuit source kinds: the only three channels Lubot can read.
 ///
-/// - `PollenGrant`  - Pollen `AccessGrant` / `TrainingDataGrant` ile yetkili okuma
-/// - `StorageDeal`  - B.U.D. depolamasında AI-dataset etiketli içerik
-/// - `SocialRef`    - SocialFi köprüsünden gelen ağ içi içerik
+/// - `PollenGrant`  - an authorised read through a Pollen `AccessGrant` /
+///   `TrainingDataGrant`
+/// - `StorageDeal`  - content labelled as an AI dataset in B.U.D. storage
+/// - `SocialRef`    - in-network content coming over the SocialFi bridge
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     PollenGrant,
@@ -57,13 +59,13 @@ pub enum SourceKind {
     SocialRef,
 }
 
-/// Bir veri kaynağının kapalı-devre referansı.
+/// The closed-circuit reference of a data source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRef {
     pub kind: SourceKind,
     pub content_id: Hash32,
-    /// Pollen eğitim grant'lerinde kalan epoch sayısı (budlum
-    /// `TrainingDataGrant` epoch limitine karşılık).
+    /// The number of epochs left on a Pollen training grant (matching the
+    /// budlum `TrainingDataGrant` epoch limit).
     pub grant_epochs_remaining: Option<u64>,
 }
 
