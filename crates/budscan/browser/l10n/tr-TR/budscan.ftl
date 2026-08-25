@@ -1,43 +1,47 @@
-# Budscan adres cubugu rozeti - Turkce.
+# Budscan adres çubuğu rozeti - Türkçe.
 #
-# Dort deger, budscan::evidence::Strength ile bire bir. Bir tanesini
-# birlestirmek, cekirdegin olctugu bir ayrimi gizlemek olurdu.
+# This file is a user-facing localisation, so its strings are Turkish by
+# design; they are the product, not untranslated source text. Only this header
+# is in English, for the reader of the tree.
+#
+# Dört değer, budscan::evidence::Strength ile bire bir. Bir tanesini
+# birleştirmek, çekirdeğin ölçtüğü bir ayrımı gizlemek olurdu.
 
 budscan-badge-verified =
-    .value = dogrulandi
-    .tooltiptext = Getirilen baytlarin ozeti beklenen kimlige esit.
+    .value = doğrulandı
+    .tooltiptext = Getirilen baytların özeti beklenen kimliğe eşit.
 
 budscan-badge-transport-only =
-    .value = yalniz tasima
-    .tooltiptext = TLS kimin gonderdigini soyluyor, neyin gonderildigini degil. Bu siradan web.
+    .value = yalnız taşıma
+    .tooltiptext = TLS kimin gönderdiğini söylüyor, neyin gönderildiğini değil. Bu sıradan web.
 
 budscan-badge-claim-only =
-    .value = yalniz beyan
-    .tooltiptext = Bir dugum cevap verdi ama kanit dogrulanmadi. Baytlar tutarli olabilir ve yine de istenen isme ait olmayabilir.
+    .value = yalnız beyan
+    .tooltiptext = Bir düğüm cevap verdi ama kanıt doğrulanmadı. Baytlar tutarlı olabilir ve yine de istenen isme ait olmayabilir.
 
 budscan-badge-refused =
     .value = reddedildi
-    .tooltiptext = Icerik gosterilmiyor. Sebep bu rozetin uzerinde yaziyor.
+    .tooltiptext = İçerik gösterilmiyor. Sebep bu rozetin üzerinde yazıyor.
 
-# Red sayfalari
+# Red sayfaları
 
-budscan-refusal-title = Bu adres acilmadi
+budscan-refusal-title = Bu adres açılmadı
 
-budscan-refusal-name-rule = Ad kurali bu adi reddetti: { $reason }
+budscan-refusal-name-rule = Ad kuralı bu adı reddetti: { $reason }
 
-budscan-refusal-scheme = { $scheme } semasi adres cubugundan acilmaz.
+budscan-refusal-scheme = { $scheme } şeması adres çubuğundan açılmaz.
 
 budscan-refusal-hash-mismatch =
-    Getirilen baytlar beklenen kimligi uretmedi.
+    Getirilen baytlar beklenen kimliği üretmedi.
     Beklenen: { $expected }
     Gelen: { $produced }
 
 budscan-refusal-no-fetcher =
-    Bu hedef icin bir getirici yok. HTTPS'e dusurmek, dogrulanmamis icerigi
-    dogrulanmis gibi gostermek olurdu.
+    Bu hedef için bir getirici yok. HTTPS'e düşürmek, doğrulanmamış içeriği
+    doğrulanmış gibi göstermek olurdu.
 
-budscan-refusal-expired = Bu isim suresi dolmus bir kayda ait.
+budscan-refusal-expired = Bu isim süresi dolmuş bir kayda ait.
 
 budscan-refusal-ambiguous =
-    Yazilan sey birden fazla seye benziyor ve tahmin edilmiyor:
+    Yazılan şey birden fazla şeye benziyor ve tahmin edilmiyor:
     { $candidates }
