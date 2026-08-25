@@ -7,8 +7,8 @@
 //! `BDLM_CONTENT_V1` domain tag. This is exactly the same trade-off the Tur
 //! 14 plan §3.1 makes:
 //!
-//! > "İçerik adresleme: `ContentId` tipi - Poseidon4 hash tabanlı (BudZero'da
-//! >  zaten kullanılan `poseidon4_hash` primitive'iyle aynı aile; yeni bir
+//! > "Content addressing: the `ContentId` type, based on a Poseidon4 hash - the
+//! >  same family as the `poseidon4_hash` primitive already used in BudZero, so no new
 //! >  hash fonksiyonu icat etme)."
 //!
 //! We are not inventing a new hash. We use the existing one and tag it

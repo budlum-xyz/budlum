@@ -210,7 +210,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: daraltilmis test reddedildi"));
+        return Err(String::from("canary: a narrowed test was rejected"));
     }
     // Not narrowed: searches the raw binding.
     let bad = "#[test]\nfn reads_own_source() {\n    let src = include_str!(\"lib.rs\");\n    assert!(src.contains(\"fn production_fn\"));\n}\n";
@@ -221,6 +221,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "source-reading kanaryasi OK (daraltilmis PASS, ham arama FAIL).",
+        "source-reading canary OK: a narrowed read PASSes and a raw search FAILs.",
     ))
 }

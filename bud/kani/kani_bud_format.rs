@@ -18,7 +18,7 @@ mod kani {
     fn kani_bud_erasure_reconstruct() {
         let data = vec![10u8; 32];
         let file = BudFile::encode(&data, BudFormatClass::Json, "application/json", 0,0, 3, BudFlags::new(true,true,false,false,false,false), data.clone());
-        // parity shard'lari uretildi mi + byte roundtrip
+        // Were the parity shards produced, and does the byte round-trip hold?
         let bytes = file.to_bytes();
         let decoded = BudFile::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.decode().unwrap(), data);

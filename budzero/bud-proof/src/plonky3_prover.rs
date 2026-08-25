@@ -4151,7 +4151,7 @@ mod tests {
     /// `OodEvaluationMismatch` would require producing a forged proof that
     /// also keeps the transcript consistent - which cannot be done without
     /// breaking the proof system, and that is the desired
-    /// ozelliktir.
+    /// property.
     ///
     /// That there are two independent layers was measured by mutation:
     ///

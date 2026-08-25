@@ -1,7 +1,7 @@
 {
   "registry_version": 2,
   "hash_pin": "sha3-256 of sorted entries",
-  "durusluk_notu": "default_ratio degerleri 2026-08-16 measure_ratios.py seed=7 ile DOGRULANMIS olcumlerdir (EK13). Eski 17.19/15.5 uydurma iddialar K19 kanaryasiyla tutmuyordu; media (jpeg/png/mp4) oranlari OLCULMEDI - device_only cozumle tutar (KF).",
+  "honesty_note": "The default_ratio values are measurements VERIFIED on 2026-08-16 with measure_ratios.py at seed=7 (EK13). The older 17.19 and 15.5 figures were invented claims and did not hold under the K19 canary; the media ratios (jpeg, png, mp4) were NOT MEASURED - they hold under the device_only resolution (KF).",
   "entries": [
     {"mime": "application/json", "class": 1, "default_pipe": 3, "default_ratio": 7.83, "measured": "zstd19 seed=7", "flags": {"byte_identical": true, "resolution_preserved": true}},
     {"mime": "text/csv", "class": 2, "default_pipe": 2, "default_ratio": 3.55, "measured": "zstd19 seed=7", "flags": {"byte_identical": true}},
