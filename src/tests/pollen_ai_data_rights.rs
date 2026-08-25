@@ -45,9 +45,10 @@ fn request(
     input_ref: Vec<u8>,
     _seed: u8,
 ) -> AiInferenceRequest {
-    // V3 okuma beyanı: Pollen referansı çözülebiliyorsa beyan aynı varlığı
-    // taşır (executor kabul kapısı varlık eşleşmesini denetler); opaque
-    // girdilerde nötr bir metin beyanı taşınır.
+    // The V3 read declaration: if the Pollen reference resolves, the
+    // declaration carries the same asset, and the executor's acceptance gate
+    // checks that the assets match; for opaque inputs a neutral text
+    // declaration is carried instead.
     let perception = match crate::pollen::data_rights::AiDataInputRef::decode(&input_ref) {
         Ok(Some(r)) => Some(crate::lubot::perception::PerceptionRequest {
             asset_id: r.asset_id,
