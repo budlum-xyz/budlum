@@ -1,12 +1,16 @@
-//! B.U.D. 2.0 Icat - Yon 2: Checkpoint Konsensus State Makinesi (2026-08-16)
+//! B.U.D. 2.0 invention - direction 2: the checkpoint consensus state machine
+//! (2026-08-16).
 //!
-//! Arastirma: ilham-2 D (kalici state makinesi + checkpoint conformance), S.123
-//! (merkeziyetsiz ajan koordinasyonu), K53/K67 (SEC 17a-4 audit trail: hash chain +
-//! timestamp + kimlik + kripto kanit). B.U.D. cok-format cok-oran konsensusu kalici
-//! checkpoint ile yurutulur: her format için seçilen oran/imzasi checkpoint'te saklanir,
-//! restart'ta geri yuklenir; bozulmus zincir RED.
+//! Research: inspiration 2 D (a durable state machine plus checkpoint
+//! conformance), S.123 (decentralised agent coordination) and K53/K67 (the
+//! SEC 17a-4 audit trail: a hash chain plus a timestamp, an identity and a
+//! cryptographic proof). B.U.D.'s multi-format multi-ratio consensus is carried
+//! by a durable checkpoint: the chosen ratio and signature of every format is
+//! stored in the checkpoint and restored on restart, and a corrupted chain is
+//! REFUSED.
 //!
-//! Bu modul iskelet degil, calisan cekirdektir: hash-zincirli checkpoint + dogrulama.
+//! This module is not a skeleton but a working core: a hash-chained checkpoint
+//! plus its verification.
 
 #![forbid(unsafe_code)]
 
@@ -21,8 +25,8 @@ pub struct Checkpoint {
     pub pipe: String,
     pub ratio: f64,
     pub content_root: [u8; 32],
-    pub prev_hash: [u8; 32], // zincir: önceki checkpoint'in hash'i (tamamen sıfır = genesis)
-    pub hash: [u8; 32],      // anchored hash: kayit anindaki kriptografik kanit (SEC 17a-4)
+    pub prev_hash: [u8; 32], // the chain: the hash of the previous checkpoint (all zero = genesis)
+    pub hash: [u8; 32],      // anchored hash: the cryptographic proof at record time (SEC 17a-4)
 }
 
 impl Checkpoint {
@@ -67,34 +71,36 @@ impl Checkpoint {
         h.finalize().into()
     }
 
-    /// Zincir dogrulama (anchored): her checkpoint'in kayitli hash'i yeniden hesaplananla
-    /// ayni olmali (kayit bozulmadi) + prev_hash bir oncekinin hash'i olmali (zincir kopuk degil).
-    /// Genesis prev_hash == [0;32].
+    /// Anchored chain verification: the stored hash of every checkpoint has to
+    /// equal the recomputed one (the record is intact), and `prev_hash` has to
+    /// be the hash of the one before it (the chain is unbroken). The genesis
+    /// `prev_hash` is `[0;32]`.
     pub fn verify_chain(checkpoints: &[Checkpoint]) -> bool {
         for (i, cp) in checkpoints.iter().enumerate() {
             if cp.hash != cp.compute_hash() {
-                return false; // kayit bozuldu (ratio/alan degisti)
+                return false; // the record is corrupt (a ratio or field changed)
             }
             if i == 0 {
                 if cp.prev_hash != [0u8; 32] {
-                    return false; // genesis zincir basi olmali
+                    return false; // genesis has to be the head of the chain
                 }
             } else {
                 let prev = &checkpoints[i - 1];
                 if cp.prev_hash != prev.hash {
-                    return false; // zincir kopuk
+                    return false; // the chain is broken
                 }
             }
         }
         true
     }
 
-    /// En son (yetkili) checkpoint - restart'ta geri yuklenir.
+    /// The latest, authoritative checkpoint - restored on restart.
     pub fn latest(checkpoints: &[Checkpoint]) -> Option<&Checkpoint> {
         checkpoints.last()
     }
 
-    /// Ratio tavanı kontrolü (KF): seçilen oran gerçekçi mi (zip bomb değil, 0 değil).
+    /// The ratio ceiling check (KF): is the chosen ratio plausible, meaning
+    /// neither a zip bomb nor zero.
     pub fn ratio_plausible(&self, min: f64, max: f64) -> bool {
         self.ratio >= min && self.ratio <= max
     }
@@ -131,7 +137,7 @@ mod tests {
             h1,
         );
         let chain = vec![c1, c2];
-        assert!(Checkpoint::verify_chain(&chain), "gecerli zincir");
+        assert!(Checkpoint::verify_chain(&chain), "a valid chain");
         let latest = Checkpoint::latest(&chain).unwrap();
         assert_eq!(latest.epoch, 2);
         assert!(latest.ratio_plausible(1.0, 100.0));
@@ -176,7 +182,7 @@ mod tests {
         );
         assert!(
             !Checkpoint::verify_chain(&[c1]),
-            "genesis prev sifir olmali"
+            "the genesis prev has to be zero"
         );
     }
 
@@ -202,10 +208,10 @@ mod tests {
             h1,
         );
         assert!(Checkpoint::verify_chain(&[c1.clone(), c2.clone()]));
-        c2.ratio = 13750.0; // değiştirildi (kayıt bozuldu)
+        c2.ratio = 13750.0; // tampered with, so the record is corrupt
         assert!(
             !Checkpoint::verify_chain(&[c1, c2]),
-            "ratio degisince zincir RED"
+            "when the ratio changes the chain is REFUSED"
         );
     }
 }

@@ -7,9 +7,9 @@
 //!   CumulativeGasUsed, logsBloom(256), logs [, accessList]])`. Types: 0x01
 //!   (EIP-2930), 0x02 (EIP-1559), 0x03 (EIP-4844).
 //!
-//! Bridge doğrulaması için yalnızca `status` (success) ve `logs` (deposit event)
-//! Gerekir; `logsBloom`/`cumulativeGasUsed`/`accessList` doğrulamada kullanılmaz
-//! (decode edilir ama yok sayılır).
+//! Bridge verification only needs `status` (success) and `logs` (the deposit
+//! event); `logsBloom`, `cumulativeGasUsed` and `accessList` take no part in
+//! verification (they are decoded and then ignored).
 
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 
@@ -27,19 +27,20 @@ pub struct EthLog {
 /// Decode edilen Ethereum receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthReceipt {
-    /// `true` = işlem başarılı (status=1 post-Byzantium; pre-Byzantium varsayılan success).
+    /// `true` means the transaction succeeded (status=1 post-Byzantium;
+    /// pre-Byzantium defaults to success).
     pub status: bool,
-    /// İşlem log'ları (deposit event aranır).
+    /// The transaction logs (the deposit event is searched for here).
     pub logs: Vec<EthLog>,
 }
 
-/// Receipt decode hatası.
+/// A receipt decoding error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiptError {
     Rlp(RlpError),
-    /// Geçersiz envelope yapısı (bilinmeyen tip / yanlış alan sayısı).
+    /// An invalid envelope shape (unknown type or wrong field count).
     InvalidEnvelope,
-    /// Geçersiz log yapısı (alan sayısı / topic boyutu).
+    /// An invalid log shape (field count or topic size).
     InvalidLog,
 }
 
@@ -61,7 +62,7 @@ impl From<RlpError> for ReceiptError {
     }
 }
 
-/// Ham envelope byte'larını receipt'e decode eder (typed + legacy destek).
+/// Decodes raw envelope bytes into a receipt (both typed and legacy).
 pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     if envelope.is_empty() {
         return Err(ReceiptError::InvalidEnvelope);
@@ -90,8 +91,9 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     Ok(EthReceipt { status, logs })
 }
 
-/// Status alanını yorumlar: boş → fail (post-Byzantium 0x00); [0x01] → success;
-/// 32-byte → pre-Byzantium postState root (varsayılan success).
+/// Interprets the status field: empty means failure (post-Byzantium 0x00),
+/// [0x01] means success, and 32 bytes are a pre-Byzantium postState root,
+/// which defaults to success.
 fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
     match b.len() {
         0 => Ok(false),     // status 0 (fail)
@@ -143,7 +145,7 @@ fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
 }
 
 impl EthReceipt {
-    /// Verilen `(emitter_address, topic0)` ile eşleşen ilk log'u döner.
+    /// Returns the first log matching the given `(emitter_address, topic0)`.
     /// Bridge: `topic0` = keccak256("Deposit(address,uint256,bytes32,uint256)") gibi
     /// Event signature; `emitter_address` = bridge kontrat adresi.
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
