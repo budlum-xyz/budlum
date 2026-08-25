@@ -30,7 +30,7 @@ struct Outcome {
 ///
 /// # Errors
 ///
-/// Bir kontrol dustugunde, hangilerinin dustugunu soyleyen bir hata doner.
+/// When a check fails, an error saying which ones failed.
 pub fn run(root: &Path) -> Result<String, String> {
     let mut lines = Vec::new();
 
@@ -133,7 +133,7 @@ pub fn self_test() -> Result<String, String> {
                 .to_string(),
         );
     }
-    Ok("pre-push kanaryasi OK: bozuk bicim reddedildi, kontrol gercekten kosuyor".to_string())
+    Ok("pre-push canary OK: a broken format was refused, so the check really runs".to_string())
 }
 
 /// Install the git `pre-push` hook.
@@ -208,10 +208,10 @@ mod tests {
 
         let hook = tmp.join(".git").join("hooks").join("pre-push");
         assert!(hook.is_file(), "the hook file must exist");
-        let body = std::fs::read_to_string(&hook).expect("kanca okunmali");
+        let body = std::fs::read_to_string(&hook).expect("the hook has to be readable");
         assert!(
             body.contains("budlum-tools"),
-            "kanca araci cagirmali: {body}"
+            "the hook has to call the tool: {body}"
         );
 
         #[cfg(unix)]
