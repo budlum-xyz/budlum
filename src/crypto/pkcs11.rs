@@ -92,8 +92,8 @@ impl Pkcs11Signer {
         let session = client.open_rw_session(*target_slot).map_err(|e| {
             CryptoError::KeyGeneration(format!("Failed to open RW session on slot {slot_id}: {e}"))
         })?;
-        // Secrecy 0.10 - secrecy::Secret kaldırıldı;
-        // Cryptoki 0.12 AuthPin = SecretString = SecretBox<str>.
+        // Secrecy 0.10 removed secrecy::Secret; in Cryptoki 0.12 an AuthPin is
+        // a SecretString, which is a SecretBox<str>.
         let pin_secret = secrecy::SecretString::new(pin.into_boxed_str());
         session
             .login(cryptoki::session::UserType::User, Some(&pin_secret))
@@ -153,24 +153,25 @@ impl Pkcs11Signer {
             .or_else(|| s.parse::<u64>().ok())
     }
 
-    /// Vendor mekanizma kurulumu. S1 fix (2026-07-17): cryptoki 0.12
-    /// GERÇEK API'si - struct literal YOK (alanlar private: E0451/E0560):
-    /// MechanismType::new_vendor_defined CKM_VENDOR_DEFINED tabanının
-    /// Altındaki id'leri reddeder (fail-closed value doğrulaması);
-    /// VendorDefinedMechanism yalnızca ::new ile kurulur.
+    /// Builds a vendor mechanism. S1 fix (2026-07-17): this is the REAL
+    /// cryptoki 0.12 API - there is NO struct literal, because the fields are
+    /// private (E0451/E0560). `MechanismType::new_vendor_defined` refuses ids
+    /// below the `CKM_VENDOR_DEFINED` base, which is a fail-closed value
+    /// check, and a `VendorDefinedMechanism` is only built through `::new`.
     fn vendor_mechanism(id: u64) -> Result<cryptoki::mechanism::Mechanism<'static>, CryptoError> {
         use cryptoki::mechanism::vendor_defined::VendorDefinedMechanism;
         use cryptoki::mechanism::MechanismType;
-        // CI (2026-07-21): Cross-platform determinism matrisinin
-        // Ilk Windows koşusu bu satırı yakaladı (E0308). `CK_MECHANISM_TYPE`
-        // Cryptoki-sys'te Windows'ta u32 (CK_ULONG, LLP64 ABI), Unix'te u64
-        // (LP64) - ve cryptoki_sys dışa açık olmadığından tür isimlendirilemez.
-        // Platform eşlemesi cryptoki-sys'in kendi tanımıyla aynı tutulur;
-        // 32-bit'e sığmayan vendor id fail-closed hata verir (sessiz kırpma yok).
+        // CI (2026-07-21): the first Windows run of the cross-platform
+        // determinism matrix caught this line (E0308). In cryptoki-sys,
+        // `CK_MECHANISM_TYPE` is u32 on Windows (CK_ULONG under the LLP64 ABI)
+        // and u64 on Unix (LP64) - and since cryptoki_sys is not re-exported,
+        // the type cannot be named here. The platform mapping is kept identical
+        // to cryptoki-sys's own definition, and a vendor id that does not fit
+        // in 32 bits fails closed with an error, never a silent truncation.
         #[cfg(windows)]
         let mech_id = u32::try_from(id).map_err(|_| {
             CryptoError::Signing(format!(
-                "PKCS#11 vendor mechanism id 0x{id:08X} 32-bit CK_ULONG (Windows ABI) araliginin disinda"
+                "PKCS#11 vendor mechanism id 0x{id:08X} is outside the range of a 32-bit CK_ULONG (Windows ABI)"
             ))
         })?;
         #[cfg(not(windows))]
@@ -211,11 +212,12 @@ impl Pkcs11Signer {
     }
 
     pub fn store_bls_key(&self, _keypair: &BlsKeypair) -> Result<(), CryptoError> {
-        // Strix HIGH (CWE-922, 2026-08-17): DATA object'e plaintext BLS
-        // saklama HER modda reddedilir. Donanim velayeti vendor-managed
-        // nesnelerdir; DATA object yazilimda okunabilir (fallback loader'lar
-        // CKA_VALUE ile rehydrate eder) - bu yuzden "hardware-only custody"
-        // iddiasi kirilirdi. store_* cagiranı yoktu; kapi tamamen kapandi.
+        // Strix HIGH (CWE-922, 2026-08-17): storing a plaintext BLS key in a
+        // DATA object is refused in EVERY mode. Hardware custody means
+        // vendor-managed objects; a DATA object is readable from software
+        // (fallback loaders rehydrate it through CKA_VALUE), so the
+        // "hardware-only custody" claim would have been broken. Nothing was
+        // calling store_*, so the door was shut completely.
         Err(CryptoError::Signing(
             "BLS key storage refused: DATA objects are not hardware custody; use vendor-native key objects"
                 .into(),
@@ -223,8 +225,9 @@ impl Pkcs11Signer {
     }
 
     pub fn store_pq_key(&self, _keypair: &PqKeyPair) -> Result<(), CryptoError> {
-        // Strix HIGH (CWE-922, 2026-08-17): ayni gerekce - PQ secret'i
-        // DATA object olarak saklanamaz; donanim velayeti vendor-managed.
+        // Strix HIGH (CWE-922, 2026-08-17): the same reasoning - a PQ secret
+        // cannot be stored as a DATA object; hardware custody is
+        // vendor-managed.
         Err(CryptoError::Signing(
             "PQ key storage refused: DATA objects are not hardware custody; use vendor-native key objects"
                 .into(),
@@ -365,8 +368,8 @@ impl ConsensusSigner for Pkcs11Signer {
             return Err(CryptoError::Signing("No Ed25519 private key in HSM".into()));
         }
         let mechanism = cryptoki::mechanism::Mechanism::Eddsa(
-            // Cryptoki 0.12 - EddsaParams::default
-            // Kaldırıldı; paramsız saf Ed25519 = EddsaSignatureScheme::Pure.
+            // Cryptoki 0.12 removed EddsaParams::default; parameterless pure
+            // Ed25519 is EddsaSignatureScheme::Pure.
             cryptoki::mechanism::eddsa::EddsaParams::new(
                 cryptoki::mechanism::eddsa::EddsaSignatureScheme::Pure,
             ),
