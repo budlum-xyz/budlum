@@ -10,7 +10,7 @@ mod rpc_tests {
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
 
-    /// Format-gecerli test zarfi (durust marker).
+    /// A format-valid test envelope, with an honest marker.
     fn valid_merkle_proof() -> Vec<u8> {
         let envelope = bud_proof::ProofEnvelope {
             proof_format_version: 1,

@@ -179,7 +179,7 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
             pos += len;
         }
         let mds = CauchyMds::new(4, 2)?;
-        let recovered = mds.decode(&shards[..4])?; // ilk 4 shard (MDS: herhangi 4)
+        let recovered = mds.decode(&shards[..4])?; // the first 4 shards (MDS: any 4 will do)
                                                    // trim the padding (the last shard was 0-padded)
         let mut out = Vec::new();
         for part in &recovered {

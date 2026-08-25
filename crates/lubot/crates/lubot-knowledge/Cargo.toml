@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Kapalı-devre bilgi katmanı: sır maskeleme, parçalama, TF-IDF gömme, kompakt bağlam, görev hafızası, LLM çıktı önbelleği"
+description = "The closed-circuit knowledge layer: secret masking, chunking, TF-IDF embedding, compact context, task memory and the LLM output cache"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

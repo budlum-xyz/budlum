@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # NOT: `comment-on-pr` bu action'in girdisi DEGILDIR ve her kosuda
+      # NOTE: `comment-on-pr` is NOT an input of this action, and on every run
       # "Unexpected input(s) 'comment-on-pr'" uyarisi uretiyordu. v0.6.1'in
       # Kabul ettigi girdiler: inputs, collect, online-audits, persona,
       # Min-severity, min-confidence, version, token, advanced-security,

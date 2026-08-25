@@ -77,7 +77,7 @@ def validate(g):
 def self_test():
     good = json.load(open("config/mainnet-genesis.json"))
     if validate(good):
-        print("BOZUK KAPI: mevcut genesis reddedildi!")
+        print("BROKEN GATE: the current genesis was refused!")
         return 1
     variants = {
         "chain_id=0": lambda g: g.update(chain_id=0),

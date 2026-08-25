@@ -1,6 +1,7 @@
-//! .bud Secure Embedded DB - gömülü veritabanı, güvenli tünel ve dağıtık kaynak desenleri
+//! .bud secure embedded DB - the embedded database, the secure tunnel and the
+//! distributed source patterns.
 //! SQLite .bud.db FTS5 + encryption + web admin + secure tunnel + distributed source
-//! Kapı K-BUD-SECURE-DB, K-BUD-TUNNEL, K-BUD-DISTRIBUTED-SOURCE
+//! Gates: K-BUD-SECURE-DB, K-BUD-TUNNEL, K-BUD-DISTRIBUTED-SOURCE.
 
 #![forbid(unsafe_code)]
 

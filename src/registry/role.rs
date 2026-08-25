@@ -106,7 +106,7 @@ pub mod roles {
     /// Unified under PermissionlessRegistry.
     pub const ATTESTER: RoleId = RoleId(7);
 
-    /// Lubot decentralized AI operator (compute-bond, PoS'tan bağımsız).
+    /// A Lubot decentralized AI operator: a compute bond, independent of PoS.
     /// Must be preserved acceptance (RoleId 8).
     pub const LUBOT_OPERATOR: RoleId = RoleId(8);
 

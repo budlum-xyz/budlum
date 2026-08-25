@@ -11,7 +11,7 @@
 //! Second slashing path is introduced.
 //!
 //! ## Design decisions
-//! * **Epoch-scoped counter** (Seçenek A+): the count resets at each new epoch,
+//! * **Epoch-scoped counter** (option A+): the count resets at each new epoch,
 //!   Mirroring `LivenessTracker`'s consecutive-epoch semantics. A validator that
 //!   Spams within one epoch is caught; scattered single misjabs across epochs
 //!   Are not disproportionately punished.

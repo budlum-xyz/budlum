@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Kapalı-devre veri katmanı: kaynak denetimi, JSONL kayıtları, SHA-256 doğrulaması"
+description = "The closed-circuit data layer: source review, JSONL records and SHA-256 verification"
 
 [dependencies]
 lubot-core = { path = "../lubot-core" }

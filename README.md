@@ -126,7 +126,7 @@ the code is the fact and the diagram is the bug.
 This repository is the whole stack. The layers below are **in-tree**, not separate
 dependencies, so the entire system builds, tests and ships as one tree.
 
-### The Universal Settlement Layer core (Evrensel Katman): [`src/`](src)
+### The Universal Settlement Layer core: [`src/`](src)
 
 | Path | Role |
 | --- | --- |

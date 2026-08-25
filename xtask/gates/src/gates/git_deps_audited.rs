@@ -156,10 +156,10 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: kayitsiz rev gecti"));
+        return Err(String::from("canary: an unrecorded rev passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "git-deps kanaryasi OK (kayitli PASS, kayitsiz FAIL).",
+        "git-deps canary OK: a recorded rev PASSes and an unrecorded one FAILs.",
     ))
 }

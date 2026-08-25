@@ -22,7 +22,7 @@ echo "[generate-sbom] starting SBOM generation..."
 # 1. install cargo-cyclonedx (if absent or the version is not pinned).
 # The version is pinned: CLI flags can change between releases (run #728:
 # `--output-file` had been removed); the pin is REQUIRED for the gate to stay deterministic.
-# (Onceki duzeltmeden tasima - triyaj bakiyesi.)
+# (Carried over from the previous fix - the triage balance.)
 CYCLONEDX_VERSION="0.5.9"
 if ! command -v cargo-cyclonedx >/dev/null 2>&1 \
     || ! cargo cyclonedx --version 2>/dev/null | grep -q "$CYCLONEDX_VERSION"; then

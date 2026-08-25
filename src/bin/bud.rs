@@ -128,7 +128,7 @@ enum QueryAction {
         /// Block number or `latest`.
         number: String,
     },
-    /// Zincir durumunu sorgula (`bud_getStatus`).
+    /// Queries the chain status (`bud_getStatus`).
     Status,
 }
 
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn binding_an_unknown_fixture_is_refused() {
         let proof = "01".repeat(32);
-        let err = run_project_bind_proof("demo-app", SOURCE_HASH, "yok-boyle-kayit", &proof)
+        let err = run_project_bind_proof("demo-app", SOURCE_HASH, "no-such-record", &proof)
             .expect_err("an unknown record must be refused");
         assert!(err.contains("no proof record named"), "{err}");
     }

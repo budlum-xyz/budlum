@@ -16,7 +16,7 @@ pub use execution::{
 };
 pub use registry::AiRegistry;
 
-/// Plonky3 STARK doğrulaması üretim kabul koşulu değildir.
+/// Plonky3 STARK verification is not a production acceptance condition.
 ///
 /// F-03 / F-04 / F-08 / F-09: full Plonky3 STARK verification of AI
 /// inference is compiled and tested, but it is not the production
@@ -36,7 +36,7 @@ mod tests {
     use crate::core::address::Address;
 
     /// Test yardimcisi: verifier stake'i MIN_VERIFIER_STAKE altindaysa
-    /// stake eder, sonra submit_result cagirir (Strix #359 auth kontrolu
+    /// stakes, then calls submit_result (the Strix #359 auth check
     /// sonrasi: yetkisiz verifier sonuc sayamaz).
     fn submit_result_staked(
         registry: &mut AiRegistry,

@@ -76,7 +76,7 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
         };
         // A job may deliberately want another compiler, but it must do so **with a
         // written justification**. If the file carries the `DELIBERATE-TOOLCHAIN-DIVERGENCE`
-        // isareti aranir; isaret varsa o dosyadaki surumler pin'e karsi
+        // marker is looked for; when it is present the versions in that file are checked against the pin
         // denetlenmez.
         //
         // Today the only legitimate example is `diverse-double-compiling.yml`: the whole
@@ -84,7 +84,7 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
         // pin'e esitlemek isi anlamsiz kilardi (bkz. ARCHITECTURE.md §73).
         //
         // The marker does not open a door, it demands a declaration: the divergence is
-        // gerekcesiyle duruyor ve tesadufen olusamiyor.
+        // stands with a stated reason and cannot come about by accident.
         if text.contains("DELIBERATE-TOOLCHAIN-DIVERGENCE") {
             continue;
         }

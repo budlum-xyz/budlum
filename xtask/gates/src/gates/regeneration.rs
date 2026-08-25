@@ -316,7 +316,7 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<Producer>) {
 
 fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
     let lines: Vec<&str> = text.lines().collect();
-    // Testler kapsam disi: uretim davranisini denetliyoruz.
+    // Tests are out of scope: what is reviewed here is production behaviour.
     let cut = lines
         .iter()
         .position(|l| l.starts_with("#[cfg(test)]"))
@@ -588,7 +588,7 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
     if run(tmp).is_ok() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: kanonik uretim noktalarinin kaybolmasi yakalanmadi",
+            "self-test: losing the canonical generation points went uncaught",
         ));
     }
 

@@ -273,6 +273,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "logup-multipliers kanaryasi OK (temiz PASS, indeks carpan FAIL).",
+        "logup-multipliers canary OK: a clean multiplier PASSes and an index multiplier FAILs.",
     ))
 }

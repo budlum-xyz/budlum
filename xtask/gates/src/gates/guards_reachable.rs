@@ -283,10 +283,10 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: cagrilan guard sayildi"));
+        return Err(String::from("canary: a called guard was counted"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "guards-reachable kanaryasi OK (uncalled sayilir, called sayilmaz).",
+        "guards-reachable canary OK: an uncalled guard is counted and a called one is not.",
     ))
 }

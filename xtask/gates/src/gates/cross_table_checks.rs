@@ -154,6 +154,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "cross-table kanaryasi OK (last_row PASS, is_halt FAIL).",
+        "cross-table canary OK: last_row PASSes and is_halt FAILs.",
     ))
 }

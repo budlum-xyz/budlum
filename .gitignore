@@ -1,5 +1,5 @@
 target/
-# CI artifact (scripts/generate-sbom.sh çıktısı), repoya commit'lenmez
+# A CI artifact (the output of scripts/generate-sbom.sh); it is not committed
 sbom.cdx.json
 protoc-*.zip
 # Build status

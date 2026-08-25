@@ -315,7 +315,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: pinli accumulatorler reddedildi"));
+        return Err(String::from("canary: pinned accumulators were rejected"));
     }
     // Unpinned: remove the first-row constraint for gas.
     let bad = good.replace(
@@ -330,6 +330,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "accumulators kanaryasi OK (pinli PASS, pinsiz FAIL).",
+        "accumulators canary OK: pinned PASSes and unpinned FAILs.",
     ))
 }

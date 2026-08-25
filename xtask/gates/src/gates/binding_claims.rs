@@ -243,7 +243,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("crates/wallet-core/src/lib.rs"), honest).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: durust descriptor reddedildi"));
+        return Err(String::from("canary: an honest descriptor was rejected"));
     }
 
     // Claims wired but nothing backs it: must fail.

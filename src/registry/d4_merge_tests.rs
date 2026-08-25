@@ -1,4 +1,4 @@
-//! Verifier Registry Birleştirme (merge) scenario tests.
+//! Verifier registry merge scenario tests.
 //!
 //! These tests prove the *single* stake-based [`PermissionlessRegistry`] serves
 //! All four v1 application domains from one primitive, as required by

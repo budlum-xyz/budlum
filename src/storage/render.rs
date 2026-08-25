@@ -705,7 +705,7 @@ mod tests {
         // Deterministic: computing it twice gives the same value. Otherwise the id
         // would be a measurement artefact, not an address.
         let id_a = super::qr_stream_content_id(&one, &payload, 64, 4).expect("ilk kimlik");
-        let id_again = super::qr_stream_content_id(&one, &payload, 64, 4).expect("yeniden");
+        let id_again = super::qr_stream_content_id(&one, &payload, 64, 4).expect("recompute");
         assert_eq!(id_a, id_again, "the same recipe must give the same id");
 
         // Distinguishing: a changed recipe changes the id. Without this two different
@@ -777,7 +777,7 @@ mod tests {
         // Determinism holds: same stream, same payload, same frame.
         assert_eq!(
             a,
-            super::render_qr_stream_frame(&one, &payload, 0, 64).expect("yeniden uretim")
+            super::render_qr_stream_frame(&one, &payload, 0, 64).expect("re-render")
         );
     }
 
