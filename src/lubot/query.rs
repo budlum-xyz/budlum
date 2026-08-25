@@ -1,10 +1,11 @@
-//! Lubot sorgu API katmanı - model listesi, stats, sorgu hazırlığı.
+//! The Lubot query API layer - the model list, the stats and query
+//! preparation.
 //!
-//! RPC/CLI tarafından çağrılacak Lubot katmanı yardımcıları.
+//! Lubot layer helpers, to be called from RPC and the CLI.
 
 use super::metrics::LubotMetricsSnapshot;
 
-/// Lubot model özeti (RPC/CLI yanıtı için).
+/// A Lubot model summary, for an RPC or CLI response.
 #[derive(Debug, Clone)]
 pub struct LubotModelInfo {
     pub model_id_bytes: [u8; 32],
@@ -12,7 +13,7 @@ pub struct LubotModelInfo {
     pub active: bool,
 }
 
-/// Lubot sorgu yanıtı özeti.
+/// A summary of a Lubot query response.
 #[derive(Debug, Clone)]
 pub struct LubotQueryResponse {
     pub active_models: Vec<LubotModelInfo>,
@@ -20,8 +21,8 @@ pub struct LubotQueryResponse {
     pub metrics: LubotMetricsSnapshot,
 }
 
-/// Lubot katmanı özetini hazırla (RPC `bud_lubotStats` için).
-/// Çağıran (RPC/CLI) model listesini + operator sayısını sağlar.
+/// Prepares the summary of the Lubot layer, for the `bud_lubotStats` RPC.
+/// The caller (RPC or CLI) supplies the model list and the operator count.
 pub fn prepare_lubot_overview(
     active_models: Vec<LubotModelInfo>,
     eligible_operators: u32,

@@ -1,7 +1,9 @@
-//! B.U.D. 2.0 - DB SAYFA DELTA (F263/F264 - InnoDB/TOAST sayfa sıkıştırma)
+//! B.U.D. 2.0 - THE DB PAGE DELTA (F263/F264 - InnoDB and TOAST page
+//! compression).
 //!
-//! Kalan iş: DB sayfa sıkıştırma. Sayfa-yapılı veritabanı dosyası (SQLite/FDB):
-//! ardışık sayfalar arası XOR-delta + zstd (append-heavy iş yükünde komşu sayfalar
+//! Remaining work: DB page compression. For a page-structured database file
+//! (SQLite or FDB): an XOR delta between consecutive pages, then zstd (under an
+//! append-heavy workload neighbouring pages
 //! benzerdir). KAYIPSIZ: orijinal sayfalar birebir geri kurulur.
 
 #![forbid(unsafe_code)]
@@ -10,7 +12,8 @@ use sha3::{Digest, Sha3_256};
 
 pub const DBD_MAGIC: [u8; 8] = *b"\xB5DBD1\0\0\0";
 
-/// Sayfa akışını delta'ya çevir: sayfa_0 ham, sonrakiler öncekiyle XOR.
+/// Turns a page stream into a delta: page 0 stays raw and each later page is
+/// XORed with the one before it.
 pub fn page_delta_encode(pages: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
     if pages.is_empty() {
         return None;
@@ -62,17 +65,18 @@ mod tests {
 
     #[test]
     fn sayfa_delta_kayipsiz() {
-        // append-heavy: her sayfa öncekine çok benzer
+        // Append-heavy: every page closely resembles the one before it.
         let mut pages: Vec<Vec<u8>> = Vec::new();
         let mut cur = vec![0u8; 256];
         for i in 0..50u8 {
             pages.push(cur.clone());
-            cur[i as usize % 256] = i; // küçük değişiklik
+            cur[i as usize % 256] = i; // a small change
         }
         let d = page_delta_encode(&pages).unwrap();
         let back = page_delta_decode(&d).unwrap();
         assert_eq!(back, pages);
-        // delta düşük entropi: zstd daha iyi sıkıştırır (yapısal kazanç)
+        // The delta has low entropy, so zstd compresses it better - a
+        // structural gain.
         let ham: usize = d
             .iter()
             .map(|p| p.iter().filter(|&&b| b != 0).count())
