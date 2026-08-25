@@ -1,10 +1,11 @@
 //! (E) private transfer relayer mempool UX + fee market.
 //!
-//! TEE tabanlı `spent_commitment` gizleme kapsam dışıdır.
+//! TEE-based hiding of `spent_commitment` is out of scope.
 //! Bu test, fee market'in (`src/chain/fee_market.rs`) private transfer
-//! Işlemlerine (`TransactionType::PrivateTransferSubmit`) uygulandığını
-//! Kanıtlar: yeterli fee bid'i kabul edilir, taban fee'nin altındaki bid
-//! Reddedilir (mempool / giriş kapısı fee market ile korunur).
+//! It proves that the fee market is applied to private transfer transactions
+//! (`TransactionType::PrivateTransferSubmit`): a sufficient fee bid is
+//! accepted, and a bid below the base fee is refused, so the mempool and the
+//! entry gate are protected by the fee market.
 
 use crate::chain::fee_market::effective_fee;
 use crate::core::address::Address;
