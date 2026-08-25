@@ -370,13 +370,11 @@ fn measure(root: &Path) -> Result<Outcome, String> {
     let tx_src =
         std::fs::read_to_string(&tx).map_err(|e| format!("cannot read {}: {e}", tx.display()))?;
 
-    let enum_at = tx_src.find("pub enum TransactionType");
-    if enum_at.is_none() {
+    let Some(enum_at) = tx_src.find("pub enum TransactionType") else {
         return Err(String::from(
             "no `pub enum TransactionType` found - wrong root?",
         ));
-    }
-    let enum_at = enum_at.unwrap();
+    };
     let open = tx_src[enum_at..].find('{').map(|d| enum_at + d);
     let Some(open) = open else {
         return Err(String::from(
