@@ -211,8 +211,15 @@ fn extract_prompt_text(prompt_source: &str) -> Result<&str, String> {
 /// vocabulary silently emptied would report OK while checking nothing, which
 /// is the shell-gate failure the Rust gates exist to remove.
 fn extract_markers(prompt_source: &str) -> Result<Vec<String>, String> {
+    // Matched on the declaration without its visibility. The first version
+    // searched for `pub const`, which made the gate depend on how widely the
+    // list is exported: narrowing it to `pub(crate)` - the correct visibility,
+    // since the only other reader is this gate, which reads the source text -
+    // made the gate report the list as gone. What the gate needs to know is
+    // that the list exists and is not empty, and neither of those is a fact
+    // about visibility.
     let start = prompt_source
-        .find("pub const GENERATION_CLAIM_MARKERS")
+        .find("const GENERATION_CLAIM_MARKERS")
         .ok_or_else(|| {
             format!("GENERATION_CLAIM_MARKERS is gone from {PROMPT_PATH}; nothing names the phrases the prompt may not offer")
         })?;

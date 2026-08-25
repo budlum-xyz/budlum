@@ -269,10 +269,14 @@ pub const DECLARED_LIMITS: &[(&str, &str, u32)] = &[
 
 /// Phrases that would turn the prompt into an offer of media generation.
 ///
-/// Exposed rather than private because the gate checks the same list against
-/// the prompt text: a list only the module can see would let the module and
-/// the gate disagree about what is banned.
-pub const GENERATION_CLAIM_MARKERS: &[&str] = &[
+/// Private. The list has exactly two readers: the checker below, and the
+/// `lubot-prompt-is-true` gate - and the gate reads the source text of this
+/// file rather than linking against the crate, precisely so that a gate and
+/// the code it checks cannot drift into agreeing with each other. Neither
+/// reader needs the item exported, so exporting it would publish an API with
+/// no caller. The gate matches the declaration without its visibility, so
+/// narrowing this does not blind it.
+const GENERATION_CLAIM_MARKERS: &[&str] = &[
     "generate an image",
     "generate images",
     "generate a video",
@@ -293,7 +297,9 @@ pub const GENERATION_CLAIM_MARKERS: &[&str] = &[
 /// decide is which direction the sentence points. Banning the words would have
 /// forced the boundary to be worded evasively, which is the opposite of the
 /// intent.
-pub const REFUSAL_NEGATIONS: &[&str] = &[
+///
+/// Private for the same reason as the marker list above.
+const REFUSAL_NEGATIONS: &[&str] = &[
     "do not",
     "does not",
     "cannot",
