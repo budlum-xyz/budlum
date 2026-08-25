@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn red_kanaryalari_tavan_iddiasi_tasimaz() {
+    fn the_refusal_canaries_carry_no_ceiling_claim() {
         assert!(!matrix_get("rastgele")
             .unwrap()
             .holds_ceiling(CEILING_USD_TB_MONTH));

@@ -1,7 +1,7 @@
 # Budscan yama listesi.
 #
-# Sira onemli: protokol isleyicisi once gelir, cunku adres cubugu rozeti
-# onun urettigi kanit nesnesini okur.
+# The order matters: the protocol handler comes first, because the address-bar
+# badge reads the evidence object it produces.
 #
 # `!` oneki bir yamayi devre disi birakir. Satiri silmek yerine isaretlemek
 # kasitli: silinen bir satir, neden silindigini soylemeyen bir satirdir.

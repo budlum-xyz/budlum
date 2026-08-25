@@ -1,4 +1,4 @@
-//! TEE execution-time confidentiality surface (Bölüm 10 #5).
+//! The TEE execution-time confidentiality surface (section 10, item 5).
 //!
 //! Real SGX/Nitro enclave integration is a separate hardware/SDK track.
 //! This module defines the wallet-facing contract and a **fail-closed**
@@ -113,7 +113,7 @@ impl TeeQuoter for UnavailableTeeRuntime {
     fn quote(&self, _report_data: [u8; 32]) -> Result<Vec<u8>, WalletError> {
         // No enclave is linked, so no quote can ever be produced.
         // `sign_with_privacy` therefore stays fail-closed under
-        // tee_enabled=true (Güvenlik denetimi (HIGH)).
+        // tee_enabled=true (security review, HIGH).
         Err(WalletError::TeeUnavailable(
             "TEE backend is not linked in this build; no quote available".into(),
         ))

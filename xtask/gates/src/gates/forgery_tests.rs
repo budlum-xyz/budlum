@@ -218,10 +218,10 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: #[test] tasimayan isim gecti"));
+        return Err(String::from("canary: a name carrying no #[test] passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "forgery-tests kanaryasi OK (test PASS, testsiz FAIL).",
+        "forgery-tests canary OK: with a test it PASSes and without one it FAILs.",
     ))
 }

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Dış veri adaptör iskeleti: WebSocket/REST bağlantı deseni, toplu mesaj ayrıştırma, kapatma sinyali"
+description = "The external data adapter skeleton: the WebSocket and REST connection pattern, batch message parsing and the shutdown signal"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

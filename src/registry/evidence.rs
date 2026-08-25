@@ -301,7 +301,7 @@ impl SlashingReport {
         )
     }
 
-    /// Relayer invalid proof - griefing/fronting/yanlış-relay.
+    /// A relayer invalid proof - griefing, fronting or a wrong relay.
     /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
     /// Per decision reuse_malicious to avoid semver break.
     pub fn consensus_invalid_relay_proof(

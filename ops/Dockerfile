@@ -70,7 +70,7 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
 
 # Build release binary
 # PROTOC env'ini build'e acikca gecir: prost-build protoc'u PATH'ten
-# bulamadigi durumlarda docker-smoke 'Could not find protoc' veriyordu.
+# could not find it, docker-smoke reported 'Could not find protoc'.
 RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
     cp target/release/budlum-core /usr/local/bin/budlum-core
 
@@ -122,5 +122,5 @@ ENV RUST_LOG=info
 
 ENTRYPOINT ["budlum-core"]
 # Default: devnet (safety - mainnet requires explicit --network mainnet flag).
-# Dockerfile varsayilan calisma modu.
+# The default run mode of the Dockerfile.
 CMD ["--network", "devnet", "--port", "4001"]

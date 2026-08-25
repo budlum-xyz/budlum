@@ -155,7 +155,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: pinli bayraklar reddedildi"));
+        return Err(String::from("canary: pinned flags were rejected"));
     }
     // Unpinned: no assert_bool, no negated side.
     let free = "pub const COL_REG_SAME: usize = 28;\n        let r_same: AB::Expr = cur[COL_REG_SAME].into();\n        builder.when_transition().assert_zero(\n            r_active.clone() * r_same.clone(),\n        );\n";
@@ -167,6 +167,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "gating-flags kanaryasi OK (pinli PASS, pinsiz FAIL).",
+        "gating-flags canary OK: pinned PASSes and unpinned FAILs.",
     ))
 }
