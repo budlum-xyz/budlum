@@ -125,7 +125,7 @@ fn e2e_three_actor_manifest_to_challenge_flow() {
         .expect("B deal-open");
     assert_ne!(deal_a, deal_b);
 
-    // Izleyici C (herhangi bir hesap, role yok, whitelist yok)
+    // Observer C: any account, with no role and not on the whitelist.
     // Opens a retrieval challenge against operator A's deal.
     let req = RetrievalChallengeRequest {
         deal_id: deal_a,

@@ -52,12 +52,12 @@ fn test_bns_renewal() {
         Err(BnsError::Expired)
     ));
     // F14: grace-period - expire (350) + GRACE_PERIOD (3000)
-    // Içinde 3. parti squat edemez. epoch 400 < 3350 → bob RED.
+    // no third party can squat inside it. epoch 400 < 3350, so bob is REFUSED.
     assert!(matches!(
         reg.register("test.bud".to_string(), bob, 400, 100),
         Err(BnsError::NameTaken)
     ));
-    // Grace-period sonrası (epoch 3360 > 3350) → bob register OK.
+    // After the grace period (epoch 3360 > 3350) bob may register.
     reg.register("test.bud".to_string(), bob, 3360, 100)
         .unwrap();
     assert_eq!(reg.resolve("test.bud", 3370), Some(bob));

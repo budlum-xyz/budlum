@@ -45,13 +45,13 @@ mod tests {
         assert_eq!(reg.resolve("expire.bud", 25), None);
 
         // F14: grace-period - expire (25) + GRACE_PERIOD (3000)
-        // Içinde 3. parti squat edemez. epoch 30 < 3025 → bob RED.
+        // no third party can squat inside it. epoch 30 < 3025, so bob is REFUSED.
         let bob = test_addr_from_byte(2u8);
         assert!(matches!(
             reg.register("expire.bud".to_string(), bob, 30, 100),
             Err(BnsError::NameTaken)
         ));
-        // Grace-period sonrası (epoch 3030 > 3025) → bob register OK.
+        // After the grace period (epoch 3030 > 3025) bob may register.
         reg.register("expire.bud".to_string(), bob, 3030, 100)
             .unwrap();
         assert_eq!(reg.resolve("expire.bud", 3035), Some(bob));
