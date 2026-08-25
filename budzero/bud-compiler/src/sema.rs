@@ -166,7 +166,7 @@ impl SemanticAnalyzer {
         }
 
         // 1a-bis. Verify that the storage field types really exist.
-        // `Type::from_str` primitif olmayan HER adi `Type::Struct(ad)`
+        // `Type::from_str` turns EVERY non-primitive name into `Type::Struct(name)`
         // yapar, dolayisiyla `count: Uint644` gibi bir yazim hatasi hayali
         // would turn into a struct type and be accepted silently - the same class as the
         // hole closed for struct field types. It runs after the struct registration pass

@@ -1,5 +1,5 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// the build FAILs (a regression gate). The same policy as the main crate.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
+// enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

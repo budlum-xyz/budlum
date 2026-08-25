@@ -88,7 +88,7 @@ pub fn encode_label(input: &str) -> Option<String> {
     let mut bias = INITIAL_BIAS;
 
     while handled < total {
-        // Kalanlar arasinda >= n olan en kucuk kod noktasi.
+        // The smallest code point >= n among those remaining.
         let next_cp = chars
             .iter()
             .map(|c| *c as u32)

@@ -103,7 +103,7 @@ mod tests {
 
     fn doc() -> String {
         (1..=300)
-            .map(|i| format!("satir {i}"))
+            .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n")
     }

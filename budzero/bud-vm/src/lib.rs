@@ -1,5 +1,5 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// the build FAILs (a regression gate). The same policy as the main crate.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
+// enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 use bud_isa::{Instruction, Opcode};
 use serde::{Deserialize, Serialize};
@@ -2222,7 +2222,7 @@ mod tests {
 
     /// The whole table is bound to a single constant.
     ///
-    /// Yukaridaki kilit 240 yuvarlak sabitin **ikisini** tutuyordu. Kalan 238'i
+    /// The lock above pinned **two** of the 240 round constants. The remaining 238
     /// could be changed silently: changing a constant changes what the permutation
     /// degistirir, permutasyonu degistirmek taahhutlerin ne sakladigini ve neye
     /// binds - and no test would see it.

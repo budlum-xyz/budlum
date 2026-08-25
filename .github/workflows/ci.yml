@@ -189,7 +189,7 @@ jobs:
       # default (bud2) and bud3 compile different module sets, while no-default
       # what falls outside both. Skipping a configuration is exactly the
       # would hide the "a 3.0 module leaked into the 2.0 build" bug found this
-      # birakirdi.
+      # would leave behind.
       # `cargo fmt --all` scans the root workspace; because `bud/` is not a member of it
       # there was no formatting check in this tree. Measured: 119
       # 103 of the files had drifted from rustfmt output. Formatting does not change
@@ -1530,7 +1530,7 @@ jobs:
         run: |
           set -euo pipefail
           # Main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;
-          # Baseline bu push'la kurulur → durust SKIP marker.
+          # The baseline is established by this push -> an honest SKIP marker.
           # On non-main branches there is no 'branch=main' ref -> Repo Lint goes red.
           # The correct form is 'origin/main' (GitHub docs: .git#branch=<remote>/<branch>).
           if git cat-file -e origin/main:buf.yaml 2>/dev/null; then

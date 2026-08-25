@@ -6,7 +6,7 @@ use crate::storage::db::Storage;
 /// B.U.D. Universal Gateway.
 /// Resolves a BNS name (.bud) to content stored in B.U.D.
 ///
-/// Bitswap + ContentDiscovery P2P fetch entegre edildi.
+/// Bitswap + ContentDiscovery P2P fetch is integrated.
 pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 
 fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -52,7 +52,7 @@ fn render_from_recipe(
     // would compare against the identity of the same bytes without a source, and
     // even a correct generation would be refused.
     //
-    // Dilim boyu: kimlik shard listesi uzerinden kurulur, dolayisiyla
+    // Slice length: identity is built over the shard list, so
     // the bytes must be sliced at the same size as the original. Assuming a single part
     // would refuse every multi-part object.
     let chunk_size = manifest
@@ -110,7 +110,7 @@ pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 /// cost.
 #[derive(Default)]
 struct GenerationCache {
-    /// Ekleme sirasinda tutulan girdiler.
+    /// The entries held in insertion order.
     entries: std::collections::VecDeque<(ContentId, Vec<u8>)>,
 }
 

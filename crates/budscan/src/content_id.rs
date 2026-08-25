@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 /// Uzunluk-onekli alan hash'i. `budlum-core::core::hash::hash_fields_bytes`.
 ///
 /// Uzunluk oneki olmasaydi `["a","bc"]` ile `["ab","c"]` ayni bayt dizisini
-/// uretirdi ve iki farkli icerik ayni kimlige sahip olurdu.
+/// and two different contents would share the same identity.
 #[must_use]
 pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -36,7 +36,7 @@ pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Kanonik icerik kimligi.
+/// The canonical content identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentId(pub [u8; 32]);
 

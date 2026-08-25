@@ -148,7 +148,7 @@ pub enum ContentSource {
 /// Kaynak rejiminin taahhut baytlari.
 ///
 /// `Stored` **bos** dizi verir. Bu kasitli: kaynak alani manifest kimligine
-/// sonradan eklendi ve `Stored` bu alandan onceki her manifest'in anlamiydi.
+/// was added later, and `Stored` was the meaning of every manifest before it.
 /// Bos dizi, o manifest'lerin id'sinin birebir ayni kalmasini saglar - bir
 /// alan eklemek eski kimlikleri degistirmemeli.
 ///

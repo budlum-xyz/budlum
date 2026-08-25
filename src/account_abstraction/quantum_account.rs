@@ -86,7 +86,7 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
-    /// Bir ML-DSA-87 imzalama anahtarinin tohumunu entropiden turetir.
+    /// Derives the seed of an ML-DSA-87 signing key from entropy.
     ///
     /// # Why there is a lower bound
     ///
@@ -375,7 +375,7 @@ mod tests {
         assert!(acc.validate_all().is_ok());
     }
 
-    /// `validate_all` uc kapinin da gectigini soylemeli; biri duserse
+    /// `validate_all` must report all three gates passing; if one drops
     /// all of them must fail.
     #[test]
     fn validate_all_refuses_an_out_of_range_threshold() {

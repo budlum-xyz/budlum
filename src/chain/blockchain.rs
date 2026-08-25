@@ -369,7 +369,7 @@ impl Blockchain {
             let v2_load = pm.load_latest_snapshot_v2();
             if let Err(ref e) = v2_load {
                 error!(
-                    "V2 snapshot yukleme basarisiz (FAIL-LOUD): {e}. Genesis/DB state ile devam ediliyor - operator mudahalesi onerilir!"
+                    "V2 snapshot load failed (FAIL-LOUD): {e}. Continuing with genesis/DB state - operator intervention advised!"
                 );
             }
             // Try V2 snapshot first, fall back to V1
@@ -413,7 +413,7 @@ impl Blockchain {
                 let v1_load = pm.load_latest_snapshot();
                 if let Err(ref e) = v1_load {
                     error!(
-                        "V1 snapshot yukleme basarisiz (FAIL-LOUD): {e}. Genesis/DB state ile devam ediliyor!"
+                        "V1 snapshot load failed (FAIL-LOUD): {e}. Continuing with genesis/DB state!"
                     );
                 }
                 if let Ok(Some(snapshot)) = v1_load {

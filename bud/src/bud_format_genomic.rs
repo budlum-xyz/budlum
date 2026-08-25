@@ -5,7 +5,7 @@
 //! sequences into a delta against a REFERENCE sequence. Matching bases are left
 //! implicit (the reference plus the difference) and the deviations are
 //! recorded.
-//! KAYIPSIZ: orijinal dizi referans+farktan birebir kurulur. Referans yoksa ham
+//! LOSSLESS: the original sequence is rebuilt exactly from reference+diff. With no reference, raw
 //! Two-bit coding (A/C/G/T in 2 bits) applies. This is a SEED: real
 //! genozip-level work, such as a quality-score model, is long term, and that is
 //! marked honestly.

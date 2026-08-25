@@ -91,7 +91,7 @@ impl MarkdownSplit {
                 // A blank line is a separator in markdown: it separates paragraph from paragraph,
                 // and list from list. If dropped, `decode` cannot return the
                 // cannot restore, and the module claim of losslessness becomes false. As a type
-                // kaydediliyor, icerigi de oldugu gibi (satir ici bosluk dahil).
+                // is recorded, and so is its content verbatim (inline whitespace included).
                 MdSection::Blank
             } else {
                 MdSection::Paragraph
@@ -113,7 +113,7 @@ impl MarkdownSplit {
 
     /// Join the sections. Returns the input of `encode` byte for byte.
     ///
-    /// `str::lines` sondaki yeni satiri yutar, bu yuzden onun varligi ayrica
+    /// `str::lines` swallows a trailing newline, so its presence is recorded
     /// is carried: otherwise "a\n" and "a" produce the same section list and one of them
     /// otekine donusur.
     #[must_use]
@@ -371,7 +371,7 @@ mod tests {
     /// Evidence that the separator is carried: two different documents must not fall into the same
     /// section list. Had the blank line been dropped these two would be indistinguishable.
     #[test]
-    fn bos_satir_iki_belgeyi_ayri_tutar() {
+    fn a_blank_line_keeps_two_documents_apart() {
         let a = MarkdownSplit::encode("bir\n\niki\n").expect("encode");
         let b = MarkdownSplit::encode("bir\niki\n").expect("encode");
         assert_ne!(
@@ -387,9 +387,9 @@ mod tests {
         assert_eq!(b.decode(), "bir\niki\n");
     }
 
-    /// Sondaki yeni satir tek basina bir belgeyi ayirir.
+    /// A trailing newline on its own separates a document.
     #[test]
-    fn sondaki_yeni_satir_bloba_giriyor() {
+    fn a_trailing_newline_enters_the_blob() {
         let a = MarkdownSplit::encode("metin\n").expect("encode");
         let b = MarkdownSplit::encode("metin").expect("encode");
         assert_eq!(a.contents, b.contents, "the section lists are the same");

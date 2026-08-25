@@ -39,7 +39,7 @@ pub struct ContentId([u8; 32]);
 impl ContentId {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         // K3 fix (2026-08-16): DefaultHasher and SipHash are NOT cryptographic (a collision can be forged
-        // edilebilir). Gercek kriptografik hash: SHA3-256, domain-etiketli + uzunluk-on-ekli
+        // forged). The real cryptographic hash: SHA3-256, domain-tagged + length-prefixed
         // (budlum src/storage/content_id.rs deseniyle ayni: BDLM_CONTENT_V1).
         let mut h = Sha3_256::new();
         h.update(b"BDLM_CONTENT_V1");
@@ -58,7 +58,7 @@ pub enum RenderFormat {
     AvifSameRes,
     WebPLossless,
     Av1SameRes,
-    Thumbnail { w: u32, h: u32 }, // turev, asil yerine gecemez
+    Thumbnail { w: u32, h: u32 }, // derived; cannot stand in for the original
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ impl FidelityCore {
                 Ok((self.canonical.clone(), (self.width, self.height)))
             }
             RenderFormat::Thumbnail { w, h } => {
-                // Turev - ayri ContentId, asil yerine gecemez
+                // Derived - a separate ContentId; cannot stand in for the original
                 // Deterministik nearest-neighbor (float yok)
                 Ok((self.canonical.clone(), (*w, *h)))
             }

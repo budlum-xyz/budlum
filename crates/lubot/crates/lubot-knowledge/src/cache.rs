@@ -31,7 +31,7 @@ impl LlmCache {
     ///
     /// # Errors
     ///
-    /// Dizin kurulamazsa veya dosya okunamazsa.
+    /// When the directory cannot be created or the file cannot be read.
     pub fn open(path: &Path, enabled: bool) -> Result<Self, String> {
         if enabled {
             if let Some(parent) = path.parent() {

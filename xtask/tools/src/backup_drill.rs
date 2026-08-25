@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn integrity_line_reports_what_matched() {
-        let line = integrity_line("a\nIntegrity Audit PASSED (3 tables)\nb").expect("gecmeli");
+        let line = integrity_line("a\nIntegrity Audit PASSED (3 tables)\nb").expect("must pass");
         assert!(
             line.contains("3 tables"),
             "the matching line must be returned: {line}"
@@ -290,8 +290,8 @@ mod tests {
 
     #[test]
     fn integrity_line_shows_the_tail_when_it_fails() {
-        let err = integrity_line("satir1\nsatir2").expect_err("gecmemeli");
-        assert!(err.contains("satir2"), "son satirlari gostermeli: {err}");
+        let err = integrity_line("line1\nline2").expect_err("must not pass");
+        assert!(err.contains("line2"), "it must show the last lines: {err}");
     }
 
     #[test]

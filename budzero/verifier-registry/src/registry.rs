@@ -621,7 +621,7 @@ impl VerifierRegistry {
     // (the 2026-08-22 decision, G0; aligned with the core
     // `src/registry/permissionless.rs` on the same day with the same decision - the
     // two registries must give the same answer to the same question). Responsibility
-    // `Registration::is_slashable`'da yasar: cikmakta olan uyenin kilidi
+    // lives in `Registration::is_slashable`: the exiting member's lock
     // suresince kesilebiliriligi surer, ama yeni is almaz.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::RELAYER)
