@@ -1,18 +1,21 @@
-//! SocialFi boost dağılımı regresyon mühürleri (F4 - raporu bulgusu,
-//! SocialFi test mühürü.
+//! Regression seals for the SocialFi boost distribution (F4 - a report finding,
+//! the SocialFi test seal).
 //!
-//! Constitution §3: boost %4 B.U.D. operatörlerine, %16 creator'a, %80
-//! Protocol'e. Mevcut birleşik semantik (5322e00 + 7f054d7): executor
-//! Bud_share'i `pending_bud_boost_share`'de biriktirir; blok commit sonrası
-//! `distribute_bud_boost_share` bunu aktif deal'lerin fee_per_byte_epoch ağırlığına
-//! Göre dağıtır (yuvarlama tozu ilk deal'in operatörüne), aktif deal yoksa
-//! Dürüst burn. Bu testler ağırlıklı dağıtımı, dust determinizmini, pending
+//! Constitution section 3: 4 percent of the boost goes to the B.U.D. operators,
+//! 16 percent to the creator and 80 percent to the protocol. The current
+//! combined semantics (5322e00 plus 7f054d7): the executor accumulates
+//! bud_share in `pending_bud_boost_share`; after the block commit
+//! `distribute_bud_boost_share` distributes it by the fee_per_byte_epoch weight
+//! of the active deals (the rounding dust goes to the operator of the first
+//! deal), and with no active deal it is an honest burn. These tests seal the
+//! weighted distribution, the dust determinism, the pending
 //! Drain'i ve burn fallback'ini kilitler.
 //!
-//! NOT: mempool zincir-seviyesi tx doğrulaması imza ister
-//! (`Transaction::verify` - imzasız tx sessizce blok dışı kalır). Bu yüzden
-//! Aktörler gerçek `KeyPair` ile imzalar; nonce `bc.get_nonce` ile zincirden
-//! Okunur, nft_id registry'den okunur (id sayacı varsayımı yoktur).
+//! NOTE: chain-level mempool transaction validation requires a signature
+//! (`Transaction::verify` - an unsigned transaction silently stays out of the
+//! block). So the actors sign with a real `KeyPair`, the nonce is read from the
+//! chain through `bc.get_nonce`, and the nft_id is read from the registry, with
+//! no assumption about an id counter.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
@@ -55,8 +58,9 @@ fn deal_econ(fee_per_byte_epoch: u64) -> StorageEconomicsParams {
     }
 }
 
-/// Format-geçerli test zarfı (dürüst marker - GERÇEK STARK kanıtı değil;
-/// Storage_deal.rs test helper'ıyla birebir aynı minimal ProofEnvelope).
+/// A format-valid test envelope, with an honest marker - it is NOT a real STARK
+/// proof, but exactly the same minimal ProofEnvelope as the test helper in
+/// storage_deal.rs.
 fn valid_merkle_proof() -> Vec<u8> {
     let envelope = bud_proof::ProofEnvelope {
         proof_format_version: 1,
@@ -96,7 +100,7 @@ fn open_weighted_deal(
         .unwrap();
 }
 
-/// İmzalı tx gönderir ve tek blok üretir.
+/// Submits a signed transaction and produces a single block.
 fn submit_tx(bc: &mut Blockchain, mut tx: Transaction, kp: &KeyPair) {
     tx.sign(kp);
     bc.mempool.add_transaction(tx).unwrap();
@@ -130,16 +134,17 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     let alice = Address::from(alice_kp.public_key_bytes());
     let bob = Address::from(bob_kp.public_key_bytes());
     // NOT: devnet_genesis'te [0x01;32] 1e9 alokasyonlu, [0x02;32] validator'dur
-    // (genesis.rs:284). Zincir testleri bu özel adreslerden uzak durmalı.
+    // (genesis.rs:284). Chain tests have to stay away from these special addresses.
     let op1 = Address::from([0x51; 32]);
     let op2 = Address::from([0x52; 32]);
     bc.state.add_balance(&alice, 1000);
     bc.state.add_balance(&bob, 1_000_000);
 
-    // Aktif deal'ler: ağırlık artık `total_fee(1)`, yani bir epoch'luk bedel,
-    // ve o bedel shard boyutuna bağlı. Shard 4 bayt, ölçek 1e9, dolayısıyla
-    // 100 ağırlık için oran 100 * 1e9 / 4 = 25e9 olmalı. Oranları buradan
-    // türetiyoruz ki testin ölçtüğü şey 100/300 payı olarak kalsın.
+    // The active deals: the weight is now `total_fee(1)`, the cost of one epoch,
+    // and that cost depends on the shard size. The shard is 4 bytes and the scale
+    // is 1e9, so for a weight of 100 the rate has to be 100 * 1e9 / 4 = 25e9. We
+    // derive the rates from that so what the test measures stays the 100/300
+    // share.
     let manifest = ContentManifest::from_bytes_sliced(b"boost pool content", 4).unwrap();
     let shard_bytes = u64::from(manifest.shards[0].size);
     let rate_for = |weight: u64| weight * (FEE_RATE_SCALE as u64) / shard_bytes;
@@ -149,23 +154,26 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     mint_nft(&mut bc, &alice_kp, ContentId([0x77; 32]));
     assert_eq!(bc.state.get_balance(&alice), 999);
 
-    // NFT id'si registry'den okunur (id sayacı varsayımı yok).
+    // The NFT id is read from the registry, with no assumption about an id counter.
     let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
 
-    // Dağıtım delta olarak kilitlenir - genesis alokasyonu değişse bile sağlam.
+    // The distribution is locked as a delta, so it holds even if the genesis
+    // allocation changes.
     let op1_pre = bc.state.get_balance(&op1);
     let op2_pre = bc.state.get_balance(&op2);
     boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
 
-    // Bud_share = 10: op1 = 10*100/400 = 2, op2 = 10*300/400 = 7, dağıtılan 9.
-    // Dust 1 ilk deal'in operatörüne (deal_id sırası deterministik) -> op1 = 3.
+    // bud_share = 10: op1 = 10*100/400 = 2, op2 = 10*300/400 = 7, so 9 are
+    // distributed. The dust of 1 goes to the operator of the first deal (the
+    // deal_id order is deterministic), giving op1 = 3.
     assert_eq!(bc.state.get_balance(&op1), op1_pre + 3);
     assert_eq!(bc.state.get_balance(&op2), op2_pre + 7);
     // %16 creator
     assert_eq!(bc.state.get_balance(&alice), 999 + 40);
     // Booster: 1_000_000 - 250 (boost) - 1 (fee)
     assert_eq!(bc.state.get_balance(&bob), 999_749);
-    // Havuz blok sonunda boşaltıldı (drain) - sonraki bloğa borç kalmaz.
+    // The pool is drained at the end of the block, so no debt carries into the
+    // next one.
     assert_eq!(bc.state.pending_bud_boost_share, 0);
 }
 
@@ -187,8 +195,9 @@ async fn boost_without_active_deals_burns_share_and_drains_pool() {
     let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
     boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
 
-    // Aktif deal yok: creator %16'sını yine alır, %4 + %80 dürüst burn -
-    // Hiçbir operatör hesabı oluşmamalı ve havuz yine drain edilmeli.
+    // With no active deal the creator still takes its 16 percent, and the 4 plus
+    // 80 percent are an honest burn: no operator account may be created and the
+    // pool still has to be drained.
     assert_eq!(bc.state.get_balance(&alice), 999 + 40);
     assert_eq!(bc.state.get_balance(&bob), 999_749);
     assert_eq!(bc.state.get_balance(&ghost), 0);

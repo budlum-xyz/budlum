@@ -25,7 +25,5 @@ src/tests/genesis_repro.rs	35
 src/tests/hardening.rs	52
 src/tests/lubot_runtime.rs	36
 src/tests/poa_onboarding_matrix.rs	33
-src/tests/relayer_gates.rs	20
 src/tests/snapshot_chaos.rs	51
-src/tests/socialfi.rs	27
 src/tests/tokenomics_proptest.rs	33
