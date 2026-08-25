@@ -200,12 +200,12 @@ fn parse_nodes(line: &str) -> (Vec<(String, String)>, Vec<String>) {
             _ => None,
         };
 
-        if let (Some(_o), Some(c)) = (opener, closer) {
+        if let (Some(o), Some(c)) = (opener, closer) {
             let mut depth = 0i32;
             let label_start = i;
             let mut j = i;
             while j < chars.len() {
-                if chars[j] == opener.unwrap() {
+                if chars[j] == o {
                     depth += 1;
                 } else if chars[j] == c {
                     depth -= 1;
