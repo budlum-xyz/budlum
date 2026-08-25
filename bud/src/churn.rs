@@ -8,7 +8,8 @@ pub struct QuadRing {
 }
 
 impl QuadRing {
-    /// Panik'siz kurucu: n < 4 ise None (K38 - herkese açık API panik üretmez).
+    /// A panic-free constructor: `None` when n is below 4 (K38 - a public API
+    /// does not panic).
     pub fn new(n: usize) -> Option<Self> {
         if n < 4 {
             return None;
@@ -20,7 +21,7 @@ impl QuadRing {
         (self.k + 1) as f64 / self.k as f64
     }
 
-    // Tek blok kaybi XOR'la kurtarma - iskelet dogruluk
+    // Recovering a single lost block with XOR - skeleton correctness.
     pub fn repair_one_missing(blocks: &[Vec<u8>], parity: &[u8]) -> Vec<u8> {
         // blocks = kalan k-1 blok + parity XOR'la kayip
         let mut out = vec![0u8; parity.len()];
@@ -71,7 +72,7 @@ impl ChurnFixture {
             ChurnFixture {
                 kind: FixtureKind::DoubleChurn,
                 n: 4,
-                description: "N=4 cift fis normal sinif KAYIP (durust sinir), kritik 2+2 kurtarir",
+                description: "at N=4 a double-plug pull LOSES the normal class (the honest boundary); the critical 2+2 recovers",
             },
             ChurnFixture {
                 kind: FixtureKind::SingleChurn,
@@ -91,7 +92,7 @@ impl ChurnFixture {
             ChurnFixture {
                 kind: FixtureKind::JournalReplay,
                 n: 4,
-                description: "Crash-only journal replay, commit'li kayitlar",
+                description: "crash-only journal replay, committed records",
             },
             ChurnFixture {
                 kind: FixtureKind::ParityRotation,
@@ -169,9 +170,12 @@ mod tests {
     use super::*;
     #[test]
     fn quad_ring_expansion() {
-        let r = QuadRing::new(4).expect("n=4 geçerli");
+        let r = QuadRing::new(4).expect("n=4 is valid");
         assert!((r.expansion() - 1.333).abs() < 0.01);
-        assert!(QuadRing::new(3).is_none(), "n<4 None dönmeli (panik yok)");
+        assert!(
+            QuadRing::new(3).is_none(),
+            "n below 4 has to return None, with no panic"
+        );
         assert!(QuadRing::new(0).is_none());
     }
     #[test]

@@ -595,13 +595,13 @@ pub const COL_SYSCALL_IS_1: usize = 742;
 pub const COL_SYSCALL_IS_2: usize = 743;
 pub const COL_SYSCALL_IS_3: usize = 744;
 
-/// The Program CTL multiplicity witness: how many times pc=`i` appears in the CPU
-/// calistirildigi.
+/// The Program CTL multiplicity witness: how many times pc=`i` appears in the
+/// CPU trace, meaning how many times that instruction was executed.
 ///
 /// The Program CTL is a *lookup*, not a permutation. With branching an instruction may
-/// never run (a skipped branch) or run several times (a loop
-/// govdesi). Sabit agirlik `pre_active` kullanildigi surece durust prover
-/// dengesiz LogUp toplami uretir ve `InvalidProof` alir.
+/// never run (a skipped branch) or run several times (a loop body). As long as
+/// the fixed weight `pre_active` is used, an honest prover produces an
+/// unbalanced LogUp sum and gets `InvalidProof`.
 pub const COL_PROG_MULT: usize = 753;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
@@ -1335,19 +1335,20 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // # Kapanan bosluk
         //
         // Asagidaki kok denetimi, **orijinal** VerifyMerkle satirinin
-        // compared the `merkle_current` value against `rs1_val` (the claimed root)
-        // karsilastiriyor. Prover o hucreye 64. turun ciktisini yaziyor - ama
-        // but **no constraint enforced it**. So the chain was computed correctly row by
-        // row and its result was bound to nothing: a malicious
-        // bir prover orijinal satira dogrudan `rs1_val`'i yazar, esitlik
-        // is satisfied and `rd_val_new = 1` is returned. The path looks verified,
-        // dogrulanan sey yoktur.
+        // compared the `merkle_current` value against `rs1_val` (the claimed
+        // root). The prover writes the output of round 64 into that cell - but
+        // **no constraint enforced it**. So the chain was computed correctly row
+        // by row and its result was bound to nothing: a malicious prover writes
+        // `rs1_val` straight into the original row, the equality is satisfied
+        // and `rd_val_new = 1` is returned. The path looks verified, and nothing
+        // has been verified.
         //
         // This was the reason the opcode is kept off in production ("unfinished
-        // path verification"). Eksik olan tek sey su gecis: **son** genisleme
-        // row (`is_expand = 1`, the successor row is not an expansion) must equal the
-        // Poseidon ciktisi, o genislemeyi baslatan orijinal satirin
-        // `merkle_current` value.
+        // path verification"). The only thing missing was this transition: the
+        // Poseidon output of the **last** expansion row (`is_expand = 1` where
+        // the successor row is not an expansion) has to equal the
+        // `merkle_current` value of the original row that started that
+        // expansion.
         //
         // # Why it is read forwards, not backwards
         //
@@ -1370,8 +1371,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(nxt_is_expand.clone())
             .assert_zero(nxt_merkle_final_expected.clone() - merkle_current.clone());
 
-        // Ve genislemeden genislemeye degismeden tasinir. Degisebilseydi
-        // tasima bir sey tasimazdi.
+        // And it is carried from expansion row to expansion row unchanged. If it
+        // could change, the carrying would carry nothing.
         builder
             .when_transition()
             .when(is_expand.clone())
@@ -2431,7 +2432,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_pc: AB::Expr = pre_cur[0].into();
             let pre_inst: AB::Expr = pre_cur[1].into();
             let pre_active: AB::Expr = pre_cur[2].into();
-            // ROM tarafinin LogUp agirligi: pc'nin kac kez calistirildigi.
+            // The LogUp weight of the ROM side: how many times this pc was executed.
             // It stays in the committed main trace -- because the verifier does not
             // see the trace it cannot be placed in the preprocessed table.
             let prog_mult: AB::Expr = cur[COL_PROG_MULT].into();

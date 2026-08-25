@@ -14,7 +14,6 @@
 #
 # Format: <path>\t<remaining Turkish lines>
 # Recorded: 2026-08-24. 347 files, 5742 lines.
-.github/workflows/ci.yml	6
 .github/workflows/docker-smoke.yml	1
 .github/workflows/extra-tooling.yml	3
 .github/workflows/osv-scanner.yml	1
@@ -27,7 +26,6 @@ bud/mime.types.bud.json	1
 bud/src/bud_format.rs	3
 bud/src/bud_format_engine.rs	1
 bud/src/bud_format_hardening.rs	2
-bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
@@ -35,16 +33,13 @@ bud/src/bud_format_qos.rs	5
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_ultra.rs	1
-bud/src/churn.rs	6
 bud/src/gates.rs	4
 bud/src/provider.rs	4
 bud/src/ratio.rs	4
 bud/tests/test_integration.rs	3
 budzero/bud-cli/tests/toolchain_end_to_end.rs	5
 budzero/bud-compiler/src/sema.rs	4
-budzero/bud-isa/src/lib.rs	6
 budzero/bud-node/src/bitswap.rs	1
-budzero/bud-proof/src/plonky3_air.rs	5
 budzero/bud-proof/src/plonky3_prover.rs	1
 budzero/bud-proof/tests/fiat_shamir_binding.rs	3
 budzero/bud-vm/src/lib.rs	1
@@ -59,8 +54,6 @@ crates/lubot/crates/lubot-integrations/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/embed.rs	3
 crates/lubot/crates/lubot-serve/src/config.rs	4
-crates/lubot/crates/lubot-serve/src/lib.rs	5
-crates/lubot/crates/lubot-tune/src/lib.rs	5
 crates/lubot/crates/lubot-tune/src/schema.rs	4
 crates/wallet-core/src/lib.rs	1
 crates/wallet-core/src/tee.rs	2
@@ -88,7 +81,6 @@ src/settlement/global_block.rs	2
 src/storage/content_id.rs	2
 src/storage/db.rs	2
 src/storage/erasure.rs	2
-src/storage/msr.rs	5
 src/storage/render.rs	2
 src/tests/ai_verification_status_locks.rs	2
 src/tests/blockchair_fixture_locks.rs	57

@@ -169,11 +169,11 @@ jobs:
       - name: Lubot reads, does not produce
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate
       # crates/lubot is a separate workspace: not a member of the root Cargo.toml, so
-      # `cargo clippy --all-targets` ona hic ugramiyordu. Yalniz kaynak metnini
-      # the gate above that reads it existed. Result: the tree stopped compiling and
-      # nobody saw it (`&'static [u16]` could not be derived with serde,
-      # `ConnState: Default` eksikti, bir test `&[]` gonderiyordu). Derleme +
-      # the test was wired here so it cannot break silently again.
+      # `cargo clippy --all-targets` never reached it. Only the gate above,
+      # which reads the source text, existed. Result: the tree stopped compiling
+      # and nobody saw it (`&'static [u16]` could not be derived with serde,
+      # `ConnState: Default` was missing, one test was passing `&[]`). The build
+      # and the tests were wired in here so it cannot break silently again.
       - name: Lubot builds and its tests pass
         run: |
           cargo clippy --manifest-path crates/lubot/Cargo.toml --all-targets -- -D warnings
@@ -223,7 +223,7 @@ jobs:
       # happens, and happens silently: the derivation manifest is still there, still looks
       # valid. The first sign is a read that cannot be served. dictionary.rs solved the same
       # shape with a reference count and a grace window; derivations needed the same
-      # bagimlilik vardi ve bunlarin hicbiri yoktu.
+      # protection, and none of it was there.
       # A storage decision divides two ratios; only the ratios matter, so the common
       # scale cancels. The danger is exactly here: applying the scale to one ratio and not the other
       # not applying it shifts every threshold by that factor and nothing looks
@@ -257,7 +257,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
-        # NOT: master 2026-07-16+ `toolchain` input'unu ZORUNLU kiliyor
+        # NOTE: master 2026-07-16 and later make the `toolchain` input MANDATORY
         # (CI evidence: job 87741629986 - "'toolchain' is a required input").
         with:
           toolchain: "1.97.1"
@@ -957,7 +957,7 @@ jobs:
       # upload to the Security tab, and run the gate last. Asking one step for both SARIF
       # if exit-code 1 is also given, the step dies when a finding appears and the upload
       # never runs; findings do not reach the Security tab. In this order a finding
-      # Gorunur olur VE job yine kirmiziya doner.
+      # becomes visible AND the job still turns red.
       - name: Trivy fs scan - generate SARIF (reporting, not a gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -1117,9 +1117,10 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree
-      # The tree is written in English. Turkish is allowed in exactly two
-      # places: README.tr.md, and the word "Türkçe" as the label on the link
-      # that points at it. The translation is unfinished, so the gate ratchets
+      # The tree is written in English. Turkish is allowed in exactly three
+      # places: README.tr.md, a Turkish localisation directory whose strings are
+      # what the Turkish user reads, and the word "Türkçe" as the label on the
+      # link that points at that README. The translation is unfinished, so the gate ratchets
       # off .github/turkish-baseline.txt: counts only go down, and a count that
       # is higher than what is actually in the file also fails, so finishing
       # the work is the only way to keep this green.
@@ -1465,11 +1466,11 @@ jobs:
       # no checked_add (both overflow paths open), a7d59cbf closes the addition side,
       # 5d47d9d5 closes the heartbeat side. One version string, three distinct security
       # postures. 0.50.0 was never published to crates.io, so nothing
-      # advisory araligi da onu kapsamiyor. cargo-vet git bagimliligini
-      # "denetlenemez" sayar ve 23 paketin hicbirini saymaz; Cargo git kaynagi
-      # writes a checksum into the lock for it. The only remaining method: the source at the pinned revision
-      # reading and writing down what was read, and when the pin moves, reading
-      # zorlamak.
+      # no advisory range covers it either. cargo-vet treats a git dependency as
+      # "unauditable" and counts none of the 23 packages; Cargo writes no
+      # checksum into the lock for a git source. The only remaining method: read
+      # the source at the pinned revision, write down what was read, and force a
+      # fresh read whenever the pin moves.
       - name: are git dependencies audited per commit + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit --self-test
