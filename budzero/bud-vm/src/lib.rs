@@ -2220,7 +2220,7 @@ mod tests {
         assert_eq!(POSEIDON_RC[0][1], 0xcb3a864e58ada44b, "RC[0][1] mismatch");
     }
 
-    /// Butun tablo tek sabite baglanir.
+    /// The whole table is bound to a single constant.
     ///
     /// Yukaridaki kilit 240 yuvarlak sabitin **ikisini** tutuyordu. Kalan 238'i
     /// could be changed silently: changing a constant changes what the permutation

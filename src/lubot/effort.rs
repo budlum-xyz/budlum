@@ -143,7 +143,7 @@ impl<'de> serde::Deserialize<'de> for EffortTier {
         // would admit out-of-range tiers (0, 4, 65535) that from_tenths
         // rejects; those values then flow into request_id and the signature
         // unchecked. Deserialize through from_tenths so the 0.5x..=10.0x
-        // invariant holds on every entry path (güvenlik denetimi, MEDIUM,
+        // invariant holds on every entry path (security review, MEDIUM,
         // CWE-20).
         let tenths = u16::deserialize(deserializer)?;
         Self::from_tenths(tenths).map_err(serde::de::Error::custom)

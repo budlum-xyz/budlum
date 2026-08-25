@@ -41,7 +41,7 @@
 //! wallet.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
 //! ```
 //!
-//! ## Gizlilik
+//! ## Confidentiality
 //!
 //! - `note_privacy_enabled`: produces a private transfer intent (the PrivacyCommit path).
 //! - `tee_enabled`: execution-time confidentiality - **fail-closed** without a

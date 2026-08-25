@@ -197,7 +197,7 @@ impl BudBitswap {
             return Ok(()); // Nothing to store.
         }
         // Strix MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
-        // gelmelidir. Yalniz kendi cid'ine hash'leyen bir payload, kotu
+        // has to arrive. A payload that only hashes to its own cid lets a bad
         // block; otherwise a malicious peer is allowed to send a different block
         // verir (cache zehirleme + eviction). Istenen cid eslesmezse red.
         if response.cid != requested_cid {

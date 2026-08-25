@@ -270,7 +270,7 @@ pub fn default_domain(
         finality_adapter: adapter_str,
         min_confirmations,
         pow_parameters,
-        // Eklenti tarafindan kurulan alan da zk kanitina kapali dogar.
+        // A domain created by a plugin is also born closed to zk proofs.
         // Programlar sonradan, acikca eklenir.
         zk_program_allowlist: Vec::new(),
         bridge_enabled: true,

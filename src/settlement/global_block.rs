@@ -50,8 +50,8 @@ pub struct GlobalBlockHeader {
     ///
     /// Merkle root of all finalized `AiInferenceOutcome`s in this block.
     /// This anchors the AI Inference Layer into the global settlement,
-    /// Fulfilling Paradigma Kayması §5: AI çıktısının orijinalliği
-    /// Kriptografik olarak kanıtlanabilir hale gelir.
+    /// This fulfils section 5 of the paradigm shift: the originality of an AI
+    /// output becomes cryptographically provable.
     ///
     /// `None`: no AI outcomes were finalized in this block.
     /// `Some(root)`: `AiRegistry::state_root` snapshot at block seal time,
