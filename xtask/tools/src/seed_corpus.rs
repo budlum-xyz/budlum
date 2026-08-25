@@ -5,14 +5,14 @@
 //! # The silent failure of the shell version
 //!
 //! Betik tohumlari `printf "\x01\x01..."` ile yaziyordu. `printf`'in kacis
-//! dizisi yorumu **kabuga ve yapiya gore degisir**: bash'in yerlesik
-//! `printf`'i `\x` anlar, `/usr/bin/printf` (coreutils) `\x`'i anlar ama
-//! dash's builtin does not understand it and writes the string literally. So the same
-//! betik `bash` ile calistiginda 8 baytlik bir ikili dosya, `sh` ile
-//! calistiginda 32 baytlik bir metin dosyasi uretiyordu ve **ikisi de
-//! silently succeeded**.
+//! The interpretation of an escape sequence **varies by shell and by build**:
+//! bash's builtin `printf` understands `\x`, `/usr/bin/printf` (coreutils)
+//! understands `\x`, but dash's builtin does not and writes the string
+//! literally. So the same script produced an 8-byte binary file under `bash`
+//! and a 32-byte text file under `sh`, and **both succeeded silently**.
 //!
-//! Rust'ta tohum bir `&[u8]` sabiti; yorumlanacak bir kacis dizisi yok.
+//! In Rust a seed is a `&[u8]` constant; there is no escape sequence to
+//! interpret.
 //!
 //! Ayrica betigin son satiri `ls -1 "$OUT_DIR"/*.bud | wc -l` ile sayiyordu;
 //! bu, dizin bos oldugunda glob'un genislememesi yuzunden `ls: no such
@@ -47,7 +47,7 @@ const SEEDS: &[Seed] = &[
     },
     Seed {
         name: "03_verify_merkle_0x1E.bud",
-        what: "VerifyMerkle (0x1E) yol dogrulamasi",
+        what: "VerifyMerkle (0x1E) path verification",
         bytes: &[0x1e, 0x01, 0x02, 0x03, 0x00, 0x01, 0x00, 0x00],
     },
     Seed {
@@ -66,10 +66,10 @@ const SEEDS: &[Seed] = &[
 ///
 /// # Errors
 ///
-/// Dizin olusturulamazsa ya da bir dosya yazilamazsa.
+/// If the directory cannot be created or a file cannot be written.
 pub fn generate(out_dir: &Path) -> Result<String, String> {
     std::fs::create_dir_all(out_dir)
-        .map_err(|e| format!("{} olusturulamadi: {e}", out_dir.display()))?;
+        .map_err(|e| format!("{} could not be created: {e}", out_dir.display()))?;
 
     let mut written: Vec<String> = Vec::with_capacity(SEEDS.len());
     let mut total_bytes = 0usize;
@@ -81,8 +81,8 @@ pub fn generate(out_dir: &Path) -> Result<String, String> {
         // Read back after writing. This is not pedantry: the failure of the shell
         // version was exactly "it thought it wrote, it wrote something else" and nobody
         // bakmadi.
-        let back =
-            std::fs::read(&path).map_err(|e| format!("{} okunamadi: {e}", path.display()))?;
+        let back = std::fs::read(&path)
+            .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
         if back != seed.bytes {
             return Err(format!(
                 "{}: {} bytes written, {} bytes read back",
@@ -110,15 +110,16 @@ pub fn default_out_dir(root: &Path) -> PathBuf {
     root.join("fuzz").join("corpus").join("zkvm")
 }
 
-/// Kanarya: uretecin gercekten ikili yazdigini kanitlar.
+/// The canary: it proves the generator really writes binary.
 ///
-/// Shell surumunun hatasi ikili yerine metin yazmakti ve bu disaridan
-/// gorunmuyordu. Burada tohumlarin ikili oldugu (yazdirilabilir ASCII
-/// not) and that reading it back gives a byte-for-byte equal result.
+/// The bug in the shell version was writing text instead of binary, and that
+/// was invisible from the outside. Here it is verified that the seeds are
+/// binary (not printable ASCII) and that reading them back gives a
+/// byte-for-byte equal result.
 ///
 /// # Errors
 ///
-/// Uretim basarisiz olursa ya da yazilan tohum metne benziyorsa.
+/// If generation fails, or if a written seed looks like text.
 pub fn self_test() -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("budlum-seed-selftest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -131,8 +132,8 @@ pub fn self_test() -> Result<String, String> {
         if bytes != seed.bytes {
             return Err(format!("{}: the read-back is not equal", seed.name));
         }
-        // Shell'in `\x01`'i harfi harfine yazdigi durumda dosya tamamen
-        // it would be printable ASCII. We expect at least one control byte.
+        // In the case where the shell wrote `\x01` literally the file would be
+        // entirely printable ASCII. We expect at least one control byte.
         if !bytes.iter().any(|b| *b < 0x20) {
             return Err(format!(
                 "{}: there is no control byte at all, this is a text file; \

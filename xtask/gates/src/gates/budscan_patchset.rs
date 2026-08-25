@@ -2,37 +2,41 @@
 //!
 //! # Why a gate
 //!
-//! The patch layout was taken as an **idea** from another Firefox derivative. That
-//! agacta iki sey vardi ve ikisi de tasinmadi:
+//! The patch layout was taken as an **idea** from another Firefox derivative.
+//! That tree held two things, and neither was carried over:
 //!
-//! 1. **The tooling layer is shell.** The concrete measurement is that in that repository
-//!    `scripts/check-patchfail.sh`: `.rej` dosyalarini `patch` ciktisindan
-//!    `grep -n rej$ | awk '{print $(NF)}'` ile cikariyor. `grep` bir sey
-//!    bulamazsa dongu bos calisir, `failed_patches` bos kalir ve betik
-//!    `success: All patches where applied successfully.` yazip 0 doner.
-//!    So if the format of `patch` output changes, every patch can fail and
-//!    kontrol gecer.
+//! 1. **The tooling layer is shell.** The concrete measurement is
+//!    `scripts/check-patchfail.sh` in that repository: it extracts the `.rej`
+//!    files from the `patch` output with
+//!    `grep -n rej$ | awk '{print $(NF)}'`. If `grep` finds nothing the loop
+//!    runs empty, `failed_patches` stays empty and the script prints
+//!    `success: All patches where applied successfully.` and returns 0.
+//!    So if the format of the `patch` output changes, every patch can fail and
+//!    the check still passes.
 //!
-//! 2. **Marka adlari.** Dosya adlari, yama adlari ve tanimlayicilarda
-//!    another browser's name appears. Taking the idea does not require taking the name,
+//! 2. **Brand names.** Another browser's name appears in file names, patch
+//!    names and identifiers. Taking the idea does not require taking the name,
 //!    and if the name stays the tree looks like a part of that project.
 //!
-//! This gate measures both and does not fall into its own hole while measuring: the case where
-//! it can inspect nothing is a separate branch and it does **not** pass.
+//! This gate measures both and does not fall into its own hole while measuring:
+//! the case where it can inspect nothing is a separate branch and it does
+//! **not** pass.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// Yama katmaninda gecmemesi gereken marka parcalari, hecelerine bolunmus.
+/// The brand fragments that must not appear in the patch layer, split into
+/// syllables.
 ///
-/// Identical to the list inside `budscan::patchset`. There are two copies because
-/// `xtask/gates` must not depend on `budscan`; the divergence risk is
-/// olculuyor.
+/// Identical to the list inside `budscan::patchset`. There are two copies
+/// because `xtask/gates` must not depend on `budscan`; the divergence risk is
+/// measured by a separate check.
 ///
-/// Heceli yazimin sebebi: bir red listesi, yasakladigi adi duz yazdigi anda
-/// would put that name into the tree, and every scan asking "does a foreign brand appear"
-/// a tool would count this line as a hit. The check keeps its strength without the literal in the tree.
+/// The reason for the syllable spelling: the moment a deny list writes the name
+/// it forbids in plain form, it would put that name into the tree, and every
+/// scan asking "does a foreign brand appear" would count this very line as a
+/// hit. The check keeps its strength without the literal being in the tree.
 const FORBIDDEN_BRAND_SYLLABLES: &[&[&str]] = &[
     &["obs", "ide"],
     &["libre", "wolf"],
@@ -144,11 +148,12 @@ pub fn run(root: &Path) -> Result<String, String> {
     {
         problems.push(format!(
             "{unlisted} is on disk but not in patches.txt; a patch that is silently never \
-             yama, uygulandigi sanilan bir yamadir"
+             applied is a patch believed to have been applied"
         ));
     }
 
-    // Her yama en az bir dosyaya dokunmali ve izin verilen agaclarda kalmali.
+    // Every patch has to touch at least one file and stay inside the permitted
+    // trees.
     let allowed_roots = [
         "browser/",
         "netwerk/",
@@ -218,16 +223,16 @@ pub fn run(root: &Path) -> Result<String, String> {
         let path = browser.join(rel);
         if !path.exists() {
             problems.push(format!(
-                "crates/budscan/browser/{rel} yok; yama katmani eksik parca ile tarif ediliyor"
+                "crates/budscan/browser/{rel} is missing; the patch layer is described with a missing piece"
             ));
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(&path) {
-            // README ve patch dosyalari, kabuk surumunun neden tasinmadigini
-            // anlatirken o depolarin adini **bilerek** aniyor. Alintiyi
-            // yasaklamak, kararin gerekcesini silmek olurdu; bu yuzden
-            // explanatory texts are not scanned, and which files go unscanned
-            // burada yazili.
+            // The README and the patch files name those repositories
+            // **deliberately** while explaining why the shell version was not
+            // carried over. Forbidding the quotation would delete the reason
+            // for the decision, so the explanatory texts are not scanned, and
+            // which files go unscanned is written right here.
             if rel == "README.md" {
                 scanned += 1;
                 continue;
@@ -258,34 +263,34 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 /// # Errors
 ///
-/// Beklendigi gibi davranmayan kanaryalar.
+/// Canaries that do not behave as expected.
 pub fn self_test() -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
 
-    // Kanarya 1: liste ayristirici bir tekrari yakalamali.
+    // Canary 1: the list parser has to catch a duplicate.
     if parse_list("a.patch\na.patch\n").is_ok() {
-        problems.push(String::from("VACUOUS: tekrarlanan yama kabul edildi"));
+        problems.push(String::from("VACUOUS: a duplicated patch was accepted"));
     }
 
     // Canary 2: an empty list yields an empty result; that is not an error but
-    // the caller must not mistake it for a pass. `run` handles that in a separate
-    // dalliyor; burada ayristiricinin bos donmesi olculuyor.
+    // the caller must not mistake it for a pass. `run` handles that in a
+    // separate branch; what is measured here is that the parser returns empty.
     match parse_list("# comment only\n") {
         Ok(v) if v.is_empty() => {}
-        Ok(_) => problems.push(String::from("yorum satiri yama sayildi")),
-        Err(e) => problems.push(format!("yorum satiri hata verdi: {e}")),
+        Ok(_) => problems.push(String::from("a comment line counted as a patch")),
+        Err(e) => problems.push(format!("a comment line produced an error: {e}")),
     }
 
-    // Kanarya 3: `+++ /dev/null` dokunulan dosya sayilmamali.
+    // Canary 3: `+++ /dev/null` must not count as a touched file.
     if !touched_files("--- a/x.js\n+++ /dev/null\n").is_empty() {
         problems.push(String::from(
-            "VACUOUS: silme hedefi dokunulan dosya sayildi",
+            "VACUOUS: a deletion target counted as a touched file",
         ));
     }
 
-    // Kanarya 4: dokunulan dosyalar `b/` onekinden temizlenmeli.
+    // Canary 4: touched files have to be stripped of the `b/` prefix.
     if touched_files("+++ b/browser/x.js\n") != vec![String::from("browser/x.js")] {
-        problems.push(String::from("'b/' oneki temizlenmedi"));
+        problems.push(String::from("the 'b/' prefix was not stripped"));
     }
 
     // Canary 5: the brand list must not be empty, otherwise the scan searches for nothing.

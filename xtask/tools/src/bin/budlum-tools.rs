@@ -8,14 +8,14 @@
 //!
 //! Araclar:
 //!
-//! | Arac | Yerine gectigi betik |
+//! | Tool | The script it replaces |
 //! |---|---|
 //! | `pre-push` | `scripts/pre-push-check.sh` |
-//! | `install-hook` | (yeni: betigi kimse cagirmiyordu) |
+//! | `install-hook` | (new: nobody was calling the script) |
 //! | `devnet` | `run_nodes.sh` |
-//! | `seed-corpus [dizin]` | `scripts/generate_zkvm_seed_corpus.sh` |
+//! | `seed-corpus [dir]` | `scripts/generate_zkvm_seed_corpus.sh` |
 //! | `backup-drill` | `ops/backup_restore_drill.sh` |
-//! | `--self-test` | (yeni: her aracin kanaryasi) |
+//! | `--self-test` | (new: the canary of every tool) |
 
 use budlum_tools::{backup_drill, devnet, prepush, repo_root, seed_corpus};
 
