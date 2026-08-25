@@ -150,12 +150,18 @@ impl Network {
 
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {
         match self {
+            // Mainnet holds five times the default entry count, so the byte
+            // budget is raised with it; leaving it at the default would make
+            // bytes rather than entries the binding limit on the network that
+            // needs the entries most. The ratio to `max_size` is kept, not the
+            // absolute number.
             Network::Mainnet => crate::mempool::pool::MempoolConfig {
                 max_size: 100_000,
                 max_per_sender: 100,
                 min_fee: 10,
                 tx_ttl_secs: 1_800,
                 rbf_bump_percent: 15,
+                max_pool_bytes: 512 * 1024 * 1024,
             },
             Network::Testnet => crate::mempool::pool::MempoolConfig {
                 max_size: 50_000,
@@ -163,6 +169,7 @@ impl Network {
                 min_fee: 1,
                 tx_ttl_secs: 3_600,
                 rbf_bump_percent: 10,
+                max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
             },
             Network::Devnet => crate::mempool::pool::MempoolConfig::default(),
         }

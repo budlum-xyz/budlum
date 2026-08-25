@@ -11,6 +11,35 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 // consensus behaviour: it is documented and tested
 // (`test_same_fee_canonical_order_by_hash`).
 
+/// The bytes a full mempool is allowed to hold.
+///
+/// # Why a byte budget exists beside the entry count
+///
+/// `max_size` bounds how many transactions the pool holds and says nothing
+/// about how large they are. `network::protocol::MAX_TX_SIZE` bounds one
+/// transaction at 100 KiB. Multiplied out, the default pool of 20 000 entries
+/// admits 1.95 GiB of transaction bodies, which is more resident memory than
+/// this repository's own build host has (measured: 1984 MiB). The two limits
+/// were each defensible alone and their product was not bounded by anything.
+///
+/// The attack does not need many peers or an unusual transaction. Signatures
+/// are verified before admission, so the flooder pays signing cost, but every
+/// transaction is otherwise ordinary: 100 KiB of `data`, a fee above the
+/// floor, a fresh nonce. Two hundred senders at the per-sender cap of 100
+/// reach the ceiling. Nothing on the path refuses them, because nothing on the
+/// path adds up their sizes.
+///
+/// # Why 256 MiB
+///
+/// It is chosen against the block the pool feeds rather than against a round
+/// number: `MAX_TRANSACTIONS_PER_BLOCK` is 5000, so at the transport ceiling a
+/// single block's worth of worst-case transactions is 488 MiB, and holding
+/// several blocks' worth of *worst-case* bodies is not a service the pool owes
+/// anyone. At realistic transaction sizes 256 MiB is far more than 20 000
+/// entries, so the entry count stays the binding limit in normal operation and
+/// this budget only engages under the flood it exists for.
+pub const DEFAULT_MAX_POOL_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct MempoolConfig {
     pub max_size: usize,
@@ -22,6 +51,14 @@ pub struct MempoolConfig {
     pub tx_ttl_secs: u64,
 
     pub rbf_bump_percent: u64,
+
+    /// The resident byte ceiling for admitted transaction bodies.
+    ///
+    /// Counted over the same measure the transport uses to refuse an oversized
+    /// transaction, so a transaction that passed `validate_tx_size` is charged
+    /// the number that check read. Two different measures of "size" on the
+    /// admission path is how a bound gets enforced against the wrong quantity.
+    pub max_pool_bytes: usize,
 }
 
 impl Default for MempoolConfig {
@@ -32,6 +69,7 @@ impl Default for MempoolConfig {
             min_fee: 1,
             tx_ttl_secs: 3600,
             rbf_bump_percent: 10,
+            max_pool_bytes: DEFAULT_MAX_POOL_BYTES,
         }
     }
 }
@@ -39,6 +77,13 @@ impl Default for MempoolConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MempoolError {
     PoolFull,
+    /// The pool is under its entry count but at its byte budget.
+    ///
+    /// Distinct from `PoolFull` because the operator response differs: a full
+    /// pool by count means raise `max_size` or the fee floor, a full pool by
+    /// bytes means the pool is being fed large bodies and raising `max_size`
+    /// would make it worse.
+    PoolBytesFull,
     DuplicateTransaction,
     FeeTooLow,
     SenderLimitReached,
@@ -63,6 +108,27 @@ pub struct Mempool {
     by_sender: HashMap<Address, BTreeMap<u64, String>>,
 
     by_fee: BTreeMap<u64, BTreeSet<String>>,
+
+    /// The running total of admitted transaction bytes.
+    ///
+    /// Kept as a counter rather than recomputed on each admission: summing the
+    /// pool per insert is O(n) on the hot path, and a re-encode per entry is
+    /// worse than the flood it would be defending against. Every mutation of
+    /// `transactions` adjusts this in the same statement block, and
+    /// `resident_bytes_are_exact` re-derives it from scratch to prove the two
+    /// have not drifted.
+    resident_bytes: usize,
+}
+
+/// How many bytes one transaction occupies, by the transport's own measure.
+///
+/// Reuses the protobuf `encoded_len` that `validate_tx_size` refuses on, so a
+/// transaction charged here is charged the number it was admitted against.
+/// The serialization is discarded; only the length is wanted.
+fn charged_bytes(tx: &Transaction) -> usize {
+    use prost::Message;
+    let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
+    proto.encoded_len()
 }
 
 impl Mempool {
@@ -72,7 +138,20 @@ impl Mempool {
             transactions: HashMap::new(),
             by_sender: HashMap::new(),
             by_fee: BTreeMap::new(),
+            resident_bytes: 0,
         }
+    }
+
+    /// The bytes currently held.
+    #[must_use]
+    pub const fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    /// The byte ceiling in force.
+    #[must_use]
+    pub const fn max_pool_bytes(&self) -> usize {
+        self.config.max_pool_bytes
     }
 
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
@@ -149,6 +228,34 @@ impl Mempool {
             return Err(MempoolError::PoolFull);
         }
 
+        // The byte budget is charged AFTER the count check and BEFORE the
+        // replacement is removed, and both orderings matter.
+        //
+        // After the count check, so a pool that is full by count refuses with
+        // `PoolFull` rather than by whichever limit happens to be read first;
+        // the two errors tell an operator different things.
+        //
+        // Before the removal, so a refusal leaves the pool untouched. The
+        // eviction ordering above exists because a refusal that had already
+        // deleted somebody else's transaction is a free deletion primitive.
+        // Charging bytes after the removal would reintroduce exactly that: a
+        // replacement large enough to exceed the budget would be refused with
+        // the transaction it replaced already gone.
+        let incoming = charged_bytes(&tx);
+        let freed = existing_hash
+            .as_ref()
+            .and_then(|h| self.transactions.get(h))
+            .map_or(0, |entry| charged_bytes(&entry.tx));
+        let projected = self
+            .resident_bytes
+            .saturating_sub(freed)
+            .saturating_add(incoming);
+        if projected > self.config.max_pool_bytes
+            && !self.evict_until_bytes_fit(&tx, projected - self.config.max_pool_bytes)
+        {
+            return Err(MempoolError::PoolBytesFull);
+        }
+
         if let Some(existing_hash) = existing_hash {
             self.remove_transaction(&existing_hash);
         }
@@ -167,6 +274,7 @@ impl Mempool {
             .or_default()
             .insert(tx.hash.clone());
 
+        self.resident_bytes = self.resident_bytes.saturating_add(incoming);
         self.transactions
             .insert(tx.hash.clone(), PendingTx { tx, added_at: now });
 
@@ -175,6 +283,9 @@ impl Mempool {
 
     pub fn remove_transaction(&mut self, hash: &str) -> Option<Transaction> {
         if let Some(pending) = self.transactions.remove(hash) {
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(charged_bytes(&pending.tx));
             if let Some(sender_txs) = self.by_sender.get_mut(&pending.tx.from) {
                 sender_txs.remove(&pending.tx.nonce);
                 if sender_txs.is_empty() {
@@ -313,6 +424,49 @@ impl Mempool {
         false
     }
 
+    /// Evict cheaper transactions until `needed` bytes have been freed.
+    ///
+    /// The same rule as [`Self::evict_lowest_fee`], applied repeatedly: only
+    /// transactions strictly cheaper than the incoming one are candidates, the
+    /// incoming sender may not evict itself, and ties break on the smallest
+    /// hash so two nodes with the same pool evict the same transactions.
+    ///
+    /// Returns `false` without having evicted anything when the budget cannot
+    /// be reached. That is the important half: a partial eviction that then
+    /// refuses the transaction would be the free-deletion primitive again,
+    /// this time paid for in bytes. So the victims are chosen first and
+    /// removed only once the sum is known to be enough.
+    fn evict_until_bytes_fit(&mut self, new_tx: &Transaction, needed: usize) -> bool {
+        let mut victims: Vec<String> = Vec::new();
+        let mut freed = 0usize;
+        'outer: for (&fee, hashes) in &self.by_fee {
+            if new_tx.fee <= fee {
+                // `by_fee` is ordered, so nothing further down can be cheaper.
+                break;
+            }
+            for hash in hashes {
+                let Some(entry) = self.transactions.get(hash) else {
+                    continue;
+                };
+                if entry.tx.from == new_tx.from {
+                    continue;
+                }
+                freed = freed.saturating_add(charged_bytes(&entry.tx));
+                victims.push(hash.clone());
+                if freed >= needed {
+                    break 'outer;
+                }
+            }
+        }
+        if freed < needed {
+            return false;
+        }
+        for hash in victims {
+            self.remove_transaction(&hash);
+        }
+        true
+    }
+
     pub fn set_min_fee(&mut self, min_fee: u64) {
         self.config.min_fee = min_fee;
     }
@@ -339,6 +493,240 @@ mod tests {
         tx.hash = tx.calculate_hash();
         tx.sign(&keypair);
         tx
+    }
+
+    /// Build a signed transaction carrying `payload` bytes of `data`.
+    fn create_test_tx_sized(seed_byte: u8, nonce: u64, fee: u64, payload: usize) -> Transaction {
+        let seed = [seed_byte; 32];
+        let keypair = crate::crypto::primitives::KeyPair::from_seed(&seed).unwrap();
+        let from = crate::core::address::Address::from(keypair.public_key_bytes());
+        let mut tx = Transaction::new(
+            from,
+            crate::core::address::Address::zero(),
+            100,
+            vec![0xAB; payload],
+        );
+        tx.nonce = nonce;
+        tx.fee = fee;
+        tx.hash = tx.calculate_hash();
+        tx.sign(&keypair);
+        tx
+    }
+
+    /// The byte budget refuses a flood the entry count would admit.
+    ///
+    /// This is the finding the budget exists for: every transaction here is
+    /// individually legal - correctly signed, under the transport's 100 KiB
+    /// ceiling, above the fee floor, a fresh nonce - and the pool is nowhere
+    /// near `max_size`. Without the budget the pool grows to the product of
+    /// the two limits, which on the default configuration is 1.95 GiB.
+    #[test]
+    fn a_flood_of_legal_transactions_is_refused_by_bytes_not_by_count() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 10_000,
+            max_per_sender: 100,
+            min_fee: 1,
+            // 200 KiB: two 64 KiB bodies fit, the third does not.
+            max_pool_bytes: 200 * 1024,
+            ..Default::default()
+        });
+
+        let mut admitted = 0usize;
+        let mut refused_by_bytes = false;
+        for nonce in 0..8u64 {
+            match pool.add_transaction(create_test_tx_sized(9, nonce, 10, 64 * 1024)) {
+                Ok(()) => admitted += 1,
+                Err(MempoolError::PoolBytesFull) => {
+                    refused_by_bytes = true;
+                    break;
+                }
+                Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            }
+        }
+
+        assert!(
+            refused_by_bytes,
+            "the pool admitted {admitted} large transactions without reaching its byte budget"
+        );
+        assert!(
+            pool.len() < 10_000,
+            "the entry count was never the binding limit, so it must not be what refused"
+        );
+        assert!(
+            pool.resident_bytes() <= pool.max_pool_bytes(),
+            "resident {} exceeds the budget {}",
+            pool.resident_bytes(),
+            pool.max_pool_bytes()
+        );
+    }
+
+    /// A pool full by count still reports `PoolFull`, not `PoolBytesFull`.
+    ///
+    /// The two errors tell an operator to do opposite things, so the check
+    /// order has to be stable. A generous byte budget with a tiny entry count
+    /// must still fail on the count.
+    #[test]
+    fn a_pool_full_by_count_reports_the_count_error() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 2,
+            max_per_sender: 100,
+            min_fee: 1,
+            max_pool_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        });
+        pool.add_transaction(create_test_tx_sized(1, 0, 10, 16))
+            .unwrap();
+        pool.add_transaction(create_test_tx_sized(2, 0, 10, 16))
+            .unwrap();
+        // Same fee as the residents, so it cannot evict either of them.
+        assert_eq!(
+            pool.add_transaction(create_test_tx_sized(3, 0, 10, 16)),
+            Err(MempoolError::PoolFull)
+        );
+    }
+
+    /// The counter matches a fresh sum of the pool at every step.
+    ///
+    /// The counter is incremental because summing per insert is O(n) on the
+    /// admission path. Incremental counters drift: an early draft charged on
+    /// insert and forgot the eviction path, and the pool reported bytes it no
+    /// longer held until it refused everything. Re-deriving the total is the
+    /// only thing that catches that class.
+    #[test]
+    fn resident_bytes_are_exact() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 100,
+            max_per_sender: 100,
+            min_fee: 1,
+            max_pool_bytes: 8 * 1024 * 1024,
+            ..Default::default()
+        });
+
+        let recompute = |p: &Mempool| -> usize {
+            p.transactions
+                .values()
+                .map(|e| charged_bytes(&e.tx))
+                .sum::<usize>()
+        };
+
+        let mut hashes = Vec::new();
+        for seed in 1..=5u8 {
+            let tx = create_test_tx_sized(seed, 0, 10, usize::from(seed) * 512);
+            hashes.push(tx.hash.clone());
+            pool.add_transaction(tx).unwrap();
+            assert_eq!(pool.resident_bytes(), recompute(&pool), "after an insert");
+        }
+
+        for hash in &hashes {
+            pool.remove_transaction(hash);
+            assert_eq!(pool.resident_bytes(), recompute(&pool), "after a removal");
+        }
+        assert_eq!(pool.resident_bytes(), 0, "an emptied pool holds no bytes");
+    }
+
+    /// A replacement is charged the difference, not the whole body.
+    ///
+    /// RBF frees the slot it takes. Charging the replacement without crediting
+    /// the transaction it replaces would make a sequence of legal fee bumps
+    /// look like a flood, and the pool would refuse its own replacement rule.
+    #[test]
+    fn a_replacement_is_charged_only_the_difference() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 100,
+            max_per_sender: 100,
+            min_fee: 1,
+            // Room for one 32 KiB body and very little else.
+            max_pool_bytes: 40 * 1024,
+            ..Default::default()
+        });
+
+        pool.add_transaction(create_test_tx_sized(4, 0, 10, 32 * 1024))
+            .unwrap();
+        let before = pool.resident_bytes();
+
+        // Same sender, same nonce, higher fee: a replacement.
+        pool.add_transaction(create_test_tx_sized(4, 0, 100, 32 * 1024))
+            .expect("a fee bump must not be refused for bytes it is about to free");
+
+        assert_eq!(pool.len(), 1, "the replacement did not replace");
+        assert_eq!(
+            pool.resident_bytes(),
+            before,
+            "a same-size replacement changed the resident total"
+        );
+    }
+
+    /// A refused admission leaves the pool exactly as it was.
+    ///
+    /// The eviction ordering above the byte check exists because a refusal
+    /// that had already deleted somebody else's transaction is a free deletion
+    /// primitive: the attacker pays no fee and occupies no slot. The byte
+    /// budget must not reintroduce it.
+    #[test]
+    fn a_byte_refusal_deletes_nothing() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 100,
+            max_per_sender: 100,
+            min_fee: 1,
+            max_pool_bytes: 80 * 1024,
+            ..Default::default()
+        });
+
+        // Two expensive residents fill the budget.
+        pool.add_transaction(create_test_tx_sized(1, 0, 1_000, 32 * 1024))
+            .unwrap();
+        pool.add_transaction(create_test_tx_sized(2, 0, 1_000, 32 * 1024))
+            .unwrap();
+        let before_len = pool.len();
+        let before_bytes = pool.resident_bytes();
+
+        // A cheap newcomer cannot evict either of them, so it must be refused
+        // and must not have removed anything on the way out.
+        assert_eq!(
+            pool.add_transaction(create_test_tx_sized(3, 0, 2, 32 * 1024)),
+            Err(MempoolError::PoolBytesFull)
+        );
+        assert_eq!(pool.len(), before_len, "a refusal evicted a resident");
+        assert_eq!(pool.resident_bytes(), before_bytes);
+    }
+
+    /// A richer transaction evicts cheaper ones until its bytes fit.
+    ///
+    /// The count-based eviction frees one slot because one slot is what a
+    /// count needs. Bytes are not one-for-one: a large newcomer may need
+    /// several small victims, and stopping after the first would refuse a
+    /// transaction the pool had room for.
+    #[test]
+    fn a_richer_transaction_evicts_until_its_bytes_fit() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 100,
+            max_per_sender: 100,
+            min_fee: 1,
+            max_pool_bytes: 70 * 1024,
+            ..Default::default()
+        });
+
+        // Four cheap 16 KiB residents, from four distinct senders.
+        for seed in 1..=4u8 {
+            pool.add_transaction(create_test_tx_sized(seed, 0, 5, 16 * 1024))
+                .unwrap();
+        }
+        assert_eq!(pool.len(), 4);
+
+        // A rich 48 KiB newcomer needs three of them gone.
+        pool.add_transaction(create_test_tx_sized(9, 0, 500, 48 * 1024))
+            .expect("a fee-beating transaction must be able to make room");
+
+        assert!(
+            pool.resident_bytes() <= pool.max_pool_bytes(),
+            "the pool overshot its budget after eviction"
+        );
+        assert!(
+            pool.get_sorted_transactions(10)
+                .iter()
+                .any(|t| t.fee == 500),
+            "the rich transaction was not admitted"
+        );
     }
 
     #[test]
