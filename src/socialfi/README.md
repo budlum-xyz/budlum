@@ -1,26 +1,38 @@
-# SocialFi / NFT Registry (modül README'si)
+# SocialFi / the NFT registry - a module README
 
-**Modül-ayrımı kuralı gereği SocialFi'nin kendi
-README'sidir.** Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları
-burada yaşar.
+**This is SocialFi's own README, as the module-separation rule requires.**
+The root `README.md` is only a dashboard; the maturity and risk warnings live
+here.
 
-## Durum
+## Status
 
-- **Olgunluk:** canlı (NFT registry + boost ekonomisi).
-- **Kod konumu:** `src/socialfi/`, `mod.rs` (`NftRegistry`), `types.rs` (`Nft`).
-- **Test sayısı:** parent suite'te (Core test'leri içinde, ayrı modül gate'i YOK).
-- **Snapshot:** `StateSnapshotV2.nft_registry: Option<NftRegistry>` (GAP-2 digest).
+- **Maturity:** live (the NFT registry plus the boost economy).
+- **Code location:** `src/socialfi/`, with `mod.rs` (`NftRegistry`) and
+  `types.rs` (`Nft`).
+- **Test count:** 4 unit tests in `src/socialfi/mod.rs`, plus 2 async tests in
+  `src/tests/socialfi.rs`. They run inside the core suite; there is no separate
+  module gate.
+- **Snapshot:** `StateSnapshotV2.nft_registry: Option<NftRegistry>` (inside the
+  GAP-2 digest).
 
-## Olgunluk uyarıları
+## Maturity warnings
 
-- **Boost ekonomisi.** NftBoost: `%4 B.U.D. share` operatör havuzuna
-  (`distribute_bud_boost_share`, F4 fix). `NftBurn` → storage pruning hook
+- **The boost economy.** NftBoost sends a 4% B.U.D. share to the operator pool
+  (`distribute_bud_boost_share_in_state` in `src/chain/blockchain.rs`, the F4
+  fix). `NftBurn` triggers the storage pruning hook
   (`NodeCommand::StoragePrune`).
-- **Mainnet v1 kapsam dışı** (M10 borcu, SocialFi/budlumxyz/Marketplace post-launch).
-  Mainnet'te nft_registry boş kalır, governance activation sonrası.
-- **NftBoost integer overflow** (SECURITY_AUDIT_HACKER H3), `saturating_mul`
-  ile kapatıldı.
+- **Out of scope for mainnet v1** (debt M10: SocialFi, budlumxyz and the
+  marketplace are all post-launch). `nft_registry` stays empty on mainnet until
+  governance activates it.
+- **The NftBoost integer overflow** (security review H3) is closed. The guard
+  is in `src/execution/executor.rs`: the cost, the creator share and the pool
+  share each go through `checked_add`/`checked_mul` and refuse with a
+  validation error rather than wrapping.
 
-## Sıradaki
+  Note: an earlier version of this file said the fix used `saturating_mul`.
+  That was measured and is wrong - saturating would have silently capped the
+  value, which is the opposite of refusing.
 
-SocialFi genişletmesi (mainnet sonrası). Boost ekonomi modeli dokümante.
+## Next
+
+Extending SocialFi, after mainnet. The boost economy model is documented.
