@@ -400,9 +400,18 @@ mod tests {
     }
 
     /// The ceilings must be ordered by what they hold, or one of them is wrong.
+    ///
+    /// Written as `const` assertions rather than runtime ones. Both operands
+    /// are constants, so the comparison is decided at compile time and a
+    /// runtime `assert!` would be a test that cannot fail at the moment it is
+    /// run - clippy's `assertions_on_constants` says so, and under `-D
+    /// warnings` it is a build error rather than advice. In a `const` block
+    /// the ordering is enforced by the build itself, which is strictly
+    /// stronger: a future edit that inverts two ceilings stops compiling
+    /// instead of waiting for someone to run the test.
     #[test]
     fn the_ceilings_are_ordered_by_what_they_carry() {
-        assert!(MAX_CONTROL_FILE_BYTES < MAX_BAN_LIST_BYTES);
-        assert!(MAX_BAN_LIST_BYTES < MAX_SNAPSHOT_BYTES);
+        const { assert!(MAX_CONTROL_FILE_BYTES < MAX_BAN_LIST_BYTES) };
+        const { assert!(MAX_BAN_LIST_BYTES < MAX_SNAPSHOT_BYTES) };
     }
 }
