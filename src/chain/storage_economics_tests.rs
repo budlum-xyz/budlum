@@ -45,10 +45,11 @@ mod tests {
                 .unwrap();
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
-        // Bir epoch'luk bedel 10 kalsın diye oran shard boyutundan türetiliyor:
-        // fiyat artık bayt başına, `10 * 1e9 / shard_bytes` tam olarak epoch
-        // başına 10 eder. Sabit 10 yazsaydık 8 baytlık shard yukarı
-        // yuvarlanıp 1 olurdu ve test fiyatı değil yuvarlamayı ölçerdi.
+        // The rate is derived from the shard size so that one epoch still costs
+        // 10: the price is now per byte, and `10 * 1e9 / shard_bytes` comes to
+        // exactly 10 per epoch. Had we written a fixed 10, an 8-byte shard would
+        // round up to 1 and the test would be measuring the rounding rather than
+        // the price.
         let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
         let economics = StorageEconomicsParams {
             operator_bond: params.min_operator_bond,

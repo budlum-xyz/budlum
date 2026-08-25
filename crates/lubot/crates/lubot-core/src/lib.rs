@@ -1,11 +1,11 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
 // derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
 #![forbid(unsafe_code)]
-//! # lubot-core - çekirdek tipler
+//! # lubot-core - the core types
 //!
-//! Zincir üstü budlum katmanıyla eşleşen **ayna tipler** (K3 kararı):
-//! yalnızca biçim aynalanır (32 bayt hash, kind enumları); izin kuralları
-//! asla kopyalanmaz - zincirden sorgulanır. Ayrıntı:
+//! **Mirror types** matching the on-chain budlum layer (the K3 decision): only
+//! the shape is mirrored (32-byte hashes, the kind enums), and permission rules
+//! are never copied - they are queried from the chain. Details:
 //! `docs/MIMARI_ONERISI_2026-08-13.md` §6a.
 
 pub mod dataset;
