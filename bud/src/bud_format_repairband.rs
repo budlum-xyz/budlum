@@ -59,7 +59,7 @@ pub fn best_repair_model(n: usize, k: usize) -> Option<(RepairModel, f64)> {
     ]
     .iter()
     .filter_map(|&m| repair_band(n, k, m).map(|b| (m, b)))
-    // NaN bir band degeri paniklemek yerine siralanir (bkz. hw modulu).
+    // A NaN band value is ordered rather than panicked on (see the hw module).
     .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 

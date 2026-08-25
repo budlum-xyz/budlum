@@ -5,7 +5,7 @@
 
 [policy]
 # KARAR (2026-08-13): Varyant B - hibrit.
-# Acik setler once B.U.D.'a StorageDeal olarak kaydedilir, TrainingCorpus
+# Open sets are first recorded to B.U.D. as a StorageDeal; TrainingCorpus
 # gets the label and has its hash verified; the network is the only channel
 # Lubot reads from.
 entry_channel = "B.U.D. StorageDeal + AiDatasetMetadata::training"
@@ -14,13 +14,13 @@ variant = "B-hibrit"
 [candidates."turkish-nlp-suite/InstrucTurca"]
 license = "Apache-2.0"
 license_verified = true
-scale = "2.58M ornek; 4.17 GB"
+scale = "2.58M samples; 4.17 GB"
 status = "aday-birincil"
 
 [candidates."hasankursun/turkish-corpus-100b"]
 license = "Apache-2.0"
 license_verified = true
-scale = "~105B token; sft split 7.62M satir"
+scale = "~105B tokens; sft split 7.62M lines"
 status = "aday-sft-split"
 
 [candidates."ogulcanaydogan/Turkish-LLM-v10-Training"]
@@ -32,7 +32,7 @@ status = "aday-sartli"
 [candidates."merve/turkish_instructions"]
 license = "the card is empty - to be verified"
 license_verified = false
-scale = "51.6K satir"
+scale = "51.6K lines"
 status = "aday-sartli"
 
 [candidates."BAAI/Infinity-Instruct"]

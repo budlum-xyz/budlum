@@ -333,7 +333,7 @@ mod hardening_tests {
     /// carrying `auth_required=false`, this check has to produce a `warn!`. The
     /// verification extracts a helper function and a `tracing` subscriber
     /// Ile log yakalayarak. (`tracing` global subscriber zaten
-    /// Test'lerde kurulu olmayabilir; bu test pratik olarak sadece
+    /// It may not be installed under test; in practice this test only
     /// verifies that the code path compiles and is called under the right
     /// condition; the real warning behaviour is verified manually in the
     /// integration tests.

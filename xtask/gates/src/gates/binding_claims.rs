@@ -251,7 +251,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("crates/wallet-core/src/lib.rs"), wired).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: kablosuz 'wired' iddiasi gecti"));
+        return Err(String::from("canary: an unwired 'wired' claim passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(

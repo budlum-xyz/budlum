@@ -23,9 +23,9 @@ struct Outcome {
     code: i32,
 }
 
-/// Push oncesi kontrolleri kosur.
+/// Runs the pre-push checks.
 ///
-/// `cargo fmt --check` ve `cargo clippy -D warnings`. Ikisi de kosar; ilki
+/// `cargo fmt --check` and `cargo clippy -D warnings`. Both run; the first
 /// dustu diye ikincisi atlanmaz.
 ///
 /// # Errors
@@ -154,7 +154,7 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
     }
     let hook = hooks.join("pre-push");
     let body = "#!/bin/sh\n\
-                # budlum-tools tarafindan kuruldu.\n\
+                # installed by budlum-tools.\n\
                 exec cargo run --quiet --manifest-path xtask/tools/Cargo.toml \\\n\
                 \x20    --bin budlum-tools -- pre-push\n";
     std::fs::write(&hook, body).map_err(|e| format!("{} yazilamadi: {e}", hook.display()))?;

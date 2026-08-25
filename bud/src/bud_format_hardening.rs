@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn recipe_verification_gate() {
-        let original = b"deterministik icerik";
+        let original = b"deterministic content";
         let cid = crate::bud_format_container::content_id(original);
         // correct production -> accepted
         assert!(verify_recipe(|d| d.to_vec(), original, &cid));

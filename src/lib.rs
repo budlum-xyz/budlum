@@ -2,7 +2,7 @@
 // an `unsafe` block enters, the build FAILS. This is a regression gate.
 #![forbid(unsafe_code)]
 /// Quantum-safe account abstraction. Signature verification is bound to ML-DSA-87
-/// oldugu icin `wallet-ml-dsa` ozelligini gerektirir.
+/// it therefore requires the `wallet-ml-dsa` feature.
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod account_abstraction;
 pub mod ai;

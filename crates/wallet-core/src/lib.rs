@@ -1,5 +1,5 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// compilation FAILS (regression gate). Same policy as the main crate.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
+// enters, compilation FAILS (regression gate). Same policy as the main crate.
 #![forbid(unsafe_code)]
 //! Budlum Wallet Core - BIP39 mnemonic + FIPS 204 ML-DSA-87 post-quantum key derivation + signing.
 //!

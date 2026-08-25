@@ -51,6 +51,23 @@
 //!      `var`, `son`, `kok`, `dal`, `bos`, `once`) are deliberately absent: a
 //!      gate that fires on `once` teaches people to disable it.
 //!
+//! # A green gate is only as wide as its vocabulary
+//!
+//! The word list started at 60 entries and the gate was green, which was read
+//! as "the tree has 9 Turkish lines left in 3 files". It did not. A scan with
+//! a wider list of undiacriticised Turkish found **121 further lines in 86
+//! files** that the gate walked straight past: `kilidi`, `satir`, `icin`,
+//! `sadece`, `derleme`, `kapisi` and the rest of the everyday vocabulary a
+//! hurried translation leaves behind. The gate was not wrong about what it
+//! looked for; it was never asked to look for those.
+//!
+//! This is the failure mode of every list-driven gate: the report says
+//! "clean", and what it means is "clean, as far as the list goes". So the
+//! vocabulary is now 114 entries, and the entries were chosen by measuring the
+//! tree rather than by guessing - each one was counted, and each surviving
+//! collision with English is handled by [`ENGLISH_COLLISIONS`] rather than by
+//! dropping the Turkish word and reopening the hole.
+//!
 //! # Why proper nouns are scrubbed first
 //!
 //! `Gröbner`, `Schrödinger` and `Poincaré` carry diacritics that are not
@@ -95,6 +112,28 @@ const ALLOWED_WORD: &str = "Türkçe";
 /// Names that carry non-Turkish diacritics and must not be reported.
 const PROPER_NOUNS: &[&str] = &["Gröbner", "Schrödinger", "Poincaré", "Ångström", "Erdős"];
 
+/// English words that begin with a Turkish vocabulary word.
+///
+/// The vocabulary is matched on a left word boundary only, so `satir` is meant
+/// to catch `satiri` and `satirlari`. It also catches the English `satire`,
+/// and `icin` catches `icing`. Dropping those two entries from the vocabulary
+/// would be the easy fix and the wrong one: `satir` and `icin` are two of the
+/// most frequent Turkish words in this tree, so dropping them keeps the hole
+/// open. Removing the English word from the line first keeps both.
+///
+/// Matched case-insensitively, after the line is lowercased.
+const ENGLISH_COLLISIONS: &[&str] = &[
+    "satire",
+    "satires",
+    "satirical",
+    "satirically",
+    "satirist",
+    "satirists",
+    "satirize",
+    "satirized",
+    "icing",
+];
+
 /// Turkish-specific characters. Their presence is unambiguous.
 const TURKISH_CHARS: &[char] = &['ş', 'ğ', 'ı', 'ç', 'ö', 'ü', 'Ş', 'Ğ', 'İ', 'Ç', 'Ö', 'Ü'];
 
@@ -106,19 +145,35 @@ const TURKISH_CHARS: &[char] = &['ş', 'ğ', 'ı', 'ç', 'ö', 'ü', 'Ş', 'Ğ',
 /// word or an English substring, and a gate with false positives gets
 /// switched off.
 const TURKISH_WORDS: &[&str] = &[
+    "acikca",
+    "acikken",
     "acikla",
     "adresleme",
     "agac",
+    "alinir",
+    "altinda",
+    "anahtar",
     "anlasma",
+    "arasinda",
     "artik",
+    "asagidaki",
+    "ayirma",
+    "ayrica",
     "ayrint",
     "bagimli",
     "bagimsiz",
+    "baglamak",
     "baglant",
+    "bakiniz",
     "baska",
+    "bayraga",
+    "baytlik",
     "belirtir",
+    "betigin",
+    "birakir",
     "birlikte",
     "butun",
+    "buyuk",
     "cagir",
     "cagri",
     "calis",
@@ -126,56 +181,124 @@ const TURKISH_WORDS: &[&str] = &[
     "cozul",
     "cozum",
     "cunku",
+    "degeri",
     "degil",
     "degisik",
+    "denetimi",
+    "denetler",
+    "derleme",
+    "devam",
     "dogru",
     "dogrula",
+    "dosyanin",
     "dugum",
     "durum",
     "dusuk",
+    "edildi",
+    "edilebilir",
+    "edilir",
     "edilmeli",
+    "eklenir",
+    "gecerken",
     "gecerli",
     "gecersiz",
+    "gecmeli",
+    "gecti",
     "gerekce",
+    "gereken",
     "gerekir",
     "gerekli",
+    "girdiler",
     "gizli",
     "gorunur",
     "guvenl",
     "hangi",
     "herhangi",
     "hicbir",
+    "hizli",
+    "icerik",
+    "icin",
     "iliski",
+    "ilki",
+    "imzalama",
+    "isaretlemek",
+    "kademesi",
     "kanarya",
     "kanit",
     "kapali",
+    "kapisi",
+    "kapiyi",
+    "kararsiz",
     "katman",
     "kaydi",
     "kayit",
+    "kilidi",
     "kisit",
+    "kopyalanmayan",
+    "korumaz",
+    "kosar",
+    "kosur",
+    "kucuk",
     "kullanici",
+    "kurulamazsa",
+    "kurulur",
     "nasil",
     "nobetci",
-    "olcum",
+    "noktasi",
+    "okunamazsa",
+    "olarak",
     "olcul",
+    "olcum",
     "olmali",
+    "olmasi",
+    "olmayan",
     "olustur",
+    "onceki",
+    "oncesi",
     "onemli",
     "ornegin",
+    "ornek",
     "ozellik",
+    "ozet",
+    "parcasi",
     "reddedil",
+    "sadece",
+    "satir",
+    "sayfa",
     "sessizce",
+    "silinen",
     "sinir",
+    "siralanir",
+    "sirasinda",
+    "sisirilmis",
+    "sonraki",
+    "sonrasi",
+    "soylemeyen",
     "surum",
+    "surumunde",
+    "tamami",
+    "tarafindan",
     "tasima",
+    "tohumunu",
+    "turetir",
+    "tutulan",
     "tutulur",
     "uretil",
     "uretim",
+    "uretiyordu",
+    "uzerinden",
     "uzlasma",
+    "uzunlugu",
+    "verilir",
     "yalniz",
     "yanlis",
     "yapild",
+    "yardimcisi",
+    "yazilir",
     "yeniden",
+    "yerine",
+    "yerlesim",
+    "yukaridaki",
     "yurut",
     "zorunlu",
 ];
@@ -230,6 +353,29 @@ fn scrub(line: &str) -> String {
     for noun in PROPER_NOUNS {
         out = out.replace(noun, " ");
     }
+    for word in ENGLISH_COLLISIONS {
+        out = replace_ascii_case_insensitive(&out, word, " ");
+    }
+    out
+}
+
+/// Replace every ASCII-case-insensitive occurrence of `needle` with `with`.
+///
+/// [`str::replace`] is case-sensitive, and the collision list has to hold for
+/// `Satire` at the start of a sentence as well as `satire` mid-line.
+fn replace_ascii_case_insensitive(haystack: &str, needle: &str, with: &str) -> String {
+    let lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find(&needle_lower) {
+        let start = cursor + rel;
+        let end = start + needle_lower.len();
+        out.push_str(haystack.get(cursor..start).unwrap_or_default());
+        out.push_str(with);
+        cursor = end;
+    }
+    out.push_str(haystack.get(cursor..).unwrap_or_default());
     out
 }
 
@@ -675,6 +821,99 @@ pub fn self_test() -> Result<String, String> {
             let _ = fs::remove_dir_all(&tmp);
             return Err(format!(
                 "canary: diacritic-free Turkish was not detected: {}",
+                body.trim()
+            ));
+        }
+    }
+
+    // The vocabulary was widened after a measurement showed the gate reporting
+    // "clean" while 121 Turkish lines sat in 86 files it walked past. These are
+    // the words that were missing, taken verbatim from lines the gate let
+    // through. If one of them is ever dropped from the vocabulary, that hole
+    // reopens silently, so each is nailed down here.
+    for (idx, body) in [
+        "// Unsafe kilidi: bu crate su an 0 unsafe.\n",
+        "// derleme FAIL eder (regresyon kapisi).\n",
+        "let text = b\"birinci satir\\nikinci satir\\n\";\n",
+        "// K-BUD-GENERATIVE-REMOVED: sadece deterministic\n",
+        "# Arweave `data_root` icin SHA-384.\n",
+        "/// Bir ML-DSA-87 imzalama anahtarinin tohumu.\n",
+        "// Programlar sonradan, acikca eklenir.\n",
+        "/// `None` = servis edilebilir.\n",
+        "// Ekleme sirasinda tutulan girdiler.\n",
+        "/// Lubot kademesi.\n",
+        "// Kalanlar arasinda >= n olan en kucuk kod noktasi.\n",
+        "// veri tasidiginda. Onceki test bunu kaciriyordu.\n",
+        "/// Push oncesi kontrolleri kosur.\n",
+        "// TEE: success-sonrasi guard.\n",
+        "// Iki dosyanin emilim dizileri ayrisirsa.\n",
+        "// besler. Mevcut testlerin tamami elle kurulmustu.\n",
+        "// Dilim boyu: shard listesi uzerinden kurulur.\n",
+        "/// Eski imzanin uzunlugu.\n",
+        "// bir sonraki accumulator olur.\n",
+        "// baglamak, Kani'nin bir sonraki surumunde.\n",
+        "// bir band degeri paniklemek yerine siralanir.\n",
+        "// stake MIN_VERIFIER_STAKE altindaysa.\n",
+        "// Dizin kurulamazsa veya dosya okunamazsa.\n",
+        "// 45 baytlik girdiyle buyuk ayirma talebi.\n",
+        "// sisirilmis count uretiyordu.\n",
+        "// SHA3 alani korumaz.\n",
+        "// blok ozeti ve genesis ozeti.\n",
+        "// Kani proofs (hizli set).\n",
+        "// bolum parcasi dusuruldu.\n",
+        "// olarak stdout'a yazilir.\n",
+        "// halt sirasinda hook kosmaz.\n",
+        "// yanit, istenen blok icin gelmeli.\n",
+        "// Trivy IMAGE kapisi.\n",
+        "// tarafindan kuruldu.\n",
+        "// Ayrica betigin son satiri sayiyordu.\n",
+        "// ornek bir deger.\n",
+        "// bir sayfa delta kayipsiz.\n",
+        "// en buyuk oran secimi.\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if accepts_with(&clean, &tmp, &format!("vocab{idx}"), "DIRTY.rs", body)? {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(format!(
+                "canary: a widened-vocabulary Turkish line was not detected: {}",
+                body.trim()
+            ));
+        }
+    }
+
+    // The collision list must not become a way to smuggle Turkish through: the
+    // English word is removed from the line, and what remains is still scanned.
+    if accepts_with(
+        &clean,
+        &tmp,
+        "collisionsmuggle",
+        "DIRTY.rs",
+        "// satire: bu satir hala Turkce, kanit dogrulama\n",
+    )? {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: Turkish hid behind an ENGLISH_COLLISIONS word",
+        ));
+    }
+
+    // Each English collision must survive on its own, or the widened
+    // vocabulary would report English prose as a translation defect.
+    for (idx, body) in [
+        "/// A satire of the protocol, written in English.\n",
+        "/// Satire, capitalised at the start of a sentence.\n",
+        "/// The satirical reading of the specification.\n",
+        "/// A satirist reviewed the design document.\n",
+        "/// The icing on the cake is the second gate.\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if !accepts_with(&clean, &tmp, &format!("collision{idx}"), "CLEAN.rs", body)? {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(format!(
+                "canary: English prose was reported as Turkish: {}",
                 body.trim()
             ));
         }

@@ -271,7 +271,7 @@ pub fn default_domain(
         min_confirmations,
         pow_parameters,
         // A domain created by a plugin is also born closed to zk proofs.
-        // Programlar sonradan, acikca eklenir.
+        // Programs are added later, explicitly.
         zk_program_allowlist: Vec::new(),
         bridge_enabled: true,
         block_hash_scheme: RootScheme::BudlumBlockV2,

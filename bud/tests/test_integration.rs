@@ -236,7 +236,7 @@ fn her_format_entegrasyonu() {
         (StructuralKind::Log, gen_log(50)),
         (
             StructuralKind::Text,
-            b"satir 1\nsatir 2\nsatir 3\n".to_vec(),
+            b"line 1\nline 2\nline 3\n".to_vec(),
         ),
         // Binary: high-bit bytes (no commas or newlines, so the detector says Binary)
         (
