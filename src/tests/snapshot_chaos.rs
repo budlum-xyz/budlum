@@ -1,12 +1,13 @@
 //! P0 mainnet-gap (2026-07-19): snapshot-corruption + crash-recovery
-//! Kaos süiti. Üçüncü P0 hattı ("hepsine başla": crash-recovery + snapshot-chaos).
+//! chaos suite. The third P0 line ("start on all of them": crash recovery and
+//! snapshot chaos).
 //!
-//! (boot sessiz-yutma) ve (çapraz-şema gölgeleme) 2026-07-19'da
-//! KAPANDI: loader'lar karantina-sonrası eski adaya düşer,
-//! V1 probe'u v2 dosyasını ISKART eder (karantinasız), boot Err'de fail-loud
-//! Loglar. Kalan GAP pinleri: (authenticity - imza görevi) +
-//! (hash kapsamı - versiyonlu genişletme, halefle koordineli);
-//! `_gap` testleri o görevlarda TERS ÇEVRİLİR.
+//! The silent boot swallow and the cross-schema shadowing were CLOSED on
+//! 2026-07-19: the loaders fall back to the older candidate after quarantining,
+//! the v1 probe DISCARDS a v2 file without quarantining it, and boot logs
+//! fail-loud on an Err. The remaining GAP pins are authenticity (the signature
+//! task) and hash coverage (a versioned extension, coordinated with its
+//! successor); the `_gap` tests are INVERTED when those tasks land.
 
 #[cfg(test)]
 mod tests {
@@ -22,10 +23,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    // ── yardımcılar ────────────────────────────────────────────────────────
+    // -- helpers ------------------------------------------------------------
 
-    /// Sled dosya kilidi drop ile senkron release değil; bounded-wait reopen
-    /// (disaster_recovery.rs'deki restart pratiğinin aynası).
+    /// The sled file lock is not released synchronously on drop, so this is a
+    /// bounded-wait reopen - a mirror of the restart practice in
+    /// disaster_recovery.rs.
     fn open_storage_bounded(path: &str) -> Storage {
         for _ in 0..100 {
             if let Ok(storage) = Storage::new(path) {
@@ -75,7 +77,8 @@ mod tests {
         let snap = StateSnapshotV2::from_state(&funded_state(&alice, 500), params_v2(30, 45262));
         pm.save_snapshot_v2(&snap).expect("save");
 
-        // JSON yapısını bozmadan bakiyeyi değiştir (snapshot_hash dokunulmaz).
+        // Change the balance without breaking the JSON structure; snapshot_hash
+        // is left untouched.
         let file = snap_file(&dir, 30);
         let raw = std::fs::read_to_string(&file).expect("read");
         let mut j: serde_json::Value = serde_json::from_str(&raw).expect("json");
@@ -88,21 +91,24 @@ mod tests {
         std::fs::write(&file, serde_json::to_string_pretty(&j).unwrap()).expect("rewrite");
 
         let res = pm.load_latest_snapshot_v2();
-        assert!(res.is_err(), "integrity ihlali reddedilmeli");
-        assert!(!file.exists(), "bozuk dosya karantinaya taşınmalı");
+        assert!(res.is_err(), "an integrity violation has to be refused");
+        assert!(
+            !file.exists(),
+            "the corrupt file has to be moved to quarantine"
+        );
         assert!(
             dir.path()
                 .join("snaps")
                 .join("snapshot_30.json.corrupted")
                 .exists(),
-            "karantina dosyası (.json.corrupted) bulunmalı"
+            "the quarantine file (.json.corrupted) has to be present"
         );
     }
 
-    // ── 2) UNHASHED alan sahtesi (GAP) - bns_registry hash kapsamı dışında ─
-    // Calculate_hash yalnız çekirdek konsensus alanlarını kapsıyor; schema-3
+    // -- 2) Forging an UNHASHED field (GAP): bns_registry is outside the hash --
+    // calculate_hash covers only the core consensus fields; schema-3
     // Ve Task-0.08+ ile eklenen alanlar (bns/nft/registry/bridge_state/…)
-    // Kapsam dışı. Sonuç: bu alanlara yapılan sahtecilik verify'ı GEÇER.
+    // are out of scope. The consequence: forgery in those fields PASSES verify.
     #[test]
     fn test_snapshot_v2_unhashed_field_forgery_gap() {
         let dir = tempdir().expect("tempdir");
@@ -114,21 +120,24 @@ mod tests {
         let mut snap =
             StateSnapshotV2::from_state(&funded_state(&alice, 500), params_v2(40, 45262));
 
-        // Sahteci, snapshot'a kendi BNS adını enjekte eder; hash'E DOKUNMAZ.
+        // The forger injects their own BNS name into the snapshot and DOES NOT
+        // TOUCH the hash.
         let mut forged = crate::bns::BnsRegistry::default();
         forged
             .register("evil.bud".to_string(), eve, 0, 100)
             .expect("register");
         snap.bns_registry = Some(forged);
 
-        // Schema-4: BNS registry digest'e dahildir; mutation red olmalı.
+        // Schema-4: the BNS registry is part of the digest, so the mutation has
+        // to be refused.
         assert!(!snap.verify(), "schema-4 must reject BNS registry forgery");
     }
 
-    // ── 3) Bilinçli rehash sahtesi (GAP) - authenticity yok ────────────────
-    // Calculate_hash deterministik ve gizli-girdi içermez; kaynağı okuyan her
-    // Saldırgan HASHED bir alanı (balance) değiştirip hash'i yeniden üretebilir.
-    // Integrity ≠ authenticity: manifest imzası (validator/HSM) emri bekliyor.
+    // -- 3) A deliberate rehash forgery (GAP): there is no authenticity --------
+    // calculate_hash is deterministic and takes no secret input, so any attacker
+    // who reads the source can change a HASHED field (a balance) and recompute
+    // the hash. Integrity is not authenticity: the manifest signature (a
+    // validator or HSM) is waiting on its own task.
     fn recompute_v2_hash_for_test(s: &StateSnapshotV2) -> String {
         use sha3::{Digest, Sha3_256};
         let mut h = Sha3_256::new();
@@ -223,7 +232,8 @@ mod tests {
         let mut snap =
             StateSnapshotV2::from_state(&funded_state(&alice, 500), params_v2(50, 45262));
 
-        // HASHED alana sahtecilik + hash'in halka-açık algoritmayla yeniden üretimi.
+        // Forgery in a HASHED field, plus recomputing the hash with the public
+        // algorithm.
         snap.balances.insert(eve, 9_000_000);
         snap.snapshot_hash = recompute_v2_hash_for_test(&snap);
 
@@ -232,7 +242,7 @@ mod tests {
         assert!(!snap.verify(), "schema-4 rejects legacy rehash forgery");
     }
 
-    // ── 4) Torn-write (yarım dosya) → karantina → eski snapshot'a düşüş ────
+    // -- 4) A torn write (a half file): quarantine, then fall back to the older snapshot --
     #[test]
     fn test_snapshot_v2_torn_write_fallback_to_older() {
         let dir = tempdir().expect("tempdir");
@@ -245,16 +255,16 @@ mod tests {
         pm.save_snapshot_v2(&older).expect("save older");
         pm.save_snapshot_v2(&newer).expect("save newer");
 
-        // Crash-in-write simülasyonu: dosyayı ortadan kes.
+        // Simulate a crash during the write by cutting the file in half.
         let newer_file = snap_file(&dir, 20);
         let raw = std::fs::read_to_string(&newer_file).expect("read");
         std::fs::write(&newer_file, &raw[..raw.len() / 2]).expect("truncate");
 
-        // Onarımı sonrası: TEK çağrı yeterli - loader yarım dosyayı
-        // Karantinalayıp eski-geçerli adaya kendi içinde düşer.
+        // After the fix a SINGLE call is enough: the loader quarantines the half
+        // file and falls back to the older valid candidate on its own.
         let first = pm
             .load_latest_snapshot_v2()
-            .expect("older'a düşmeli")
+            .expect("it has to fall back to the older one")
             .expect("older present");
         assert_eq!(first.height, 10);
         assert_eq!(first.balances.values().next().copied(), Some(700));
@@ -267,10 +277,10 @@ mod tests {
         );
     }
 
-    // ── 5) Çapraz-şema (KAPANDI): v1 loader v2 dosyasını ıskart eder ──
-    // Onarım öncesi: v1 probe'u geçerli v2 dosyasını karantinalardı. Onarım
-    // Sonrası pin: v1 loader "schema_version" sniffing ile v2'yi KARANTİNASIZ
-    // Atlar ve doğrudan gerçek v1 dosyasını döndürür.
+    // -- 5) Cross-schema (CLOSED): the v1 loader discards a v2 file ----------
+    // Before the fix the v1 probe quarantined a valid v2 file. The pin after the
+    // fix: the v1 loader sniffs "schema_version", skips the v2 file WITHOUT
+    // quarantining it, and returns the real v1 file directly.
     #[test]
     fn test_snapshot_v1_loader_skips_v2_without_quarantine() {
         let dir = tempdir().expect("tempdir");
@@ -286,26 +296,27 @@ mod tests {
         pm.save_snapshot(&v1_snap).expect("save v1");
         pm.save_snapshot_v2(&v2_snap).expect("save v2");
 
-        // PIN 1: tek çağrıda doğrudan v1 h10 döner (v2 ıskart edilir).
+        // PIN 1: a single call returns v1 h10 directly, discarding the v2 file.
         let loaded = pm.load_latest_snapshot().expect("ok").expect("v1 present");
         assert_eq!(loaded.height, 10);
         assert_eq!(loaded.balances.values().next().copied(), Some(700));
 
-        // PIN 2: geçerli v2 dosyası YERİNDE kalır (karantina YOK - giderildi).
+        // PIN 2: the valid v2 file stays IN PLACE - no quarantine, which was the fix.
         assert!(dir.path().join("snaps").join("snapshot_20.json").exists());
         assert!(
             !dir.path()
                 .join("snaps")
                 .join("snapshot_20.json.corrupted")
                 .exists(),
-            "GAP-4 giderildi: v2 dosyasi karantinalanmamali"
+            "GAP-4 was fixed: the v2 file must not be quarantined"
         );
     }
 
-    // ── 6) Boot entegrasyonu (KAPANDI): bozuk-latest → tek boot self-heal ─
-    // Onarım öncesi: bozuk-latest Err'i yutulur + v1 probe'u geçerli v2'yi
-    // Karantinalardı → kalıcı sessiz rollback. Onarım sonrası: loader B'yi
-    // Karantinalayıp A'ya düşer; boot fail-loud loglar; TEK boot'ta iyileşir.
+    // -- 6) Boot integration (CLOSED): a corrupt latest self-heals in one boot --
+    // Before the fix the Err from the corrupt latest was swallowed and the v1
+    // probe quarantined the valid v2, which meant a permanent silent rollback.
+    // After the fix the loader quarantines B and falls back to A, boot logs
+    // fail-loud, and it recovers in a SINGLE boot.
     #[test]
     fn test_boot_corrupt_latest_quarantine_self_heal() {
         let dir = tempdir().expect("tempdir");
@@ -343,7 +354,7 @@ mod tests {
             std::fs::write(&file_b, &raw[..raw.len() / 2]).expect("truncate B");
         }
 
-        // BOOT 1 (onarım sonrası): B karantinalanır, A yüklenir → alice=700.
+        // BOOT 1 (after the fix): B is quarantined and A is loaded, so alice=700.
         {
             let storage = open_storage_bounded(db_str);
             let pm = PruningManager::new(10, 10, snap_dir_of(&dir));
@@ -351,14 +362,14 @@ mod tests {
             assert_eq!(
                 bc.state.get_balance(&alice),
                 700,
-                "loader eski-gecerli A'ya dustu (tek boot self-heal)"
+                "the loader fell back to the older valid A - a single-boot self-heal"
             );
             assert!(
                 dir.path()
                     .join("snaps")
                     .join(format!("snapshot_{snap_height_b}.json.corrupted"))
                     .exists(),
-                "bozuk B karantinada olmali"
+                "the corrupt B has to be in quarantine"
             );
             assert!(
                 dir.path()
@@ -369,7 +380,7 @@ mod tests {
             );
         }
 
-        // BOOT 2: A hâlâ geçerli → yine 700 (kalıcı iyileşme).
+        // BOOT 2: A is still valid, so 700 again - the recovery is permanent.
         {
             let storage = open_storage_bounded(db_str);
             let pm = PruningManager::new(10, 10, snap_dir_of(&dir));
@@ -382,7 +393,7 @@ mod tests {
         }
     }
 
-    // ── 7) Crash-resume: kapanışsız drop sonrası üretim sürekliliği ────────
+    // -- 7) Crash resume: production continuity after a drop with no shutdown --
     #[test]
     fn test_crash_resume_production_continuity() {
         let dir = tempdir().expect("tempdir");
@@ -413,20 +424,20 @@ mod tests {
             bc.state.base_fee = 0;
             bc.mempool.set_min_fee(0);
 
-            assert_eq!(bc.last_block().index, tip3_index, "tip dayanıklı");
-            assert_eq!(bc.last_block().hash, tip3_hash, "tip hash dayanıklı");
-            // Bilinen semantik (disaster_recovery.rs notu): doğrudan state
-            // Mutasyonları (add_balance) block-replay dışı olduğundan restart'ta
-            // GERİ GELMEZ; yalnızca blok-seviyesi state dayanıklıdır.
+            assert_eq!(bc.last_block().index, tip3_index, "the tip is durable");
+            assert_eq!(bc.last_block().hash, tip3_hash, "the tip hash is durable");
+            // Known semantics (see the note in disaster_recovery.rs): direct state
+            // mutations such as add_balance sit outside block replay, so they DO
+            // NOT come back on restart; only block-level state is durable.
             assert_eq!(
                 bc.state.get_balance(&alice),
                 0,
                 "manuel mutasyon replay-disidir (belgelenmis semantik)"
             );
 
-            let (b4, _) = bc.produce_block(zero).expect("resume uretimi");
-            assert_eq!(b4.previous_hash, tip3_hash, "tip üzerine inşa");
-            assert_eq!(b4.index, tip3_index + 1, "yükseklik sürekliliği");
+            let (b4, _) = bc.produce_block(zero).expect("production on resume");
+            assert_eq!(b4.previous_hash, tip3_hash, "it builds on the tip");
+            assert_eq!(b4.index, tip3_index + 1, "height continuity");
             let (b5, _) = bc.produce_block(zero).expect("ikinci blok");
             assert_eq!(b5.index, tip3_index + 2);
         }
