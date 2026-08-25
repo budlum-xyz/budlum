@@ -75,6 +75,7 @@ mod gates {
     pub mod fork_choice_gate;
     pub mod fuzz_targets_wired;
     pub mod gates_are_wired;
+    pub mod gates_do_not_panic;
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
@@ -384,6 +385,14 @@ const GATES: &[Gate] = &[
         run: gates::no_idle_code::run,
         run_args: None,
         self_test: gates::no_idle_code::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "gates-do-not-panic",
+        replaces: None,
+        run: gates::gates_do_not_panic::run,
+        run_args: None,
+        self_test: gates::gates_do_not_panic::self_test,
         run_log: None,
     },
     Gate {
