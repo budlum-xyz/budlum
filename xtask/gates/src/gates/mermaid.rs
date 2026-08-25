@@ -349,14 +349,20 @@ fn check(block: &Block) -> Vec<Finding> {
 /// kind that goes wrong, and the reason this gate exists is that two of the
 /// main document's diagrams were wrong in ways a reader does not notice.
 ///
-/// Each entry carries a floor. A document that suddenly reports zero diagrams
-/// has usually moved or had its fences renamed, and reporting OK on nothing is
-/// the failure mode a gate must not have. The floors are deliberately below the
-/// current counts, so adding a diagram never needs an edit here, while deleting
-/// most of them does.
+/// Each entry carries a floor. A document that suddenly reports fewer diagrams
+/// than it is known to carry has usually moved or had its fences renamed, and
+/// reporting OK on nothing is the failure mode a gate must not have. The floors
+/// are deliberately below the current counts, so adding a diagram never needs
+/// an edit here, while deleting most of them does.
+///
+/// A floor of zero means "check whatever is here, and do not require any".
+/// The crate document is written on one branch and not another, and a gate
+/// whose verdict depends on which branch it runs from is a gate that teaches
+/// people to ignore it. What must not vary by branch is that the diagrams
+/// present are checked; how many exist is a property of the work in progress.
 const DOCUMENTS: &[(&str, usize)] = &[
     ("docs/ARCHITECTURE.md", 50),
-    ("crates/lubot/ARCHITECTURE.md", 1),
+    ("crates/lubot/ARCHITECTURE.md", 0),
 ];
 
 pub fn run(root: &Path) -> Result<String, String> {
