@@ -1,18 +1,20 @@
-//! Lock'lar: Blockchair'den çekilmiş GERÇEK zincir vektörleriyle regresyon.
+//! Locks: regression against REAL chain vectors pulled from Blockchair.
 //!
-//! Bu dosya ağ çağrısı YAPMAZ; tüm değerler commit'lenmiş fixture'dır.
-//! Kaynak: Blockchair API v2 (`api.blockchair.com`), 2026-08-14 çekimi.
-//! BTC ucu: yükseklik 962380; ETH ucu: 20000000-20000003.
-//! Merkle kökleri iki bağımsız hesapla çapraz doğrulandı (Blockchair'in kendi
-//! `merkle_root` alanı + bağımsız yerel hesap) - ikisi birebir eşit.
+//! This file makes NO network call; every value is a committed fixture.
+//! Source: the Blockchair API v2 (`api.blockchair.com`), pulled 2026-08-14.
+//! The BTC endpoint is at height 962380; the ETH endpoint covers
+//! 20000000-20000003. The merkle roots were cross-verified by two independent
+//! computations - Blockchair's own `merkle_root` field and an independent local
+//! computation - and the two are byte for byte equal.
 //!
-//! Kapsam dürüstlüğü: `VerifyMerkle` devresi `BudZero`'nun kendi hash alanında
-//! çalışır; aşağıdaki merkle testleri Bitcoin-tarafı kök hesabımızın
-//! endianness/eşleştirme (pairing) kilididir - devre soundness'i bu dosyanın
-//! kapsamı DIŞINDADIR (harici opcode denetimi bekleniyor).
+//! Honesty about scope: the `VerifyMerkle` circuit works in `BudZero`'s own hash
+//! field; the merkle tests below are the endianness and pairing lock of our
+//! Bitcoin-side root computation. The soundness of the circuit is OUTSIDE the
+//! scope of this file - an external opcode review is pending.
 //!
-//! Test-time ≠ runtime: fixture'lar tek seferlik üretimle tazelenir; CI asla
-//! canlı API çağırmaz. Production runtime bağımlılığı hiçbir senaryoda yoktur.
+//! Test time is not runtime: the fixtures are refreshed by a one-off generation
+//! and CI never calls the live API. Under no scenario is there a production
+//! runtime dependency.
 
 use crate::consensus::pow::U256;
 use crate::core::address::Address;
@@ -21,9 +23,9 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams,
 use crate::cross_domain::nonce::ReplayNonceStore;
 use sha2::{Digest, Sha256};
 
-// ============ 1. BTC chainwork vektörleri ============
-/// (yükseklik, blok hash, chainwork - 64 hex = 256 bit).
-/// Uç: `/bitcoin/blocks?limit=1&q=id({yukseklik})`.
+// ============ 1. BTC chainwork vectors ============
+/// (height, block hash, chainwork - 64 hex characters, so 256 bits).
+/// Endpoint: `/bitcoin/blocks?limit=1&q=id({height})`.
 const BTC_CHAINWORK: &[(&str, &str, &str)] = &[
     (
         "0",
@@ -72,7 +74,7 @@ const BTC_CHAINWORK: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Büyük-endian hex'i `U256`'ya çevir (her set bit bir `pow2` terimi).
+/// Converts a big-endian hex string into a `U256`; each set bit is a `pow2` term.
 fn u256_from_hex_be(hex: &str) -> U256 {
     let mut acc = U256::ZERO;
     for (i, c) in hex.as_bytes().iter().rev().enumerate() {
@@ -86,48 +88,48 @@ fn u256_from_hex_be(hex: &str) -> U256 {
     acc
 }
 
-/// Gerçek chainwork değerleri monotondur (her blok iş ekler) ve şu an
-/// 2^128'in altındadır: raporlama yüzeyi kayıpsız olmalı. 2^128'i aşan
-/// yapay değerlerde raporlama DOYMALI, sıralama doymamalı - bu iki
-/// sözleşme bir arada kilitlenir (128-bit doygunluk bug'ının gerçek-
-/// büyüklük kilidi).
+/// Real chainwork values are monotonic - every block adds work - and are
+/// currently below 2^128, so the reporting surface has to be lossless. For
+/// artificial values above 2^128 the reporting HAS TO SATURATE while the
+/// ordering must not; the two contracts are locked together. This is the
+/// real-magnitude lock of the 128-bit saturation bug.
 #[test]
 fn real_bitcoin_chainwork_is_monotonic_and_reports_losslessly() {
     let mut prev: Option<(&str, U256)> = None;
     for &(height, hash, cw) in BTC_CHAINWORK {
-        assert_eq!(cw.len(), 64, "chainwork 256-bit olmalı: yükseklik {height}");
+        assert_eq!(cw.len(), 64, "chainwork has to be 256-bit: height {height}");
         assert_eq!(
             hash.len(),
             64,
-            "blok hash 256-bit olmalı: yükseklik {height}"
+            "the block hash has to be 256-bit: height {height}"
         );
         let value = u256_from_hex_be(cw);
         if let Some((prev_height, prev_value)) = prev {
             assert!(
                 value > prev_value,
-                "chainwork monotonluğu bozuldu: {height} vs {prev_height}"
+                "chainwork monotonicity broke: {height} vs {prev_height}"
             );
         }
-        // u128 altında: raporlama kayıpsız (doygunluk yanlış yerde devredeyse
-        // gerçek sıralama zaten bozulmuş olurdu).
+        // Below u128 the reporting is lossless; if the saturation fired in the
+        // wrong place the real ordering would already be broken.
         let low = value.saturating_to_u128();
-        assert_ne!(low, u128::MAX, "yükseklik {height} u128 doygunluğuna düştü");
+        assert_ne!(low, u128::MAX, "height {height} fell into u128 saturation");
         prev = Some((height, value));
     }
-    // 2^128 üstü sınır davranışı: rapor doyar, sıralama doymaz.
+    // The boundary behaviour above 2^128: the report saturates, the ordering does not.
     let big = U256::pow2(130);
     assert_eq!(big.saturating_to_u128(), u128::MAX);
     for &(_, _, cw) in BTC_CHAINWORK {
         assert!(
             big > u256_from_hex_be(cw),
-            "2^130 her gerçek chainwork'ten büyük"
+            "2^130 is larger than every real chainwork"
         );
     }
 }
 
-// ============ 2. ETH gerçek header zinciri ============
+// ============ 2. A real ETH header chain ============
 /// (number, hash, parentHash, stateRoot, receiptsRoot) - Blockchair
-/// `/ethereum/raw/block/{yükseklik}` `decoded_raw_block` alanları.
+/// The `decoded_raw_block` fields of `/ethereum/raw/block/{height}`.
 const ETH_HEADERS: &[(u64, &str, &str, &str, &str)] = &[
     (
         20_000_000,
@@ -177,24 +179,25 @@ fn eth_header(row: &(u64, &str, &str, &str, &str)) -> EthHeader {
     }
 }
 
-/// Fixture kendi içinde zincir olmalı (`parent_hash` → önceki hash, sayı +1).
+/// The fixture has to be a chain in itself: `parent_hash` points at the previous
+/// hash and the number increases by one.
 #[test]
 fn real_ethereum_headers_form_a_linked_chain() {
     let rows: Vec<EthHeader> = ETH_HEADERS.iter().map(eth_header).collect();
     for w in rows.windows(2) {
-        assert_eq!(w[1].parent_hash, w[0].hash, "parent bağı koptu");
-        assert_eq!(w[1].number, w[0].number + 1, "yükseklik atladı");
+        assert_eq!(w[1].parent_hash, w[0].hash, "the parent link broke");
+        assert_eq!(w[1].number, w[0].number + 1, "the height skipped");
     }
 }
 
-/// N-confirmation finality mantığı gerçek zincir bloklarında çalışır;
-/// yetersiz onay ve kırık zincir fail-closed reddedilir.
+/// The N-confirmation finality logic works on real chain blocks; insufficient
+/// confirmations and a broken chain are refused fail-closed.
 #[test]
 fn real_ethereum_verify_chain_accepts_and_refuses() {
     let rows: Vec<EthHeader> = ETH_HEADERS.iter().map(eth_header).collect();
     assert!(
         verify_chain(&rows[0], &rows[1..4], 3).is_ok(),
-        "3 gerçek onay kabul edilmeli"
+        "3 real confirmations have to be accepted"
     );
     assert_eq!(
         verify_chain(&rows[0], &rows[1..4], 4),
@@ -206,14 +209,14 @@ fn real_ethereum_verify_chain_accepts_and_refuses() {
     assert_eq!(
         verify_chain(&rows[0], &[broken], 1),
         Err(HeaderError::ChainBroken),
-        "kırık zincir reddedilmeli"
+        "a broken chain has to be refused"
     );
 }
 
-// ============ 3. Replay kilitleri (gerçek tx hash'leriyle) ============
-/// Gerçek işlem hash'leri (Blockchair `/multi/` ucu, 2026-08-14) - payload
-/// ön-imajı olarak kullanılır; mesaj kimlikleri gerçek zincir malzemesinden
-/// türer. Senaryo adresleri test yer tutucularıdır.
+// ============ 3. Replay locks, with real transaction hashes ============
+/// Real transaction hashes (the Blockchair `/multi/` endpoint, 2026-08-14),
+/// used as the payload preimage, so the message ids derive from real chain
+/// material. The scenario addresses are test placeholders.
 const REPLAY_PAYLOAD_TXHASHES: &[&str] = &[
     "75cb3d596dacc93afa54e6e3c32519b6fb1df4867b74a14f628d56356131991a",
     "f38f4b36477743a87d348a5900bceaee13bdd49fba5bfd776cc9353cf7ce9bbb",
@@ -224,7 +227,7 @@ const REPLAY_PAYLOAD_TXHASHES: &[&str] = &[
     "0x627b87a1be2cadcc4f47e8323efc6753978d099ee1cf496f643ba26ce7dcd1de",
     "69f3c0898c3cbd72652afacc5dffbbd4a8bb5526fc4a4c33b3bd810e06ebf568",
 ];
-/// Bu işlemlerin gerçek blok yükseklikleri (`block_id`).
+/// The real block heights of these transactions (`block_id`).
 const REPLAY_SOURCE_HEIGHTS: &[u64] = &[
     962_384, 962_380, 962_374, 962_372, 962_364, 962_361, 25_749_980, 962_355,
 ];
@@ -240,7 +243,7 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
     assert_eq!(
         store.next_nonce(1, 2, recipient),
         0,
-        "sender başına ayrı sayaç"
+        "a separate counter per sender"
     );
 
     let params = |i: usize| CrossDomainMessageParams {
@@ -259,13 +262,13 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
     let msg0 = CrossDomainMessage::new(params(0));
     assert!(
         msg0.verify_id(),
-        "gerçek payload'dan türetilen id doğrulanmalı"
+        "an id derived from a real payload has to verify"
     );
     assert!(store.mark_processed(msg0.message_id).is_ok());
     assert_eq!(
         store.mark_processed(msg0.message_id),
         Err("Cross-domain message was already processed".to_string()),
-        "çift uygulama reddedilmeli (replay)"
+        "applying it twice has to be refused - a replay"
     );
     assert!(store.is_processed(&msg0.message_id));
     assert_eq!(store.processed_count(), 1);
@@ -273,16 +276,17 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
     let msg1 = CrossDomainMessage::new(params(1));
     assert_ne!(
         msg0.message_id, msg1.message_id,
-        "farklı gerçek payload → farklı id"
+        "a different real payload gives a different id"
     );
     assert!(store.mark_processed(msg1.message_id).is_ok());
     assert_eq!(store.processed_count(), 2);
 }
 
-// ============ 4. Bitcoin merkle kök vektörleri ============
-/// (blok yüksekliği, beklenen `merkle_root`, txid listesi).
-/// Kök: Blockchair `merkle_root` alanı; bağımsız yerel hesapla eşit (kanıt:
-/// bu dosyanın üretim notları, 2026-08-14).
+// ============ 4. Bitcoin merkle root vectors ============
+/// (the block height, the expected `merkle_root`, the txid list).
+/// The root comes from Blockchair's `merkle_root` field and equals an
+/// independent local computation; the evidence is in the generation notes of
+/// this file, 2026-08-14.
 const MERKLE_VECTORS: &[(u32, &str, &[&str])] = &[
     (
         0,
@@ -733,7 +737,7 @@ const MERKLE_VECTORS: &[(u32, &str, &[&str])] = &[
     ),
 ];
 
-/// Bitcoin çift-SHA256 (merkle eşleştirmesinde kullanılır).
+/// The Bitcoin double SHA-256, used in the merkle pairing.
 fn btc_double_sha256(data: &[u8]) -> [u8; 32] {
     let mut h1 = Sha256::new();
     h1.update(data);
@@ -743,9 +747,10 @@ fn btc_double_sha256(data: &[u8]) -> [u8; 32] {
     h2.finalize().into()
 }
 
-/// Bitcoin merkle kökü: txid'ler hash gösteriminde (BE) gelir, eşleştirme
-/// little-endian baytlar üzerinden yapılır; tek sayıda düğümde son eleman
-/// kopyalanır. Kök hash gösteriminde (BE) döndürülür.
+/// The Bitcoin merkle root: the txids arrive in hash presentation (big endian),
+/// the pairing runs over little-endian bytes, and with an odd number of nodes the
+/// last element is duplicated. The root is returned in hash presentation (big
+/// endian).
 fn btc_merkle_root(txids: &[&str]) -> [u8; 32] {
     let mut level: Vec<[u8; 32]> = txids
         .iter()
@@ -784,11 +789,12 @@ fn btc_merkle_root(txids: &[&str]) -> [u8; 32] {
 fn real_bitcoin_merkle_roots_match_committed_vectors() {
     for &(height, expected, txids) in MERKLE_VECTORS {
         let got = hex::encode(btc_merkle_root(txids));
-        assert_eq!(got, expected, "merkle kök uyuşmazlığı: blok {height}");
+        assert_eq!(got, expected, "merkle root mismatch: block {height}");
     }
 }
 
-/// Tek-yapraklı bloklarda kök = txid (eşleştirme yok) - endianness kilidi.
+/// In a single-leaf block the root equals the txid, with no pairing - the
+/// endianness lock.
 #[test]
 fn bitcoin_merkle_single_leaf_equals_txid() {
     for &(height, expected, txids) in MERKLE_VECTORS {
