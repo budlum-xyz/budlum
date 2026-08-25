@@ -8,12 +8,12 @@ publish = false
 # `budlum-core`.
 #
 # Kani ships its own pinned nightly (0.67.0 bundles rustc 1.93.0-nightly), and
-# `budlum-core` declares `rust-version = "1.97.0"`. Cargo refuses to build a
+# `budlum-core` declares `rust-version = "1.97.1"`. Cargo refuses to build a
 # package whose MSRV is above the running compiler, so pointing `cargo kani` at
 # the root crate fails before any harness runs:
 #
 #     error: rustc 1.93.0-nightly is not supported by the following packages:
-#       budlum-core@0.1.0 requires rustc 1.97.0
+#       budlum-core@0.1.0 requires rustc 1.97.1
 #
 # The upstream fix is merged (model-checking/kani#4645 moved the bundled
 # toolchain to a nightly new enough for 1.94) but unreleased: 0.67.0 is still

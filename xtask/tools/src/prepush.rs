@@ -9,7 +9,7 @@
 //!    ran again, saw the second, ran again. Here
 //!    every check runs and all of them are reported at once.
 //! 2. The script did not say which toolchain it ran with. `rust-toolchain.toml`
-//!    pins 1.97.0 but the developer's default may be another; then
+//!    pins 1.97.1 but the developer's default may be another; then
 //!    the local `cargo fmt` passes and CI comes back red. This is the
 //!    "toolchain drift" class recorded in past notes. Here the version is printed first.
 
