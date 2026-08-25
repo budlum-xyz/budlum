@@ -1,6 +1,12 @@
-//! .bud Devrimsel Oranlar V6 - Kaynak Bağlı Sıkı Tablo + SQLite + Kanıt Öncelikli + Hibrit Arama
-//! Ölçüme dayalı oranlar ve dil modeli odaklı tekniklerin genel anlatımı
-//! Kapılar: K-BUD-COMPACT-TABLE, K-BUD-EVIDENCE, K-BUD-SQLITE, K-BUD-SECRET-REDACT, K-BUD-COLUMNAR, K-BUD-FTS5, K-BUD-COMPACT_TABLE-COMPACT
+//! .bud revolutionary ratios V6 - a source-bound compact table, SQLite, an
+//! evidence-first path and hybrid search.
+//!
+//! Measurement-based ratios plus a general account of the language-model
+//! oriented techniques.
+//!
+//! Gates: K-BUD-COMPACT-TABLE, K-BUD-EVIDENCE, K-BUD-SQLITE,
+//! K-BUD-SECRET-REDACT, K-BUD-COLUMNAR, K-BUD-FTS5,
+//! K-BUD-COMPACT_TABLE-COMPACT.
 
 #![forbid(unsafe_code)]
 
@@ -54,12 +60,13 @@ impl CompactTable {
         self.rows.push(escaped);
     }
 
-    /// Tabloyu metne çevirir.
+    /// Renders the table as text.
     ///
-    /// `Display` üzerinden gelir: envanter metodu `to_string` adıyla inherent
-    /// tanımlıysa (clippy::inherent_to_string) `ToString`'in ürettiğini
-    /// gölgeler ve tür `{}` ile biçimlendirilemez. `Display` yazmak ikisini
-    /// aynı gövdede birleştirir; `.to_string()` çağrıları aynen çalışır.
+    /// It comes through `Display`: if the inventory method were defined
+    /// inherently under the name `to_string` (clippy::inherent_to_string), it
+    /// would shadow what `ToString` produces and the type could not be
+    /// formatted with `{}`. Writing `Display` unites both in the same body, and
+    /// existing `.to_string()` calls keep working.
     fn fmt_rows(&self) -> String {
         let mut lines = Vec::new();
         lines.push(self.headers.join(" | "));

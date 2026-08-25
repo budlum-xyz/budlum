@@ -1,17 +1,17 @@
-//! Chat şablonu - yapısal taslak.
+//! The chat template - a structural draft.
 //!
-//! DeepSeek V4'ün gerçek şablonu `encoding_dsv4`dür ve HF tokenizer
-//! config'inden okunur. Bu modül marker icat etmez; yalnızca sıralamayı
-//! (system → user → assistant) yapısal olarak sabitler. Üretimde tokenizer
-//! config'iyle birebir eşleşme testi zorunludur (bkz.
+//! The real template of DeepSeek V4 is `encoding_dsv4` and it is read from the
+//! HF tokenizer config. This module invents no markers; it only pins the order
+//! (system, then user, then assistant) structurally. In production a test that
+//! matches the tokenizer config exactly is mandatory (see
 //! `docs/EGITIM_VERISI_STRATEJISI` §6: "Use the V4 chat template
 //! (encoding_dsv4). Do not roll your own.").
 
 use crate::jsonl::InstructionRecord;
 
-/// Yapısal şablon taslağı: gerçek marker'lar üretimde tokenizer'dan gelir.
-/// Bu fonksiyonun çıktısı eğitimde KULLANILMAZ - yalnızca kayıt sırasını
-/// gösteren bir taslaktır.
+/// A structural template draft: the real markers come from the tokenizer in
+/// production. The output of this function is NOT used in training - it is only
+/// a draft showing the order of the records.
 #[must_use]
 pub fn render_structural(rec: &InstructionRecord) -> String {
     let mut out = String::new();

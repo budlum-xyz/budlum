@@ -1,23 +1,24 @@
-//! Kuantum-guvenli hesap soyutlama (KQ-* kapilari).
+//! Quantum-safe account abstraction (the KQ-* gates).
 //!
-//! # Bu dizinin gecmisi
+//! # The history of this directory
 //!
-//! Bu dizin `lib.rs`'te bildirilmemisti: bes dosyanin hicbiri derlenmiyordu.
-//! Olculdu, tahmin edilmedi: `threshold_mldsa.rs`'e gecersiz Rust yazildi ve
-//! `cargo check --lib` yine gecti. Derlenmedigi icin ne clippy, ne kapilar,
-//! ne de testler bu koda bakiyordu; icerideki uc "dogrulama" fonksiyonu
-//! hicbir seyi reddedemeyecek durumdaydi ve bu fark edilmemisti.
+//! This directory was never declared in `lib.rs`, so none of its five files
+//! compiled. That was measured, not guessed: invalid Rust was written into
+//! `threshold_mldsa.rs` and `cargo check --lib` still passed. Because it did
+//! not compile, neither clippy nor the gates nor the tests were looking at this
+//! code; the three "verification" functions inside were in no position to
+//! refuse anything, and nobody had noticed.
 //!
-//! `no-orphan-source-files` kapisi da goremezdi: kapi `mod.rs` adli dosyalari
-//! kosulsuz muaf tutuyordu, dolayisiyla ulasilamaz bir dizinin `mod.rs`'i
-//! muaf sayiliyor, kardes dosyalar da o muaf dosya tarafindan "bildirilmis"
-//! kabul ediliyordu. Kapi artik koklerden ulasilabilirligi izliyor.
+//! The `no-orphan-source-files` gate could not see it either: the gate exempted
+//! any file named `mod.rs` unconditionally, so the `mod.rs` of an unreachable
+//! directory counted as exempt, and its sibling files counted as "declared" by
+//! that exempt file. The gate now follows reachability from the crate roots.
 //!
-//! # Kapsam
+//! # Scope
 //!
-//! Buradaki tipler imza ve politika dogrulamasi yapar. Zincir durumu
-//! degistirmezler ve bir kanit sisteminin yerine gecmezler; her modulun
-//! basinda ne soyledigi ve ne soylemedigi ayri ayri yaziyor.
+//! The types here verify signatures and policy. They do not change chain state
+//! and they do not stand in for a proof system; the header of each module
+//! states separately what it does and does not claim.
 
 pub mod private_transfer_auth;
 pub mod quantum_account;

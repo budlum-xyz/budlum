@@ -645,32 +645,33 @@ mod tests {
 
     /// The VM the CLI constructs must be **in mainnet mode**.
     ///
-    /// `Vm::new` varsayilani `mainnet_mode: false` birakir ve o kipte
-    /// `decode_instruction` kapili opcode'lari (VerifyMerkle, VerifyInference)
-    /// cozer. CLI mainnet-guvenli varsayilan tasimazsa kapili bir opcode
-    /// yerel calistirmada gecer, zincirde reddedilir - tek bir bytecode iki
-    /// carries a different meaning.
+    /// `Vm::new` leaves the default at `mainnet_mode: false`, and in that mode
+    /// `decode_instruction` decodes the gated opcodes (VerifyMerkle,
+    /// VerifyInference). If the CLI does not carry a mainnet-safe default, a
+    /// gated opcode passes in a local run and is refused on chain - one
+    /// bytecode carrying two different meanings.
     ///
-    /// Test `run_pipeline`'i **gercekten kosuyor** ve dondurdugu VM'in kipine
-    /// bakiyor. Ilk yazimi bunun yerine `Vm::with_mainnet_mode(.., true)`
-    /// cagirip sonucu olcuyordu; o test `with_mainnet_mode`'un kendisini
-    /// verified, not the CLI - measured by mutation: turning the flag inside
-    /// cagri `Vm::new`'e dondurulunce test yesil kaliyordu.
+    /// The test **really runs** `run_pipeline` and looks at the mode of the VM
+    /// it returns. The first version instead called
+    /// `Vm::with_mainnet_mode(.., true)` and measured the result; that test
+    /// verified `with_mainnet_mode` itself, not the CLI - measured by mutation:
+    /// when the call inside the pipeline was turned back into `Vm::new`, the
+    /// test stayed green.
     #[test]
-    fn cli_vm_mainnet_kipinde_kurulur() {
-        let varsayilan = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+    fn the_cli_builds_its_vm_in_mainnet_mode() {
+        let default_vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
         assert!(
-            !varsayilan.mainnet_mode,
+            !default_vm.mainnet_mode,
             "Vm::new now arrives in mainnet mode; the CLI no longer needs to set the \
-             secmesinin gerekcesi bu testin dayandigi varsayimdi"
+             flag itself; the reason the CLI chooses it was the assumption this test rests on"
         );
 
-        let yol = std::env::temp_dir().join(format!(
-            "budcli-kip-{}-{}.json",
+        let path = std::env::temp_dir().join(format!(
+            "budcli-mode-{}-{}.json",
             std::process::id(),
             line!()
         ));
-        let cikti = run_pipeline(ExecutionConfig {
+        let output = run_pipeline(ExecutionConfig {
             bytecode: vec![bud_isa::Instruction {
                 opcode: bud_isa::Opcode::Halt,
                 rd: 0,
@@ -684,18 +685,18 @@ mod tests {
             block_height: None,
             args: Vec::new(),
             chain_id: 1,
-            state_in_file: Some(yol.to_string_lossy().into_owned()),
+            state_in_file: Some(path.to_string_lossy().into_owned()),
             commit_state: false,
         })
-        .expect("bos Halt programi kosmaliydi");
+        .expect("an empty Halt program had to run");
 
         assert!(
-            cikti.vm.mainnet_mode,
-            "CLI boru hatti VM'i mainnet kipinde kurmuyor; kapili opcode'lar \
-             yerelde calisip zincirde reddedilir"
+            output.vm.mainnet_mode,
+            "the CLI pipeline does not build its VM in mainnet mode; gated opcodes \
+             would run locally and be refused on chain"
         );
 
-        std::fs::remove_file(&yol).ok();
+        std::fs::remove_file(&path).ok();
     }
 
     /// A transaction for a sender absent from the state must be **refused**.
@@ -706,14 +707,18 @@ mod tests {
     #[test]
     fn an_unregistered_sender_is_refused() {
         // `State::load` opens a non-existent path as empty state (measured,
-        // `bud-state/src/lib.rs:158`), dolayisiyla dosya olusturmak gerekmiyor
-        // - onemli olan hesabin state'te BULUNMAMASI.
-        let yol = std::env::temp_dir().join(format!(
-            "budcli-yok-{}-{}.json",
+        // `bud-state/src/lib.rs:158`), so no file needs to be created - what
+        // matters is that the account is ABSENT from the state.
+        let path = std::env::temp_dir().join(format!(
+            "budcli-missing-{}-{}.json",
             std::process::id(),
             line!()
         ));
-        assert!(!yol.exists(), "test dosyasi zaten var: {}", yol.display());
+        assert!(
+            !path.exists(),
+            "the test file already exists: {}",
+            path.display()
+        );
 
         let config = ExecutionConfig {
             bytecode: vec![bud_isa::Instruction {
@@ -730,7 +735,7 @@ mod tests {
             block_height: None,
             args: Vec::new(),
             chain_id: 1,
-            state_in_file: Some(yol.to_string_lossy().into_owned()),
+            state_in_file: Some(path.to_string_lossy().into_owned()),
             commit_state: false,
         };
 
