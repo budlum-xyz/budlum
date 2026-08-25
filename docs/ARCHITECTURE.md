@@ -92,6 +92,7 @@
 - [82. A disconnect is not an amnesty](#82-a-disconnect-is-not-an-amnesty)
 - [83. Who chooses the size of the allocation](#83-who-chooses-the-size-of-the-allocation)
 - [84. Where a guarantee lives](#84-where-a-guarantee-lives)
+- [85. A gate that panics is a gate that stopped checking](#85-a-gate-that-panics-is-a-gate-that-stopped-checking)
 
 ## 1. Overall system architecture
 
@@ -3654,3 +3655,94 @@ is no branch left, so there is nothing to re-verify.
 
 Both changes point the same way. A guarantee should live in the code that depends on it: as a refusal when the condition
 is a runtime fact, and as a pattern the build checks when it is not.
+
+## 85. A gate that panics is a gate that stopped checking
+
+The workspace crates deny `unwrap_used` and `expect_used`. `xtask/gates` was
+left out, on the reasoning that gate code is not production code: it does not
+ship in the node binary, and if it breaks, a developer sees the break
+immediately.
+
+The reasoning is wrong in two ways, and only the second is obvious.
+
+The first: a panic in a gate is a worse *report* than a failure. CI prints a
+backtrace, and whoever reads it has to work out whether the tree is broken or
+the gate is. A finding says what is wrong in a sentence written by someone who
+knew what the check was for; a backtrace says a slice index was out of range in
+a function whose name means nothing to the reader.
+
+The second is the one that matters for coverage. A gate runs as a process. When
+it panics, the process is gone, and **every check it had not reached yet is
+silently not performed**. A malformed input in one file does not merely fail
+that file's check - it removes the rest of the run. The gate reports one loud
+problem and hides an unknown number of quiet ones, which is the opposite of what
+a gate is for.
+
+```mermaid
+flowchart TD
+    A[Gate starts] --> B{Input malformed}
+    B -->|Returns Err| C[One finding printed]
+    C --> D[Remaining checks still run]
+    B -->|Panics| E[Backtrace printed]
+    E --> F[Process gone]
+    F --> G[Remaining checks never run]
+    G --> H[Absence of findings is not evidence]
+```
+
+### What is exempt, and why it is structural
+
+Two categories are not defects, and both are recognised by shape rather than by
+an allowlist. An allowlist would need maintaining, and a stale allowlist grants
+permissions nobody remembers granting.
+
+**Canary bodies.** A self-test asserts that a gate behaves; panicking is the
+assertion mechanism, and it happens under `--self-test`, where a backtrace is
+the expected way to report a broken canary. Recognised by the function name.
+
+**`write!` and `writeln!` into a `String`.** `std::fmt::Write` for `String`
+cannot fail; the `Result` exists only because the trait is shared with
+`io::Write`, where it can. Rewriting these buys nothing and costs readability.
+
+### Counting the debt correctly
+
+The first measurement of this debt reported 295 findings. The number was wrong
+three times over, and each correction is a lesson about measuring before fixing.
+
+Excluding `#[cfg(test)]` by brace depth rather than by a line-oriented guess
+took it to 181. Then `.expect(` turned out to match `self.expect(Token::Comma)`
+- a parser method returning `Result`, not a panic - which alone accounted for 81
+phantom findings in one file. Requiring a string-literal argument took the count
+to 94. Splitting canaries and infallible `String` writes out left **27 real
+panic points**, all in gate code.
+
+Fixing 295 things would have been a month of work against a number that was
+mostly an artefact of the grep that produced it.
+
+### The ratchet, and why duplicates need an ordinal
+
+`.github/gate-panics-baseline.txt` records the 27, and `gates-do-not-panic`
+fails in both directions: a new panic point is a finding, and a baseline entry
+that is no longer a panic point is also a finding, so the file cannot rot into a
+permanent excuse for a tree that no longer exists.
+
+The baseline key is `path + ordinal + source text`, not `path + line`. Line
+numbers would make every inserted comment above a panic point look like one
+entry disappearing and another appearing, for a change that moved nothing.
+
+The ordinal exists because the first version keyed on `path + text` alone, and
+that collapsed the four identical `runtime.quote([0u8; 32]).unwrap()` lines in
+one file into a single entry. Removing three of the four would then have left
+the fourth matching the same key, and the ratchet would have reported no change
+for work that removed three quarters of the debt. Four identical lines are four
+debts. The ordinal only shifts when a duplicate is genuinely added or removed,
+which is exactly when the debt changed.
+
+Four points were removed rather than recorded, because each was a question asked
+twice. `mermaid.rs` matched `Some(_o)` and then unwrapped the same `Option`;
+`wire_fields_are_signed.rs` checked `is_none()` and then unwrapped;
+`refusals_no_mutate.rs` searched for `fn ` a second time in a slice that began
+with it; and `zero_storage_frozen.rs` asked `contains` whether a test existed
+and then `find` where it was, unwrapping the second on the strength of the
+first. In every case the panic was defending an invariant the same function had
+just established, and restructuring so the answer is only obtained once removed
+both the duplication and the panic.
