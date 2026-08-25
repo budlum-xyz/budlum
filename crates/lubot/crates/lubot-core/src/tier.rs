@@ -1,26 +1,26 @@
-//! Lubot model kademe adlandırması.
+//! Lubot model tier naming.
 //!
-//! Karar (2026-08-13): DeepSeek'in varyant adları (Flash/Pro) Lubot
-//! katmanında kullanılmaz; kendi adlarımız geçerlidir:
+//! Decision (2026-08-13): DeepSeek's variant names (Flash and Pro) are not
+//! used in the Lubot layer; our own names apply:
 //!
-//! - `Light`  ← DeepSeek-V4-Flash(-Base) tabanlı
-//! - `Normal` ← DeepSeek-V4-Pro(-Base) tabanlı
+//! - `Light`  is based on DeepSeek-V4-Flash(-Base)
+//! - `Normal` is based on DeepSeek-V4-Pro(-Base)
 //!
-//! Çarpan/kat kademe etiketleri (ör. "0.5x", "10x") Lubot'ta **yoktur**.
-//! Ağırlık repo adları (üçüncü taraf) atıf gereği olduğu gibi korunur
-//! (bkz. `NOTICE.md`); yalnız bizim katmanımız kendi adını taşır.
+//! Multiplier tier labels (such as "0.5x" or "10x") do **not** exist in Lubot.
+//! Third-party weight repository names are kept as they are because attribution
+//! requires it (see `NOTICE.md`); only our own layer carries our own name.
 
 /// Lubot kademesi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelTier {
-    /// Flash tabanlı: günlük kullanım, düşük gecikme.
+    /// Flash-based: everyday use, low latency.
     Light,
-    /// Pro tabanlı: en yüksek kapasite.
+    /// Pro-based: the highest capacity.
     Normal,
 }
 
 impl ModelTier {
-    /// Kademenin adı (kimliklerde ve `served_model_name` içinde kullanılır).
+    /// The name of the tier (used in identifiers and in `served_model_name`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -29,7 +29,8 @@ impl ModelTier {
         }
     }
 
-    /// Bu kademe için API'de sunulan model adı: `lubot-{kademe}-{sürüm}`.
+    /// The model name served over the API for this tier:
+    /// `lubot-{tier}-{version}`.
     #[must_use]
     pub fn served_model_name(self, version: &str) -> String {
         format!("lubot-{}-{}", self.as_str(), version)
