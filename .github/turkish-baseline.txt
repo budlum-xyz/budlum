@@ -29,9 +29,7 @@ bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
 bud/src/bud_format_engine.rs	1
-bud/src/bud_format_genomic.rs	11
 bud/src/bud_format_hardening.rs	2
-bud/src/bud_format_jpegre.rs	11
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
@@ -44,7 +42,6 @@ bud/src/bud_format_segment.rs	3
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/churn.rs	6
-bud/src/cli.rs	11
 bud/src/fidelity.rs	8
 bud/src/gates.rs	4
 bud/src/provider.rs	4
@@ -53,7 +50,6 @@ bud/src/ratio.rs	4
 bud/tests/test_integration.rs	3
 budzero/bud-cli/src/main.rs	8
 budzero/bud-cli/tests/toolchain_end_to_end.rs	5
-budzero/bud-compiler/src/lib.rs	11
 budzero/bud-compiler/src/sema.rs	4
 budzero/bud-isa/src/lib.rs	6
 budzero/bud-node/src/bitswap.rs	1
