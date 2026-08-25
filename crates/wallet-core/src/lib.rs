@@ -66,8 +66,7 @@ pub use tee::{
 };
 
 use ml_dsa::{
-    signature::SignatureEncoding as _, EncodedSignature, KeyInit, MlDsa87, Signature, Signer,
-    SigningKey, Verifier, VerifyingKey,
+    EncodedSignature, KeyInit, MlDsa87, Signature, Signer, SigningKey, Verifier, VerifyingKey,
 };
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;

@@ -132,11 +132,13 @@ pub use budlum_note_packing::{field_from_hash, hash_from_field, is_packed};
 /// Does not fit in one field element.
 #[must_use]
 pub fn address_to_recipient_tag(addr: &[u8; 32]) -> u64 {
-    let raw = u64::from_le_bytes(
-        addr[..8]
-            .try_into()
-            .expect("8-byte slice is always 8 bytes"),
-    );
+    // Destructured rather than sliced-and-`try_into`-ed. Both express "take
+    // the first eight bytes", but slicing leaves a panic branch that the
+    // compiler cannot see is dead, so the honest `.expect()` on it is a claim
+    // a reader has to verify. A pattern on a fixed-size array is checked when
+    // the crate is built: there is no branch left to reason about.
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *addr;
+    let raw = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
     raw % GOLDILOCKS_P
 }
 
