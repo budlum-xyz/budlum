@@ -97,7 +97,7 @@ pub struct MainnetActivation {
     /// clippy::derivable_impls nedeniyle derive'a indirildi.
     pub verify_merkle_enabled: bool,
     /// AI inference verification opcode gate.
-    /// False = mainnet'te KAPALI - requires post-ceremony activation.
+    /// False means OFF on mainnet - it requires post-ceremony activation.
     /// When true, VerifyInference (0x1F) opcode is allowed on mainnet,
     /// Enabling ZKVM-proven AI inference verification.
     pub verify_inference_enabled: bool,
@@ -126,23 +126,24 @@ impl Default for MainnetActivation {
     /// circuit behind it at all and returns a hard-coded zero; see
     /// `docs/AI_VERIFICATION_STATUS.md`.
     ///
-    /// `VerifyMerkle`'in gerekcesi degisti. Uzun sure "unfinished path
-    /// verification" yaziyordu ve dogruydu: 64 genisleme satiri Poseidon
-    /// chain correctly row by row, but **the result it reaches was bound to nothing**.
-    /// baglanmiyordu**. Kok karsilastirmasi orijinal satirin
-    /// `merkle_current` hucresine bakiyordu ve o hucreye 64. turun
-    /// ciktisinin yazildigini zorlayan kisit yoktu; genisleme satirlarina
-    /// a prover that writes the claimed root itself there without touching
-    /// produced a proof that verified. Measured, and it did.
+    /// The rationale for `VerifyMerkle` has changed. For a long time it read
+    /// "unfinished path verification", and that was true: the 64 expansion rows
+    /// walked the Poseidon chain correctly row by row, but **the result they
+    /// reached was bound to nothing**. The root comparison looked at the
+    /// `merkle_current` cell of the original row, and no constraint forced the
+    /// output of round 64 to be written into that cell; a prover that writes the
+    /// claimed root there itself, without touching the expansion rows, produced
+    /// a proof that verified. That was measured, and it did.
     ///
-    /// O bosluk kapandi (`plonky3_air.rs`, "Son turun ciktisi ...";
-    /// `rejects_verify_merkle_root_not_produced_by_the_path`). Kapi yine de
-    /// closed: the remaining condition is an **external check**, not a missing constraint.
-    /// iddiasinin onu yazani ikna etmesi yetmez. Bu yorumun onceki surumu
-    /// yol dogrulamasini "implemented" sayiyordu ve eksik olan sey tam da
-    /// a binding nobody had written down as a separate item - the internal review's
-    /// neyi kacirdigini gosteren orneklerden biri. Bayragi bu yorumun
-    /// gucune dayanarak acmayin.
+    /// That gap is now closed (`plonky3_air.rs`, "The output of the last round
+    /// ..."; `rejects_verify_merkle_root_not_produced_by_the_path`). The gate
+    /// nevertheless stays closed: the remaining condition is an **external
+    /// review**, not a missing constraint. It is not enough for the claim to
+    /// convince the person who wrote it. The previous version of this very
+    /// comment counted path verification as "implemented", and what was missing
+    /// was exactly a binding nobody had written down as a separate item - one of
+    /// the examples showing what an internal review can miss. Do not turn this
+    /// flag on merely on the strength of this comment.
     fn default() -> Self {
         Self {
             verify_merkle_enabled: false,
