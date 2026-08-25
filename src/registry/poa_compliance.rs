@@ -4,28 +4,29 @@
 //! Module therefore requires every state-changing operation to declare its
 //! Domain kind and fails closed for [`ComplianceDomainKind::Permissionless`].
 //!
-//! PoA alanlari icin uyum defteri: tarama, dondurma ve seyahat kurali
-//! kayitlari ile bunlarin denetim izi.
+//! The compliance ledger for PoA domains: screening, freeze and travel-rule
+//! records, together with their audit trail.
 //!
-//! # Kapi, defter degil
+//! # A gate, not a ledger
 //!
-//! Bu modul bir sure yalniz kayit tutuyordu: dondurma cagrilabiliyordu ama
-//! dondurulmus olmanin hicbir sonucu yoktu. "Donduruldu" bir not olarak
-//! kaliyordu, bir karar olarak degil.
+//! For a while this module only kept records: a freeze could be called, but
+//! being frozen had no consequence at all. "Frozen" stayed a note rather than a
+//! decision.
 //!
-//! Artik `Blockchain::poa_compliance` uzerinde yasiyor ve iki yerden
-//! baglaniyor:
+//! It now lives on `Blockchain::poa_compliance` and is wired in from two
+//! places:
 //!
-//!   * `Blockchain::freeze_poa_account` - alanin turu **kaydindan** okunur,
-//!     cagirandan degil; cagiran kendi alanini "PoA" ilan edip dondurma
-//!     yetkisi uretemez.
-//!   * `Blockchain::validate_sovereign_audit_export` - dondurulmus bir
-//!     operatorun egemen denetim paketi reddedilir. Operator paketten degil
-//!     **kayitli sablondan** okunur.
+//!   * `Blockchain::freeze_poa_account` - the kind of the domain is read from
+//!     its **record**, not from the caller, so a caller cannot declare its own
+//!     domain to be "PoA" and manufacture freeze authority.
+//!   * `Blockchain::validate_sovereign_audit_export` - the sovereign audit
+//!     bundle of a frozen operator is refused. The operator is read from the
+//!     **recorded template**, not from the bundle.
 //!
-//! Izinsiz (permissionless) alanlarda dondurma **kasten** reddedilir
-//! (`ensure_poa`): egemenlik iddiasi tasiyan bir agda, izinsiz bir alanin
-//! hesabini merkezi bir yonetici dondurememeli.
+//! On permissionless domains a freeze is refused **deliberately**
+//! (`ensure_poa`): on a network that claims sovereignty, no central
+//! administrator should be able to freeze an account in a permissionless
+//! domain.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};

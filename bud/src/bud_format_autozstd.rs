@@ -1,8 +1,11 @@
-//! B.U.D. 2.0 - OTOMATİK ZSTD SEVİYESİ + SIKIŞMAZLIKTA GEÇ (F133/F179)
+//! B.U.D. 2.0 - AUTOMATIC ZSTD LEVEL, AND SKIP WHEN IT DOES NOT COMPRESS
+//! (F133/F179).
 //!
-//! Kalan iş: akıllı zstd seviyesi. Hızlı seviye dene → kazanç küçükse (≤%5) ya da
-//! zaman bütçesi aşıldıysa SIKIŞTIRMADAN GEÇ (CPU koru - ZFS smart deseni).
-//! Dürüstlük: karar GERÇEK ölçüme dayanır; tahmin yok.
+//! Remaining work: a smart zstd level. Try the fast level, and if the gain is
+//! small (5 percent or less) or the time budget is spent, SKIP the compression
+//! and save the CPU - the ZFS smart pattern.
+//!
+//! Honesty: the decision rests on a REAL measurement, never on a guess.
 
 #![forbid(unsafe_code)]
 
@@ -12,13 +15,15 @@ pub const AUTOZ_MAGIC: [u8; 8] = *b"\xB5AZST\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZstdDecision {
-    Level(u8), // seçilen seviye
-    Skip,      // sıkışmaz - ham sakla
+    Level(u8), // the chosen level
+    Skip,      // it does not compress, so store it raw
 }
 
-/// Sıkıştırma denemesi sonucuna göre karar.
-/// `fast_ratio`: hızlı seviye oranı (orijinal/sıkışmış) · `time_budget_ms` kaldı mı?
-/// `skip_threshold`: bu oranın altında SKIP (varsayılan 1.05 - %5 kazanç).
+/// The decision, taken from the result of the compression attempt.
+///
+/// `fast_ratio` is the ratio of the fast level (original over compressed), and
+/// `time_budget_ms` says how much time is left. `skip_threshold` is the ratio
+/// below which the answer is SKIP (the default is 1.05, a 5 percent gain).
 pub fn decide(
     fast_ratio: f64,
     slow_ratio: f64,
@@ -26,13 +31,14 @@ pub fn decide(
     skip_threshold: f64,
 ) -> ZstdDecision {
     if fast_ratio <= skip_threshold.max(1.0) {
-        return ZstdDecision::Skip; // sıkışmaz
+        return ZstdDecision::Skip; // it does not compress
     }
     if time_budget_ms_left < 200 {
-        // zaman dar → hızlı seviye yeter (F190: düşük seviye yeter)
+        // Time is short, so the fast level is enough (F190: a low level is
+        // enough).
         return ZstdDecision::Level(3);
     }
-    // yavaş seviye ek kazanç veriyor mu?
+    // Does the slow level give any extra gain?
     let gain = slow_ratio / fast_ratio.max(1e-9);
     if gain >= 1.10 {
         ZstdDecision::Level(19)

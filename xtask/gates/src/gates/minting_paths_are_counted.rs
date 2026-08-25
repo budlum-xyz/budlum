@@ -44,8 +44,8 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
         11,
         "bridge unlock and refund (existing locked money is returned), \
          storage deal refunds and operator bond refunds (money that was \
-         borclandirilmis para), ucret dagitimi (odenmis ucretin paylastirilmasi). \
-         Hicbiri yeni arz yaratmaz.",
+         already owed), and fee distribution (splitting a fee that was already paid). \
+         None of these create new supply.",
     ),
     (
         "src/core/account.rs",
@@ -57,17 +57,19 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
 ];
 
-/// Bir satirin uretim kodu mu test kodu mu oldugunu kabaca ayirt eder.
+/// Roughly tells whether a line is production code or test code.
 ///
-/// Testler tavandan muaf: orada bir hesabi fonlamak kurulumun parcasi.
+/// Tests are exempt from the ceiling: funding an account there is part of the
+/// setup.
 fn production_lines(text: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut in_tests = false;
     for (i, line) in text.lines().enumerate() {
         let t = line.trim();
-        // The boundary is only a column-zero `mod tests`: `#[cfg(test)]` is not production
-        // kodunda da geciyor (test-only dallar, test-only yardimcilar), o
-        // yuzden onu sinir saymak dosyanin yarisini gorunmez yapardi.
+        // The boundary is only a column-zero `mod tests`: `#[cfg(test)]` also
+        // appears inside production code (test-only branches, test-only
+        // helpers), so treating it as the boundary would make half the file
+        // invisible.
         if line.starts_with("mod tests") || line.starts_with("pub mod tests") {
             in_tests = true;
         }
@@ -84,7 +86,7 @@ fn production_lines(text: &str) -> Vec<(usize, &str)> {
 
 /// # Errors
 ///
-/// Bakiye ekleyen cagrilarin sayisi gerekcelendirilmis sayidan farkliysa.
+/// If the number of balance-adding calls differs from the justified count.
 pub fn run(root: &Path) -> Result<String, String> {
     let mut problems = String::new();
     let mut minting = 0usize;
@@ -113,10 +115,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         if found_move != *expected {
             let _ = write!(
                 problems,
-                "\n  {source}: {found_move} adet `{MOVE_FN}` cagrisi var, \
+                "\n  {source}: there are {found_move} `{MOVE_FN}` calls, \
                  the justified count is {expected}.\n    \
                  Recorded rationale: {why}\n    \
-                 Yeni bir cagri eklendiyse su soru cevaplanmali: bu yeni para mi \
+                 If a call was added this question has to be answered: is this new money \
                  (then `{MINT_FN}` must be used, it checks the ceiling) or money that \
                  merely changes place (then the rationale must be written into this gate)? \
                  If a call was deleted the count must be updated."
@@ -129,7 +131,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if minting == 0 {
         return Err(format!(
-            "minting-paths-are-counted: hic `{MINT_FN}` cagrisi bulunamadi. \
+            "minting-paths-are-counted: no `{MINT_FN}` call was found at all. \
              If the ceiling check was removed the supply cap is only a document."
         ));
     }
@@ -142,7 +144,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 /// # Errors
 ///
-/// Kapi test kodunu uretimden ayirt edemezse.
+/// If the gate cannot tell test code apart from production code.
 pub fn self_test() -> Result<String, String> {
     let sample = r"
         fn production() {
@@ -165,18 +167,18 @@ mod tests {
     let mints = lines.iter().filter(|(_, l)| l.contains(MINT_FN)).count();
     if moves != 1 {
         return Err(format!(
-            "self_test: uretimde 1 tasima beklenirdi, {moves} sayildi (test modulu sizmis olabilir)"
+            "self_test: 1 move was expected in production, {moves} were counted (the test module may have leaked in)"
         ));
     }
     if mints != 1 {
         return Err(format!(
-            "self_test: uretimde 1 basim beklenirdi, {mints} sayildi"
+            "self_test: 1 mint was expected in production, {mints} were counted"
         ));
     }
     // An example in a comment line must not be counted.
     let commented = "        // self.state.try_add_balance(&a, 1);";
     if !production_lines(commented).is_empty() {
-        return Err("self_test: yorumdaki cagri sayildi".into());
+        return Err("self_test: a call inside a comment was counted".into());
     }
     Ok("minting-paths-are-counted self-test OK: the test module and comments are outside the count".into())
 }

@@ -2,32 +2,36 @@
 // invariant, so the workspace-wide panic gate does not apply.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! BULGU: derleyicinin urettigi kosullu dallanma kanitlanamiyor.
+//! FINDING: the conditional branching the compiler emits could not be proven.
 //!
-//! Olculdu (canli `bud-cli run`): dallanma iceren HER program
-//! "Verification of generated proof failed!" veriyor, duz programlar geciyor.
+//! Measured with a live `bud-cli run`: EVERY program containing a branch gave
+//! "Verification of generated proof failed!", while straight-line programs
+//! passed.
 //!
-//!   example.bud      (Jmp/Jnz yok, 22 adim) -> VALID
-//!   example2.bud     (Jmp/Jnz yok, 16 adim) -> VALID
-//!   uzun.bud         (Jmp/Jnz yok, 19 adim) -> VALID
-//!   sadeceif.bud     (Jnz + Jmp)            -> BASARISIZ
-//!   kisadongu.bud    (Jnz + Jmp)            -> BASARISIZ
-//!   control_flow.bud (Jnz + Jmp)            -> BASARISIZ
-//!   example_loop.bud (Jnz + Jmp)            -> BASARISIZ
+//!   example.bud      (no Jmp/Jnz, 22 steps) -> VALID
+//!   example2.bud     (no Jmp/Jnz, 16 steps) -> VALID
+//!   long.bud         (no Jmp/Jnz, 19 steps) -> VALID
+//!   if_only.bud      (Jnz + Jmp)            -> FAILED
+//!   short_loop.bud   (Jnz + Jmp)            -> FAILED
+//!   control_flow.bud (Jnz + Jmp)            -> FAILED
+//!   example_loop.bud (Jnz + Jmp)            -> FAILED
 //!
-//! Bytecode karsilastirmasi ayrimi kesinlestirdi: basarisiz programlarin
-//! opcode kumesinde `Jnz` ve `Jmp` var, gecenlerde ikisi de yok. Yani sorun
-//! not the trace length but branching itself -- a straight 19 step program
-//! gecerken 2 turluk dongu dusuyor.
+//! (`long.bud`, `if_only.bud` and `short_loop.bud` were written by hand for
+//! that measurement and are not kept in the tree; the other four are.)
 //!
-//! Mevcut 106 prover testi bu bosluga dusmustu: hepsi ELLE kurulmus komut
-//! dizileri kanitliyor (`inst(Opcode::Jnz, ...)`), derleyicinin gercek
-//! ciktisini hicbiri kanitlamiyor. Elle kurulan Jnz gecerken derlenmis Jnz
-//! fails, the difference is not in the instruction itself but in the
-//! cevresinde (pc hedefi, cagri cercevesi, register tahsisi) demektir.
+//! Comparing the bytecode settled the distinction: the opcode set of the
+//! failing programs contains `Jnz` and `Jmp`, and the passing ones contain
+//! neither. So the problem is not the trace length but branching itself -- a
+//! straight 19 step program passes while a two-iteration loop fails.
 //!
-//! Bu test o boslugu kapatir: kaynak koddan baslar, derleyiciyi calistirir,
-//! VM ile yurutur ve URETILEN kaniti dogrular.
+//! The existing 106 prover tests had fallen into this gap: they all prove
+//! HAND-BUILT instruction sequences (`inst(Opcode::Jnz, ...)`), and none of
+//! them proves the compiler's actual output. When a hand-built Jnz passes but a
+//! compiled Jnz fails, the difference is not in the instruction itself but in
+//! what surrounds it: the pc target, the call frame, the register allocation.
+//!
+//! This test closes that gap: it starts from source code, runs the compiler,
+//! executes the result on the VM and verifies the proof that was PRODUCED.
 
 use bud_compiler::compile;
 use bud_isa::IsaProfile;
@@ -93,8 +97,8 @@ fn compile_run_prove(kaynak: &str) -> Result<(), String> {
 /// ve asagidaki testin teshisi yaniltici olur.
 #[test]
 fn a_branchless_program_is_proven() {
-    let kaynak = r#"
-contract Duz {
+    let source = r#"
+contract Straight {
     pub fn main() {
         let a = 1;
         let b = 2;
@@ -103,32 +107,33 @@ contract Duz {
     }
 }
 "#;
-    compile_run_prove(kaynak).expect("dallanmasiz program kanitlanabilmeli");
+    compile_run_prove(source).expect("a branchless program has to be provable");
 }
 
-/// BULGU: tek bir `if` iceren program kanitlanamiyor.
+/// FINDING: a program containing a single `if` could not be proven.
 #[test]
 fn a_compiled_if_is_proven() {
-    let kaynak = r#"
-contract SadeceIf {
+    let source = r#"
+contract IfOnly {
     pub fn main() {
         let a = 5;
         if (a > 3) {
-            emit Buyuk(a);
+            emit Greater(a);
         } else {
-            emit Kucuk(a);
+            emit Smaller(a);
         }
     }
 }
 "#;
-    compile_run_prove(kaynak).expect("derleyicinin urettigi kosullu dallanma kanitlanabilmeli");
+    compile_run_prove(source)
+        .expect("the conditional branching the compiler emits has to be provable");
 }
 
-/// BULGU: `while` dongusu iceren program kanitlanamiyor.
+/// FINDING: a program containing a `while` loop could not be proven.
 #[test]
 fn a_compiled_while_loop_is_proven() {
-    let kaynak = r#"
-contract KisaDongu {
+    let source = r#"
+contract ShortLoop {
     pub fn main() {
         let i = 0;
         while (i < 2) {
@@ -138,5 +143,5 @@ contract KisaDongu {
     }
 }
 "#;
-    compile_run_prove(kaynak).expect("derleyicinin urettigi dongu kanitlanabilmeli");
+    compile_run_prove(source).expect("the loop the compiler emits has to be provable");
 }
