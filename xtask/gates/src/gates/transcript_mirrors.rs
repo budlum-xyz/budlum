@@ -11,12 +11,14 @@
 //! Bugun bu aynalama iki dosyanin yorumlarinda anlatiliyor ("the verifier
 //! absorbs the same slice at the same point") and **nothing enforces it**.
 //! Adding an absorption on one side and forgetting the other is a silent
-//! degisikliktir: kod derlenir, testler kosar, transcript ayrisir.
+//! change: the code compiles, the tests pass, and the transcripts drift
+//! apart.
 //!
-//! Kapi iki dosyadaki emilim dizisini cikarir ve karsilastirir. Karsilastirdigi
-//! is **order and kind**, not variable names: the same kind of absorption in the same order.
+//! The gate extracts the absorption sequence from both files and compares
+//! them. What it compares is **order and kind**, not variable names: the same
+//! kind of absorption in the same order.
 //!
-//! # Neden kaynak okuyarak
+//! # Why by reading the source
 //!
 //! Measuring at run time means running both sides, that is producing and verifying a full
 //! proof; that is already the job of the tests and it is expensive. The question here is
@@ -34,12 +36,12 @@ use std::path::Path;
 const PROVER: &str = "budzero/bud-proof/src/bud_stark/prover.rs";
 const VERIFIER: &str = "budzero/bud-proof/src/bud_stark/verifier.rs";
 
-/// Bir emilim cagrisinin turu.
+/// The kind of an absorption call.
 ///
 /// The **shape** is kept, not the name: `observe` or `observe_slice`, and over
 /// what. The same value may be held under different local names on the two sides
-/// (`trace_commit` versus `commitments.trace`), but the order and kind of absorption must be the
-/// olmak zorunda.
+/// (`trace_commit` versus `commitments.trace`), but the order and kind of the
+/// absorptions have to be identical.
 #[derive(Debug, PartialEq, Eq)]
 struct Absorb {
     /// `observe` veya `observe_slice`.
@@ -65,9 +67,9 @@ fn classify(arg: &str) -> &'static str {
 
 /// Extract the absorption sequence from a file.
 ///
-/// Yalnizca `challenger.observe...` cagrilari sayilir ve **yorum satirlari
-/// atlanir**: bir yorumda gecen `challenger.observe(...)` ornegi diziyi
-/// kaydirirdi.
+/// Only `challenger.observe...` calls are counted, and **comment lines are
+/// skipped**: a `challenger.observe(...)` example inside a comment would shift
+/// the sequence.
 fn absorptions(text: &str) -> Vec<Absorb> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -114,7 +116,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if pa.is_empty() || va.is_empty() {
         return Err(format!(
-            "transcript-mirrors: emilim bulunamadi (kanitlayici {}, dogrulayici {}). \
+            "transcript-mirrors: no absorption was found (prover {}, verifier {}). \
              The gate may have gone blind - if the call shape changed the gate must be updated too.",
             pa.len(),
             va.len()
@@ -123,9 +125,9 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if pa.len() != va.len() {
         return Err(format!(
-            "transcript-mirrors: kanitlayici {} emilim yapiyor, dogrulayici {}. \
-             Bir tarafta olup otekinde olmayan her emilim, o alani meydan \
-             resolves without reading and leaves an attacker free over it.\n  \
+            "transcript-mirrors: the prover makes {} absorptions and the verifier {}. \
+             Every absorption present on one side and missing on the other is a field the \
+             challenge resolves without reading, and leaves an attacker free over it.\n  \
              prover:   {pa:?}\n  verifier: {va:?}",
             pa.len(),
             va.len()
@@ -185,13 +187,17 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
     if absorptions(short).len() == g.len() {
-        return Err("self_test: eksik emilim fark edilmedi".into());
+        return Err("self_test: a missing absorption went unnoticed".into());
     }
     if absorptions(swapped) == g {
-        return Err("self_test: sira degisikligi fark edilmedi".into());
+        return Err("self_test: a change of order went unnoticed".into());
     }
     if absorptions(commented) != g {
         return Err("self_test: an example in a comment shifted the sequence".into());
     }
-    Ok("transcript-mirrors self-test OK: eksik emilim, sira degisikligi ve yorum ornegi ayirt ediliyor".into())
+    Ok(
+        "transcript-mirrors self-test OK: a missing absorption, a change of order and an example \
+         in a comment are all told apart"
+            .into(),
+    )
 }
