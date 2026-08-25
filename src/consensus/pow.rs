@@ -133,20 +133,21 @@ impl PoWEngine {
         let ratio_capped = ratio_scaled.clamp(25, 400);
         ((current as u128 * ratio_capped) / 100).clamp(1, 32) as usize
     }
-    /// Uretici tick araligina kalibre edilmis motor.
+    /// An engine calibrated to the producer's tick interval.
     ///
-    /// `new` her zaman `PoWConfig::default()` degerini (10 sn hedef) alir.
-    /// Uretici ise `slot_ms` ile tick atar: devnet 1 sn, testnet 3 sn,
-    /// mainnet 6 sn. Iki sayi birbirinden habersiz oldugu icin retarget
-    /// zinciri "cok hizli" sayip zorlugu her 100 blokta 4 katina cikarir.
+    /// `new` always takes `PoWConfig::default()` (a 10 second target), while
+    /// the producer ticks at `slot_ms`: 1 second on devnet, 3 on testnet, 6 on
+    /// mainnet. Because the two numbers know nothing about each other, the
+    /// retarget counts the chain as "too fast" and quadruples the difficulty
+    /// every 100 blocks.
     ///
-    /// Canli devnet dugumunde olculdu: 100. blokta zorluk 2 -> 8 (32 sifir
-    /// bit), ardindan 364 milyon iterasyonda blok bulunamadi ve zincir
-    /// durdu. Tirmanis 2 -> 8 -> 32 (tavan) diye devam ettigi icin geri
-    /// donusu yoktur.
+    /// Measured on a live devnet node: at block 100 the difficulty went from 2
+    /// to 8 (32 zero bits), then no block was found in 364 million iterations
+    /// and the chain stopped. The climb continues 2 -> 8 -> 32 (the ceiling),
+    /// so there is no way back.
     ///
-    /// Bu kurucu hedefi uretim hizina esitler; retarget boylece gercek
-    /// sapmayi olcer, sabit bir kalibrasyon hatasini degil.
+    /// This constructor equates the target with the production rate, so the
+    /// retarget measures real drift rather than a fixed calibration error.
     pub fn calibrated(difficulty: usize, slot_ms: u64) -> Self {
         let target_block_time = (slot_ms / 1000).max(1);
         PoWEngine::with_config(PoWConfig {
@@ -624,66 +625,75 @@ mod tests {
         // Invalid hex should return false, not panic
         assert!(!engine.meets_difficulty("not-a-hex-string"));
     }
-    /// BULGU: uretici tick araligi (`slot_ms`) ile PoW retarget hedefi
-    /// (`target_block_time`) birbirinden habersiz kuruluyor. `PoWEngine::new`
-    /// her zaman `PoWConfig::default()` degerini (10 sn) aliyor, oysa devnet
-    /// slotu 1 sn. Olculdu: canli devnet dugumu 100. blokta zorlugu 2'den 8'e
-    /// (32 sifir bit) sicratti, 285 milyon iterasyonda blok bulamadi ve zincir
-    /// durdu. Retarget her 100 blokta en fazla 4x artabildigi icin tirmanis
-    /// 2 -> 8 -> 32 (tavan) diye devam eder; bu geri donusu olmayan bir kilit.
-    /// Mevcut testler yalnizca [1,32] clamp'ini dogruluyordu, orantiligi degil.
+    /// FINDING: the producer's tick interval (`slot_ms`) and the PoW retarget
+    /// target (`target_block_time`) are set up in ignorance of each other.
+    /// `PoWEngine::new` always takes `PoWConfig::default()` (10 seconds) while
+    /// the devnet slot is 1 second. Measured: a live devnet node jumped the
+    /// difficulty from 2 to 8 (32 zero bits) at block 100, found no block in
+    /// 285 million iterations and the chain stopped. Because the retarget can
+    /// rise at most 4x every 100 blocks, the climb goes 2 -> 8 -> 32 (the
+    /// ceiling); that is a lock with no way back. The existing tests only
+    /// verified the [1,32] clamp, not the proportionality.
     #[test]
-    fn retarget_uretici_hizina_gore_kalibre_edilmeli() {
-        // Zincirin gercekten urettigi hiz: 1 sn/blok (devnet slot_ms=1000).
-        let gercek_slot_sn = 1u64;
-        // Hedef bu hiza kalibre edilirse zorluk sabit kalmali.
+    fn the_retarget_has_to_be_calibrated_to_the_producer_rate() {
+        // The rate the chain really produces at: 1 s per block (devnet
+        // slot_ms=1000).
+        let real_slot_secs = 1u64;
+        // If the target is calibrated to that rate the difficulty has to stay
+        // put.
         let engine = PoWEngine::with_config(PoWConfig {
             difficulty: 2,
-            target_block_time: gercek_slot_sn,
+            target_block_time: real_slot_secs,
             adjustment_interval: 100,
         });
-        // 100 blok x 1 sn = 100 sn gecti; beklenen de 100 sn.
+        // 100 blocks x 1 s = 100 s elapsed, and 100 s expected.
         let d = engine.adjusted_difficulty_for_test(2, 100);
         assert_eq!(
             d, 2,
-            "uretici hizi hedefe esitken zorluk degismemeli, {d} bulundu"
+            "the difficulty must not change when the producer rate equals the target, found {d}"
         );
 
-        // Kalibrasyon yoksa (varsayilan 10 sn hedef) ayni zincir zorlugu
-        // 4 katina cikarir - canli dugumde olculen davranis budur.
-        let kalibresiz = PoWEngine::new(2);
-        let d2 = kalibresiz.adjusted_difficulty_for_test(2, 100);
+        // Without calibration (the default 10 second target) the same chain
+        // quadruples the difficulty - this is the behaviour measured on the
+        // live node.
+        let uncalibrated = PoWEngine::new(2);
+        let d2 = uncalibrated.adjusted_difficulty_for_test(2, 100);
         assert_eq!(
             d2, 8,
-            "kalibresiz motor 100 sn'lik 100 blogu 10x hizli sayip zorlugu 8'e cikarir"
+            "an uncalibrated engine counts 100 blocks over 100 s as 10x too fast and raises the difficulty to 8"
         );
     }
 
-    /// `calibrated` her ag icin retargeti uretim hizina esitler.
+    /// `calibrated` equates the retarget with the production rate on every
+    /// network.
     #[test]
-    fn calibrated_uretim_hizina_esitler() {
-        // (slot_ms, beklenen hedef sn)
-        for (slot_ms, beklenen) in [(1_000u64, 1u64), (3_000, 3), (6_000, 6)] {
+    fn calibrated_equates_the_target_with_the_production_rate() {
+        // (slot_ms, the expected target in seconds)
+        for (slot_ms, expected) in [(1_000u64, 1u64), (3_000, 3), (6_000, 6)] {
             let e = PoWEngine::calibrated(2, slot_ms);
             assert_eq!(
-                e.config.target_block_time, beklenen,
-                "slot {slot_ms}ms icin hedef {beklenen} sn olmali"
+                e.config.target_block_time, expected,
+                "the target for a {slot_ms}ms slot has to be {expected} s"
             );
-            // Zincir tam bu hizda uretirken zorluk sabit kalmali.
-            let gecen = beklenen.saturating_mul(e.config.adjustment_interval);
+            // While the chain produces at exactly that rate the difficulty has
+            // to stay put.
+            let elapsed = expected.saturating_mul(e.config.adjustment_interval);
             assert_eq!(
-                e.adjusted_difficulty_for_test(2, gecen),
+                e.adjusted_difficulty_for_test(2, elapsed),
                 2,
-                "uretim hedefe esitken zorluk degismemeli (slot {slot_ms}ms)"
+                "the difficulty must not change when production equals the target (slot {slot_ms}ms)"
             );
         }
     }
 
-    /// Kalibrasyon sifira bolunmeye yol acmamali: 1 sn altindaki slotlar
-    /// tabana oturur.
+    /// Calibration must not lead to a division by zero: slots under 1 second
+    /// settle on the floor.
     #[test]
-    fn calibrated_alt_sinirda_sifirlanmaz() {
+    fn calibrated_does_not_fall_to_zero_at_the_lower_bound() {
         let e = PoWEngine::calibrated(2, 200);
-        assert_eq!(e.config.target_block_time, 1, "hedef en az 1 sn olmali");
+        assert_eq!(
+            e.config.target_block_time, 1,
+            "the target has to be at least 1 s"
+        );
     }
 }
