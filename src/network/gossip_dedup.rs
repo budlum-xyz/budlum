@@ -23,6 +23,25 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Default deduplication window size (number of recent message hashes to keep).
 pub const DEFAULT_DEDUP_WINDOW: usize = 10_000;
 
+/// Maximum number of peers whose scores are retained.
+///
+/// # Why the score table needs a ceiling
+///
+/// The dedup window is bounded and the score table was not. A `PeerId` is a
+/// public key, so producing a fresh one costs a key generation and nothing
+/// else; a peer that connects, sends one message and disconnects leaves a
+/// `PeerScore` behind, and the map had no path that ever removed it.
+/// `remove_peer` existed and was called from nowhere, which is why the tree's
+/// idle-code baseline lists it: the eviction was written and never wired.
+///
+/// The ceiling is set well above `node::MAX_PEERS` because the table is
+/// deliberately allowed to outlive a connection. A peer that misbehaves,
+/// disconnects and reconnects must not arrive with a clean score, or
+/// disconnecting becomes the cheapest way to launder a ban. So the record
+/// survives the connection and is dropped only under pressure, oldest close
+/// first.
+const MAX_SCORED_PEERS: usize = 4_096;
+
 /// Minimum peer score before disconnection candidate.
 pub const MIN_PEER_SCORE: f64 = -10.0;
 
@@ -110,7 +129,18 @@ pub struct GossipDedup {
     /// Maximum number of entries in the dedup window.
     window_size: usize,
     /// Per-peer scores.
+    ///
+    /// Bounded by [`MAX_SCORED_PEERS`]. See that constant for why the bound
+    /// exists and why a disconnect alone does not drop an entry.
     peer_scores: HashMap<libp2p::PeerId, PeerScore>,
+    /// Peers whose connection has closed, in the order they closed.
+    ///
+    /// A disconnected peer's score is kept - dropping it would let a
+    /// misbehaving peer clear its record by reconnecting - but it is the first
+    /// thing evicted when the table is full. Held separately from
+    /// `peer_scores` so the eviction order does not depend on hash iteration
+    /// order, which differs between processes.
+    disconnected_order: VecDeque<libp2p::PeerId>,
     /// Total messages processed (for metrics).
     total_processed: u64,
     /// Total duplicates rejected (for metrics).
@@ -124,6 +154,7 @@ impl GossipDedup {
             seen_order: VecDeque::with_capacity(window_size),
             window_size,
             peer_scores: HashMap::new(),
+            disconnected_order: VecDeque::new(),
             total_processed: 0,
             total_duplicates: 0,
         }
@@ -143,6 +174,7 @@ impl GossipDedup {
             score.score += SCORE_DUPLICATE;
             score.duplicate_count += 1;
             score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
+            self.enforce_score_ceiling();
             return DedupResult::Duplicate;
         }
 
@@ -175,6 +207,7 @@ impl GossipDedup {
         }
         score.last_message_at = timestamp_ms;
         score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
+        self.enforce_score_ceiling();
     }
 
     /// Record an invalid message from a peer.
@@ -183,6 +216,7 @@ impl GossipDedup {
         score.score += SCORE_INVALID;
         score.invalid_count += 1;
         score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
+        self.enforce_score_ceiling();
     }
 
     /// Get the score for a peer.
@@ -219,9 +253,74 @@ impl GossipDedup {
         }
     }
 
-    /// Remove a peer's score (e.g. on disconnect).
+    /// Remove a peer's score outright.
+    ///
+    /// Used when the record must genuinely go - a clear, or a peer that was
+    /// never scored. On an ordinary disconnect call
+    /// [`Self::note_peer_disconnected`] instead, which keeps the record and
+    /// only marks it evictable.
     pub fn remove_peer(&mut self, peer: &libp2p::PeerId) {
         self.peer_scores.remove(peer);
+        self.disconnected_order.retain(|p| p != peer);
+    }
+
+    /// Mark a peer as disconnected.
+    ///
+    /// The score is deliberately **not** deleted. Deleting it on disconnect
+    /// would make reconnecting the cheapest way to clear a bad record: a peer
+    /// one message away from the ban threshold drops the connection, comes
+    /// back at zero, and repeats. The entry instead joins the eviction queue,
+    /// so it survives until the table is under pressure.
+    ///
+    /// Idempotent: a peer that closes several connections is queued once.
+    pub fn note_peer_disconnected(&mut self, peer: &libp2p::PeerId) {
+        if !self.peer_scores.contains_key(peer) {
+            return;
+        }
+        if !self.disconnected_order.iter().any(|p| p == peer) {
+            self.disconnected_order.push_back(*peer);
+        }
+    }
+
+    /// Note that a peer connected, so its record is no longer evictable.
+    pub fn note_peer_connected(&mut self, peer: &libp2p::PeerId) {
+        self.disconnected_order.retain(|p| p != peer);
+    }
+
+    /// How many peers currently hold a score.
+    #[must_use]
+    pub fn scored_peer_count(&self) -> usize {
+        self.peer_scores.len()
+    }
+
+    /// Drop records until the table is within [`MAX_SCORED_PEERS`].
+    ///
+    /// Disconnected peers go first, oldest close first. Only if that is not
+    /// enough - every scored peer is currently connected, which means the
+    /// ceiling is below the connection limit and is misconfigured - does it
+    /// touch a connected peer, and then it takes the **highest** score, because
+    /// the record worth keeping is the one that would ban somebody.
+    fn enforce_score_ceiling(&mut self) {
+        while self.peer_scores.len() > MAX_SCORED_PEERS {
+            if let Some(peer) = self.disconnected_order.pop_front() {
+                self.peer_scores.remove(&peer);
+                continue;
+            }
+            let Some(victim) = self
+                .peer_scores
+                .iter()
+                .max_by(|a, b| {
+                    a.1.score
+                        .partial_cmp(&b.1.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(b.0))
+                })
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.peer_scores.remove(&victim);
+        }
     }
 
     /// Total messages processed.
@@ -244,6 +343,7 @@ impl GossipDedup {
         self.seen_set.clear();
         self.seen_order.clear();
         self.peer_scores.clear();
+        self.disconnected_order.clear();
         self.total_processed = 0;
         self.total_duplicates = 0;
     }
@@ -265,6 +365,139 @@ fn hash_message(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A distinct peer id per message must not grow the score table without
+    /// bound.
+    ///
+    /// A `PeerId` is a public key, so the attacker's cost per entry is one key
+    /// generation. Before the ceiling the table had no eviction path at all:
+    /// `remove_peer` was written and called from nowhere, which is why the
+    /// idle-code baseline lists it.
+    #[test]
+    fn peer_id_churn_cannot_grow_the_score_table_without_bound() {
+        let mut dedup = GossipDedup::new(64);
+        for n in 0..(MAX_SCORED_PEERS + 500) {
+            let peer = libp2p::PeerId::random();
+            dedup.record_invalid(&peer);
+            // Every one of them then goes away, as a churning attacker's would.
+            dedup.note_peer_disconnected(&peer);
+            assert!(
+                dedup.scored_peer_count() <= MAX_SCORED_PEERS,
+                "the table reached {} entries after {n} peers",
+                dedup.scored_peer_count()
+            );
+        }
+        assert!(dedup.scored_peer_count() <= MAX_SCORED_PEERS);
+    }
+
+    /// Disconnecting does not clear a bad record.
+    ///
+    /// This is the half that makes the eviction safe. If a disconnect deleted
+    /// the score, a peer one message from the ban threshold would reconnect at
+    /// zero, and dropping the connection would be the cheapest ban laundry
+    /// available.
+    #[test]
+    fn a_disconnect_does_not_launder_a_bad_score() {
+        let mut dedup = GossipDedup::new(64);
+        let peer = libp2p::PeerId::random();
+        for _ in 0..5 {
+            dedup.record_invalid(&peer);
+        }
+        let before = dedup.peer_score(&peer);
+        assert!(before < 0.0, "the setup did not produce a bad score");
+
+        dedup.note_peer_disconnected(&peer);
+        assert_eq!(
+            dedup.peer_score(&peer),
+            before,
+            "the score was cleared by a disconnect"
+        );
+        assert!(dedup.peer_should_be_banned(&peer) || before > MIN_PEER_SCORE);
+    }
+
+    /// A connected peer is not evicted while a disconnected record is
+    /// available.
+    ///
+    /// The resident is given a HIGH score on purpose. The fallback path -
+    /// the one that runs when the eviction queue is empty - drops the highest
+    /// score first, so a resident scored like the churn would survive by the
+    /// id tie-break and the test would pass without the queue existing at all.
+    /// That is what the first version of this test did: deleting the queue
+    /// left it green. Scoring the resident above the churn makes it the
+    /// fallback's first victim, so only the queue can save it.
+    #[test]
+    fn eviction_prefers_disconnected_peers() {
+        let mut dedup = GossipDedup::new(64);
+        let resident = libp2p::PeerId::random();
+        for _ in 0..20 {
+            dedup.record_valid(&resident, 0);
+        }
+        dedup.note_peer_connected(&resident);
+        assert!(
+            dedup.peer_score(&resident) > 0.0,
+            "the resident must outscore the churn for this test to mean anything"
+        );
+
+        for _ in 0..(MAX_SCORED_PEERS + 10) {
+            let churn = libp2p::PeerId::random();
+            dedup.record_invalid(&churn);
+            dedup.note_peer_disconnected(&churn);
+        }
+
+        assert!(
+            dedup.get_peer_score(&resident).is_some(),
+            "the connected peer was evicted while disconnected records remained"
+        );
+    }
+
+    /// Reconnecting takes a record back out of the eviction queue.
+    #[test]
+    fn reconnecting_protects_the_record_again() {
+        let mut dedup = GossipDedup::new(64);
+        let peer = libp2p::PeerId::random();
+        dedup.record_invalid(&peer);
+        dedup.note_peer_disconnected(&peer);
+        dedup.note_peer_connected(&peer);
+
+        for _ in 0..(MAX_SCORED_PEERS + 10) {
+            let churn = libp2p::PeerId::random();
+            dedup.record_invalid(&churn);
+            dedup.note_peer_disconnected(&churn);
+        }
+        assert!(
+            dedup.get_peer_score(&peer).is_some(),
+            "a reconnected peer stayed in the eviction queue"
+        );
+    }
+
+    /// Marking an unknown peer disconnected does not create a record.
+    #[test]
+    fn a_never_scored_peer_is_not_queued() {
+        let mut dedup = GossipDedup::new(64);
+        dedup.note_peer_disconnected(&libp2p::PeerId::random());
+        assert_eq!(dedup.scored_peer_count(), 0);
+    }
+
+    /// `clear` empties the eviction queue too.
+    ///
+    /// A queue holding ids whose scores are gone would evict nothing on the
+    /// next pass and let the table run past its ceiling.
+    #[test]
+    fn clear_empties_the_eviction_queue() {
+        let mut dedup = GossipDedup::new(64);
+        let peer = libp2p::PeerId::random();
+        dedup.record_invalid(&peer);
+        dedup.note_peer_disconnected(&peer);
+        dedup.clear();
+        assert_eq!(dedup.scored_peer_count(), 0);
+
+        for _ in 0..(MAX_SCORED_PEERS + 5) {
+            let churn = libp2p::PeerId::random();
+            dedup.record_invalid(&churn);
+            dedup.note_peer_disconnected(&churn);
+        }
+        assert!(dedup.scored_peer_count() <= MAX_SCORED_PEERS);
+    }
 
     fn peer(_b: u8) -> libp2p::PeerId {
         let key = libp2p::identity::Keypair::generate_ed25519();

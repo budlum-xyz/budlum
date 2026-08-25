@@ -15,6 +15,14 @@ pub struct Metrics {
     /// operator watching only the count cannot tell which of those is
     /// happening until the process is killed.
     pub mempool_bytes: IntGauge,
+    /// Peers holding a gossip score record.
+    ///
+    /// Separate from `peer_count`: the score table deliberately outlives a
+    /// connection so that reconnecting does not clear a bad record, so this
+    /// gauge is expected to sit above the connected count. What it makes
+    /// visible is the gap - a table climbing toward `MAX_SCORED_PEERS` while
+    /// the connected count stays flat is peer-id churn.
+    pub gossip_scored_peers: IntGauge,
     pub blocks_produced: IntCounter,
     pub transactions_processed: IntCounter,
     pub reorgs_total: IntCounter,
@@ -66,6 +74,10 @@ impl Metrics {
         let mempool_bytes = IntGauge::new(
             "budlum_mempool_bytes",
             "Resident bytes of pending transaction bodies",
+        )?;
+        let gossip_scored_peers = IntGauge::new(
+            "budlum_gossip_scored_peers",
+            "Peers holding a gossip score record",
         )?;
         let blocks_produced = IntCounter::new("budlum_blocks_produced", "Total blocks produced")?;
         let transactions_processed =
@@ -179,6 +191,7 @@ impl Metrics {
         registry.register(Box::new(peer_count.clone()))?;
         registry.register(Box::new(mempool_size.clone()))?;
         registry.register(Box::new(mempool_bytes.clone()))?;
+        registry.register(Box::new(gossip_scored_peers.clone()))?;
         registry.register(Box::new(blocks_produced.clone()))?;
         registry.register(Box::new(transactions_processed.clone()))?;
         registry.register(Box::new(reorgs_total.clone()))?;
@@ -217,6 +230,7 @@ impl Metrics {
             peer_count,
             mempool_size,
             mempool_bytes,
+            gossip_scored_peers,
             blocks_produced,
             transactions_processed,
             reorgs_total,
