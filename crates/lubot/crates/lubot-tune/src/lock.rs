@@ -1,19 +1,19 @@
-//! Çıktı hash kilidi: eğitim çıktısı manifest digest'ine bağlanır.
+//! The output hash lock: a training output is bound to its manifest digest.
 //!
-//! Zincir üstü `register_lubot_model(model_hash)` kaydı bu digest ile
-//! eşleşmelidir - aynı digest'ten türetilmemiş bir çıktı kabul edilmez.
+//! The on-chain `register_lubot_model(model_hash)` record has to match this
+//! digest: an output not derived from the same digest is not accepted.
 
 use lubot_core::manifest::LoRaManifest;
 use lubot_core::model::{Hash32, ModelId};
 
-/// Eğitim çıktısına vurulan kilit.
+/// The lock placed on a training output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputLock {
     pub manifest_digest: Hash32,
     pub model_id: ModelId,
 }
 
-/// Manifest'ten çıktı kilidi üret.
+/// Produces an output lock from a manifest.
 #[must_use]
 pub fn lock_output(manifest: &LoRaManifest) -> OutputLock {
     OutputLock {
@@ -22,17 +22,17 @@ pub fn lock_output(manifest: &LoRaManifest) -> OutputLock {
     }
 }
 
-/// Kilit-manifest eşleşmesini doğrula.
+/// Verifies that the lock and the manifest match.
 ///
 /// # Errors
 ///
-/// Digest veya model_id uyuşmuyorsa.
+/// If the digest or the model_id does not match.
 pub fn verify_lock(lock: &OutputLock, manifest: &LoRaManifest) -> Result<(), String> {
     if lock.manifest_digest != manifest.digest() {
-        return Err("çıktı kilidi manifest digest'iyle eşleşmiyor".to_string());
+        return Err("the output lock does not match the manifest digest".to_string());
     }
     if lock.model_id != manifest.base_model {
-        return Err("çıktı kilidi taban modelle eşleşmiyor".to_string());
+        return Err("the output lock does not match the base model".to_string());
     }
     Ok(())
 }
