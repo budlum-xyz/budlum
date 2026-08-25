@@ -93,6 +93,7 @@
 - [83. Who chooses the size of the allocation](#83-who-chooses-the-size-of-the-allocation)
 - [84. Where a guarantee lives](#84-where-a-guarantee-lives)
 - [85. A gate that panics is a gate that stopped checking](#85-a-gate-that-panics-is-a-gate-that-stopped-checking)
+- [86. When ambiguity stops being a reason to skip](#86-when-ambiguity-stops-being-a-reason-to-skip)
 
 ## 1. Overall system architecture
 
@@ -3746,3 +3747,71 @@ and then `find` where it was, unwrapping the second on the strength of the
 first. In every case the panic was defending an invariant the same function had
 just established, and restructuring so the answer is only obtained once removed
 both the duplication and the panic.
+
+## 86. When ambiguity stops being a reason to skip
+
+`no-idle-code` asks, for every public item, whether any other production file
+names it. When two files define the same name the question has no honest answer:
+a mention of `is_valid` elsewhere in the tree does not say which `is_valid` it
+reached, and calling either one idle would be a guess. So ambiguous names were
+skipped, and the count of skips was printed alongside the result.
+
+Printing the number is what eventually exposed the problem. The gate was
+reporting **1267 skipped items against 4614 public items** - over a quarter of
+the public surface checked by nothing at all, sitting in plain sight at the end
+of a green line.
+
+### The case that needs no guess
+
+The skip is right whenever there is something to be ambiguous about. There is
+one case where there is not: when *no* file outside the defining set mentions
+the name at all.
+
+If the tree contains zero mentions, then no definition under that name was
+reached - whichever one a mention would have meant. The ambiguity is about
+*attribution*, and attribution only matters once there is something to
+attribute. At zero, every candidate is unreached, and the gate can say so
+without guessing.
+
+```mermaid
+flowchart TD
+    A[Public name] --> B{Defined in more than one file}
+    B -->|No| C[Reached, or idle]
+    B -->|Yes| D{Mentioned outside the defining files}
+    D -->|Yes, at least once| E[Skip: which one was meant is a guess]
+    D -->|No mentions at all| F[Every definition is unreached]
+    F --> G[Same finding as idle, same baseline]
+```
+
+This moved **191 items** out of the blind spot and onto the ratchet, leaving
+1076 genuinely undecidable. They are folded into the existing baseline rather
+than reported separately: a reader does not care why the scan was unsure of a
+name, only that nothing calls it.
+
+### What the widened scan found
+
+Most of the 191 are ordinary debt. Some are worth naming, because a duplicated
+name is itself a signal:
+
+- `MAX_BLOCK_SIZE` is defined twice, at 1_000_000 and 1_048_576. This one is
+  deliberate and already defended by a test: the consensus bound is measured
+  over JSON and the transport bound over protobuf, and the transport bound must
+  stay the looser of the two or gossip admits blocks every validator then
+  refuses. Both constants document the other.
+- `MAX_DECOMPRESSED_BYTES` is defined twice, at 100 MB and 4 GiB, in two
+  different layers of the same format.
+- `PROTOCOL_VERSION` exists as both a `u32` and a `&str`.
+
+None of these were introduced by the change; the gate simply had no way to
+mention them before. A name that means two things is not automatically wrong -
+the block-size pair is the example of doing it correctly, with each constant
+naming the other and a test pinning the relationship - but it is always worth a
+reader's attention, and a gate that skips the whole category gives it none.
+
+### The canary pair
+
+Two canaries, because a one-sided check here would be worse than none. Two
+definitions with no outside mention must FAIL, and the same pair with one
+outside mention must PASS. Without the second canary, a gate that simply stopped
+skipping ambiguous names would look correct while making exactly the guess the
+skip existed to avoid.
