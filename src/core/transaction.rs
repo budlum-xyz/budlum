@@ -35,14 +35,14 @@ pub const SIGNATURE_VERSION_V5: u32 = 5;
 ///
 /// V6 opens that path: the signature field stays empty, `authorization` takes its place, and
 /// `from` is the hash not of a single key but of the **owner set**. That way
-/// which set spends is bound to the address itself; an attacker cannot point their own
-/// sahip kumesiyle baskasinin adresini harcayamaz.
+/// which set spends is bound to the address itself; an attacker cannot spend
+/// somebody else's address with their own owner set.
 pub const SIGNATURE_VERSION_V6: u32 = 6;
 
-/// Coklu imzali bir hesabin adresi: sahip kumesi + esik.
+/// The address of a multisig account: the owner set plus the threshold.
 ///
-/// Adres, kumenin kendisinden turetilir. Turetmeye esigin de girmesi
-/// is needed: `2-of-3` and `3-of-3` policies over the same three owners are two different
+/// The address is derived from the set itself. The threshold has to enter the
+/// derivation as well: `2-of-3` and `3-of-3` policies over the same three owners are two different
 /// security statements, and if they shared an address the lower threshold would spend
 /// the funds of the higher one.
 #[must_use]
@@ -396,7 +396,7 @@ pub struct Transaction {
 /// would require reading account state and `verify()` would stop being
 /// stateless. Instead the set travels with the transaction, and because the
 /// `from` address is derived from the set, a transaction bringing the wrong set
-/// baskasinin hesabini gosteremez: adres tutmaz.
+/// cannot point at somebody else's account: the address will not match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultisigAuthorizationV6 {
     /// The owner ML-DSA-87 public keys.
@@ -640,10 +640,11 @@ impl Transaction {
         put_u128(&mut preimage, self.timestamp);
         put_u64(&mut preimage, self.chain_id);
         put_u32(&mut preimage, self.signature_version);
-        // V6: sahip kumesi ve esik imzanin kapsamina girer, imzalarin kendisi
-        // It does not. Had the set stayed outside, an intermediary could swap the set and
-        // imzalari oldugu gibi tasimasi mumkun olurdu; imzalar iceride
-        // were included the signature would sign itself.
+        // V6: the owner set and the threshold enter the scope of the signature;
+        // the signatures themselves do not. Had the set stayed outside, an
+        // intermediary could swap the set and carry the signatures over
+        // unchanged; and if the signatures were included the signature would be
+        // signing itself.
         if let Some(auth) = &self.authorization {
             let mut sorted: Vec<&Vec<u8>> = auth.owners.iter().collect();
             sorted.sort_unstable();
@@ -714,12 +715,12 @@ impl Transaction {
         self.signature_version = SIGNATURE_VERSION_V5;
         self.hash = self.calculate_hash();
     }
-    /// Coklu imzali bir hesap adina imzala.
+    /// Signs on behalf of a multisig account.
     ///
-    /// `from` does not come from the caller but is derived from the set and threshold: the
-    /// baskasinin adresini gostermesi burada da mumkun olmamali. Imzalar
-    /// authorization set is taken **after** it enters the preimage, because
-    /// imzalanan sey kumeyi de kapsar.
+    /// `from` does not come from the caller but is derived from the set and the
+    /// threshold: pointing at somebody else's address must be impossible here
+    /// too. The signatures are taken **after** the authorization set has entered
+    /// the preimage, because what is signed covers the set as well.
     ///
     /// If the caller supplies fewer signatures than the threshold the transaction is produced but
     /// does not verify; silently filling the gap would make the threshold meaningless.
@@ -855,8 +856,8 @@ impl Transaction {
     ///
     /// There are two separate gates and both are required. The first is **binding**:
     /// `from` must be the address derived from the supplied set and threshold. Without it
-    /// an attacker who collects valid signatures could point their own set at
-    /// baskasinin adresine iliskilendirebilirdi. Ikincisi **yetki**:
+    /// an attacker who collects valid signatures could associate their own set
+    /// with somebody else's address. The second is **authority**:
     /// the signatures are verified one by one through `MultisigPolicy`, a repeated owner
     /// does not count twice, and a transaction below the threshold is refused.
     /// Without `wallet-ml-dsa` the ML-DSA-87 verifier is not compiled.
@@ -2014,7 +2015,8 @@ mod v29_signing_tests {
             assert!(!tx.verify(), "a signer outside the set must be refused");
         }
 
-        /// Adres kumeye baglidir: baska bir hesabin adresi gosterilemez.
+        /// The address is bound to the set: another account's address cannot
+        /// be pointed at.
         #[test]
         fn an_authorization_cannot_point_at_another_address() {
             let (keys, owners) = owner_set(3);

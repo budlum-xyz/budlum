@@ -25,7 +25,6 @@ README.md	1
 bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
 bud/src/bud_format.rs	3
-bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_engine.rs	1
 bud/src/bud_format_hardening.rs	2
 bud/src/bud_format_markdown.rs	6
@@ -33,7 +32,6 @@ bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_qos.rs	5
-bud/src/bud_format_registry.rs	7
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_ultra.rs	1
@@ -77,15 +75,12 @@ src/ai/mod.rs	2
 src/bin/bud.rs	2
 src/budlumxyz/mod.rs	3
 src/chain/storage_economics_tests.rs	4
-src/core/governance.rs	6
-src/core/transaction.rs	6
 src/crypto/mainnet_policy.rs	3
 src/domain/plugin.rs	1
 src/domain/storage_deal.rs	2
 src/execution/executor.rs	3
 src/lib.rs	4
 src/lubot/effort.rs	1
-src/lubot/query.rs	6
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
 src/registry/d4_merge_tests.rs	1
@@ -94,7 +89,6 @@ src/registry/invalid_vote.rs	1
 src/registry/role.rs	1
 src/rpc/tests.rs	1
 src/settlement/global_block.rs	2
-src/socialfi/mod.rs	6
 src/storage/content_id.rs	2
 src/storage/db.rs	2
 src/storage/erasure.rs	2

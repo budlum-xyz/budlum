@@ -1,6 +1,6 @@
-//! SocialFi modulu - kategorizasyonu: src/nft -> src/socialfi
-//! Rename'i (scope_v1). Yalniz modul yolu degisti; RPC method
-//! String'leri ve tipler ayni (kamusal kirilma yok).
+//! The SocialFi module - the categorisation rename from `src/nft` to
+//! `src/socialfi` (scope_v1). Only the module path changed; the RPC method
+//! strings and the types are the same, so nothing public broke.
 pub mod types;
 
 use crate::core::address::Address;
@@ -82,8 +82,8 @@ impl NftRegistry {
         if new_val < 0 {
             new_val = 0;
         }
-        // Clamp to u64::MAX - eskiden `as u64` truncate
-        // Ediyordu (büyük delta_mcd değerinde sessiz overflow).
+        // Clamp to u64::MAX. This used to be an `as u64` truncation, which
+        // overflowed silently on a large delta_mcd.
         if new_val > u64::MAX as i128 {
             new_val = u64::MAX as i128;
         }
@@ -145,10 +145,11 @@ impl NftRegistry {
             hasher.update(nft.content_id.0);
             hasher.update(nft.luminance.to_le_bytes());
             hasher.update(nft.minted_at_epoch.to_le_bytes());
-            // Güvenlik denetimi (MEDIUM): uzunluk-öneksiz metadata
-            // hash değeri belirsiz sınırlar üretiyordu (isim/etiket bayt akışında
-            // bitişik). V5: alan marker'ı + uzunluk öneki; None/Some ayrımı
-            // açık marker ile.
+            // Security review (MEDIUM): a length-unprefixed metadata hash
+            // produced ambiguous boundaries, because the name and the label sat
+            // adjacent in the byte stream. V5 adds a field marker plus a length
+            // prefix, and the None/Some distinction is carried by an explicit
+            // marker.
             match nft.author_name.as_ref() {
                 Some(name) => {
                     hasher.update(b"name:");

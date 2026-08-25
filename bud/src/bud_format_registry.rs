@@ -21,9 +21,11 @@ impl MimeRegistry {
         entries.insert("image/jpeg".into(), 11);
         entries.insert("image/png".into(), 12);
         entries.insert("video/mp4".into(), 10);
-        // K38: pin DETERMINISTIK olmalı - HashMap iterasyon sırası çalışmadan çalışmaya
-        // değişir (RandomState); aynı registry iki farklı çalışmada FARKLI pin üretirdi.
-        // Çözüm: pin hesabında key'ler SIRALI işlenir (BTreeMap'e gerek yok, sıralama yeter).
+        // K38: the pin has to be DETERMINISTIC. HashMap iteration order changes
+        // from run to run (RandomState), so the same registry would produce a
+        // DIFFERENT pin in two runs. The fix: the keys are processed in SORTED
+        // order when computing the pin (no BTreeMap is needed, sorting is
+        // enough).
         let mut keys: Vec<&String> = entries.keys().collect();
         keys.sort();
         let mut h = Sha3_256::new();
@@ -35,7 +37,8 @@ impl MimeRegistry {
         Self { entries, hash }
     }
 
-    /// Deterministlik kanıtı: aynı içerik → aynı pin (K38 mülkiyeti).
+    /// The determinism proof: the same content gives the same pin (the K38
+    /// property).
     pub fn pin_matches(&self, other: &Self) -> bool {
         self.hash == other.hash && self.entries.len() == other.entries.len()
     }
@@ -234,15 +237,16 @@ mod tests {
     }
     #[test]
     fn registry_pin_deterministic() {
-        // K38: iki ayrı default_registry AYNI pin'i üretmeli (HashMap sırasından bağımsız)
+        // K38: two separate default_registry values have to produce the SAME
+        // pin, independently of HashMap order.
         let a = MimeRegistry::default_registry();
         let b = MimeRegistry::default_registry();
         assert_eq!(
             a.hash, b.hash,
-            "pin deterministik olmalı (HashMap iterasyon sırası farklı olsa dahi)"
+            "the pin has to be deterministic, even when HashMap iteration order differs"
         );
         assert!(a.pin_matches(&b));
-        assert_ne!(a.hash, [0u8; 32], "pin boş değil");
+        assert_ne!(a.hash, [0u8; 32], "the pin is not empty");
     }
     #[test]
     fn ratio_proof() {
