@@ -809,10 +809,11 @@ mod chaos_tests {
     }
 
     /// Chaos v2:
-    /// Çakışan nonce saldırısı: aynı gönderici aynı nonce'u iki farklı
-    /// Payload ile basarsa pool yalnızca RBF kazananını tutmalı; blok YALNIZ
-    /// Kazananı içermeli; zincir nonce'u ilerledikten sonra eski çakışan tx
-    /// Geri dönememeli; gap'li nonce doğrudan reddedilmeli.
+    /// The conflicting-nonce attack: if the same sender submits the same nonce
+    /// with two different payloads, the pool must keep only the RBF winner, the
+    /// block must contain ONLY the winner, the old conflicting transaction must
+    /// not be able to come back once the chain nonce has advanced, and a nonce
+    /// with a gap must be refused outright.
     #[test]
     fn test_chaos_v2_mempool_poison_conflicting_nonce_serves_latest_fee() {
         let consensus = Arc::new(PoWEngine::new(0));
@@ -822,7 +823,7 @@ mod chaos_tests {
         let sender_pub = Address::from(sender.public_key_bytes());
         blockchain.state.add_balance(&sender_pub, 10_000);
 
-        // Tx_old: nonce=0 fee=1, payload=[1] - önce bu girer.
+        // tx_old: nonce=0, fee=1, payload=[1] - this one enters first.
         let mut tx_old = Transaction::new(sender_pub, Address::from([0x99; 32]), 1, vec![1]);
         tx_old.nonce = 0;
         tx_old.fee = 1;
@@ -831,7 +832,8 @@ mod chaos_tests {
         blockchain.add_transaction(tx_old).unwrap();
         assert_eq!(blockchain.mempool.len(), 1);
 
-        // Tx_new: aynı nonce=0 ama fee=5, payload=[2] - RBF kazananı; eski silinir.
+        // tx_new: the same nonce=0 but fee=5, payload=[2] - the RBF winner; the
+        // old one is dropped.
         let mut tx_new = Transaction::new(sender_pub, Address::from([0x99; 32]), 1, vec![2]);
         tx_new.nonce = 0;
         tx_new.fee = 5;
@@ -839,7 +841,7 @@ mod chaos_tests {
         blockchain.add_transaction(tx_new).unwrap();
         assert_eq!(blockchain.mempool.len(), 1, "RBF kazanani tek kalmali");
 
-        // Blok üret: YALNIZ kazanan (fee=5, data=[2]) zincire girmeli.
+        // Produce a block: ONLY the winner (fee=5, data=[2]) may enter the chain.
         let _ = blockchain.produce_block(Address::from([0x03; 32]));
         let blk = blockchain.chain.last().unwrap();
         assert_eq!(blk.transactions.len(), 1);
@@ -850,7 +852,7 @@ mod chaos_tests {
             "poisoned replace: eski tx asla zincire girmemeli"
         );
 
-        // Zincir nonce'u 1 oldu; eski çakışan tx geri dönemez.
+        // The chain nonce is now 1, so the old conflicting transaction cannot come back.
         let mut tx_back = Transaction::new(sender_pub, Address::from([0x88; 32]), 1, vec![3]);
         tx_back.nonce = 0;
         tx_back.fee = 10;
@@ -861,7 +863,7 @@ mod chaos_tests {
             "zincir nonce=1 iken nonce=0 tx kabul edilmemeli"
         );
 
-        // Gap'li nonce (zincir 1, tx 5) doğrudan reddedilir.
+        // A nonce with a gap (the chain is at 1 and the transaction says 5) is refused outright.
         let mut tx_gap = Transaction::new(sender_pub, Address::from([0x77; 32]), 1, vec![4]);
         tx_gap.nonce = 5;
         tx_gap.fee = 10;
@@ -870,10 +872,10 @@ mod chaos_tests {
         assert!(res.is_err(), "gap'li nonce kabul edilmemeli");
     }
 
-    /// Chaos v2: spam flood'cu dürüst ücretliler
-    /// Tarafından tamamen evict edilmeli. Pool doluyken evict_lowest_fee
-    /// (new.fee > lowest) çalışır; tüm spam'ler atılınca yeni düşük-fee tx
-    /// En düşük dürüst fee'yi görevdığından PoolFull ile reddedilir.
+    /// Chaos v2: a spam flood has to be evicted entirely by honest fee payers.
+    /// While the pool is full, evict_lowest_fee runs whenever new.fee is above the
+    /// lowest; once all the spam has been thrown out, a new low-fee transaction is
+    /// refused with PoolFull because it does not beat the lowest honest fee.
     #[test]
     fn test_chaos_v2_mempool_poison_flooder_evicted_by_honest_fees() {
         use crate::mempool::pool::{Mempool, MempoolConfig};
@@ -900,21 +902,21 @@ mod chaos_tests {
             tx
         };
 
-        // 1) Flooder: 100 farklı gönderici, hepsi fee=1.
+        // 1) The flooder: 100 different senders, all at fee=1.
         for i in 0..100u8 {
             let tx = create_signed_tx(i, 1);
             pool.add_transaction(tx).unwrap();
         }
         assert_eq!(pool.len(), 100);
 
-        // 2) Dürüst akış: 100 gönderici fee=2 - her biri bir spam'i evict eder.
+        // 2) The honest flow: 100 senders at fee=2, each evicting one spam entry.
         for i in 0..100u8 {
             let tx = create_signed_tx(i | 0x80, 2);
             pool.add_transaction(tx).unwrap();
         }
         assert_eq!(pool.len(), 100);
 
-        // 3) Mühür: havuzun en düşük fee'si artık 2 - yeni fee=1 spam hiçbir
+        // 3) The seal: the lowest fee in the pool is now 2, so a new fee=1 spam entry has no
         //    Şeyi evict edemez -> PoolFull; fee=3 ise tam tersine evict EDER.
         let spam = create_signed_tx(0x7E, 1);
         assert!(matches!(
@@ -929,10 +931,10 @@ mod chaos_tests {
 
     // ─── Chaos: double-lock, state determinism, genesis mismatch ───
 
-    /// **Double-spend koruması:** Aynı asset iki kez lock edilemez. BridgeState
-    /// `asset_locations` tek-durum haritası - ilk lock'tan sonra asset Active→Locked
-    /// Geçer, ikinci lock reddedilir. Bu, cross-domain double-spend'in temel
-    /// Korumasıdır.
+    /// **Double-spend protection:** the same asset cannot be locked twice.
+    /// `asset_locations` in BridgeState is a single-state map: after the first
+    /// lock the asset moves from Active to Locked and a second lock is refused.
+    /// This is the fundamental protection against a cross-domain double spend.
     #[test]
     fn test_chaos_bridge_double_lock_same_asset_rejected() {
         use crate::cross_domain::bridge::BridgeState;
@@ -942,13 +944,13 @@ mod chaos_tests {
         let owner = test_addr_from_byte(1u8);
         let recipient = test_addr_from_byte(2u8);
 
-        // İlk lock başarılı.
+        // The first lock succeeds.
         bridge.register_asset(asset, 1).unwrap();
         let (_transfer1, _event1) = bridge
             .lock(1, 2, 10, 0, asset, owner, recipient, 100, 1000)
             .expect("first lock must succeed");
 
-        // İkinci lock AYNI asset ile - reddedilmeli (double-spend koruması).
+        // A second lock on the SAME asset has to be refused - double-spend protection.
         let result = bridge.lock(1, 2, 11, 0, asset, owner, recipient, 100, 1000);
         assert!(
             result.is_err(),
@@ -956,8 +958,9 @@ mod chaos_tests {
         );
     }
 
-    /// **State determinizmi:** Aynı işlem seti farklı sıralarda işlendiğinde
-    /// Bakiye değişmemeli (konsensüs gereği - conservation of funds).
+    /// **State determinism:** when the same set of operations is applied in
+    /// different orders the balances must not change - consensus requires the
+    /// conservation of funds.
     #[test]
     fn test_chaos_state_determinism_under_tx_reordering() {
         let consensus = Arc::new(PoWEngine::new(0));
@@ -967,7 +970,7 @@ mod chaos_tests {
         let alice = Address::from_hex(&"01".repeat(32)).unwrap();
         let bob = Address::from_hex(&"02".repeat(32)).unwrap();
 
-        // İlk hesapları seed'le (conservation kontrolü için başlangıç bakiyesi).
+        // Seed the initial accounts, giving a starting balance for the conservation check.
         chain_a.state.add_balance(&alice, 1000);
         chain_a.state.add_balance(&bob, 1000);
         chain_b.state.add_balance(&alice, 1000);
@@ -976,31 +979,32 @@ mod chaos_tests {
         // Bakiye transferi模拟 - direkt state mutate (add/spend) ile.
         // Alice → Bob: 100
         chain_a.state.add_balance(&bob, 100);
-        chain_a.state.add_balance(&alice, 0); // (no-op, conservation check için)
+        chain_a.state.add_balance(&alice, 0); // a no-op, for the conservation check
 
-        // Bob → Alice: 50 (ters sırada chain_b'de)
+        // Bob to Alice: 50, in the reverse order on chain_b.
         chain_b.state.add_balance(&alice, 50);
 
-        // Conservation: total supply her iki chain'de eşit olmalı.
+        // Conservation: the total supply has to be equal on both chains.
         let total_a = chain_a.state.get_balance(&alice) + chain_a.state.get_balance(&bob);
         let total_b = chain_b.state.get_balance(&alice) + chain_b.state.get_balance(&bob);
-        // Farklı işlemler uyguladık ama başlangıç seed'i aynı → conservation.
-        // Bu test, state mutations'ın deterministic olduğunu ve hesapların
-        // Bağımsız工作了 olduğunu doğrular (cross-contamination yok).
+        // We applied different operations but the starting seed is the same, so
+        // conservation holds. This test verifies that the state mutations are
+        // deterministic and that the accounts are independent, with no
+        // cross-contamination.
         assert!(total_a > 0, "chain A must have non-zero total");
         assert!(total_b > 0, "chain B must have non-zero total");
     }
 
-    /// **Genesis mismatch:** Farklı genesis hash'li iki chain reorg ile
-    /// Birleştirilemez (cross-chain fork reddi). Bu test, genesis farklı
-    /// Chain'lerin fork/reorg denemesinin reddedildiğini doğrular.
+    /// **Genesis mismatch:** two chains with different genesis hashes cannot be
+    /// merged by a reorg - a cross-chain fork is refused. This test verifies that
+    /// a fork or reorg attempt between chains with different genesis is refused.
     #[test]
     fn test_chaos_genesis_mismatch_reorg_rejected() {
         let consensus_a = Arc::new(PoWEngine::new(0));
         let mut chain_a = Blockchain::new(consensus_a, None, 45262, None);
 
         let consensus_b = Arc::new(PoWEngine::new(0));
-        let mut chain_b = Blockchain::new(consensus_b, None, 9999, None); // farklı chain_id
+        let mut chain_b = Blockchain::new(consensus_b, None, 9999, None); // a different chain_id
 
         let producer = Address::from_hex(&"01".repeat(32)).unwrap();
         for _ in 0..3 {
@@ -1010,7 +1014,7 @@ mod chaos_tests {
             let _ = chain_b.produce_block(producer);
         }
 
-        // Farklı chain_id → reorg başarısız olmalı (genesis mismatch).
+        // A different chain_id means the reorg has to fail - a genesis mismatch.
         let result = chain_a.try_reorg(chain_b.chain.clone());
         assert!(
             result.is_err() || !result.unwrap(),
@@ -1018,9 +1022,9 @@ mod chaos_tests {
         );
     }
 
-    /// **Reorg sonrası işlem replay:** Bir zincirde işlenen işlem, reorg sonrası
-    /// Yeniden işlenirse nonce/replay koruması çalışmalı. Bu, fork sonrası
-    /// Işlemlerin geçerliliğini sınar.
+    /// **Transaction replay after a reorg:** if a transaction already applied on
+    /// one chain is applied again after a reorg, the nonce and replay protection
+    /// has to fire. This exercises the validity of transactions after a fork.
     #[test]
     fn test_chaos_tx_validity_survives_reorg() {
         let consensus_a = Arc::new(PoWEngine::new(0));
@@ -1031,13 +1035,13 @@ mod chaos_tests {
 
         let producer = Address::from_hex(&"01".repeat(32)).unwrap();
 
-        // Chain A: 3 blok üret.
+        // Chain A: produce 3 blocks.
         for _ in 0..3 {
             let _ = chain_a.produce_block(producer);
         }
         assert_eq!(chain_a.chain.len(), 4);
 
-        // Chain B: 5 blok üret (daha uzun).
+        // Chain B: produce 5 blocks, so it is longer.
         for _ in 0..5 {
             let _ = chain_b.produce_block(producer);
         }
@@ -1047,7 +1051,7 @@ mod chaos_tests {
         let result = chain_a.try_reorg(chain_b.chain.clone());
         assert!(result.is_ok(), "reorg must succeed for longer chain");
 
-        // Reorg sonrası chain_a'nın uzunluğu B ile eşit olmalı.
+        // After the reorg the length of chain_a has to equal that of B.
         assert_eq!(
             chain_a.chain.len(),
             6,
