@@ -9,11 +9,12 @@ use crate::domain::types::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-// Fix (2026-07-18): `AssetId` eskiden `Hash32`
-// (= [u8;32]) alias'ıydı - serde_json object-key olarak serialize EDİLEMEZDİ
-// (R3 anti-pattern; bridge_state snapshot/RPC yoluna girerse patlar). Artık
-// String-serde struct (Address deseni, `src/core/address.rs`); AsRef<[u8]> ile
-// Mevcut hash_fields_bytes çağrıları uyumlu.
+// Fix (2026-07-18): `AssetId` used to be an alias for `Hash32` (= [u8;32]),
+// which serde_json CANNOT serialise as an object key (the R3 anti-pattern; it
+// blows up the moment bridge_state reaches the snapshot or RPC path). It is now
+// a String-serde struct following the `Address` pattern in
+// `src/core/address.rs`, and `AsRef<[u8]>` keeps the existing
+// `hash_fields_bytes` calls working.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AssetId(#[serde(with = "asset_id_serde")] pub [u8; 32]);
 
@@ -470,18 +471,20 @@ impl BridgeState {
                 "Transfer is not burned on target domain".into(),
             ));
         }
-        // (denetimi, cross_domain) unlock
-        // Mesajı **burn domain'inden** (transfer.target_domain) gelir. Önceki
-        // Kod `transfer.source_domain != source_domain` kontrol ediyordu;
-        // Production'da `executor.rs` `msg.source_domain` (= burn domain =
-        // Target_domain) geçtiğü için 1 != 2 mismatch → tüm unlock'lar reddi.
-        // Doğru kontrol: gelen domain burn domain'ine eşit olmalı.
+        // The cross_domain unlock message arrives from the **burn domain**,
+        // which is `transfer.target_domain`. The earlier code checked
+        // `transfer.source_domain != source_domain`; in production
+        // `executor.rs` passes `msg.source_domain` (the burn domain, so
+        // target_domain), which gave a 1 != 2 mismatch and refused every
+        // unlock. The correct check is that the incoming domain equals the burn
+        // domain.
         if transfer.target_domain != source_domain {
             return Err(BridgeError(
                 "Unlock must originate from the burn (target) domain".into(),
             ));
         }
-        // Asset **orijinal source domain**'de (lock'un yapıldığı yer) Active'e döner.
+        // The asset returns to Active on the **original source domain**, where
+        // the lock was made.
         let original_source = transfer.source_domain;
         transfer.status = BridgeStatus::Unlocked {
             domain: original_source,
@@ -496,9 +499,9 @@ impl BridgeState {
     }
 
     pub fn root(&self) -> Hash32 {
-        // Root eskiden yalnızca asset_locations'ı
-        // Hash'liyordu - transfers (owner/recipient/amount/status) kapsam
-        // Dışındaydı. Artık transfer metadata da digest'e girer.
+        // The root used to hash only asset_locations, leaving the transfers
+        // (owner, recipient, amount, status) out of scope. The transfer
+        // metadata now goes into the digest as well.
         let mut leaves: Vec<Hash32> = self
             .asset_locations
             .iter()
@@ -549,7 +552,7 @@ impl BridgeState {
     /// Idempotent: transfers already past `expiry_height` stay `Active`
     /// Once released; subsequent calls are no-ops.
     /// Sweep expired locks and return (owner, amount) for balance refund.
-    /// Owner bilgisi döndürülür ki caller bakiye iadesi yapabilsin.
+    /// The owner is returned so the caller can refund the balance.
     pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, u128)> {
         let mut released = Vec::new();
 

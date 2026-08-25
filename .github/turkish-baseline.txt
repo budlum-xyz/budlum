@@ -45,7 +45,6 @@ bud/src/churn.rs	6
 bud/src/fidelity.rs	8
 bud/src/gates.rs	4
 bud/src/provider.rs	4
-bud/src/quantum.rs	10
 bud/src/ratio.rs	4
 bud/tests/test_integration.rs	3
 budzero/bud-cli/src/main.rs	8
@@ -96,8 +95,6 @@ src/chain/snapshot.rs	9
 src/chain/storage_economics_tests.rs	4
 src/core/governance.rs	6
 src/core/transaction.rs	6
-src/cross_domain/bridge.rs	10
-src/cross_domain/evm/mod.rs	10
 src/crypto/mainnet_policy.rs	3
 src/domain/finality_adapter.rs	7
 src/domain/plugin.rs	1
@@ -106,7 +103,6 @@ src/domain/storage_deal.rs	2
 src/execution/executor.rs	3
 src/lib.rs	4
 src/lubot/effort.rs	1
-src/lubot/metrics.rs	10
 src/lubot/query.rs	6
 src/lubot/storage.rs	8
 src/network/sync_codec.rs	1
