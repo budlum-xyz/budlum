@@ -1,30 +1,33 @@
-//! Finality live-path son taraması.
+//! The final sweep of the finality live path.
 //!
-//! Mevcut `finality_adversarial.rs` (12 test) düzeltmelerini
-//! (equivocation → slashing evidence, ingest-time imza doğrulama) kapsar.
-//! Bu dosya, **live-path pencerelerini** ve **dürüstlük sınırlarını** test
+//! The existing `finality_adversarial.rs` (12 tests) covers the fixes there:
+//! equivocation producing slashing evidence, and signature verification at
+//! ingest time. This file tests the **live-path windows** and the **honesty
+//! boundaries**
 //! Eder - son taramada eksik kalan senaryolar.
 //!
 //! ## Kapsam
 //!
-//! - **2.1 Epoch değişimi**: validator seti her epoch'ta yenileniyor; eski
-//!   Epoch'un oyları yeni aggregator'a karışmamalı.
-//! - **2.2 Geç prevote (height uyumsuzluğu)**: aynı epoch içinde farklı
-//!   Checkpoint_height'e verilen oy "height mismatch" ile reddedilmeli.
-//! - **2.3 Çift sign (aynı voter, aynı epoch)**: bir voter aynı epoch'ta iki
-//!   Kez sign edip ardı ardına iki farklı hash'e oy atarsa sadece İLK oyu
-//!   Sayılır, ikincisi reddedilir; oy penceresi sızdırmaz.
-//! - **2.4 Snapshot hash tutarlılığı**: farklı validator setlerinin aynı
-//!   `compute_hash` çıktısı eşit olmamalı (collision-free kabul).
+//! - **2.1 The epoch change**: the validator set is renewed at every epoch, and
+//!   the votes of the old epoch must not leak into the new aggregator.
+//! - **2.2 A late prevote (a height mismatch)**: inside the same epoch, a vote
+//!   cast for a different checkpoint_height has to be refused with a height
+//!   mismatch.
+//! - **2.3 Double signing (the same voter in the same epoch)**: if a voter signs
+//!   twice in the same epoch and casts votes for two different hashes back to
+//!   back, only the FIRST vote counts and the second is refused; the vote window
+//!   does not leak.
+//! - **2.4 Snapshot hash consistency**: different validator sets must not
+//!   produce the same `compute_hash` output - it is treated as collision-free.
 //!
-//! ## Yapmadıkları
+//! ## What it does not do
 //!
-//! - Quorum / split-brain / byzantine gürültü: `finality_adversarial.rs`
-//!   Bunları kapsadı, regresyon DEĞİL.
-//! - Snapshot roundtrip: `equivocation_slashing_record_survives_snapshot_roundtrip`
-//!   Bunu kapsadı.
-//! - Rate-limit invalid sig slashing: `repeated_invalid_signatures_trigger_slash`
-//!   Kapsadı.
+//! - Quorum, split brain and byzantine noise: `finality_adversarial.rs` covers
+//!   those, and this is NOT a regression of it.
+//! - The snapshot round-trip:
+//!   `equivocation_slashing_record_survives_snapshot_roundtrip` covers that.
+//! - Rate-limited invalid-signature slashing:
+//!   `repeated_invalid_signatures_trigger_slash` covers that.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -38,7 +41,7 @@ use bls12_381::{G2Affine, G2Projective, Scalar};
 
 // --- Test harness ------------------------------------------------------------
 
-/// Deterministik ama gerçek bir BLS anahtar çifti (mock DEĞİL).
+/// A deterministic but real BLS key pair - NOT a mock.
 fn make_key(seed: u8) -> (Scalar, Vec<u8>) {
     let mut sk_bytes = [0u8; 64];
     sk_bytes[0] = seed + 1;
@@ -53,7 +56,7 @@ fn addr_for(i: usize) -> Address {
     Address::from(b)
 }
 
-/// N validator'lık, her biri gerçek BLS + geçerli PoP taşıyan snapshot.
+/// A snapshot of N validators, each carrying a real BLS key and a valid PoP.
 fn make_snapshot(n: usize, epoch: u64, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {
     let mut sks = Vec::new();
     let validators: Vec<ValidatorEntry> = (0..n)
@@ -87,30 +90,35 @@ fn sign_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address
     v
 }
 
-// 2.1 - Epoch değişimi (pencere izolasyonu)
+// 2.1 - The epoch change (window isolation)
 
-/// Farklı epoch'ların aggregator'ları birbirinden tamamen izole: epoch 1'de
-/// Oy veren bir voter, epoch 2'de aynı hash'e oy verse de yeni aggregator
-/// Bunu kendi penceresinde sayar (eski aggregator'ı etkilemez, yenisini de
+/// The aggregators of different epochs are completely isolated: a voter who
+/// voted in epoch 1 and votes for the same hash in epoch 2 is counted by the new
+/// aggregator in its own window; it does not affect the old aggregator, and the
+/// old one does not affect
 /// Kirletmez).
 #[test]
 fn live_path_epoch_change_isolates_votes() {
     let (snap1, sks1) = make_snapshot(4, 1, 1000);
     let mut agg1 = FinalityAggregator::new(1, 10, "H".into());
     agg1.set_validator_snapshot(snap1.clone());
-    // 3/4 prevote -> epoch 1 penceresi 3 oy alır.
+    // 3 of 4 prevote, so the epoch 1 window takes 3 votes.
     for i in 0..3 {
         let pv = sign_prevote(&sks1[i], 1, 10, "H", snap1.validators[i].address);
         agg1.add_prevote(pv).expect("epoch 1 prevote");
     }
-    assert_eq!(agg1.prevotes.len(), 3, "epoch 1 pencere 3 oy almalı");
+    assert_eq!(
+        agg1.prevotes.len(),
+        3,
+        "the epoch 1 window has to take 3 votes"
+    );
 
-    // Epoch 2 için YENİ bir aggregator + YENİ bir snapshot üret.
+    // Produce a NEW aggregator and a NEW snapshot for epoch 2.
     let (snap2, sks2) = make_snapshot(4, 2, 1000);
     let mut agg2 = FinalityAggregator::new(2, 20, "H2".into());
     agg2.set_validator_snapshot(snap2.clone());
 
-    // Epoch 2'de 1 validator oy verir - kendi penceresinde sayılır.
+    // One validator votes in epoch 2 and is counted in its own window.
     let pv2 = sign_prevote(&sks2[0], 2, 20, "H2", snap2.validators[0].address);
     agg2.add_prevote(pv2).expect("epoch 2 prevote");
     assert_eq!(agg2.prevotes.len(), 1);
@@ -118,27 +126,28 @@ fn live_path_epoch_change_isolates_votes() {
     assert_eq!(agg1.prevotes.len(), 3, "epoch 1 penceresi kirletilmemeli");
 }
 
-// 2.2 - Geç prevote (height uyumsuzluğu)
+// 2.2 - A late prevote (a height mismatch)
 
-/// Aynı epoch içinde FARKLI checkpoint_height'e verilen oy reddedilir -
-/// Aggregator'ın `checkpoint_height`'i sabit, farklı height'tan gelen oy
-/// Kabul edilmez (pencere sızıntısı yok).
+/// Inside the same epoch a vote cast for a DIFFERENT checkpoint_height is
+/// refused: the `checkpoint_height` of the aggregator is fixed, and a vote from
+/// another height is not accepted - the window does not leak.
 #[test]
 fn live_path_prevote_with_wrong_height_rejected() {
     let (snap, sks) = make_snapshot(4, 1, 1000);
     let mut agg = FinalityAggregator::new(1, 10, "H".into());
     agg.set_validator_snapshot(snap.clone());
 
-    // Doğru height=10, doğru hash.
+    // The right height=10 and the right hash.
     let pv_ok = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
-    agg.add_prevote(pv_ok).expect("doğru height kabul");
+    agg.add_prevote(pv_ok)
+        .expect("the right height is accepted");
 
-    // Yanlış height=11. İmza farklı mesaj üzerinden atıldığı için
-    // Aggregator'ın beklediği mesaja UYMUYOR → reddedilir.
+    // The wrong height=11. Because the signature was made over a different
+    // message, it DOES NOT MATCH what the aggregator expects, so it is refused.
     let pv_bad = sign_prevote(&sks[0], 1, 11, "H", snap.validators[0].address);
     let err = agg
         .add_prevote(pv_bad)
-        .expect_err("yanlış height imza geçersiz olmalı");
+        .expect_err("a signature at the wrong height has to be invalid");
     let err_lower = err.to_lowercase();
     assert!(
         err_lower.contains("invalid")
@@ -150,11 +159,12 @@ fn live_path_prevote_with_wrong_height_rejected() {
     assert_eq!(agg.prevotes.len(), 1);
 }
 
-// 2.3 - Çift sign penceresi (aynı voter, aynı epoch, ardışık iki oy)
+// 2.3 - The double-sign window (the same voter, the same epoch, two votes in a row)
 
-/// Aynı voter aynı epoch'ta aynı hash'e İKİ kez oy veremez (pencere
-/// Tek-oy kabul eder; ikincisi Duplicate ile reddedilir). Farklı hash'e ikinci
-/// Oy da reddedilir. Pencerenin "sızdırmaz" olduğu doğrulanır.
+/// The same voter cannot vote TWICE for the same hash in the same epoch: the
+/// window accepts a single vote and refuses the second as a Duplicate. A second
+/// vote for a different hash is refused too. This verifies that the window does
+/// not leak.
 #[test]
 fn live_path_double_sign_window_is_tight() {
     let (snap, sks) = make_snapshot(3, 1, 1000);
@@ -165,28 +175,29 @@ fn live_path_double_sign_window_is_tight() {
     let pv1 = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
     agg.add_prevote(pv1).expect("first prevote");
 
-    // 2. oy (AYNI voter, AYNI hash) - Duplicate, reddedilir.
+    // The second vote (the SAME voter, the SAME hash) is a Duplicate and refused.
     let pv_dup = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
     let err = agg
         .add_prevote(pv_dup)
-        .expect_err("duplicate prevote reddedilmeli");
+        .expect_err("a duplicate prevote has to be refused");
     assert!(err.contains("Duplicate"));
 
     // 3. oy (AYNI voter, FARKLI hash) - hash mismatch + evidence.
     let pv_conflict = sign_prevote(&sks[0], 1, 10, "H2", snap.validators[0].address);
-    let _ = agg.add_prevote(pv_conflict); // reddedilir ama evidence üretir
-    assert_eq!(agg.prevotes.len(), 1, "sadece ilk oy sayılmalı");
+    let _ = agg.add_prevote(pv_conflict); // refused, but it produces evidence
+    assert_eq!(agg.prevotes.len(), 1, "only the first vote may count");
     assert_eq!(
         agg.detected_equivocations.len(),
         1,
-        "çelişkili-hash oyu evidence üretmeli"
+        "a vote with a conflicting hash has to produce evidence"
     );
 }
 
-// 2.4 - Snapshot hash çeşitliliği
+// 2.4 - Snapshot hash diversity
 
-/// Farklı validator setleri (farklı sıralama, farklı sayı) farklı snapshot
-/// Hash üretir - collision-free kabul. AYNI set aynı hash üretir
+/// Different validator sets (a different order, a different count) produce
+/// different snapshot hashes - treated as collision-free. The SAME set produces
+/// the same hash
 /// (deterministik kabul).
 #[test]
 fn live_path_snapshot_hash_distinguishes_sets() {
@@ -201,18 +212,18 @@ fn live_path_snapshot_hash_distinguishes_sets() {
 
     assert_ne!(
         hash_a, hash_b,
-        "3 vs 4 validator setleri aynı hash olmamalı"
+        "a 3-validator set and a 4-validator set must not share a hash"
     );
     assert_ne!(
         hash_a, hash_c,
-        "1000 vs 2000 stake setleri aynı hash olmamalı"
+        "sets at 1000 and 2000 stake must not share a hash"
     );
     assert_ne!(
         hash_b, hash_c,
-        "farklı stake + farklı boyut aynı hash olmamalı"
+        "a different stake and a different size must not share a hash"
     );
 
-    // AYNI set deterministik olarak aynı hash üretir.
+    // The SAME set deterministically produces the same hash.
     let hash_a2 = ValidatorSetSnapshot::compute_hash(&snap_a.validators);
-    assert_eq!(hash_a, hash_a2, "compute_hash deterministik olmalı");
+    assert_eq!(hash_a, hash_a2, "compute_hash has to be deterministic");
 }
