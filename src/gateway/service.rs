@@ -19,31 +19,33 @@ fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, Strin
     Ok(data)
 }
 
-/// Tarife dayali bir manifest'i baytlara cevir, yoksa `None`.
+/// Turn a recipe-based manifest into bytes, or `None` if it is not one.
 ///
-/// `Ok(None)` means "this manifest is not a recipe" and leaves the caller to the
-/// bayt yollarina birakir. `Err` ise tarif var ama uretim guvenilmez
-/// demektir; bu durumda sonraki yollara **dusulmez**. Duserek devam etmek,
-/// after an unverifiable generation it would serve bytes from another source
-/// under the same name.
+/// `Ok(None)` means "this manifest is not a recipe" and leaves the caller to
+/// the stored-byte paths. `Err` means the recipe exists but the generation is
+/// untrustworthy; in that case the later paths are **not** fallen back to.
+/// Falling through would serve bytes from another source under the same name
+/// after an unverifiable generation.
 fn render_from_recipe(
     manifest: &crate::storage::ContentManifest,
 ) -> Result<Option<Vec<u8>>, String> {
     use crate::storage::generated::ContentSource;
     let spec = match &manifest.source {
         ContentSource::Generated(spec) => spec,
-        // `Hybrid` and `Derived` cannot be produced from the recipe alone: the first carries a
-        // uretilemeyen bir onek tasir, ikincisi master'in baytlarina
-        // bagimlidir. Ikisi de saklanmis bayt yollarina birakilir.
+        // `Hybrid` and `Derived` cannot be produced from the recipe alone: the
+        // first carries a prefix that cannot be regenerated, and the second
+        // depends on the master's bytes. Both are left to the stored-byte
+        // paths.
         _ => return Ok(None),
     };
     let bytes = crate::storage::generated::generate_content(spec)
         .map_err(|e| format!("recipe did not produce its bytes: {e:?}"))?;
-    // Verify that what was produced is what was requested. The recipe is on chain, but
-    // the only thing saying the generator read it correctly is that the identity
-    // tutmasidir.
+    // Verify that what was produced is what was requested. The recipe is on
+    // chain, but the only thing saying the generator read it correctly is that
+    // the identity holds.
     //
-    // Iki ayrinti kimligi belirler ve ikisi de manifest'ten okunur.
+    // Two details determine the identity, and both are read from the
+    // manifest.
     //
     // Source: the manifest identity **commits to** the source (see section 66),
     // `with_source` recomputes the identity. Comparing without the source
@@ -74,7 +76,7 @@ fn render_from_recipe(
     Ok(Some(bytes))
 }
 
-/// Uretim onbelleginde tutulacak en fazla nesne.
+/// The maximum number of objects held in the generation cache.
 ///
 /// A count, not bytes: each entry is already bounded by [`MAX_GATEWAY_CONTENT_BYTES`],
 /// and the product of the two bounds gives worst-case memory. Bounding the count
@@ -89,7 +91,7 @@ pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 /// the recipe, and validator disk load is zero in this class. This cache does not touch
 /// that claim: it is an ephemeral, node-local, rebuildable
 /// performance layer. Delete it and the system still works correctly, only
-/// yavaslar - depolamanin tanimi bu degildir.
+/// more slowly - and slowness is not the definition of storage.
 ///
 /// # Why it is needed
 ///
@@ -135,7 +137,7 @@ pub struct BudGateway {
     chain: ChainHandle,
     network: Option<NodeClient>,
     storage: Option<Storage>,
-    /// Uretilmis icerigin gecici onbellegi.
+    /// An ephemeral cache of generated content.
     ///
     /// `Mutex` because the gateway is read through a shared reference and
     /// writing to the cache happens on the read path. The lock is held only for lookup and insert;
@@ -179,13 +181,14 @@ impl BudGateway {
         // 3. Recipe-born content: the bytes are stored nowhere.
         //
         // This branch comes first because there is nothing for the others to look for.
-        // `Generated` bir manifest'in baytlari zincirde de, yerel depoda da,
-        // uzak eslerde de yoktur; zincirde olan **tariftir**. Dort getirme
-        // because that path also looks for stored bytes, every generated content
-        // gecitten "bulunamadi" diye donuyordu: kaydi kabul edilen, ucreti
-        // hesaplanan, kopya hedefi belirlenen bir nesne okunamiyordu.
+        // The bytes of a `Generated` manifest exist neither on chain, nor in
+        // local storage, nor on remote peers; what is on chain is the
+        // **recipe**. Because all four fetch paths look for stored bytes,
+        // every generated object used to come back from the gateway as "not
+        // found": an object whose record was accepted, whose fee was computed
+        // and whose replica target was set could not be read.
         //
-        // `generate_content` tarifi baytlara cevirir ve
+        // `generate_content` turns the recipe into bytes and the result
         // is rehashed with `ContentManifest::from_bytes_sliced` and verified
         // against the manifest identity. So the gateway verifies what it produces:
         // if a wrong recipe produces wrong bytes the identity does not hold and
@@ -247,13 +250,14 @@ impl BudGateway {
 
     /// Produce the same recipe in the format the reader asks for.
     ///
-    /// `fetch_name_content` tarifin ham ciktisini doner: uretici ne
-    /// whatever it produces. A browser wants SVG, a wallet a small PNG, a
+    /// `fetch_name_content` returns the recipe's raw output: the generator
+    /// produces whatever it produces. A browser wants SVG, a wallet a small PNG, a
     /// gallery another size. For a generated object all of these are born from the **same
     /// recipe**; none of them are stored.
     ///
-    /// Format is part of the commitment. A recipe produced as PNG gets a different
-    /// tarifin SVG'sinden **baska bir nesnedir** ve `render_id` ikisine ayri
+    /// Format is part of the commitment. A recipe produced as PNG is **a
+    /// different object** from the SVG of the same recipe, and `render_id`
+    /// gives each its own
     /// identity. So the identity returned here is not the manifest identity but the
     /// format-dependent render identity; the caller cannot confuse the two because
     /// the function returns both together.
@@ -322,8 +326,8 @@ mod tests {
 
     fn generated_manifest() -> ContentManifest {
         let spec = spec();
-        let bytes = crate::storage::generated::generate_content(&spec).expect("uretim");
-        let len = u32::try_from(bytes.len()).expect("boyut");
+        let bytes = crate::storage::generated::generate_content(&spec).expect("generation");
+        let len = u32::try_from(bytes.len()).expect("size");
         ContentManifest::from_bytes_sliced(&bytes, len)
             .expect("manifest")
             .with_source(ContentSource::Generated(spec))
@@ -333,12 +337,13 @@ mod tests {
     ///
     /// The bytes are stored nowhere; all four fetch paths look for stored
     /// bytes. Without this branch every generated object returned "not found":
-    /// kaydi kabul edilen, kopya hedefi belirlenen bir nesne okunamiyordu.
+    /// an object whose record was accepted and whose replica target was set
+    /// could not be read.
     #[test]
     fn a_recipe_is_rendered_on_demand() {
         let manifest = generated_manifest();
         let bytes = render_from_recipe(&manifest)
-            .expect("tarif uretilebilmeli")
+            .expect("the recipe has to be producible")
             .expect("generated content must return bytes");
         assert_eq!(bytes.len(), 32 * 32);
         // And what was produced is what was requested: the identity holds.
@@ -388,15 +393,16 @@ mod tests {
         );
     }
 
-    /// `Hybrid` ve `Derived` de saklanmis bayt yollarina birakilir.
+    /// `Hybrid` and `Derived` are also left to the stored-byte paths.
     ///
-    /// Neither can be produced from the recipe alone: the first carries a non-regenerable
-    /// onek tasir, ikincisi master'in baytlarina bagimlidir. Bunlari
-    /// uretmeye kalkmak, elde olmayan baytlari varmis gibi gostermek olurdu.
+    /// Neither can be produced from the recipe alone: the first carries a
+    /// non-regenerable prefix, and the second depends on the master's bytes.
+    /// Trying to produce them would mean presenting bytes that are not in hand
+    /// as though they were.
     #[test]
     fn hybrid_content_is_not_rendered_from_the_recipe_alone() {
-        let bytes = b"onek arti tarif".to_vec();
-        let len = u32::try_from(bytes.len()).expect("boyut");
+        let bytes = b"a prefix plus a recipe".to_vec();
+        let len = u32::try_from(bytes.len()).expect("size");
         let manifest = ContentManifest::from_bytes_sliced(&bytes, len)
             .expect("manifest")
             .with_source(ContentSource::Hybrid {
@@ -407,7 +413,7 @@ mod tests {
             render_from_recipe(&manifest)
                 .expect("hybrid is not an error")
                 .is_none(),
-            "hybrid yalniz tariften uretilemez"
+            "hybrid cannot be produced from the recipe alone"
         );
     }
 
