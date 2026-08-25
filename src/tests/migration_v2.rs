@@ -1,6 +1,7 @@
-//! Migration/upgrade path testi - CI Genişletme Madde 3.
+//! The migration and upgrade path test - CI expansion, item 3.
 //!
-//! Eski format snapshot'tan yeni formata migration veri bozmadan çalışmalı.
+//! Migrating a snapshot from the old format to the new one has to work without
+//! corrupting any data.
 
 #[cfg(test)]
 mod migration_tests {
@@ -8,8 +9,9 @@ mod migration_tests {
     use crate::core::account::AccountState;
     use crate::core::address::Address;
 
-    /// Schema-2 snapshot migration: report doğrudan snapshot üzerinde kontrol edilir
-    /// (from_bytes schema_version'ı yükseltir, bu yüzden report from_bytes ÖNCEsi alınır).
+    /// Schema-2 snapshot migration: the report is checked directly on the
+    /// snapshot, because `from_bytes` raises the schema_version, so the report is
+    /// taken BEFORE `from_bytes`.
     #[test]
     fn schema2_migration_preserves_data() {
         let mut state = AccountState::new();
@@ -32,21 +34,21 @@ mod migration_tests {
             },
         );
 
-        // Schema-2'ye düşür
+        // Drop it down to schema-2.
         let mut old = snapshot.clone();
         old.schema_version = 2;
 
-        // From_bytes ÖNCESİ migration report kontrol
+        // Check the migration report BEFORE from_bytes.
         let report = old.migration_report().unwrap();
         assert!(report.migrated, "Schema-2 should trigger migration");
         assert_eq!(report.original_schema_version, 2);
         assert_eq!(report.target_schema_version, 4);
 
-        // From_bytes ile yükle (schema otomatik yükseltilir)
+        // Load it with from_bytes; the schema is raised automatically.
         let bytes = serde_json::to_vec(&old).unwrap();
         let restored = StateSnapshotV2::from_bytes(&bytes).unwrap();
 
-        // Veri korunmalı
+        // The data has to be preserved.
         assert_eq!(restored.balances.get(&alice), Some(&5000));
         assert_eq!(restored.balances.get(&bob), Some(&3000));
         assert!(restored.validators.contains_key(&alice));
@@ -55,7 +57,7 @@ mod migration_tests {
         assert_eq!(restored.schema_version, 4);
     }
 
-    /// Desteklenmeyen schema reddedilmeli.
+    /// An unsupported schema has to be refused.
     #[test]
     fn unsupported_schema_rejected() {
         let state = AccountState::new();
@@ -81,7 +83,7 @@ mod migration_tests {
         assert!(StateSnapshotV2::from_bytes(&serde_json::to_vec(&future).unwrap()).is_err());
     }
 
-    /// Mevcut schema doğrudan yüklenmeli.
+    /// The current schema has to load directly.
     #[test]
     fn current_schema_loads_directly() {
         let state = AccountState::new();
