@@ -1,12 +1,14 @@
-//! B.U.D. 2.0 - JPEG Yeniden Sıkıştırma Yolu (K80) (2026-08-16)
+//! B.U.D. 2.0 - the JPEG recompression path (K80) (2026-08-16).
 //!
-//! K80: JPEG XL, mevcut JPEG'i KAYIPSIZ yeniden sıkıştırabilir (%20 tasarruf, bit-exact
-//! roundtrip - orijinal JPEG baytları yeniden üretilebilir). B.U.D. için bu, KF2'nin
-//! (çözünürlük korunursa format değişebilir) görüntü ayağıdır.
+//! K80: JPEG XL can recompress an existing JPEG LOSSLESSLY (a 20 percent
+//! saving with a bit-exact round trip - the original JPEG bytes can be
+//! reproduced). For B.U.D. this is the image leg of KF2, which says the format
+//! may change as long as the resolution is preserved.
 //!
-//! Bu modül, JXL'e geçmeden önce JPEG'İN SIKIŞTIRILABİLİRLİĞİNİ ölçer ve kararı
-//! kayıt altına alır: segment yapısı (SOI/APP/DQT/SOF/SOS/EOI) + tahmini tasarruf +
-//! karar kaydı (deterministik blob - zincire yazılabilir).
+//! Before moving to JXL, this module MEASURES HOW COMPRESSIBLE THE JPEG IS and
+//! records the decision: the segment structure (SOI, APP, DQT, SOF, SOS, EOI),
+//! the estimated saving and a decision record (a deterministic blob that can be
+//! written to the chain).
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +24,8 @@ const MARKER_DQT: u8 = 0xDB;
 const MARKER_SOF0: u8 = 0xC0;
 const MARKER_SOF2: u8 = 0xC2;
 
-/// JPEG analiz sonucu: segment yapısı + tahmini sıkıştırılabilirlik.
+/// The JPEG analysis result: the segment structure plus the estimated
+/// compressibility.
 #[derive(Debug, Clone)]
 pub struct JpegAnalysis {
     pub width: u32,
@@ -37,7 +40,7 @@ pub struct JpegAnalysis {
 impl JpegAnalysis {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_JPEGRE_V1";
 
-    /// JPEG baytlarını analiz et (panik'siz, kaba ayrıştırma).
+    /// Analyses JPEG bytes with a coarse, panic-free parse.
     pub fn analyze(data: &[u8]) -> Option<Self> {
         if !data.starts_with(&[0xFF, MARKER_SOI]) {
             return None;
@@ -94,7 +97,7 @@ impl JpegAnalysis {
                     break;
                 }
             } else {
-                // katsayı verisi: EOI (0xFF 0xD9) dışında her şey
+                // Coefficient data: everything except EOI (0xFF 0xD9).
                 if data[pos] == 0xFF && data[pos + 1] == MARKER_EOI {
                     break;
                 }
@@ -221,7 +224,7 @@ mod tests {
         assert!(a.quant_tables >= 1);
         assert!(a.scan_data_bytes > 0);
         assert!(a.header_bytes > 0);
-        assert!(a.recommends_jxl(), "yeniden sıkıştırma önerilir");
+        assert!(a.recommends_jxl(), "recompression is recommended");
         assert!(a.recompress_savings_pct >= 15.0);
     }
 

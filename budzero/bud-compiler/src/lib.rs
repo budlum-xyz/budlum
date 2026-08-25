@@ -105,9 +105,9 @@ mod tests {
     /// The same gate applies to `Hash32`.
     ///
     /// A separate test, because `is_opaque_bytes32` covers both types
-    /// (`Type::Address | Type::Hash32`) ve birinin listeden dusmesi
-    /// digerinin testiyle gorunmez kalirdi - olculdu: `Hash32` kaldirilinca
-    /// only this test turns red.
+    /// (`Type::Address | Type::Hash32`), and one of them dropping off the list
+    /// would stay invisible behind the test for the other - measured: when
+    /// `Hash32` is removed, only this test turns red.
     #[test]
     fn rejects_arithmetic_on_hash32() {
         let source = r"
@@ -191,17 +191,17 @@ mod tests {
     /// The bytecode the compiler produces must give the **right result** for the
     /// four uncovered operators too.
     ///
-    /// Olculdu: `BinOp` on operator tasiyor, ama VM'de kosturulup sonucu
-    /// only `+ - * == >=` appeared in the verified tests. The code generated for
-    /// `Neq`, `Lt`, `Gt`, `Lte` had never been executed - only
-    /// "derlendi mi" duzeyinde olculuyorlardi. `Lt` yerine `Gt` yayan bir
-    /// a code generator would pass all of those tests.
+    /// Measured: `BinOp` carries ten operators, but only `+ - * == >=` appeared
+    /// in the tests that run on the VM and verify the result. The code
+    /// generated for `Neq`, `Lt`, `Gt` and `Lte` had never been executed - they
+    /// were only measured at the "did it compile" level. A code generator
+    /// emitting `Gt` in place of `Lt` would pass all of those tests.
     ///
     /// (`Div` is absent here: it is now refused over `u64`, for the reason
-    /// `bolme_u64_uzerinde_reddedilir` testinde.)
+    /// given in the `division_over_u64_is_refused` test.)
     #[test]
     #[cfg(feature = "experimental")]
-    fn kapsanmayan_operatorler_dogru_sonuc_uretir() {
+    fn the_uncovered_operators_produce_the_right_result() {
         let source = r#"
             contract OperatorTest {
                 pub fn main() {
@@ -214,9 +214,9 @@ mod tests {
             }
         "#;
 
-        let bytecode = compile(source, IsaProfile::Experimental).expect("derleme");
+        let bytecode = compile(source, IsaProfile::Experimental).expect("compilation");
         let mut vm = bud_vm::Vm::new(1024);
-        vm.run(&bytecode).expect("calistirma");
+        vm.run(&bytecode).expect("execution");
 
         assert_eq!(
             vm.events,
@@ -225,14 +225,15 @@ mod tests {
         );
     }
 
-    /// Ayrilmis tip adlarinin **hepsi** reddedilmeli.
+    /// **Every** reserved type name has to be refused.
     ///
     /// `RESERVED_TYPE_NAMES` carries thirteen names and none of them had a test.
     /// The list carries a silent trap: `Type::from_str` accepts every unrecognised
     /// name as a **struct name**. So if a name drops off the list
-    /// `u128` reddedilmez, "tanimsiz struct" hatasina donusur - ya da o adda
-    /// and a struct is defined, it compiles silently and the developer
-    /// aritmetigi aldigini sanar. VM'de karsiligi yoktur.
+    /// `u128` is not refused but turns into an "undefined struct" error - or,
+    /// if a struct is defined under that name, it compiles silently and the
+    /// developer believes they got 128-bit arithmetic. There is no such thing
+    /// on the VM.
     ///
     /// Each name is asserted separately: a single loop assertion would hide one name
     /// dropping off the list under the success of the others.
@@ -317,22 +318,22 @@ mod tests {
     /// `/` over `u64` must be **refused**.
     ///
     /// The VM executes `Opcode::Div` as Goldilocks field division
-    /// (`rs1 * rs2^-1 mod p`) ve AIR kisiti bunu sabitliyor (`rd * rs2 =
-    /// rs1`). That is the right choice in a ZK circuit; integer division additionally
-    /// range-check ister.
+    /// (`rs1 * rs2^-1 mod p`), and the AIR constraint pins that down
+    /// (`rd * rs2 = rs1`). That is the right choice in a ZK circuit; integer
+    /// division would additionally require a range check.
     ///
-    /// But a developer writing `u64` expects integer division. Measured: without the gate
-    /// yokken `7 / 2` **9223372034707292164** veriyordu ve `7 / 0` hata
-    /// it returned **0** without any error. Both are contracts that branch silently
-    /// uretir, bu yuzden derleme zamaninda kesiliyor.
+    /// But a developer writing `u64` expects integer division. Measured:
+    /// without the gate, `7 / 2` returned **9223372034707292164**, and `7 / 0`
+    /// returned **0** with no error at all. Both produce contracts that branch
+    /// on a silently wrong number, so this is cut off at compile time.
     #[test]
     #[cfg(feature = "experimental")]
-    fn bolme_u64_uzerinde_reddedilir() {
+    fn division_over_u64_is_refused() {
         let source = r#"
             contract DivU64 {
                 pub fn main() {
-                    let bolme = 7 / 2;
-                    emit Result(bolme);
+                    let quotient = 7 / 2;
+                    emit Result(quotient);
                 }
             }
         "#;
@@ -1412,9 +1413,10 @@ mod tests {
     /// answer that a type is supposed to prevent.
     #[test]
     fn arithmetic_on_an_opaque_32_byte_type_is_refused() {
-        // `<=` ve `>=` listede yoktu. Kapi (`sema.rs`, `is_opaque_bytes32`)
-        // ikisini de kapsiyor, ama kapsadigi olculmemisti: listeden dusen bir
-        // operator would make removing the gate for that operator invisible.
+        // `<=` and `>=` were missing from the list. The gate (`sema.rs`,
+        // `is_opaque_bytes32`) covers both, but that coverage had never been
+        // measured: an operator dropping off the list would make removing the
+        // gate for that operator invisible.
         for op in ["+", "-", "*", "/", "<", ">", "<=", ">="] {
             let source = format!(
                 r#"
