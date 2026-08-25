@@ -36,7 +36,6 @@ bud/src/bud_format_qos.rs	5
 bud/src/bud_format_registry.rs	7
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
-bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/churn.rs	6
 bud/src/gates.rs	4
@@ -52,7 +51,6 @@ budzero/bud-proof/src/plonky3_prover.rs	1
 budzero/bud-proof/tests/fiat_shamir_binding.rs	3
 budzero/bud-proof/tests/soundness_negatives.rs	6
 budzero/bud-vm/src/lib.rs	1
-budzero/verifier-registry/src/registry.rs	7
 config/mainnet-genesis.json	1
 crates/budscan/browser/patches.txt	2
 crates/budscan/browser/patches/bud-protocol-handler.patch	4
@@ -77,15 +75,12 @@ ops/scripts/check_genesis_schema.py	1
 ops/scripts/generate-sbom.sh	1
 src/ai/mod.rs	2
 src/bin/bud.rs	2
-src/bns/registry.rs	7
 src/budlumxyz/mod.rs	3
 src/chain/storage_economics_tests.rs	4
 src/core/governance.rs	6
 src/core/transaction.rs	6
 src/crypto/mainnet_policy.rs	3
-src/domain/finality_adapter.rs	7
 src/domain/plugin.rs	1
-src/domain/registry.rs	7
 src/domain/storage_deal.rs	2
 src/execution/executor.rs	3
 src/lib.rs	4
@@ -148,7 +143,6 @@ xtask/gates/src/gates/git_deps_audited.rs	2
 xtask/gates/src/gates/guards_reachable.rs	2
 xtask/gates/src/gates/lock_failures.rs	2
 xtask/gates/src/gates/logup_multipliers.rs	1
-xtask/gates/src/gates/proof_deps_are_exactly_pinned.rs	7
 xtask/gates/src/gates/regeneration.rs	2
 xtask/gates/src/gates/required_tests.rs	2
 xtask/gates/src/gates/source_reading.rs	2
