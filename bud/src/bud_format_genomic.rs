@@ -1,10 +1,14 @@
-//! B.U.D. 2.0 - GENOMİK REFERANS TRANSFORMU (F21/F228-F231 - CRAM/genozip deseni)
+//! B.U.D. 2.0 - THE GENOMIC REFERENCE TRANSFORM (F21/F228-F231 - the CRAM and
+//! genozip pattern).
 //!
-//! Kalan iş #7 (genom ayağı): FASTQ/FASTA benzeri dizileri REFERANS dizisine göre
-//! delta'ya çevirir: eşleşen bazlar örtülür (referans + fark), sapmalar kaydedilir.
+//! Remaining work item #7, the genome leg: turns FASTQ- and FASTA-like
+//! sequences into a delta against a REFERENCE sequence. Matching bases are left
+//! implicit (the reference plus the difference) and the deviations are
+//! recorded.
 //! KAYIPSIZ: orijinal dizi referans+farktan birebir kurulur. Referans yoksa ham
-//! 2-bit kodlama (A/C/G/T → 2 bit) düşer. Bu bir TOHUMdur - gerçek genozip
-//! seviyesi (quality-score modeli vb.) uzun vade; dürüstçe işaretli.
+//! Two-bit coding (A/C/G/T in 2 bits) applies. This is a SEED: real
+//! genozip-level work, such as a quality-score model, is long term, and that is
+//! marked honestly.
 
 #![forbid(unsafe_code)]
 
@@ -31,8 +35,10 @@ fn bit2base(x: u8) -> u8 {
     }
 }
 
-/// Referans tabanlı delta kodla: dizi ile referansın aynı olduğu yerlerde
-/// "0" (örtük), farklı bazlarda "1+2bit". Çıktı: vektör (0 = aynı, 1-4 = farklı baz).
+/// Reference-based delta coding: where the sequence and the reference agree the
+/// output is an implicit "0", and where the bases differ it is "1 plus 2 bits".
+/// The output is a vector where 0 means identical and 1 to 4 name the differing
+/// base.
 pub fn ref_encode(seq: &[u8], ref_seq: &[u8]) -> Option<Vec<u8>> {
     if seq.len() != ref_seq.len() || seq.is_empty() {
         return None;
@@ -64,7 +70,7 @@ pub fn ref_decode(delta: &[u8], ref_seq: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Referanssız 2-bit kodlama (A/C/G/T) - ham dizi için.
+/// Reference-free two-bit coding (A/C/G/T), for a raw sequence.
 pub fn two_bit_encode(seq: &[u8]) -> Option<Vec<u8>> {
     if seq.is_empty() {
         return None;
@@ -103,7 +109,7 @@ mod tests {
         let ref_seq = b"ACGTACGTACGTACGTACGT";
         let seq = b"ACGTACGTATGTACGTACGT"; // 1 sapma (T→A)
         let d = ref_encode(seq, ref_seq).unwrap();
-        // sapma sayısı: 1
+        // The number of deviations is 1.
         let mut snp = 0;
         for &x in &d {
             if x != 0 {
@@ -112,7 +118,7 @@ mod tests {
         }
         assert_eq!(snp, 1);
         assert_eq!(ref_decode(&d, ref_seq).unwrap(), seq.to_vec());
-        // zstd'ye verilecek delta çok seyrek → yüksek oran
+        // The delta handed to zstd is very sparse, so the ratio is high.
         assert!(d.iter().filter(|&&x| x == 0).count() > d.len() / 2);
     }
 
@@ -125,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn gecersiz_baz_red() {
+    fn an_invalid_base_is_refused() {
         assert!(ref_encode(b"ACGN", b"ACGT").is_none());
         assert!(two_bit_encode(b"NACGT").is_none());
         assert!(ref_encode(b"ACGT", b"ACG").is_none());
