@@ -916,10 +916,11 @@ mod tests {
 
     #[test]
     fn governance_whitelist_invariant_blocks_all_non_core_params() {
-        // ADR-004 whitelist invariant: yalnızca güvenlik-kritik parametreler
-        // Değiştirilebilir; permissionless core davranışları (code upgrade,
-        // Arz, fee/treasury, validator set) ASLA değiştirilemez. Bu test
-        // Invariant'ı non-whitelist parametre deneyerek korur (breaking test).
+        // The ADR-004 whitelist invariant: only security-critical parameters
+        // can be changed; the permissionless core behaviours (code upgrade,
+        // supply, fee and treasury, the validator set) can NEVER be changed.
+        // This test protects the invariant by trying a non-whitelisted
+        // parameter - a breaking test.
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let non_core = [
@@ -944,8 +945,8 @@ mod tests {
                 "non-core param '{key}' must be rejected by the whitelist invariant"
             );
         }
-        // Whitelist içindeki güvenlik parametreleri whitelist tarafından
-        // Reddedilmez (yanlış pozitif yok).
+        // A security parameter inside the whitelist is not refused by the
+        // whitelist, so there is no false positive.
         for key in [
             "min_stake",
             "unbonding_epochs",
