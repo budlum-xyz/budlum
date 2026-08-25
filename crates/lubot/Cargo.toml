@@ -10,14 +10,16 @@ members = [
     "crates/lubot-ops",
 ]
 
-# Panik siniri: uretim yolunda `unwrap`/`expect` yasak.
+# The panic limit: `unwrap` and `expect` are forbidden on the production path.
 #
-# Bu workspace ana repodaki kapinin disinda kalmisti. Olcum: tek ihlal
-# (`lubot-data/src/jsonl.rs` `encode`), ve o ihlalin belgesi "uretimde
+# This workspace had been left outside the gate in the main repo. Measured: a
+# single violation (`encode` in `lubot-data/src/jsonl.rs`), and the
+# documentation of that violation claimed "in production
 # `Result` donen sarmalayici kullanilir" diyordu - oyle bir sarmalayici
-# yoktu. Kapi olmadan yanlis beyan agacta kalmisti.
+# did not exist. Without a gate, the false claim stayed in the tree.
 #
-# Release profili `panic = "abort"` degil burada, ama lubot ayni ikilinin
+# The release profile is not `panic = "abort"` here, but lubot is part of the
+# same binary
 # icinde kosuyor; bir panik yine sureci dusurur. Testler muaf
 # (`clippy.toml`: allow-unwrap-in-tests).
 [workspace.lints.clippy]

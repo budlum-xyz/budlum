@@ -1,8 +1,9 @@
-# Lubot model kademeleri (2026-08-13 kararı):
+# The Lubot model tiers (the 2026-08-13 decision):
 #   lubot-light  <- DeepSeek-V4-Flash-Base tabanli
 #   lubot-normal <- DeepSeek-V4-Pro-Base tabanli
-# Çarpan/kat kademe etiketleri (0.5x, 10x vb.) Lubot'ta KULLANILMAZ.
-# Ağırlık repo adlari (ucuncu taraf) atif geregi oldugu gibi korunur.
+# Multiplier-style tier labels (0.5x, 10x and the like) are NOT USED in Lubot.
+# The weight repository names (third party) are kept as they are, as
+# attribution requires.
 
 [tiers]
 light = "deepseek-ai/DeepSeek-V4-Flash-Base"
@@ -10,7 +11,8 @@ normal = "deepseek-ai/DeepSeek-V4-Pro-Base"
 
 [default]
 # 2026-08-13: yontem = LoRA SFT; varsayilan kademe = light.
-# K2 karari geregi ilk ince ayar oncesinde kademe secimi yeniden onaylanir.
+# Per the K2 decision, the tier choice is re-approved before the first
+# fine-tune.
 tier = "light"
 license = "MIT"
 fine_tune_source = "BaseModel"

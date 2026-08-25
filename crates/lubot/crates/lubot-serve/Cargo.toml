@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Serving köprüsü: vLLM/SGLang yapılandırması, atıf politikası denetimi, sağlık sayaçları"
+description = "The serving bridge: vLLM/SGLang configuration, the attribution policy check, and health counters"
 
 [dependencies]
 lubot-core = { path = "../lubot-core" }

@@ -49,7 +49,8 @@ audit-as-crates-io = true
 # the highest version is 0.6.0. So this package has NO counterpart on crates.io; "count it as the same"
 # was not correct and cargo vet ran no scan at all. `false` counts the package as
 # first party: no crates.io audit is looked for, and its source is the commit in Cargo.lock
-# pini ile sabit kalir. Yayimlanmis 0.7.0 cikarsa `true`ya donulebilir.
+# stays fixed by the pin. If a published 0.7.0 appears this can go back to
+# `true`.
 [policy."libp2p-connection-limits"]
 audit-as-crates-io = false
 

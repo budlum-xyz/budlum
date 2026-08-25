@@ -1,11 +1,13 @@
 # Aday veri setleri (bkz. docs/ACIK_KAYNAK_VERI_ARASTIRMASI_2026-08-13.md §3).
-# İlke: her set önce B.U.D.'a StorageDeal olarak kaydedilir, TrainingCorpus
-# etiketi alır, hash doğrulanır; doğrudan dış okuma YOKTUR (kapalı-devre).
+# The principle: every set is first registered with B.U.D. as a StorageDeal,
+# gets the TrainingCorpus label and has its hash verified; there is NO direct
+# external read (closed circuit).
 
 [policy]
 # KARAR (2026-08-13): Varyant B - hibrit.
 # Acik setler once B.U.D.'a StorageDeal olarak kaydedilir, TrainingCorpus
-# etiketi alir, hash dogrulanir; Lubot'un okudugu tek kanal agdir.
+# gets the label and has its hash verified; the network is the only channel
+# Lubot reads from.
 entry_channel = "B.U.D. StorageDeal + AiDatasetMetadata::training"
 variant = "B-hibrit"
 
@@ -22,13 +24,13 @@ scale = "~105B token; sft split 7.62M satir"
 status = "aday-sft-split"
 
 [candidates."ogulcanaydogan/Turkish-LLM-v10-Training"]
-license = "acik (kart dogrulanacak)"
+license = "open (the card is to be verified)"
 license_verified = false
 scale = "144K kuratorlu TR cifti"
 status = "aday-sartli"
 
 [candidates."merve/turkish_instructions"]
-license = "kart bos - dogrulanacak"
+license = "the card is empty - to be verified"
 license_verified = false
 scale = "51.6K satir"
 status = "aday-sartli"
@@ -43,10 +45,10 @@ status = "sartli-sharealike"
 license = "CC BY-NC + Llama"
 license_verified = true
 scale = "-"
-status = "uygun-degil-nc"
+status = "not-suitable-nc"
 
 [candidates."brewinteractive/alpaca-tr"]
-license = "dogrulanacak"
+license = "to be verified"
 license_verified = false
 scale = "52K"
 status = "aday-sartli"
