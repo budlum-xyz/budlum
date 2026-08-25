@@ -98,15 +98,6 @@ pub struct DeviceBudget {
 }
 
 impl DeviceBudget {
-    /// A device with no accelerator.
-    #[must_use]
-    pub const fn cpu_only(system_bytes: u64) -> Self {
-        Self {
-            accelerator_bytes: 0,
-            system_bytes,
-        }
-    }
-
     /// Bytes available in a tier.
     #[must_use]
     pub const fn bytes_in(self, tier: Tier) -> u64 {
@@ -383,8 +374,15 @@ mod tests {
         .unwrap();
 
         // Exactly enough for the dense part and not one byte more.
-        let starved =
-            ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(1000), profile()).unwrap();
+        let starved = ResidencyPlan::plan(
+            &model(),
+            DeviceBudget {
+                accelerator_bytes: 0,
+                system_bytes: 1000,
+            },
+            profile(),
+        )
+        .unwrap();
 
         assert_eq!(
             generous.semantics, starved.semantics,
@@ -403,7 +401,15 @@ mod tests {
     /// The dense part never lands on disk.
     #[test]
     fn per_token_weights_are_never_streamed() {
-        let plan = ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(1200), profile()).unwrap();
+        let plan = ResidencyPlan::plan(
+            &model(),
+            DeviceBudget {
+                accelerator_bytes: 0,
+                system_bytes: 1200,
+            },
+            profile(),
+        )
+        .unwrap();
         let dense = plan
             .placements
             .iter()
@@ -415,8 +421,15 @@ mod tests {
     /// A device too small for the dense part is refused, not degraded.
     #[test]
     fn a_device_that_cannot_hold_the_dense_part_is_refused() {
-        let err =
-            ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(999), profile()).unwrap_err();
+        let err = ResidencyPlan::plan(
+            &model(),
+            DeviceBudget {
+                accelerator_bytes: 0,
+                system_bytes: 999,
+            },
+            profile(),
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             PlanError::DensePartDoesNotFit {
@@ -430,7 +443,15 @@ mod tests {
     #[test]
     fn fast_memory_is_filled_before_disk() {
         // 1000 dense + two 500-byte experts fit; two spill.
-        let plan = ResidencyPlan::plan(&model(), DeviceBudget::cpu_only(2000), profile()).unwrap();
+        let plan = ResidencyPlan::plan(
+            &model(),
+            DeviceBudget {
+                accelerator_bytes: 0,
+                system_bytes: 2000,
+            },
+            profile(),
+        )
+        .unwrap();
         assert_eq!(plan.bytes_in(Tier::System), 2000);
         assert_eq!(plan.bytes_in(Tier::Disk), 1000);
     }
@@ -459,7 +480,10 @@ mod tests {
     /// machines disagree about what they need.
     #[test]
     fn the_plan_is_deterministic_across_shard_order() {
-        let budget = DeviceBudget::cpu_only(2000);
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 2000,
+        };
         let forward = ResidencyPlan::plan(&model(), budget, profile()).unwrap();
 
         let mut reversed = model();
@@ -485,7 +509,15 @@ mod tests {
     #[test]
     fn every_shard_is_placed_exactly_once() {
         let shards = model();
-        let plan = ResidencyPlan::plan(&shards, DeviceBudget::cpu_only(1000), profile()).unwrap();
+        let plan = ResidencyPlan::plan(
+            &shards,
+            DeviceBudget {
+                accelerator_bytes: 0,
+                system_bytes: 1000,
+            },
+            profile(),
+        )
+        .unwrap();
         assert_eq!(plan.placements.len(), shards.len());
         let mut ids: Vec<[u8; 32]> = plan.placements.iter().map(|p| p.content_id).collect();
         ids.sort_unstable();
@@ -497,7 +529,14 @@ mod tests {
     #[test]
     fn an_empty_model_is_refused() {
         assert_eq!(
-            ResidencyPlan::plan(&[], DeviceBudget::cpu_only(1000), profile()),
+            ResidencyPlan::plan(
+                &[],
+                DeviceBudget {
+                    accelerator_bytes: 0,
+                    system_bytes: 1000
+                },
+                profile()
+            ),
             Err(PlanError::NothingToPlace)
         );
     }

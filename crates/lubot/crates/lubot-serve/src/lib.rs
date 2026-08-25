@@ -9,6 +9,7 @@
 //! bridge connects to the OpenAI-compatible endpoint of vLLM or SGLang, and the
 //! chain queries are a fail-closed draft.
 
+pub mod bridge;
 pub mod chain;
 pub mod config;
 pub mod health;
