@@ -93,7 +93,9 @@ pub fn self_test() -> Result<String, String> {
         baseline(&dir).map_err(|e| format!("canary: the baseline could not be read: {e}"))?;
     if (base - 64.30).abs() > 1e-9 {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(format!("canary: read '{base}' instead of the 64.30 baseline"));
+        return Err(format!(
+            "canary: read '{base}' instead of the 64.30 baseline"
+        ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
