@@ -1,7 +1,7 @@
 //! The fixture integrity gate.
 //!
-//! `config/fixtures/gercek-zincir.json` is the single source the tests rest on
-//! (`src/tests/gercek_zincir_fixtures.rs` reads the same file - the single-source
+//! `config/fixtures/real-chain.json` is the single source the tests rest on
+//! (`src/tests/real_chain_fixtures.rs` reads the same file - the single-source
 //! rule; a second copy is the worst copy). This gate verifies that the file exists,
 //! carries the required sections, stays within a sane size and obeys its own format
 //! rules (hex without 0x). Verifying the content against the real chain is the
@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-const FIXTURE_PATH: &str = "config/fixtures/gercek-zincir.json";
+const FIXTURE_PATH: &str = "config/fixtures/real-chain.json";
 const MIN_BYTES: u64 = 1_024;
 const MAX_BYTES: u64 = 64 * 1_024;
 const REQUIRED_SECTIONS: &[&str] = &[

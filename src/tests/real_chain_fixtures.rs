@@ -1,14 +1,15 @@
-//! Gerçek zincir fixture'larıyla differential testler.
+//! Differential tests against real chain fixtures.
 //!
-//! Kaynak: `config/fixtures/gercek-zincir.json` (tek kaynak kuralı - test ve
-//! `fixture-integrity` gate'i aynı dosyayı okur). Fixture'lar 2026-08-14'te
-//! api.blockchair.com'dan canlı çekildi ve bağımsız kaynaklarla çapraz
-//! doğrulandı (BTC yükseklik mempool.space, ETH yükseklik blockcypher).
+//! Source: `config/fixtures/real-chain.json` (the single-source rule - the
+//! tests and the `fixture-integrity` gate read the same file). The fixtures
+//! were pulled live from api.blockchair.com on 2026-08-14 and cross-checked
+//! against independent sources (the BTC height against mempool.space, the ETH
+//! height against blockcypher).
 //!
-//! Bu testler production runtime verisi kullanmaz; üçüncü taraf API'ye hiçbir
-//! bağımlılık yoktur. Amaç: kendi hash/merkle/RLP uygulamalarımızın gerçek
-//! zincir değerleriyle birebir eşleştiğini kanıtlamak (endianness, çift-SHA,
-//! alan sırası hataları burada yakalanır).
+//! These tests use no production runtime data and have no dependency on a
+//! third-party API. The purpose is to prove that our own hash, merkle and RLP
+//! implementations match real chain values exactly; endianness, double-SHA and
+//! field-order mistakes are caught here.
 
 use crate::cross_domain::evm::rlp::{self, Item};
 use serde::{Deserialize, Serialize};
@@ -58,13 +59,13 @@ struct RealChainFixture {
 fn fixture() -> RealChainFixture {
     let raw = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/config/fixtures/gercek-zincir.json"
+        "/config/fixtures/real-chain.json"
     ));
-    serde_json::from_str(raw).expect("gercek-zincir.json parse edilemeli")
+    serde_json::from_str(raw).expect("real-chain.json parse edilemeli")
 }
 
 fn from_hex(s: &str) -> Vec<u8> {
-    hex::decode(s).expect("fixture hex alanları çözülebilmeli")
+    hex::decode(s).expect("the fixture hex fields have to decode")
 }
 
 fn sha256d(data: &[u8]) -> [u8; 32] {
@@ -76,9 +77,10 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Bitcoin Merkle kökü: display-hex txid'ler → iç bayt sırası (ters) →
-/// yapraklar (txid zaten sha256d'dir - yeniden hashlenmez) → ikili eşleme
-/// (tek sayıda son yaprak kopyalanır) → display-hex kök.
+/// The Bitcoin merkle root: display-hex txids, reversed into internal byte
+/// order, become the leaves (a txid is already sha256d and is not rehashed),
+/// then pairwise hashing (an odd last leaf is duplicated) gives the display-hex
+/// root.
 fn btc_merkle_root(txids: &[String]) -> String {
     let mut leaves: Vec<[u8; 32]> = txids
         .iter()
@@ -109,7 +111,7 @@ fn btc_merkle_root(txids: &[String]) -> String {
     hex::encode(root)
 }
 
-/// RLP skaler kodlaması için minimal big-endian baytlar (0 → boş).
+/// The minimal big-endian bytes for RLP scalar encoding (0 becomes empty).
 fn min_bytes(n: u64) -> Vec<u8> {
     if n == 0 {
         return Vec::new();
@@ -119,7 +121,7 @@ fn min_bytes(n: u64) -> Vec<u8> {
     be[start..].to_vec()
 }
 
-/// Yellow Paper alan sırasıyla gerçek header'ın RLP'sini kur.
+/// Build the RLP of the real header in Yellow Paper field order.
 /// Pre-London 15 alan; London+ 16. alan `baseFeePerGas`.
 fn build_header_rlp(h: &EthHeaderFixture) -> Vec<u8> {
     let mut items = vec![
@@ -150,14 +152,14 @@ fn btc_merkle_reconstruction_matches_real_blocks() {
     let fx = fixture();
     assert!(
         fx.btc_merkle_blocks.len() >= 3,
-        "fixture en az 3 merkle bloğu içermeli"
+        "the fixture has to contain at least 3 merkle blocks"
     );
     for block in &fx.btc_merkle_blocks {
         let computed = btc_merkle_root(&block.txids);
         assert_eq!(
             computed, block.merkle_root,
-            "blok {}: bizim merkle hesabımız gerçek zincir köküyle eşleşmeli \
-             (endianness/eşleme hatası yakalandı)",
+            "block {}: our merkle computation has to match the real chain root \
+             (an endianness or pairing mistake was caught)",
             block.height
         );
     }
@@ -166,25 +168,32 @@ fn btc_merkle_reconstruction_matches_real_blocks() {
 #[test]
 fn eth_header_hash_matches_real_mainnet_blocks() {
     let fx = fixture();
-    assert!(fx.eth_headers.len() >= 2, "fixture en az 2 header içermeli");
+    assert!(
+        fx.eth_headers.len() >= 2,
+        "the fixture has to contain at least 2 headers"
+    );
     for h in &fx.eth_headers {
         let rlp_bytes = build_header_rlp(h);
-        // decode_header: RLP'yi çözer, alanları okur ve hash = keccak256(raw)
-        // hesaplar. Bu test hem bizim RLP encoder'ımızı hem decoder'ı gerçek
-        // zincir hash'ine karşı doğrular.
+        // decode_header parses the RLP, reads the fields and computes
+        // hash = keccak256(raw). This test verifies both our RLP encoder and
+        // the decoder against the real chain hash.
         let decoded = crate::cross_domain::evm::header::decode_header(&rlp_bytes)
             .unwrap_or_else(|e| panic!("{}: decode_header reddetti: {e}", h.name));
         assert_eq!(
             hex::encode(decoded.hash),
             h.expected_hash,
-            "{}: keccak256(rlp(header)) gerçek blok hash'iyle eşleşmeli",
+            "{}: keccak256(rlp(header)) has to match the real block hash",
             h.name
         );
-        assert_eq!(decoded.number, h.number, "{}: number uyuşmuyor", h.name);
+        assert_eq!(
+            decoded.number, h.number,
+            "{}: number does not match",
+            h.name
+        );
         assert_eq!(
             hex::encode(decoded.parent_hash),
             h.parent_hash,
-            "{}: parent_hash uyuşmuyor",
+            "{}: parent_hash does not match",
             h.name
         );
     }
@@ -197,23 +206,26 @@ fn post_merge_header_carries_zero_difficulty_and_ommers_constant() {
         .eth_headers
         .iter()
         .find(|h| h.name.contains("post_merge"))
-        .expect("post-merge fixture'ı bulunmalı");
-    // PoS geçişinin zincir üstü imzaları: difficulty=0 ve ommersHash =
-    // keccak256(rlp([])) sabiti. Fixture'ın kendisinin bu değişmezleri
-    // taşıdığı doğrulanır - üretimde EVM adapter'ın PoS/PoW ayrımı bu
-    // sinyallere dayanır.
-    assert_eq!(pm.difficulty, 0, "post-merge header difficulty=0 olmalı");
+        .expect("the post-merge fixture has to be present");
+    // The on-chain signatures of the PoS transition: difficulty=0 and
+    // ommersHash equal to the keccak256(rlp([])) constant. The fixture itself
+    // is verified to carry these invariants - in production the EVM adapter's
+    // PoS/PoW distinction rests on these signals.
+    assert_eq!(
+        pm.difficulty, 0,
+        "a post-merge header has to have difficulty=0"
+    );
     assert_eq!(
         pm.ommers_hash, "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "ommersHash, keccak256(rlp([])) sabitine eşit olmalı"
+        "ommersHash has to equal the keccak256(rlp([])) constant"
     );
     assert!(
         pm.base_fee_per_gas.is_some(),
-        "post-merge header baseFeePerGas taşımalı (London+)"
+        "a post-merge header has to carry baseFeePerGas (London and later)"
     );
     let rlp_bytes = build_header_rlp(pm);
     let decoded = crate::cross_domain::evm::header::decode_header(&rlp_bytes)
-        .expect("post-merge RLP'si decode edilmeli");
+        .expect("the post-merge RLP has to decode");
     assert_eq!(hex::encode(decoded.hash), pm.expected_hash);
 }
 
@@ -226,17 +238,18 @@ fn btc_halving_series_follows_210k_rule() {
         assert_eq!(
             next.height - prev.height,
             210_000,
-            "halving'ler arası tam 210.000 blok olmalı"
+            "there have to be exactly 210,000 blocks between halvings"
         );
         assert_eq!(
             next.generation_sat,
             prev.generation_sat / 2,
-            "h={}: ödül tam yarılanmalı",
+            "h={}: the reward has to halve exactly",
             next.height
         );
     }
-    // Serinin uçları: 25 BTC → 3.125 BTC. Sabit-arz modelinin referans
-    // noktaları (Budlum'un 100M $BUD sabit arz tasarım tartışmasına veri).
+    // The ends of the series: 25 BTC down to 3.125 BTC. These are the
+    // reference points of the fixed-supply model (data for Budlum's own 100M
+    // $BUD fixed-supply design discussion).
     assert_eq!(fx.btc_halvings[0].generation_sat, 2_500_000_000);
     assert_eq!(fx.btc_halvings[3].generation_sat, 312_500_000);
 }
@@ -245,10 +258,17 @@ fn btc_halving_series_follows_210k_rule() {
 fn fixture_file_parses_and_fields_are_well_formed() {
     let fx = fixture();
     for block in &fx.btc_merkle_blocks {
-        assert_eq!(block.merkle_root.len(), 64, "merkle_root 64 hex olmalı");
-        assert!(!block.txids.is_empty(), "her blok en az 1 txid içermeli");
+        assert_eq!(
+            block.merkle_root.len(),
+            64,
+            "merkle_root has to be 64 hex characters"
+        );
+        assert!(
+            !block.txids.is_empty(),
+            "every block has to contain at least 1 txid"
+        );
         for t in &block.txids {
-            assert_eq!(t.len(), 64, "txid 64 hex olmalı");
+            assert_eq!(t.len(), 64, "a txid has to be 64 hex characters");
         }
     }
     for h in &fx.eth_headers {
@@ -261,7 +281,12 @@ fn fixture_file_parses_and_fields_are_well_formed() {
             &h.receipts_root,
             &h.mix_hash,
         ] {
-            assert_eq!(f.len(), 64, "{}: hash alanı 64 hex olmalı", h.name);
+            assert_eq!(
+                f.len(),
+                64,
+                "{}: a hash field has to be 64 hex characters",
+                h.name
+            );
         }
         assert_eq!(h.beneficiary.len(), 40, "{}: beneficiary 20 bayt", h.name);
         assert_eq!(h.nonce.len(), 16, "{}: nonce 8 bayt", h.name);
