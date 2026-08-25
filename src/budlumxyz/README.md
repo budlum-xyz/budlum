@@ -1,24 +1,31 @@
-# budlumxyz Registry (modül README'si)
+# The budlumxyz registry - a module README
 
-**Modül-ayrımı kuralı gereği budlumxyz'ın kendi README'sidir.**
-Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
+**This is budlumxyz's own README, as the module-separation rule requires.**
+The root `README.md` is only a dashboard; the maturity and risk warnings live
+here.
 
-## Durum
+## Status
 
-- **Olgunluk:** iskelet: kayıt/resolve tipi mevcut, ekonomi/yönetişim mainnet sonrası.
-- **Kod konumu:** `src/budlumxyz/`, `mod.rs` (`BudlumxyzRegistry`), `types.rs` (`AppRecord`).
-- **Test sayısı:** 0 (yazılım testi yok; davranış `MarketplaceRegistry` deseniyle
-  parent test'lerde örtüşüyor).
-- **Snapshot:** `StateSnapshotV2.budlumxyz: Option<BudlumxyzRegistry>` (GAP-2 digest'inde).
+- **Maturity:** a skeleton. The registration and resolve types exist; the
+  economy and governance come after mainnet.
+- **Code location:** `src/budlumxyz/`, with `mod.rs` (`BudlumxyzRegistry`) and
+  `types.rs` (`AppRecord`).
+- **Test count:** 10, all in `src/budlumxyz/mod.rs`.
 
-## Olgunluk uyarıları
+  Note: an earlier version of this file said "0 tests; behaviour is covered
+  indirectly in the parent tests through the `MarketplaceRegistry` pattern".
+  That was measured and is wrong: the module carries its own tests.
+- **Snapshot:** `StateSnapshotV2.budlumxyz: Option<BudlumxyzRegistry>` (inside
+  the GAP-2 digest).
 
-- **Mainnet v1 kapsam dışı.** budlumxyz (uygulama registry'si, DeEd/SocialFi/dApp
-  listesi)  gereği post-launch. Mainnet'te boş kalır, governance
-  activation sonrası.
-- **Ekonomi modeli yok.** Listing fee / curation / slashing mainnet sonrası
-  tasarım.
+## Maturity warnings
 
-## Sıradaki
+- **Out of scope for mainnet v1.** budlumxyz - the application registry listing
+  DeEd, SocialFi and dApps - is post-launch. It stays empty on mainnet until
+  governance activates it.
+- **No economic model.** Listing fees, curation and slashing are a post-mainnet
+  design.
 
-budlumxyz genişletmesi (mainnet sonrası, kullanıcı emriyle).
+## Next
+
+Extending budlumxyz, after mainnet, on the user's instruction.
