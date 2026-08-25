@@ -23,7 +23,7 @@ impl request_response::Codec for SyncCodec {
     {
         // Strix HIGH (CWE-400, 2026-08-17): /sync istekleri handshake/ban/
         // rate-limit kontrollerinden ONCE tamponlanir. 10 MiB tavan, uzak bir
-        // peer'in baglanti kurup kucuk kontrol istekleri (GetHeaders,
+        // a peer connects and sends small control requests (GetHeaders,
         // GetBlocksRange) icin buyuk tahsisler yapmasina izin veriyordu.
         // Kontrol istekleri kilobayt seviyesindedir; tavan 1 MiB'a indirildi.
         let mut buf = Vec::new();

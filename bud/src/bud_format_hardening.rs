@@ -170,7 +170,7 @@ mod tests {
         // correct production -> accepted
         assert!(verify_recipe(|d| d.to_vec(), original, &cid));
         // wrong production -> REFUSE
-        let wrong = crate::bud_format_container::content_id(b"baska");
+        let wrong = crate::bud_format_container::content_id(b"other");
         assert!(!verify_recipe(|d| d.to_vec(), original, &wrong));
     }
 
@@ -192,7 +192,7 @@ mod tests {
         let derivative = b"qr-video-turev";
         let cid = crate::bud_format_container::content_id(derivative);
         assert!(verify_derivative(derivative, &cid));
-        assert!(!verify_derivative(b"baska", &cid));
+        assert!(!verify_derivative(b"other", &cid));
     }
 
     #[test]

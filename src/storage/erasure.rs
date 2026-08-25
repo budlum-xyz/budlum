@@ -637,7 +637,7 @@ pub fn reconstruct_object(
     // Verify every reconstructed shard against the manifest, and try another
     // k-subset when more than k shards survive: taking only the first k
     // survivors means a single corrupted low-index survivor makes a
-    // recoverable object look unrecoverable (güvenlik denetimi, MEDIUM).
+    // recoverable object look unrecoverable (security review, MEDIUM).
     // The integrity check is the same one the old code ran after
     // the single attempt; now a failure with spare survivors retries with a
     // different subset instead of giving up.
@@ -897,7 +897,7 @@ mod tests {
         // With k=4, n=6 and one parity shard lost, five survivors remain. One
         // of them is corrupted; the decoder must drop the corrupted survivor
         // and reconstruct from the other four rather than failing the whole
-        // object (Güvenlik denetimi (MEDIUM)). A single bad
+        // object (security review, MEDIUM). A single bad
         // survivor must not cause avoidable object-level denial of recovery.
         let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
         let scheme = ErasureScheme { k: 4, n: 6 };

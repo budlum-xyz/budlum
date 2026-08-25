@@ -199,7 +199,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: kurtarilan guard reddedildi"));
+        return Err(String::from("canary: a recovered guard was rejected"));
     }
     let bad = "impl Node {\n    fn admit(&self) -> bool {\n        self.peer_manager\n            .lock()\n            .map(|pm| pm.can_admit())\n            .unwrap_or(true)\n    }\n}\n";
     std::fs::write(dir.join("src/lib.rs"), bad).map_err(|e| e.to_string())?;
@@ -209,6 +209,6 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "lock-failures kanaryasi OK (guard PASS, fail-open FAIL).",
+        "lock-failures canary OK: a guard PASSes and a fail-open FAILs.",
     ))
 }

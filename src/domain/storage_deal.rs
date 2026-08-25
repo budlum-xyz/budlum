@@ -3682,7 +3682,7 @@ mod tests {
             .collect()
     }
 
-    /// Bir bilet acan en kisa yol: anlasma ac, meydan okumayi kacir.
+    /// The shortest path that opens a ticket: open a deal and miss the challenge.
     fn registry_with_pending_ticket() -> StorageRegistry {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -5196,7 +5196,7 @@ mod demand_driven_replication_tests {
             output_len: 32 * 32,
             step_budget: 8_000,
         };
-        let bytes = crate::storage::generated::generate_content(&spec).expect("uretim");
+        let bytes = crate::storage::generated::generate_content(&spec).expect("generation");
         let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
             .expect("manifest")
             .with_source(ContentSource::Generated(spec));

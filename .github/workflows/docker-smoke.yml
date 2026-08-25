@@ -105,6 +105,6 @@ jobs:
         run: |
           chmod +x ops/scripts/devnet-multinode-smoke.sh
           ./ops/scripts/devnet-multinode-smoke.sh || { docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke ps || true; docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150 || true; exit 1; }
-      - name: Teardown (her durumda)
+      - name: Teardown (always)
         if: always()
         run: docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke down -v --remove-orphans || true
