@@ -1,9 +1,12 @@
-//! B.U.D. 2.0 - ÜRETİM MALİYETİ TABLOSU (fikirler2.0 İ3 - "üretim maliyeti ölçülmedi" kapatıldı)
+//! B.U.D. 2.0 - THE PRODUCTION COST TABLE (ideas 2.0, I3 - closing "the
+//! production cost was never measured").
 //!
-//! İ3 üretim piyasasının fiyat fonksiyonu girdisi: her boru hattı adımının BİRİM
-//! maliyeti. Sayılar 2026-08-16 sandbox ölçümlerinden (zstd/xz/ffmpeg süreleri ve
-//! yayınlanan benchmark'lar) türetilmiştir; `measure()` ile canlı ölçüm yapılabilir.
-//! Ekonomi: validatör üretim maliyeti CPU tarafında; kullanıcıya TEK FİYAT (flat_price).
+//! The price function input of the I3 production market: the UNIT cost of each
+//! pipeline step. The numbers are derived from sandbox measurements on
+//! 2026-08-16 (zstd/xz/ffmpeg timings and published benchmarks); `measure()`
+//! can take a live measurement.
+//! The economics: the validator's production cost sits on the CPU side, while
+//! the user sees a SINGLE PRICE (flat_price).
 
 #![forbid(unsafe_code)]
 
@@ -11,12 +14,13 @@ use sha3::{Digest, Sha3_256};
 
 pub const PRODCOST_MAGIC: [u8; 8] = *b"\xB5COST\0\0\0";
 
-/// Boru hattı adımının maliyet modeli: MB/s (çıktı veya girdi, adıma göre).
+/// The cost model of a pipeline step: MB/s (of output or input, depending on
+/// the step).
 #[derive(Debug, Clone, Copy)]
 pub struct StepCost {
     pub step: &'static str,
-    pub mb_per_s: f64,       // işleme hızı (ölçülmüş/yayınlanmış)
-    pub cpu_sec_per_tb: f64, // hesaplanmış: 1_048_576 MB / mb_per_s
+    pub mb_per_s: f64,       // the processing rate (measured or published)
+    pub cpu_sec_per_tb: f64, // computed: 1_048_576 MB / mb_per_s
 }
 
 pub const STEPS: &[StepCost] = &[
@@ -97,12 +101,13 @@ pub const STEPS: &[StepCost] = &[
     },
 ];
 
-/// Adım maliyetini adıyla bul.
+/// Find a step cost by its name.
 pub fn step_cost(name: &str) -> Option<&'static StepCost> {
     STEPS.iter().find(|s| s.step == name)
 }
 
-/// Boru hattının toplam CPU süresi (saniye/TB) - fiyat fonksiyonu girdisi.
+/// The total CPU time of the pipeline (seconds per TB) - the price function
+/// input.
 pub fn pipeline_cpu_sec_per_tb(steps: &[&str]) -> f64 {
     steps
         .iter()
@@ -111,15 +116,16 @@ pub fn pipeline_cpu_sec_per_tb(steps: &[&str]) -> f64 {
         .sum()
 }
 
-/// CPU saniyesinin $ karşılığı (validatör donanım amortismanı ~$0.00002/CPU-sn).
+/// The dollar value of a CPU second (validator hardware amortisation, about
+/// $0.00002 per CPU second).
 pub const USD_PER_CPU_SEC: f64 = 0.00002;
 
-/// Boru hattının üretim maliyeti: $/TB.
+/// The production cost of the pipeline: dollars per TB.
 pub fn pipeline_production_usd_per_tb(steps: &[&str]) -> f64 {
     pipeline_cpu_sec_per_tb(steps) * USD_PER_CPU_SEC
 }
 
-/// Kanıt özeti (deterministik).
+/// The evidence digest (deterministic).
 pub fn cost_digest() -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(PRODCOST_MAGIC);
@@ -135,42 +141,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn her_adim_maliyeti_pozitif_ve_makul() {
+    fn every_step_cost_is_positive_and_plausible() {
         for s in STEPS {
-            assert!(s.mb_per_s > 0.0, "{} hız 0", s.step);
+            assert!(s.mb_per_s > 0.0, "{} has a rate of 0", s.step);
             assert!(s.cpu_sec_per_tb > 0.0);
-            // 1 TB = 1_048_576 MB → cpu_sec = MB/mb_per_s
-            let beklenen = 1_048_576.0 / s.mb_per_s;
+            // 1 TB = 1_048_576 MB, so cpu_sec = MB / mb_per_s
+            let expected = 1_048_576.0 / s.mb_per_s;
             assert!(
-                (s.cpu_sec_per_tb - beklenen).abs() < 1.0,
-                "{} tutarsız",
+                (s.cpu_sec_per_tb - expected).abs() < 1.0,
+                "{} is inconsistent",
                 s.step
             );
         }
     }
 
     #[test]
-    fn kolay_pipeline_ucuz_agir_pipeline_pahali() {
-        let hafif = pipeline_production_usd_per_tb(&["detect", "structural-split", "zstd-3"]);
-        let agir = pipeline_production_usd_per_tb(&[
+    fn an_easy_pipeline_is_cheap_and_a_heavy_one_is_expensive() {
+        let light = pipeline_production_usd_per_tb(&["detect", "structural-split", "zstd-3"]);
+        let heavy = pipeline_production_usd_per_tb(&[
             "detect",
             "columnar-json",
             "zstd-19",
             "cauchy-erasure-enc",
             "sha3-256",
         ]);
-        assert!(agir > hafif);
-        assert!(hafif > 0.0);
+        assert!(heavy > light);
+        assert!(light > 0.0);
     }
 
     #[test]
-    fn bilinmeyen_adim_sifir_katki() {
-        assert!(step_cost("yok-boyle-adim").is_none());
-        assert_eq!(pipeline_cpu_sec_per_tb(&["yok"]), 0.0);
+    fn an_unknown_step_contributes_zero() {
+        assert!(step_cost("no-such-step").is_none());
+        assert_eq!(pipeline_cpu_sec_per_tb(&["none"]), 0.0);
     }
 
     #[test]
-    fn maliyet_digest_deterministik() {
+    fn the_cost_digest_is_deterministic() {
         assert_eq!(cost_digest(), cost_digest());
     }
 }
