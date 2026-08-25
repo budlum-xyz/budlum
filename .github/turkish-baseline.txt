@@ -17,4 +17,3 @@
 crates/lubot/crates/lubot-data/src/jsonl.rs	2
 crates/lubot/crates/lubot-knowledge/src/embed.rs	3
 crates/lubot/crates/lubot-tune/src/schema.rs	4
-src/tests/blockchair_fixture_locks.rs	57
