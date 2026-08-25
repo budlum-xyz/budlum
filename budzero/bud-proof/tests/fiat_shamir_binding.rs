@@ -209,13 +209,15 @@ fn alpha_and_zeta_follow_their_commitments() {
         //
         // This test was named "alpha_and_zeta" and its body measured only zeta;
         // olcuyordu - alpha hic aranmiyordu. Belgelenmis ama denetlenmemis
-        // bir degismez, denetlenmeyen bir degismezdir; adi gecen kisim
-        // that is worse still, because it gives a reader the impression of coverage.
+        // an invariant nobody checks is an unchecked invariant; naming it in
+        // passing is worse still, because it gives a reader the impression of
+        // coverage.
         //
-        // Kisitlari tek polinomda katlayan carpan alpha'dir. Iz taahhudu
-        // is sampled before being fixed, the prover can search for a trace after
-        // secebilir ve katlanmis kisitin sifira gitmesini saglayacak bir iz
-        // learning alpha. Folding is meaningful only if the things it folds are fixed.
+        // alpha is the coefficient folding the constraints into a single
+        // polynomial. If it is sampled before the trace commitment is fixed, the
+        // prover can learn alpha first and then search for a trace that drives
+        // the folded constraint to zero. Folding is meaningful only if the things
+        // it folds are fixed.
         let trace_observe = code(body)
             .iter()
             .enumerate()
@@ -244,9 +246,9 @@ fn alpha_and_zeta_follow_their_commitments() {
             trace_observe + 1
         );
 
-        // Ve alpha, zeta'dan once gelmeli: zeta, alpha ile katlanmis kisitin
-        // is evaluated. In the reverse order the point would be independent of the folding
-        // secilmis olurdu.
+        // And alpha has to come before zeta: zeta is the point at which the
+        // constraint folded by alpha is evaluated. In the reverse order the point
+        // would have been chosen independently of the folding.
         assert!(
             alpha < zeta,
             "{name}: zeta (line {}) is sampled before alpha (line {}); the \
