@@ -85,12 +85,10 @@ crates/budscan/browser/patches/bud-protocol-handler.patch	4
 crates/budscan/browser/patches/name-bar-punycode.patch	6
 crates/budscan/browser/settings/policies.json	10
 crates/budscan/src/content_id.rs	12
-crates/budscan/src/punycode.rs	16
 crates/lubot/Cargo.toml	5
 crates/lubot/config/datasets.toml	7
 crates/lubot/config/models.toml	4
 crates/lubot/crates/lubot-core/Cargo.toml	1
-crates/lubot/crates/lubot-core/src/dataset.rs	16
 crates/lubot/crates/lubot-core/src/lib.rs	4
 crates/lubot/crates/lubot-core/src/manifest.rs	12
 crates/lubot/crates/lubot-core/src/tier.rs	12
