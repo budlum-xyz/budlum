@@ -1016,13 +1016,13 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
 /// pair:
 ///
 /// ```text
-/// PoW                kayit=pow-header-chain-v1    runtime=pow-header-chain-v1    OK
-/// PoS                kayit=pos-qc-finality        runtime=pos-qc-finality        OK
-/// PoA                kayit=poa-authority-quorum   runtime=poa-authority-quorum   OK
-/// Bft                kayit=bft-quorum-commit      runtime=bft-quorum-commit      OK
-/// Zk                 kayit=zk-proof-verification  runtime=zk-proof-verification  OK
-/// StorageAttestation kayit=storage-attestation-v1 runtime=storage-attestation-v1 OK
-/// AiInference        kayit=ai-inference-threshold runtime=storage-attestation-v1 CELISKI
+/// PoW                record=pow-header-chain-v1    runtime=pow-header-chain-v1    OK
+/// PoS                record=pos-qc-finality        runtime=pos-qc-finality        OK
+/// PoA                record=poa-authority-quorum   runtime=poa-authority-quorum   OK
+/// Bft                record=bft-quorum-commit      runtime=bft-quorum-commit      OK
+/// Zk                 record=zk-proof-verification  runtime=zk-proof-verification  OK
+/// StorageAttestation record=storage-attestation-v1 runtime=storage-attestation-v1 OK
+/// AiInference        record=ai-inference-threshold runtime=storage-attestation-v1 DISAGREES
 /// ```
 ///
 /// The same class of dead wiring was already found and fixed once in the `Zk`

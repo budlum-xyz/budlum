@@ -1,7 +1,11 @@
-//! .bud Transpile - bash'e derlenir + AST dönüşümü
-//! DÜRÜSTLÜK (K19/K38): "bash transpile 10x" iddiası ÖLÇÜLÜMDE TUTMADI - echo-script
-//! kodu büyütür (ratio < 1), kapı RED verir (kanarya testi). AST stub'tır; oran iddiası yok.
-//! Kapı K-BUD-TRANSPILE
+//! .bud transpile - compiles to bash, plus the AST transform.
+//!
+//! HONESTY (K19/K38): the claim "bash transpile 10x" DID NOT HOLD UP UNDER
+//! MEASUREMENT - an echo script makes the code bigger (the ratio is below 1) and
+//! the gate REFUSES it (the canary test). The AST part is a stub; no ratio is
+//! claimed for it.
+//!
+//! Gate: K-BUD-TRANSPILE.
 
 #![forbid(unsafe_code)]
 
@@ -43,7 +47,7 @@ pub struct AstTransform {
 impl AstTransform {
     pub fn transform(code: &str) -> Self {
         // stub: AST = {"type":"File","body":[...]}
-        // K38: UTF-8 güvenli kırpma - bayt dilimi çok baytlı karakteri BÖLEMEZ (panik yok)
+        // K38: UTF-8 safe truncation - a byte slice must NOT split a multi-byte character, so no panic.
         let snippet: String = code.chars().take(100).collect();
         let ast = format!("{{\"type\":\"File\",\"body\":[\"{}\"]}}", snippet);
         Self {
@@ -84,8 +88,9 @@ mod tests {
     fn transpile() {
         let code = "fn main() { println!(\"hello\"); }";
         let t = BashTranspile::transpile(code);
-        // Gerçek ölçüm: bash echo-script kodu KÜÇÜLTMEZ, büyütür (ratio < 1).
-        // "bash transpile 10x" iddiası yanlıştır - kapı RED vermelidir (kanarya).
+        // The real measurement: a bash echo script does NOT shrink the code, it
+        // grows it (the ratio is below 1). The claim "bash transpile 10x" is
+        // false, and the gate has to REFUSE it - this is the canary.
         assert!(t.ratio() < 1.0);
         assert!(TranspileGates::k_bud_transpile(&t).is_err());
     }
