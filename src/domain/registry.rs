@@ -34,9 +34,10 @@ pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 /// yukseltmek ya da kullanilmayan domainleri emekliye ayirmak - ve o karar
 /// becomes visible. From a silently growing cost to a discussed decision.
 ///
-/// Emekli (`Retired`) domainler de sayilir: yaprak agacta durdugu surece kok
-/// count against it. To be excluded from the count they must be **removed** from the
-/// registry, which is a separate decision and a separate path.
+/// Retired domains count too: as long as the leaf stands in the tree, the root
+/// and the proof size count against it. To be excluded from the count a domain
+/// has to be **removed** from the registry, which is a separate decision and a
+/// separate path.
 pub const MAX_REGISTERED_DOMAINS: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -210,11 +211,11 @@ impl ConsensusDomainRegistry {
     /// # Why this path exists
     ///
     /// `zk_program_allowlist` is read in `submit_zk_proof` and an empty list means
-    /// fail-closed - the right default. But no code touched the **insertion**
-    /// yolu yoktu**: alan olusturulurken `Vec::new()` yaziliyor ve baska
-    /// side of the list. So there could never be anything behind the gate; a list that is
-    /// read but can never be filled gives a reader the impression that "programs are
-    /// managed" while they are not.
+    /// fail-closed - the right default. But nothing touched the **insertion**
+    /// side of the list: `Vec::new()` is written when the domain is created and
+    /// no other code path ever reached it. So there could never be anything
+    /// behind the gate; a list that is read but can never be filled gives a
+    /// reader the impression that "programs are managed" while they are not.
     ///
     /// # Errors
     ///
@@ -236,25 +237,25 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
-    /// Bir zk programini izin listesinden cikarir.
+    /// Removes a zk program from the allowlist.
     ///
     /// # Why revocation is mandatory
     ///
-    /// Kabul edilmis bir program, alanin durumunu ilerletme hakkina sahiptir.
-    /// If a defect is later found in that program - a field the proof system does not
-    /// constrain, a wrong transition rule - the only defence is to take it
-    /// listeden cikarmaktir. Ekleme yolu olup cikarma yolu olmayan bir izin
-    /// listesi, tek yonlu bir kapidir: iceri alinan bir daha disari
-    /// cannot be removed, and once that program is known to be wrong the only thing
-    /// left to do would be to freeze the whole domain.
+    /// An admitted program holds the right to advance the state of the domain.
+    /// If a defect is later found in that program - a field the proof system
+    /// does not constrain, a wrong transition rule - the only defence is to take
+    /// it off the list. An allowlist with an insertion path but no removal path
+    /// is a one-way door: what gets in can never be taken out, and once that
+    /// program is known to be wrong the only thing left to do would be to freeze
+    /// the whole domain.
     ///
-    /// Cikarma **geriye donuk degildir**: cikarilmadan once uretilmis ve
-    /// already accepted proofs stay valid. The history of the chain is not rewritten;
+    /// Revocation is **not retroactive**: proofs produced and already accepted
+    /// before the removal stay valid. The history of the chain is not rewritten;
     /// what changes is what will be accepted from now on.
     ///
     /// # Errors
     ///
-    /// Alan yoksa, ya da program listede degilse.
+    /// If the domain does not exist, or the program is not on the list.
     pub fn revoke_zk_program(&mut self, id: DomainId, program: &Hash32) -> Result<(), String> {
         let domain = self
             .domains
