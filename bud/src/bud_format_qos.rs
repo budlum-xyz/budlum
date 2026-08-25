@@ -61,12 +61,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kota_icinde_izni_ver() {
+    fn within_quota_is_allowed() {
         assert!(matches!(decide_qos(50, 10, 100, 1, 10), QosVerdict::Allow));
     }
 
     #[test]
-    fn hiz_asimi_yavaslatir() {
+    fn exceeding_the_rate_throttles() {
         assert!(matches!(
             decide_qos(0, 10, 100, 11, 10),
             QosVerdict::Throttled(_)
@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn kota_asimi_reddeder() {
+    fn exceeding_the_quota_is_rejected() {
         assert!(matches!(decide_qos(90, 90, 100, 1, 10), QosVerdict::Denied));
     }
 

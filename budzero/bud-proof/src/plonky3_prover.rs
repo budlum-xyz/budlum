@@ -3935,7 +3935,7 @@ mod tests {
                 }),
             ),
             (
-                "bolum parcasi dusuruldu",
+                "quotient chunk dropped",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.opened_values.quotient_chunks.pop();
                 }),
@@ -4262,7 +4262,7 @@ mod tests {
 
     /// The ZK flag and the randomness commitment in the proof must **agree**.
     ///
-    /// `verifier.rs:363` bunu acikca denetliyor: ZK acikken rastgelelik
+    /// `verifier.rs:363` checks this explicitly: with ZK on, randomness
     /// commitment must be present when it is on and absent when it is off.
     /// There was no test for it at all. If a mismatch were accepted, a proof
     /// with no randomness while ZK is on would silently lose the privacy

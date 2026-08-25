@@ -79,7 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kucuk_nesneler_hep_hit_buyukler_dolmazsa() {
+    fn small_objects_always_hit_while_large_ones_do_not_fill() {
         let mut c = EdgeCache::new(100_000).unwrap();
         // 100 small objects (900 bytes): all of them hit.
         for _ in 0..100 {

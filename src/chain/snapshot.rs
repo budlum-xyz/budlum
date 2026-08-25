@@ -1709,7 +1709,7 @@ mod tests {
     // `serde(default)` dolgusu hic sinanmiyordu. Gercek bir schema-2/3 disk
     // in a real record those fields are not present as bytes; what migration promises is exactly
     // o yokluga karsi davranistir. Iki test blobu bu yuzden `serde_json`
-    // ameliyatiyla kurar: kaynak blobda alan anahtari HIC yok.
+    // surgery: the field key is entirely ABSENT from the source blob.
     // The red evidence was taken in an isolated vault (the pd vault): an importer without the bump line
     // reported "migration done" while leaving the version at 2 and the test
     // failed; the variant with the bump passed the same test.
@@ -1718,16 +1718,16 @@ mod tests {
     fn legacy_params(height: u64) -> StateSnapshotV2Params {
         StateSnapshotV2Params {
             height,
-            block_hash: "blok-ozeti".into(),
-            genesis_hash: "genesis-ozeti".into(),
+            block_hash: "block-digest".into(),
+            genesis_hash: "genesis-digest".into(),
             chain_id: 42,
             finalized_height: 0,
-            finalized_hash: "fin-ozeti".into(),
+            finalized_hash: "fin-digest".into(),
             finality_certificates: vec![],
         }
     }
 
-    /// `snapshot`'i eski bir disk blobu gibi goster: verilen anahtarlari
+    /// Present `snapshot` as an old on-disk blob: the given keys are
     /// DELETES it from the serialized record and rewinds the version number.
     /// The deleted key is absent from the blob as bytes; the `serde(default)` fill-in
     /// can only be exercised with such a blob.
@@ -1791,7 +1791,7 @@ mod tests {
     const POA_ADMISSION_KEYS: &[&str] = &["poa_onboarding"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
-    /// kaybetmemesi gereken alanlar. `snapshot_hash` bilincli disarida:
+    /// the fields it must not lose. `snapshot_hash` is deliberately outside:
     /// the seal is recomputed because the version changed.
     const SCHEMA2_FIELDS: &[&str] = &[
         "height",
@@ -1872,7 +1872,7 @@ mod tests {
         }
     }
 
-    /// Serilestirilmis alan kumesinin kilidi: `StateSnapshotV2`'ye yeni bir
+    /// A lock on the serialised field set: adding a new field to
     /// this test must fail when a field is added, because the "every field" claim of the two
     /// old-blob tests only holds if this list is current. Whoever adds a field:
     /// add that field's behaviour to both old-blob tests, then update
@@ -2010,7 +2010,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(restored.tokenomics).unwrap(),
             serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
-            "blobda olmayan tokenomics default'a donmeli"
+            "tokenomics absent from the blob must fall back to the default"
         );
         // The seal must be recomputed and consistent with itself.
         assert!(
@@ -2022,7 +2022,7 @@ mod tests {
     /// schema-3 blobu: v3 alanlari veri TASIYOR, v4 alanlari yok.
     ///
     /// The other half of the loss distinction: the same `serde(default)` field, when present
-    /// veri tasidiginda, o veriyi birebir teslim etmek zorunda. Onceki test
+    /// carries data, it must deliver that data verbatim. The previous test
     /// hic-tasinmayan tarafi, bu test dolu-tasinan tarafi kilitler.
     #[test]
     fn a_legacy_schema3_blob_migrates_keeping_v3_data_and_defaulting_v4() {
@@ -2071,7 +2071,7 @@ mod tests {
         for key in SCHEMA4_ONLY_KEYS {
             assert!(
                 !obj.contains_key(*key),
-                "kaynak blobda olmamasi gereken v4 anahtari var: {key}"
+                "the source blob carries a v4 key it must not: {key}"
             );
         }
 
@@ -2138,7 +2138,7 @@ mod tests {
         for key in POA_ADMISSION_KEYS {
             assert!(
                 !obj.contains_key(*key),
-                "kaynak blobda olmamasi gereken kabul anahtari var: {key}"
+                "the source blob carries an acceptance key it must not: {key}"
             );
         }
         assert!(

@@ -24,7 +24,7 @@ pub enum ServeEngine {
 
 impl ServeEngine {
     /// Whether this engine is guaranteed to produce bit-identical output for the same
-    /// edilebilir mi?
+    /// is it serviceable?
     ///
     /// **Why it matters:** `AiRegistry::try_finalize_with_proofs` groups results by
     /// `output_commitment: [u8; 32]`. If two operators differ by a single

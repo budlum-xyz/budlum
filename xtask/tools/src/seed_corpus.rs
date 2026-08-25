@@ -1,6 +1,6 @@
 //! `BudZero` ZKVM fuzz tohum korpusu ureteci.
 //!
-//! `scripts/generate_zkvm_seed_corpus.sh` yerine gecer.
+//! Replaces `scripts/generate_zkvm_seed_corpus.sh`.
 //!
 //! # The silent failure of the shell version
 //!
@@ -14,7 +14,7 @@
 //! In Rust a seed is a `&[u8]` constant; there is no escape sequence to
 //! interpret.
 //!
-//! Ayrica betigin son satiri `ls -1 "$OUT_DIR"/*.bud | wc -l` ile sayiyordu;
+//! The script's last line also counted with `ls -1 "$OUT_DIR"/*.bud | wc -l`;
 //! bu, dizin bos oldugunda glob'un genislememesi yuzunden `ls: no such
 //! file` yazip **1** sayardi. Burada sayim yazilan dosyalarin kendisinden
 //! geliyor.
@@ -62,7 +62,7 @@ const SEEDS: &[Seed] = &[
     },
 ];
 
-/// Tohumlari `out_dir` icine yaz.
+/// Write the seeds into `out_dir`.
 ///
 /// # Errors
 ///

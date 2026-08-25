@@ -1334,7 +1334,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //
         // # Kapanan bosluk
         //
-        // Asagidaki kok denetimi, **orijinal** VerifyMerkle satirinin
+        // The root check below reads the root the **original** VerifyMerkle row
         // compared the `merkle_current` value against `rs1_val` (the claimed
         // root). The prover writes the output of round 64 into that cell - but
         // **no constraint enforced it**. So the chain was computed correctly row
@@ -2532,7 +2532,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let prog_active_ext: AB::ExprEF = prog_active.into();
             // A row outside the program can lend nothing: the multiplicity can be
             // non-zero only on a real ROM row (pre_active=1).
-            // Aksi halde prover programda olmayan bir pc'ye agirlik yazarak
+            // Otherwise the prover could write weight to a pc absent from the program and
             // dengeyi uydurabilirdi.
             builder.assert_zero(prog_mult.clone() * (one.clone() - pre_active.clone()));
             let pre_active_ext: AB::ExprEF = prog_mult.into();
@@ -2934,7 +2934,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                     }
                     poseidon_out = sum;
                     // Strix HIGH CWE-345: SWrite son round ciktisinin ilk 4
-                    // lane'i bir sonraki accumulator olur (8 x u32 limb).
+                    // lane becomes the next accumulator (8 x u32 limbs).
                     for k in 0..4 {
                         let mut out_k: AB::Expr = AB::Expr::ZERO;
                         for j in 0..8 {

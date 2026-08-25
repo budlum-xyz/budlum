@@ -75,7 +75,7 @@ jobs:
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
-      - name: Trivy IMAGE kapisi (smoke imaji; CRITICAL/HIGH = fail)
+      - name: Trivy IMAGE gate (smoke image; CRITICAL/HIGH = fail)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image

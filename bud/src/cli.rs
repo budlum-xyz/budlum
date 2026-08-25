@@ -112,7 +112,7 @@ mod tests {
         let json = br#"[{"a":1},{"a":2},{"a":3},{"a":4}]"#;
         let csv = b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n";
         let log = b"2026-08-16T10:00:00Z INFO req=1\n2026-08-16T10:01:00Z WARN req=2\n";
-        let text = b"birinci satir\nikinci satir\nucuncu satir\n";
+        let text = b"first line\nsecond line\nthird line\n";
         let bin: Vec<u8> = (0u8..255).cycle().take(200_000).collect();
         for (data, kind, codec) in [
             (&json[..], StructuralKind::Json, FormatCodec::Json),

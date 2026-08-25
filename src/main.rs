@@ -1029,7 +1029,7 @@ async fn main() {
             budlum_core::crypto::primitives::ValidatorKeys::load(&v_path)
                 .map_err(|e| {
                     tracing::warn!(
-                        "Validator key load failed ({v_path}): {e} - producersuz devam."
+                        "Validator key load failed ({v_path}): {e} - continuing without a producer."
                     );
                 })
                 .ok()

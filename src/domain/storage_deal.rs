@@ -2519,7 +2519,7 @@ impl StorageRegistry {
         Some(ticket_id)
     }
 
-    /// Bekleyen biletlere yerlesim tavsiyesini yaz.
+    /// Write the placement advice onto the pending tickets.
     ///
     /// `assign_shard` rendezvous hashing ile shard basina deterministik bir
     /// chooses a holder: the same shard, the same entropy and the same
@@ -3671,7 +3671,7 @@ mod tests {
         (id, shard_id)
     }
 
-    // === Yerlesim tavsiyesi ==============================================
+    // === Placement advice =================================================
 
     fn placement_candidates(n: u8) -> Vec<crate::storage::assignment::ShardCandidate> {
         (1..=n)
@@ -4492,7 +4492,7 @@ mod tests {
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
         // Gate (9d82f61): None her zaman MerkleProofRequired vermeli.
-        // REGRESYON KILIDI - a0671c4'te silinmisti, geri yuklendi; SILME.
+        // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -4517,7 +4517,7 @@ mod tests {
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
         // Format gate: deserialize edilemeyen blob InvalidMerkleProof vermeli.
-        // REGRESYON KILIDI - a0671c4'te silinmisti, geri yuklendi; SILME.
+        // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;

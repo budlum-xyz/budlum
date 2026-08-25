@@ -185,7 +185,7 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
     let pre_root = state.root();
 
-    // Strix HIGH (2026-08-17): Vm::new mainnet_mode=false birakir; gated
+    // Strix HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
     // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
     // runs. The CLI default must be mainnet safe: mainnet_mode=true.
     let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, true);

@@ -4,7 +4,7 @@
 //! Remaining work: DB page compression. For a page-structured database file
 //! (SQLite or FDB): an XOR delta between consecutive pages, then zstd (under an
 //! append-heavy workload neighbouring pages
-//! benzerdir). KAYIPSIZ: orijinal sayfalar birebir geri kurulur.
+//! is similar). LOSSLESS: the original pages are restored byte for byte.
 
 #![forbid(unsafe_code)]
 
@@ -64,7 +64,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sayfa_delta_kayipsiz() {
+    fn page_delta_is_lossless() {
         // Append-heavy: every page closely resembles the one before it.
         let mut pages: Vec<Vec<u8>> = Vec::new();
         let mut cur = vec![0u8; 256];
