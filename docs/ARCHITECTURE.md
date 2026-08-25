@@ -91,6 +91,7 @@
 - [81. The product of two defensible limits](#81-the-product-of-two-defensible-limits)
 - [82. A disconnect is not an amnesty](#82-a-disconnect-is-not-an-amnesty)
 - [83. Who chooses the size of the allocation](#83-who-chooses-the-size-of-the-allocation)
+- [84. Where a guarantee lives](#84-where-a-guarantee-lives)
 
 ## 1. Overall system architecture
 
@@ -3612,3 +3613,44 @@ file as a clean first boot.
 
 This is the same shape as the mempool ceiling (§81) and the score table (§82): a quantity that is small in every real
 run is still unbounded until something states the bound.
+
+## 84. Where a guarantee lives
+
+The wallet builds a change output only when the input note is larger than the payment. That output needs two secrets the
+caller supplies, and both are `Option`. The code read them with `expect("validated")`, and the word was accurate: the
+same function calls `validate_conservation()` on its first line, and that check refuses a change transfer whose secrets
+are missing. The panic could not fire.
+
+It could not fire *because of a check somewhere else*. That is a different property from cannot fire, and the difference
+is invisible at the point where the value is read.
+
+```mermaid
+flowchart TD
+  R["change transfer request"] --> V{"validate_conservation"}
+  V -->|"refuses"| E1["InvalidPrivateTransfer - no output built"]
+  V -->|"passes"| B["build change output"]
+  B --> S{"both change secrets present?"}
+  S -->|"no"| E2["InvalidPrivateTransfer - second line of defence"]
+  S -->|"yes"| O["change output"]
+  E1 -.->|"guard removed or bypassed"| S
+```
+
+The dotted edge is the whole argument. Delete the validation call, or add a second caller that reaches the builder
+without it, and the `expect` version aborts the process - inside a wallet, while holding the user's note witnesses and
+spend secrets in memory. The `let ... else` version answers with the refusal the caller already knows how to handle.
+
+This was measured rather than assumed. A test that passes a change request with one secret missing is green against
+*both* versions, because the early validation refuses first and the reader never runs. Removing that one line from the
+builder separates them: the refusal stays green, the `expect` fails with a panic. A test whose value only appears under
+mutation is still worth keeping, provided the mutation result is written down next to it - otherwise a later reader sees
+a test that would pass with the guard deleted and concludes it tests nothing.
+
+The other three sites in the same crate are the opposite case, and they are worth separating from the first. They read
+the first eight bytes of a 32-byte hash with `out[..8].try_into().expect("SHA3-256 output is always 32 bytes")`. The
+claim is true and always will be. But the compiler cannot see that a slice of a known-size array has a known size, so a
+panic branch survives into the binary and the `.expect()` string becomes an assertion the next reader has to re-verify
+by hand. Destructuring the array instead - `let [b0, ..., b7, ..] = out;` - moves the same claim into the build. There
+is no branch left, so there is nothing to re-verify.
+
+Both changes point the same way. A guarantee should live in the code that depends on it: as a refusal when the condition
+is a runtime fact, and as a pattern the build checks when it is not.
