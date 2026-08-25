@@ -1,5 +1,7 @@
-//! Kapilar - her darbozgaz olculmus kapi ile sertlestirilir
-//! Kapi yalniz dogruyu gecirmekle yetmez, bozulmayi yakaladigi gosterilmeden kapi sayilmaz
+//! The gates - every bottleneck is hardened with a measured gate.
+//!
+//! A gate letting the correct case through is not enough: nothing counts as a
+//! gate until it has been shown to catch the broken case.
 
 use crate::fidelity::FidelityCore;
 use crate::fidelity::RenderFormat;
@@ -83,7 +85,7 @@ impl GateSuite {
         let rendered = core.render(fmt);
         match rendered {
             Ok((_, (w, h))) => {
-                // Thumbnail icin cozunurluk farkli olabilir ama turev oldugu icin OK - burada sadakat cekirdegi: original formatlar icin ayni olmali
+                // A thumbnail may carry a different resolution and that is fine, because it is a derivative. What matters here is the fidelity core: for originals the format must match.
                 let expected_ok = match fmt {
                     RenderFormat::Thumbnail { .. } => true, // turev, KF2 icin orijinal kabul
                     _ => w == core.width && h == core.height,
@@ -133,7 +135,7 @@ impl GateSuite {
 
     pub fn all_gates_demo() -> Vec<GateResult> {
         let price = PriceModel::default();
-        // K38: demo da panik üretmez - geçersiz oran 0.0 ile işaretlenir
+        // K38: the demo does not panic either - an invalid ratio is marked with 0.0.
         let cost_json = price.cost_sold(1.143, 17.191).unwrap_or(0.0);
         let cost_jpeg = price.cost_sold(1.286, 4.885).unwrap_or(0.0);
         let core = FidelityCore::new(vec![1, 2, 3], 1920, 1080);

@@ -251,7 +251,7 @@ mod tests {
         // pure production: producer + seed -> bytes; the commitment must match the production
         let seed = [7u8; 32];
         let producer = [1u8; 32];
-        let produced = b"deterministik uretim ciktisi 1234567890";
+        let produced = b"deterministic production output 1234567890";
         let pact = PactRecord::pure(producer, seed, produced, 100);
         assert!(
             pact.verify_production(produced),
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn producer_plus_residual_classification() {
         // producer plus residual: the unproducible remainder gets its own commitment (I6)
-        let produced = b"uretilen kisim";
+        let produced = b"the produced part";
         let residual = b"organic remainder: noise 0x1234";
         let pact =
             PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
@@ -343,14 +343,14 @@ mod tests {
     #[test]
     fn consensus_safe_serialization_roundtrip() {
         // I1: to_blob -> from_blob is exact; the blob is canonical (fixed size and order).
-        let p1 = PactRecord::pure([7u8; 32], [9u8; 32], b"uretilen veri", 1_768_000_000);
+        let p1 = PactRecord::pure([7u8; 32], [9u8; 32], b"produced data", 1_768_000_000);
         let blob = p1.to_blob();
         let p2 = PactRecord::from_blob(&blob).expect("the blob opens");
         assert_eq!(p1.record_hash(), p2.record_hash(), "serialization is exact");
         assert_eq!(p1.mode, p2.mode);
         assert_eq!(p1.residual_len, p2.residual_len);
         // canonical: the same record -> the same bytes (no effect on the state root)
-        let p3 = PactRecord::pure([7u8; 32], [9u8; 32], b"uretilen veri", 1_768_000_000);
+        let p3 = PactRecord::pure([7u8; 32], [9u8; 32], b"produced data", 1_768_000_000);
         assert_eq!(blob, p3.to_blob());
         // bozuk blob → None (panik yok)
         let mut bozuk = blob.clone();
