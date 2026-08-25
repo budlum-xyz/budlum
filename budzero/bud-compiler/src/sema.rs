@@ -117,9 +117,9 @@ pub struct SemanticAnalyzer {
     ///
     /// Erisim `storage::ad` sozdizimiyle olur ve `Stmt::StorageWrite` /
     /// is parsed as `Expr::StorageRead`, so the fields are
-    /// degisken ortamina konmaz. Burada tutulmalarinin nedeni tiplerin bir
-    /// kez dogrulanmasi: bir alanin tip adindaki yazim hatasi, struct alan
-    /// so it does not silently turn into an imaginary struct type, as with struct field types.
+    /// not placed into the variable environment. They are held here so the types
+    /// are verified once: a typo in a field's type name must not silently turn
+    /// into an imaginary struct type, as it can with struct field types.
     pub storage: HashMap<String, Type>,
     pub current_func_ret: Type,
 }
@@ -634,23 +634,24 @@ impl SemanticAnalyzer {
                         // are for.
                         // `/` is field division, not integer division.
                         //
-                        // The VM executes `Opcode::Div` as the Goldilocks multiplicative
-                        // yurutuyor (`bud-vm`: `rs1 * rs2^-1 mod p`) ve AIR
-                        // kisiti da bunu sabitliyor: `rd * rs2 = rs1`. Bu ZK
-                        // inverse - the right choice in a ZK circuit; integer division
-                        // needs separate range checks for the quotient and the remainder.
+                        // The VM executes `Opcode::Div` as the Goldilocks
+                        // multiplicative inverse (`bud-vm`: `rs1 * rs2^-1 mod
+                        // p`) and the AIR constraint pins that down
+                        // (`rd * rs2 = rs1`). That is the right choice in a ZK
+                        // circuit; integer division would need separate range
+                        // checks for the quotient and the remainder.
                         //
                         // But a developer writing `u64` expects integer division.
                         // Measured: `7 / 2` gives 9223372034707292164 in the field,
                         // not 3. Every contract that builds a condition on such a
                         // result branches silently wrongly.
                         //
-                        // So `/` is free only over `field`:
-                        // orada semantik zaten alan aritmetigidir ve yazan
-                        // whoever writes it chose it deliberately. It is refused for `u64`.
+                        // So `/` is free only over `field`: there the semantics
+                        // are field arithmetic already, and whoever writes it
+                        // chose that deliberately. It is refused for `u64`.
                         // A division result of 0 on division by zero is likewise
                         // meaningful only in a `field` context, for the same reason
-                        // (AIR bunu acikca kisitliyor).
+                        // (the AIR constrains this explicitly).
                         if matches!(op, BinOp::Div) && matches!(ty, Type::U64) {
                             errors.push(CompileError::SemanticError(String::from(
                                 "Operator Div cannot be applied to u64 (`/` is field \

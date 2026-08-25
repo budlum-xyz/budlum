@@ -147,7 +147,7 @@ jobs:
             tail -30 /tmp/mutants-canary.log >&2
             exit 1
           fi
-      # `--in-diff`: her kosuda tum agaci mutasyona ugratmak saatler surer ve
+      # `--in-diff`: mutating the whole tree on every run takes hours and yields
       # findings about code a PR did not change. This branch's diff is inspected,
       # so the question becomes "is this change tested", which is the only
       # answerable question.
@@ -235,18 +235,18 @@ jobs:
               sys.exit(1)
 
           if orphans:
-              print(f"{len(orphans)} sahipsiz bagimlilik:", file=sys.stderr)
+              print(f"{len(orphans)} ownerless dependencies:", file=sys.stderr)
               for o in sorted(orphans):
                   print(f"  {o}", file=sys.stderr)
               print(
                   "\nAn ownerless crate cannot be patched by anyone. If a vulnerability "
                   "appears there is nobody to wait for; replace the dependency or "
-                  "icerlestirin.",
+                  "vendor it in.",
                   file=sys.stderr,
               )
               sys.exit(1)
 
-          print(f"Sahipsiz bagimlilik yok: {total} crates.io kraftinin hepsinin yayincisi var.")
+          print(f"No ownerless dependencies: all {total} crates.io crates have a publisher.")
           PY
 
   # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
@@ -273,7 +273,7 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # Canary: a deliberately racing program is written and TSan is expected to
-      # beklenir. Yakalamazsa arac calismiyor demektir ve temiz rapor bir sey
+      # catch it. If it does not, the tool is not working and a clean report says
       # nothing. Without the canary a green job would say not that the scan ran,
       # but at most that it did not fail.
       - name: TSan canary (does the tool really catch it)

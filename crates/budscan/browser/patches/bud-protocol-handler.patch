@@ -1,13 +1,14 @@
-bud:// protokol isleyicisi.
+The bud:// protocol handler.
 
-Sema bir kanal acmadan once `budscan` cekirdegine sorar ve **yalniz
-dogrulanmis baytlar** kanala yazilir. Dogrulanmayan bir cevap bir hata
-sayfasina cevrilir; baytlar hicbir kosulda ayristiriciya ulasmaz.
+Before opening a channel the scheme asks the `budscan` core, and **only
+verified bytes** are written into the channel. An answer that does not verify
+is turned into an error page; under no circumstance do the bytes reach the
+parser.
 
-Neden bir yonlendirme degil: `bud://ayaz.bud` bir HTTPS gecidine
-yonlendirilseydi, sayfanin kaynagi (origin) gecidin kaynagi olurdu ve
-`bud://ayaz.bud` altindaki iki farkli isim ayni kaynagi paylasirdi. Kanali
-kendimiz acmak, kaynagin `bud://<isim>` olmasini sagliyor.
+Why this is not a redirect: if `bud://ayaz.bud` were redirected to an HTTPS
+gateway, the origin of the page would be the origin of the gateway, and two
+different names under `bud://` would share one origin. Opening the channel
+ourselves keeps the origin at `bud://<name>`.
 
 --- a/netwerk/build/components.conf
 +++ b/netwerk/build/components.conf

@@ -1,6 +1,7 @@
 //! Provider soyutlamasi - B.U.D. 2.0 final kararlari
 //! no_social: SocialOpen iptal, sadece DeviceClosed + NetworkFull
-//! device offline: kendi icerigi suresiz, baskasinin replikasi 10dk grace
+//! When the device is offline: its own content stays indefinitely, while a
+//! replica of somebody else's gets a 10-minute grace period.
 //! cost zero_model, Pollen strict, storage_only, manual class, byte_identical + transcode_replace
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +49,7 @@ impl Provider for SocialMediaProvider {
 #[derive(Debug, Clone)]
 pub struct MobileSelfProvider {
     pub device_id: String,
-    pub is_owner: bool, // kendi icerigi mi baskasinin replikasi mi
+    pub is_owner: bool, // is this its own content, or a replica of somebody else's
     pub last_seen_secs: u64,
 }
 
@@ -121,7 +122,8 @@ impl Provider for NetworkFullProvider {
     }
 }
 
-/// Media cozum: device-closed zorunlu maliyet 0 ile $0.016 tutar
+/// The media resolution: with device-closed the mandatory cost is 0 and it
+/// still holds at $0.016.
 pub struct MediaDeviceOnlyPolicy;
 impl MediaDeviceOnlyPolicy {
     pub fn holds_price() -> bool {
@@ -129,7 +131,7 @@ impl MediaDeviceOnlyPolicy {
         true
     }
     pub fn explain() -> &'static str {
-        "no_social karari + tutmasi karari => media Sınıf C degil Sınıf B zorunlu, cost 0, KF OK. Agda sadece manifest shard (~1KB)."
+        "the no_social decision plus the retention decision mean media must be Class B rather than Class C, cost 0, KF OK. Only the manifest shard is on the network (about 1 KB)."
     }
 }
 
