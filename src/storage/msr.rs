@@ -3,10 +3,10 @@
 //! WIRING: unwired - this module measures the repair-traffic floor for the
 //! storage research; the consensus surface that will price repair from it
 //! (validator-facing accounting, Layer 3) is not built yet, so the module is
-//! reached by its own tests only. (Yon duzeltmesi: bu modul `lrc.rs`'i
-//! **okur** - `lrc_repair_traffic_scaled` icin `LrcLayout` alir - tersi
-//! degil. Onceki ifade "by `lrc.rs`" diyerek bagimliligi ters gosteriyordu,
-//! yani bu modulun bir cagirani varmis gibi okunuyordu; yok.)
+//! reached by its own tests only. (Direction correction: this module **reads**
+//! `lrc.rs` - it takes an `LrcLayout` for `lrc_repair_traffic_scaled` - not the
+//! other way round. The earlier wording, "by `lrc.rs`", showed the dependency
+//! backwards and read as if this module had a caller; it does not.)
 //!
 //! A repair that must read every surviving data shard costs `k` shards of
 //! traffic no matter how the parity is laid out. Regenerating codes lower
@@ -27,9 +27,10 @@
 //!
 //! # Why this module exists
 //!
-//! The storage research closes with "MSR onarımı hesaplayarak trafiği
-//! düşürüyor - fikrinizin 'üretim maliyetli olsun ama depolama sorun olmasın'
-//! mantığının matematiksel karşılığı." This is that claim as a checkable
+//! The storage research closes by saying that MSR lowers the traffic by
+//! computing the repair, and that this is the mathematical counterpart of the
+//! idea "let production be expensive, but let storage not be a problem". This
+//! is that claim as a checkable
 //! integer: given a repair degree, what is the traffic floor, and how does
 //! it compare to the LRC the tree already has?
 //!

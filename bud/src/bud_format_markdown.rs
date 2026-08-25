@@ -173,12 +173,12 @@ impl MarkdownSplit {
         }
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
-        // `count` SALDIRGAN KONTROLLU bir sayidir ve dogrudan `with_capacity`'e
-        // a 45-byte blob produces an 8.6 GB allocation request (measured:
+        // `count` is an ATTACKER-CONTROLLED number, and handed straight to
+        // `with_capacity` a 45-byte blob produces an 8.6 GB allocation request (measured:
         // "memory allocation of 8589934590 bytes failed" -> SIGABRT; crate
         // with panic="abort" the node dies instantly). The SHA3 above
-        // butunluk kontrolu bunu ENGELLEMEZ: ozet anahtarsizdir ve DOMAIN
-        // uses a public constant, so producing a blob with a valid digest is free.
+        // integrity check above does NOT prevent this: the digest is keyless and
+        // DOMAIN is a public constant, so producing a blob with a valid digest is free.
         //
         // The ceiling is derived from the input's OWN length: each section consumes at least 1 byte
         // of type + 4 bytes of length = 5 bytes. That keeps allocation always
@@ -287,12 +287,14 @@ fn read_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
 mod tests {
 
     /// RAM AUDIT (2026-08-21): a small blob with an inflated `count` field
-    /// govdede karsiligi olmamasina ragmen devasa bir on-ayirma tetikliyordu.
+    /// triggered an enormous pre-allocation even though the body held nothing
+    /// matching it.
     /// Measured: a 45-byte input -> an 8,589,934,590-byte allocation request ->
-    /// SIGABRT (crate panic="abort"). SHA3 butunluk alani KORUMAZ: ozet
-    /// is keyless and the DOMAIN constant is public, so a blob with a valid digest can be produced.
+    /// SIGABRT (the crate uses panic="abort"). The SHA3 integrity field does NOT
+    /// protect: the digest is keyless and the DOMAIN constant is public, so a
+    /// blob with a valid digest can be produced.
     #[test]
-    fn sisirilmis_bolum_sayisi_ayirmadan_once_reddedilir() {
+    fn an_inflated_section_count_is_refused_before_any_allocation() {
         use sha3::{Digest, Sha3_256};
         let mut b = Vec::new();
         b.extend_from_slice(&MD_MAGIC);
@@ -338,17 +340,17 @@ mod tests {
     /// A blank line is a separator in markdown - it separates paragraph from paragraph and list
     /// from list - so what is dropped is meaning, not formatting.
     #[test]
-    fn markdown_transformu_bayt_birebir_geri_doner() {
-        let durumlar = [
+    fn the_markdown_transform_returns_byte_for_byte() {
+        let cases = [
             "# Heading\n\nParagraph text.\n\n## Subheading\n\n- item\n",
             "# Heading\n\nParagraph text.\n\n## Subheading\n\n- item",
-            "tek satir",
-            "tek satir\n",
+            "a single line",
+            "a single line\n",
             "\n\n\nconsecutive blank lines\n\n\n",
-            "# B\n\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\nson\n",
+            "# B\n\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\nend\n",
             "   \na blank line with spaces is preserved\n",
         ];
-        for md in durumlar {
+        for md in cases {
             let split = MarkdownSplit::encode(md).expect("encode");
             assert_eq!(
                 split.decode(),
