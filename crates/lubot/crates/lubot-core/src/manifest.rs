@@ -1,30 +1,31 @@
-//! LoRA/SFT çıktısının manifesti.
+//! The manifest of a LoRA or SFT output.
 //!
-//! Çıktı, zincir üstü `register_lubot_model` kaydıyla bu manifest'in
-//! digest'i üzerinden eşleşir. Adaptör dtype'ı BF16/FP16 olarak tip
-//! sisteminde kalır (FP4 yoktur - router-collapse riski, araştırma §1.5).
+//! The output is matched against the on-chain `register_lubot_model` record
+//! through the digest of this manifest. The adapter dtype stays in the type
+//! system as BF16 or FP16 (there is no FP4, because of the router-collapse
+//! risk; see research section 1.5).
 
 use crate::model::{placeholder_digest, Hash32, ModelId};
 
-/// Adaptör hassasiyeti. FP4 bilinçli olarak yoktur.
+/// Adapter precision. FP4 is deliberately absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterDtype {
     Bf16,
     Fp16,
 }
 
-/// Eğitim çıktısı manifesti.
+/// The training output manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoRaManifest {
     pub base_model: ModelId,
-    /// Adaptörün SHA-256'sı. Üretimde zorunlu (fail-closed).
+    /// The SHA-256 of the adapter. Mandatory in production (fail-closed).
     pub adapter_sha256: Option<String>,
     pub rank: u16,
     pub alpha: u16,
     pub dtype: AdapterDtype,
-    /// Eğitimde kullanılan veri setlerinin content_id listesi.
+    /// The content_id list of the datasets used in training.
     pub dataset_refs: Vec<Hash32>,
-    /// Eğitim çerçevesi (ör. "llama-factory", "axolotl").
+    /// The training framework (for example "llama-factory" or "axolotl").
     pub framework: String,
     /// ISO-8601 tarih.
     pub trained_at: String,
@@ -45,7 +46,7 @@ impl LoRaManifest {
         }
     }
 
-    /// Manifest digest'i (yer tutucu; üretimde SHA-256 girer).
+    /// The manifest digest (a placeholder; in production a SHA-256 goes here).
     #[must_use]
     pub fn digest(&self) -> Hash32 {
         let mut buf = Vec::new();
@@ -58,7 +59,8 @@ impl LoRaManifest {
         placeholder_digest(&buf)
     }
 
-    /// Üretim kabulü: adaptör hash'i ve tarih olmadan çıktı kilitlenmez.
+    /// Production acceptance: an output is not locked in without an adapter
+    /// hash and a date.
     #[must_use]
     pub fn is_production_ready(&self) -> bool {
         self.adapter_sha256.is_some() && !self.trained_at.is_empty()
@@ -83,7 +85,7 @@ mod tests {
     fn default_dtype_is_bf16_not_fp4() {
         let m = LoRaManifest::new(ModelId([2; 32]), 16, 32);
         assert_eq!(m.dtype, AdapterDtype::Bf16);
-        // FP4 bu enum'da yoktur; aşağıdaki satır derlenmez:
+        // FP4 does not exist in this enum; the line below does not compile:
         // let _ = AdapterDtype::Fp4;
     }
 }

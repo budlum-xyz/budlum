@@ -42,7 +42,6 @@ bud/src/bud_format_registry.rs	7
 bud/src/bud_format_revolutionary.rs	8
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
-bud/src/bud_format_serviceclass.rs	12
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/churn.rs	6
@@ -73,11 +72,8 @@ crates/budscan/browser/patches.txt	2
 crates/budscan/browser/patches/address-bar-verification-badge.patch	9
 crates/budscan/browser/patches/bud-protocol-handler.patch	4
 crates/budscan/browser/patches/name-bar-punycode.patch	6
-crates/budscan/src/content_id.rs	12
 crates/lubot/crates/lubot-core/Cargo.toml	1
 crates/lubot/crates/lubot-core/src/lib.rs	4
-crates/lubot/crates/lubot-core/src/manifest.rs	12
-crates/lubot/crates/lubot-core/src/tier.rs	12
 crates/lubot/crates/lubot-data/Cargo.toml	1
 crates/lubot/crates/lubot-data/src/jsonl.rs	2
 crates/lubot/crates/lubot-data/src/lib.rs	6
