@@ -1,13 +1,14 @@
-Adres cubugu dogrulama rozeti.
+The address-bar verification badge.
 
-Rozet **en zayif halkayi** gosterir. Bir sayfanin baytlari hash'iyle tutuyor
-olabilir ve rozet yine de `yalniz beyan` diyebilir: adin cozumu kanitsizsa
-gosterilen sayfa istenen isme ait olmayabilir. Bayt dogrulamasi bu soruya
-cevap vermez ve rozetin o farki gizlememesi gerekir.
+The badge shows the **weakest link**. The bytes of a page may hash correctly
+and the badge may still say `claim only`: if the name resolution carried no
+proof, the page on screen may not belong to the name that was asked for. Byte
+verification does not answer that question, and the badge must not hide the
+difference.
 
-Kilit simgesi kullanilmiyor. Kilit "tasima korunuyor" demek ve bu tarayicinin
-soyledigi sey o degil; ayni simgeyi farkli bir anlamda kullanmak, kullanicinin
-yillar icinde ogrendigi anlami bozar.
+No lock icon is used. A lock means "the transport is protected", which is not
+what this browser is saying; reusing the same icon for a different meaning
+would corrupt a meaning users spent years learning.
 
 --- a/browser/base/content/browser.js
 +++ b/browser/base/content/browser.js
@@ -63,7 +64,7 @@ yillar icinde ogrendigi anlami bozar.
 + *
 + * Ordering is weak-to-strong and the badge shows the weakest claim. A page
 + * whose bytes hash correctly but whose name resolution carried no proof is
-+ * "yalniz beyan", not "dogrulandi": the bytes are what they say they are, and
++ * "claim only", not "verified": the bytes are what they say they are, and
 + * nobody proved they are the bytes this name points at.
 + */
 +var gBudVerificationBadge = {
@@ -103,7 +104,7 @@ yillar icinde ogrendigi anlami bozar.
 +   * The default is Refused, not "nothing". A page whose strength could not be
 +   * read is a page nobody measured, and an unmeasured page is not a verified
 +   * one. Failing towards the strong end here would mean a bug in the channel
-+   * silently produces a "dogrulandi" badge.
++   * silently produces a "verified" badge.
 +   */
 +  update(aRequest, aLocation) {
 +    if (!this._element) {
@@ -112,7 +113,7 @@ yillar icinde ogrendigi anlami bozar.
 +
 +    if (!aLocation || aLocation.scheme !== "bud") {
 +      // Ordinary web. The badge is hidden rather than set to a low value:
-+      // showing "yalniz tasima" on every https page would train users to
++      // showing "transport only" on every https page would train users to
 +      // ignore it, and an ignored badge measures nothing.
 +      this._element.hidden = true;
 +      return;

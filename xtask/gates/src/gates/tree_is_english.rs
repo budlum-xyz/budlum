@@ -7,10 +7,13 @@
 //!
 //! # What is allowed to stay Turkish
 //!
-//! Exactly two things:
+//! Exactly three things:
 //!
 //!   * [`ALLOWED_FILES`] - `README.tr.md` is a deliberate translation for
 //!     Turkish readers and is published as such.
+//!   * [`ALLOWED_DIRS`] - a Turkish localisation directory. The strings shown
+//!     to a Turkish user ARE the product there; translating them into English
+//!     would delete the feature rather than clean the tree.
 //!   * The word "Türkçe" itself, wherever it appears. It is the label on the
 //!     link that points at that README, so banning it would ban the link.
 //!
@@ -75,6 +78,15 @@ const ALLOWED_FILES: &[&str] = &[
     // nobody can audit what the gate actually bans.
     "tree_is_english.rs",
 ];
+
+/// Path fragments whose contents are a Turkish localisation.
+///
+/// A localisation file is not untranslated source: its Turkish is what the
+/// Turkish user reads. The exemption is by directory rather than by file name
+/// so that a localisation gains files without the gate having to be edited,
+/// and it is deliberately narrow - only the Turkish locale of the browser,
+/// never a source tree.
+const ALLOWED_DIRS: &[&str] = &["browser/l10n/tr-TR/"];
 
 /// The one Turkish word that may appear anywhere: the label on the link to the
 /// Turkish README. Scrubbed before both scans.
@@ -261,10 +273,16 @@ fn turkish_word(scrubbed: &str) -> Option<&'static str> {
     None
 }
 
-/// Is this path exempt by file name?
+/// Is this path exempt by file name, or by living in a localisation directory?
 fn is_allowed(path: &Path) -> bool {
-    path.file_name()
+    if path
+        .file_name()
         .is_some_and(|n| ALLOWED_FILES.contains(&n.to_string_lossy().as_ref()))
+    {
+        return true;
+    }
+    let text = path.to_string_lossy().replace('\\', "/");
+    ALLOWED_DIRS.iter().any(|dir| text.contains(dir))
 }
 
 /// Is this path skipped by extension?
@@ -443,8 +461,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
         msg.push_str(
             "\n  The tree is written in English. Translate the line.\n  \
-             Turkish is allowed only in README.tr.md and in the word \"Türkçe\",\n  \
-             which is the label on the link pointing at that README.\n  \
+             Turkish is allowed only in README.tr.md, in a Turkish localisation\n  \
+             directory, and in the word \"Türkçe\", which is the label on the link\n  \
+             pointing at that README.\n  \
              The baseline only shrinks: do not raise a number in ",
         );
         msg.push_str(BASELINE_PATH);
@@ -672,6 +691,36 @@ pub fn self_test() -> Result<String, String> {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
             "canary: README.tr.md was rejected, but it is a deliberate translation",
+        ));
+    }
+
+    // A Turkish localisation is exempt: what is written there is what the
+    // Turkish user reads.
+    if !accepts_with(
+        &clean,
+        &tmp,
+        "l10n",
+        "browser/l10n/tr-TR/app.ftl",
+        "badge-verified =\n    .value = doğrulandı; kanit dogrulama\n",
+    )? {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: the Turkish localisation was rejected, but its strings are the product",
+        ));
+    }
+
+    // The exemption must not spill over: the same text one directory up, or in
+    // another locale, is still a finding.
+    if accepts_with(
+        &clean,
+        &tmp,
+        "l10nspill",
+        "browser/l10n/en-US/app.ftl",
+        "badge-verified =\n    .value = doğrulandı; kanit dogrulama\n",
+    )? {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: the localisation exemption leaked into another locale",
         ));
     }
 

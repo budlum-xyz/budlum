@@ -1,7 +1,9 @@
-//! B.U.D. 2.0 - EDGE CACHE POLİTİKASI (F93/F247 - CDN/edge offload %90-95 hit)
+//! B.U.D. 2.0 - THE EDGE CACHE POLICY (F93/F247 - a 90 to 95 percent hit rate
+//! for CDN and edge offload).
 //!
-//! Kalan iş: edge cache. Karar katmanı: bir istek önbellekten karşılanır mı?
-//! (recency + boyut + bant bütçesi). Deterministik; egress tasarrufu ölçülür.
+//! Remaining work: the edge cache. This is the decision layer - is a request
+//! served from the cache? The inputs are recency, size and the bandwidth
+//! budget. It is deterministic, and the egress saving is measured.
 
 #![forbid(unsafe_code)]
 
@@ -30,12 +32,14 @@ impl EdgeCache {
         })
     }
 
-    /// İstek: boyut verilen nesne önbelleğe sığıyor mu + karşıla bütçe.
-    /// `budget_hit_ratio` hedefi aşılırsa (küçük nesneler) yine de önbelleğe al.
+    /// The request: does an object of the given size fit in the cache, and is
+    /// there budget to serve it? If the `budget_hit_ratio` target is exceeded,
+    /// small objects are cached anyway.
     pub fn request(&mut self, size_bytes: usize, budget_hit_ratio: f64) -> bool {
-        // deterministik karar: küçük nesneler hep önbelleğe; büyükler yalnız yer varken
+        // A deterministic decision: small objects are always cached, large
+        // ones only while there is room.
         let fits = size_bytes <= self.capacity_bytes.saturating_sub(self.used);
-        let small = size_bytes <= self.capacity_bytes / 100; // %1'den küçük
+        let small = size_bytes <= self.capacity_bytes / 100; // under 1 percent
         let hit = fits || small;
         if hit {
             self.used = (self.used + size_bytes).min(self.capacity_bytes);
@@ -77,12 +81,12 @@ mod tests {
     #[test]
     fn kucuk_nesneler_hep_hit_buyukler_dolmazsa() {
         let mut c = EdgeCache::new(100_000).unwrap();
-        // 100 küçük nesne (900 bayt) → hepsi hit
+        // 100 small objects (900 bytes): all of them hit.
         for _ in 0..100 {
             assert!(c.request(900, 0.0));
         }
         assert!(c.hit_ratio() > 0.99);
-        // 100KB'lık dev nesne → kapasite dolu → miss
+        // A 100 KB giant object: the capacity is full, so it misses.
         assert!(!c.request(200_000, 0.0));
     }
 

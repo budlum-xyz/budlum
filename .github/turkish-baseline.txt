@@ -26,8 +26,6 @@ bud/kani/kani_bud_format.rs	1
 bud/mime.types.bud.json	1
 bud/src/bud_format.rs	3
 bud/src/bud_format_dbdelta.rs	7
-bud/src/bud_format_dedup.rs	9
-bud/src/bud_format_edge.rs	9
 bud/src/bud_format_engine.rs	1
 bud/src/bud_format_hardening.rs	2
 bud/src/bud_format_markdown.rs	6
@@ -59,10 +57,7 @@ budzero/bud-proof/tests/soundness_negatives.rs	6
 budzero/bud-vm/src/lib.rs	1
 budzero/verifier-registry/src/registry.rs	7
 config/mainnet-genesis.json	1
-crates/budscan/browser/l10n/tr-TR/budscan.ftl	8
-crates/budscan/browser/mozconfig	9
 crates/budscan/browser/patches.txt	2
-crates/budscan/browser/patches/address-bar-verification-badge.patch	9
 crates/budscan/browser/patches/bud-protocol-handler.patch	4
 crates/budscan/browser/patches/name-bar-punycode.patch	6
 crates/lubot/crates/lubot-core/Cargo.toml	1
