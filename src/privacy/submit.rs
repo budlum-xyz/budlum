@@ -47,17 +47,17 @@ impl PrivateTransferSubmit {
                 "private transfer: exceeds MAX_PRIVATE_IO ({MAX_PRIVATE_IO})"
             ));
         }
-        // Yetkilendirme imzasi iki bicimden biri olabilir: eski Ed25519 (64
-        // bayt) ya da ML-DSA-87 (4627 bayt). Uzunluk yalnizca **bicim**
-        // denetimidir; hangisinin gecerli oldugu, islemin imza surumune gore
-        // `Executor` tarafinda karara baglanir.
+        // The authorization signature can take one of two shapes: the older
+        // Ed25519 (64 bytes) or ML-DSA-87 (4627 bytes). The length is only a
+        // **shape** check; which one is actually valid is decided in the
+        // `Executor`, from the signature version of the transaction.
         //
-        // Onceden yalnizca 64 kabul ediliyordu. Bu, ML-DSA-87 anahtarli (V5)
-        // bir hesabin gizli transfer yetkilendirmesini **imkansiz**
-        // kiliyordu: dogru imzayi uretse bile islem "must be 64 bytes"
-        // diyerek bicim kapisinda dusuyordu. Zincirin varsayilan cuzdani
-        // ML-DSA-87 oldugu icin bu, ozelligin varsayilan yapilandirmada hic
-        // calismamasi demekti.
+        // Previously only 64 was accepted. That made a private transfer
+        // authorization **impossible** for an account holding an ML-DSA-87 key
+        // (V5): even when it produced the correct signature, the transaction
+        // fell at the shape gate with "must be 64 bytes". Since ML-DSA-87 is
+        // the default wallet of the chain, this meant the feature did not work
+        // at all in the default configuration.
         if self.authorization_sig.len() != ED25519_AUTH_SIG_LEN
             && self.authorization_sig.len() != ML_DSA_87_AUTH_SIG_LEN
         {
@@ -116,11 +116,11 @@ mod tests {
             .is_ok());
     }
 
-    /// ML-DSA-87 yetkilendirmesi de kabul edilmeli.
+    /// An ML-DSA-87 authorization has to be accepted too.
     ///
-    /// Zincirin varsayilan cuzdani ML-DSA-87. Bicim kapisi yalnizca 64 bayta
-    /// izin verdigi surece, V5 hesabi dogru imzayi uretse bile gizli transfer
-    /// yapamiyordu.
+    /// ML-DSA-87 is the default wallet of the chain. As long as the shape gate
+    /// allowed only 64 bytes, a V5 account could not make a private transfer
+    /// even when it produced the correct signature.
     #[test]
     fn an_ml_dsa_87_authorization_is_accepted() {
         assert!(submit_with_sig(ML_DSA_87_AUTH_SIG_LEN)
@@ -128,13 +128,13 @@ mod tests {
             .is_ok());
     }
 
-    /// Iki bicimden hicbirine uymayan uzunluk reddedilmeli.
+    /// A length matching neither shape has to be refused.
     #[test]
     fn an_authorization_of_any_other_length_is_refused() {
         for len in [0usize, 1, 63, 65, 4626, 4628] {
             let err = submit_with_sig(len)
                 .validate_shape()
-                .expect_err("gecersiz uzunluk reddedilmeli");
+                .expect_err("an invalid length has to be refused");
             assert!(err.contains("authorization_sig"), "{err}");
         }
     }

@@ -76,9 +76,7 @@ crates/lubot/crates/lubot-data/Cargo.toml	1
 crates/lubot/crates/lubot-data/src/jsonl.rs	2
 crates/lubot/crates/lubot-data/src/lib.rs	6
 crates/lubot/crates/lubot-data/src/template.rs	8
-crates/lubot/crates/lubot-data/src/verify.rs	11
 crates/lubot/crates/lubot-integrations/Cargo.toml	1
-crates/lubot/crates/lubot-integrations/src/rest.rs	11
 crates/lubot/crates/lubot-knowledge/Cargo.toml	1
 crates/lubot/crates/lubot-knowledge/src/embed.rs	3
 crates/lubot/crates/lubot-serve/src/config.rs	4
@@ -109,7 +107,6 @@ src/domain/finality_adapter.rs	7
 src/domain/plugin.rs	1
 src/domain/registry.rs	7
 src/domain/storage_deal.rs	2
-src/domain/types.rs	11
 src/execution/executor.rs	3
 src/lib.rs	4
 src/lubot/effort.rs	1
@@ -118,7 +115,6 @@ src/lubot/query.rs	6
 src/lubot/storage.rs	8
 src/network/sync_codec.rs	1
 src/privacy/mod.rs	1
-src/privacy/submit.rs	11
 src/registry/d4_merge_tests.rs	1
 src/registry/evidence.rs	1
 src/registry/invalid_vote.rs	1

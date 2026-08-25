@@ -1,27 +1,28 @@
-//! İçerik doğrulaması - gerçek SHA-256.
+//! Content verification - a real SHA-256.
 //!
-//! Üretim yolunun ilk adımı: iskelet artık fail-closed "uygulanmadı"
-//! hatası döndürmez; içerik hash'i gerçek SHA-256 ile doğrulanır.
-//! Doğrulama başarısızsa `HashMismatch` - veri akmaz.
+//! The first step of the production path: the skeleton no longer returns a
+//! fail-closed "not implemented" error; the content hash is verified with a
+//! real SHA-256. If verification fails the answer is `HashMismatch`, and no
+//! data flows.
 
 use lubot_core::model::Hash32;
 use sha2::{Digest, Sha256};
 
 use crate::source::DataError;
 
-/// İçeriği beklenen hex SHA-256 ile doğrula.
+/// Verifies content against an expected hex SHA-256.
 ///
 /// # Errors
 ///
-/// - Hex çözülemezse `HashMismatch` (boş/yanlış biçim).
-/// - Digest uyuşmuyorsa `HashMismatch`.
+/// - `HashMismatch` if the hex cannot be decoded (empty or malformed).
+/// - `HashMismatch` if the digest does not match.
 pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), DataError> {
     let expected: Vec<u8> = hex_bytes(expected_hex).ok_or_else(|| DataError::HashMismatch {
-        detail: format!("beklenen hex çözülemedi: {expected_hex}"),
+        detail: format!("the expected hex could not be decoded: {expected_hex}"),
     })?;
     if expected.len() != 32 {
         return Err(DataError::HashMismatch {
-            detail: format!("SHA-256 32 bayttır; {expected_hex} farklı uzunlukta"),
+            detail: format!("a SHA-256 is 32 bytes; {expected_hex} has a different length"),
         });
     }
     let actual = Sha256::digest(data);
@@ -30,14 +31,14 @@ pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), DataError> {
     } else {
         Err(DataError::HashMismatch {
             detail: format!(
-                "beklenen: {expected_hex}, gerçek: {}",
+                "expected: {expected_hex}, actual: {}",
                 hex_of(actual.as_slice())
             ),
         })
     }
 }
 
-/// İçerikten content_id türet - SHA-256 (üretim biçimi).
+/// Derives a content_id from content - SHA-256, the production form.
 #[must_use]
 pub fn content_id_of(data: &[u8]) -> Hash32 {
     let digest = Sha256::digest(data);

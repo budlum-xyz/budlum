@@ -42,8 +42,9 @@ pub enum ConsensusKind {
     /// Every consumer to handle the storage-specific limits. We use a new
     /// Enum variant (not `Custom("StorageProofOfReplication")`) because the
     /// Parameter bundle is part of the consensus surface plan
-    /// §3.1: "yeni bir hash fonksiyonu icat etme" / "yeni bir köprü protokolü
-    /// Icat etme" but it IS a new domain kind that needs its own typing.
+    /// section 3.1: "do not invent a new hash function" and "do not invent a
+    /// new bridge protocol" - but it IS a new domain kind that needs its own
+    /// typing.
     StorageAttestation(StorageDomainParams),
     /// AI Inference Consensus Domain (Paradigma §5).
     ///
@@ -193,31 +194,33 @@ pub struct ConsensusDomain {
     pub pow_parameters: Option<PoWDomainParameters>,
     /// Bu alani ilerletmesine izin verilen zk programlarinin hash'leri.
     ///
-    /// # Neden bir izin listesi gerekiyor
+    /// # Why an allowlist is needed
     ///
-    /// Kanit dogrulayicisi (`Plonky3Adapter::verify`) programin hash'ini
-    /// hesaplayip `public_inputs.program_hash` ile karsilastirir. Bu **ic
-    /// tutarlilik** denetimidir: gonderen hem programi hem beklenen hash'i
-    /// kendisi verdigi icin, ikisi birbirini dogrular ve her zaman uyusur.
-    /// Denetim "gonderdigin program, gonderdigin hash'e uyuyor" der;
-    /// "bu programin bu alani ilerletmeye hakki var" demez.
+    /// The proof verifier (`Plonky3Adapter::verify`) computes the hash of the
+    /// program and compares it with `public_inputs.program_hash`. That is an
+    /// **internal consistency** check: since the sender supplies both the
+    /// program and the expected hash, the two confirm each other and always
+    /// agree. The check says "the program you sent matches the hash you sent";
+    /// it does not say "this program has the right to advance this domain".
     ///
-    /// Sonuc: saldirgan kendi yazdigi bir programi - ornegin durum kokunu
-    /// istedigi degere goturen bir program - kusursuz bir kanitla sunabilirdi.
-    /// Kanit gercekten gecerlidir; yalan soyleyen kanit degil, programin
-    /// kendisidir. Kanit sistemi bunu yakalayamaz, cunku isi "bu program boyle
-    /// kostu" demektir, "bu program calistirilmali miydi" demek degil.
+    /// The consequence: an attacker could present a program of their own
+    /// writing - for example one that drives the state root to any value they
+    /// like - together with a flawless proof. The proof really is valid; what
+    /// lies is not the proof but the program itself. The proof system cannot
+    /// catch this, because its job is to say "this program ran like this", not
+    /// "should this program have been run at all".
     ///
-    /// Bu liste o bosluu kapatir: alan, kendisini ilerletebilecek program
-    /// kumesini onceden ilan eder. Disaridan gelen kod, ancak bizim
-    /// eklememizle ice girer.
+    /// This list closes that gap: a domain declares in advance the set of
+    /// programs allowed to advance it. Code from outside only gets in when we
+    /// add it.
     ///
-    /// # Bos liste = kapali kapi
+    /// # An empty list is a closed door
     ///
-    /// Bos birakilirsa alan **hicbir** zk kanitini kabul etmez. Varsayilan
-    /// kasten bu yonde: yeni ya da eski (goc etmis) bir kayit, kimse ona bir
-    /// program listesi vermeden zk ile ilerletilemez. Fail-open bir varsayilan
-    /// (bos liste = herkese acik) bu alani tamamen sussuz birakirdi.
+    /// Left empty, the domain accepts **no** zk proof at all. The default
+    /// leans that way deliberately: a record that is new, or old and migrated,
+    /// cannot be advanced with zk until somebody gives it a program list. A
+    /// fail-open default - an empty list meaning open to everyone - would have
+    /// left this domain completely undefended.
     #[serde(default)]
     pub zk_program_allowlist: Vec<Hash32>,
 }
