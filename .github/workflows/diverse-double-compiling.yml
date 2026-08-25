@@ -27,8 +27,8 @@ name: Diverse Double Compiling
 # produce different bytes across two runs. Those differences do not change
 # behaviour, and comparing them would make the job always red, measuring nothing.
 # Instead the values the chain agrees on are compared: the genesis hash, the
-# canonical program hash and state root samples. For a backdoor
-# gizlenebilecegi yer tam da bunlardir.
+# canonical program hash and state root samples. Those are exactly the places
+# a backdoor could hide.
 
 on:
   push:
