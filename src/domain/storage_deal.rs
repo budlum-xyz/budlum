@@ -521,6 +521,31 @@ pub enum ReallocationStatus {
     Cancelled,
 }
 
+/// Why a reallocation ticket exists.
+///
+/// `FailedDeal` is the historic path: a slash or an expiry left a slot empty
+/// and the ticket names the deal that failed. `NeverPlaced` is the bootstrap
+/// path: the manifest lists a shard, the repair band sees zero live replicas,
+/// and no deal has ever been opened for that shard. The two are not the same
+/// obligation — one replaces a holder, the other places the first one — so the
+/// cause is part of the ticket, not a comment next to a zeroed deal id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReallocationCause {
+    /// A prior deal on this slot ended (slash or expiry). `failed_deal_id` is set.
+    FailedDeal,
+    /// The shard was registered and never held a deal. `failed_deal_id` is 0 and
+    /// is not a lookup key.
+    NeverPlaced,
+}
+
+impl Default for ReallocationCause {
+    fn default() -> Self {
+        // Wire default for tickets serialised before this field existed: every
+        // historic ticket named a failed deal.
+        Self::FailedDeal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageReallocationTicket {
     pub ticket_id: u64,
@@ -551,6 +576,10 @@ pub struct StorageReallocationTicket {
     /// An empty recommendation is better than a wrong one.
     #[serde(default)]
     pub expected_holder: Option<Address>,
+    /// What opened this ticket. Default `FailedDeal` keeps pre-field tickets
+    /// bit-stable under serde defaulting and bincode append-at-end.
+    #[serde(default)]
+    pub cause: ReallocationCause,
 }
 
 /// On-chain, in-memory registry of all `StorageDeal`s, `RetrievalChallenge`s,
@@ -2335,6 +2364,7 @@ impl StorageRegistry {
                     // recommendation is written after opening, by
                     // `annotate_expected_holders`.
                     expected_holder: None,
+                    cause: ReallocationCause::FailedDeal,
                 }
             });
             (slash_amount, ticket)
@@ -2523,6 +2553,72 @@ impl StorageRegistry {
             deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
             status: ReallocationStatus::Pending,
             expected_holder: None,
+            cause: ReallocationCause::FailedDeal,
+        };
+        self.reallocations.insert(ticket_id, ticket);
+        Some(ticket_id)
+    }
+
+    /// Open a bootstrap ticket for a shard that has never held a deal.
+    ///
+    /// The expiry and slash paths both require a historic `deal_id`. A shard
+    /// the registry registered but never placed has none, and the repair band
+    /// used to log that gap and walk on. Logging is not a ticket: nothing is
+    /// pending, nothing can be accepted, and the object stays under-replicated
+    /// forever under a warning that looks like progress.
+    ///
+    /// Dedup key is `(manifest_id, shard_id, replica_index)` among pending /
+    /// under-replicated never-placed tickets — the same slot must not pay two
+    /// operators for the first copy. `failed_deal_id` is 0 and is not a lookup
+    /// key for this cause.
+    ///
+    /// `domain_id` is taken from the caller because the manifest does not carry
+    /// one; the chain actor passes the storage domain it is sweeping.
+    pub fn open_never_placed_ticket(
+        &mut self,
+        domain_id: u32,
+        manifest_id: ContentId,
+        shard_id: ContentId,
+        replica_index: u8,
+        now_epoch: u64,
+    ) -> Option<u64> {
+        if self.manifests.get(&manifest_id).is_none() {
+            return None;
+        }
+        // Refuse when the slot already has a live deal: a never-placed ticket
+        // is only for the empty case the repair band already filtered.
+        if self.active_replica_count(&manifest_id, &shard_id) > 0 {
+            return None;
+        }
+        let already = self.reallocations.values().any(|ticket| {
+            ticket.cause == ReallocationCause::NeverPlaced
+                && ticket.manifest_id == manifest_id
+                && ticket.shard_id == shard_id
+                && ticket.replica_index == replica_index
+                && matches!(
+                    ticket.status,
+                    ReallocationStatus::Pending | ReallocationStatus::UnderReplicated
+                )
+        });
+        if already {
+            return None;
+        }
+        let ticket_id = self.next_reallocation_id;
+        self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
+        let ticket = StorageReallocationTicket {
+            ticket_id,
+            failed_deal_id: 0,
+            replacement_deal_id: None,
+            domain_id,
+            manifest_id,
+            shard_id,
+            replica_index,
+            slashed_operator: Address::zero(),
+            opened_epoch: now_epoch,
+            deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
+            status: ReallocationStatus::Pending,
+            expected_holder: None,
+            cause: ReallocationCause::NeverPlaced,
         };
         self.reallocations.insert(ticket_id, ticket);
         Some(ticket_id)
@@ -4358,6 +4454,76 @@ mod tests {
             reg.lifecycle_state(deal_id),
             Some(crate::storage::StorageLifecycleState::UnderReplicated)
         );
+    }
+
+    #[test]
+    fn a_never_placed_shard_gets_a_bootstrap_ticket() {
+        // Register without opening a deal. The repair band used to log
+        // "no ticket type" and walk on; the bootstrap ticket is what makes
+        // that gap actionable.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let shard_id = m.shards[0].shard_id;
+
+        let ticket_id = reg
+            .open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+            .expect("a never-held shard must open a bootstrap ticket");
+        let ticket = reg.get_reallocation_ticket(ticket_id).unwrap();
+        assert_eq!(ticket.cause, ReallocationCause::NeverPlaced);
+        assert_eq!(ticket.failed_deal_id, 0, "no historic deal to name");
+        assert_eq!(ticket.manifest_id, m.manifest_id);
+        assert_eq!(ticket.shard_id, shard_id);
+        assert_eq!(ticket.domain_id, 42);
+        assert_eq!(ticket.status, ReallocationStatus::Pending);
+    }
+
+    #[test]
+    fn never_placed_ticket_opens_once_per_slot() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let shard_id = m.shards[0].shard_id;
+
+        assert!(reg
+            .open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+            .is_some());
+        assert!(
+            reg.open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 101)
+                .is_none(),
+            "a second sweep must not open a second first-copy ticket"
+        );
+        assert!(
+            reg.open_never_placed_ticket(42, m.manifest_id, shard_id, 1, 102)
+                .is_some(),
+            "replica_index is part of the slot key"
+        );
+    }
+
+    #[test]
+    fn never_placed_refuses_when_a_live_deal_already_holds_the_shard() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (_, shard_id) = open_one(&mut reg, &m);
+        assert!(
+            reg.open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+                .is_none(),
+            "bootstrap is only for the empty case"
+        );
+    }
+
+    #[test]
+    fn slash_and_expiry_tickets_record_failed_deal_cause() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let ticket = reg.all_reallocation_tickets()[0];
+        assert_eq!(ticket.cause, ReallocationCause::FailedDeal);
+        assert_eq!(ticket.failed_deal_id, deal_id);
     }
 
     #[test]

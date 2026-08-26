@@ -298,4 +298,42 @@ mod tests {
         assert!(encoded.contains("budlum_blocks_produced 1"));
         assert!(encoded.contains("budlum_rpc_request_duration_seconds"));
     }
+
+    /// Every series bound in the metrics-are-written pass must appear in a
+    /// live Prometheus scrape body. A gauge that exists only on the struct and
+    /// never in `encode()` is still a dashboard lie.
+    #[test]
+    fn prometheus_scrape_lists_every_bound_series() {
+        let metrics = Metrics::new().expect("metric names are literals in this file");
+        let scrape = metrics.encode();
+        assert!(!scrape.is_empty(), "encode must produce a body after registration");
+        for name in [
+            "budlum_chain_height",
+            "budlum_mempool_size",
+            "budlum_mempool_bytes",
+            "budlum_mempool_sender_count",
+            "budlum_bridge_amount_locked",
+            "budlum_storage_db_size_bytes",
+            "budlum_p2p_peers_connected",
+            "budlum_p2p_gossip_duplicates",
+            "budlum_p2p_sync_requests",
+            "budlum_peer_connection_quality",
+            "budlum_bns_names_registered",
+            "budlum_ai_requests_total",
+            "budlum_ai_outcomes_finalized",
+            "budlum_slashing_events_total",
+            "budlum_settlement_equivocations_detected",
+            "budlum_bridge_transfers_total",
+        ] {
+            assert!(
+                scrape.contains(name),
+                "scrape missing series {name}; body starts: {}",
+                scrape.chars().take(200).collect::<String>()
+            );
+        }
+        assert!(
+            !scrape.contains("budlum_peer_count"),
+            "deleted duplicate gauge must not reappear in scrapes"
+        );
+    }
 }

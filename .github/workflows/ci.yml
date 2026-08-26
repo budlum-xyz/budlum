@@ -137,6 +137,10 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable --self-test
       - name: Generatable content is verifiable
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable
+      - name: QR is derivative only canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only --self-test
+      - name: QR is derivative only
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only
       # For a described object the recipe is the ONLY copy. An edit that changes the
       # generator does not produce a wrong image, it produces an object that can no longer be produced at all:
       # the id stops verifying and there are no bytes on disk to fall back to. Applied to a value
