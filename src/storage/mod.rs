@@ -42,6 +42,8 @@ pub mod qr_reemit;
 pub mod qr_receive;
 pub mod three_pipe;
 pub mod three_nft;
+pub mod three_meter;
+pub mod three_hooks;
 pub mod three_reveal;
 pub mod qr_codec;
 pub mod transformed;
@@ -140,4 +142,9 @@ pub use three_reveal::{RevealError, RevealSession};
 pub use three_nft::{
     meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta,
 };
+
+pub use three_hooks::{
+    emit_hook, NopThreeHook, RecordingThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind,
+};
+pub use three_meter::{MeterError, ThreeMeter};
 
