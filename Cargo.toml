@@ -22,6 +22,8 @@ p2p-mdns = ["libp2p/mdns"]
 sha2 = "0.11"
 # zlib for Three payload pack (K-QR-SIKISTIR: only when it shrinks).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# G1 payload AEAD (T11): content bytes encrypted before A1 pack.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

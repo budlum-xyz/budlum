@@ -121,7 +121,7 @@ impl std::fmt::Display for CarouselError {
 impl std::error::Error for CarouselError {}
 
 /// Parameters fixed for one carousel stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CarouselParams {
     /// Source block count.
     pub k: u16,

@@ -34,8 +34,10 @@ pub mod msr;
 pub mod provider;
 pub mod pruning;
 pub mod qr_carousel;
+pub mod payload_crypt;
 pub mod qr_frame;
 pub mod qr_payload;
+pub mod qr_recipe;
 pub mod render;
 pub mod view_grant;
 pub mod traits;
@@ -106,5 +108,13 @@ pub use qr_carousel::{
 pub use qr_frame::{
     fold_frame_digests, frame_digest, pack_frame, stream_id_prefix, unpack_frame, FrameError,
     MAX_DROP_WIRE, THREE_FRAME_HEADER_LEN, THREE_FRAME_MAGIC, THREE_FRAME_VERSION,
+};
+pub use payload_crypt::{
+    derived_nonce, open_payload, seal_payload, PayloadKey, SealError, MAX_SEAL_PLAINTEXT,
+    SEALED_HEADER_LEN, SEALED_MAGIC, SEALED_NONCE_LEN, SEALED_VERSION,
+};
+pub use qr_recipe::{
+    three_recipe_digest, three_sealed_recipe_commitment, ThreeRecipe, ThreeRecipePublic,
+    ThreeRecipeSealed,
 };
 
