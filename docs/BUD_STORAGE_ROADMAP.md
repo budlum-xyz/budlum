@@ -300,7 +300,7 @@ deals is the next step, along with what a failed audit costs the operator.
 Recorded here rather than left for a reader to find: the arithmetic is real
 and the trigger is not there yet.
 
-## Gap 4: repair trigger: **expressible now**
+## Gap 4: repair trigger: **closed**
 
 With `k` known, "how much redundancy is left" is a number, and repair becomes a
 condition rather than a wish:
@@ -318,10 +318,13 @@ threshold above `k` for the same reason.
 nothing to reconstruct from, and a repair deal opened then would only burn an
 operator bond. Both directions are pinned by tests.
 
-**Still open:** wiring the trigger to the deal lifecycle. `needs_repair` is a
-predicate; nobody calls it on a slash yet, and nothing opens the replacement
-deal. That work depends on the coder, since a repair with no parity to rebuild
-from is just a re-upload.
+**Wired:** the maintenance sweep in `chain_actor` calls
+`objects_below_own_repair_margin` each epoch, logs the band, and for every
+shard with zero active replicas opens an expiry-reallocation ticket against a
+historic deal when one exists. Unrecoverable objects are surfaced on a separate
+list so they cannot hide inside the repairable set. The `repair-fires` gate
+pins the presence of those call sites. A never-placed shard still has no ticket
+type; that residual is logged rather than papered over.
 
 ## Gap 6: what a failure costs: **closed**
 
@@ -437,7 +440,7 @@ would bound total load directly and is the better long-term shape.
 2. **Gap 3** (erasure coding): **closed**: schema, coder, and verified
    reconstruction.
 3. **Gap 1** (real storage proof): blocked on `VerifyMerkle`.
-4. **Gap 4** (repair): predicates and coder landed; wiring the trigger into
+4. **Gap 4** (repair): **closed** — predicates, coder, and maintenance wiring landed; residual never-placed shard ticket type remains. Prior note was:
    the deal lifecycle remains.
 5. **Gap 5** (bond calibration): measured; the range-proportional bond has
    landed, calibrating `OPENER_BOND_PER_KIB` and moving the rate limit to a
