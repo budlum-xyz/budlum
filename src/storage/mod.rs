@@ -43,6 +43,7 @@ pub mod qr_receive;
 pub mod three_pipe;
 pub mod three_nft;
 pub mod three_meter;
+pub mod three_gate;
 pub mod three_hooks;
 pub mod three_reveal;
 pub mod qr_codec;
@@ -147,4 +148,4 @@ pub use three_hooks::{
     emit_hook, NopThreeHook, RecordingThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind,
 };
 pub use three_meter::{MeterError, ThreeMeter};
-
+pub use three_gate::{classify_three_blob, is_transport_derivative, refuse_durable_derivative, ThreeBlobKind};
