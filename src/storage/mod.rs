@@ -49,7 +49,7 @@ pub use dictionary::{
     MAX_DICTIONARY_BYTES,
 };
 pub use erasure::{
-    encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
+    encode_object, verify_object_encoding, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
 };
 pub use generated::{
     generate_and_verify, generate_content, generated_spec_digest, held_bytes, BudStorageEdition,
