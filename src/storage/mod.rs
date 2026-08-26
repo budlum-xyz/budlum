@@ -41,6 +41,8 @@ pub mod qr_recipe;
 pub mod qr_reemit;
 pub mod qr_receive;
 pub mod three_pipe;
+pub mod three_nft;
+pub mod three_reveal;
 pub mod qr_codec;
 pub mod transformed;
 pub mod render;
@@ -132,5 +134,10 @@ pub use qr_codec::{
 pub use three_pipe::{
     decode_frames, encode_plain, mux_raw, recipe_commitment, EncodedPipe, PipeError,
     PIPE_DEFAULT_BLOCK_LEN,
+};
+
+pub use three_reveal::{RevealError, RevealSession};
+pub use three_nft::{
+    meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta,
 };
 
