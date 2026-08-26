@@ -188,6 +188,71 @@ impl Blockchain {
             // memory. See `mempool::pool::DEFAULT_MAX_POOL_BYTES`.
             m.mempool_bytes
                 .set(i64::try_from(self.mempool.resident_bytes()).unwrap_or(i64::MAX));
+            // Distinct senders, not entry count: concentration is invisible
+            // from `mempool_size` alone.
+            m.mempool_sender_count
+                .set(i64::try_from(self.mempool.sender_count()).unwrap_or(i64::MAX));
+            // Locked bridge inventory: sum of transfer amounts still in
+            // `BridgeStatus::Locked`. Minted/unlocked transfers drop out.
+            m.bridge_amount_locked.set(
+                i64::try_from(
+                    self.state
+                        .bridge_state
+                        .locked_amount_total()
+                        .min(u128::try_from(i64::MAX).unwrap_or(u128::MAX)),
+                )
+                .unwrap_or(i64::MAX),
+            );
+            if let Some(ref store) = self.storage {
+                if let Ok(bytes) = store.size_on_disk() {
+                    m.storage_db_size_bytes
+                        .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+                }
+                // Observability must not abort a block commit on disk-stat
+                // failure: leave the last scraped value.
+            }
+        }
+    }
+
+    /// Event-local counters for transaction types that own a dedicated metric.
+    ///
+    /// Called once per successfully committed block, not per mempool accept,
+    /// so a tx that never lands does not inflate the counter. Reorgs that
+    /// re-apply the same height will recount; prometheus counters already
+    /// reset on process restart, and the alternative (remembering every
+    /// hash ever applied) is a second consensus log.
+    fn emit_applied_tx_metrics(
+        &self,
+        txs: &[crate::core::transaction::Transaction],
+        outcomes_before: usize,
+    ) {
+        let Some(ref m) = self.metrics else {
+            return;
+        };
+        use crate::core::transaction::TransactionType;
+        for tx in txs {
+            match &tx.tx_type {
+                TransactionType::BnsRegister => {
+                    m.bns_names_registered.inc();
+                }
+                TransactionType::AiInferenceRequest(_) => {
+                    m.ai_requests_total.inc();
+                }
+                _ => {}
+            }
+        }
+        // Finalization is not 1:1 with AiInferenceResult txs (threshold may
+        // need several results). The registry length delta across the apply
+        // is the honest event count; pruning only shrinks and is ignored.
+        let newly_finalized = self
+            .state
+            .ai_registry
+            .outcomes
+            .len()
+            .saturating_sub(outcomes_before);
+        if newly_finalized > 0 {
+            m.ai_outcomes_finalized
+                .inc_by(u64::try_from(newly_finalized).unwrap_or(u64::MAX));
         }
     }
 
@@ -1690,6 +1755,9 @@ impl Blockchain {
                 .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
+        if let Some(ref m) = self.metrics {
+            m.bridge_transfers_total.inc();
+        }
         Ok(())
     }
 
@@ -2699,6 +2767,13 @@ impl Blockchain {
                         self.state.mark_dirty(&reporter);
                     }
                 }
+                // Count only actionable slashes. Ok(None) is an honest no-op
+                // against an unregistered target and is not a slashing event.
+                if outcome.is_some() {
+                    if let Some(ref m) = self.metrics {
+                        m.slashing_events_total.inc();
+                    }
+                }
                 Ok(outcome)
             }
             Err(e) => {
@@ -3026,6 +3101,9 @@ impl Blockchain {
                 slash_ratio_fixed,
                 "slashable QC fault",
             );
+            if let Some(ref m) = self.metrics {
+                m.slashing_events_total.inc();
+            }
         }
 
         if let Some(height) = verdict.invalidate_from_height {
@@ -3774,6 +3852,7 @@ impl Blockchain {
         // F1 (Constitution §1): pre-scan NftBurn CIDs before state mutation.
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
+        let ai_outcomes_before = self.state.ai_registry.outcomes.len();
         let mut committed_state = match Self::apply_block_effects(&self.state, &block, &self.chain)
         {
             Ok(state) => state,
@@ -3877,6 +3956,7 @@ impl Blockchain {
         self.mempool.set_min_fee(self.state.base_fee);
         self.emit_chain_metrics();
         self.emit_tx_processed(block.transactions.len() as u64);
+        self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         Some((block, nft_burn_cids.iter().map(|(cid, _)| cid.0).collect()))
     }
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
@@ -4085,6 +4165,7 @@ impl Blockchain {
         // F1 (Constitution §1): pre-scan NftBurn CIDs before state mutation.
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
+        let ai_outcomes_before = self.state.ai_registry.outcomes.len();
         let mut commit_state = Self::apply_block_effects(&self.state, &block, &self.chain)?;
 
         if block.index > 0 {
@@ -4151,8 +4232,9 @@ impl Blockchain {
         // Deterministic replay contract. Doing it here, after the commit,
         // Made the producer's `liveness` root unreproducible by replay.
 
-        // Sayac blok tasinmadan once okunuyor: `push` blogu tuketiyor.
+        // Counter and tx-type metrics must be read before `push` consumes the block.
         let applied_tx_count = block.transactions.len() as u64;
+        self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
 
         if let Some(last_block) = self.chain.last() {
@@ -4959,6 +5041,12 @@ impl Blockchain {
             let reports = aggregator.take_detected_equivocations();
             (res, reports)
         };
+        if !reports.is_empty() {
+            if let Some(ref m) = self.metrics {
+                m.settlement_equivocations_detected
+                    .inc_by(u64::try_from(reports.len()).unwrap_or(u64::MAX));
+            }
+        }
         for report in reports {
             let _ = self.submit_registry_slashing_report(report);
         }
@@ -4999,6 +5087,12 @@ impl Blockchain {
             let reports = aggregator.take_detected_equivocations();
             (res, quorum, reports)
         };
+        if !reports.is_empty() {
+            if let Some(ref m) = self.metrics {
+                m.settlement_equivocations_detected
+                    .inc_by(u64::try_from(reports.len()).unwrap_or(u64::MAX));
+            }
+        }
         for report in reports {
             let _ = self.submit_registry_slashing_report(report);
         }
@@ -5736,6 +5830,11 @@ impl Blockchain {
             tracing::warn!("Burned {burned} from operator {operator} for {reason}");
         }
         self.storage_burned_bond_total = self.storage_burned_bond_total.saturating_add(burned);
+        if burned > 0 {
+            if let Some(ref m) = self.metrics {
+                m.slashing_events_total.inc();
+            }
+        }
         self.storage_economics_events.push(StorageEconomicsEvent {
             epoch,
             deal_id,

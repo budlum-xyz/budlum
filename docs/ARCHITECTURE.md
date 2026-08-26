@@ -3815,3 +3815,86 @@ definitions with no outside mention must FAIL, and the same pair with one
 outside mention must PASS. Without the second canary, a gate that simply stopped
 skipping ambiguous names would look correct while making exactly the guess the
 skip existed to avoid.
+
+## 87. A metric that is never written is a dashboard lie
+
+Prometheus scrapes are trusted in a way log lines are not. An operator looking
+at a permanent zero next to a real counter does not read "this path was never
+wired"; they read "the network is quiet". The tree has paid for that confusion
+once already: `budlum_peer_count` sat beside `budlum_p2p_peers_connected`, only
+the second was ever set, and scrapes reported a healthy mesh next to a gauge
+that never left zero.
+
+### What the gate asks
+
+`metrics-are-written` walks every `pub field: IntCounter | IntGauge | Histogram`
+in `src/core/metrics.rs` and asks whether any production `.rs` file writes it.
+A write is a call of the form `.<field>.<method>(...)` after three scrubbing
+steps:
+
+1. `#[cfg(test)]` items are stripped, bodyful and bodyless. A bodyless
+   attribute (`#[cfg(test)] use foo;`) has no `{`; matching braces from the next
+   opening brace in the file would swallow the rest of the crate, so the scan
+   asks whether the decorated item has a body before walking.
+2. Comments and string literals are replaced with spaces, so a name that
+   appears only in prose cannot count as a write. A temporary mutation that
+   comments out `.p2p_gossip_duplicates.inc()` must turn the gate red; without
+   this step it stayed green.
+3. Whitespace is collapsed entirely so a call that spans lines still matches.
+
+The methods counted are the prometheus mutators this tree actually uses:
+`set`, `inc`, `dec`, `add`, `sub`, `observe`, `inc_by`, `add_by`,
+`start_timer`, and `observe_closure_duration`. Histograms written only through
+`start_timer()` are honest writes - the timer observes on drop - and a canary
+pins that.
+
+### Why a ratchet and not a ban
+
+Some metrics name surfaces that are not yet on a production path. Those can be
+recorded in `.github/unwritten-metrics-baseline.txt` so the gate fails on
+**new** unwritten metrics without forcing a half-honest bind. The baseline only
+shrinks: a line for a metric that is now written is itself a failure, so the
+file cannot rot into a permanent excuse.
+
+The adoption path preferred binding over baselining. Thirteen metrics were
+unwritten when the gate first measured the tree. One was deleted
+(`peer_count`, a duplicate of `p2p_peers_connected`). The rest were bound to
+real events or live state:
+
+| Metric | Bind |
+|---|---|
+| `mempool_sender_count` | `emit_chain_metrics` from `Mempool::sender_count` |
+| `p2p_gossip_duplicates` | per-duplicate branch in the gossip handler |
+| `p2p_sync_requests` | inbound `/sync` accept and outbound `send_request` |
+| `peer_connection_quality` | mean gossip score on connect/disconnect |
+| `storage_db_size_bytes` | `Storage::size_on_disk` on chain metric emit |
+| `bridge_amount_locked` | sum of `BridgeStatus::Locked` amounts |
+| `bridge_transfers_total` | successful bridge mint |
+| `bns_names_registered` | committed `BnsRegister` transactions |
+| `ai_requests_total` | committed `AiInferenceRequest` transactions |
+| `ai_outcomes_finalized` | registry outcome-length delta across apply |
+| `slashing_events_total` | QC fault slash, actionable registry slash, storage bond burn |
+| `settlement_equivocations_detected` | drained finality equivocation reports |
+
+Cumulative getters are not bind points. Setting a counter from
+`GossipDedup::total_duplicates()` would require a gauge and would hide the rate
+under a level; the event branch is the honest increment.
+
+### The canary set
+
+Written tree PASSes. Unwritten field FAILs. Baseline exempts. Stale baseline
+FAILs. Multi-line write counts. `start_timer` counts. `#[cfg(test)]` write does
+not. Bodyless `#[cfg(test)]` does not swallow the file. Identity boundary holds
+(`m11` is not satisfied by `m11_extra`). Comment-only write FAILs. Near-empty
+metrics struct FAILs the vacuity floor.
+
+```mermaid
+flowchart TD
+    A[Field in metrics.rs] --> B{Written in production after scrub}
+    B -->|Yes| C{On baseline}
+    C -->|Yes| D[FAIL: stale baseline entry]
+    C -->|No| E[OK]
+    B -->|No| F{On baseline}
+    F -->|Yes| G[OK: recorded debt]
+    F -->|No| H[FAIL: new unwritten metric]
+```
