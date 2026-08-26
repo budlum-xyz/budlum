@@ -1664,6 +1664,77 @@ mod integration_tests {
         bc.emit_chain_metrics();
         assert_eq!(metrics.chain_height.get(), 1); // genesis block
         assert_eq!(metrics.blocks_produced.get(), 1);
+        // Gauges bound in the metrics-are-written pass must move on the same
+        // production emit path, not only when a test writes them by hand.
+        assert_eq!(
+            metrics.mempool_size.get(),
+            0,
+            "empty pool still reports a size"
+        );
+        assert_eq!(metrics.mempool_bytes.get(), 0);
+        assert_eq!(metrics.mempool_sender_count.get(), 0);
+        assert_eq!(
+            metrics.bridge_amount_locked.get(),
+            0,
+            "no locked bridge inventory at genesis"
+        );
+        // finality_lag = height - finalized; genesis shape is whatever the
+        // chain recorded — just must be a finite scrape value.
+        let _ = metrics.finality_lag.get();
+    }
+
+    /// Prometheus text scrape must list every registered series after a real
+    /// emit, including the fields bound in the metrics-are-written pass.
+    ///
+    /// A gauge that exists in the registry but never appears in `encode()` is
+    /// still a dashboard lie: the operator scrapes and sees nothing. This is
+    /// the live-scrape half of the bar; the gate is the static half.
+    #[test]
+    fn prometheus_scrape_lists_bound_series_after_emit() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use crate::core::metrics::Metrics;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
+        let bc = Blockchain::new(consensus, None, 45262, None).with_metrics(metrics.clone());
+        bc.emit_chain_metrics();
+
+        let scrape = metrics.encode();
+        assert!(
+            !scrape.is_empty(),
+            "encode must produce a body after registration"
+        );
+        for name in [
+            "budlum_chain_height",
+            "budlum_mempool_size",
+            "budlum_mempool_bytes",
+            "budlum_mempool_sender_count",
+            "budlum_bridge_amount_locked",
+            "budlum_storage_db_size_bytes",
+            "budlum_p2p_peers_connected",
+            "budlum_p2p_gossip_duplicates",
+            "budlum_p2p_sync_requests",
+            "budlum_peer_connection_quality",
+            "budlum_bns_names_registered",
+            "budlum_ai_requests_total",
+            "budlum_ai_outcomes_finalized",
+            "budlum_slashing_events_total",
+            "budlum_settlement_equivocations_detected",
+            "budlum_bridge_transfers_total",
+        ] {
+            assert!(
+                scrape.contains(name),
+                "scrape missing series {name}; body starts: {}",
+                scrape.chars().take(200).collect::<String>()
+            );
+        }
+        // peer_count was deleted as a duplicate of p2p_peers_connected.
+        assert!(
+            !scrape.contains("budlum_peer_count"),
+            "deleted duplicate gauge must not reappear in scrapes"
+        );
     }
 
     /// The counter has to rise on the real production path, not only when it is
