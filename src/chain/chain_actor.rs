@@ -2500,11 +2500,36 @@ impl ChainActor {
                         );
                     }
                 } else {
-                    tracing::warn!(
-                        "B.U.D. repair band: shard {} of {} has never had a deal; no ticket type exists for a never-placed shard",
-                        hex::encode(shard.shard_id.0),
-                        hex::encode(manifest_id.0)
-                    );
+                    // Bootstrap path: the shard is on the manifest and has never
+                    // held a deal. domain_id comes from any sibling deal on the
+                    // same object when one exists; otherwise the storage domain
+                    // this node is configured for (0 on a fresh registry).
+                    let domain_id = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_manifest(manifest_id)
+                        .first()
+                        .map(|d| d.domain_id)
+                        .unwrap_or(0);
+                    if let Some(ticket_id) = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .open_never_placed_ticket(
+                            domain_id,
+                            *manifest_id,
+                            shard.shard_id,
+                            0,
+                            current_epoch,
+                        )
+                    {
+                        tracing::info!(
+                            "B.U.D. opened never-placed ticket {ticket_id} for shard {} on {}",
+                            hex::encode(shard.shard_id.0),
+                            hex::encode(manifest_id.0)
+                        );
+                    }
                 }
             }
         }
