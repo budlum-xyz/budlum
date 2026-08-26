@@ -116,7 +116,7 @@ pub fn run(root: &Path) -> Result<String, String> {
              id proves nothing; the id claim becomes decoration.",
         ));
     }
-    let unmetered = find_unmetered(&code);
+        let unmetered = find_unmetered(&code);
     if !unmetered.is_empty() {
         return Err(format!(
             "generators that never charge the meter: {}\n  \
@@ -125,8 +125,25 @@ pub fn run(root: &Path) -> Result<String, String> {
             unmetered.join(", ")
         ));
     }
+    // B.U.D. 3.0 is recipe-only: the edition enum and the body-refusal check
+    // must stay present. Without them a Three+Stored pair is silent.
+    if !code.contains("enum BudStorageEdition") {
+        return Err(String::from(
+            "BudStorageEdition is gone.\n  BUD edition Three body-lessness needs a named edition,\n               or Classic and Three collapse into one regime again.",
+        ));
+    }
+    if !code.contains("fn admits_body") || !code.contains("fn check_source") {
+        return Err(String::from(
+            "BudStorageEdition::admits_body / check_source missing.\n               edition Three must refuse Stored/Hybrid/Derived at the type boundary.",
+        ));
+    }
+    if !code.contains("BUD_EDITION_3") {
+        return Err(String::from(
+            "Three edition commitment tag BUD_EDITION_3 missing.\n               Without a bound tag, edition can be rewritten under a stable id.",
+        ));
+    }
     Ok(String::from(
-        "Generated-content gate OK: no floats, generate_and_verify checks the id, every draw_* is metered.",
+        "Generated-content gate OK: no floats, id check, metered draws, BudStorageEdition Three body-less.",
     ))
 }
 
@@ -141,7 +158,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!("budlum-gates-gen-{}-{nanos}", std::process::id()));
     let _ = std::fs::create_dir_all(dir.join("src/storage"));
 
-    let good = "fn generate_and_verify() {\n    let id = ContentId::of(&bytes);\n    if id != expected { return IdMismatch; }\n}\nfn draw_thing(meter: &mut Meter) -> Vec<u8> {\n    meter.charge(1)?;\n    vec![]\n}\n";
+    let good = "enum BudStorageEdition { Classic, Three }\nfn admits_body() {}\nfn check_source() {}\nconst TAG: &[u8] = b\"BUD_EDITION_3\";\nfn generate_and_verify() {\n    let id = ContentId::of(&bytes);\n    if id != expected { return IdMismatch; }\n}\nfn draw_thing(meter: &mut Meter) -> Vec<u8> {\n    meter.charge(1)?;\n    vec![]\n}\n";
     std::fs::write(dir.join("src/storage/generated.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
@@ -162,8 +179,17 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: a generator with no metre passed"));
     }
 
+    let no_edition = "fn generate_and_verify() {\n    let id = ContentId::of(&bytes);\n}\nfn draw_thing(meter: &mut Meter) -> Vec<u8> {\n    meter.charge(1)?;\n    vec![]\n}\n";
+    std::fs::write(dir.join("src/storage/generated.rs"), no_edition).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a module without BudStorageEdition passed",
+        ));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "generated-content canary OK (clean PASSes, float/metreless FAILs).",
+        "generated-content canary OK (clean PASSes, float/metreless/no-edition FAILs).",
     ))
 }

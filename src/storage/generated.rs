@@ -4,7 +4,7 @@
 //! removes them: an object whose bytes follow from a short description does
 //! not need the bytes on disk at all, only the description. Measured against
 //! the alternatives, it is the only lever that reaches a zero multiplier,
-//! and every other lever is an asymptote that approaches 1.0 from above.
+//! and every other lever is an asymptote that approaches one from above.
 //!
 //! # Why the chain can trust a generated object
 //!
@@ -87,6 +87,79 @@ use crate::storage::content_id::ContentId;
 use crate::storage::fixed_point::{
     fixed_clamp_unit, fixed_div, fixed_from_int, fixed_mul, fixed_sqrt, fixed_to_int, FIXED_ONE,
 };
+
+/// Which B.U.D. storage edition a manifest claims.
+///
+/// # Why two editions
+///
+/// **Classic (editions one and two)** is the deal-and-body world: operators may hold real
+/// byte bodies under `Stored` or a `Hybrid` prefix. Users who want custody of
+/// irreproducible bytes stay here.
+///
+/// **Three (edition three)** is recipe-only. The durable object on the network is a
+/// generative recipe; QR-video and other presentations are derivatives and are
+/// not stored. A validator unplugging cannot "lose the file" because there is
+/// no file body to lose — only a recipe everyone can re-run. Bodies are not
+/// banned from the project; they are banned from *this* edition.
+///
+/// The default is `Classic` so every manifest written before this field keeps
+/// its meaning and its id (the commitment adds no bytes for Classic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum BudStorageEdition {
+    /// BUD Classic: bodies allowed (`Stored`, `Hybrid`, …).
+    #[default]
+    Classic = 1,
+    /// BUD edition Three: generative recipe only; no durable body.
+    Three = 3,
+}
+
+impl BudStorageEdition {
+    /// Whether this edition permits a durable byte body on the network.
+    #[must_use]
+    pub const fn admits_body(self) -> bool {
+        matches!(self, Self::Classic)
+    }
+
+    /// Bytes folded into the manifest id. `Classic` adds nothing so pre-edition
+    /// ids stay bit-identical; `Three` binds the claim so it cannot be rewritten
+    /// under a stable id.
+    #[must_use]
+    pub fn commitment_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Classic => Vec::new(),
+            Self::Three => b"BUD_EDITION_3".to_vec(),
+        }
+    }
+
+    /// Refuse source regimes that imply a durable body (or depend on one)
+    /// when the edition is Three.
+    ///
+    /// # Errors
+    ///
+    /// Returns a reason string when `Three` is paired with anything but
+    /// `Generated`.
+    pub fn check_source(self, source: &ContentSource) -> Result<(), String> {
+        match self {
+            Self::Classic => Ok(()),
+            Self::Three => match source {
+                ContentSource::Generated(_) => Ok(()),
+                ContentSource::Stored => Err(
+                    "BUD edition Three admits no durable body: ContentSource::Stored is Classic-only"
+                        .into(),
+                ),
+                ContentSource::Hybrid { .. } => Err(
+                    "BUD edition Three admits no durable body: ContentSource::Hybrid is Classic-only"
+                        .into(),
+                ),
+                ContentSource::Derived(_) => Err(
+                    "BUD edition Three admits no durable body: Derived depends on a master body                      and is Classic-only"
+                        .into(),
+                ),
+            },
+        }
+    }
+}
 
 /// How the bytes behind a manifest come to exist.
 ///
@@ -185,7 +258,7 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
 
 /// How many independent copies must be held for this source.
 ///
-/// **The core rule of B.U.D. 3.0.** Until now the replication target was a
+/// **The core rule of B.U.D. Three.** Until now the replication target was a
 /// fixed number, `STORAGE_REPLICATION_TARGET` = 3, and it did not ask what it
 /// was holding. Holding three copies of content that is born from a recipe is
 /// storing the same deterministic generator three times: the copies **add no
@@ -790,6 +863,38 @@ mod tests {
             output_len: len,
             step_budget: budget,
         }
+    }
+
+    #[test]
+    fn edition_three_rejects_every_body_regime() {
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [9u8; 32],
+            output_len: 64,
+            step_budget: 20_000,
+        };
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Generated(spec.clone()))
+            .is_ok());
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Stored)
+            .is_err());
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Hybrid {
+                prefix_bytes: 1,
+                spec: spec.clone(),
+            })
+            .is_err());
+        assert!(BudStorageEdition::Classic
+            .check_source(&ContentSource::Stored)
+            .is_ok());
+        assert!(!BudStorageEdition::Three.admits_body());
+        assert!(BudStorageEdition::Classic.admits_body());
+        assert!(BudStorageEdition::Classic.commitment_bytes().is_empty());
+        assert_eq!(
+            BudStorageEdition::Three.commitment_bytes(),
+            b"BUD_EDITION_3".to_vec()
+        );
     }
 
     #[test]

@@ -393,6 +393,13 @@ pub struct ContentManifest {
     /// silently replace the other.
     #[serde(default)]
     pub source: crate::storage::generated::ContentSource,
+    /// Which B.U.D. edition this manifest claims.
+    ///
+    /// Default `Classic` (editions one and two): durable bodies are allowed. `Three` is
+    /// recipe-only and refuses every body regime at registration. The
+    /// commitment adds no bytes for `Classic`, so pre-edition ids are stable.
+    #[serde(default)]
+    pub edition: crate::storage::generated::BudStorageEdition,
     /// Length of the *object*, as opposed to `total_size`, which is the sum
     /// of the stored shard sizes.
     ///
@@ -481,6 +488,7 @@ impl ContentManifest {
             shard_count,
             erasure,
             source: crate::storage::generated::ContentSource::Stored,
+            edition: crate::storage::generated::BudStorageEdition::Classic,
             content_size: total,
             encryption,
             shards,
@@ -507,9 +515,44 @@ impl ContentManifest {
             self.total_size,
             &source,
             self.dictionary_id.as_ref(),
+            self.edition,
         );
         self.source = source;
         self
+    }
+
+    /// Declare the B.U.D. edition. Recomputes the id when the edition binds
+    /// bytes (`Three`); `Classic` is a no-op on the preimage.
+    ///
+    /// Does not check source compatibility — that is
+    /// [`BudStorageEdition::check_source`] at registration time.
+    #[must_use]
+    pub fn with_edition(mut self, edition: crate::storage::generated::BudStorageEdition) -> Self {
+        self.manifest_id = manifest_id_from_parts(
+            &self.shards,
+            &self.erasure,
+            &self.encryption,
+            self.content_size(),
+            self.total_size,
+            &self.source,
+            self.dictionary_id.as_ref(),
+            edition,
+        );
+        self.edition = edition;
+        self
+    }
+
+    fn recompute_id(&mut self) {
+        self.manifest_id = manifest_id_from_parts(
+            &self.shards,
+            &self.erasure,
+            &self.encryption,
+            self.content_size(),
+            self.total_size,
+            &self.source,
+            self.dictionary_id.as_ref(),
+            self.edition,
+        );
     }
 
     /// The object's byte length.
@@ -543,13 +586,7 @@ impl ContentManifest {
             ));
         }
         self.content_size = content_size;
-        self.manifest_id = manifest_id_from_parts_stored(
-            &self.shards,
-            &self.erasure,
-            &self.encryption,
-            self.content_size(),
-            self.total_size,
-        );
+        self.recompute_id();
         Ok(self)
     }
 
@@ -571,6 +608,7 @@ impl ContentManifest {
             self.total_size,
             &self.source,
             self.dictionary_id.as_ref(),
+            self.edition,
         );
         if expected != self.manifest_id {
             return Err(format!(
@@ -664,6 +702,9 @@ impl ContentManifest {
                 self.content_size()
             ));
         }
+        self.edition
+            .check_source(&self.source)
+            .map_err(|reason| format!("edition/source pair refused: {reason}"))?;
         self.verify_id()
     }
 
@@ -705,13 +746,7 @@ impl ContentManifest {
             ));
         }
         self.erasure = erasure;
-        self.manifest_id = manifest_id_from_parts_stored(
-            &self.shards,
-            &self.erasure,
-            &self.encryption,
-            self.content_size(),
-            self.total_size,
-        );
+        self.recompute_id();
         Ok(self)
     }
 
@@ -760,13 +795,7 @@ impl ContentManifest {
     #[must_use]
     pub fn with_encryption(mut self, encryption: ContentEncryption) -> Self {
         self.encryption = encryption;
-        self.manifest_id = manifest_id_from_parts_stored(
-            &self.shards,
-            &self.erasure,
-            &self.encryption,
-            self.content_size(),
-            self.total_size,
-        );
+        self.recompute_id();
         self
     }
 
@@ -871,6 +900,7 @@ pub fn manifest_id_from_parts(
     total_size: u64,
     source: &crate::storage::generated::ContentSource,
     dictionary_id: Option<&ContentId>,
+    edition: crate::storage::generated::BudStorageEdition,
 ) -> ContentId {
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
@@ -898,6 +928,8 @@ pub fn manifest_id_from_parts(
     // ids of manifests written before this field have to stay exactly the same.
     // A claim is committed only when something is claimed.
     buf.extend_from_slice(&crate::storage::generated::source_commitment_bytes(source));
+    // Classic edition adds nothing (pre-edition id stability). Three binds.
+    buf.extend_from_slice(&edition.commitment_bytes());
     // The dictionary commitment follows the same rule as the source commitment.
     // With no dictionary, no byte is written, so the preimage of manifests
     // recorded before this field does not change and their ids are preserved.
@@ -928,6 +960,7 @@ pub fn manifest_id_from_parts_stored(
         total_size,
         &crate::storage::generated::ContentSource::Stored,
         None,
+        crate::storage::generated::BudStorageEdition::Classic,
     )
 }
 
