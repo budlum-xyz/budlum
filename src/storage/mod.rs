@@ -38,6 +38,8 @@ pub mod payload_crypt;
 pub mod qr_frame;
 pub mod qr_payload;
 pub mod qr_recipe;
+pub mod qr_reemit;
+pub mod qr_receive;
 pub mod render;
 pub mod view_grant;
 pub mod traits;
@@ -117,4 +119,5 @@ pub use qr_recipe::{
     three_recipe_digest, three_sealed_recipe_commitment, ThreeRecipe, ThreeRecipePublic,
     ThreeRecipeSealed,
 };
-
+pub use qr_reemit::{RecipeEmitter, ReemitError};
+pub use qr_receive::{ProgressiveReceiver, ReceiveError};
