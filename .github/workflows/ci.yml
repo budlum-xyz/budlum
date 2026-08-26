@@ -1136,6 +1136,13 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code
+      # A registered Prometheus metric that nothing writes is a dashboard lie:
+      # scrapes report a permanent zero next to real counters. Ratched off
+      # .github/unwritten-metrics-baseline.txt; the baseline only shrinks.
+      - name: metrics are written gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- metrics-are-written --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- metrics-are-written
       - name: typographic dash gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
