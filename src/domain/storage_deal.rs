@@ -667,6 +667,12 @@ pub struct StorageRegistry {
     /// replicas.
     #[serde(default)]
     operator_classes: BTreeMap<Address, OperatorClass>,
+    /// Who may open non-public content (view-key permission book).
+    ///
+    /// Key material stays off-chain; this map is grants only. Classic/2.0
+    /// private bodies and Three/3.0 encrypted recipes both use it.
+    #[serde(default)]
+    pub view_grants: crate::storage::ViewGrantRegistry,
 }
 
 use std::collections::BTreeMap;
