@@ -467,6 +467,7 @@ dependencies = [
  "bud-vm",
  "budlum-note-packing",
  "bytes",
+ "chacha20poly1305",
  "clap",
  "criterion",
  "cryptoki",
