@@ -33,6 +33,7 @@ pub mod mobile_self;
 pub mod msr;
 pub mod provider;
 pub mod pruning;
+pub mod qr_carousel;
 pub mod qr_payload;
 pub mod render;
 pub mod view_grant;
@@ -97,3 +98,8 @@ pub use qr_payload::{
     FLAG_ZLIB, MAX_PAYLOAD_CONTENT, THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_MAGIC,
     THREE_PAYLOAD_VERSION,
 };
+pub use qr_carousel::{
+    planned_drop_count, CarouselDecoder, CarouselEncoder, CarouselError, CarouselParams, Drop,
+    DEFAULT_BLOCK_LEN, DROP_HEADER_LEN, DROP_MAGIC, DROP_VERSION, MAX_CAROUSEL_BYTES, MAX_K,
+};
+
