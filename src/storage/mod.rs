@@ -34,6 +34,7 @@ pub mod msr;
 pub mod provider;
 pub mod pruning;
 pub mod render;
+pub mod view_grant;
 pub mod traits;
 
 pub use assignment::{
@@ -84,3 +85,8 @@ pub use pruning::{NodeMode, PruningPolicy};
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
 
 pub mod pact_binding;
+pub use view_grant::{
+    ConfidentialBodyCommit, ConfidentialProofKind, ViewGrant, ViewGrantError, ViewGrantRegistry,
+    ViewPolicy,
+};
+
