@@ -80,6 +80,7 @@ mod gates {
     pub mod geiger;
     pub mod generated_content;
     pub mod qr_is_derivative_only;
+    pub mod three_is_recipe_only;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
@@ -743,6 +744,14 @@ const GATES: &[Gate] = &[
         run: gates::qr_is_derivative_only::run,
         run_args: None,
         self_test: gates::qr_is_derivative_only::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "three-is-recipe-only",
+        replaces: None,
+        run: gates::three_is_recipe_only::run,
+        run_args: None,
+        self_test: gates::three_is_recipe_only::self_test,
         run_log: None,
     },
 

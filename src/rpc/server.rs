@@ -1938,11 +1938,12 @@ impl BudlumApiServer for RpcServer {
         if matches!(
             manifest.source,
             crate::storage::generated::ContentSource::Generated(_)
+                | crate::storage::generated::ContentSource::SealedGenerated(_)
                 | crate::storage::generated::ContentSource::Derived(_)
         ) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "verify_encoding refuses Generated/Derived sources: there is no body to re-encode; the recipe is the object",
+                "verify_encoding refuses recipe sources (Generated/SealedGenerated/Derived): there is no body to re-encode",
                 None::<()>,
             ));
         }

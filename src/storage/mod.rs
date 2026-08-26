@@ -53,8 +53,9 @@ pub use erasure::{
     encode_object, verify_object_encoding, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
 };
 pub use generated::{
-    generate_and_verify, generate_content, generated_spec_digest, held_bytes, BudStorageEdition,
-    ContentSource, GenerateError, GeneratedSpec, GeneratorId, MAX_GENERATED_BYTES,
+    generate_and_verify, generate_content, generated_spec_digest, held_bytes, is_three_recipe,
+    recipe_seed_is_public, sealed_generated_commitment, BudStorageEdition, ContentSource,
+    GenerateError, GeneratedSpec, GeneratorId, SealedGeneratedSpec, MAX_GENERATED_BYTES,
 };
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
