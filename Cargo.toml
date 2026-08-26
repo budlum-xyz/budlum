@@ -20,6 +20,8 @@ p2p-mdns = ["libp2p/mdns"]
 
 [dependencies]
 sha2 = "0.11"
+# zlib for Three payload pack (K-QR-SIKISTIR: only when it shrinks).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

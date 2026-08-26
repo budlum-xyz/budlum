@@ -33,6 +33,7 @@ pub mod mobile_self;
 pub mod msr;
 pub mod provider;
 pub mod pruning;
+pub mod qr_payload;
 pub mod render;
 pub mod view_grant;
 pub mod traits;
@@ -91,3 +92,8 @@ pub use view_grant::{
     ViewPolicy,
 };
 
+pub use qr_payload::{
+    pack_payload, packed_is_zlib, payload_commitment, unpack_payload, PayloadError, PayloadKind,
+    FLAG_ZLIB, MAX_PAYLOAD_CONTENT, THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_MAGIC,
+    THREE_PAYLOAD_VERSION,
+};
