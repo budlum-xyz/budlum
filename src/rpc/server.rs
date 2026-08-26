@@ -2396,9 +2396,8 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Ghost RPC was documented but not implemented.
-        // Implementation: query PermissionlessRegistry active members for STORAGE_OPERATOR (RoleId 5).
-        // No admin gate, no whitelist - permissionless read, same as bud_registryActiveMembers.
+        // Permissionless read of active STORAGE_OPERATOR (RoleId 5) members.
+        // Same surface as bud_registryActiveMembers; no admin gate.
         let role = crate::registry::role::roles::STORAGE_OPERATOR;
         let members = self.chain.get_registry_active_members(role).await;
         let list: Vec<serde_json::Value> = members
