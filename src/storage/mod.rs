@@ -34,6 +34,7 @@ pub mod msr;
 pub mod provider;
 pub mod pruning;
 pub mod qr_carousel;
+pub mod qr_frame;
 pub mod qr_payload;
 pub mod render;
 pub mod view_grant;
@@ -101,5 +102,9 @@ pub use qr_payload::{
 pub use qr_carousel::{
     planned_drop_count, CarouselDecoder, CarouselEncoder, CarouselError, CarouselParams, Drop,
     DEFAULT_BLOCK_LEN, DROP_HEADER_LEN, DROP_MAGIC, DROP_VERSION, MAX_CAROUSEL_BYTES, MAX_K,
+};
+pub use qr_frame::{
+    fold_frame_digests, frame_digest, pack_frame, stream_id_prefix, unpack_frame, FrameError,
+    MAX_DROP_WIRE, THREE_FRAME_HEADER_LEN, THREE_FRAME_MAGIC, THREE_FRAME_VERSION,
 };
 
