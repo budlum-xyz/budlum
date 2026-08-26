@@ -517,4 +517,11 @@ mod tests {
         assert_ne!(before, after);
         assert_ne!(root_before, reg.root());
     }
+
+    #[test]
+    fn r2_r3_body_is_classic_not_three_in_docs() {
+        let doc = include_str!("view_grant.rs");
+        assert!(doc.contains("R2/R3 in the cost tables are **not** a third edition"));
+        assert!(doc.contains("If it has a body, it is 2.0 (Classic)"));
+    }
 }

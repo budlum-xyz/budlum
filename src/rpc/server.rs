@@ -1968,6 +1968,182 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn storage_issue_view_grant(
+        &self,
+        content_id: String,
+        issuer: String,
+        grantee: Option<String>,
+        key_id: String,
+        policy: String,
+        opened_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let issuer = Address::from_hex(issuer.strip_prefix("0x").unwrap_or(&issuer)).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("issuer: {e}"), None::<()>)
+        })?;
+        let grantee = match grantee {
+            None => None,
+            Some(g) if g.is_empty() => None,
+            Some(g) => Some(
+                Address::from_hex(g.strip_prefix("0x").unwrap_or(&g)).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("grantee: {e}"), None::<()>)
+                })?,
+            ),
+        };
+        let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let policy = match policy.to_ascii_lowercase().as_str() {
+            "owneronly" | "owner_only" | "owner" => crate::storage::ViewPolicy::OwnerOnly,
+            "namedgrantee" | "named_grantee" | "named" | "dm" => {
+                crate::storage::ViewPolicy::NamedGrantee
+            }
+            "publickeyid" | "public_key_id" | "public" => crate::storage::ViewPolicy::PublicKeyId,
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown view policy {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let grant_id = self
+            .chain
+            .issue_view_grant(content_id, issuer, grantee, key_id, policy, opened_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({ "grantId": grant_id }))
+    }
+
+    async fn storage_revoke_view_grant(
+        &self,
+        grant_id: u64,
+        caller: String,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let caller = Address::from_hex(caller.strip_prefix("0x").unwrap_or(&caller)).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("caller: {e}"), None::<()>)
+        })?;
+        self.chain
+            .revoke_view_grant(grant_id, caller, at_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({ "revoked": true, "grantId": grant_id }))
+    }
+
+    async fn storage_may_view(
+        &self,
+        content_id: String,
+        viewer: String,
+        key_id: String,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer)).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>)
+        })?;
+        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner)).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>)
+        })?;
+        let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let allowed = self
+            .chain
+            .may_view_content(content_id, viewer, key_id, owner)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        Ok(serde_json::json!({ "allowed": allowed }))
+    }
+
+    async fn storage_register_confidential_commit(
+        &self,
+        content_id: String,
+        encryption: String,
+        ciphertext_root: String,
+        proof_kind: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let encryption = match encryption.to_ascii_lowercase().as_str() {
+            "aes-256-gcm" | "aes256gcm" => {
+                crate::storage::ContentEncryption::ClientSide(crate::storage::ContentCipher::Aes256Gcm)
+            }
+            "chacha20-poly1305" | "chacha20poly1305" => crate::storage::ContentEncryption::ClientSide(
+                crate::storage::ContentCipher::ChaCha20Poly1305,
+            ),
+            "xchacha20-poly1305" | "xchacha20poly1305" => {
+                crate::storage::ContentEncryption::ClientSide(
+                    crate::storage::ContentCipher::XChaCha20Poly1305,
+                )
+            }
+            "plaintext" => crate::storage::ContentEncryption::Plaintext,
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown encryption {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let ciphertext_root = parse_hex32_field(&ciphertext_root, "ciphertext_root")?;
+        let proof_kind = match proof_kind.to_ascii_lowercase().as_str() {
+            "retrieval" | "retrievalchallenge" | "retrieval_challenge" => {
+                crate::storage::ConfidentialProofKind::RetrievalChallenge
+            }
+            "zk" | "zkstorage" | "zk_storage_proof" => {
+                crate::storage::ConfidentialProofKind::ZkStorageProof
+            }
+            "tee" | "teeattested" | "tee_attested" => {
+                crate::storage::ConfidentialProofKind::TeeAttested
+            }
+            "hybrid" | "hybridzktee" | "hybrid_zk_tee" => {
+                crate::storage::ConfidentialProofKind::HybridZkTee
+            }
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown proof_kind {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let commit = crate::storage::ConfidentialBodyCommit::new(
+            content_id,
+            encryption,
+            ciphertext_root,
+            proof_kind,
+        )
+        .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let commitment = self
+            .chain
+            .register_confidential_commit(commit)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "commitment": format!("0x{}", hex::encode(commitment)),
+            "contentId": format!("0x{}", hex::encode(content_id.0)),
+        }))
+    }
+
+    async fn storage_get_confidential_commit(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let commit = self
+            .chain
+            .get_confidential_commit(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        match commit {
+            None => Ok(serde_json::json!({ "found": false })),
+            Some(c) => Ok(serde_json::json!({
+                "found": true,
+                "contentId": format!("0x{}", hex::encode(c.content_id.0)),
+                "encryption": c.encryption.to_string(),
+                "ciphertextRoot": format!("0x{}", hex::encode(c.ciphertext_root)),
+                "proofKind": format!("{:?}", c.proof_kind),
+                "commitment": format!("0x{}", hex::encode(c.commitment())),
+            })),
+        }
+    }
+
     async fn storage_open_deal(
         &self,
         domain_id: u32,
