@@ -1518,7 +1518,12 @@ impl StorageRegistry {
         // Membership was just checked, so the shard is present; take its size
         // while the manifest is still in hand. Pricing reads this and not the
         // registry copy, which a later manifest write could move.
-        let shard_bytes = u64::from(
+        //
+        // `held_bytes` is the axis that makes Generated and Stored comparable:
+        // a recipe holds nothing on disk, so charging its listed output size
+        // would invent a rent for bytes nobody stores. A Hybrid whose prefix
+        // exceeds the listed size is a contradictory spec and is refused.
+        let listed_bytes = u64::from(
             manifest
                 .shard(&shard_id)
                 .ok_or(StorageError::UnknownShard {
@@ -1527,6 +1532,12 @@ impl StorageRegistry {
                 })?
                 .size,
         );
+        let shard_bytes = crate::storage::generated::held_bytes(&manifest.source, listed_bytes)
+            .ok_or_else(|| StorageError::InvalidManifest {
+                reason: String::from(
+                    "held_bytes refused the source (hybrid prefix longer than listed size)",
+                ),
+            })?;
         self.register_manifest(manifest);
 
         let deal_id = self.next_deal_id;
@@ -3511,6 +3522,60 @@ mod tests {
             deal.total_fee(10),
             good_econ().total_fee(u64::from(shard.size), 10),
             "the deal must price itself from its own recorded size"
+        );
+    }
+
+    /// A Generated source holds no bytes. Pricing from the listed output size
+    /// would invent a rent for a recipe; `held_bytes` is what keeps Three's
+    /// "kira = 0" claim true on the deal path, not only in a spreadsheet.
+    #[test]
+    fn a_generated_deal_is_priced_at_zero_held_bytes() {
+        use crate::storage::generated::{
+            generate_content, ContentSource, GeneratedSpec, GeneratorId,
+        };
+
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [7u8; 32],
+            output_len: 32 * 32,
+            step_budget: 8_000,
+        };
+        let bytes = generate_content(&spec).expect("generation");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("manifest")
+            .with_source(ContentSource::Generated(spec));
+        // Classic edition still admits a body-shaped deal for the live copy;
+        // the rent must still read held_bytes = 0.
+        let mut reg = StorageRegistry::new();
+        let shard = &manifest.shards[0];
+        let listed = u64::from(shard.size);
+        assert!(listed > 0, "fixture must list a non-zero output size");
+        let id = reg
+            .open_deal(
+                42,
+                &manifest,
+                shard.shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect("generated deal opens");
+        let deal = reg.get_deal(id).expect("deal");
+        assert_eq!(deal.shard_bytes, 0, "Generated holds nothing to rent");
+        assert_eq!(
+            deal.total_fee(10),
+            0,
+            "zero held bytes must yield zero rent even at a positive rate"
+        );
+        assert_ne!(
+            good_econ().total_fee(listed, 10),
+            0,
+            "control: the same rate on listed size would not be free"
         );
     }
 
