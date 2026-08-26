@@ -5566,11 +5566,42 @@ mod demand_driven_replication_tests {
 
 
     #[test]
-    #[test]
     fn three_manifest_cannot_open_a_storage_deal() {
+        use crate::core::address::Address;
+        use crate::domain::storage_params::StorageDomainParams;
         use crate::storage::generated::{
             generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
         };
+
+        fn operator() -> Address {
+            Address::from([7u8; 32])
+        }
+        fn params() -> StorageDomainParams {
+            StorageDomainParams {
+                chunk_size: 256,
+                max_committed_chunks: 1000,
+                challenge_interval: 10,
+                min_operator_bond: 1_000_000,
+            }
+        }
+        fn good_econ() -> StorageEconomicsParams {
+            StorageEconomicsParams {
+                operator_bond: 5_000_000,
+                fee_per_byte_epoch: 100,
+            }
+        }
+        fn valid_merkle_proof() -> Vec<u8> {
+            let envelope = bud_proof::ProofEnvelope {
+                proof_format_version: 1,
+                backend: "test-backend".to_string(),
+                p3_version: "0.6".to_string(),
+                fri_params_id: "test-fri".to_string(),
+                public_inputs_hash: [0x42u8; 32],
+                proof_bytes: vec![0xABu8; 96],
+                degree_bits: 8,
+            };
+            bincode::serialize(&envelope).expect("test envelope serialize")
+        }
 
         let spec = GeneratedSpec {
             generator: GeneratorId::Avatar,
@@ -5579,6 +5610,15 @@ mod demand_driven_replication_tests {
             step_budget: 8_000,
         };
         let bytes = generate_content(&spec).expect("gen");
+        let shard_id = {
+            let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+                .expect("m");
+            manifest
+                .shards
+                .first()
+                .expect("shard")
+                .shard_id
+        };
         let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
             .expect("m")
             .with_source(ContentSource::Generated(spec))
@@ -5590,7 +5630,7 @@ mod demand_driven_replication_tests {
             .open_deal(
                 42,
                 &manifest,
-                manifest.shards[0].shard_id,
+                shard_id,
                 operator(),
                 0,
                 10,
@@ -5607,6 +5647,7 @@ mod demand_driven_replication_tests {
         );
     }
 
+    #[test]
     fn confidential_commit_refuses_three_edition_manifest() {
         use crate::storage::generated::{
             generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
