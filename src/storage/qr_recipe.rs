@@ -137,6 +137,28 @@ impl ThreeRecipe {
             Self::Sealed(s) => three_sealed_recipe_commitment(s),
         }
     }
+
+    /// G2: whether this recipe form is publicly re-emittable without a grant.
+    #[must_use]
+    pub const fn is_publicly_reemitable(&self) -> bool {
+        matches!(self, Self::Public(_))
+    }
+}
+
+/// G2 — may the actor open/re-emit a Three recipe right now?
+///
+/// - [`ThreeRecipe::Public`]: yes (V2).
+/// - [`ThreeRecipe::Sealed`]: only when `grant_allows` is true (caller already
+///   checked [`crate::storage::ViewGrantRegistry::may_view`] for this content).
+///
+/// This does **not** deliver key material; it only answers the authorization
+/// question so reveal RPC cannot skip the grant check (T14).
+#[must_use]
+pub fn may_open_three_recipe(recipe: &ThreeRecipe, grant_allows: bool) -> bool {
+    match recipe {
+        ThreeRecipe::Public(_) => true,
+        ThreeRecipe::Sealed(_) => grant_allows,
+    }
 }
 
 // CarouselParams needs serde — check if it has derives; if not, add manually in tests only via fields.
@@ -177,6 +199,20 @@ mod tests {
         let mut bad = full.clone();
         bad.stream_id[1] ^= 0xaa;
         assert!(sealed.open_with(&bad).is_err());
+    }
+
+    #[test]
+    fn sealed_requires_grant_to_open() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"g2").unwrap();
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, 32).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        let full = ThreeRecipePublic::new(commit, enc.params(), stream);
+        let sealed = ThreeRecipe::Sealed(full.seal());
+        let public = ThreeRecipe::Public(full);
+        assert!(may_open_three_recipe(&public, false));
+        assert!(!may_open_three_recipe(&sealed, false));
+        assert!(may_open_three_recipe(&sealed, true));
     }
 
     #[test]

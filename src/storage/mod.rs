@@ -40,6 +40,9 @@ pub mod qr_payload;
 pub mod qr_recipe;
 pub mod qr_reemit;
 pub mod qr_receive;
+pub mod three_pipe;
+pub mod qr_codec;
+pub mod transformed;
 pub mod render;
 pub mod view_grant;
 pub mod traits;
@@ -116,8 +119,18 @@ pub use payload_crypt::{
     SEALED_HEADER_LEN, SEALED_MAGIC, SEALED_NONCE_LEN, SEALED_VERSION,
 };
 pub use qr_recipe::{
-    three_recipe_digest, three_sealed_recipe_commitment, ThreeRecipe, ThreeRecipePublic,
-    ThreeRecipeSealed,
+    may_open_three_recipe, three_recipe_digest, three_sealed_recipe_commitment, ThreeRecipe,
+    ThreeRecipePublic, ThreeRecipeSealed,
 };
 pub use qr_reemit::{RecipeEmitter, ReemitError};
 pub use qr_receive::{ProgressiveReceiver, ReceiveError};
+
+pub use transformed::{CodecFlags, TransformError, TransformedPayload};
+pub use qr_codec::{
+    gate_codec, split_raw_concat, CodecError, CodecKind, FrameMux, RawFrameConcat,
+};
+pub use three_pipe::{
+    decode_frames, encode_plain, mux_raw, recipe_commitment, EncodedPipe, PipeError,
+    PIPE_DEFAULT_BLOCK_LEN,
+};
+
