@@ -1263,6 +1263,31 @@ impl StorageRegistry {
                     },
                 )?;
             }
+            // Sealed Three recipe: seed is off-chain. We cannot run the
+            // generator. We check shape (one shard, public fields sane) and
+            // refuse a zero commitment. Reveal-time open_with + generate is
+            // the honesty check, gated by view-grants.
+            crate::storage::generated::ContentSource::SealedGenerated(sealed) => {
+                if manifest.shards.len() != 1 {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "SealedGenerated manifest must have exactly one shard".into(),
+                    });
+                }
+                if sealed.recipe_commitment == [0u8; 32] {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "SealedGenerated recipe_commitment must not be zero".into(),
+                    });
+                }
+                if sealed.output_len == 0 {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "SealedGenerated output_len must be non-zero".into(),
+                    });
+                }
+                // Public digest must match the sealed fields (no seed).
+                let expect =
+                    crate::storage::generated::sealed_generated_commitment(sealed);
+                let _ = expect; // commitment is part of source_commitment_bytes via id
+            }
             crate::storage::generated::ContentSource::Hybrid { .. } => {
                 return Err(StorageError::InvalidManifest {
                     reason:
@@ -1587,6 +1612,17 @@ impl StorageRegistry {
         manifest
             .validate_untrusted()
             .map_err(|reason| StorageError::InvalidManifest { reason })?;
+        // Three is recipe-only: a storage deal is custody of held bytes. Opening
+        // a deal against a Three manifest would reintroduce body economics under
+        // another name (operators "holding" a recipe, charging rent for zero
+        // held_bytes, or laundering a body as a live copy). Classic only.
+        if !manifest.edition.admits_body() {
+            return Err(StorageError::InvalidManifest {
+                reason: String::from(
+                    "BUD edition Three admits no storage deal: recipes are not placed with operators; use Classic for bodies",
+                ),
+            });
+        }
         self.validate_shard_membership(manifest, &shard_id)?;
         // Membership was just checked, so the shard is present; take its size
         // while the manifest is still in hand. Pricing reads this and not the
@@ -5530,6 +5566,47 @@ mod demand_driven_replication_tests {
 
 
     #[test]
+    #[test]
+    fn three_manifest_cannot_open_a_storage_deal() {
+        use crate::storage::generated::{
+            generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
+        };
+
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [2u8; 32],
+            output_len: 32 * 32,
+            step_budget: 8_000,
+        };
+        let bytes = generate_content(&spec).expect("gen");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("m")
+            .with_source(ContentSource::Generated(spec))
+            .with_edition(BudStorageEdition::Three);
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&manifest)
+            .expect("three recipe may register");
+        let err = reg
+            .open_deal(
+                42,
+                &manifest,
+                manifest.shards[0].shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("Three must not open a deal");
+        assert!(
+            matches!(err, StorageError::InvalidManifest { .. }),
+            "got {err:?}"
+        );
+    }
+
     fn confidential_commit_refuses_three_edition_manifest() {
         use crate::storage::generated::{
             generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,

@@ -32,6 +32,15 @@ fn render_from_recipe(
     use crate::storage::generated::ContentSource;
     let spec = match &manifest.source {
         ContentSource::Generated(spec) => spec,
+        // Sealed recipes have no seed on chain: regenerating here would be
+        // impossible, and falling through to stored bytes would serve the wrong
+        // category under a Three name.
+        ContentSource::SealedGenerated(_) => {
+            return Err(
+                "sealed recipe cannot be rendered without a view-granted seed; the chain holds no seed"
+                    .into(),
+            );
+        }
         // `Hybrid` and `Derived` cannot be produced from the recipe alone: the
         // first carries a prefix that cannot be regenerated, and the second
         // depends on the master's bytes. Both are left to the stored-byte
@@ -293,12 +302,19 @@ impl BudGateway {
             .await
             .ok_or_else(|| format!("BNS name '{name}' resolves to no known manifest"))?;
 
-        let crate::storage::generated::ContentSource::Generated(ref spec) = manifest.source else {
-            return Err(
-                "only recipe-born content can be rendered into a requested format; \
-                 stored bytes already are their format"
-                    .into(),
-            );
+        let spec = match &manifest.source {
+            crate::storage::generated::ContentSource::Generated(spec) => spec,
+            crate::storage::generated::ContentSource::SealedGenerated(_) => {
+                return Err(
+                    "sealed recipe cannot be rendered without a view-granted seed".into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "only recipe-born content can be rendered into a requested format;                      stored bytes already are their format"
+                        .into(),
+                );
+            }
         };
 
         let bytes = crate::storage::render::render(spec, format)
