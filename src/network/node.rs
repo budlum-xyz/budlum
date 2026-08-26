@@ -1566,6 +1566,12 @@ impl Node {
                                    }
                                    if let Some(ref m) = self.metrics {
                                        m.p2p_peers_connected.set(count as i64);
+                                       let mean_quality = self
+                                           .gossip_dedup
+                                           .lock()
+                                           .map(|d| d.mean_peer_score_i64())
+                                           .unwrap_or_else(|p| p.into_inner().mean_peer_score_i64());
+                                       m.peer_connection_quality.set(mean_quality);
                                    }
                                    info!("Connected to {peer_id}, Peers: {count}");
 
@@ -1658,17 +1664,17 @@ impl Node {
                                    if let Some(ref m) = self.metrics {
                                        m.p2p_peers_connected
                                            .set(self.peer_count.load(Ordering::SeqCst) as i64);
-                                       m.gossip_scored_peers.set(
-                                           i64::try_from(
-                                               self.gossip_dedup
-                                                   .lock()
-                                                   .map(|d| d.scored_peer_count())
-                                                   .unwrap_or_else(|p| {
-                                                       p.into_inner().scored_peer_count()
-                                                   }),
-                                           )
-                                           .unwrap_or(i64::MAX),
-                                       );
+                                       let (scored, mean_quality) = self
+                                           .gossip_dedup
+                                           .lock()
+                                           .map(|d| (d.scored_peer_count(), d.mean_peer_score_i64()))
+                                           .unwrap_or_else(|p| {
+                                               let d = p.into_inner();
+                                               (d.scored_peer_count(), d.mean_peer_score_i64())
+                                           });
+                                       m.gossip_scored_peers
+                                           .set(i64::try_from(scored).unwrap_or(i64::MAX));
+                                       m.peer_connection_quality.set(mean_quality);
                                    }
                                    warn!(
                                        "Disconnected from {}, Peers: {}",
@@ -1751,6 +1757,14 @@ impl Node {
                                        }
                                    };
                                    if let Some(should_ban) = duplicate_action {
+                                       // Event-local: one increment per duplicate
+                                       // observation. Setting from
+                                       // `total_duplicates()` would require a
+                                       // gauge and would hide the rate under a
+                                       // cumulative level.
+                                       if let Some(ref m) = self.metrics {
+                                           m.p2p_gossip_duplicates.inc();
+                                       }
                                        if should_ban {
                                            warn!("Duplicate gossip flood detected from {peer_id}; banning peer");
                                            {
@@ -2611,6 +2625,9 @@ impl Node {
                                                        warn!("Rejected sync request from unhandshaked/rate-limited/banned peer {peer}");
                                                        continue;
                                                    }
+                                                   if let Some(ref m) = self.metrics {
+                                                       m.p2p_sync_requests.inc();
+                                                   }
                                                    if let Ok(msg) = NetworkMessage::from_bytes_validated(&request) {
                                                        match msg {
                                                            NetworkMessage::GetHeaders { locator, limit } => {
@@ -2691,6 +2708,9 @@ impl Node {
                                                                            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                                                                            Ordering::SeqCst,
                                                                        );
+                                                                       if let Some(ref m) = self.metrics {
+                                                                           m.p2p_sync_requests.inc();
+                                                                       }
                                                                        let _ = self.swarm.behaviour_mut().sync.send_request(&peer, req.to_bytes());
                                                                    }
                                                                }

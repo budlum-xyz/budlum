@@ -293,6 +293,26 @@ impl GossipDedup {
         self.peer_scores.len()
     }
 
+    /// Mean gossip score across scored peers, rounded toward zero as `i64`.
+    ///
+    /// Returns 0 when the table is empty so a cold node does not look like a
+    /// mass ban. Used by the `peer_connection_quality` gauge.
+    #[must_use]
+    pub fn mean_peer_score_i64(&self) -> i64 {
+        if self.peer_scores.is_empty() {
+            return 0;
+        }
+        let sum: f64 = self.peer_scores.values().map(|s| s.score).sum();
+        let mean = sum / self.peer_scores.len() as f64;
+        if mean >= i64::MAX as f64 {
+            i64::MAX
+        } else if mean <= i64::MIN as f64 {
+            i64::MIN
+        } else {
+            mean as i64
+        }
+    }
+
     /// Drop records until the table is within [`MAX_SCORED_PEERS`].
     ///
     /// Disconnected peers go first, oldest close first. Only if that is not

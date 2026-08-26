@@ -390,6 +390,22 @@ impl BridgeState {
         self.transfers.get(message_id)
     }
 
+    /// Sum of amounts on transfers still in [`BridgeStatus::Locked`].
+    ///
+    /// Minted, burned and unlocked transfers are inventory that has already
+    /// moved; only the locked set is capital currently trapped in the bridge.
+    /// Saturates at `u128::MAX` rather than overflowing a scrape.
+    #[must_use]
+    pub fn locked_amount_total(&self) -> u128 {
+        let mut total = 0u128;
+        for transfer in self.transfers.values() {
+            if matches!(transfer.status, BridgeStatus::Locked { .. }) {
+                total = total.saturating_add(transfer.amount);
+            }
+        }
+        total
+    }
+
     pub fn burn(&mut self, message_id: MessageId, domain: DomainId) -> Result<(), BridgeError> {
         self.burn_with_event(message_id, domain, 0, 0, 0)
             .map(|_| ())
