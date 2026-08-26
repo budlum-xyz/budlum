@@ -348,6 +348,51 @@ pub trait BudlumApi {
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Issue a view grant (key handle on-chain; key material off-chain).
+    #[method(name = "bud_storageIssueViewGrant")]
+    async fn storage_issue_view_grant(
+        &self,
+        content_id: String,
+        issuer: String,
+        grantee: Option<String>,
+        key_id: String,
+        policy: String,
+        opened_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_storageRevokeViewGrant")]
+    async fn storage_revoke_view_grant(
+        &self,
+        grant_id: u64,
+        caller: String,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_storageMayView")]
+    async fn storage_may_view(
+        &self,
+        content_id: String,
+        viewer: String,
+        key_id: String,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Classic/2.0 confidential body commit. Three/recipe-only is refused.
+    #[method(name = "bud_storageRegisterConfidentialCommit")]
+    async fn storage_register_confidential_commit(
+        &self,
+        content_id: String,
+        encryption: String,
+        ciphertext_root: String,
+        proof_kind: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_storageGetConfidentialCommit")]
+    async fn storage_get_confidential_commit(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Open a new `StorageDeal` for a specific shard of a registered manifest.
     #[method(name = "bud_storageOpenDeal")]
     async fn storage_open_deal(

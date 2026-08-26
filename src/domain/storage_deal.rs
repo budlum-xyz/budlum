@@ -673,6 +673,10 @@ pub struct StorageRegistry {
     /// private bodies and Three/3.0 encrypted recipes both use it.
     #[serde(default)]
     pub view_grants: crate::storage::ViewGrantRegistry,
+    /// Classic/2.0 confidential body commits (ciphertext root + proof kind).
+    /// Three/R1 has no body; this map is the private-body surface only.
+    #[serde(default)]
+    pub confidential_commits: BTreeMap<ContentId, crate::storage::ConfidentialBodyCommit>,
 }
 
 use std::collections::BTreeMap;
@@ -1396,6 +1400,69 @@ impl StorageRegistry {
     pub fn get_manifest(&self, manifest_id: &ContentId) -> Option<&ContentManifest> {
         self.manifests.get(manifest_id)
     }
+
+    /// Issue a view grant. Key material stays off-chain.
+    pub fn issue_view_grant(
+        &mut self,
+        content_id: ContentId,
+        issuer: Address,
+        grantee: Option<Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+    ) -> Result<u64, crate::storage::ViewGrantError> {
+        self.view_grants
+            .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
+    }
+
+    pub fn revoke_view_grant(
+        &mut self,
+        grant_id: u64,
+        caller: Address,
+        at_epoch: u64,
+    ) -> Result<(), crate::storage::ViewGrantError> {
+        self.view_grants.revoke(grant_id, caller, at_epoch)
+    }
+
+    #[must_use]
+    pub fn may_view(
+        &self,
+        content_id: &ContentId,
+        viewer: &Address,
+        key_id: &[u8; 32],
+        owner: &Address,
+    ) -> bool {
+        self.view_grants.may_view(content_id, viewer, key_id, owner)
+    }
+
+    /// Record a Classic confidential body commit. Refuses plaintext encryption
+    /// (see ConfidentialBodyCommit::new) and refuses a Three edition manifest
+    /// when one is already registered for this id (body vs recipe category).
+    pub fn register_confidential_commit(
+        &mut self,
+        commit: crate::storage::ConfidentialBodyCommit,
+    ) -> Result<[u8; 32], String> {
+        if let Some(m) = self.manifests.get(&commit.content_id) {
+            if !m.edition.admits_body() {
+                return Err(String::from(
+                    "confidential body commit refused: registered manifest is Three (recipe-only); bodies are Classic/2.0",
+                ));
+            }
+        }
+        let commitment = commit.commitment();
+        self.confidential_commits
+            .insert(commit.content_id, commit);
+        Ok(commitment)
+    }
+
+    #[must_use]
+    pub fn get_confidential_commit(
+        &self,
+        content_id: &ContentId,
+    ) -> Option<&crate::storage::ConfidentialBodyCommit> {
+        self.confidential_commits.get(content_id)
+    }
+
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
     /// `open_deal`; exposed so the E2E test can exercise the failure
@@ -5459,6 +5526,67 @@ mod demand_driven_replication_tests {
             STORAGE_REPLICATION_TARGET
         );
         assert_eq!(reg.under_replicated_shards(0).len(), 1);
+    }
+
+
+    #[test]
+    fn confidential_commit_refuses_three_edition_manifest() {
+        use crate::storage::generated::{
+            generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
+        };
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [1u8; 32],
+            output_len: 32 * 32,
+            step_budget: 8_000,
+        };
+        let bytes = generate_content(&spec).expect("gen");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("m")
+            .with_source(ContentSource::Generated(spec))
+            .with_edition(BudStorageEdition::Three);
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&manifest)
+            .expect("three recipe registers");
+        let commit = ConfidentialBodyCommit::new(
+            manifest.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [9u8; 32],
+            ConfidentialProofKind::ZkStorageProof,
+        )
+        .expect("client-side ok");
+        let err = reg
+            .register_confidential_commit(commit)
+            .expect_err("Three must not take a body commit");
+        assert!(
+            err.contains("Three") || err.contains("recipe"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn confidential_commit_accepts_classic_encrypted_body() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let c = reg.register_confidential_commit(commit).unwrap();
+        assert_eq!(c.len(), 32);
+        assert!(reg.get_confidential_commit(&m.manifest_id).is_some());
     }
 
     fn generated_registry() -> (StorageRegistry, ContentId) {
