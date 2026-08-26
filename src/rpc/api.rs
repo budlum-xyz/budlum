@@ -337,6 +337,17 @@ pub trait BudlumApi {
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Optional node-side encode path: re-encode `data` under the scheme the
+    /// client-built `manifest` claims and refuse a mismatch. Costly; the
+    /// client-built register path remains the default. Three/Generated has no
+    /// body to re-encode — callers should not send one.
+    #[method(name = "bud_storageVerifyEncoding")]
+    async fn storage_verify_encoding(
+        &self,
+        data_hex: String,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Open a new `StorageDeal` for a specific shard of a registered manifest.
     #[method(name = "bud_storageOpenDeal")]
     async fn storage_open_deal(

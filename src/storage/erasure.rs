@@ -613,6 +613,59 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
     })
 }
 
+/// Re-encode `data` under the scheme the claimed manifest declares and refuse
+/// if the result is a different object.
+///
+/// The usual path is client-built: the client encodes, builds a manifest, and
+/// registers it. The node then trusts the structural checks in
+/// `validate_untrusted` but never re-runs the coder, so a client that lies
+/// about parity (or pads a different payload into the same listed sizes) can
+/// still pass registration. This function is the optional, costly half of
+/// that path: given the bytes the client claims to have encoded, the node
+/// produces the only honest manifest for that `(data, scheme)` pair and
+/// compares ids.
+///
+/// # Errors
+///
+/// Scheme/empty-object failures from [`encode_object`], or a mismatch when the
+/// claimed id / shard list is not the one re-encoding produces.
+pub fn verify_object_encoding(
+    data: &[u8],
+    claimed: &ContentManifest,
+) -> Result<(), ErasureError> {
+    // Structural lies are cheaper to catch first; the coder is the expensive
+    // half and should not run on a manifest that already fails the free checks.
+    claimed
+        .validate_untrusted()
+        .map_err(ErasureError::InvalidScheme)?;
+    let encoded = encode_object(data, claimed.erasure)?;
+    let honest = encoded
+        .to_manifest()
+        .map_err(ErasureError::InvalidScheme)?;
+    if honest.manifest_id != claimed.manifest_id {
+        return Err(ErasureError::ShardMismatch(format!(
+            "re-encode produced manifest {} but the claim was {}",
+            honest.manifest_id, claimed.manifest_id
+        )));
+    }
+    if honest.shards.len() != claimed.shards.len() {
+        return Err(ErasureError::ShardMismatch(format!(
+            "re-encode produced {} shards, claim has {}",
+            honest.shards.len(),
+            claimed.shards.len()
+        )));
+    }
+    for (h, c) in honest.shards.iter().zip(claimed.shards.iter()) {
+        if h.shard_id != c.shard_id || h.kind != c.kind || h.size != c.size || h.index != c.index {
+            return Err(ErasureError::ShardMismatch(format!(
+                "shard {} disagrees after re-encode (honest id {}, claimed id {})",
+                h.index, h.shard_id, c.shard_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Rebuild the original bytes from whatever shards survived.
 ///
 /// `present` is the full code word with `None` for lost shards. Recovered
@@ -1202,5 +1255,26 @@ mod tests {
                 .unwrap_or_else(|e| panic!("losing {lost:?} broke recovery: {e}"));
             assert_eq!(out, data, "wrong bytes after losing {lost:?}");
         }
+    }
+
+    #[test]
+    fn verify_object_encoding_accepts_an_honest_client_manifest() {
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let manifest = enc.to_manifest().unwrap();
+        verify_object_encoding(&data, &manifest).expect("honest encoding must verify");
+    }
+
+    #[test]
+    fn verify_object_encoding_refuses_a_swapped_payload() {
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let manifest = encode_object(&data, scheme).unwrap().to_manifest().unwrap();
+        let other: Vec<u8> = (1u8..=201).cycle().take(900).collect();
+        assert!(
+            verify_object_encoding(&other, &manifest).is_err(),
+            "a different payload under the same scheme must not verify"
+        );
     }
 }
