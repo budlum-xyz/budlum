@@ -3898,3 +3898,32 @@ flowchart TD
     F -->|Yes| G[OK: recorded debt]
     F -->|No| H[FAIL: new unwritten metric]
 ```
+
+## 88. B.U.D. edition Three holds no body
+
+B.U.D. is not one regime. **Classic** (editions one and two) is the deal-and-body
+world: operators may hold real bytes under `Stored` or a `Hybrid` prefix. Users
+who need custody of irreproducible media stay there.
+
+**Three** is recipe-only. The durable object on the network is a generative
+recipe. QR-video and other presentations are derivatives and are not stored. A
+validator unplugging cannot lose "the file" because there is no file body to
+lose - only a recipe that can be re-run. Bodies are not banned from the project;
+they are banned from *this* edition.
+
+```mermaid
+flowchart TD
+    M[ContentManifest] --> E{edition}
+    E -->|Classic| S[Stored / Hybrid / Derived allowed]
+    E -->|Three| G[Generated only]
+    G --> R[Recipe on chain]
+    R --> D[Derivatives on demand: QR-video, frames]
+    D --> X[Not a deal object]
+```
+
+`BudStorageEdition` defaults to `Classic` and adds no commitment bytes in that
+case, so every pre-edition id stays bit-identical. `Three` binds
+`BUD_EDITION_3` into the manifest id and `check_source` refuses `Stored`,
+`Hybrid` and `Derived` at registration and at `validate_untrusted`. The
+generated-content gate pins the enum, `admits_body`, `check_source` and the
+commitment tag so the pair cannot silently disappear.
