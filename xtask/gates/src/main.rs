@@ -91,6 +91,7 @@ mod gates {
     pub mod lubot_reads;
     pub mod master_derivation;
     pub mod mermaid;
+    pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
     pub mod named_tests;
     pub mod network_hardening_gate;
@@ -385,6 +386,14 @@ const GATES: &[Gate] = &[
         run: gates::no_idle_code::run,
         run_args: None,
         self_test: gates::no_idle_code::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "metrics-are-written",
+        replaces: None,
+        run: gates::metrics_are_written::run,
+        run_args: None,
+        self_test: gates::metrics_are_written::self_test,
         run_log: None,
     },
     Gate {

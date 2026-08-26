@@ -345,6 +345,17 @@ impl Mempool {
         self.transactions.len()
     }
 
+    /// How many distinct sender addresses currently hold at least one
+    /// transaction in the pool.
+    ///
+    /// Distinct from [`Self::len`]: the entry count can be large while a
+    /// handful of addresses dominate, and the reverse is also true. Operators
+    /// watching only the entry count cannot see sender concentration.
+    #[must_use]
+    pub fn sender_count(&self) -> usize {
+        self.by_sender.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.transactions.is_empty()
     }

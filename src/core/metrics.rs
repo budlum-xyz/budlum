@@ -5,7 +5,6 @@ use std::sync::Arc;
 pub struct Metrics {
     pub registry: Arc<Registry>,
     pub chain_height: IntGauge,
-    pub peer_count: IntGauge,
     pub mempool_size: IntGauge,
     /// Bytes of transaction bodies resident in the mempool.
     ///
@@ -17,7 +16,7 @@ pub struct Metrics {
     pub mempool_bytes: IntGauge,
     /// Peers holding a gossip score record.
     ///
-    /// Separate from `peer_count`: the score table deliberately outlives a
+    /// Separate from `p2p_peers_connected`: the score table deliberately outlives a
     /// connection so that reconnecting does not clear a bad record, so this
     /// gauge is expected to sit above the connected count. What it makes
     /// visible is the gap - a table climbing toward `MAX_SCORED_PEERS` while
@@ -39,6 +38,12 @@ pub struct Metrics {
     pub settlement_frozen_domains: IntGauge,
     pub settlement_global_headers_sealed: IntCounter,
     pub settlement_equivocations_detected: IntCounter,
+    /// Connected P2P peers.
+    ///
+    /// This is the single live peer-count gauge. A second `peer_count` field
+    /// used to export the same number under `budlum_peer_count` and was never
+    /// written in production, so scrapes saw a permanent zero next to a real
+    /// connected count. The duplicate was deleted rather than bound.
     pub p2p_peers_connected: IntGauge,
     pub p2p_messages_received: IntCounter,
     pub p2p_gossip_duplicates: IntCounter,
@@ -69,7 +74,6 @@ impl Metrics {
         let registry = Registry::new();
 
         let chain_height = IntGauge::new("budlum_chain_height", "Current chain height")?;
-        let peer_count = IntGauge::new("budlum_peer_count", "Connected peers")?;
         let mempool_size = IntGauge::new("budlum_mempool_size", "Pending transactions")?;
         let mempool_bytes = IntGauge::new(
             "budlum_mempool_bytes",
@@ -188,7 +192,6 @@ impl Metrics {
         )?;
 
         registry.register(Box::new(chain_height.clone()))?;
-        registry.register(Box::new(peer_count.clone()))?;
         registry.register(Box::new(mempool_size.clone()))?;
         registry.register(Box::new(mempool_bytes.clone()))?;
         registry.register(Box::new(gossip_scored_peers.clone()))?;
@@ -227,7 +230,6 @@ impl Metrics {
         Ok(Metrics {
             registry: Arc::new(registry),
             chain_height,
-            peer_count,
             mempool_size,
             mempool_bytes,
             gossip_scored_peers,
