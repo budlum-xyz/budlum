@@ -423,6 +423,20 @@ impl CarouselDecoder {
         self.params.is_some() && self.missing() == 0
     }
 
+    /// Count of leading contiguous solved source blocks (progressive prefix).
+    #[must_use]
+    pub fn solid_prefix_blocks(&self) -> usize {
+        let mut n = 0usize;
+        for slot in &self.solved {
+            if slot.is_some() {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+
     /// Ingest one drop.
     ///
     /// # Errors
