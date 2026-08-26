@@ -1927,6 +1927,47 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn storage_verify_encoding(
+        &self,
+        data_hex: String,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Generated / Three has no body on the network. Re-encoding a recipe
+        // as if it were held bytes would launder a custody claim under the
+        // encode path.
+        if matches!(
+            manifest.source,
+            crate::storage::generated::ContentSource::Generated(_)
+                | crate::storage::generated::ContentSource::Derived(_)
+        ) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "verify_encoding refuses Generated/Derived sources: there is no body to re-encode; the recipe is the object",
+                None::<()>,
+            ));
+        }
+        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        let data = hex::decode(hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
+        })?;
+        crate::storage::verify_object_encoding(&data, &manifest).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("verify_encoding failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "manifestId": format!("0x{}", hex::encode(manifest.manifest_id.0)),
+            "scheme": {
+                "k": manifest.erasure.k,
+                "n": manifest.erasure.n,
+            },
+            "totalSize": manifest.total_size,
+        }))
+    }
+
     async fn storage_open_deal(
         &self,
         domain_id: u32,
