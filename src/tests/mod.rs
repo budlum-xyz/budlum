@@ -28,6 +28,7 @@ pub mod sharding_e2e;
 // + §4 kabul kriterleri).
 #[cfg(test)]
 pub mod bud_e2e;
+pub mod operator_kill_chaos;
 #[cfg(test)]
 pub mod byzantine_settlement;
 #[cfg(test)]
