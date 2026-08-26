@@ -79,6 +79,7 @@ mod gates {
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
+    pub mod qr_is_derivative_only;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
@@ -736,6 +737,15 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::generated_content::self_test,
     },
+    Gate {
+        name: "qr-is-derivative-only",
+        replaces: None,
+        run: gates::qr_is_derivative_only::run,
+        run_args: None,
+        self_test: gates::qr_is_derivative_only::self_test,
+        run_log: None,
+    },
+
     Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),
