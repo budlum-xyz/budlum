@@ -141,16 +141,17 @@ fn operator_kill_opens_ticket_and_replacement_restores_count() {
 
     let tickets = reg.all_reallocation_tickets();
     assert_eq!(tickets.len(), 1, "exactly one repair ticket after one kill");
-    let ticket = tickets[0];
+    let ticket = tickets[0].clone();
     assert_eq!(ticket.cause, ReallocationCause::FailedDeal);
     assert_eq!(ticket.failed_deal_id, deal_a);
     assert_eq!(ticket.status, ReallocationStatus::Pending);
     assert_eq!(ticket.slashed_operator, op_a);
+    let ticket_id = ticket.ticket_id;
 
     // The slashed operator cannot take its own replacement.
     let barred = reg
         .accept_reallocation_ticket(
-            ticket.ticket_id,
+            ticket_id,
             op_a,
             201,
             500,
@@ -171,7 +172,7 @@ fn operator_kill_opens_ticket_and_replacement_restores_count() {
     // A fresh fourth operator restores the slot.
     let replacement = reg
         .accept_reallocation_ticket(
-            ticket.ticket_id,
+            ticket_id,
             op_d,
             201,
             500,
@@ -186,7 +187,7 @@ fn operator_kill_opens_ticket_and_replacement_restores_count() {
         DealStatus::Active
     );
     assert_eq!(
-        reg.get_reallocation_ticket(ticket.ticket_id)
+        reg.get_reallocation_ticket(ticket_id)
             .unwrap()
             .status,
         ReallocationStatus::ActiveReplacement
