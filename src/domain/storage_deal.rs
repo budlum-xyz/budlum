@@ -1187,6 +1187,15 @@ impl StorageRegistry {
         // Checking **after** the record would be too late: manifest
         // registration is first-writer-wins and idempotent, so a rejected
         // record cannot be taken back.
+        // Edition gate first: BUD edition Three admits no durable body. Classic keeps
+        // Stored/Hybrid. Checked before recipe execution so a Three+Stored claim
+        // never pays for a generate_and_verify of content that the edition
+        // forbids holding.
+        manifest
+            .edition
+            .check_source(&manifest.source)
+            .map_err(|reason| StorageError::InvalidManifest { reason })?;
+
         match &manifest.source {
             crate::storage::generated::ContentSource::Stored => {}
             crate::storage::generated::ContentSource::Generated(spec) => {
@@ -3104,7 +3113,7 @@ mod tests {
         );
     }
 
-    // === B.U.D. 3.0: recipe durability stands in for a replica ===========
+    // === B.U.D. Three: recipe durability stands in for a replica ===========
 
     /// A manifest whose recipe really runs, so its registration is accepted.
     fn generated_manifest() -> (ContentManifest, crate::storage::generated::GeneratedSpec) {
@@ -3131,6 +3140,32 @@ mod tests {
     /// Storing the same deterministic generator three times is not a third
     /// backup, it is three copies of the same answer. What keeps the content
     /// alive is the recipe on chain.
+
+    #[test]
+    fn edition_three_refuses_a_stored_body() {
+        use crate::storage::generated::BudStorageEdition;
+        let mut m = good_manifest();
+        m = m.with_edition(BudStorageEdition::Three);
+        // source still Stored (default from good_manifest)
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .register_manifest_with_source(&m)
+            .expect_err("Three must refuse Stored");
+        assert!(
+            matches!(err, StorageError::InvalidManifest { .. }),
+            "expected InvalidManifest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classic_edition_still_accepts_stored_body() {
+        use crate::storage::generated::BudStorageEdition;
+        let m = good_manifest().with_edition(BudStorageEdition::Classic);
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&m)
+            .expect("Classic Stored must remain valid");
+    }
+
     #[test]
     fn a_recipe_backed_object_needs_one_copy_not_three() {
         use crate::storage::generated::{required_replica_count, ContentSource};
