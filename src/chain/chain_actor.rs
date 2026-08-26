@@ -351,6 +351,38 @@ pub enum ChainCommand {
         manifest: crate::storage::ContentManifest,
         response: oneshot::Sender<Result<crate::storage::ContentId, String>>,
     },
+    /// View-key permission book (Classic private body or Three encrypted recipe).
+    IssueViewGrant {
+        content_id: crate::storage::ContentId,
+        issuer: crate::core::address::Address,
+        grantee: Option<crate::core::address::Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    RevokeViewGrant {
+        grant_id: u64,
+        caller: crate::core::address::Address,
+        at_epoch: u64,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    MayViewContent {
+        content_id: crate::storage::ContentId,
+        viewer: crate::core::address::Address,
+        key_id: [u8; 32],
+        owner: crate::core::address::Address,
+        response: oneshot::Sender<bool>,
+    },
+    /// Classic/2.0 confidential body commit (not Three).
+    RegisterConfidentialCommit {
+        commit: crate::storage::ConfidentialBodyCommit,
+        response: oneshot::Sender<Result<[u8; 32], String>>,
+    },
+    GetConfidentialCommit {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::storage::ConfidentialBodyCommit>>,
+    },
     OpenStorageChallenge {
         request: crate::domain::storage_deal::RetrievalChallengeRequest,
         response: oneshot::Sender<Result<u64, String>>,
@@ -911,6 +943,106 @@ impl ChainHandle {
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn issue_view_grant(
+        &self,
+        content_id: crate::storage::ContentId,
+        issuer: crate::core::address::Address,
+        grantee: Option<crate::core::address::Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IssueViewGrant {
+                content_id,
+                issuer,
+                grantee,
+                key_id,
+                policy,
+                opened_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn revoke_view_grant(
+        &self,
+        grant_id: u64,
+        caller: crate::core::address::Address,
+        at_epoch: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RevokeViewGrant {
+                grant_id,
+                caller,
+                at_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn may_view_content(
+        &self,
+        content_id: crate::storage::ContentId,
+        viewer: crate::core::address::Address,
+        key_id: [u8; 32],
+        owner: crate::core::address::Address,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::MayViewContent {
+                content_id,
+                viewer,
+                key_id,
+                owner,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn register_confidential_commit(
+        &self,
+        commit: crate::storage::ConfidentialBodyCommit,
+    ) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterConfidentialCommit {
+                commit,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_confidential_commit(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<Option<crate::storage::ConfidentialBodyCommit>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConfidentialCommit {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .map_err(|_| "Actor dropped".to_string())
     }
 
     /// Derive the coding audit for `manifest_id` at `challenge_id`.
@@ -3538,6 +3670,91 @@ impl ChainActor {
                         .transpose()
                         .map_err(|e| e.to_string());
                     let _ = response.send(persist.map(|_| manifest_id));
+                }
+                ChainCommand::IssueViewGrant {
+                    content_id,
+                    issuer,
+                    grantee,
+                    key_id,
+                    policy,
+                    opened_epoch,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .issue_view_grant(
+                            content_id,
+                            issuer,
+                            grantee,
+                            key_id,
+                            policy,
+                            opened_epoch,
+                        )
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::RevokeViewGrant {
+                    grant_id,
+                    caller,
+                    at_epoch,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .revoke_view_grant(grant_id, caller, at_epoch)
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::MayViewContent {
+                    content_id,
+                    viewer,
+                    key_id,
+                    owner,
+                    response,
+                } => {
+                    let ok = self.blockchain.state.storage_registry.may_view(
+                        &content_id,
+                        &viewer,
+                        &key_id,
+                        &owner,
+                    );
+                    let _ = response.send(ok);
+                }
+                ChainCommand::RegisterConfidentialCommit { commit, response } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .register_confidential_commit(commit);
+                    let _ = response.send(res);
+                }
+                ChainCommand::GetConfidentialCommit {
+                    content_id,
+                    response,
+                } => {
+                    let c = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_confidential_commit(&content_id)
+                        .cloned();
+                    let _ = response.send(c);
                 }
                 ChainCommand::OpenStorageChallenge { request, response } => {
                     if self.storage_economics_disabled_on_mainnet() {
