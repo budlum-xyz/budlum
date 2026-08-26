@@ -49,7 +49,7 @@ mod hardening_tests {
     fn test_metrics_encoding_format() {
         let metrics = Metrics::new().expect("metric names are literals");
         metrics.chain_height.set(1234);
-        metrics.peer_count.set(5);
+        metrics.p2p_peers_connected.set(5);
 
         let encoded = metrics.encode();
         assert!(
@@ -57,7 +57,7 @@ mod hardening_tests {
             "Encoded metrics should contain height"
         );
         assert!(
-            encoded.contains("budlum_peer_count 5"),
+            encoded.contains("budlum_p2p_peers_connected 5"),
             "Encoded metrics should contain peer count"
         );
         assert!(

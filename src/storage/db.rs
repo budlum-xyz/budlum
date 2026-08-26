@@ -156,6 +156,15 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Approximate on-disk size of the sled database, for the
+    /// `storage_db_size_bytes` gauge.
+    ///
+    /// Sled's own `size_on_disk` walks the file set; it can fail under lock
+    /// contention. Callers treat `Err` as "leave the last scrape".
+    pub fn size_on_disk(&self) -> std::io::Result<u64> {
+        self.db.size_on_disk().map_err(std::io::Error::from)
+    }
+
     pub fn apply_migrations(&self) -> std::io::Result<()> {
         const CURRENT_SCHEMA_VERSION: u64 = 1;
         let current = self.schema_version()?;
