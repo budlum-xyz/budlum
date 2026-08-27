@@ -233,7 +233,9 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
         let mut lb = [0u8; 4];
         lb.copy_from_slice(len_bytes);
         let len = u32::from_be_bytes(lb) as usize;
-        let ty = png.get(off + 4..off + 8).ok_or_else(|| "png ty".to_string())?;
+        let ty = png
+            .get(off + 4..off + 8)
+            .ok_or_else(|| "png ty".to_string())?;
         let data = png
             .get(off + 8..off + 8 + len)
             .ok_or_else(|| "png chunk".to_string())?;
@@ -301,14 +303,15 @@ mod tests {
         let content = b"qr-video-root-content".repeat(8);
         let enc = encode_plain(&content, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
         // Use a short prefix of frames for speed in unit test (systematic enough for small)
-        let frames: Vec<_> = enc.frames.iter().take(enc.frames.len().min(40)).cloned().collect();
-        let video = QrVideo::from_optical_frames(
-            &enc.recipe,
-            &enc.stream_commitment,
-            &frames,
-            DEFAULT_FPS,
-        )
-        .unwrap();
+        let frames: Vec<_> = enc
+            .frames
+            .iter()
+            .take(enc.frames.len().min(40))
+            .cloned()
+            .collect();
+        let video =
+            QrVideo::from_optical_frames(&enc.recipe, &enc.stream_commitment, &frames, DEFAULT_FPS)
+                .unwrap();
         let blob = video.to_bytes();
         let parsed = QrVideo::from_bytes(&blob).unwrap();
         assert_eq!(parsed.png_frames.len(), frames.len());

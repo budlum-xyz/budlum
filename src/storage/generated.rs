@@ -1570,7 +1570,9 @@ mod tests {
             step_budget: 8_000,
         };
         assert!(BudStorageEdition::Three
-            .check_source(&ContentSource::SealedGenerated(SealedGeneratedSpec::seal(&full)))
+            .check_source(&ContentSource::SealedGenerated(SealedGeneratedSpec::seal(
+                &full
+            )))
             .is_ok());
         assert!(BudStorageEdition::Three
             .check_source(&ContentSource::Generated(full))
@@ -1588,10 +1590,11 @@ mod tests {
             output_len: 16,
             step_budget: 4_000,
         };
-        assert!(recipe_seed_is_public(&ContentSource::Generated(full.clone())));
+        assert!(recipe_seed_is_public(&ContentSource::Generated(
+            full.clone()
+        )));
         assert!(!recipe_seed_is_public(&ContentSource::SealedGenerated(
             SealedGeneratedSpec::seal(&full)
         )));
     }
-
 }

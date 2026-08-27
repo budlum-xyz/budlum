@@ -71,7 +71,10 @@ impl std::fmt::Display for FrameError {
             Self::BadMagic => write!(f, "three qr frame bad magic"),
             Self::BadVersion(v) => write!(f, "three qr frame unsupported version {v}"),
             Self::UnsupportedFlags(flags) => {
-                write!(f, "three qr frame unsupported must-understand flags {flags:#x}")
+                write!(
+                    f,
+                    "three qr frame unsupported must-understand flags {flags:#x}"
+                )
             }
             Self::BadDropLen(n) => write!(f, "three qr frame bad drop len {n}"),
             Self::DigestMismatch => write!(f, "three qr frame digest mismatch"),
@@ -113,10 +116,7 @@ pub fn pack_frame(stream_commitment: &[u8; 32], drop: &Drop) -> Vec<u8> {
 /// # Errors
 ///
 /// Magic / version / flags / digest / stream prefix / nested drop failures.
-pub fn unpack_frame(
-    stream_commitment: &[u8; 32],
-    frame: &[u8],
-) -> Result<Drop, FrameError> {
+pub fn unpack_frame(stream_commitment: &[u8; 32], frame: &[u8]) -> Result<Drop, FrameError> {
     if frame.len() < THREE_FRAME_HEADER_LEN {
         return Err(FrameError::Truncated);
     }
@@ -143,9 +143,7 @@ pub fn unpack_frame(
     if drop_len == 0 || drop_len > MAX_DROP_WIRE {
         return Err(FrameError::BadDropLen(drop_len));
     }
-    let digest_wire = frame
-        .get(14..18)
-        .ok_or(FrameError::Truncated)?;
+    let digest_wire = frame.get(14..18).ok_or(FrameError::Truncated)?;
     let drop_end = THREE_FRAME_HEADER_LEN
         .checked_add(usize::from(drop_len))
         .ok_or(FrameError::Truncated)?;

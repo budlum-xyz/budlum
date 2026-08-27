@@ -111,7 +111,8 @@ fn sniff_magic(bytes: &[u8]) -> ContentClass {
     if bytes.len() >= 4 && bytes[0..4] == *b"\x89PNG" {
         return ContentClass::Generic; // try zlib; often already deflated inside
     }
-    if bytes.len() >= 4 && (bytes[0..4] == *b"ftyp" || (bytes.len() >= 8 && &bytes[4..8] == b"ftyp"))
+    if bytes.len() >= 4
+        && (bytes[0..4] == *b"ftyp" || (bytes.len() >= 8 && &bytes[4..8] == b"ftyp"))
     {
         return ContentClass::EntropyMedia; // ISO BMFF
     }
@@ -240,7 +241,10 @@ pub struct TransformOpts {
 /// # Errors
 ///
 /// Empty / oversized input.
-pub fn transform_content(input: &[u8], opts: TransformOpts) -> Result<TransformedPayload, TransformError> {
+pub fn transform_content(
+    input: &[u8],
+    opts: TransformOpts,
+) -> Result<TransformedPayload, TransformError> {
     if input.is_empty() {
         return Err(TransformError::Empty);
     }

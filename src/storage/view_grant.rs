@@ -143,7 +143,10 @@ impl std::fmt::Display for ViewGrantError {
                 write!(f, "OwnerOnly grants must not name a grantee")
             }
             Self::DuplicateLiveGrant => {
-                write!(f, "a live grant already exists for this content/grantee/key")
+                write!(
+                    f,
+                    "a live grant already exists for this content/grantee/key"
+                )
             }
         }
     }
@@ -397,14 +400,7 @@ mod tests {
         let content = cid(9);
         let key = [7u8; 32];
         let id = reg
-            .issue(
-                content,
-                owner,
-                Some(bob),
-                key,
-                ViewPolicy::NamedGrantee,
-                10,
-            )
+            .issue(content, owner, Some(bob), key, ViewPolicy::NamedGrantee, 10)
             .unwrap();
         assert!(reg.may_view(&content, &bob, &key, &owner));
         assert!(reg.may_view(&content, &owner, &key, &owner));
@@ -446,10 +442,7 @@ mod tests {
                 0,
             )
             .unwrap();
-        assert_eq!(
-            reg.revoke(id, addr(2), 5),
-            Err(ViewGrantError::NotIssuer)
-        );
+        assert_eq!(reg.revoke(id, addr(2), 5), Err(ViewGrantError::NotIssuer));
         reg.revoke(id, owner, 5).unwrap();
         assert_eq!(
             reg.revoke(id, owner, 6),

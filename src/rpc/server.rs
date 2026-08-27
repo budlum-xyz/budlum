@@ -1952,11 +1952,7 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
         })?;
         crate::storage::verify_object_encoding(&data, &manifest).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("verify_encoding failed: {e}"),
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
         })?;
         Ok(serde_json::json!({
             "ok": true,
@@ -1979,9 +1975,8 @@ impl BudlumApiServer for RpcServer {
         opened_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
-        let issuer = Address::from_hex(issuer.strip_prefix("0x").unwrap_or(&issuer)).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("issuer: {e}"), None::<()>)
-        })?;
+        let issuer = Address::from_hex(issuer.strip_prefix("0x").unwrap_or(&issuer))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("issuer: {e}"), None::<()>))?;
         let grantee = match grantee {
             None => None,
             Some(g) if g.is_empty() => None,
@@ -2020,9 +2015,8 @@ impl BudlumApiServer for RpcServer {
         caller: String,
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let caller = Address::from_hex(caller.strip_prefix("0x").unwrap_or(&caller)).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("caller: {e}"), None::<()>)
-        })?;
+        let caller = Address::from_hex(caller.strip_prefix("0x").unwrap_or(&caller))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("caller: {e}"), None::<()>))?;
         self.chain
             .revoke_view_grant(grant_id, caller, at_epoch)
             .await
@@ -2038,12 +2032,10 @@ impl BudlumApiServer for RpcServer {
         owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
-        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer)).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>)
-        })?;
-        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner)).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>)
-        })?;
+        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>))?;
+        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
         let key_id = parse_hex32_field(&key_id, "key_id")?;
         let allowed = self
             .chain
@@ -2062,12 +2054,14 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
         let encryption = match encryption.to_ascii_lowercase().as_str() {
-            "aes-256-gcm" | "aes256gcm" => {
-                crate::storage::ContentEncryption::ClientSide(crate::storage::ContentCipher::Aes256Gcm)
-            }
-            "chacha20-poly1305" | "chacha20poly1305" => crate::storage::ContentEncryption::ClientSide(
-                crate::storage::ContentCipher::ChaCha20Poly1305,
+            "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
+                crate::storage::ContentCipher::Aes256Gcm,
             ),
+            "chacha20-poly1305" | "chacha20poly1305" => {
+                crate::storage::ContentEncryption::ClientSide(
+                    crate::storage::ContentCipher::ChaCha20Poly1305,
+                )
+            }
             "xchacha20-poly1305" | "xchacha20poly1305" => {
                 crate::storage::ContentEncryption::ClientSide(
                     crate::storage::ContentCipher::XChaCha20Poly1305,

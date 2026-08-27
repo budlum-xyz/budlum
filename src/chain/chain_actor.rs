@@ -1009,8 +1009,7 @@ impl ChainHandle {
                 response: tx,
             })
             .await;
-        rx.await
-            .map_err(|_| "Actor dropped".to_string())
+        rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
     pub async fn register_confidential_commit(
@@ -1041,8 +1040,7 @@ impl ChainHandle {
                 response: tx,
             })
             .await;
-        rx.await
-            .map_err(|_| "Actor dropped".to_string())
+        rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
     /// Derive the coding audit for `manifest_id` at `challenge_id`.
@@ -3688,14 +3686,7 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .issue_view_grant(
-                            content_id,
-                            issuer,
-                            grantee,
-                            key_id,
-                            policy,
-                            opened_epoch,
-                        )
+                        .issue_view_grant(content_id, issuer, grantee, key_id, policy, opened_epoch)
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
