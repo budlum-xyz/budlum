@@ -629,19 +629,14 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
 ///
 /// Scheme/empty-object failures from [`encode_object`], or a mismatch when the
 /// claimed id / shard list is not the one re-encoding produces.
-pub fn verify_object_encoding(
-    data: &[u8],
-    claimed: &ContentManifest,
-) -> Result<(), ErasureError> {
+pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<(), ErasureError> {
     // Structural lies are cheaper to catch first; the coder is the expensive
     // half and should not run on a manifest that already fails the free checks.
     claimed
         .validate_untrusted()
         .map_err(ErasureError::InvalidScheme)?;
     let encoded = encode_object(data, claimed.erasure)?;
-    let honest = encoded
-        .to_manifest()
-        .map_err(ErasureError::InvalidScheme)?;
+    let honest = encoded.to_manifest().map_err(ErasureError::InvalidScheme)?;
     if honest.manifest_id != claimed.manifest_id {
         return Err(ErasureError::ShardMismatch(format!(
             "re-encode produced manifest {} but the claim was {}",

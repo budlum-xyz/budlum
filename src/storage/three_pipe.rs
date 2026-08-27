@@ -9,11 +9,11 @@ use crate::storage::qr_carousel::{
     ONESHOT_REPAIR_PERMILLAGE,
 };
 use crate::storage::qr_codec::{CodecError, CodecKind, FrameMux, RawFrameConcat};
-use crate::storage::qr_video::{demux_optical_frames, QrVideo, QrVideoError, DEFAULT_FPS};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
 use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
-use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
+use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
+use crate::storage::qr_video::{demux_optical_frames, QrVideo, QrVideoError, DEFAULT_FPS};
 use crate::storage::transformed::{transform_content, ContentClass, TransformError, TransformOpts};
 
 /// Errors from the facade.
@@ -234,7 +234,6 @@ pub fn decode_qr_video(video_blob: &[u8]) -> Result<(PayloadKind, Vec<u8>, QrVid
     let (kind, raw) = decode_frames(&video.stream_commitment, &optical)?;
     Ok((kind, raw, video))
 }
-
 
 #[cfg(test)]
 mod tests {

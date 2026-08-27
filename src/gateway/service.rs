@@ -305,9 +305,7 @@ impl BudGateway {
         let spec = match &manifest.source {
             crate::storage::generated::ContentSource::Generated(spec) => spec,
             crate::storage::generated::ContentSource::SealedGenerated(_) => {
-                return Err(
-                    "sealed recipe cannot be rendered without a view-granted seed".into(),
-                );
+                return Err("sealed recipe cannot be rendered without a view-granted seed".into());
             }
             _ => {
                 return Err(

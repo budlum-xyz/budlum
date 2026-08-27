@@ -178,9 +178,7 @@ pub fn unpack_payload(packed: &[u8]) -> Result<(PayloadKind, Vec<u8>), PayloadEr
     if packed.len() < THREE_PAYLOAD_HEADER_LEN {
         return Err(PayloadError::Truncated);
     }
-    let magic = packed
-        .get(0..4)
-        .ok_or(PayloadError::Truncated)?;
+    let magic = packed.get(0..4).ok_or(PayloadError::Truncated)?;
     if magic != THREE_PAYLOAD_MAGIC {
         return Err(PayloadError::BadMagic);
     }
@@ -192,9 +190,7 @@ pub fn unpack_payload(packed: &[u8]) -> Result<(PayloadKind, Vec<u8>), PayloadEr
     let kind_tag = *packed.get(6).ok_or(PayloadError::Truncated)?;
     let kind = PayloadKind::from_tag(kind_tag).ok_or(PayloadError::BadKind(kind_tag))?;
 
-    let orig_len_bytes = packed
-        .get(7..15)
-        .ok_or(PayloadError::Truncated)?;
+    let orig_len_bytes = packed.get(7..15).ok_or(PayloadError::Truncated)?;
     let mut orig_len_arr = [0u8; 8];
     orig_len_arr.copy_from_slice(orig_len_bytes);
     let orig_len_u64 = u64::from_le_bytes(orig_len_arr);
@@ -203,9 +199,7 @@ pub fn unpack_payload(packed: &[u8]) -> Result<(PayloadKind, Vec<u8>), PayloadEr
         max: MAX_PAYLOAD_CONTENT,
     })?;
 
-    let expect_sha_slice = packed
-        .get(15..47)
-        .ok_or(PayloadError::Truncated)?;
+    let expect_sha_slice = packed.get(15..47).ok_or(PayloadError::Truncated)?;
     let mut expect_sha = [0u8; 32];
     expect_sha.copy_from_slice(expect_sha_slice);
 
@@ -242,9 +236,7 @@ pub fn payload_commitment(packed: &[u8]) -> [u8; 32] {
 /// True when the packed header has the zlib flag set. Returns false on short buffers.
 #[must_use]
 pub fn packed_is_zlib(packed: &[u8]) -> bool {
-    packed
-        .get(5)
-        .is_some_and(|f| f & FLAG_ZLIB != 0)
+    packed.get(5).is_some_and(|f| f & FLAG_ZLIB != 0)
 }
 
 fn try_zlib9(data: &[u8]) -> Option<Vec<u8>> {

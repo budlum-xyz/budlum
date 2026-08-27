@@ -187,9 +187,7 @@ fn operator_kill_opens_ticket_and_replacement_restores_count() {
         DealStatus::Active
     );
     assert_eq!(
-        reg.get_reallocation_ticket(ticket_id)
-            .unwrap()
-            .status,
+        reg.get_reallocation_ticket(ticket_id).unwrap().status,
         ReallocationStatus::ActiveReplacement
     );
     assert_eq!(
@@ -295,7 +293,8 @@ fn never_placed_shard_on_coded_object_is_ticketed() {
     let missing = manifest.shards[5].shard_id;
     assert_eq!(reg.active_replica_count(&manifest.manifest_id, &missing), 0);
     assert!(
-        reg.deals_for_shard(&manifest.manifest_id, &missing).is_empty(),
+        reg.deals_for_shard(&manifest.manifest_id, &missing)
+            .is_empty(),
         "fixture must have no historic deal on the missing shard"
     );
 

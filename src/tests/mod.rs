@@ -28,7 +28,6 @@ pub mod sharding_e2e;
 // + §4 kabul kriterleri).
 #[cfg(test)]
 pub mod bud_e2e;
-pub mod operator_kill_chaos;
 #[cfg(test)]
 pub mod byzantine_settlement;
 #[cfg(test)]
@@ -41,6 +40,7 @@ pub mod fork_choice_locks;
 pub mod manifest_commitment_locks;
 #[cfg(test)]
 pub mod multi_consensus_locks;
+pub mod operator_kill_chaos;
 #[cfg(test)]
 pub mod poisoned_lock_locks;
 #[cfg(test)]

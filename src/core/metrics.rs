@@ -306,7 +306,10 @@ mod tests {
     fn prometheus_scrape_lists_every_bound_series() {
         let metrics = Metrics::new().expect("metric names are literals in this file");
         let scrape = metrics.encode();
-        assert!(!scrape.is_empty(), "encode must produce a body after registration");
+        assert!(
+            !scrape.is_empty(),
+            "encode must produce a body after registration"
+        );
         for name in [
             "budlum_chain_height",
             "budlum_mempool_size",

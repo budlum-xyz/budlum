@@ -186,17 +186,16 @@ fn fnv1a32_local(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::qr_carousel::{
-        planned_drop_count, CarouselEncoder, DEFAULT_BLOCK_LEN,
-    };
+    use crate::storage::qr_carousel::{planned_drop_count, CarouselEncoder, DEFAULT_BLOCK_LEN};
     use crate::storage::qr_frame::pack_frame;
     use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
-    use crate::storage::qr_reemit::RecipeEmitter;
     use crate::storage::qr_recipe::ThreeRecipePublic;
+    use crate::storage::qr_reemit::RecipeEmitter;
 
     #[test]
     fn progressive_prefix_grows_on_systematic() {
-        let packed = pack_payload(PayloadKind::ContentBytes, &b"prefix-progress".repeat(30)).unwrap();
+        let packed =
+            pack_payload(PayloadKind::ContentBytes, &b"prefix-progress".repeat(30)).unwrap();
         let commit = payload_commitment(&packed);
         let enc = CarouselEncoder::new(&packed, DEFAULT_BLOCK_LEN).unwrap();
         let stream = enc.params().stream_commitment(&commit);
