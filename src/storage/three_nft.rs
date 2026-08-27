@@ -36,6 +36,8 @@ pub enum MetadataVisibility {
 pub struct ThreeNftMeta {
     /// Recipe commitment ([`ThreeRecipe::commitment`]).
     pub recipe_commitment: [u8; 32],
+    /// Optional BDLV video blob commitment (tarif → bu video).
+    pub video_commitment: Option<[u8; 32]>,
     pub visibility: MetadataVisibility,
     pub preview: PreviewMode,
     /// Optional content-addressed preview blob id (not the recipe seed).
@@ -52,6 +54,7 @@ impl ThreeNftMeta {
         };
         Self {
             recipe_commitment: recipe.commitment(),
+            video_commitment: None,
             visibility,
             preview,
             preview_content_id: None,
@@ -64,6 +67,10 @@ impl ThreeNftMeta {
         hash_fields_bytes(&[
             b"BDLM_THREE_NFT_META_V1",
             &self.recipe_commitment,
+            self.video_commitment
+                .as_ref()
+                .map(|c| c.as_slice())
+                .unwrap_or(&[]),
             &[self.visibility as u8],
             &[self.preview as u8],
             self.preview_content_id
@@ -71,6 +78,13 @@ impl ThreeNftMeta {
                 .map(|c| c.as_slice())
                 .unwrap_or(&[]),
         ])
+    }
+
+    /// Attach QR-video blob commitment (still no seed / no BDLV body on chain).
+    #[must_use]
+    pub fn with_video_commitment(mut self, video_blob_commitment: [u8; 32]) -> Self {
+        self.video_commitment = Some(video_blob_commitment);
+        self
     }
 }
 
@@ -94,7 +108,8 @@ mod tests {
         let enc = CarouselEncoder::new(&packed, 32).unwrap();
         let stream = enc.params().stream_commitment(&commit);
         let full = ThreeRecipePublic::new(commit, enc.params(), stream);
-        let meta = ThreeNftMeta::from_recipe(&ThreeRecipe::Public(full.clone()), PreviewMode::None);
+        let meta = ThreeNftMeta::from_recipe(&ThreeRecipe::Public(full.clone()), PreviewMode::None)
+            .with_video_commitment([7u8; 32]);
         assert!(meta_tracks_public_recipe(&meta, &full));
         assert_ne!(meta.commitment(), [0u8; 32]);
         // sealed has different recipe commitment surface

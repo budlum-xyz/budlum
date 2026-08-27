@@ -6,7 +6,7 @@
 //! openable for **new** sessions (T3 honesty: devices already holding frames
 //! are not clawed back).
 
-use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic, ThreeRecipeSealed};
+use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
 use crate::storage::view_grant::ViewPolicy;
 
 /// Product default at upload time.
