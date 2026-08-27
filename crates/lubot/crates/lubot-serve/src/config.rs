@@ -243,6 +243,32 @@ const REQUIRED_PROMPT_PHRASES: &[(&str, &str)] = &[
         "the honesty boundary: access and bond are verified while end-to-end inference proof is not; \
          a prompt that overstated it would make the model the place the claim leaks out of",
     ),
+    (
+        "Tiers are called light and normal.",
+        "the tier naming decision; the prompt is where a third-party name would leak to a user",
+    ),
+];
+
+/// The quoted effort figures the prompt must keep, and why each one matters.
+///
+/// These mirror the `EFFORT_FIGURES` of the `lubot-prompt-is-true` gate. The
+/// gate derives the figures from the on-chain constants in `src/lubot/effort.rs`
+/// (`TIER_MIN_TENTHS` / `TIER_BASELINE_TENTHS` / `TIER_MAX_TENTHS` divided by
+/// `TIER_SCALE`); this off-chain crate cannot depend on that source, so the
+/// quoted strings are kept here as literals and the gate remains the authority
+/// that recomputes them. The runtime's job is the cheap half: refuse a prompt
+/// whose prose has quietly dropped a bound.
+const REQUIRED_EFFORT_FIGURES: &[(&str, &str)] = &[
+    (
+        "0.5x",
+        "the shallowest tier; a requester reads it to know the floor",
+    ),
+    ("1.0x", "the baseline tier the default effort is"),
+    (
+        "10.0x",
+        "the deepest tier; dropping it from the prose leaves the chain enforcing \
+         a depth nobody was told about",
+    ),
 ];
 
 /// The verification of one prompt text without the identity assumption.
@@ -266,6 +292,12 @@ fn verify_prompt_text(text: &str) -> Result<(), String> {
     for (phrase, why) in REQUIRED_PROMPT_PHRASES {
         if !text.contains(phrase) {
             return Err(format!("the prompt lost `{phrase}`.\n  {why}"));
+        }
+    }
+
+    for (figure, why) in REQUIRED_EFFORT_FIGURES {
+        if !text.contains(figure) {
+            return Err(format!("the prompt no longer quotes `{figure}`.\n  {why}"));
         }
     }
 
@@ -713,6 +745,34 @@ mod tests {
         assert!(
             err.contains("SocialFi reference") || err.contains("lost"),
             "expected the refusal to name the lost channel, got: {err}"
+        );
+    }
+
+    /// A prompt whose depth range has shrunk by one bound is refused.
+    ///
+    /// Effort figures are the one class of claim that a prose edit can drop
+    /// without breaking anything that reads the constants: the numbers are
+    /// prose here and code in the crate that enforces them, and the two can
+    /// drift apart silently.
+    #[test]
+    fn a_prompt_missing_an_effort_figure_is_refused() {
+        let stripped = LUBOT_SYSTEM_PROMPT.replace("10.0x", "<missing>");
+        let err = verify_prompt_text(&stripped).expect_err("a dropped bound must be refused");
+        assert!(
+            err.contains("10.0x") || err.contains("quotes"),
+            "expected the refusal to name the missing figure, got: {err}"
+        );
+    }
+
+    /// A prompt that lost the tier naming decision is refused.
+    #[test]
+    fn a_prompt_missing_the_tier_naming_is_refused() {
+        let stripped =
+            LUBOT_SYSTEM_PROMPT.replace("Tiers are called light and normal.", "<missing>");
+        let err = verify_prompt_text(&stripped).expect_err("a lost tier naming must be refused");
+        assert!(
+            err.contains("Tiers are called light and normal.") || err.contains("lost"),
+            "expected the refusal to name the missing claim, got: {err}"
         );
     }
 
