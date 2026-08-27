@@ -8,6 +8,7 @@ use crate::storage::qr_carousel::{
     planned_drop_count, CarouselEncoder, CarouselError, DEFAULT_BLOCK_LEN,
 };
 use crate::storage::qr_codec::{CodecError, CodecKind, FrameMux, RawFrameConcat};
+use crate::storage::qr_video::{demux_optical_frames, QrVideo, QrVideoError, DEFAULT_FPS};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
 use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
 use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
@@ -31,6 +32,8 @@ pub enum PipeError {
     Codec(CodecError),
     /// A7.
     Receive(ReceiveError),
+    /// A4 QR-video.
+    Video(QrVideoError),
 }
 
 impl std::fmt::Display for PipeError {
@@ -43,6 +46,7 @@ impl std::fmt::Display for PipeError {
             Self::Frame(e) => write!(f, "{e}"),
             Self::Codec(e) => write!(f, "{e}"),
             Self::Receive(e) => write!(f, "{e}"),
+            Self::Video(e) => write!(f, "{e}"),
         }
     }
 }
@@ -82,6 +86,11 @@ impl From<CodecError> for PipeError {
 impl From<ReceiveError> for PipeError {
     fn from(e: ReceiveError) -> Self {
         Self::Receive(e)
+    }
+}
+impl From<QrVideoError> for PipeError {
+    fn from(e: QrVideoError) -> Self {
+        Self::Video(e)
     }
 }
 
@@ -177,6 +186,47 @@ pub fn recipe_commitment(recipe: &ThreeRecipePublic) -> [u8; 32] {
 /// Default block length re-export for callers.
 pub const PIPE_DEFAULT_BLOCK_LEN: u16 = DEFAULT_BLOCK_LEN;
 
+/// Full product object: recipe + QR-video blob (BDLV of QR PNGs).
+#[derive(Debug, Clone)]
+pub struct EncodedQrVideo {
+    /// Pipe encoding (packed, recipe, optical frames, stream id).
+    pub pipe: EncodedPipe,
+    /// QR-video container.
+    pub video: QrVideo,
+    /// Serialized BDLV bytes (what NFT/tarif re-emits as the video object).
+    pub video_blob: Vec<u8>,
+}
+
+/// Root 3.0 encode: content → (optional seal) → A1…A3 → QR matrices → BDLV video.
+pub fn encode_qr_video(
+    content: &[u8],
+    block_len: u16,
+    seal_key: Option<&PayloadKey>,
+) -> Result<EncodedQrVideo, PipeError> {
+    let pipe = encode_plain(content, block_len, seal_key)?;
+    let video = QrVideo::from_optical_frames(
+        &pipe.recipe,
+        &pipe.stream_commitment,
+        &pipe.frames,
+        DEFAULT_FPS,
+    )?;
+    let video_blob = video.to_bytes();
+    Ok(EncodedQrVideo {
+        pipe,
+        video,
+        video_blob,
+    })
+}
+
+/// Root 3.0 decode: BDLV → optical frames → content body (kind + bytes).
+pub fn decode_qr_video(video_blob: &[u8]) -> Result<(PayloadKind, Vec<u8>, QrVideo), PipeError> {
+    let video = QrVideo::from_bytes(video_blob)?;
+    let optical = demux_optical_frames(&video)?;
+    let (kind, raw) = decode_frames(&video.stream_commitment, &optical)?;
+    Ok((kind, raw, video))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +242,19 @@ mod tests {
         let _ = recipe_commitment(&enc.recipe);
         let blob = mux_raw(&enc.frames).unwrap();
         assert!(blob.starts_with(b"BDLR"));
+    }
+
+    #[test]
+    fn qr_video_root_round_trip() {
+        let content = b"root-qr-video-product".repeat(5);
+        let enc = encode_qr_video(&content, 64, None).unwrap();
+        assert!(enc.video_blob.starts_with(b"BDLV"));
+        let (kind, raw, _v) = decode_qr_video(&enc.video_blob).unwrap();
+        assert_eq!(kind, PayloadKind::ContentBytes);
+        assert_eq!(raw, content.as_slice());
+        // re-emit video from recipe path must match blob commitment if same frames
+        let again = encode_qr_video(&content, 64, None).unwrap();
+        assert_eq!(enc.video_blob, again.video_blob);
     }
 
     #[test]
