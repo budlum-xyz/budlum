@@ -27,7 +27,9 @@ impl std::fmt::Display for RevealError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Forbidden => write!(f, "three reveal forbidden without grant"),
-            Self::NeedFullRecipe => write!(f, "three reveal needs full public recipe to open sealed"),
+            Self::NeedFullRecipe => {
+                write!(f, "three reveal needs full public recipe to open sealed")
+            }
             Self::Reemit(e) => write!(f, "three reveal reemit: {e}"),
         }
     }
@@ -130,6 +132,9 @@ mod tests {
         let (full, packed) = sample();
         let recipe = ThreeRecipe::Sealed(full.seal());
         let s = RevealSession::open(&recipe, Some(&full), &packed, true).unwrap();
-        assert_eq!(s.stream_commitment(), full.carousel.stream_commitment(&full.payload_commitment));
+        assert_eq!(
+            s.stream_commitment(),
+            full.carousel.stream_commitment(&full.payload_commitment)
+        );
     }
 }

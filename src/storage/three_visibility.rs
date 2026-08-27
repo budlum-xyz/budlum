@@ -69,6 +69,9 @@ mod tests {
         let full = ThreeRecipePublic::new(c, enc.params(), s);
         let r = recipe_for_upload(&full, UploadVisibility::default());
         assert!(matches!(r, ThreeRecipe::Sealed(_)));
-        assert_eq!(policy_for_upload(UploadVisibility::default()), ViewPolicy::OwnerOnly);
+        assert_eq!(
+            policy_for_upload(UploadVisibility::default()),
+            ViewPolicy::OwnerOnly
+        );
     }
 }

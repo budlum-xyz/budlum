@@ -1577,7 +1577,6 @@ mod repair_band {
         );
     }
 
-
     #[test]
     fn a_deal_inside_its_renewal_window_is_offered_before_it_matures() {
         use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;

@@ -50,7 +50,10 @@ pub fn classify_three_blob(bytes: &[u8]) -> ThreeBlobKind {
 pub fn is_transport_derivative(bytes: &[u8]) -> bool {
     matches!(
         classify_three_blob(bytes),
-        ThreeBlobKind::CarouselDrop | ThreeBlobKind::OpticalFrame | ThreeBlobKind::RawConcat | ThreeBlobKind::QrVideo
+        ThreeBlobKind::CarouselDrop
+            | ThreeBlobKind::OpticalFrame
+            | ThreeBlobKind::RawConcat
+            | ThreeBlobKind::QrVideo
     )
 }
 
@@ -62,9 +65,10 @@ pub fn is_transport_derivative(bytes: &[u8]) -> bool {
 pub fn refuse_durable_derivative(bytes: &[u8]) -> Result<(), ThreeBlobKind> {
     let kind = classify_three_blob(bytes);
     match kind {
-        ThreeBlobKind::CarouselDrop | ThreeBlobKind::OpticalFrame | ThreeBlobKind::RawConcat | ThreeBlobKind::QrVideo => {
-            Err(kind)
-        }
+        ThreeBlobKind::CarouselDrop
+        | ThreeBlobKind::OpticalFrame
+        | ThreeBlobKind::RawConcat
+        | ThreeBlobKind::QrVideo => Err(kind),
         ThreeBlobKind::PackedPayload | ThreeBlobKind::Other => Ok(()),
     }
 }
@@ -95,9 +99,7 @@ mod tests {
             refuse_durable_derivative(&frame).unwrap_err(),
             ThreeBlobKind::OpticalFrame
         );
-        let concat = RawFrameConcat
-            .mux(CodecKind::RawFrames, &[frame])
-            .unwrap();
+        let concat = RawFrameConcat.mux(CodecKind::RawFrames, &[frame]).unwrap();
         assert_eq!(
             refuse_durable_derivative(&concat).unwrap_err(),
             ThreeBlobKind::RawConcat

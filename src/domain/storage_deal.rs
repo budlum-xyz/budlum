@@ -1284,8 +1284,7 @@ impl StorageRegistry {
                     });
                 }
                 // Public digest must match the sealed fields (no seed).
-                let expect =
-                    crate::storage::generated::sealed_generated_commitment(sealed);
+                let expect = crate::storage::generated::sealed_generated_commitment(sealed);
                 let _ = expect; // commitment is part of source_commitment_bytes via id
             }
             crate::storage::generated::ContentSource::Hybrid { .. } => {
@@ -1475,8 +1474,7 @@ impl StorageRegistry {
             }
         }
         let commitment = commit.commitment();
-        self.confidential_commits
-            .insert(commit.content_id, commit);
+        self.confidential_commits.insert(commit.content_id, commit);
         Ok(commitment)
     }
 
@@ -1487,7 +1485,6 @@ impl StorageRegistry {
     ) -> Option<&crate::storage::ConfidentialBodyCommit> {
         self.confidential_commits.get(content_id)
     }
-
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
     /// `open_deal`; exposed so the E2E test can exercise the failure
@@ -5564,7 +5561,6 @@ mod demand_driven_replication_tests {
         assert_eq!(reg.under_replicated_shards(0).len(), 1);
     }
 
-
     #[test]
     fn three_manifest_cannot_open_a_storage_deal() {
         use crate::core::address::Address;
@@ -5611,13 +5607,9 @@ mod demand_driven_replication_tests {
         };
         let bytes = generate_content(&spec).expect("gen");
         let shard_id = {
-            let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
-                .expect("m");
-            manifest
-                .shards
-                .first()
-                .expect("shard")
-                .shard_id
+            let manifest =
+                ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("m");
+            manifest.shards.first().expect("shard").shard_id
         };
         let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
             .expect("m")
@@ -5680,10 +5672,7 @@ mod demand_driven_replication_tests {
         let err = reg
             .register_confidential_commit(commit)
             .expect_err("Three must not take a body commit");
-        assert!(
-            err.contains("Three") || err.contains("recipe"),
-            "got {err}"
-        );
+        assert!(err.contains("Three") || err.contains("recipe"), "got {err}");
     }
 
     #[test]
