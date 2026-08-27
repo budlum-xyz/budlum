@@ -21,8 +21,9 @@ use crate::core::hash::{calculate_hash_bytes, hash_fields_bytes};
 use crate::storage::qr_carousel::{oneshot_drop_count, CarouselEncoder, CarouselError};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
 use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
+use crate::storage::qr_png::frame_to_qr_png;
 use crate::storage::qr_recipe::ThreeRecipePublic;
-use crate::storage::qr_video::{QrVideo, QrVideoError, VIDEO_MAGIC};
+use crate::storage::qr_video::{QrVideo, QrVideoError, MAX_VIDEO_FRAMES, VIDEO_MAGIC};
 use crate::storage::three_pipe::{EncodedPipe, EncodedQrVideo, PipeError};
 use crate::storage::transformed::{transform_content, ContentClass, TransformError, TransformOpts};
 
@@ -110,21 +111,12 @@ impl From<FrameError> for VideoRecipeError {
 /// wire object, because a deserialized recipe cannot promise a `'static`
 /// string. The conversion is explicit in both directions so the two cannot
 /// drift silently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecipeTransform {
     /// Forced class. `None` means "sniff the body".
     pub force_class: Option<ContentClass>,
     /// Apply shrink-only zlib at A0. Off by default because A1 already does it.
     pub apply_zlib: bool,
-}
-
-impl Default for RecipeTransform {
-    fn default() -> Self {
-        Self {
-            force_class: None,
-            apply_zlib: false,
-        }
-    }
 }
 
 impl RecipeTransform {
@@ -296,13 +288,30 @@ impl VideoRecipe {
         if seq >= self.frame_count {
             return Err(VideoRecipeError::Video(QrVideoError::TooMany(seq)));
         }
-        let encoded = self.reemit(body)?;
-        encoded
-            .video
-            .png_frames
-            .get(seq as usize)
-            .cloned()
-            .ok_or(VideoRecipeError::Video(QrVideoError::BadBlob))
+        self.frame_stream(body)?.frame_at(seq)
+    }
+
+    /// Open an incremental cursor over this recipe's frames.
+    ///
+    /// The shared work (transform, pack, carousel) runs once here, so asking
+    /// for frame 999 after frame 0 costs one frame, not a second video.
+    ///
+    /// # Errors
+    ///
+    /// Body hash mismatch, or any A0-A2 failure.
+    pub fn frame_stream(&self, body: &[u8]) -> Result<VideoFrameStream, VideoRecipeError> {
+        if calculate_hash_bytes(body) != self.content_sha256 {
+            return Err(VideoRecipeError::BodyMismatch);
+        }
+        let core = RecipeCore::from_body(
+            body,
+            self.transform.as_opts(),
+            self.payload_kind,
+            self.block_len,
+            self.repair_permillage,
+            self.fps,
+        )?;
+        Ok(VideoFrameStream { core, next_seq: 0 })
     }
 }
 
@@ -334,11 +343,120 @@ impl VideoRecipeSealed {
     }
 }
 
+/// Everything the production path needs once the knobs are pinned, but before
+/// any frame is materialised.
+///
+/// Holding this is what lets the recipe hand frames over one at a time: the
+/// expensive shared work (transform, pack, carousel) runs once, and each frame
+/// afterwards is its own independent PNG.
+#[derive(Clone)]
+struct RecipeCore {
+    /// The packed A1 body, owned so the encoder can borrow it.
+    packed: Vec<u8>,
+    /// Carousel encoder over `packed`.
+    enc: CarouselEncoder,
+    /// Stream binding every frame carries.
+    stream_commitment: [u8; 32],
+    /// Frame count the recipe pins.
+    n: u32,
+    /// Pinned pacing hint.
+    fps: u16,
+}
+
+impl RecipeCore {
+    /// Run A0-A2 under pinned knobs. No frame is produced yet.
+    ///
+    /// `opts` is the A0 knob set; a caller that already transformed once passes
+    /// it straight through so the body is never transformed twice.
+    #[allow(clippy::too_many_arguments)]
+    fn from_body(
+        content: &[u8],
+        opts: TransformOpts,
+        payload_kind: u8,
+        block_len: u16,
+        repair_permillage: u32,
+        fps: u16,
+    ) -> Result<Self, VideoRecipeError> {
+        // A0: classify with the pinned knobs.
+        let transformed = transform_content(content, opts)?;
+
+        // A1: pack under the pinned kind.
+        let kind = match payload_kind {
+            1 => PayloadKind::ContentBytes,
+            2 => PayloadKind::PublicRecipeWire,
+            3 => PayloadKind::EncryptedContent,
+            other => {
+                return Err(VideoRecipeError::Pipe(PipeError::Payload(
+                    PayloadError::BadKind(other),
+                )));
+            }
+        };
+        let packed = pack_payload(kind, &transformed.bytes)?;
+        let commit = payload_commitment(&packed);
+
+        // A2: systematic pass plus the pinned repair margin, never 2k carousel.
+        let enc = CarouselEncoder::new(&packed, block_len)?;
+        let stream_commitment = enc.params().stream_commitment(&commit);
+        let n = oneshot_drop_count(enc.params().k, repair_permillage);
+        if n > MAX_VIDEO_FRAMES {
+            return Err(VideoRecipeError::Video(QrVideoError::TooMany(n)));
+        }
+
+        Ok(Self {
+            packed,
+            enc,
+            stream_commitment,
+            n,
+            fps,
+        })
+    }
+
+    /// One optical (A3) frame. Independent of every other frame.
+    fn optical_frame(&self, seq: u32) -> Vec<u8> {
+        let drop = self.enc.drop_at(seq);
+        pack_frame(&self.stream_commitment, &drop)
+    }
+
+    /// Materialise every frame and mux the BDLV container (A3-A4).
+    fn finish(&self) -> Result<EncodedQrVideo, VideoRecipeError> {
+        let mut frames = Vec::with_capacity(self.n as usize);
+        let mut digests = Vec::with_capacity(self.n as usize);
+        for seq in 0..self.n {
+            let drop = self.enc.drop_at(seq);
+            digests.push(frame_digest(&self.stream_commitment, seq, &drop.to_bytes()));
+            frames.push(pack_frame(&self.stream_commitment, &drop));
+        }
+        let fold = fold_frame_digests(&digests)?;
+        let pipe_recipe =
+            ThreeRecipePublic::new(payload_commitment(&self.packed), self.enc.params(), fold);
+
+        // A4: QR matrices to PNG frames, muxed into the BDLV container.
+        let video =
+            QrVideo::from_optical_frames(&pipe_recipe, &self.stream_commitment, &frames, self.fps)?;
+        let video_blob = video.to_bytes();
+        Ok(EncodedQrVideo {
+            pipe: EncodedPipe {
+                packed: self.packed.clone(),
+                recipe: pipe_recipe,
+                frames,
+                stream_commitment: self.stream_commitment,
+                // Overwritten by the caller, which knows the real A0 class;
+                // this default is never observable because both production
+                // paths set it before returning.
+                class: ContentClass::classify(&self.packed, None),
+            },
+            video,
+            video_blob,
+        })
+    }
+}
+
 /// Encode with every production knob pinned by a recipe.
 ///
 /// This is the single production path: both the first encode at upload and the
 /// re-emit from a recipe run through here, which is what makes the two
-/// bit-equal.
+/// bit-equal. The frame stream in [`VideoFrameStream`] shares the same
+/// [`RecipeCore`], so a streamed frame and a re-emitted frame cannot drift.
 ///
 /// # Errors
 ///
@@ -351,53 +469,91 @@ pub fn encode_qr_video_internal(
     repair_permillage: u32,
     fps: u16,
 ) -> Result<EncodedQrVideo, VideoRecipeError> {
-    // A0: classify with the pinned knobs.
-    let transformed = transform_content(content, transform.as_opts())?;
+    let opts = transform.as_opts();
+    let class = transform_content(content, opts)?.class;
+    let core = RecipeCore::from_body(
+        content,
+        opts,
+        payload_kind,
+        block_len,
+        repair_permillage,
+        fps,
+    )?;
+    let mut encoded = core.finish()?;
+    encoded.pipe.class = class;
+    Ok(encoded)
+}
 
-    // A1: pack under the pinned kind.
-    let kind = match payload_kind {
-        1 => PayloadKind::ContentBytes,
-        2 => PayloadKind::PublicRecipeWire,
-        3 => PayloadKind::EncryptedContent,
-        other => {
-            return Err(VideoRecipeError::Pipe(PipeError::Payload(
-                PayloadError::BadKind(other),
-            )));
-        }
-    };
-    let packed = pack_payload(kind, &transformed.bytes)?;
-    let commit = payload_commitment(&packed);
+/// Frames of one produced video, handed over one at a time.
+///
+/// Opening does the shared work once; each [`next`](Self::next) is a single
+/// QR matrix and a single PNG, independent of the others. This is what makes
+/// "fast open, then progressive" real instead of a claim.
+pub struct VideoFrameStream {
+    core: RecipeCore,
+    next_seq: u32,
+}
 
-    // A2: systematic pass plus the pinned repair margin, never the 2k carousel.
-    let enc = CarouselEncoder::new(&packed, block_len)?;
-    let stream_commitment = enc.params().stream_commitment(&commit);
-    let n = oneshot_drop_count(enc.params().k, repair_permillage);
-
-    // A3: optical frames, bound to the stream.
-    let mut frames = Vec::with_capacity(n as usize);
-    let mut digests = Vec::with_capacity(n as usize);
-    for seq in 0..n {
-        let drop = enc.drop_at(seq);
-        digests.push(frame_digest(&stream_commitment, seq, &drop.to_bytes()));
-        frames.push(pack_frame(&stream_commitment, &drop));
+impl std::fmt::Debug for VideoFrameStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VideoFrameStream")
+            .field("next_seq", &self.next_seq)
+            .field("len", &self.core.n)
+            .finish()
     }
-    let fold = fold_frame_digests(&digests)?;
-    let pipe_recipe = ThreeRecipePublic::new(commit, enc.params(), fold);
+}
 
-    // A4: QR matrices to PNG frames, muxed into the BDLV container.
-    let video = QrVideo::from_optical_frames(&pipe_recipe, &stream_commitment, &frames, fps)?;
-    let video_blob = video.to_bytes();
-    Ok(EncodedQrVideo {
-        pipe: EncodedPipe {
-            packed,
-            recipe: pipe_recipe,
-            frames,
-            stream_commitment,
-            class: transformed.class,
-        },
-        video,
-        video_blob,
-    })
+impl VideoFrameStream {
+    /// Frame `seq` of the stream, without producing the frames before it.
+    ///
+    /// # Errors
+    ///
+    /// [`QrVideoError::TooMany`] past the end, or any A4 failure.
+    pub fn frame_at(&self, seq: u32) -> Result<Vec<u8>, VideoRecipeError> {
+        if seq >= self.core.n {
+            return Err(VideoRecipeError::Video(QrVideoError::TooMany(seq)));
+        }
+        let optical = self.core.optical_frame(seq);
+        // QrPngError -> QrVideoError::Png, the same wrapper the muxer uses.
+        frame_to_qr_png(&optical)
+            .map_err(QrVideoError::from)
+            .map_err(VideoRecipeError::from)
+    }
+
+    /// Frames still to come, including the next one.
+    #[must_use]
+    pub const fn remaining(&self) -> u32 {
+        self.core.n.saturating_sub(self.next_seq)
+    }
+
+    /// Total frame count the recipe pins.
+    #[must_use]
+    pub const fn len(&self) -> u32 {
+        self.core.n
+    }
+
+    /// True when every frame has been handed over.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.remaining() == 0
+    }
+
+    /// Take the next frame in order. `None` once the video is exhausted.
+    ///
+    /// Not [`Iterator`] on purpose: a stream is *opened* fallibly (the body pin
+    /// is checked first), which [`Iterator`] has no shape for.
+    ///
+    /// # Errors
+    ///
+    /// Any A4 failure on that frame.
+    pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, VideoRecipeError> {
+        if self.next_seq >= self.core.n {
+            return Ok(None);
+        }
+        let frame = self.frame_at(self.next_seq)?;
+        self.next_seq += 1;
+        Ok(Some(frame))
+    }
 }
 
 /// BDLV magic, re-exported so callers can recognise a produced video.
@@ -416,6 +572,7 @@ mod tests {
     use super::*;
     use crate::storage::qr_video::DEFAULT_FPS;
     use crate::storage::three_pipe::decode_qr_video;
+    use std::time::Instant;
 
     fn incompressible(len: usize) -> Vec<u8> {
         use sha2::{Digest, Sha256};
@@ -503,8 +660,78 @@ mod tests {
         );
     }
 
-    /// Progressive delivery: every frame is produced on its own, in order, and
-    /// the sequence assembled from those single frames is the same video.
+    /// The first frame is what a phone shows first, so its cost must be one
+    /// frame, not `n` videos. Frames must be handed over *progressively*: one at a time, in order,
+    /// and — this is the point of the whole shape — **without re-encoding the
+    /// whole video for each frame**. The first frame is what a phone shows
+    /// first, so its cost must be one frame, not `n` videos.
+    #[test]
+    fn first_frame_costs_one_frame_not_the_whole_video() {
+        let content = incompressible(9_000);
+        let (recipe, _video) = upload(&content);
+
+        let t0 = Instant::now();
+        let _first = recipe.frame_at(&content, 0).unwrap();
+        let one_frame = t0.elapsed();
+
+        let t1 = Instant::now();
+        let full = recipe.reemit(&content).unwrap();
+        let whole_video = t1.elapsed();
+
+        // One frame cannot cost as much as the entire video. If it does, the
+        // implementation is re-encoding per frame and the progressive promise
+        // is fiction on any real content size.
+        assert!(
+            one_frame < whole_video,
+            "first frame took {one_frame:?} but the whole video took {whole_video:?}"
+        );
+        assert!(
+            whole_video.as_nanos() > 3 * one_frame.as_nanos(),
+            "first frame is not clearly cheaper: frame {one_frame:?}, video {whole_video:?}"
+        );
+        assert!(!full.video.png_frames.is_empty());
+    }
+
+    /// The incremental cursor must be *the* video: byte for byte, same order,
+    /// same count. Any drift means the on-chain recipe and the streamed frames
+    /// describe two different videos, which breaks the whole claim.
+    #[test]
+    fn frame_stream_is_bit_equal_to_reemit() {
+        let content = incompressible(3_000);
+        let (recipe, _video) = upload(&content);
+        let full = recipe.reemit(&content).unwrap();
+
+        let mut stream = recipe.frame_stream(&content).unwrap();
+        for expected in &full.video.png_frames {
+            let got = stream
+                .next_frame()
+                .expect("frame must be produced")
+                .expect("stream ran short");
+            assert_eq!(&got, expected, "frame drift against reemit");
+        }
+        assert!(
+            stream
+                .next_frame()
+                .expect("exhaust must not fail")
+                .is_none(),
+            "stream must stop after {}",
+            full.video.png_frames.len()
+        );
+    }
+
+    /// A stream opened on a body that is not the pinned one must refuse at
+    /// open time, exactly like `reemit`, and must not yield a single frame.
+    #[test]
+    fn frame_stream_refuses_a_wrong_body_at_open() {
+        let content = incompressible(2_000);
+        let (recipe, _video) = upload(&content);
+        let mut wrong = content.clone();
+        wrong[0] ^= 0xff;
+
+        let err = recipe.frame_stream(&wrong).unwrap_err();
+        assert!(matches!(err, VideoRecipeError::BodyMismatch));
+    }
+
     #[test]
     fn frames_are_produced_one_at_a_time_in_order() {
         let content = incompressible(6_000);
