@@ -48,6 +48,7 @@ pub mod three_nft;
 pub mod three_meter;
 pub mod three_gate;
 pub mod three_hooks;
+pub mod three_recipe;
 pub mod three_reveal;
 pub mod three_visibility;
 pub mod qr_codec;
@@ -147,6 +148,10 @@ pub use three_pipe::{
     EncodedPipe, EncodedQrVideo, PipeError, PIPE_DEFAULT_BLOCK_LEN,
 };
 
+pub use three_recipe::{
+    encode_qr_video_internal, recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError,
+    VideoRecipeSealed, RECIPE_VIDEO_MAGIC,
+};
 pub use three_reveal::{RevealError, RevealSession};
 pub use three_nft::{
     meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta,
