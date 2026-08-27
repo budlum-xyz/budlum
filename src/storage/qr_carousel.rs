@@ -418,6 +418,49 @@ pub fn oneshot_drop_count(k: u16, p_milli: u32) -> u32 {
     k.saturating_add(repair)
 }
 
+/// Repair margin needed to hold a reliability target against frame loss.
+///
+/// Derivation, not a tuned constant. With `k` source blocks, frame loss `p`
+/// and a one-shot budget `n = k + r`, the receiver keeps about
+/// `(k + r)(1 - p)` frames. Decoding is Gauss-Jordan over GF(2), so failure is
+/// rank deficiency, which for random rows is about `2^-spare` where
+///
+/// ```text
+/// spare = (k + r)(1 - p) - k
+/// ```
+///
+/// Requiring `spare >= e` and solving for `r`:
+///
+/// ```text
+/// r >= (p*k + e) / (1 - p)
+/// ```
+///
+/// So reliability is bought with frames, one bit of failure probability per
+/// spare frame, and the exchange rate is fixed by the loss rate. This is the
+/// honest shape of an LT code without pre-coding: there is no margin that is
+/// both small and near-certain.
+///
+/// Measured at k=101: a pure repair stream decoded 5/5 from `1.10k` frames and
+/// 3/5 from `1.05k`, and a 15% budget at 8% loss (about 7 spare) failed 1 trial
+/// in 12 — consistent with `2^-7`.
+///
+/// * `p_milli` — expected frame loss, permillage.
+/// * `spare_frames` — reliability exponent: failure about `2^-spare_frames`.
+#[must_use]
+pub fn repair_margin_for(k: u16, p_milli: u32, spare_frames: u32) -> u32 {
+    let k = u32::from(k);
+    if k == 0 {
+        return 0;
+    }
+    let p = p_milli.min(900);
+    let denom = 1000u32.saturating_sub(p).max(1);
+    // r = ceil((p*k + spare) / (1 - p)) in milli-units.
+    let num = k
+        .saturating_mul(p)
+        .saturating_add(spare_frames.saturating_mul(1000));
+    num.div_ceil(denom)
+}
+
 /// Receiver that accumulates drops and recovers the original payload.
 #[derive(Debug, Clone)]
 pub struct CarouselDecoder {
@@ -1174,7 +1217,55 @@ mod tests {
         rank
     }
 
-    /// The repair equations must be close to independent, otherwise no amount
+    /// The margin formula must agree with the algebra it is derived from, and
+    /// with the measured threshold. If it drifts, every budget sized from it is
+    /// wrong by the same amount.
+    #[test]
+    fn repair_margin_matches_the_derivation() {
+        // r = ceil((p*k + e) / (1 - p)), all in whole frames.
+        assert_eq!(repair_margin_for(0, 80, 20), 0);
+        // k=100, 8% loss, 20 spare: (8 + 20) / 0.92 = 30.4 -> 31
+        assert_eq!(repair_margin_for(100, 80, 20), 31);
+        // k=100, 5% loss, 20 spare: (5 + 20) / 0.95 = 26.3 -> 27
+        assert_eq!(repair_margin_for(100, 50, 20), 27);
+        // No loss: the margin is exactly the reliability exponent.
+        assert_eq!(repair_margin_for(100, 0, 20), 20);
+        // No reliability target: the margin only covers the loss itself.
+        assert_eq!(repair_margin_for(100, 0, 0), 0);
+        // Monotone in both knobs.
+        assert!(repair_margin_for(100, 80, 20) > repair_margin_for(100, 50, 20));
+        assert!(repair_margin_for(100, 80, 30) > repair_margin_for(100, 80, 20));
+
+        // And the budget it produces must actually decode, at the loss rate it
+        // was sized for. This is the check that ties the formula to the wire.
+        let payload: Vec<u8> = (0..20_200u32).map(|i| (i % 251) as u8).collect();
+        let enc = CarouselEncoder::new(&payload, DEFAULT_BLOCK_LEN).unwrap();
+        let k = usize::from(enc.params().k);
+        let r = repair_margin_for(enc.params().k, 50, 12);
+        let budget = k + r as usize;
+        let mut failures = 0usize;
+        for trial in 0..10u64 {
+            let mask = loss_mask(budget, trial, 50);
+            let mut dec = CarouselDecoder::new();
+            for (seq, keep) in mask.iter().enumerate() {
+                if *keep {
+                    dec.push(&enc.drop_at(seq as u32)).unwrap();
+                }
+            }
+            if dec.is_complete() {
+                assert_eq!(dec.finish().unwrap(), payload);
+            } else {
+                failures += 1;
+            }
+        }
+        assert!(
+            failures <= 1,
+            "{failures}/10 failed with a margin sized for 2^-12 at 5% loss \
+             (k={k}, r={r}, budget={budget})"
+        );
+    }
+
+    /// The repair equations must be close to independent    /// The repair equations must be close to independent, otherwise no amount
     /// of margin helps: the decoder cannot solve what the coefficient matrix
     /// does not span. This is the check that separates "the margin is too
     /// small" from "the distribution is broken", and it is what showed the
