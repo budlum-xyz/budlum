@@ -12,3 +12,4 @@
 pub mod chain;
 pub mod config;
 pub mod health;
+pub mod prompt;
