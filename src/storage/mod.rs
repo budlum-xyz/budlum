@@ -37,6 +37,9 @@ pub mod qr_carousel;
 pub mod payload_crypt;
 pub mod qr_frame;
 pub mod qr_payload;
+pub mod qr_video;
+pub mod qr_png;
+pub mod qr_matrix;
 pub mod qr_recipe;
 pub mod qr_reemit;
 pub mod qr_receive;
@@ -46,6 +49,7 @@ pub mod three_meter;
 pub mod three_gate;
 pub mod three_hooks;
 pub mod three_reveal;
+pub mod three_visibility;
 pub mod qr_codec;
 pub mod transformed;
 pub mod render;
@@ -135,8 +139,8 @@ pub use qr_codec::{
     gate_codec, split_raw_concat, CodecError, CodecKind, FrameMux, RawFrameConcat,
 };
 pub use three_pipe::{
-    decode_frames, encode_plain, mux_raw, recipe_commitment, EncodedPipe, PipeError,
-    PIPE_DEFAULT_BLOCK_LEN,
+    decode_frames, decode_qr_video, encode_plain, encode_qr_video, mux_raw, recipe_commitment,
+    EncodedPipe, EncodedQrVideo, PipeError, PIPE_DEFAULT_BLOCK_LEN,
 };
 
 pub use three_reveal::{RevealError, RevealSession};
@@ -149,3 +153,13 @@ pub use three_hooks::{
 };
 pub use three_meter::{MeterError, ThreeMeter};
 pub use three_gate::{classify_three_blob, is_transport_derivative, refuse_durable_derivative, ThreeBlobKind};
+
+pub use qr_matrix::{QrMatrix, QrMatrixError, MAX_QR_PAYLOAD, MODULE_PX, QUIET_ZONE, THREE_QR_EC};
+pub use qr_png::{frame_to_qr_png, matrix_to_png, QrPngError};
+pub use qr_video::{
+    demux_optical_frames, png_to_optical_frame, QrVideo, QrVideoError, DEFAULT_FPS, MAX_VIDEO_FRAMES,
+    VIDEO_MAGIC, VIDEO_VERSION,
+};
+pub use three_visibility::{
+    delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
+};
