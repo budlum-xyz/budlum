@@ -112,6 +112,223 @@ fn regenerate_storage_challenge_program() -> Vec<u64> {
     ]
 }
 
+// --- Independent reproduction of the AI matmul guest program -------------
+//
+// Wheeler DDC: the MLP inference guest program is a second canonical program.
+// Its identity is bound into the AI execution proof
+// (`AiExecutionProof.program_hash`, produced by `stark_program_hash_from_words`
+// in `src/ai/execution/guest.rs`). It is reproduced here from the
+// specification alone - dims -> memory layout -> instruction stream - using
+// this gate's own ISA encoding rule and its own Keccak-256, with no import
+// from `bud_isa` and no look at the tree's builder. The reproduction must
+// land on the pinned canonical value; the same pins are asserted in the
+// tree's own tests, so a drift on either side turns a CI run red.
+
+/// Opcodes the matmul guest uses (independent copy of the ISA values).
+const OP_ADD: u64 = 0x01;
+const OP_SUB: u64 = 0x02;
+const OP_MUL: u64 = 0x03;
+const OP_GT: u64 = 0x0D;
+const OP_LOAD: u64 = 0x14;
+const OP_STORE: u64 = 0x15;
+const OP_POSEIDON: u64 = 0x19;
+const OP_LOG: u64 = 0x1A;
+
+/// Register allocation of the canonical guest (independent copy).
+const GR_ZERO: u64 = 1; // constant 0
+const GR_ONE: u64 = 2; // constant 1
+const GR_HALF: u64 = 3; // (P-1)/2, the ReLU threshold
+const GR_ACC: u64 = 4; // neuron accumulator
+const GR_W: u64 = 5; // weight
+const GR_X: u64 = 6; // activation
+const GR_T: u64 = 7; // product / temporary
+const GR_SEL: u64 = 8; // ReLU selector bit
+const GR_HASH: u64 = 9; // rolling Poseidon commitment
+
+const GUEST_MAX_MLP_WIDTH: usize = 64;
+const GUEST_WORD_BYTES: usize = 8;
+const GUEST_MEMORY_BYTES: usize = 8192;
+
+/// The memory map the canonical guest reads from (independent copy of the
+/// documented layout rule): input at word 0, then weights, biases, two
+/// MAX_MLP_WIDTH scratch regions, then the output region.
+struct MatmulGuestLayout {
+    weight_base: usize,
+    bias_base: usize,
+    act_in_base: usize,
+    act_out_base: usize,
+    output_base: usize,
+}
+
+fn matmul_guest_layout(dims: &[u16]) -> Result<MatmulGuestLayout, String> {
+    if dims.len() < 2 || dims.len() > 5 {
+        return Err(format!("dims length must be 2..=5 (got {})", dims.len()));
+    }
+    for &d in dims {
+        if d == 0 || d as usize > GUEST_MAX_MLP_WIDTH {
+            return Err(format!("layer dim {d} out of 1..={GUEST_MAX_MLP_WIDTH}"));
+        }
+    }
+    let mut weights = 0usize;
+    let mut biases = 0usize;
+    for w in dims.windows(2) {
+        weights += w[0] as usize * w[1] as usize;
+        biases += w[1] as usize;
+    }
+    let weight_base = dims[0] as usize;
+    let bias_base = weight_base + weights;
+    let act_in_base = bias_base + biases;
+    let act_out_base = act_in_base + GUEST_MAX_MLP_WIDTH;
+    let output_base = act_out_base + GUEST_MAX_MLP_WIDTH;
+    let total_words = output_base + *dims.last().unwrap() as usize;
+    if total_words * GUEST_WORD_BYTES > GUEST_MEMORY_BYTES {
+        return Err(format!(
+            "guest layout needs {} bytes > GUEST_MEMORY_BYTES {GUEST_MEMORY_BYTES}",
+            total_words * GUEST_WORD_BYTES
+        ));
+    }
+    Ok(MatmulGuestLayout {
+        weight_base,
+        bias_base,
+        act_in_base,
+        act_out_base,
+        output_base,
+    })
+}
+
+/// Byte address of a word index, as the `imm` operand of Load/Store.
+fn matmul_byte_addr(word: usize) -> Result<i32, String> {
+    let addr = word
+        .checked_mul(GUEST_WORD_BYTES)
+        .ok_or("guest address overflow")?;
+    if addr + GUEST_WORD_BYTES > GUEST_MEMORY_BYTES {
+        return Err(format!("guest address {addr} out of memory"));
+    }
+    i32::try_from(addr).map_err(|_| "guest address exceeds i32".to_string())
+}
+
+/// The prologue materialising (P-1)/2 in `GR_HALF` (2^63 - 2^31, imm is only
+/// 32 bits wide, so the constant is built from 2^30 by squaring and scaling).
+fn matmul_emit_half(prog: &mut Vec<u64>) {
+    const POW30: i32 = 1 << 30;
+    prog.push(encode_instruction(OP_LOAD, GR_HALF, 0, 0, POW30)); // 2^30
+    prog.push(encode_instruction(OP_MUL, GR_HALF, GR_HALF, GR_HALF, 0)); // 2^60
+    prog.push(encode_instruction(OP_LOAD, GR_T, 0, 0, 8));
+    prog.push(encode_instruction(OP_MUL, GR_HALF, GR_HALF, GR_T, 0)); // 2^63
+    prog.push(encode_instruction(OP_LOAD, GR_T, 0, 0, i32::MAX)); // 2^31 - 1
+    prog.push(encode_instruction(OP_ADD, GR_T, GR_T, GR_ONE, 0)); // 2^31
+    prog.push(encode_instruction(OP_SUB, GR_HALF, GR_HALF, GR_T, 0)); // 2^63 - 2^31
+}
+
+/// Reproduce `build_matmul_guest_program` from the specification.
+///
+/// Per output neuron: bias load, then per input a weight load, an activation
+/// load, a multiply and an add; hidden layers get a branchless ReLU
+/// (`acc *= 1 - (acc > HALF)`) and a pong->ping copy; the final layer stores
+/// into the output region and folds each output into the rolling Poseidon
+/// commitment, which is logged before `Halt`.
+fn regenerate_matmul_guest_program(dims: &[u16]) -> Result<Vec<u64>, String> {
+    let layout = matmul_guest_layout(dims)?;
+    let mut prog: Vec<u64> = Vec::new();
+
+    // Prologue: constants and the rolling commitment at zero.
+    prog.push(encode_instruction(OP_LOAD, GR_ZERO, 0, 0, 0));
+    prog.push(encode_instruction(OP_SUB, GR_ZERO, GR_ZERO, GR_ZERO, 0));
+    prog.push(encode_instruction(OP_LOAD, GR_ONE, 0, 0, 1));
+    matmul_emit_half(&mut prog);
+    prog.push(encode_instruction(OP_ADD, GR_HASH, GR_ZERO, GR_ZERO, 0));
+
+    let n_layers = dims.len() - 1;
+    let mut w_off = 0usize;
+    let mut b_off = 0usize;
+    for (layer_idx, w) in dims.windows(2).enumerate() {
+        let in_d = w[0] as usize;
+        let out_d = w[1] as usize;
+        let hidden = layer_idx + 1 < n_layers;
+
+        for o in 0..out_d {
+            let bias_addr = matmul_byte_addr(layout.bias_base + b_off + o)?;
+            prog.push(encode_instruction(OP_LOAD, GR_ACC, GR_ZERO, 0, bias_addr));
+
+            for i in 0..in_d {
+                let w_addr = matmul_byte_addr(layout.weight_base + w_off + o * in_d + i)?;
+                let x_addr = matmul_byte_addr(layout.act_in_base + i)?;
+                prog.push(encode_instruction(OP_LOAD, GR_W, GR_ZERO, 0, w_addr));
+                prog.push(encode_instruction(OP_LOAD, GR_X, GR_ZERO, 0, x_addr));
+                prog.push(encode_instruction(OP_MUL, GR_T, GR_W, GR_X, 0));
+                prog.push(encode_instruction(OP_ADD, GR_ACC, GR_ACC, GR_T, 0));
+            }
+
+            if hidden {
+                // Branchless ReLU: acc *= 1 - (acc > HALF).
+                prog.push(encode_instruction(OP_GT, GR_SEL, GR_ACC, GR_HALF, 0));
+                prog.push(encode_instruction(OP_SUB, GR_SEL, GR_ONE, GR_SEL, 0));
+                prog.push(encode_instruction(OP_MUL, GR_ACC, GR_ACC, GR_SEL, 0));
+            }
+
+            // Store the neuron into the next layer's scratch.
+            let dst = matmul_byte_addr(layout.act_out_base + o)?;
+            prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_ACC, dst));
+
+            if !hidden {
+                let out_addr = matmul_byte_addr(layout.output_base + o)?;
+                prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_ACC, out_addr));
+                // Fold the output into the rolling Poseidon commitment so the
+                // logged value depends on every output.
+                prog.push(encode_instruction(OP_POSEIDON, GR_HASH, GR_HASH, GR_ACC, 0));
+            }
+        }
+
+        if hidden {
+            // pong -> ping, so the next layer reads from act_in_base.
+            for o in 0..out_d {
+                let src = matmul_byte_addr(layout.act_out_base + o)?;
+                let dst = matmul_byte_addr(layout.act_in_base + o)?;
+                prog.push(encode_instruction(OP_LOAD, GR_T, GR_ZERO, 0, src));
+                prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_T, dst));
+            }
+        }
+
+        w_off += in_d * out_d;
+        b_off += out_d;
+    }
+
+    prog.push(encode_instruction(OP_LOG, 0, GR_HASH, 0, 0));
+    prog.push(encode_instruction(OP_HALT, 0, 0, 0, 0));
+    Ok(prog)
+}
+
+/// The canonical hash of the matmul guest program: every word little-endian,
+/// no tag, through this gate's own Keccak-256 (the same rule the verifier
+/// binds and `stark_program_hash_from_words` implements).
+fn matmul_guest_program_hash(dims: &[u16]) -> Result<[u8; 32], String> {
+    let prog = regenerate_matmul_guest_program(dims)?;
+    Ok(keccak256(&canonical_program_bytes(&prog)))
+}
+
+/// Pins of the canonical matmul guest program hash, measured on 2026-08-27
+/// from `build_matmul_guest_program` at `main` 2c122eb. The same pins are
+/// asserted in the tree (`src/ai/execution/guest.rs`); if either producer
+/// drifts away from this value, a CI run turns red.
+const PINNED_MATMUL_PROGRAM_HASHES: &[(&[u16], &str)] = &[
+    (
+        &[2, 3, 2],
+        "4c4e86b4d34230df02acb991eb3111e459fb8bf06dd2b65b78c143b7f8b7e8c7",
+    ),
+    (
+        &[3, 4, 2],
+        "0d3fac206034bd666834220cb4a6b29e9aeda4c9124a02914cce74ad8d29f541",
+    ),
+    (
+        &[1, 1],
+        "2216a1ff61cda10e45cf6a98b124895913dd04d37eb67eeb5e475774e8e04799",
+    ),
+    (
+        &[4, 4, 4, 4, 2],
+        "de98ca525e706cb13eaa267cc815d608d5366de43b462085e4615c74d6a555ad",
+    ),
+];
+
 // --- Independent Keccak-256 ---------------------------------------------
 
 const RC: [u64; 24] = [
@@ -731,5 +948,43 @@ mod tests {
         let got = encode_instruction(OP_VERIFY_MERKLE, 1, 2, 3, 256);
         let expected = 0x1E | (1 << 8) | (2 << 13) | (3 << 18) | (256u64 << 23);
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn matmul_guest_program_reproduction_matches_the_pin() {
+        // Wheeler DDC: the independent reproduction must land on the canonical
+        // value pinned from the tree's builder. The same pins are asserted in
+        // `src/ai/execution/guest.rs`; a drift on either side turns CI red.
+        for (dims, pin) in PINNED_MATMUL_PROGRAM_HASHES {
+            let got = hex32(&matmul_guest_program_hash(dims).expect("reproduction"));
+            assert_eq!(
+                &got, pin,
+                "independent reproduction of {dims:?} drifted from the canonical value"
+            );
+        }
+    }
+
+    #[test]
+    fn matmul_reproduction_is_convergent() {
+        // Convergence applies to every canonical program, not just the storage
+        // challenge: a second reproduction must give the same stream.
+        let a = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
+        let b = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
+        assert_eq!(a, b, "the second reproduction must be the same (idempotence)");
+    }
+
+    #[test]
+    fn matmul_layout_matches_the_documented_rule() {
+        // dims [2,3,2]: input=0, weights=2..14 (2*3+3*2=12 words), biases=14..19
+        // (3+2=5 words), act_in=19, act_out=83, output=147, total=149 words.
+        let l = matmul_guest_layout(&[2, 3, 2]).unwrap();
+        assert_eq!(l.weight_base, 2);
+        assert_eq!(l.bias_base, 14);
+        assert_eq!(l.act_in_base, 19);
+        assert_eq!(l.act_out_base, 19 + GUEST_MAX_MLP_WIDTH);
+        assert_eq!(l.output_base, 19 + 2 * GUEST_MAX_MLP_WIDTH);
+        let prog = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
+        // 11 (prologue) + 45 (hidden layer 2x3) + 32 (final layer 3x2) + 2 (Log, Halt)
+        assert_eq!(prog.len(), 90, "the reproduced stream length must match the estimate");
     }
 }
