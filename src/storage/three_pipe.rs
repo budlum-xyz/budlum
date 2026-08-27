@@ -13,7 +13,7 @@ use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, Fra
 use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
 use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
-use crate::storage::transformed::{CodecFlags, TransformError, TransformedPayload};
+use crate::storage::transformed::{transform_content, ContentClass, TransformError, TransformOpts};
 
 /// Errors from the facade.
 #[derive(Debug)]
@@ -105,6 +105,8 @@ pub struct EncodedPipe {
     pub frames: Vec<Vec<u8>>,
     /// A2 stream commitment used to bind frames.
     pub stream_commitment: [u8; 32],
+    /// A0 content class after transform.
+    pub class: ContentClass,
 }
 
 /// Encode plaintext (optionally sealed) through A0–A3/A5.
@@ -117,20 +119,15 @@ pub fn encode_plain(
     block_len: u16,
     seal_key: Option<&PayloadKey>,
 ) -> Result<EncodedPipe, PipeError> {
-    let transformed = TransformedPayload::from_bytes(
-        content.to_vec(),
-        if seal_key.is_some() {
-            CodecFlags::CIPHERTEXT
-        } else {
-            CodecFlags::NONE
-        },
-    )?;
+    // A0: classify + zlib-if-shrinks (entropy types skip zlib).
+    let transformed = transform_content(content, TransformOpts::default())?;
     let (kind, body) = if let Some(key) = seal_key {
         let sealed = seal_payload(key, &derived_nonce(b"three_pipe"), &transformed.bytes)?;
         (PayloadKind::EncryptedContent, sealed)
     } else {
         (PayloadKind::ContentBytes, transformed.bytes)
     };
+    let class = transformed.class;
     let packed = pack_payload(kind, &body)?;
     let commit = payload_commitment(&packed);
     let enc = CarouselEncoder::new(&packed, block_len)?;
@@ -150,6 +147,7 @@ pub fn encode_plain(
         recipe,
         frames,
         stream_commitment,
+        class,
     })
 }
 
