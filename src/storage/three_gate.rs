@@ -18,6 +18,8 @@ pub enum ThreeBlobKind {
     OpticalFrame,
     /// A4 raw frame concat (`BDLR`).
     RawConcat,
+    /// A4 QR-video container (`BDLV`) — recipe holds the pin; blob is derivative.
+    QrVideo,
     /// Unknown / not a Three transport magic.
     Other,
 }
@@ -37,6 +39,9 @@ pub fn classify_three_blob(bytes: &[u8]) -> ThreeBlobKind {
     if bytes.len() >= 4 && bytes[0..4] == *b"BDLR" {
         return ThreeBlobKind::RawConcat;
     }
+    if bytes.len() >= 4 && bytes[0..4] == *b"BDLV" {
+        return ThreeBlobKind::QrVideo;
+    }
     ThreeBlobKind::Other
 }
 
@@ -45,7 +50,7 @@ pub fn classify_three_blob(bytes: &[u8]) -> ThreeBlobKind {
 pub fn is_transport_derivative(bytes: &[u8]) -> bool {
     matches!(
         classify_three_blob(bytes),
-        ThreeBlobKind::CarouselDrop | ThreeBlobKind::OpticalFrame | ThreeBlobKind::RawConcat
+        ThreeBlobKind::CarouselDrop | ThreeBlobKind::OpticalFrame | ThreeBlobKind::RawConcat | ThreeBlobKind::QrVideo
     )
 }
 
@@ -57,7 +62,7 @@ pub fn is_transport_derivative(bytes: &[u8]) -> bool {
 pub fn refuse_durable_derivative(bytes: &[u8]) -> Result<(), ThreeBlobKind> {
     let kind = classify_three_blob(bytes);
     match kind {
-        ThreeBlobKind::CarouselDrop | ThreeBlobKind::OpticalFrame | ThreeBlobKind::RawConcat => {
+        ThreeBlobKind::CarouselDrop | ThreeBlobKind::OpticalFrame | ThreeBlobKind::RawConcat | ThreeBlobKind::QrVideo => {
             Err(kind)
         }
         ThreeBlobKind::PackedPayload | ThreeBlobKind::Other => Ok(()),
