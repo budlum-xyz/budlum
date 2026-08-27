@@ -267,7 +267,11 @@ mod tests {
     #[test]
     fn oneshot_encode_emits_k_plus_repair_not_two_k() {
         // Direct count check first: same k, two different budgets.
-        assert_eq!(oneshot_drop_count(100, ONESHOT_REPAIR_PERMILLAGE), 105);
+        assert_eq!(
+            oneshot_drop_count(100, ONESHOT_REPAIR_PERMILLAGE),
+            115,
+            "15% repair margin: k + ceil(k * 150/1000)"
+        );
         assert_eq!(planned_drop_count(100, 0), 200, "carousel floor is 2k");
 
         let content = incompressible(20_000);
