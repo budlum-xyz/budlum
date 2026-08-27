@@ -224,11 +224,38 @@ pub fn assert_consensus_ready(cfg: &ServeConfig) -> Result<(), String> {
 ///
 /// When a generation phrase is offered, or a declared limit is missing from
 /// the prompt text.
-pub fn checked_system_prompt() -> Result<&'static str, String> {
-    generation_phrases_are_all_refusals(LUBOT_SYSTEM_PROMPT)?;
+/// The phrases the prompt must keep, and what each one protects.
+///
+/// These mirror the `REQUIRED_CLAIMS` of the `lubot-prompt-is-true` gate. The
+/// gate is the authority; this list is the runtime half, so a prompt that has
+/// lost a core doctrine is refused at bridge start rather than only failing CI.
+/// Each entry is (exact phrase, why the phrase matters to the model a user
+/// talks to).
+const REQUIRED_PROMPT_PHRASES: &[(&str, &str)] = &[
+    (
+        "Pollen grant",
+        "the first closed-loop channel; a refusal cannot name a missing channel it never learned",
+    ),
+    ("B.U.D. storage deal", "the second closed-loop channel"),
+    ("SocialFi reference", "the third closed-loop channel"),
+    (
+        "is not something the field can do yet",
+        "the honesty boundary: access and bond are verified while end-to-end inference proof is not; \
+         a prompt that overstated it would make the model the place the claim leaks out of",
+    ),
+];
+
+/// The verification of one prompt text without the identity assumption.
+///
+/// Split out from [`checked_system_prompt`] so a canary can drive it against a
+/// doctored *copy* of the prompt rather than against the immutable `const`. The
+/// shipped prompt is a constant, so the red-green test cannot mutate it; the
+/// way to prove a check catches a defect is to feed a defeated copy in.
+fn verify_prompt_text(text: &str) -> Result<(), String> {
+    generation_phrases_are_all_refusals(text)?;
 
     for (medium, unit, limit) in DECLARED_LIMITS {
-        if !LUBOT_SYSTEM_PROMPT.contains(&limit.to_string()) {
+        if !text.contains(&limit.to_string()) {
             return Err(format!(
                 "the prompt no longer states the {medium} limit of {limit} {unit}; \
                  the runtime would enforce a number the user was never told"
@@ -236,6 +263,17 @@ pub fn checked_system_prompt() -> Result<&'static str, String> {
         }
     }
 
+    for (phrase, why) in REQUIRED_PROMPT_PHRASES {
+        if !text.contains(phrase) {
+            return Err(format!("the prompt lost `{phrase}`.\n  {why}"));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn checked_system_prompt() -> Result<&'static str, String> {
+    verify_prompt_text(LUBOT_SYSTEM_PROMPT)?;
     Ok(LUBOT_SYSTEM_PROMPT)
 }
 
@@ -660,6 +698,32 @@ mod tests {
                 "the {medium} limit of {limit} {unit} is missing from the prompt"
             );
         }
+    }
+
+    /// A prompt that lost a closed-loop channel is refused.
+    ///
+    /// The required phrases are checked, not merely listed. The shipped prompt
+    /// is a `const`, so we cannot mutate it in the red-green cycle; we feed a
+    /// doctored copy to [`verify_prompt_text`] instead, and the check must
+    /// refuse it. A check that passes unconditionally is a vase.
+    #[test]
+    fn a_prompt_missing_a_closed_loop_channel_is_refused() {
+        let stripped = LUBOT_SYSTEM_PROMPT.replace("SocialFi reference", "<missing>");
+        let err = verify_prompt_text(&stripped).expect_err("a missing channel must be refused");
+        assert!(
+            err.contains("SocialFi reference") || err.contains("lost"),
+            "expected the refusal to name the lost channel, got: {err}"
+        );
+    }
+
+    /// The shipped prompt itself passes the strengthened check.
+    ///
+    /// This is the green half of the red-green pair above: the doctored copy is
+    /// refused, the real one is not. Both directions together prove the check
+    /// is not vacuous.
+    #[test]
+    fn the_shipped_prompt_passes_the_check() {
+        assert!(verify_prompt_text(LUBOT_SYSTEM_PROMPT).is_ok());
     }
 
     /// A consensus bridge cannot skip the prompt check.

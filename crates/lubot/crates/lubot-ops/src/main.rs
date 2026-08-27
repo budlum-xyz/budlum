@@ -64,6 +64,24 @@ fn main() {
                 "lubot-ops status: a skeleton - the chain connection is fail-closed (NotConnected)"
             );
         }
+        Command::Prompt => match lubot_serve::config::checked_system_prompt() {
+            // The prompt is served unaltered: the bridge serves exactly this
+            // text, so printing it here is printing what the model sees.
+            Ok(text) => {
+                println!(
+                    "lubot system prompt (verified): {}\n{}\n---",
+                    text.len(),
+                    text
+                )
+            }
+            // A start-up refusal would catch the same thing later; surfacing it
+            // here lets the operator fix the prompt (or understand a bad state)
+            // before they attempt to bring a bridge up.
+            Err(e) => {
+                eprintln!("THE PROMPT CHECK REFUSED: {e}");
+                std::process::exit(1);
+            }
+        },
         Command::Validate { path } => match path {
             None => println!("validate: <no jsonl file given>"),
             Some(p) => match std::fs::read_to_string(&p) {

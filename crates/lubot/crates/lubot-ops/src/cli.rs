@@ -20,6 +20,15 @@ pub enum Command {
     Status,
     /// Run a JSONL data file through the schema gate (lubot-tune::schema).
     Validate { path: Option<String> },
+    /// Print the verified system prompt this bridge will serve.
+    ///
+    /// The prompt is a `const`; an operator serves the same text every other
+    /// operator serves. This command runs the same startup check
+    /// (`lubot_serve::config::checked_system_prompt`) and prints the verified
+    /// text, or a refusal — so an operator can audit what they are about to
+    /// serve before they commit, rather than discovering a refusal only at
+    /// `Bridge::start`.
+    Prompt,
     /// The help text.
     Help,
 }
@@ -41,6 +50,7 @@ pub fn parse(argv: &[String]) -> Command {
         "validate" => Command::Validate {
             path: argv.get(1).cloned(),
         },
+        "prompt" => Command::Prompt,
         _ => Command::Help,
     }
 }
@@ -57,6 +67,7 @@ Usage:
   lubot-ops status                    health summary
   lubot-ops validate [JSONL_FILE]     data set schema gate (empty field, byte
                                       ceiling, line-numbered error, TR ratio)
+  lubot-ops prompt                    print the verified serving system prompt
   lubot-ops help                      this text
 
 Note: on-chain operations (registration, bond) go through the budlum node RPC;
@@ -97,5 +108,6 @@ mod tests {
                 path: Some("data.jsonl".into())
             }
         );
+        assert_eq!(parse(&["prompt".into()]), Command::Prompt);
     }
 }
