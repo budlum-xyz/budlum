@@ -23,9 +23,9 @@
 //! - Consensus verification of plaintext (chain never sees content).
 //! - Decimen source.
 
+use crate::core::hash::hash_fields_bytes;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use crate::core::hash::hash_fields_bytes;
 
 /// Sealed-blob magic.
 pub const SEALED_MAGIC: [u8; 4] = *b"BDLC";
@@ -146,14 +146,10 @@ pub fn open_payload(key: &PayloadKey, sealed: &[u8]) -> Result<Vec<u8>, SealErro
         .ok_or(SealError::BadBlob)?;
     let mut nonce_arr = [0u8; SEALED_NONCE_LEN];
     nonce_arr.copy_from_slice(nonce_bytes);
-    let ct = sealed
-        .get(SEALED_HEADER_LEN..)
-        .ok_or(SealError::BadBlob)?;
+    let ct = sealed.get(SEALED_HEADER_LEN..).ok_or(SealError::BadBlob)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).map_err(|_| SealError::Decrypt)?;
     let nonce = XNonce::from_slice(&nonce_arr);
-    cipher
-        .decrypt(nonce, ct)
-        .map_err(|_| SealError::Decrypt)
+    cipher.decrypt(nonce, ct).map_err(|_| SealError::Decrypt)
 }
 
 /// Deterministic nonce from stream context (lab/tests; production should use CSPRNG).
@@ -192,7 +188,10 @@ mod tests {
         let key = PayloadKey::derive(b"a");
         let other = PayloadKey::derive(b"b");
         let sealed = seal_payload(&key, &derived_nonce(b"c"), b"hidden").unwrap();
-        assert_eq!(open_payload(&other, &sealed).unwrap_err(), SealError::Decrypt);
+        assert_eq!(
+            open_payload(&other, &sealed).unwrap_err(),
+            SealError::Decrypt
+        );
     }
 
     #[test]

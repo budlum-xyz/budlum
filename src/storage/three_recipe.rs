@@ -18,13 +18,13 @@
 //! is a derivative: produced when someone opens the content, never held.
 
 use crate::core::hash::{calculate_hash_bytes, hash_fields_bytes};
-use crate::storage::qr_carousel::{CarouselEncoder, CarouselError, oneshot_drop_count};
-use crate::storage::qr_frame::{FrameError, fold_frame_digests, frame_digest, pack_frame};
-use crate::storage::qr_payload::{PayloadError, PayloadKind, pack_payload, payload_commitment};
+use crate::storage::qr_carousel::{oneshot_drop_count, CarouselEncoder, CarouselError};
+use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
+use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
 use crate::storage::qr_recipe::ThreeRecipePublic;
 use crate::storage::qr_video::{QrVideo, QrVideoError, VIDEO_MAGIC};
 use crate::storage::three_pipe::{EncodedPipe, EncodedQrVideo, PipeError};
-use crate::storage::transformed::{ContentClass, TransformError, TransformOpts, transform_content};
+use crate::storage::transformed::{transform_content, ContentClass, TransformError, TransformOpts};
 
 /// Errors from the recipe layer.
 #[derive(Debug)]

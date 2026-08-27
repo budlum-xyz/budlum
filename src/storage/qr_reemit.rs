@@ -151,11 +151,7 @@ impl RecipeEmitter {
             let seq = seq_start.wrapping_add(i);
             let drop = self.drop_at(seq);
             let frame = pack_frame(&self.stream_commitment, &drop);
-            digests.push(frame_digest(
-                &self.stream_commitment,
-                seq,
-                &drop.to_bytes(),
-            ));
+            digests.push(frame_digest(&self.stream_commitment, seq, &drop.to_bytes()));
             frames.push(frame);
         }
         let fold = fold_frame_digests(&digests)?;
@@ -215,8 +211,11 @@ mod tests {
         let packed = packed_plain(b"body-a");
         let commit = payload_commitment(&packed);
         let enc = CarouselEncoder::new(&packed, 32).unwrap();
-        let recipe =
-            ThreeRecipePublic::new(commit, enc.params(), enc.params().stream_commitment(&commit));
+        let recipe = ThreeRecipePublic::new(
+            commit,
+            enc.params(),
+            enc.params().stream_commitment(&commit),
+        );
         let other = packed_plain(b"body-b");
         assert_eq!(
             RecipeEmitter::open(recipe, &other).unwrap_err(),

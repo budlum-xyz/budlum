@@ -244,7 +244,9 @@ impl Drop {
         let degree = *bytes.get(18).ok_or(CarouselError::Truncated)?;
         // pad at 19
         let body_hash = u32_from_le(bytes, 20)?;
-        let body = bytes.get(DROP_HEADER_LEN..).ok_or(CarouselError::Truncated)?;
+        let body = bytes
+            .get(DROP_HEADER_LEN..)
+            .ok_or(CarouselError::Truncated)?;
         if block_len == 0 {
             return Err(CarouselError::BadBlockLen);
         }
@@ -300,9 +302,7 @@ impl CarouselEncoder {
             let mut block = vec![0u8; bl];
             if start < payload.len() {
                 let end = (start + bl).min(payload.len());
-                let slice = payload
-                    .get(start..end)
-                    .ok_or(CarouselError::Truncated)?;
+                let slice = payload.get(start..end).ok_or(CarouselError::Truncated)?;
                 block
                     .get_mut(..slice.len())
                     .ok_or(CarouselError::Truncated)?
@@ -540,7 +540,9 @@ impl CarouselDecoder {
     ///
     /// [`CarouselError::Incomplete`] when blocks are still missing.
     pub fn finish(&self) -> Result<Vec<u8>, CarouselError> {
-        let params = self.params.ok_or(CarouselError::Incomplete { missing: 0 })?;
+        let params = self
+            .params
+            .ok_or(CarouselError::Incomplete { missing: 0 })?;
         let missing = self.missing();
         if missing != 0 {
             return Err(CarouselError::Incomplete { missing });
@@ -549,7 +551,9 @@ impl CarouselDecoder {
         let total = params.total_len as usize;
         let mut out = Vec::with_capacity(total);
         for block in &self.solved {
-            let b = block.as_ref().ok_or(CarouselError::Incomplete { missing: 1 })?;
+            let b = block
+                .as_ref()
+                .ok_or(CarouselError::Incomplete { missing: 1 })?;
             out.extend_from_slice(b);
         }
         if out.len() < total {
@@ -562,10 +566,7 @@ impl CarouselDecoder {
     }
 
     fn solve_block(&mut self, idx: usize, body: Vec<u8>) -> Result<(), CarouselError> {
-        let slot = self
-            .solved
-            .get_mut(idx)
-            .ok_or(CarouselError::BadK(0))?;
+        let slot = self.solved.get_mut(idx).ok_or(CarouselError::BadK(0))?;
         if slot.is_none() {
             *slot = Some(body);
         }
@@ -578,11 +579,7 @@ impl CarouselDecoder {
             let mut progressed = false;
             let mut i = 0usize;
             while i < self.residuals.len() {
-                let deg = self
-                    .residuals
-                    .get(i)
-                    .map(|r| r.degree)
-                    .unwrap_or(0);
+                let deg = self.residuals.get(i).map(|r| r.degree).unwrap_or(0);
                 if deg == 0 {
                     self.residuals.remove(i);
                     continue;
