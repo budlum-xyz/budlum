@@ -36,6 +36,7 @@ pub mod provider;
 pub mod pruning;
 pub mod qr_carousel;
 pub mod qr_codec;
+pub mod qr_encode;
 pub mod qr_frame;
 pub mod qr_matrix;
 pub mod qr_payload;
