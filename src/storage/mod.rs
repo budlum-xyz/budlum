@@ -134,7 +134,10 @@ pub use qr_recipe::{
 pub use qr_reemit::{RecipeEmitter, ReemitError};
 pub use qr_receive::{ProgressiveReceiver, ReceiveError};
 
-pub use transformed::{CodecFlags, TransformError, TransformedPayload};
+pub use transformed::{
+    transform_content, CodecFlags, ContentClass, TransformError, TransformOpts, TransformedPayload,
+    MAX_TRANSFORM_IN,
+};
 pub use qr_codec::{
     gate_codec, split_raw_concat, CodecError, CodecKind, FrameMux, RawFrameConcat,
 };
