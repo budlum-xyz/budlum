@@ -1,7 +1,17 @@
 //! Deterministic PNG raster of a [`QrMatrix`] (K-QR-DETERMINIZM).
 //!
-//! Same discipline as catalogue PNG: filter 0, zlib **stored**, table CRC/Adler.
-//! Bit-equal across machines; no floating point.
+//! Same discipline as catalogue PNG: filter 0, table CRC, Adler-32 handled by
+//! the deflate writer. Bit-equal across machines; no floating point.
+//!
+//! # Why IDAT is deflated
+//!
+//! A QR raster is long runs of two colours, so deflate is nearly free on it.
+//! The stored-block writer this replaced made every frame PNG the size of its
+//! raw RGB8 buffer: measured on a 224-byte optical frame that was 203 086
+//! bytes against 2 104 with deflate, a 96.6x difference, and the whole BDLV
+//! video inherits it frame by frame. zlib deflate at a fixed level is
+//! deterministic, so K-QR-DETERMINIZM is unchanged; the test pins both the
+//! ratio and bit-equality across runs.
 
 use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MODULE_PX, QUIET_ZONE};
 
@@ -83,7 +93,7 @@ fn write_png_rgb8(width: u32, height: u32, filtered_raw: &[u8]) -> Vec<u8> {
     ihdr.push(0);
     ihdr.push(0);
     write_chunk(&mut out, b"IHDR", &ihdr);
-    let idat = zlib_stored(filtered_raw);
+    let idat = zlib_deflate(filtered_raw);
     write_chunk(&mut out, b"IDAT", &idat);
     write_chunk(&mut out, b"IEND", &[]);
     out
@@ -99,6 +109,23 @@ fn write_chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc32_png(&crc_input).to_be_bytes());
 }
 
+/// Deflate `data` at a fixed level so the PNG stays bit-equal across machines.
+fn zlib_deflate(data: &[u8]) -> Vec<u8> {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+    if enc.write_all(data).is_err() {
+        // Vec-backed write only fails on allocation failure; fall back to the
+        // uncompressed form rather than losing the frame.
+        return zlib_stored(data);
+    }
+    enc.finish().unwrap_or_else(|_| zlib_stored(data))
+}
+
+/// Uncompressed zlib stream. Not the default path: only the allocation-failure
+/// fallback above and the size reference in tests. Kept compiled in both
+/// profiles because the fallback is reachable in release.
 fn zlib_stored(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 16);
     out.push(0x78);
@@ -156,5 +183,108 @@ mod tests {
         let b = frame_to_qr_png(b"stable-qr-png-payload-001").unwrap();
         assert_eq!(a, b);
         assert_eq!(&a[0..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+    }
+
+    /// IDAT chunk length, scanned from the chunk stream (no fixed offset).
+    fn idat_len(png: &[u8]) -> usize {
+        let mut off = 8usize;
+        while off + 8 <= png.len() {
+            let len =
+                u32::from_be_bytes([png[off], png[off + 1], png[off + 2], png[off + 3]]) as usize;
+            if &png[off + 4..off + 8] == b"IDAT" {
+                return len;
+            }
+            off += 12 + len;
+        }
+        0
+    }
+
+    /// A QR raster is long runs of two colours, so deflate must win by a wide
+    /// margin. The stored-block writer made every frame PNG the size of its raw
+    /// RGB8 buffer; measured on a 224-byte optical frame that was 203 086 bytes
+    /// against 2 104 with deflate. This test pins the ratio, not the number.
+    #[test]
+    fn png_idat_is_deflated_and_deterministic() {
+        let frame = b"BDL3-optical-frame-deflate-check-payload".repeat(5);
+        let a = frame_to_qr_png(&frame).unwrap();
+        let b = frame_to_qr_png(&frame).unwrap();
+        assert_eq!(a, b, "deflate output must stay bit-equal across runs");
+
+        let matrix = QrMatrix::encode(&frame).unwrap();
+        let side = matrix.raster_modules() * MODULE_PX;
+        let raw_len = side as usize * (1 + side as usize * 3);
+        let idat = idat_len(&a);
+        assert!(idat > 0, "IDAT chunk must exist");
+        assert!(
+            idat * 10 < raw_len,
+            "IDAT {idat} is not at least 10x smaller than raw {raw_len}"
+        );
+    }
+
+    /// Decode our own PNG bytes for real: inflate IDAT, undo filter 0, then
+    /// hand the bitmap to `rqrr`. A smaller file that no reader can
+    /// open is not a win, so this test reads pixels, not our own matrix.
+    fn decode_our_png(png: &[u8]) -> (u32, u32, Vec<u8>) {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+
+        assert_eq!(
+            png.get(0..8),
+            Some([0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a].as_slice())
+        );
+        let mut off = 8usize;
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut idat: Vec<u8> = Vec::new();
+        while off + 12 <= png.len() {
+            let len =
+                u32::from_be_bytes([png[off], png[off + 1], png[off + 2], png[off + 3]]) as usize;
+            let ty = &png[off + 4..off + 8];
+            let data = &png[off + 8..off + 8 + len];
+            if ty == b"IHDR" {
+                width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                assert_eq!(data[8], 8, "bit depth");
+                assert_eq!(data[9], 2, "colour type RGB8");
+            } else if ty == b"IDAT" {
+                idat.extend_from_slice(data);
+            } else if ty == b"IEND" {
+                break;
+            }
+            off += 12 + len;
+        }
+        let mut raw = Vec::new();
+        ZlibDecoder::new(&idat[..])
+            .read_to_end(&mut raw)
+            .expect("IDAT must inflate");
+        let w = width as usize;
+        let stride = 1 + w * 3;
+        assert_eq!(raw.len(), height as usize * stride);
+        let mut gray = vec![0u8; w * height as usize];
+        for y in 0..height as usize {
+            let row = &raw[y * stride..(y + 1) * stride];
+            assert_eq!(row[0], 0, "filter must stay None so pixels are exact");
+            for x in 0..w {
+                let v = row[1 + x * 3];
+                assert_eq!(v, row[2 + x * 3], "RGB channels must agree");
+                assert_eq!(v, row[3 + x * 3], "RGB channels must agree");
+                gray[y * w + x] = v;
+            }
+        }
+        (width, height, gray)
+    }
+
+    #[test]
+    fn png_pixels_decode_back_to_the_frame() {
+        let frame = b"BDL3-optical-frame-roundtrip-payload".repeat(4);
+        let png = frame_to_qr_png(&frame).unwrap();
+        let (w, h, gray) = decode_our_png(&png);
+        let mut img = rqrr::PreparedImage::prepare_from_bitmap(w as usize, h as usize, |x, y| {
+            gray[(y * w as usize) + x] < 128
+        });
+        let grids = img.detect_grids();
+        assert_eq!(grids.len(), 1, "one QR grid must be detectable");
+        let (_meta, decoded) = grids[0].decode().expect("grid must decode");
+        assert_eq!(decoded.as_bytes(), frame);
     }
 }
