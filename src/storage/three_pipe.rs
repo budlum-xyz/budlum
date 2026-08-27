@@ -5,7 +5,8 @@
 
 use crate::storage::payload_crypt::{derived_nonce, seal_payload, PayloadKey, SealError};
 use crate::storage::qr_carousel::{
-    planned_drop_count, CarouselEncoder, CarouselError, DEFAULT_BLOCK_LEN,
+    oneshot_drop_count, CarouselEncoder, CarouselError, DEFAULT_BLOCK_LEN,
+    ONESHOT_REPAIR_PERMILLAGE,
 };
 use crate::storage::qr_codec::{CodecError, CodecKind, FrameMux, RawFrameConcat};
 use crate::storage::qr_video::{demux_optical_frames, QrVideo, QrVideoError, DEFAULT_FPS};
@@ -109,6 +110,14 @@ pub struct EncodedPipe {
     pub class: ContentClass,
 }
 
+impl EncodedPipe {
+    /// Source block count `k` locked by the carousel params.
+    #[must_use]
+    pub const fn pipe_recipe_k(&self) -> u16 {
+        self.recipe.carousel.k
+    }
+}
+
 /// Encode plaintext (optionally sealed) through A0–A3/A5.
 ///
 /// # Errors
@@ -132,7 +141,9 @@ pub fn encode_plain(
     let commit = payload_commitment(&packed);
     let enc = CarouselEncoder::new(&packed, block_len)?;
     let stream_commitment = enc.params().stream_commitment(&commit);
-    let n = planned_drop_count(enc.params().k, 0);
+    // One-shot handover, not a carousel broadcast: systematic pass plus a
+    // repair margin, never the 2k cycle. See `oneshot_drop_count`.
+    let n = oneshot_drop_count(enc.params().k, ONESHOT_REPAIR_PERMILLAGE);
     let mut frames = Vec::with_capacity(n as usize);
     let mut digests = Vec::with_capacity(n as usize);
     for seq in 0..n {
@@ -229,6 +240,82 @@ pub fn decode_qr_video(video_blob: &[u8]) -> Result<(PayloadKind, Vec<u8>, QrVid
 mod tests {
     use super::*;
     use crate::storage::payload_crypt::{open_payload, PayloadKey};
+    use crate::storage::qr_carousel::{oneshot_drop_count, planned_drop_count};
+
+    /// Incompressible bytes, so `k` is large enough that `k + repair` and the
+    /// `2k` carousel floor are different numbers. A repeated-text payload
+    /// would shrink to one block at A1 and the two counts would both be small.
+    fn incompressible(len: usize) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut out = Vec::with_capacity(len);
+        let mut i: u64 = 0;
+        while out.len() < len {
+            let mut h = Sha256::new();
+            h.update(b"oneshot-count-seed");
+            h.update(i.to_le_bytes());
+            out.extend_from_slice(&h.finalize());
+            i += 1;
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// A one-shot encode is not a carousel broadcast: the receiver gets the
+    /// frames in order, so the systematic pass alone already carries every
+    /// source block. `planned_drop_count(k, p)` is `max(ceil(1.02kT), 2k)`, so
+    /// below k=197 the `2k` floor binds and the carousel plan writes the
+    /// content twice; the QR-video inherits that doubling frame by frame.
+    #[test]
+    fn oneshot_encode_emits_k_plus_repair_not_two_k() {
+        // Direct count check first: same k, two different budgets.
+        assert_eq!(oneshot_drop_count(100, ONESHOT_REPAIR_PERMILLAGE), 105);
+        assert_eq!(planned_drop_count(100, 0), 200, "carousel floor is 2k");
+
+        let content = incompressible(20_000);
+        let enc = encode_plain(&content, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        let k = enc.pipe_recipe_k();
+        assert!(
+            k > 4,
+            "need enough blocks to separate k+repair from 2k, got {k}"
+        );
+
+        let expected = oneshot_drop_count(k, ONESHOT_REPAIR_PERMILLAGE);
+        let carousel = planned_drop_count(k, 0);
+        assert_eq!(
+            enc.frames.len() as u32,
+            expected,
+            "one-shot frame count must be k+repair"
+        );
+        assert!(
+            (enc.frames.len() as u32) < carousel,
+            "one-shot {} must stay below the 2k carousel plan {}",
+            enc.frames.len(),
+            carousel
+        );
+
+        let (kind, raw) = decode_frames(&enc.stream_commitment, &enc.frames).unwrap();
+        assert_eq!(kind, PayloadKind::ContentBytes);
+        assert_eq!(raw, content.as_slice());
+    }
+
+    /// Frame loss is the reason repair drops exist at all. With the systematic
+    /// pass only, a single lost frame must still be recoverable from the
+    /// repair margin; this pins that the margin is real, not decorative.
+    #[test]
+    fn oneshot_survives_sparse_frame_loss() {
+        let content = b"oneshot-loss-margin-payload".repeat(60);
+        let enc = encode_plain(&content, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        let kept: Vec<Vec<u8>> = enc
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 20 != 0)
+            .map(|(_, f)| f.clone())
+            .collect();
+        let (kind, raw) = decode_frames(&enc.stream_commitment, &kept).unwrap();
+        assert_eq!(kind, PayloadKind::ContentBytes);
+        assert_eq!(raw, content.as_slice());
+    }
 
     #[test]
     fn plain_pipe_round_trip() {
