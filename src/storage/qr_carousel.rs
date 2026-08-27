@@ -40,6 +40,13 @@ pub const MAX_K: u16 = 4096;
 /// Maximum original payload accepted by one carousel segment (not consensus).
 pub const MAX_CAROUSEL_BYTES: usize = 64 * 1024 * 1024;
 
+/// Repair margin for a one-shot encode, in permillage of `k`.
+///
+/// The systematic pass is complete on its own, so this only covers frames the
+/// transport drops on the way. Fifty permillage is five percent of `k`; the
+/// loss test in `three_pipe` drops every twentieth frame and still decodes.
+pub const ONESHOT_REPAIR_PERMILLAGE: u32 = 50;
+
 /// Fixed drop header length before the body:
 /// magic4 + ver1 + flags1 + seq4 + k2 + block_len2 + total_len4 + degree1 + pad1 + body_hash4.
 pub const DROP_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 2 + 2 + 4 + 1 + 1 + 4;
@@ -378,6 +385,29 @@ pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {
     // At least one full carousel cycle (2k) so systematic pass is covered.
     n.max(u64::from(k).saturating_mul(2))
         .min(u64::from(u32::MAX)) as u32
+}
+
+/// Drop budget for a **one-shot** encode, as opposed to a carousel broadcast.
+///
+/// [`planned_drop_count`] floors at `2k` because a carousel receiver can tune
+/// in at any point in the cycle and must still see a whole systematic pass.
+/// A one-shot encode hands the frames over in order, so the systematic pass
+/// alone already carries every source block and the `2k` floor only writes the
+/// content twice. Measured on a 20 000-byte JPEG that doubled the QR-video:
+/// 202 frames instead of 101.
+///
+/// `p_milli` is the expected frame-loss permillage; the repair margin on top
+/// of `k` is `ceil(k * p_milli / 1000)`, so `p_milli = 0` means a lossless
+/// handover and no repair at all.
+#[must_use]
+pub fn oneshot_drop_count(k: u16, p_milli: u32) -> u32 {
+    let k = u32::from(k);
+    if k == 0 {
+        return 0;
+    }
+    let p = p_milli.min(999);
+    let repair = k.saturating_mul(p).div_ceil(1000).min(u32::from(MAX_K));
+    k.saturating_add(repair)
 }
 
 /// Receiver that accumulates drops and recovers the original payload.
@@ -963,6 +993,22 @@ mod tests {
             CarouselEncoder::new(b"", 200).unwrap_err(),
             CarouselError::Empty
         );
+    }
+
+    #[test]
+    fn oneshot_count_is_k_plus_repair() {
+        assert_eq!(oneshot_drop_count(0, 0), 0);
+        assert_eq!(
+            oneshot_drop_count(1, 0),
+            1,
+            "lossless one-shot needs no repair"
+        );
+        assert_eq!(oneshot_drop_count(100, 0), 100);
+        assert_eq!(oneshot_drop_count(100, 50), 105, "5% loss margin");
+        assert_eq!(oneshot_drop_count(100, 300), 130);
+        // The carousel plan must stay at the 2k floor; the two are different jobs.
+        assert!(planned_drop_count(100, 0) >= 200);
+        assert!(oneshot_drop_count(100, 0) < planned_drop_count(100, 0));
     }
 
     #[test]

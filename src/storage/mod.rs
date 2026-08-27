@@ -116,7 +116,8 @@ pub use qr_payload::{
     THREE_PAYLOAD_VERSION,
 };
 pub use qr_carousel::{
-    planned_drop_count, CarouselDecoder, CarouselEncoder, CarouselError, CarouselParams, Drop,
+    oneshot_drop_count, planned_drop_count, CarouselDecoder, CarouselEncoder, CarouselError,
+    CarouselParams, Drop, ONESHOT_REPAIR_PERMILLAGE,
     DEFAULT_BLOCK_LEN, DROP_HEADER_LEN, DROP_MAGIC, DROP_VERSION, MAX_CAROUSEL_BYTES, MAX_K,
 };
 pub use qr_frame::{
