@@ -329,6 +329,60 @@ const PINNED_MATMUL_PROGRAM_HASHES: &[(&[u16], &str)] = &[
     ),
 ];
 
+// --- Independent reproduction of the private-transfer check program ------
+//
+// The privacy trio (PrivacyCommit 0x20, SumConservation 0x22, NullifierCheck
+// 0x21) is now a third canonical program, built in the tree by
+// `budzero/bud-vm/src/private_transfer.rs::build_private_transfer_check_program`.
+// Reproduced here from the schema alone, with this gate's own ISA encoding and
+// its own Keccak-256, landing on the pinned canonical value.
+
+const OP_PRIVACY_COMMIT: u64 = 0x20;
+const OP_NULLIFIER_CHECK: u64 = 0x21;
+const OP_SUM_CONSERVATION: u64 = 0x22;
+
+const PT_AMOUNT: i32 = 1000;
+const PT_BLINDING: i32 = 42;
+const PT_RECIPIENT: i32 = 77;
+const PT_SUM_IN: i32 = 1000;
+const PT_SUM_OUT: i32 = 1000;
+const PT_CLAIMED_NULLIFIER: i32 = 0x1234_5678;
+const PT_SECRET: i32 = 0x0bad_c0de;
+
+/// Reproduce `build_private_transfer_check_program` from the schema.
+///
+/// Stream (12 instructions): load amount/blinding, commit, load sums,
+/// conservation flag, load claimed/secret, nullifier flag, log both flags,
+/// halt. Register allocation is part of the schema, exactly as in the tree.
+fn regenerate_private_transfer_check_program() -> Vec<u64> {
+    let mut prog = Vec::with_capacity(12);
+    prog.push(encode_instruction(OP_LOAD, 1, 0, 0, PT_AMOUNT));
+    prog.push(encode_instruction(OP_LOAD, 2, 0, 0, PT_BLINDING));
+    prog.push(encode_instruction(
+        OP_PRIVACY_COMMIT,
+        4,
+        1,
+        2,
+        PT_RECIPIENT,
+    ));
+    prog.push(encode_instruction(OP_LOAD, 5, 0, 0, PT_SUM_IN));
+    prog.push(encode_instruction(OP_LOAD, 6, 0, 0, PT_SUM_OUT));
+    prog.push(encode_instruction(OP_SUM_CONSERVATION, 7, 5, 6, 0));
+    prog.push(encode_instruction(OP_LOAD, 8, 0, 0, PT_CLAIMED_NULLIFIER));
+    prog.push(encode_instruction(OP_LOAD, 9, 0, 0, PT_SECRET));
+    prog.push(encode_instruction(OP_NULLIFIER_CHECK, 10, 8, 9, 0));
+    prog.push(encode_instruction(OP_LOG, 0, 7, 0, 0));
+    prog.push(encode_instruction(OP_LOG, 0, 10, 0, 0));
+    prog.push(encode_instruction(OP_HALT, 0, 0, 0, 0));
+    prog
+}
+
+/// Pin of the canonical private-transfer check program hash, measured on
+/// 2026-08-27 from `budzero/bud-vm/src/private_transfer.rs` at `main`
+/// 2c122eb + this slice. Asserted in the tree's own tests as well.
+const PINNED_PRIVATE_TRANSFER_PROGRAM_HASH: &str =
+    "313a4da25d92952dbd14ce71c2f30fdab7cd47a397a612403f7da1562dabf154";
+
 // --- Independent Keccak-256 ---------------------------------------------
 
 const RC: [u64; 24] = [
@@ -986,5 +1040,35 @@ mod tests {
         let prog = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
         // 11 (prologue) + 45 (hidden layer 2x3) + 32 (final layer 3x2) + 2 (Log, Halt)
         assert_eq!(prog.len(), 90, "the reproduced stream length must match the estimate");
+    }
+
+    #[test]
+    fn private_transfer_reproduction_matches_the_pin() {
+        // The third canonical program: the privacy trio as one stream, pinned
+        // from the tree's builder in bud-vm. A drift on either side turns CI red.
+        let got = hex32(&keccak256(&canonical_program_bytes(
+            &regenerate_private_transfer_check_program(),
+        )));
+        assert_eq!(
+            got, PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
+            "independent reproduction of the private-transfer check program drifted from the canonical value"
+        );
+    }
+
+    #[test]
+    fn private_transfer_reproduction_is_convergent_and_detects_drift() {
+        let a = regenerate_private_transfer_check_program();
+        let b = regenerate_private_transfer_check_program();
+        assert_eq!(a, b, "a second reproduction must be the same (idempotence)");
+        assert_eq!(a.len(), 12, "the canonical stream must be 12 instructions");
+        // A drift in any operand changes the identity: flip the recipient tag.
+        let mut drifted = a.clone();
+        drifted[2] ^= 1 << 23;
+        assert_ne!(drifted, a, "the drift must change the program");
+        assert_ne!(
+            keccak256(&canonical_program_bytes(&drifted)),
+            keccak256(&canonical_program_bytes(&a)),
+            "the drifted stream must hash differently"
+        );
     }
 }
