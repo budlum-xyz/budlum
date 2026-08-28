@@ -1,8 +1,9 @@
 //! T4 / CH.4 - Three derivatives are not durable storage.
 //!
-//! WIRING: unwired - staged 3.0 guard; no production write path accepts a
-//! Three derivative yet, so there is nothing to intercept until the emit
-//! path lands (plan §CH.4).
+//! WIRING: reference-enforced - the provider reference implementation checks
+//! this gate on every put; the emit path that produces the blobs is still not
+//! reachable from RPC (plan §CH.4), so the rule runs against the bytes a
+//! reader can bring, not against our own output.
 //!
 //! Optical frames, carousel drops, and raw-concat mux blobs are **transport**.
 //! A node that writes them into the content-addressed body store is lying about
@@ -11,10 +12,17 @@
 //! This gate is a pure classifier + refuse helper so RPC/providers can fail
 //! closed without parsing the whole pipe.
 
+use crate::storage::qr_carousel::DROP_MAGIC;
+use crate::storage::qr_codec::RAW_CONCAT_MAGIC;
+use crate::storage::qr_frame::THREE_FRAME_MAGIC;
+use crate::storage::qr_payload::THREE_PAYLOAD_MAGIC;
+use crate::storage::qr_video::VIDEO_MAGIC;
+
 /// What kind of bytes someone is trying to put in a durable slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreeBlobKind {
     /// A1 packed container (durable-capable: commitment body / sealed ciphertext).
+    /// The only kind a provider stores.
     PackedPayload,
     /// A2 drop wire.
     CarouselDrop,
@@ -31,19 +39,19 @@ pub enum ThreeBlobKind {
 /// Classify a blob by magic (cheap prefix check).
 #[must_use]
 pub fn classify_three_blob(bytes: &[u8]) -> ThreeBlobKind {
-    if bytes.starts_with(b"BDL3") {
+    if bytes.starts_with(&THREE_PAYLOAD_MAGIC) {
         return ThreeBlobKind::PackedPayload;
     }
-    if bytes.starts_with(b"BDLD") {
+    if bytes.starts_with(&DROP_MAGIC) {
         return ThreeBlobKind::CarouselDrop;
     }
-    if bytes.starts_with(&[0xBD, 0x3A]) {
+    if bytes.starts_with(&THREE_FRAME_MAGIC) {
         return ThreeBlobKind::OpticalFrame;
     }
-    if bytes.starts_with(b"BDLR") {
+    if bytes.starts_with(&RAW_CONCAT_MAGIC) {
         return ThreeBlobKind::RawConcat;
     }
-    if bytes.starts_with(b"BDLV") {
+    if bytes.starts_with(&VIDEO_MAGIC) {
         return ThreeBlobKind::QrVideo;
     }
     ThreeBlobKind::Other

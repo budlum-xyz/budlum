@@ -15,6 +15,11 @@
 //! A future mux adapter implements [`FrameMux`] and is refused unless
 //! [`CodecKind::is_allowed`] is true.
 
+/// Magic of the [`CodecKind::RawFrames`] carrier: frames concatenated under a
+/// count header. Named here so the durable-storage classifier reads the same
+/// constant the muxer writes - a bumped magic cannot silently un-classify a blob.
+pub const RAW_CONCAT_MAGIC: [u8; 4] = *b"BDLR";
+
 /// Channel kinds that may carry Three optical frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
@@ -108,7 +113,7 @@ impl FrameMux for RawFrameConcat {
             return Err(CodecError::EmptyFrames);
         }
         let mut out = Vec::new();
-        out.extend_from_slice(b"BDLR"); // raw concat magic
+        out.extend_from_slice(&RAW_CONCAT_MAGIC);
         out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
         for fr in frames {
             out.extend_from_slice(&(fr.len() as u32).to_le_bytes());
@@ -124,7 +129,7 @@ impl FrameMux for RawFrameConcat {
 ///
 /// Malformed blob.
 pub fn split_raw_concat(blob: &[u8]) -> Result<Vec<Vec<u8>>, CodecError> {
-    if blob.len() < 8 || blob.get(0..4) != Some(b"BDLR".as_slice()) {
+    if blob.len() < 8 || blob.get(0..4) != Some(RAW_CONCAT_MAGIC.as_slice()) {
         return Err(CodecError::EmptyFrames);
     }
     let n = {
