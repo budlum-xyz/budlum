@@ -129,6 +129,7 @@ mod gates {
     pub mod the_image_builds_what_the_manifest_declares;
     pub mod threshold_rates;
     pub mod timing_safe;
+    pub mod tree_pin;
     pub mod transcript_mirrors;
     pub mod tree_is_english;
     pub mod udeps;
@@ -534,6 +535,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::relay::self_test,
+    },
+    Gate {
+        name: "tree-pin",
+        replaces: None,
+        run: gates::tree_pin::run,
+        run_log: None,
+        run_args: Some(gates::tree_pin::run_with_args),
+        self_test: gates::tree_pin::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",

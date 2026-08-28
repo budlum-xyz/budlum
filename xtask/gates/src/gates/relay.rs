@@ -33,7 +33,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::regeneration::{hex32, hex_decode, keccak256};
 
 /// Schema version of the relay status report.
-pub const RELAY_STATUS_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 added the gate-binary hash to the signed payload (kapı binary'sine
+/// müdahale vektörü): the status now covers which exact binary produced it,
+/// so an external monitor can compare binaries across reports.
+pub const RELAY_STATUS_SCHEMA_VERSION: u32 = 2;
 
 /// Output directory for the signed status report, relative to the repo root.
 /// The directory name is `target/relay`.
@@ -167,6 +171,7 @@ fn status_payload(
     tokens: &RegenTokens,
     proof_digest: &[u8; 32],
     live: Option<(&LiveProofSideReport, bool)>,
+    gate_binary_hash: &[u8; 32],
 ) -> Vec<u8> {
     let mut p: Vec<u8> = Vec::new();
     p.extend_from_slice(&RELAY_STATUS_SCHEMA_VERSION.to_le_bytes());
@@ -192,7 +197,20 @@ fn status_payload(
             p.push(u8::from(matches));
         }
     }
+    p.extend_from_slice(gate_binary_hash);
     p
+}
+
+/// Keccak-256 of the gate binary currently executing. This is the "kapı
+/// binary'sine müdahale" tripwire: the signed report names its producer, so
+/// an externally mounted monitor can compare the binary across reports and
+/// detect a swapped or patched gate binary.
+fn gate_binary_hash() -> Result<[u8; 32], String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("relay: cannot locate the gate binary: {e}"))?;
+    let bytes = std::fs::read(&exe)
+        .map_err(|e| format!("relay: cannot read the gate binary {}: {e}", exe.display()))?;
+    Ok(keccak256(&bytes))
 }
 
 /// Write the relay status JSON (with signature) to `root/target/relay/`.
@@ -204,15 +222,22 @@ fn write_status_report(
     generated_at: u64,
     tokens: &RegenTokens,
     proof_digest: &[u8; 32],
-    live: Option<&LiveProofSideReport>,
-    live_matches: bool,
+    live: Option<(&LiveProofSideReport, bool)>,
+    gate_binary_hash: &[u8; 32],
 ) -> Result<[u8; 32], String> {
-    let payload = status_payload(status_ok, generated_at, tokens, proof_digest, live.map(|l| (l, live_matches)));
+    let payload = status_payload(
+        status_ok,
+        generated_at,
+        tokens,
+        proof_digest,
+        live,
+        gate_binary_hash,
+    );
     let sig = keccak256(&payload);
 
     let live_json = match live {
         None => String::from("\"live_proof_side_report\": null"),
-        Some(l) => format!(
+        Some((l, live_matches)) => format!(
             "\"live_proof_side_report\": {{\"status\": \"{}\", \"verified_at_unix\": {}, \
              \"report_sig_valid\": {}, \"canonical_set_matches\": {}}}",
             if l.status_ok { "ok" } else { "alarm" },
@@ -223,12 +248,14 @@ fn write_status_report(
     };
     let json = format!(
         "{{\n  \"schema_version\": {},\n  \"kind\": \"relay_status\",\n  \"status\": \"{}\",\n \
-         \"generated_at_unix\": {},\n  \"tokens\": {{\"program_hash\": \"{}\", \"matmul_hash\": \
-         \"{}\", \"syscall_hash\": \"{}\", \"canonical_set\": \"{}\"}},\n  \
-         \"proof_side_canonical_set_digest\": \"{}\",\n  {},\n  \"report_sig\": \"{}\"\n}}\n",
+         \"generated_at_unix\": {},\n  \"gate_binary_hash\": \"{}\",\n  \"tokens\": {{\"program_hash\": \
+         \"{}\", \"matmul_hash\": \"{}\", \"syscall_hash\": \"{}\", \"canonical_set\": \
+         \"{}\"}},\n  \"proof_side_canonical_set_digest\": \"{}\",\n  {},\n  \"report_sig\": \
+         \"{}\"\n}}\n",
         RELAY_STATUS_SCHEMA_VERSION,
         status_word(status_ok),
         generated_at,
+        hex32(gate_binary_hash),
         tokens.program_hash,
         tokens.matmul_hash,
         tokens.syscall_hash,
@@ -408,7 +435,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         Some(Err(e)) => return Err(format!("relay: live proof-side report is invalid: {e}")),
     };
 
-    // 5. Signed status report.
+    // 5. Signed status report (covers the gate binary that produced it).
+    let binary_hash = gate_binary_hash()?;
     let generated_at = now_unix();
     let sig = write_status_report(
         root,
@@ -416,8 +444,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         generated_at,
         &tokens,
         &proof_digest,
-        live.as_ref(),
-        live_matches,
+        live.as_ref().map(|l| (l, live_matches)),
+        &binary_hash,
     )?;
 
     let status_word = if live_status_ok { "ok" } else { "alarm" };
@@ -524,14 +552,14 @@ fn st_status_payload(digest: &[u8; 32]) -> Result<(), String> {
         syscall_hash: String::from("0123456789abcdef"),
         canonical_set: String::from("7068f0e7209ca558"),
     };
-    let p1 = status_payload(true, 1_700_000_000, &t, digest, None);
-    let p2 = status_payload(true, 1_700_000_000, &t, digest, None);
+    let p1 = status_payload(true, 1_700_000_000, &t, digest, None, &[7u8; 32]);
+    let p2 = status_payload(true, 1_700_000_000, &t, digest, None, &[7u8; 32]);
     if p1 != p2 {
         return Err(String::from("relay self-test: status payload is not deterministic"));
     }
     let mut tampered = t.clone();
     tampered.canonical_set = String::from("7068f0e7209ca559");
-    if status_payload(true, 1_700_000_000, &tampered, digest, None) == p1 {
+    if status_payload(true, 1_700_000_000, &tampered, digest, None, &[7u8; 32]) == p1 {
         return Err(String::from(
             "relay self-test: token tamper did not change the signed payload",
         ));

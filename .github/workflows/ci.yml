@@ -1496,6 +1496,13 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- relay --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- relay
+      # Tree-pin: the whole budzero source tree must match its integrity
+      # pins (any added/deleted/modified .rs file is a red relay). Pins are
+      # committed with the changes they describe; re-pin with `--pin`.
+      - name: tree-pin (budzero source-tree integrity) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;
