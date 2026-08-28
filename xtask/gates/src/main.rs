@@ -107,6 +107,7 @@ mod gates {
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
     pub mod regeneration;
+    pub mod relay;
     pub mod rejection_tests;
     pub mod repair_fires;
     pub mod required_tests;
@@ -525,6 +526,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::regeneration::self_test,
+    },
+    Gate {
+        name: "relay",
+        replaces: None,
+        run: gates::relay::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::relay::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",
