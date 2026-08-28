@@ -4,6 +4,11 @@
 //! QR-video pipe. This module is the single mouth: classify → optional
 //! shrink-only zlib → pin sha256 → [`TransformedPayload`].
 //!
+//! WIRING: unwired - `verify_hash` is the one refusal here no production path
+//! calls: the emit path pins the digest in `from_bytes` and does not re-read
+//! the body afterwards, so the check only protects the class tests. It moves
+//! to the A1 handoff when the 2.0 unified transform lands (plan §CK.6.5).
+//!
 //! Real 2.0 codecs elsewhere still exist; new call sites must enter here so
 //! 3.0 never greps scattered helpers. Entropy-coded types **do not** try zlib
 //! (K-QR-SIKISTIR / şartname §16).
