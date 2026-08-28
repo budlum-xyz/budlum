@@ -1256,13 +1256,20 @@ mod tests {
             }
             let Some(pr) = piv else { continue };
             rows.swap(rank, pr);
-            for (r, row) in rows.iter().enumerate() {
-                if r != rank && row.get(c).copied().unwrap_or(false) {
-                    for j in 0..k {
-                        let v = rows[rank].get(j).copied().unwrap_or(false);
-                        if let Some(cell) = rows[r].get_mut(j) {
-                            *cell ^= v;
-                        }
+            // The pivot row is read while every other row is written, so the
+            // two halves are split apart instead of borrowed through `rows`.
+            let (head, tail) = rows.split_at_mut(rank + 1);
+            let (before, pivot_row) = head.split_at_mut(rank);
+            // `split_at_mut(rank + 1)` left at least one element in `head`, so
+            // the pivot row is always there; `continue` keeps the bound check
+            // explicit instead of indexing.
+            let Some(pivot) = pivot_row.first_mut() else {
+                continue;
+            };
+            for row in before.iter_mut().chain(tail.iter_mut()) {
+                if row.get(c).copied().unwrap_or(false) {
+                    for (cell, p) in row.iter_mut().zip(pivot.iter_mut()) {
+                        *cell ^= *p;
                     }
                 }
             }
