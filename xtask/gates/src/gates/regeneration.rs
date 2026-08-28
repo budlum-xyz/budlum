@@ -133,6 +133,7 @@ const OP_LOAD: u64 = 0x14;
 const OP_STORE: u64 = 0x15;
 const OP_POSEIDON: u64 = 0x19;
 const OP_LOG: u64 = 0x1A;
+const OP_SYSCALL: u64 = 0x1D;
 
 /// Register allocation of the canonical guest (independent copy).
 const GR_ZERO: u64 = 1; // constant 0
@@ -400,6 +401,35 @@ fn regenerate_private_transfer_check_program() -> Vec<u64> {
 /// 2c122eb + this slice. Asserted in the tree's own tests as well.
 const PINNED_PRIVATE_TRANSFER_PROGRAM_HASH: &str =
     "313a4da25d92952dbd14ce71c2f30fdab7cd47a397a612403f7da1562dabf154";
+
+/// Reproduce `build_syscall_context_check_program` from the schema.
+///
+/// Stream (7 instructions): read the three context values through the
+/// `Syscall` context opcodes (imm 1 = sender, 2 = block height, 3 = nonce)
+/// into r1..r3, log all three, halt. Register allocation is part of the
+/// schema, exactly as in the tree (`budzero/bud-vm/src/syscall_context.rs`).
+///
+/// This is the canonical program that attests the syscall context bindings
+/// of the AIR (`COL_IS_SYSCALL` and the per-imm constraint groups): a proof
+/// whose trace carries these rows proves the same sender, block height and
+/// nonce that the prover was given.
+fn regenerate_syscall_context_check_program() -> Vec<u64> {
+    vec![
+        encode_instruction(OP_SYSCALL, 1, 0, 0, 1), // r1 ← sender
+        encode_instruction(OP_SYSCALL, 2, 0, 0, 2), // r2 ← block height
+        encode_instruction(OP_SYSCALL, 3, 0, 0, 3), // r3 ← nonce
+        encode_instruction(OP_LOG, 0, 1, 0, 0),     // log r1
+        encode_instruction(OP_LOG, 0, 2, 0, 0),     // log r2
+        encode_instruction(OP_LOG, 0, 3, 0, 0),     // log r3
+        encode_instruction(OP_HALT, 0, 0, 0, 0),
+    ]
+}
+
+/// Pin of the canonical syscall-context check program hash, measured on
+/// 2026-08-28 from `budzero/bud-vm/src/syscall_context.rs`. Asserted in the
+/// tree's own tests as well.
+const PINNED_SYSCALL_CONTEXT_PROGRAM_HASH: &str =
+    "30cf71d4f910cd7f8adf8178e0f2c44ec9c4209252212ff4a0a74f3c6a15fd69";
 
 // --- Independent Keccak-256 ---------------------------------------------
 
@@ -725,11 +755,12 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let checked = producers.len();
 
-    // The other two canonical programs are reproduced from their
+    // The other three canonical programs are reproduced from their
     // specifications and pinned here, exactly like the storage challenge
-    // above. These are the values `src/ai/execution/guest.rs` and
-    // `budzero/bud-vm/src/private_transfer.rs` build; if either builder
-    // drifts, the pin comparison turns the release red.
+    // above. These are the values `src/ai/execution/guest.rs`,
+    // `budzero/bud-vm/src/private_transfer.rs` and
+    // `budzero/bud-vm/src/syscall_context.rs` build; if any builder drifts,
+    // the pin comparison turns the release red.
     for (name, dims, pin) in [
         (
             "matmul guest [2,3,2]",
@@ -741,11 +772,21 @@ pub fn run(root: &Path) -> Result<String, String> {
             &[][..],
             PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
         ),
+        (
+            "syscall-context check",
+            &[][..],
+            PINNED_SYSCALL_CONTEXT_PROGRAM_HASH,
+        ),
     ] {
         let got = if dims.is_empty() {
-            hex32(&keccak256(&canonical_program_bytes(
-                &regenerate_private_transfer_check_program(),
-            )))
+            // Two canonical programs share the "no dims" shape; the pin
+            // itself disambiguates which producer must match.
+            let words = if pin == PINNED_PRIVATE_TRANSFER_PROGRAM_HASH {
+                regenerate_private_transfer_check_program()
+            } else {
+                regenerate_syscall_context_check_program()
+            };
+            hex32(&keccak256(&canonical_program_bytes(&words)))
         } else {
             hex32(&matmul_guest_program_hash(dims)?)
         };
@@ -784,14 +825,21 @@ pub fn run(root: &Path) -> Result<String, String> {
     // stays the first token (the storage-challenge value); `matmul-hash`
     // is grepped the same way and compared across compilers too.
     let matmul_token = hex32(&matmul_guest_program_hash(&[2, 3, 2])?)[..16].to_string();
+    let syscall_token =
+        hex32(&keccak256(&canonical_program_bytes(&regenerate_syscall_context_check_program())))[
+            ..16
+        ]
+        .to_string();
 
     Ok(format!(
         "regeneration OK: program-hash {} reproduced, \
          convergence (idempotence + repair) was verified, and all {checked} \
          production points found by discovery are canonical (verified with an \
-         independent Keccak-256 and an independent ISA encoding). matmul-hash {}",
+         independent Keccak-256 and an independent ISA encoding). matmul-hash {} \
+         syscall-hash {}",
         &hex32(&regenerated)[..16],
         matmul_token,
+        syscall_token,
     ))
 }
 
@@ -993,16 +1041,23 @@ mod tests {
             "the DDC workflow no longer greps for `matmul-hash <hex>`; if the \
              extraction changed, update this test with it rather than deleting it"
         );
+        assert!(
+            workflow.contains(r#"grep -oE "syscall-hash [0-9a-f]+""#),
+            "the DDC workflow no longer greps for `syscall-hash <hex>`; if the \
+             extraction changed, update this test with it rather than deleting it"
+        );
 
         // The message the gate actually emits on success, rebuilt here.
         let message = format!(
-            "regeneration OK: program-hash {} reproduced, and the rest is prose. matmul-hash {}",
+            "regeneration OK: program-hash {} reproduced, and the rest is prose. matmul-hash {} \
+             syscall-hash {}",
             &hex32(&[0xabu8; 32])[..16],
             &hex32(&[0xcdu8; 32])[..16],
+            &hex32(&[0xefu8; 32])[..16],
         );
 
-        // The workflow's own extraction, applied to both tokens.
-        for needle in ["program-hash", "matmul-hash"] {
+        // The workflow's own extraction, applied to all three tokens.
+        for needle in ["program-hash", "matmul-hash", "syscall-hash"] {
             let token = message
                 .split_whitespace()
                 .skip_while(|w| *w != needle)
@@ -1127,6 +1182,38 @@ mod tests {
         assert_eq!(
             got, PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
             "independent reproduction of the private-transfer check program drifted from the canonical value"
+        );
+    }
+
+    #[test]
+    fn syscall_context_reproduction_matches_the_pin() {
+        // The fourth canonical program: the syscall context bindings
+        // (sender, block height, nonce) read through the `Syscall` opcode and
+        // logged, pinned from the tree's builder in bud-vm. A drift on either
+        // side turns CI red.
+        let got = hex32(&keccak256(&canonical_program_bytes(
+            &regenerate_syscall_context_check_program(),
+        )));
+        assert_eq!(
+            got, PINNED_SYSCALL_CONTEXT_PROGRAM_HASH,
+            "independent reproduction of the syscall-context check program drifted from the canonical value"
+        );
+    }
+
+    #[test]
+    fn syscall_context_reproduction_is_convergent_and_detects_drift() {
+        let a = regenerate_syscall_context_check_program();
+        let b = regenerate_syscall_context_check_program();
+        assert_eq!(a, b, "a second reproduction must be the same (idempotence)");
+        assert_eq!(a.len(), 7, "the canonical stream must be 7 instructions");
+        // A drift in any operand changes the identity: flip a syscall imm.
+        let mut drifted = a.clone();
+        drifted[0] ^= 1 << 23;
+        assert_ne!(drifted, a, "the drift must change the program");
+        assert_ne!(
+            keccak256(&canonical_program_bytes(&drifted)),
+            keccak256(&canonical_program_bytes(&a)),
+            "the drifted stream must hash differently"
         );
     }
 
