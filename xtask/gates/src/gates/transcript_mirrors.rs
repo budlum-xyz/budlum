@@ -107,9 +107,9 @@ fn absorptions(text: &str) -> Vec<Absorb> {
 /// When the two files' absorption sequences differ in length or order.
 pub fn run(root: &Path) -> Result<String, String> {
     let p = std::fs::read_to_string(root.join(PROVER))
-        .map_err(|e| format!("{PROVER} okunamadi: {e}"))?;
+        .map_err(|e| format!("could not read {PROVER}: {e}"))?;
     let v = std::fs::read_to_string(root.join(VERIFIER))
-        .map_err(|e| format!("{VERIFIER} okunamadi: {e}"))?;
+        .map_err(|e| format!("could not read {VERIFIER}: {e}"))?;
 
     let pa = absorptions(&p);
     let va = absorptions(&v);

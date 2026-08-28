@@ -128,7 +128,7 @@ pub fn self_test() -> Result<String, String> {
     for seed in SEEDS {
         let path = tmp.join(seed.name);
         let bytes =
-            std::fs::read(&path).map_err(|e| format!("{} okunamadi: {e}", path.display()))?;
+            std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
         if bytes != seed.bytes {
             return Err(format!("{}: the read-back is not equal", seed.name));
         }

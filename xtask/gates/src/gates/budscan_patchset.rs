@@ -106,13 +106,13 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let list_path = browser.join("patches.txt");
     let list_text = std::fs::read_to_string(&list_path)
-        .map_err(|e| format!("{} okunamadi: {e}", list_path.display()))?;
+        .map_err(|e| format!("could not read {}: {e}", list_path.display()))?;
     let listed = parse_list(&list_text)?;
 
     let patch_dir = browser.join("patches");
     let mut on_disk: BTreeSet<String> = BTreeSet::new();
     let entries = std::fs::read_dir(&patch_dir)
-        .map_err(|e| format!("{} okunamadi: {e}", patch_dir.display()))?;
+        .map_err(|e| format!("could not read {}: {e}", patch_dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("an entry under patches/ could not be read: {e}"))?;
         let name = entry.file_name().to_string_lossy().into_owned();

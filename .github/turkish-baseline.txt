@@ -1,8 +1,10 @@
 # Files that still carry Turkish, with the number of lines each carries.
 #
-# The tree is written in English. These files are the unfinished part of the
-# translation, recorded so the `tree-is-english` gate can ratchet instead of
-# failing on every commit.
+# The tree is written in English. The files below are not untranslated prose:
+# each one carries Turkish because Turkish is what the line is about, a
+# roundtrip test feeding non-ASCII through the JSONL encoder, the stopword list
+# the embedder strips, and the character set the language detector measures.
+# They are recorded so the gate ratchets instead of failing on every commit.
 #
 # The numbers only go DOWN. Translating lines lowers a count; a file that
 # reaches zero has its line deleted. The gate fails if a count goes up, if a

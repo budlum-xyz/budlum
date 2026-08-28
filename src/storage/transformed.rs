@@ -588,9 +588,9 @@ mod tests {
                 v
             },
         ];
-        for girdi in entropy_inputs {
+        for input in entropy_inputs {
             let t = transform_content(
-                &girdi,
+                &input,
                 TransformOpts {
                     apply_zlib: true,
                     ..Default::default()

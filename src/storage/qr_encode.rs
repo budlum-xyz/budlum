@@ -67,31 +67,44 @@ const GF_TABLES: ([u8; 256], [u8; 256]) = gf_tables();
 const GF_EXP: [u8; 256] = GF_TABLES.0;
 const GF_LOG: [u8; 256] = GF_TABLES.1;
 
-const fn gf_mul(a: u8, b: u8) -> u8 {
+fn gf_mul(a: u8, b: u8) -> u8 {
     if a == 0 || b == 0 {
         0
     } else {
-        GF_EXP[(GF_LOG[a as usize] as usize + GF_LOG[b as usize] as usize) % 255]
+        // A `u8` index cannot leave a 256-entry table and the sum is reduced
+        // modulo the group order, so the lookups below are total. They are
+        // written checked anyway: `const fn` was the only reason the indexed
+        // form existed, and a table that ever shrinks answers with the
+        // annihilator 0, which every golden QR vector then refuses.
+        let la = usize::from(GF_LOG.get(usize::from(a)).copied().unwrap_or(0));
+        let lb = usize::from(GF_LOG.get(usize::from(b)).copied().unwrap_or(0));
+        GF_EXP.get((la + lb) % 255).copied().unwrap_or(0)
     }
 }
 
 /// Generator polynomial for `ec_len` error-correction codewords, highest
 /// degree first and monic; for `ec_len = 7` it is
 /// `[1, 127, 122, 154, 164, 11, 68, 117]`.
-const fn rs_generator(ec_len: usize) -> [u8; MAX_EC + 1] {
+fn rs_generator(ec_len: usize) -> [u8; MAX_EC + 1] {
+    assert!(
+        ec_len <= MAX_EC,
+        "rs_generator: ec_len {ec_len} exceeds MAX_EC {MAX_EC}"
+    );
     let mut g = [0u8; MAX_EC + 1];
     g[0] = 1;
     let mut deg = 0usize;
-    let mut i = 0usize;
-    while i < ec_len {
-        let root = GF_EXP[i];
+    for &root in GF_EXP.iter().take(ec_len) {
         let mut k = deg + 1;
         while k > 0 {
-            g[k] ^= gf_mul(g[k - 1], root);
+            // `g[k] ^= gf_mul(g[k - 1], root)`: the previous coefficient is
+            // read before the write, exactly as the indexed form did.
+            let prev = g.get(k - 1).copied().unwrap_or(0);
+            if let Some(cur) = g.get_mut(k) {
+                *cur ^= gf_mul(prev, root);
+            }
             k -= 1;
         }
         deg += 1;
-        i += 1;
     }
     g
 }
@@ -102,11 +115,20 @@ fn rs_encode(data: &[u8], ec_len: usize) -> Vec<u8> {
     let mut res = data.to_vec();
     res.resize(data.len() + ec_len, 0);
     for i in 0..data.len() {
-        let lead = res[i];
+        let Some(&lead) = res.get(i) else {
+            break;
+        };
         if lead != 0 {
-            let log_lead = GF_LOG[lead as usize] as usize;
+            let log_lead = usize::from(GF_LOG.get(usize::from(lead)).copied().unwrap_or(0));
             for k in 0..ec_len {
-                res[i + 1 + k] ^= GF_EXP[(GF_LOG[gen[k + 1] as usize] as usize + log_lead) % 255];
+                let mut add = 0u8;
+                if let Some(&gene) = gen.get(k + 1) {
+                    let lg = usize::from(GF_LOG.get(usize::from(gene)).copied().unwrap_or(0));
+                    add = GF_EXP.get((lg + log_lead) % 255).copied().unwrap_or(0);
+                }
+                if let Some(slot) = res.get_mut(i + 1 + k) {
+                    *slot ^= add;
+                }
             }
         }
     }
@@ -210,9 +232,21 @@ const fn side_len(version: u8) -> usize {
     17 + 4 * version as usize
 }
 
+/// Table row of a version, `None` when the version is outside 1..=40. Every
+/// caller reads its row through this so a bad version is a refusal, never a
+/// slice index aborting the node.
+fn cap_l(version: u8) -> Option<(u16, u16, u16, u16, u16, u16)> {
+    let idx = usize::from(version).checked_sub(1)?;
+    CAP_L.get(idx).copied()
+}
+
 fn data_codewords(version: u8) -> usize {
-    let (_, _, sd, sn, ld, ln) = CAP_L[(version - 1) as usize];
-    (sd * sn + ld * ln) as usize
+    // A version with no table row has no capacity; zero makes `version_for`
+    // refuse the payload instead of reading out of range.
+    let Some((_, _, sd, sn, ld, ln)) = cap_l(version) else {
+        return 0;
+    };
+    usize::from(sd) * usize::from(sn) + usize::from(ld) * usize::from(ln)
 }
 
 /// Byte-mode payload capacity of a version: data codewords minus the 4-bit
@@ -248,7 +282,11 @@ impl BitWriter {
                 self.bytes.resize(idx + 1, 0);
             }
             if (value >> i) & 1 != 0 {
-                self.bytes[idx] |= 0x80 >> (self.len % 8);
+                // `idx` was just reserved above; the checked access keeps the
+                // arithmetic in one place instead of trusting it.
+                if let Some(slot) = self.bytes.get_mut(idx) {
+                    *slot |= 0x80 >> (self.len % 8);
+                }
             }
             self.len += 1;
         }
@@ -282,7 +320,9 @@ fn build_codewords(data: &[u8]) -> Result<(Vec<u8>, u8), QrError> {
         alt = !alt;
     }
 
-    let (_, ec, sd, sn, ld, ln) = CAP_L[(version - 1) as usize];
+    let Some((_, ec, sd, sn, ld, ln)) = cap_l(version) else {
+        return Err(QrError::TooLong(data.len()));
+    };
     let (sd, sn, ld, ln, ec) = (
         sd as usize,
         sn as usize,
@@ -293,27 +333,35 @@ fn build_codewords(data: &[u8]) -> Result<(Vec<u8>, u8), QrError> {
     let mut blocks: Vec<&[u8]> = Vec::with_capacity(sn + ln);
     let mut at = 0usize;
     for _ in 0..sn {
-        blocks.push(&bytes[at..at + sd]);
+        let Some(part) = bytes.get(at..at + sd) else {
+            break;
+        };
+        blocks.push(part);
         at += sd;
     }
     for _ in 0..ln {
-        blocks.push(&bytes[at..at + ld]);
+        let Some(part) = bytes.get(at..at + ld) else {
+            break;
+        };
+        blocks.push(part);
         at += ld;
     }
     debug_assert_eq!(at, dcw);
     let ecs: Vec<Vec<u8>> = blocks.iter().map(|b| rs_encode(b, ec)).collect();
 
-    let mut stream = Vec::with_capacity(CAP_L[(version - 1) as usize].0 as usize);
+    let mut stream = Vec::with_capacity(cap_l(version).map_or(0, |row| usize::from(row.0)));
     for i in 0..core::cmp::max(sd, ld) {
         for b in &blocks {
-            if i < b.len() {
-                stream.push(b[i]);
+            if let Some(&v) = b.get(i) {
+                stream.push(v);
             }
         }
     }
     for i in 0..ec {
         for e in &ecs {
-            stream.push(e[i]);
+            if let Some(&v) = e.get(i) {
+                stream.push(v);
+            }
         }
     }
     Ok((stream, version))
@@ -385,7 +433,12 @@ impl EncodedMatrix {
     }
 
     pub fn is_dark(&self, row: usize, col: usize) -> bool {
-        self.dark[row][col]
+        // The matrix is square and `side_len` names its edge, so a caller that
+        // steps past the edge reads a light cell instead of aborting the node.
+        self.dark
+            .get(row)
+            .and_then(|r| r.get(col))
+            .is_some_and(|v| *v)
     }
 }
 
@@ -426,7 +479,10 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
 
     // alignment patterns, skipping the three that collide with finders
     let last = side - 7;
-    let centers: Vec<usize> = ALIGN[(version - 1) as usize]
+    let centers: Vec<usize> = ALIGN
+        .get(usize::from(version).saturating_sub(1))
+        .copied()
+        .unwrap_or([0u8; 7])
         .iter()
         .copied()
         .filter(|&p| p != 0)
@@ -451,9 +507,13 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     set(&mut dark, &mut reserved, side - 8, 8, true);
     for i in 0..15 {
         let (r, c) = format_cell_main(i);
-        reserved[r][c] = true;
+        if let Some(slot) = reserved.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = true;
+        }
         let (r, c) = format_cell_side(i, side);
-        reserved[r][c] = true;
+        if let Some(slot) = reserved.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = true;
+        }
     }
 
     // version information, versions 7 and up
@@ -483,11 +543,17 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
             let row = if upward { side - 1 - i } else { i };
             for dx in 0..2 {
                 let c = (col - dx as isize) as usize;
-                if reserved[row][c] {
+                if reserved.get(row).and_then(|r| r.get(c)).is_some_and(|v| *v) {
                     continue;
                 }
                 if bit_at < total_bits {
-                    dark[row][c] = stream[bit_at / 8] >> (7 - bit_at % 8) & 1 != 0;
+                    let bit = stream
+                        .get(bit_at / 8)
+                        .copied()
+                        .is_some_and(|byte| (byte >> (7 - bit_at % 8)) & 1 != 0);
+                    if let Some(slot) = dark.get_mut(row).and_then(|r| r.get_mut(c)) {
+                        *slot = bit;
+                    }
                     bit_at += 1;
                 }
             }
@@ -500,8 +566,14 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     // mask 0 on every data module
     for r in 0..side {
         for c in 0..side {
-            if !reserved[r][c] && (r + c) % 2 == 0 {
-                dark[r][c] = !dark[r][c];
+            let reserved_cell = reserved
+                .get(r)
+                .and_then(|row| row.get(c))
+                .is_some_and(|v| *v);
+            if !reserved_cell && (r + c) % 2 == 0 {
+                if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
+                    *slot = !*slot;
+                }
             }
         }
     }
@@ -511,11 +583,17 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     for i in 0..15 {
         let bit = (word >> i) & 1 != 0;
         let (r, c) = format_cell_main(i);
-        dark[r][c] = bit;
+        if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = bit;
+        }
         let (r, c) = format_cell_side(i, side);
-        dark[r][c] = bit;
+        if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = bit;
+        }
     }
-    dark[side - 8][8] = true;
+    if let Some(slot) = dark.get_mut(side - 8).and_then(|row| row.get_mut(8)) {
+        *slot = true;
+    }
 
     Ok(EncodedMatrix { version, dark })
 }

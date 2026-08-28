@@ -163,7 +163,7 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perm = std::fs::metadata(&hook)
-            .map_err(|e| format!("izin okunamadi: {e}"))?
+            .map_err(|e| format!("could not read the hook permissions: {e}"))?
             .permissions();
         perm.set_mode(0o755);
         std::fs::set_permissions(&hook, perm).map_err(|e| format!("izin yazilamadi: {e}"))?;

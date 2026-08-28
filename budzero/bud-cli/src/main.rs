@@ -300,14 +300,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         event_digest,
         // The storage write digest comes from the VM, not from a hardcoded zero.
         //
-        // Burada `[0u8; 32]` yaziliydi. Depolamaya dokunmayan programlarda
-        // that was the right answer and nothing broke; a program containing a single
-        // `storage::x = 5;` produced a proof and then failed **in its own
-        // verifier**, because the AIR binds this field to the real SWrite
-        // zincirine bagliyor (Strix HIGH CWE-345) ve kamu girdisi sifir
-        // kaliyordu. Kusur gorunmez kalmisti: sema `storage` alanlarini
-        // into the environment at all, a program using storage was already
-        // derlenemiyordu.
+        // This used to read `[0u8; 32]`. For programs that never touch storage
+        // that was the right answer and nothing broke; a program containing a
+        // single `storage::x = 5;` produced a proof and then failed **in its own
+        // verifier**, because the AIR binds this field to the real SWrite chain
+        // (Strix HIGH CWE-345) while the public input stayed zero. The flaw
+        // stayed invisible: the schema did not feed the `storage` fields into the
+        // environment at all, so a program that used storage could not compile.
         state_writes_digest: receipt.state_writes_digest,
     };
 

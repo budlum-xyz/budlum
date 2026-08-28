@@ -63,7 +63,7 @@
 //!
 //! This is the failure mode of every list-driven gate: the report says
 //! "clean", and what it means is "clean, as far as the list goes". So the
-//! vocabulary is now 114 entries, and the entries were chosen by measuring the
+//! vocabulary is now 157 entries, and the entries were chosen by measuring the
 //! tree rather than by guessing - each one was counted, and each surviving
 //! collision with English is handled by [`ENGLISH_COLLISIONS`] rather than by
 //! dropping the Turkish word and reopening the hole.
@@ -208,7 +208,7 @@ const TURKISH_WORDS: &[&str] = &[
     "gereken",
     "gerekir",
     "gerekli",
-    "girdiler",
+    "girdi",
     "gizli",
     "gorunur",
     "guvenl",
@@ -245,6 +245,7 @@ const TURKISH_WORDS: &[&str] = &[
     "nasil",
     "nobetci",
     "noktasi",
+    "okunamad",
     "okunamazsa",
     "olarak",
     "olcul",

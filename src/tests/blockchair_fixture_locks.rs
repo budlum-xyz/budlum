@@ -162,8 +162,8 @@ const ETH_HEADERS: &[(u64, &str, &str, &str, &str)] = &[
 ];
 
 fn hex32(s: &str) -> [u8; 32] {
-    let b = hex::decode(s.strip_prefix("0x").unwrap_or(s)).expect("hex32 girdi");
-    assert_eq!(b.len(), 32, "32 bayt beklenir");
+    let b = hex::decode(s.strip_prefix("0x").unwrap_or(s)).expect("hex32 input");
+    assert_eq!(b.len(), 32, "32 bytes expected");
     let mut a = [0u8; 32];
     a.copy_from_slice(&b);
     a
