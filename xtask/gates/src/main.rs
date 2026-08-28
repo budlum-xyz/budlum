@@ -74,6 +74,7 @@ mod gates {
     pub mod forgery_tests;
     pub mod fork_choice_gate;
     pub mod fuzz_targets_wired;
+    pub mod gas_calibration;
     pub mod gates_are_wired;
     pub mod gating_flags;
     pub mod geiger;
@@ -871,6 +872,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::fuzz_targets_wired::self_test,
+    },
+    Gate {
+        name: "gas-calibration",
+        replaces: None,
+        run: gates::gas_calibration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::gas_calibration::self_test,
     },
     Gate {
         name: "gates-are-wired",
