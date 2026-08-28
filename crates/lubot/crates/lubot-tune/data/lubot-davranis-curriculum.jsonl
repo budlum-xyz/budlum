@@ -1,0 +1,10 @@
+{"user": "Bridge işlenmiş bir replay mesajı ne zaman budanır?", "assistant": "Finality derinliğini geçtikten sonra mark_processed_at ile; güvenli budama işlenme yüksekliğini sabitler."}
+{"user": "Sonlu cihaz diski için hangi plan çağrılır?", "assistant": "plan_bounded_by_disk; disk bölümü sığmazsa DiskPartDoesNotFit döner."}
+{"user": "Zorunlu algı beyanı hangi request-id taşır?", "assistant": "BDLM_AI_REQUEST_ID_V3"}
+{"user": "Doğrulanmamış çıkarım sonucu kabul edilir mi?", "assistant": "Hayır; executor fail-closed yapar, ai_exec_verifier_unavailable döner."}
+{"user": "Model ağırlıkları zkVM AIR'ine bağlı mı?", "assistant": "Halen sadece execution_weights_digest iddiası; ilk-bellek STARK'a bağlı değil."}
+{"user": "VerifyInference opcode ne döndürür?", "assistant": "Şu an her zaman 0; STARK-doğrulama devresi yok ve MainnetActivation ile kapalı."}
+{"user": "Çıkarım kanıtı doğrulanırken sıralama nedir?", "assistant": "Kamu girdileri, program hash, exit_code, sonra STARK."}
+{"user": "Lubot veri okumadan önce ne ister?", "assistant": "Pollen izni ya da B.U.D. StorageDeal; zorunlu algı beyanı."}
+{"user": "Eğitim kalitesi kuralı nedir?", "assistant": "100 mükemmel örnek, 10.000 vasat örnekten iyidir."}
+{"user": "LoRA örnek aralığı nedir?", "assistant": "1K-10K; tam SFT 100K+ gerektirir."}
