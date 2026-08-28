@@ -1,5 +1,8 @@
 //! B.U.D. 3.0 — the recipe that **produces the QR-video**.
 //!
+//! WIRING: unwired - staged 3.0 core; the production caller is the reveal
+//! session's emit path (plan §A5), wired at the final integration step.
+//!
 //! # What this module is
 //!
 //! The invention is not "content is a recipe". Organic content cannot be
@@ -368,7 +371,6 @@ impl RecipeCore {
     ///
     /// `opts` is the A0 knob set; a caller that already transformed once passes
     /// it straight through so the body is never transformed twice.
-    #[allow(clippy::too_many_arguments)]
     fn from_body(
         content: &[u8],
         opts: TransformOpts,
