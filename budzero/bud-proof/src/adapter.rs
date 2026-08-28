@@ -2,6 +2,15 @@ use bud_vm::Step;
 use serde::{Deserialize, Serialize};
 use tiny_keccak::{Hasher, Keccak};
 
+/// The current proof format version.
+///
+/// Every `ProofEnvelope` carries it; the verifier rejects anything else
+/// (older bytes are not migrated, newer bytes are not understood). Bump this
+/// constant together with any change to the serialized proof shape,
+/// transcript, public inputs, or envelope fields — never edit the literals
+/// scattered across the codebase, or a bump is silently half-applied.
+pub const PROOF_FORMAT_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionPublicInputs {
     pub chain_id: u64,

@@ -1,5 +1,6 @@
 use crate::adapter::{
     ExecutionPublicInputs, ProofEnvelope, ProverAdapter, ProverError, VerifyError,
+    PROOF_FORMAT_VERSION,
 };
 use crate::bud_stark::{
     prove_with_preprocessed, setup_preprocessed,
@@ -1624,7 +1625,7 @@ impl ProverAdapter for Plonky3Adapter {
             .map_err(|e| ProverError::SerializationError(e.to_string()))?;
 
         Ok(ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -1644,7 +1645,7 @@ impl ProverAdapter for Plonky3Adapter {
             proof_len = envelope.proof_bytes.len(),
             "Verifying proof"
         );
-        if envelope.proof_format_version != 1 {
+        if envelope.proof_format_version != PROOF_FORMAT_VERSION {
             return Err(VerifyError::InvalidEnvelope(
                 "Unsupported proof format version".to_string(),
             ));
@@ -1740,6 +1741,16 @@ mod tests {
     }
 
     fn prove_and_verify(program: Vec<u64>, setup: impl FnOnce(&mut Vm)) -> ProofEnvelope {
+        prove_and_verify_full(program, setup).0
+    }
+
+    /// Prove a program, verify it, and return the envelope together with the
+    /// public inputs — for tests that must tamper with the envelope after a
+    /// successful round-trip.
+    fn prove_and_verify_full(
+        program: Vec<u64>,
+        setup: impl FnOnce(&mut Vm),
+    ) -> (ProofEnvelope, ExecutionPublicInputs) {
         let mut vm = Vm::new(64);
         setup(&mut vm);
         let receipt = vm.run_receipt(&program);
@@ -1789,7 +1800,42 @@ mod tests {
             eprintln!("Verification error: {:?}", e);
         }
         assert!(verify_res.is_ok());
-        envelope
+        (envelope, pi)
+    }
+
+    /// The proof format version is a hard gate: bytes from an older format
+    /// are not migrated and bytes claiming a future format are not
+    /// understood. Both must be rejected before anything else is inspected.
+    #[test]
+    fn verifier_rejects_old_and_future_proof_format_versions() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (mut envelope, pi) = prove_and_verify_full(program.clone(), |_| {});
+
+        // v0 (pre-versioning) and v2 (unknown future) are both unsupported.
+        for bad_version in [0u32, PROOF_FORMAT_VERSION - 1, PROOF_FORMAT_VERSION + 1] {
+            if bad_version == PROOF_FORMAT_VERSION {
+                continue;
+            }
+            let mut tampered = envelope.clone();
+            tampered.proof_format_version = bad_version;
+            match Plonky3Adapter::verify(&tampered, &pi, &program) {
+                Err(VerifyError::InvalidEnvelope(_)) => {}
+                other => panic!(
+                    "version {bad_version} must be rejected as InvalidEnvelope, got {other:?}"
+                ),
+            }
+        }
+
+        // Sanity: the untouched envelope still verifies after the tampered
+        // attempts (the check reads the field, it does not consume it).
+        envelope.proof_format_version = PROOF_FORMAT_VERSION;
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "the untouched envelope must still verify"
+        );
     }
 
     /// Run the program, tamper the trace, and assert that proving FAILS.
@@ -2555,7 +2601,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -2946,7 +2992,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3205,7 +3251,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3320,7 +3366,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3462,7 +3508,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3599,7 +3645,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3751,7 +3797,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -4446,7 +4492,7 @@ mod tests {
     #[test]
     fn rejects_invalid_proof_bytes() {
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5034,7 +5080,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5149,7 +5195,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5254,7 +5300,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5451,7 +5497,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5611,7 +5657,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5824,7 +5870,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6081,7 +6127,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6207,7 +6253,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6453,7 +6499,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6582,7 +6628,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6720,7 +6766,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6881,7 +6927,7 @@ mod tests {
             Ok(p3_proof) => {
                 let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
                 let envelope = ProofEnvelope {
-                    proof_format_version: 1,
+                    proof_format_version: PROOF_FORMAT_VERSION,
                     backend: "Plonky3-Keccak-Goldilocks".to_string(),
                     p3_version: "0.5.2".to_string(),
                     fri_params_id: "test_fri_params".to_string(),
@@ -7164,7 +7210,7 @@ mod tests {
             Ok(p3_proof) => {
                 let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
                 let envelope = ProofEnvelope {
-                    proof_format_version: 1,
+                    proof_format_version: PROOF_FORMAT_VERSION,
                     backend: "Plonky3-Keccak-Goldilocks".to_string(),
                     p3_version: "0.5.2".to_string(),
                     fri_params_id: "test_fri_params".to_string(),
@@ -7260,7 +7306,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -7750,7 +7796,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -7860,7 +7906,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -7969,7 +8015,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -8229,7 +8275,7 @@ mod tests {
 
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -8436,7 +8482,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
