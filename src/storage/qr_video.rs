@@ -304,8 +304,8 @@ mod tests {
     }
 
     /// Altın vektör: tek karelik BDLV blobunun başlığı ve tam sha256'sı.
-    /// PNG baytları qr bağımlılığından geldiği için bu vektör bağımlılık
-    /// sürümündeki davranış değişimini de yakalar.
+    /// Kare modülleri artık bizim sabit-maskeli qr_encode'umuzdan geliyor;
+    /// bu vektör kodlayıcının ve mux'ın bayt düzeyindeki davranışını çiviler.
     #[test]
     fn video_wire_matches_the_golden_vectors() {
         let pc = [
@@ -325,7 +325,7 @@ mod tests {
         };
         let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"vektor kare".to_vec()], 10).unwrap();
         let blob = v.to_bytes();
-        assert_eq!(blob.len(), 506);
+        assert_eq!(blob.len(), 503);
         assert_eq!(
             hex(&blob[..76]),
             "42444c5601000a00010000007e380b6b1a1e981793bc14e8970fefe3a25cff3895bac65b5e5cc2c9f855ac0dba46b1eab74314497ca00de7ae9ee2d4976fdaa64bd1e51f397c7eedcbce8962"
@@ -335,7 +335,7 @@ mod tests {
         h.update(&blob);
         assert_eq!(
             hex(&h.finalize()),
-            "8fde83a711af91e00b3a54b99a45a40c7bb6f3eccf2bca03e79144ad03f0f4d0"
+            "bab09b692296eb54e81010842ab0d000e91553f86e0a4a4e7242bbecfc2fbe3e"
         );
     }
 
