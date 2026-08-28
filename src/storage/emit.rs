@@ -63,7 +63,9 @@ use crate::storage::three_meter::{MeterError, ThreeMeter};
 use crate::storage::three_pipe::{
     decode_frames, decode_qr_video, encode_qr_video, recipe_commitment, PipeError,
 };
-use crate::storage::three_recipe::{RecipeTransform, VideoRecipe, VideoRecipeError};
+use crate::storage::three_recipe::{
+    recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, RECIPE_VIDEO_MAGIC,
+};
 use crate::storage::transformed::{transform_content, TransformError, TransformOpts};
 use crate::storage::{ContentId, ContentManifest};
 
@@ -192,6 +194,9 @@ pub struct FeedPreview {
     pub decoded_body_len: usize,
     /// Body length the BDLV container decodes back to.
     pub video_body_len: usize,
+    /// The class the recipe's pinned transform forced the body into, reported so
+    /// a client opens the feed the way the recipe meant it to be opened.
+    pub recipe_class: String,
 }
 
 /// Errors from the emit path.
@@ -1026,6 +1031,42 @@ pub fn qr_feed_preview(
     if recipe.video_commitment != QrVideo::blob_commitment(&encoded.video_blob) {
         return Err(EmitError::Video(QrVideoError::CommitmentMismatch));
     }
+    // The blob this build produced must carry the tag this build reads. The
+    // decoder is not consulted for this: a blob whose four leading bytes are
+    // foreign is refused before anything is asked of it.
+    if encoded.video_blob.get(0..4) != Some(RECIPE_VIDEO_MAGIC.as_slice()) {
+        return Err(EmitError::DerivativeAccepted(video_blob_kind));
+    }
+
+    // A4 is a second and independent producer of the same frames: it walks the
+    // recipe alone and never sees the carousel. Its frames must be the ones
+    // being published, otherwise the feed answers "what is frame zero" twice.
+    let mut stream = recipe.frame_stream(content)?;
+    if stream.len() != actual {
+        return Err(EmitError::PlanMismatch {
+            planned: stream.len(),
+            actual,
+        });
+    }
+    let gez = want.min(actual).min(3);
+    let mut alinan = 0u32;
+    while alinan < gez {
+        let kare = stream.next_frame()?.ok_or(EmitError::DecodePathMismatch)?;
+        if video3.png_frames.get(alinan as usize).map(Vec::as_slice) != Some(kare.as_slice()) {
+            return Err(EmitError::DecodePathMismatch);
+        }
+        alinan += 1;
+    }
+    if stream.remaining() != actual - alinan || (actual == alinan) != stream.is_empty() {
+        return Err(EmitError::PlanMismatch {
+            planned: actual,
+            actual: alinan,
+        });
+    }
+    // Which class the recipe's pinned transform forces: a client decides how to
+    // open the feed from this, and the answer must come from the recipe rather
+    // than from whatever the transport's blob kind happens to imply.
+    let recipe_class = format!("{:?}", recipe_class(&recipe));
 
     Ok(FeedPreview {
         content_id,
@@ -1063,6 +1104,7 @@ pub fn qr_feed_preview(
         publicly_reemitable,
         decoded_body_len,
         video_body_len,
+        recipe_class,
     })
 }
 
