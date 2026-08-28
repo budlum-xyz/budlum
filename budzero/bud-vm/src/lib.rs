@@ -70,6 +70,8 @@ fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instructi
     }
 }
 
+pub mod private_transfer;
+
 pub struct Vm {
     pub registers: [u64; 32],
     pub pc: usize,
