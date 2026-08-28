@@ -192,7 +192,6 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_VIEW_GRANT_REG_V1",
     "BDLM_VIEW_GRANT_V1",
     "BDLM_ZK_PROOF_PAYLOAD_V2",
-
 ];
 
 /// Tags whose misuse would let an attacker move a signature or hash from one
