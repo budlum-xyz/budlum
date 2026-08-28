@@ -1071,4 +1071,47 @@ mod tests {
             "the drifted stream must hash differently"
         );
     }
+
+    /// Regeneration must beat proof production: the whole point of the
+    /// reproduction gate is that re-deriving canonical state is cheap enough
+    /// to run before release, while a proof is the expensive artifact.
+    /// `bud_format_regeneration.rs` asserts `production_cost < %1 x
+    /// proof_cost`; this pins the same inequality on the gate side.
+    ///
+    /// Reference prove costs (measured 2026-08-27, `benches/canonical_programs.rs`,
+    /// release, single sample): storage-challenge 0.270s, private-transfer
+    /// 0.166s, matmul-2-3-2 0.548s. 1% of the slowest is 5.48ms; the
+    /// reproduction here must stay well under it. The constant is the budget,
+    /// not a timing calibration: generation is microseconds, so a budget this
+    /// loose only trips on a pathological regression.
+    #[test]
+    fn regeneration_beats_one_percent_of_proof_cost() {
+        // 1% of the measured matmul prove cost (548ms), in milliseconds.
+        const ONE_PERCENT_MATMUL_MS: f64 = 5.48;
+        let mut total = std::time::Duration::ZERO;
+
+        let start = std::time::Instant::now();
+        let _ = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
+        total += start.elapsed();
+
+        let start = std::time::Instant::now();
+        let _ = regenerate_private_transfer_check_program();
+        total += start.elapsed();
+
+        let start = std::time::Instant::now();
+        let _ = regenerate_storage_challenge_program();
+        total += start.elapsed();
+
+        // Plus the canonical hash of the largest stream.
+        let start = std::time::Instant::now();
+        let _ = matmul_guest_program_hash(&[2, 3, 2]).unwrap();
+        total += start.elapsed();
+
+        let ms = total.as_secs_f64() * 1_000.0;
+        assert!(
+            ms < ONE_PERCENT_MATMUL_MS,
+            "regeneration took {ms:.2}ms, over the 1%-of-proof-cost budget \
+             ({ONE_PERCENT_MATMUL_MS}ms); regeneration no longer beats proof production"
+        );
+    }
 }
