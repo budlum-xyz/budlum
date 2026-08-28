@@ -21,6 +21,7 @@ pub mod content_id;
 pub mod db;
 pub mod derived;
 pub mod dictionary;
+pub mod emit;
 pub mod erasure;
 pub mod fixed_point;
 pub mod generated;

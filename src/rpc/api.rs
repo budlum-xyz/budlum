@@ -348,6 +348,32 @@ pub trait BudlumApi {
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Measure a QR feed before publishing it: every ceiling the pipe enforces,
+    /// the drop and frame schedule, what a viewer can rebuild from those frames,
+    /// and the commitments a publish would pin. Bounded by
+    /// `MAX_PREVIEW_CONTENT_BYTES`, so it is a question an operator can ask
+    /// twice on the same body and get the same answer.
+    #[method(name = "bud_storageQrFeedPreview")]
+    async fn storage_qr_feed_preview(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        manifest: Option<crate::storage::ContentManifest>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-emit `count` frames of that feed from `seq`, with the fold a client
+    /// checks them against. The caller supplies the body, so this publishes no
+    /// handle into stored content and grants nothing: whoever holds the bytes
+    /// can already produce the frames.
+    #[method(name = "bud_storageQrFeedFrames")]
+    async fn storage_qr_feed_frames(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        first_frame: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Issue a view grant (key handle on-chain; key material off-chain).
     #[method(name = "bud_storageIssueViewGrant")]
     async fn storage_issue_view_grant(

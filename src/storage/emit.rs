@@ -1,0 +1,979 @@
+//! Provider-side emit path: bytes in, QR feed out, with the ceilings checked
+//! before any of them is paid for.
+//!
+//! The stages below `src/storage` each refuse on their own terms: the carousel
+//! caps `k`, the frame header caps the wire, the matrix caps a QR symbol, the
+//! provider refuses a transport derivative as a body. Nothing stood at the
+//! front of that queue and answered the operator's actual question, which is
+//! not "does `encode_qr_video` compile" but "what will this cost me, what will
+//! the viewer hold, and do the two agree".
+//!
+//! `qr_feed_preview` is that front seat. It measures the request against every
+//! ceiling, encodes once, reassembles what a viewer would reassemble from those
+//! frames, re-emits frame zero from the recipe alone and compares, and reports
+//! the commitments a publish would pin. It also runs the durable step against a
+//! scratch `InMemoryStorageProvider`: the receipt it reports is the receipt a
+//! publish returns, and the refusal it reports for the video blob is the refusal
+//! a publish would raise. The scratch store is discarded with the preview, which
+//! is the point - the node does not select a provider at startup, so this path
+//! must not need one to answer.
+//!
+//! # What this does not do
+//!
+//! It does not authorise anything. Both entry points take their bytes from the
+//! caller and publish no handle into stored content, so there is no viewer here
+//! to grant: the grant and Pollen checks belong to whichever path reads content
+//! out of a registry, and adding a second copy of that registry here would give
+//! the answer twice and let the two disagree.
+
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::generated::{
+    generate_content, held_bytes, is_three_recipe, recipe_seed_is_public, ContentSource,
+    GenerateError,
+};
+use crate::storage::payload_crypt::{open_payload, PayloadKey, SealError, MAX_SEAL_PLAINTEXT};
+use crate::storage::provider::{InMemoryStorageProvider, StorageProvider, StorageProviderError};
+use crate::storage::qr_carousel::{
+    oneshot_drop_count, planned_drop_count, repair_margin_for, CarouselError, CarouselParams,
+    DROP_HEADER_LEN, MAX_CAROUSEL_BYTES, MAX_K, ONESHOT_REPAIR_PERMILLAGE,
+};
+use crate::storage::qr_codec::{gate_codec, split_raw_concat, CodecError, CodecKind};
+use crate::storage::qr_encode::MAX_DATA_BYTES;
+use crate::storage::qr_frame::{
+    stream_id_prefix, FrameError, MAX_DROP_WIRE, THREE_FRAME_HEADER_LEN,
+};
+use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MAX_QR_PAYLOAD, THREE_QR_EC};
+use crate::storage::qr_payload::{
+    pack_payload, packed_is_zlib, unpack_payload, PayloadError, PayloadKind, MAX_PAYLOAD_CONTENT,
+    THREE_PAYLOAD_HEADER_LEN,
+};
+use crate::storage::qr_png::{frame_to_qr_png, QrPngError};
+use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
+use crate::storage::qr_reemit::{RecipeEmitter, ReemitError};
+use crate::storage::qr_video::{QrVideo, QrVideoError, DEFAULT_FPS};
+use crate::storage::three_gate::{classify_three_blob, is_transport_derivative, ThreeBlobKind};
+use crate::storage::three_meter::{MeterError, ThreeMeter};
+use crate::storage::three_pipe::{encode_qr_video, mux_raw, PipeError};
+use crate::storage::three_recipe::{RecipeTransform, VideoRecipe, VideoRecipeError};
+use crate::storage::transformed::{transform_content, TransformError, TransformOpts};
+use crate::storage::{ContentId, ContentManifest};
+
+/// Largest body this path will encode in one call.
+///
+/// The ceilings below bound the *produced* bytes, not the request; a caller who
+/// sends 60 MiB of body is billed for a full carousel before the first refusal.
+/// This is the number that bounds the request itself.
+pub const MAX_PREVIEW_CONTENT_BYTES: usize = 1 << 20;
+
+/// Knobs for one emit.
+///
+/// The A2 repair margin is deliberately not a knob: the only production encode
+/// path (`three_pipe::encode_qr_video`) seals and packs under
+/// `ONESHOT_REPAIR_PERMILLAGE`, and a policy field that a stage ignores is a
+/// lie a caller would pay for. The margin the encode used is reported back in
+/// [`FeedPreview`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitPolicy {
+    /// A2 source block length.
+    pub block_len: u16,
+    /// Display pacing hint written into the video header.
+    pub fps: u16,
+    /// A9 meter budget; `None` is unlimited and belongs to the lab, not to an
+    /// endpoint a caller can hit twice.
+    pub meter_budget: Option<u64>,
+    /// G1 seal seed. `Some` seals the body before it is carouselled, so the
+    /// feed carries ciphertext under a plaintext recipe.
+    pub seal_seed: Option<[u8; 32]>,
+    /// Frames one burst may return. A burst is a screenful, not a download.
+    pub max_burst_frames: u32,
+}
+
+impl Default for EmitPolicy {
+    fn default() -> Self {
+        Self {
+            block_len: crate::storage::qr_carousel::DEFAULT_BLOCK_LEN,
+            fps: DEFAULT_FPS,
+            meter_budget: Some(4096),
+            seal_seed: None,
+            max_burst_frames: 32,
+        }
+    }
+}
+
+/// What one publish would pin, and what a viewer would end up holding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedPreview {
+    /// Content id of the durable packed container, the thing a publish stores.
+    pub content_id: ContentId,
+    /// Provider commitment of that put (zeros when no manifest was supplied).
+    pub provider_commitment: [u8; 32],
+    /// Bytes in the packed container.
+    pub packed_len: usize,
+    /// Whether A1 zlib-compressed the body.
+    pub packed_is_zlib: bool,
+    /// A2 source block count the carousel locked over the packed container.
+    pub k: u16,
+    /// Blocks the pre-flight bound put on the request, before anything was
+    /// transformed or packed. Reported so the caller can see how much the
+    /// shrink bought.
+    pub preflight_k: u16,
+    /// Drops a full 2k carousel cycle would emit at this `k`.
+    pub ceiling_drops: u32,
+    /// Drops the one-shot schedule emits at this `k`.
+    pub planned_drops: u32,
+    /// Drop bound the A9 budget was charged against before the encode.
+    pub drop_bound: u32,
+    /// Repair margin the encode used, permillage of `k`.
+    pub repair_permillage: u32,
+    /// Repair drops the margin adds above the systematic pass, at this `k`
+    /// and with no spare frames.
+    pub repair_margin: u32,
+    /// Frames the encode produced.
+    pub frame_count: u32,
+    /// Nested wire length of frame zero's drop.
+    pub drop_wire_len: usize,
+    /// A2 stream commitment the frames are bound to.
+    pub stream_commitment: [u8; 32],
+    /// A3 stream id prefix carried in every frame header.
+    pub stream_prefix: u32,
+    /// Feed identity: this body, this stream, this many frames.
+    pub feed_id: [u8; 32],
+    /// Commitment the recipe pins the produced video blob with.
+    pub video_commitment: [u8; 32],
+    /// Commitment over the full recipe, the sealed form's only field a holder
+    /// needs to verify a re-emission.
+    pub recipe_commitment: [u8; 32],
+    /// Fold over the burst the emitter re-produced from the recipe alone.
+    pub burst_fold: [u8; 32],
+    /// Frames that burst carried.
+    pub burst_len: usize,
+    /// Whether the A4 raw concat is on the allow list in this build. The concat
+    /// is produced only when this is true; `gate_codec` is what refuses at the
+    /// muxer itself.
+    pub codec_allowed: bool,
+    /// Frames the reassembly accepted / rejected, from the receiver's counters.
+    pub frames_accepted: u32,
+    /// Frames the receiver rejected as unusable.
+    pub frames_rejected: u32,
+    /// A9 weighted work the emit was charged for.
+    pub meter_weight: u64,
+    /// Raster modules of frame zero's QR symbol, quiet zone included.
+    pub raster_modules: u32,
+    /// Pixels on one side of that raster, as the renderer reports it.
+    pub raster_side: u32,
+    /// PNG bytes a browser would scan.
+    pub png_len: usize,
+    /// EC level the matrix builder pins for QR ECC, as it prints.
+    pub ec_level: String,
+    /// Classifier's verdict on the produced video blob.
+    pub video_blob_kind: ThreeBlobKind,
+    /// Set when a Three-edition manifest named a public recipe: the length of
+    /// the bytes the generator produced.
+    pub regenerated_len: Option<usize>,
+    /// Whether the manifest's source puts the regenerating seed on chain.
+    pub seed_is_public: bool,
+}
+
+/// Errors from the emit path.
+#[derive(Debug)]
+pub enum EmitError {
+    /// Empty body: nothing to encode, and an empty frame stream is not a feed.
+    Empty,
+    /// Body over [`MAX_PREVIEW_CONTENT_BYTES`].
+    TooLarge {
+        /// Bytes offered.
+        len: usize,
+        /// Ceiling.
+        limit: usize,
+    },
+    /// A2 payload ceiling.
+    CarouselTooLarge {
+        /// Bytes offered.
+        len: usize,
+        /// Ceiling.
+        limit: usize,
+    },
+    /// G1 seal ceiling.
+    SealTooLarge {
+        /// Bytes offered.
+        len: usize,
+        /// Ceiling.
+        limit: usize,
+    },
+    /// A1 container ceiling.
+    PayloadTooLarge {
+        /// Bytes offered.
+        len: usize,
+        /// Ceiling.
+        limit: usize,
+    },
+    /// `k` over the residual path's bound.
+    TooManyBlocks {
+        /// Blocks the policy implies.
+        k: u16,
+        /// Ceiling.
+        limit: u16,
+    },
+    /// A drop's wire would not fit the frame header's bound.
+    WireTooLarge {
+        /// Wire length.
+        wire: usize,
+        /// Ceiling.
+        limit: usize,
+    },
+    /// A frame would not fit one QR symbol.
+    QrOverflow {
+        /// Frame length.
+        len: usize,
+        /// Ceiling.
+        limit: usize,
+    },
+    /// The matrix builder's cap and the encoder's cap disagree, so which one
+    /// binds is not knowable here.
+    QrCapsDisagree {
+        /// Cap the matrix builder enforces.
+        matrix: usize,
+        /// Cap the symbol encoder enforces.
+        encoder: usize,
+    },
+    /// The one-shot schedule emitted more drops than the full cycle ceiling.
+    PlanMismatch {
+        /// Drops planned.
+        planned: u32,
+        /// Drops produced.
+        actual: u32,
+    },
+    /// A burst wider than the policy allows, or wider than the stream.
+    BurstTooWide {
+        /// Frames asked for.
+        count: u32,
+        /// Ceiling.
+        limit: u32,
+    },
+    /// Frame number past the end of the feed.
+    FrameOutOfRange {
+        /// Frame asked for.
+        seq: u32,
+        /// Frames the feed has.
+        len: u32,
+    },
+    /// Frame zero rebuilt from the recipe alone is not frame zero as emitted.
+    ReemitMismatch,
+    /// The renderer reports fewer pixels than the modules it must draw, so a
+    /// client sizing a canvas from this preview would size the wrong one.
+    RasterDegenerate {
+        /// Modules the matrix reports.
+        modules: u32,
+        /// Pixels the renderer reports on one side.
+        side: u32,
+    },
+    /// The optional A4 concat does not split back into the frames it carried.
+    ConcatMismatch {
+        /// Frames put in.
+        want: usize,
+        /// Frames split out.
+        got: usize,
+    },
+    /// Reassembly did not reproduce the packed container that was carouselled.
+    ReassemblyMismatch,
+    /// The receiver never completed on a stream it was handed in full.
+    Incomplete {
+        /// Blocks still missing.
+        missing: usize,
+    },
+    /// The seal did not open back to the bytes A1 packed.
+    SealMismatch,
+    /// A sealed feed's body is not ciphertext.
+    SealKindMismatch {
+        /// Kind the container declared.
+        kind: u8,
+    },
+    /// The provider stored a transport derivative it should have refused, so
+    /// the durable/derivative boundary has moved without this path noticing.
+    DerivativeAccepted(ThreeBlobKind),
+    /// A stage refused.
+    Carousel(CarouselError),
+    /// A stage refused.
+    Payload(PayloadError),
+    /// A stage refused.
+    Pipe(PipeError),
+    /// A stage refused.
+    Receive(ReceiveError),
+    /// A stage refused.
+    Reemit(ReemitError),
+    /// A stage refused.
+    Codec(CodecError),
+    /// A stage refused.
+    Frame(FrameError),
+    /// A stage refused.
+    Matrix(QrMatrixError),
+    /// A stage refused.
+    Png(QrPngError),
+    /// A stage refused.
+    Seal(SealError),
+    /// A stage refused.
+    Transform(TransformError),
+    /// A stage refused.
+    Video(QrVideoError),
+    /// A stage refused.
+    Recipe(VideoRecipeError),
+    /// The provider refused.
+    Provider(StorageProviderError),
+    /// The A9 budget is spent.
+    Meter(MeterError),
+    /// The generator refused to produce the body a recipe names.
+    Generate(GenerateError),
+    /// The manifest's edition and source are not a legal pair.
+    Edition(String),
+    /// A Three-edition manifest names a sealed recipe: the seed is not on
+    /// chain, so nobody but its holder can say what bytes this feed carries.
+    SeedNotPublic,
+    /// A Three-edition manifest named a source that is not a recipe at all.
+    RecipeOnlyEdition,
+    /// The body offered is not the body the manifest's recipe produces.
+    BodyNotRecipe {
+        /// Hash of the regenerated bytes.
+        want: [u8; 32],
+        /// Hash of the bytes offered.
+        got: [u8; 32],
+    },
+    /// A manifest whose source contradicts its own declared sizes.
+    SelfContradictingSource,
+}
+
+impl std::fmt::Display for EmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "empty body"),
+            Self::TooLarge { len, limit } => {
+                write!(f, "body of {len} bytes over emit cap {limit}")
+            }
+            Self::CarouselTooLarge { len, limit } => {
+                write!(f, "body of {len} bytes over carousel cap {limit}")
+            }
+            Self::SealTooLarge { len, limit } => {
+                write!(f, "body of {len} bytes over seal cap {limit}")
+            }
+            Self::PayloadTooLarge { len, limit } => {
+                write!(f, "body of {len} bytes over payload cap {limit}")
+            }
+            Self::TooManyBlocks { k, limit } => {
+                write!(f, "carousel k={k} over block bound {limit}")
+            }
+            Self::WireTooLarge { wire, limit } => {
+                write!(f, "drop wire of {wire} bytes over frame bound {limit}")
+            }
+            Self::QrOverflow { len, limit } => {
+                write!(
+                    f,
+                    "frame of {len} bytes does not fit one QR symbol ({limit})"
+                )
+            }
+            Self::QrCapsDisagree { matrix, encoder } => {
+                write!(f, "qr caps disagree: matrix {matrix}, encoder {encoder}")
+            }
+            Self::PlanMismatch { planned, actual } => {
+                write!(
+                    f,
+                    "one-shot schedule emitted {actual} drops, planned {planned}"
+                )
+            }
+            Self::BurstTooWide { count, limit } => {
+                write!(f, "burst of {count} frames over burst bound {limit}")
+            }
+            Self::FrameOutOfRange { seq, len } => {
+                write!(f, "frame {seq} past a feed of {len} frames")
+            }
+            Self::ReemitMismatch => write!(f, "recipe re-emitted a frame the pipe did not produce"),
+            Self::RasterDegenerate { modules, side } => {
+                write!(f, "raster side {side} cannot hold {modules} modules")
+            }
+            Self::ConcatMismatch { want, got } => {
+                write!(f, "raw concat split back into {got} frames, not {want}")
+            }
+            Self::ReassemblyMismatch => write!(f, "reassembly did not reproduce the packed body"),
+            Self::Incomplete { missing } => {
+                write!(f, "receiver missed {missing} blocks on a full stream")
+            }
+            Self::SealMismatch => write!(f, "sealed body does not open to the packed bytes"),
+            Self::SealKindMismatch { kind } => {
+                write!(f, "sealed feed declared non-ciphertext kind {kind}")
+            }
+            Self::DerivativeAccepted(kind) => {
+                write!(f, "provider accepted a {kind:?} as a durable body")
+            }
+            Self::Carousel(e) => write!(f, "carousel: {e}"),
+            Self::Payload(e) => write!(f, "payload: {e}"),
+            Self::Pipe(e) => write!(f, "pipe: {e}"),
+            Self::Receive(e) => write!(f, "receive: {e}"),
+            Self::Reemit(e) => write!(f, "reemit: {e}"),
+            Self::Codec(e) => write!(f, "codec: {e}"),
+            Self::Frame(e) => write!(f, "frame: {e}"),
+            Self::Matrix(e) => write!(f, "matrix: {e}"),
+            Self::Png(e) => write!(f, "png: {e}"),
+            Self::Seal(e) => write!(f, "seal: {e}"),
+            Self::Transform(e) => write!(f, "transform: {e}"),
+            Self::Video(e) => write!(f, "video: {e}"),
+            Self::Recipe(e) => write!(f, "recipe: {e}"),
+            Self::Provider(e) => write!(f, "provider: {e:?}"),
+            Self::Meter(e) => write!(f, "meter: {e}"),
+            Self::Generate(e) => write!(f, "generator: {e}"),
+            Self::Edition(reason) => write!(f, "edition refuses: {reason}"),
+            Self::SeedNotPublic => write!(f, "sealed recipe: the seed is not on chain"),
+            Self::RecipeOnlyEdition => {
+                write!(f, "edition Three carries no durable body to emit")
+            }
+            Self::BodyNotRecipe { want, got } => write!(
+                f,
+                "body is not the recipe's output: want {}, got {}",
+                hex(*want),
+                hex(*got)
+            ),
+            Self::SelfContradictingSource => {
+                write!(f, "manifest source contradicts its declared sizes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EmitError {}
+
+impl From<CarouselError> for EmitError {
+    fn from(e: CarouselError) -> Self {
+        Self::Carousel(e)
+    }
+}
+
+impl From<PipeError> for EmitError {
+    fn from(e: PipeError) -> Self {
+        Self::Pipe(e)
+    }
+}
+
+impl From<ReceiveError> for EmitError {
+    fn from(e: ReceiveError) -> Self {
+        Self::Receive(e)
+    }
+}
+
+impl From<ReemitError> for EmitError {
+    fn from(e: ReemitError) -> Self {
+        Self::Reemit(e)
+    }
+}
+
+impl From<CodecError> for EmitError {
+    fn from(e: CodecError) -> Self {
+        Self::Codec(e)
+    }
+}
+
+impl From<MeterError> for EmitError {
+    fn from(e: MeterError) -> Self {
+        Self::Meter(e)
+    }
+}
+
+impl From<StorageProviderError> for EmitError {
+    fn from(e: StorageProviderError) -> Self {
+        Self::Provider(e)
+    }
+}
+
+impl From<VideoRecipeError> for EmitError {
+    fn from(e: VideoRecipeError) -> Self {
+        Self::Recipe(e)
+    }
+}
+
+impl From<TransformError> for EmitError {
+    fn from(e: TransformError) -> Self {
+        Self::Transform(e)
+    }
+}
+
+impl From<PayloadError> for EmitError {
+    fn from(e: PayloadError) -> Self {
+        Self::Payload(e)
+    }
+}
+
+impl From<SealError> for EmitError {
+    fn from(e: SealError) -> Self {
+        Self::Seal(e)
+    }
+}
+
+impl From<GenerateError> for EmitError {
+    fn from(e: GenerateError) -> Self {
+        Self::Generate(e)
+    }
+}
+
+impl From<QrMatrixError> for EmitError {
+    fn from(e: QrMatrixError) -> Self {
+        Self::Matrix(e)
+    }
+}
+
+impl From<QrPngError> for EmitError {
+    fn from(e: QrPngError) -> Self {
+        Self::Png(e)
+    }
+}
+
+impl From<FrameError> for EmitError {
+    fn from(e: FrameError) -> Self {
+        Self::Frame(e)
+    }
+}
+
+fn hex(bytes: [u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Everything the ceilings say about a body before a single drop is built.
+///
+/// The bound is computed on `len + THREE_PAYLOAD_HEADER_LEN`, not on `len`:
+/// A1 may shrink the body but never grows it, so the packed container is the
+/// larger of the two and the carousel locks `k` over it. Charging the request
+/// on the smaller number would let a caller walk up to a ceiling and be told it
+/// is fine, then pay for the encode anyway.
+///
+/// # Errors
+///
+/// [`EmitError`] naming the first ceiling the request crosses.
+fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
+    if content.is_empty() {
+        return Err(EmitError::Empty);
+    }
+    let len = content.len();
+    if len > MAX_PREVIEW_CONTENT_BYTES {
+        return Err(EmitError::TooLarge {
+            len,
+            limit: MAX_PREVIEW_CONTENT_BYTES,
+        });
+    }
+    if len > MAX_CAROUSEL_BYTES {
+        return Err(EmitError::CarouselTooLarge {
+            len,
+            limit: MAX_CAROUSEL_BYTES,
+        });
+    }
+    if len > MAX_SEAL_PLAINTEXT {
+        return Err(EmitError::SealTooLarge {
+            len,
+            limit: MAX_SEAL_PLAINTEXT,
+        });
+    }
+    if len > MAX_PAYLOAD_CONTENT {
+        return Err(EmitError::PayloadTooLarge {
+            len,
+            limit: MAX_PAYLOAD_CONTENT,
+        });
+    }
+    if MAX_QR_PAYLOAD != MAX_DATA_BYTES {
+        return Err(EmitError::QrCapsDisagree {
+            matrix: MAX_QR_PAYLOAD,
+            encoder: MAX_DATA_BYTES,
+        });
+    }
+    let wire = usize::from(policy.block_len)
+        .saturating_add(DROP_HEADER_LEN)
+        .saturating_add(THREE_FRAME_HEADER_LEN);
+    let bound = usize::from(MAX_DROP_WIRE);
+    if wire > bound {
+        return Err(EmitError::WireTooLarge { wire, limit: bound });
+    }
+    if wire > MAX_QR_PAYLOAD {
+        return Err(EmitError::QrOverflow {
+            len: wire,
+            limit: MAX_QR_PAYLOAD,
+        });
+    }
+    gate_codec(CodecKind::RawFrames)?;
+    let blok = usize::from(policy.block_len);
+    let bloklar = len.saturating_add(THREE_PAYLOAD_HEADER_LEN).div_ceil(blok);
+    let k = u16::try_from(bloklar).map_err(|_| EmitError::TooManyBlocks {
+        k: MAX_K,
+        limit: MAX_K,
+    })?;
+    if k > MAX_K {
+        return Err(EmitError::TooManyBlocks { k, limit: MAX_K });
+    }
+    let bound_drops = oneshot_drop_count(k, ONESHOT_REPAIR_PERMILLAGE);
+    Ok((k, bound_drops))
+}
+
+/// The recipe-shaped truth about an already-encoded feed: what a publish pins
+/// and what a viewer can rebuild from the frames alone.
+///
+/// # Errors
+///
+/// [`EmitError`] when a ceiling, a reassembly, a re-emission or the provider
+/// disagrees with the encode.
+pub fn qr_feed_preview(
+    content: &[u8],
+    policy: &EmitPolicy,
+    manifest: Option<&ContentManifest>,
+) -> Result<FeedPreview, EmitError> {
+    let (preflight_k, drop_bound) = plan(content, policy)?;
+    let mut meter = ThreeMeter::with_budget(policy.meter_budget);
+    meter.record_pack()?;
+    meter.record_drops(drop_bound.into())?;
+    if policy.seal_seed.is_some() {
+        meter.record_seal()?;
+    }
+    let key = policy.seal_seed.map(|seed| PayloadKey::derive(&seed));
+    let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
+    let pipe = &encoded.pipe;
+    // The carousel locks `k` over the packed container, so that is what the
+    // plan is measured against here; `k` from the request is only ever a bound.
+    let params = CarouselParams::from_payload(&pipe.packed, policy.block_len)?;
+    let planned = oneshot_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
+    let ceiling = planned_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
+    let repair_margin = repair_margin_for(params.k, ONESHOT_REPAIR_PERMILLAGE, 0);
+    let actual = u32::try_from(pipe.frames.len()).map_err(|_| EmitError::PlanMismatch {
+        planned,
+        actual: u32::MAX,
+    })?;
+    meter.record_frames(actual.into())?;
+    if actual != planned || actual > ceiling || actual > drop_bound {
+        return Err(EmitError::PlanMismatch { planned, actual });
+    }
+    if params.k != pipe.recipe.carousel.k {
+        return Err(EmitError::PlanMismatch {
+            planned: u32::from(params.k),
+            actual: u32::from(pipe.recipe.carousel.k),
+        });
+    }
+
+    let mut regenerated_len = None;
+    let mut seed_is_public = false;
+    if let Some(manifest) = manifest {
+        manifest
+            .edition
+            .check_source(&manifest.source)
+            .map_err(EmitError::Edition)?;
+        let _ = held_bytes(&manifest.source, manifest.content_size)
+            .ok_or(EmitError::SelfContradictingSource)?;
+        seed_is_public = recipe_seed_is_public(&manifest.source);
+        if !manifest.edition.admits_body() {
+            // Edition Three holds no body: the feed's bytes are the generator's
+            // output, so the caller's copy is checked against it, not trusted.
+            let ContentSource::Generated(spec) = &manifest.source else {
+                return Err(if is_three_recipe(&manifest.source) {
+                    EmitError::SeedNotPublic
+                } else {
+                    EmitError::RecipeOnlyEdition
+                });
+            };
+            let regen = generate_content(spec)?;
+            let want = ContentId::of(&regen);
+            let got = ContentId::of(content);
+            if want != got {
+                return Err(EmitError::BodyNotRecipe {
+                    want: *want.as_bytes(),
+                    got: *got.as_bytes(),
+                });
+            }
+            regenerated_len = Some(regen.len());
+        }
+    }
+
+    // What a viewer holding every frame can rebuild, measured here rather than
+    // assumed: the frames are pushed one at a time, exactly as a camera hands
+    // them over.
+    let mut rx = ProgressiveReceiver::new(pipe.stream_commitment);
+    let mut accepted = 0u32;
+    for frame in &pipe.frames {
+        rx.push_frame(frame)?;
+        accepted += 1;
+        if rx.is_complete() {
+            break;
+        }
+    }
+    let (got, rejected) = rx.stats();
+    if !rx.is_complete() {
+        return Err(EmitError::Incomplete {
+            missing: rx.missing(),
+        });
+    }
+    if got != accepted {
+        return Err(EmitError::ReassemblyMismatch);
+    }
+    if rejected != 0 || rx.finish_packed()? != pipe.packed {
+        return Err(EmitError::ReassemblyMismatch);
+    }
+    let (kind, _) = rx.finish_unpacked()?;
+
+    if let Some(key) = key.as_ref() {
+        let (_, body) = unpack_payload(&pipe.packed)?;
+        if kind != PayloadKind::EncryptedContent {
+            return Err(EmitError::SealKindMismatch { kind: kind.tag() });
+        }
+        let clear = open_payload(key, &body)?;
+        let again = transform_content(content, TransformOpts::default())?;
+        if ContentId::of(&clear) != ContentId::of(&again.bytes) {
+            return Err(EmitError::SealMismatch);
+        }
+    }
+
+    // The recipe alone, with no pipe and no frames held, must reproduce frame
+    // zero byte for byte. This is the whole reason a recipe can be published
+    // instead of a video.
+    let emitter = RecipeEmitter::open(pipe.recipe.clone(), &pipe.packed)?;
+    let drop_wire_len = emitter.drop_at(0).to_bytes().len();
+    let frame0 = emitter.frame_at(0);
+    if Some(&frame0) != pipe.frames.first() {
+        return Err(EmitError::ReemitMismatch);
+    }
+    let want = policy.max_burst_frames.min(actual).max(1);
+    if want > policy.max_burst_frames {
+        return Err(EmitError::BurstTooWide {
+            count: want,
+            limit: policy.max_burst_frames,
+        });
+    }
+    let (burst, burst_fold) = emitter.emit_frames(0, want)?;
+    emitter.verify_stream_id(&pipe.recipe.stream_id)?;
+    let burst_len = burst.len();
+    if burst.first() != Some(&frame0) {
+        return Err(EmitError::ReemitMismatch);
+    }
+
+    // Frame zero as the thing a browser scans, plus the raster a client sizes a
+    // canvas from.
+    let matrix = QrMatrix::encode(&frame0)?;
+    if matrix.pixel_side() < matrix.raster_modules() {
+        return Err(EmitError::RasterDegenerate {
+            modules: matrix.raster_modules(),
+            side: matrix.pixel_side(),
+        });
+    }
+    let png = frame_to_qr_png(&frame0)?;
+    let raster_modules = matrix.raster_modules();
+    let raster_side = matrix.pixel_side();
+    let png_len = png.len();
+    let ec_level = format!("{THREE_QR_EC:?}");
+
+    // The optional A4 concat, produced only when it is allowed and split back
+    // here so the muxer is not trusted on its word alone.
+    let codec_allowed = CodecKind::RawFrames.is_allowed();
+    if codec_allowed {
+        let blob = mux_raw(&pipe.frames)?;
+        let back = split_raw_concat(&blob)?;
+        if back.len() != pipe.frames.len() {
+            return Err(EmitError::ConcatMismatch {
+                want: pipe.frames.len(),
+                got: back.len(),
+            });
+        }
+    }
+
+    let video_blob_kind = classify_three_blob(&encoded.video_blob);
+    if !is_transport_derivative(&encoded.video_blob) {
+        return Err(EmitError::DerivativeAccepted(video_blob_kind));
+    }
+
+    let stream_prefix = stream_id_prefix(&pipe.stream_commitment);
+    let feed_id = hash_fields_bytes(&[
+        b"BDLM_EMIT_FEED_V1",
+        &pipe.stream_commitment,
+        &actual.to_le_bytes(),
+        &encoded.video_blob.len().to_le_bytes(),
+    ]);
+
+    let (content_id, provider_commitment) = if let Some(manifest) = manifest {
+        let mut scratch = InMemoryStorageProvider::with_operator(feed_id);
+        let receipt = scratch.put(manifest, &pipe.packed)?;
+        // The video blob is a rendering of bytes that already carry a
+        // commitment. If a provider ever accepts it into a body slot, this path
+        // has started handing out pixels-of-pixels.
+        match scratch.put(manifest, &encoded.video_blob) {
+            Err(StorageProviderError::DurableDerivative(ThreeBlobKind::QrVideo)) => {}
+            Err(other) => return Err(EmitError::Provider(other)),
+            Ok(_) => return Err(EmitError::DerivativeAccepted(ThreeBlobKind::QrVideo)),
+        }
+        (receipt.content_id, receipt.provider_commitment)
+    } else {
+        let packed = pack_payload(PayloadKind::ContentBytes, content)?;
+        (ContentId::of(&packed), [0u8; 32])
+    };
+
+    let recipe = VideoRecipe::from_encoded(
+        content,
+        RecipeTransform::pin_from(TransformOpts::default(), content),
+        kind.tag(),
+        policy.block_len,
+        ONESHOT_REPAIR_PERMILLAGE,
+        policy.fps,
+        &encoded,
+    );
+    let sealed = recipe.seal();
+    if sealed.frame_count != actual {
+        return Err(EmitError::PlanMismatch {
+            planned: actual,
+            actual: sealed.frame_count,
+        });
+    }
+    if recipe.video_commitment != QrVideo::blob_commitment(&encoded.video_blob) {
+        return Err(EmitError::Video(QrVideoError::CommitmentMismatch));
+    }
+
+    Ok(FeedPreview {
+        content_id,
+        provider_commitment,
+        packed_len: pipe.packed.len(),
+        packed_is_zlib: packed_is_zlib(&pipe.packed),
+        k: params.k,
+        preflight_k,
+        drop_bound,
+        repair_permillage: ONESHOT_REPAIR_PERMILLAGE,
+        ceiling_drops: ceiling,
+        planned_drops: planned,
+        repair_margin,
+        frame_count: actual,
+        drop_wire_len,
+        stream_commitment: pipe.stream_commitment,
+        stream_prefix,
+        feed_id,
+        video_commitment: recipe.video_commitment,
+        recipe_commitment: sealed.recipe_commitment,
+        burst_fold,
+        burst_len,
+        codec_allowed,
+        frames_accepted: accepted,
+        frames_rejected: rejected,
+        meter_weight: meter.weight(),
+        raster_modules,
+        raster_side,
+        png_len,
+        ec_level,
+        video_blob_kind,
+        regenerated_len,
+        seed_is_public,
+    })
+}
+
+/// Frames `seq_start..seq_start + count` of the feed, with the fold a client
+/// checks them against.
+///
+/// This is the read path a progressive player uses: the recipe re-emits each
+/// frame without the video being held anywhere, and every frame is compared to
+/// what the pipe produced, so a client cannot be handed a frame nobody emitted.
+///
+/// # Errors
+///
+/// [`EmitError`] when the burst is wider than the policy or past the end of the
+/// feed, or when a re-emitted frame differs from the emitted one.
+pub fn qr_feed_frames_burst(
+    content: &[u8],
+    policy: &EmitPolicy,
+    seq_start: u32,
+    count: u32,
+) -> Result<(Vec<Vec<u8>>, [u8; 32]), EmitError> {
+    let (preflight_k, _) = plan(content, policy)?;
+    if count == 0 || count > policy.max_burst_frames {
+        return Err(EmitError::BurstTooWide {
+            count,
+            limit: policy.max_burst_frames,
+        });
+    }
+    let key = policy.seal_seed.map(|seed| PayloadKey::derive(&seed));
+    let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
+    let total = u32::try_from(encoded.pipe.frames.len()).unwrap_or(u32::MAX);
+    if seq_start.saturating_add(count) > total {
+        return Err(EmitError::FrameOutOfRange {
+            seq: seq_start,
+            len: total,
+        });
+    }
+    if u32::from(preflight_k) == 0 {
+        return Err(EmitError::Empty);
+    }
+    let emitter = RecipeEmitter::open(encoded.pipe.recipe.clone(), &encoded.pipe.packed)?;
+    let (frames, fold) = emitter.emit_frames(seq_start, count)?;
+    emitter.verify_stream_id(&encoded.pipe.recipe.stream_id)?;
+    if frames.first() != encoded.pipe.frames.get(seq_start as usize) {
+        return Err(EmitError::ReemitMismatch);
+    }
+    Ok((frames, fold))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(n: usize) -> Vec<u8> {
+        (0..n)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+            .collect()
+    }
+
+    #[test]
+    fn preview_reports_a_feed_that_reassembles() {
+        let p = qr_feed_preview(&body(4096), &EmitPolicy::default(), None).expect("preview");
+        assert_eq!(p.frames_rejected, 0);
+        assert!(p.planned_drops <= p.ceiling_drops);
+        assert_eq!(
+            p.burst_len,
+            usize::try_from(p.planned_drops.min(32)).unwrap()
+        );
+        assert!(p.png_len > 0);
+        assert!(p.drop_wire_len <= usize::from(MAX_DROP_WIRE));
+    }
+
+    #[test]
+    fn ceilings_refuse_before_anything_is_paid_for() {
+        let big = body(MAX_PREVIEW_CONTENT_BYTES + 1);
+        assert!(matches!(
+            qr_feed_preview(&big, &EmitPolicy::default(), None),
+            Err(EmitError::TooLarge { .. })
+        ));
+        let tiny_policy = EmitPolicy {
+            block_len: 4095,
+            ..EmitPolicy::default()
+        };
+        assert!(matches!(
+            qr_feed_preview(&body(4096), &tiny_policy, None),
+            Err(EmitError::QrOverflow { .. }) | Err(EmitError::WireTooLarge { .. })
+        ));
+        assert!(matches!(
+            qr_feed_preview(&[], &EmitPolicy::default(), None),
+            Err(EmitError::Empty)
+        ));
+    }
+
+    #[test]
+    fn a_sealed_feed_still_opens_to_the_packed_body() {
+        let policy = EmitPolicy {
+            seal_seed: Some([7u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let p = qr_feed_preview(&body(2048), &policy, None).expect("sealed preview");
+        assert!(!p.packed_is_zlib || p.packed_len > 0);
+    }
+
+    #[test]
+    fn a_burst_reemits_the_frames_the_pipe_produced() {
+        let content = body(6000);
+        let policy = EmitPolicy::default();
+        let (burst, fold) = qr_feed_frames_burst(&content, &policy, 0, 2).expect("burst");
+        assert_eq!(burst.len(), 2);
+        assert_ne!(fold, [0u8; 32]);
+        assert!(matches!(
+            qr_feed_frames_burst(&content, &policy, 0, policy.max_burst_frames + 1),
+            Err(EmitError::BurstTooWide { .. })
+        ));
+        assert!(matches!(
+            qr_feed_frames_burst(&content, &policy, 10_000, 1),
+            Err(EmitError::FrameOutOfRange { .. })
+        ));
+    }
+}

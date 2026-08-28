@@ -1,8 +1,9 @@
 //! A9 - Three pipe step / frame meter (plan §CH A9).
 //!
-//! WIRING: unwired - staged 3.0 accounting; it binds to the reveal-session
-//! encode loop, which is not in production until the emit path lands
-//! (plan §A9).
+//! WIRING: charged by `storage::emit::qr_feed_preview`, which spends this
+//! meter against the drop bound of a request before it transforms, packs or
+//! carousels anything, so an over-budget body is refused rather than encoded and
+//! then rejected.
 //!
 //! Catalogue generators already meter `step_budget`. The content-QR pipe needs
 //! its own counters so a reveal session cannot free-ride unbounded encode.
@@ -80,40 +81,44 @@ impl ThreeMeter {
         Ok(())
     }
 
+    /// Record one pack.
     /// # Errors
     ///
-    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
-    /// Record one pack.
+    /// Propagates `MeterError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn record_pack(&mut self) -> Result<(), MeterError> {
         self.charge(1)?;
         self.packs = self.packs.saturating_add(1);
         Ok(())
     }
 
+    /// Record `n` drops.
     /// # Errors
     ///
-    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
-    /// Record `n` drops.
+    /// Propagates `MeterError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn record_drops(&mut self, n: u64) -> Result<(), MeterError> {
         self.charge(n)?;
         self.drops = self.drops.saturating_add(n);
         Ok(())
     }
 
+    /// Record `n` frames.
     /// # Errors
     ///
-    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
-    /// Record `n` frames.
+    /// Propagates `MeterError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn record_frames(&mut self, n: u64) -> Result<(), MeterError> {
         self.charge(n.saturating_mul(2))?;
         self.frames = self.frames.saturating_add(n);
         Ok(())
     }
 
+    /// Record one seal/open.
     /// # Errors
     ///
-    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
-    /// Record one seal/open.
+    /// Propagates `MeterError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn record_seal(&mut self) -> Result<(), MeterError> {
         self.charge(4)?;
         self.seals = self.seals.saturating_add(1);

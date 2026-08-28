@@ -968,6 +968,58 @@ fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorO
     )?))
 }
 
+fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
+    serde_json::json!({
+        "contentId": format!("0x{}", hex::encode(feed.content_id.as_bytes())),
+        "providerCommitment": format!("0x{}", hex::encode(feed.provider_commitment)),
+        "packedLen": feed.packed_len,
+        "packedIsZlib": feed.packed_is_zlib,
+        "k": feed.k,
+        "preflightK": feed.preflight_k,
+        "plannedDrops": feed.planned_drops,
+        "ceilingDrops": feed.ceiling_drops,
+        "dropBound": feed.drop_bound,
+        "repairPermillage": feed.repair_permillage,
+        "repairMargin": feed.repair_margin,
+        "frameCount": feed.frame_count,
+        "dropWireLen": feed.drop_wire_len,
+        "streamCommitment": format!("0x{}", hex::encode(feed.stream_commitment)),
+        "streamPrefix": feed.stream_prefix,
+        "feedId": format!("0x{}", hex::encode(feed.feed_id)),
+        "videoCommitment": format!("0x{}", hex::encode(feed.video_commitment)),
+        "recipeCommitment": format!("0x{}", hex::encode(feed.recipe_commitment)),
+        "burstLen": feed.burst_len,
+        "burstFold": format!("0x{}", hex::encode(feed.burst_fold)),
+        "framesAccepted": feed.frames_accepted,
+        "framesRejected": feed.frames_rejected,
+        "meterWeight": feed.meter_weight,
+        "rasterModules": feed.raster_modules,
+        "rasterSide": feed.raster_side,
+        "pngLen": feed.png_len,
+        "ecLevel": feed.ec_level,
+        "codecAllowed": feed.codec_allowed,
+        "videoBlobKind": format!("{:?}", feed.video_blob_kind),
+        "seedIsPublic": feed.seed_is_public,
+        "regeneratedLen": feed.regenerated_len,
+    })
+}
+
+/// A refused emit is the caller's arithmetic, not the node's, unless a stage
+/// below this one is what said no: an out-of-bounds request is a bad param and
+/// everything else is a server-side refusal the caller cannot fix by resending
+/// the same body.
+fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
+    let code = match &e {
+        crate::storage::emit::EmitError::Empty
+        | crate::storage::emit::EmitError::TooLarge { .. }
+        | crate::storage::emit::EmitError::BurstTooWide { .. }
+        | crate::storage::emit::EmitError::FrameOutOfRange { .. }
+        | crate::storage::emit::EmitError::Edition(_) => -32602,
+        _ => -32000,
+    };
+    ErrorObjectOwned::owned(code, format!("qr feed: {e}"), None::<()>)
+}
+
 fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
     serde_json::json!({
         "dealId": deal.deal_id,
@@ -1962,6 +2014,51 @@ impl BudlumApiServer for RpcServer {
                 "n": manifest.erasure.n,
             },
             "totalSize": manifest.total_size,
+        }))
+    }
+
+    async fn storage_qr_feed_preview(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        manifest: Option<crate::storage::ContentManifest>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        let data = hex::decode(hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
+        })?;
+        let policy = crate::storage::emit::EmitPolicy {
+            block_len,
+            ..crate::storage::emit::EmitPolicy::default()
+        };
+        let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
+            .map_err(emit_reject)?;
+        Ok(qr_feed_json(&feed))
+    }
+
+    async fn storage_qr_feed_frames(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        first_frame: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        let data = hex::decode(hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
+        })?;
+        let policy = crate::storage::emit::EmitPolicy {
+            block_len,
+            ..crate::storage::emit::EmitPolicy::default()
+        };
+        let (frames, fold) =
+            crate::storage::emit::qr_feed_frames_burst(&data, &policy, first_frame, count)
+                .map_err(emit_reject)?;
+        Ok(serde_json::json!({
+            "firstFrame": first_frame,
+            "count": frames.len(),
+            "fold": format!("0x{}", hex::encode(fold)),
+            "frames": frames.iter().map(hex::encode).collect::<Vec<String>>(),
         }))
     }
 

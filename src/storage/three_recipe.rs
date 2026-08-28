@@ -1,7 +1,10 @@
 //! B.U.D. 3.0 - the recipe that **produces the QR-video**.
 //!
-//! WIRING: unwired - staged 3.0 core; the production caller is the reveal
-//! session's emit path (plan §A5), wired at the final integration step.
+//! WIRING: `storage::emit::qr_feed_preview` writes a recipe over the feed it
+//! just encoded, seals it, and `qr_feed_frames_burst` serves frames through
+//! `frame_stream` / `reemit` rather than holding a video. What is still ahead
+//! of that is the reveal session's own encode loop (plan §A5), which has to
+//! adopt the same recipe path to stop producing videos it then throws away.
 //!
 //! # What this module is
 //!
@@ -458,7 +461,7 @@ impl RecipeCore {
 /// This is the single production path: both the first encode at upload and the
 /// re-emit from a recipe run through here, which is what makes the two
 /// bit-equal. The frame stream in [`VideoFrameStream`] shares the same
-/// [`RecipeCore`], so a streamed frame and a re-emitted frame cannot drift.
+/// `RecipeCore`, so a streamed frame and a re-emitted frame cannot drift.
 ///
 /// # Errors
 ///
@@ -488,7 +491,7 @@ pub fn encode_qr_video_internal(
 
 /// Frames of one produced video, handed over one at a time.
 ///
-/// Opening does the shared work once; each [`next`](Self::next) is a single
+/// Opening does the shared work once; each [`next_frame`](Self::next_frame) is a single
 /// QR matrix and a single PNG, independent of the others. This is what makes
 /// "fast open, then progressive" real instead of a claim.
 pub struct VideoFrameStream {
