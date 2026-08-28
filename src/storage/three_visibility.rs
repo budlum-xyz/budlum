@@ -10,9 +10,10 @@ use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
 use crate::storage::view_grant::ViewPolicy;
 
 /// Product default at upload time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UploadVisibility {
     /// V0 — sealed recipe; only owner keystore opens.
+    #[default]
     SealedOwner,
     /// V1 — will attach NamedGrantee grants after upload.
     Restricted,
@@ -20,11 +21,7 @@ pub enum UploadVisibility {
     Public,
 }
 
-impl Default for UploadVisibility {
-    fn default() -> Self {
-        Self::SealedOwner
-    }
-}
+
 
 /// Build on-chain recipe form from the full public pipe recipe.
 #[must_use]

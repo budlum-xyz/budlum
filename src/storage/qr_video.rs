@@ -187,7 +187,7 @@ fn u32_le(b: &[u8], off: usize) -> Result<u32, QrVideoError> {
 
 /// Decode one QR PNG back to optical frame bytes via rqrr.
 pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrVideoError> {
-    let (w, h, grey) = decode_png_grey(png).map_err(|e| QrVideoError::Decode(e))?;
+    let (w, h, grey) = decode_png_grey(png).map_err(QrVideoError::Decode)?;
     // rqrr wants a flat grid; use PreparedImage
     let mut img = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| {
         grey.get(y * w + x).copied().unwrap_or(255)
