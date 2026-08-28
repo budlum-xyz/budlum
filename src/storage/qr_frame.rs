@@ -322,6 +322,10 @@ mod tests {
             assert!(header < max_drop_wire);
             assert!(frame_header >= 18);
         }
-        check(DROP_HEADER_LEN, usize::from(MAX_DROP_WIRE), THREE_FRAME_HEADER_LEN);
+        check(
+            DROP_HEADER_LEN,
+            usize::from(MAX_DROP_WIRE),
+            THREE_FRAME_HEADER_LEN,
+        );
     }
 }
