@@ -116,7 +116,7 @@ pub fn run(root: &Path) -> Result<String, String> {
              id proves nothing; the id claim becomes decoration.",
         ));
     }
-        let unmetered = find_unmetered(&code);
+    let unmetered = find_unmetered(&code);
     if !unmetered.is_empty() {
         return Err(format!(
             "generators that never charge the meter: {}\n  \
