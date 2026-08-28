@@ -197,6 +197,10 @@ pub struct FeedPreview {
     /// The class the recipe's pinned transform forced the body into, reported so
     /// a client opens the feed the way the recipe meant it to be opened.
     pub recipe_class: String,
+    /// Whether A4's independent frame stream was measured against the published
+    /// frames. `false` means the feed is sealed and the measurement is not
+    /// available to anyone holding the public recipe.
+    pub a4_agreement: bool,
 }
 
 /// Errors from the emit path.
@@ -695,6 +699,15 @@ pub fn qr_feed_preview(
         meter.record_seal()?;
     }
     let key = policy.seal_seed.map(|seed| PayloadKey::derive(&seed));
+    // The pipe writes the pacing it pins, not the pacing a caller asks for, so a
+    // policy naming any other rate is refused here rather than reported wrongly
+    // by the preview below.
+    if policy.fps != DEFAULT_FPS {
+        return Err(EmitError::PlanMismatch {
+            planned: u32::from(DEFAULT_FPS),
+            actual: u32::from(policy.fps),
+        });
+    }
     let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
     let pipe = &encoded.pipe;
     // The carousel locks `k` over the packed container, so that is what the
@@ -1041,27 +1054,38 @@ pub fn qr_feed_preview(
     // A4 is a second and independent producer of the same frames: it walks the
     // recipe alone and never sees the carousel. Its frames must be the ones
     // being published, otherwise the feed answers "what is frame zero" twice.
-    let mut stream = recipe.frame_stream(content)?;
-    if stream.len() != actual {
-        return Err(EmitError::PlanMismatch {
-            planned: stream.len(),
-            actual,
-        });
-    }
-    let gez = want.min(actual).min(3);
-    let mut alinan = 0u32;
-    while alinan < gez {
-        let kare = stream.next_frame()?.ok_or(EmitError::DecodePathMismatch)?;
-        if video3.png_frames.get(alinan as usize).map(Vec::as_slice) != Some(kare.as_slice()) {
-            return Err(EmitError::DecodePathMismatch);
+    //
+    // A sealed feed is not measured this way, and the reason is structural: the
+    // A1 layer of a sealed feed is ciphertext whose key lives in `seal_seed`,
+    // which a recipe deliberately does not carry. Asking A4 to reproduce frame
+    // counts from plaintext it cannot pack is not a check, it is a false
+    // accusation (measured: a sealed feed reported 3 frames against 13). So the
+    // agreement is skipped there and reported as skipped, not passed.
+    let mut a4_agreement = false;
+    if kind != PayloadKind::EncryptedContent {
+        let mut stream = recipe.frame_stream(content)?;
+        if stream.len() != actual {
+            return Err(EmitError::PlanMismatch {
+                planned: stream.len(),
+                actual,
+            });
         }
-        alinan += 1;
-    }
-    if stream.remaining() != actual - alinan || (actual == alinan) != stream.is_empty() {
-        return Err(EmitError::PlanMismatch {
-            planned: actual,
-            actual: alinan,
-        });
+        let gez = want.min(actual).min(3);
+        let mut alinan = 0u32;
+        while alinan < gez {
+            let kare = stream.next_frame()?.ok_or(EmitError::DecodePathMismatch)?;
+            if video3.png_frames.get(alinan as usize).map(Vec::as_slice) != Some(kare.as_slice()) {
+                return Err(EmitError::DecodePathMismatch);
+            }
+            alinan += 1;
+        }
+        if stream.remaining() != actual - alinan || (actual == alinan) != stream.is_empty() {
+            return Err(EmitError::PlanMismatch {
+                planned: actual,
+                actual: alinan,
+            });
+        }
+        a4_agreement = true;
     }
     // Which class the recipe's pinned transform forces: a client decides how to
     // open the feed from this, and the answer must come from the recipe rather
@@ -1105,6 +1129,7 @@ pub fn qr_feed_preview(
         decoded_body_len,
         video_body_len,
         recipe_class,
+        a4_agreement,
     })
 }
 
@@ -1205,6 +1230,13 @@ mod tests {
         };
         let p = qr_feed_preview(&body(2048), &policy, None).expect("sealed preview");
         assert!(!p.packed_is_zlib || p.packed_len > 0);
+        // The A4 agreement is not measured across a seal, and the preview says
+        // so rather than reporting a check it never ran.
+        assert!(!p.a4_agreement);
+        let acik =
+            qr_feed_preview(&body(2048), &EmitPolicy::default(), None).expect("plain preview");
+        assert!(acik.a4_agreement);
+        assert_eq!(acik.recipe_class, p.recipe_class);
     }
 
     #[test]

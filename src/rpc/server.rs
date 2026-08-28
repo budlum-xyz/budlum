@@ -1006,6 +1006,7 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
         "decodedBodyLen": feed.decoded_body_len,
         "videoBodyLen": feed.video_body_len,
         "recipeClass": feed.recipe_class,
+        "a4Agreement": feed.a4_agreement,
     })
 }
 
