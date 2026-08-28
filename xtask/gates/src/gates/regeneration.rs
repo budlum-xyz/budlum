@@ -358,13 +358,7 @@ fn regenerate_private_transfer_check_program() -> Vec<u64> {
     let mut prog = Vec::with_capacity(12);
     prog.push(encode_instruction(OP_LOAD, 1, 0, 0, PT_AMOUNT));
     prog.push(encode_instruction(OP_LOAD, 2, 0, 0, PT_BLINDING));
-    prog.push(encode_instruction(
-        OP_PRIVACY_COMMIT,
-        4,
-        1,
-        2,
-        PT_RECIPIENT,
-    ));
+    prog.push(encode_instruction(OP_PRIVACY_COMMIT, 4, 1, 2, PT_RECIPIENT));
     prog.push(encode_instruction(OP_LOAD, 5, 0, 0, PT_SUM_IN));
     prog.push(encode_instruction(OP_LOAD, 6, 0, 0, PT_SUM_OUT));
     prog.push(encode_instruction(OP_SUM_CONSERVATION, 7, 5, 6, 0));
@@ -1024,7 +1018,10 @@ mod tests {
         // challenge: a second reproduction must give the same stream.
         let a = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
         let b = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
-        assert_eq!(a, b, "the second reproduction must be the same (idempotence)");
+        assert_eq!(
+            a, b,
+            "the second reproduction must be the same (idempotence)"
+        );
     }
 
     #[test]
@@ -1039,7 +1036,11 @@ mod tests {
         assert_eq!(l.output_base, 19 + 2 * GUEST_MAX_MLP_WIDTH);
         let prog = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
         // 11 (prologue) + 45 (hidden layer 2x3) + 32 (final layer 3x2) + 2 (Log, Halt)
-        assert_eq!(prog.len(), 90, "the reproduced stream length must match the estimate");
+        assert_eq!(
+            prog.len(),
+            90,
+            "the reproduced stream length must match the estimate"
+        );
     }
 
     #[test]
