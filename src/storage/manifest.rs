@@ -526,7 +526,7 @@ impl ContentManifest {
     /// Declare the B.U.D. edition. Recomputes the id when the edition binds
     /// bytes (`Three`); `Classic` is a no-op on the preimage.
     ///
-    /// Does not check source compatibility — that is
+    /// Does not check source compatibility - that is
     /// [`BudStorageEdition::check_source`] at registration time.
     #[must_use]
     pub fn with_edition(mut self, edition: crate::storage::generated::BudStorageEdition) -> Self {
@@ -901,7 +901,7 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// bytes it pulled were never protected.
 #[must_use]
 /// Registration provenance grouped so the id preimage stays a single call:
-/// source, dictionary binding and edition are one concept — where the bytes
+/// source, dictionary binding and edition are one concept - where the bytes
 /// came from and under which claim they are registered.
 #[derive(Debug, Clone, Copy)]
 pub struct ManifestProvenance<'a> {

@@ -1,4 +1,4 @@
-//! G3 — reveal session (plan §CH G3).
+//! G3 - reveal session (plan §CH G3).
 //!
 //! After `may_view` / `may_open_three_recipe` succeeds, a short-lived session
 //! may re-emit frames **in memory**. Nothing is written to durable storage.
@@ -52,10 +52,10 @@ pub struct RevealSession {
 impl RevealSession {
     /// Open a session.
     ///
-    /// * `recipe` — public or sealed form.
-    /// * `full` — required when recipe is sealed (the opening).
-    /// * `packed` — A1 bytes whose commitment the public recipe pins.
-    /// * `grant_allows` — result of the caller's `may_view` check.
+    /// * `recipe` - public or sealed form.
+    /// * `full` - required when recipe is sealed (the opening).
+    /// * `packed` - A1 bytes whose commitment the public recipe pins.
+    /// * `grant_allows` - result of the caller's `may_view` check.
     ///
     /// # Errors
     ///

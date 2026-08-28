@@ -159,11 +159,18 @@ pub fn open_payload(key: &PayloadKey, sealed: &[u8]) -> Result<Vec<u8>, SealErro
 #[must_use]
 pub fn derived_nonce(context: &[u8]) -> [u8; SEALED_NONCE_LEN] {
     let h = hash_fields_bytes(&[b"BDLM_THREE_SEAL_NONCE_V1", context]);
-    let mut n = [0u8; SEALED_NONCE_LEN];
-    n[..16].copy_from_slice(&h[..16]);
+    // `split_at` on the 32-byte digest cannot reach out of range, so the two
+    // halves are taken without an index; the zip below is the measurement that
+    // `SEALED_NONCE_LEN` is exactly 16 + 8, and a longer nonce would stay zero
+    // in the tail rather than read past the digest.
+    let (head, _) = h.split_at(16);
     // stretch with a second block half
     let h2 = hash_fields_bytes(&[b"BDLM_THREE_SEAL_NONCE2_V1", context]);
-    n[16..24].copy_from_slice(&h2[..8]);
+    let (tail, _) = h2.split_at(SEALED_NONCE_LEN - 16);
+    let mut n = [0u8; SEALED_NONCE_LEN];
+    for (slot, byte) in n.iter_mut().zip(head.iter().chain(tail)) {
+        *slot = *byte;
+    }
     n
 }
 

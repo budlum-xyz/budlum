@@ -1,4 +1,4 @@
-//! A9 — Three pipe step / frame meter (plan §CH A9).
+//! A9 - Three pipe step / frame meter (plan §CH A9).
 //!
 //! WIRING: unwired - staged 3.0 accounting; it binds to the reveal-session
 //! encode loop, which is not in production until the emit path lands
@@ -6,7 +6,7 @@
 //!
 //! Catalogue generators already meter `step_budget`. The content-QR pipe needs
 //! its own counters so a reveal session cannot free-ride unbounded encode.
-//! This is an **accounting shape**, not a fee market — pricing tables stay
+//! This is an **accounting shape**, not a fee market - pricing tables stay
 //! with tokenomics.
 
 /// Work units charged for pipe operations.

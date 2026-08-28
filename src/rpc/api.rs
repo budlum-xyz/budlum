@@ -340,7 +340,7 @@ pub trait BudlumApi {
     /// Optional node-side encode path: re-encode `data` under the scheme the
     /// client-built `manifest` claims and refuse a mismatch. Costly; the
     /// client-built register path remains the default. Three/Generated has no
-    /// body to re-encode — callers should not send one.
+    /// body to re-encode - callers should not send one.
     #[method(name = "bud_storageVerifyEncoding")]
     async fn storage_verify_encoding(
         &self,

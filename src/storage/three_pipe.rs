@@ -118,7 +118,7 @@ impl EncodedPipe {
     }
 }
 
-/// Encode plaintext (optionally sealed) through A0–A3/A5.
+/// Encode plaintext (optionally sealed) through A0-A3/A5.
 ///
 /// # Errors
 ///

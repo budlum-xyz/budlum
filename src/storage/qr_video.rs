@@ -1,9 +1,9 @@
-//! Three **QR-video** container (plan §CI A4 kök).
+//! Three **QR-video** container (plan CI A4 root).
 //!
 //! In-tree lab container `BDLV`: ordered deterministic QR-PNG frames bound to a
 //! stream commitment. This **is** the QR-video object the recipe re-emits.
 //! H.264/VP9 remain optional external channels behind [`crate::storage::qr_codec`];
-//! they are not required for the product claim "tarif → QR video → içerik".
+//! they are not required for the product claim "recipe -> QR video -> content".
 //!
 //! # Wire
 //!
@@ -284,7 +284,7 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
 }
 
 fn inflate_zlib_stored(z: &[u8]) -> Result<Vec<u8>, String> {
-    // Our encoder writes zlib stored only — parse that; also accept flate2 for safety.
+    // Our encoder writes zlib stored only - parse that; also accept flate2 for safety.
     use flate2::read::ZlibDecoder;
     use std::io::Read;
     let mut d = ZlibDecoder::new(z);
@@ -303,9 +303,9 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Altın vektör: tek karelik BDLV blobunun başlığı ve tam sha256'sı.
-    /// Kare modülleri artık bizim sabit-maskeli qr_encode'umuzdan geliyor;
-    /// bu vektör kodlayıcının ve mux'ın bayt düzeyindeki davranışını çiviler.
+    /// Golden vector: the header of a single-frame BDLV blob and its full sha256.
+    /// Frame modules now come from our fixed-mask qr_encode, so
+    /// this vector pins the byte-level behaviour of the encoder and the mux.
     #[test]
     fn video_wire_matches_the_golden_vectors() {
         let pc = [

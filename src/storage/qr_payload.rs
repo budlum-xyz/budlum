@@ -12,7 +12,7 @@
 //!
 //! # What this module does not claim
 //!
-//! - It does not encode QR video yet (A2–A4).
+//! - It does not encode QR video yet (A2-A4).
 //! - It does not write a full content QR recipe (A5).
 //! - Decimen source is not copied (AGPL); only the measured rule we already
 //!   pinned: try zlib only when it shrinks; never claim QR as storage.
@@ -35,7 +35,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{Read, Write};
 
-/// Wire magic: "BDL3" — B.U.D. edition Three payload, not a storage blob id.
+/// Wire magic: "BDL3" - B.U.D. edition Three payload, not a storage blob id.
 pub const THREE_PAYLOAD_MAGIC: [u8; 4] = *b"BDL3";
 /// Current header version. Unknown versions refuse on unpack.
 pub const THREE_PAYLOAD_VERSION: u8 = 1;
@@ -46,7 +46,7 @@ pub const FLAG_ZLIB: u8 = 1 << 0;
 pub const THREE_PAYLOAD_HEADER_LEN: usize = 4 + 1 + 1 + 1 + 8 + 32;
 
 /// Hard cap for a single payload pack in this process (not a network consensus
-/// limit — that lands with domain params later). 64 MiB keeps lab tests honest
+/// limit - that lands with domain params later). 64 MiB keeps lab tests honest
 /// without letting one pack exhaust a 2 GB sandbox.
 pub const MAX_PAYLOAD_CONTENT: usize = 64 * 1024 * 1024;
 
@@ -56,7 +56,7 @@ pub const MAX_PAYLOAD_CONTENT: usize = 64 * 1024 * 1024;
 pub enum PayloadKind {
     /// Opaque transformed content bytes (2.0 pipe output).
     ContentBytes = 1,
-    /// A public generative recipe wire (catalogue path) — not the main invent.
+    /// A public generative recipe wire (catalogue path) - not the main invent.
     PublicRecipeWire = 2,
     /// Ciphertext of content bytes (privacy G1). Body is encrypted; the committed
     /// sha256 is of the bytes the caller passed (typically the ciphertext).
@@ -85,7 +85,7 @@ impl PayloadKind {
 /// Errors packing or unpacking a three payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayloadError {
-    /// Empty content is refused — a zero-length payload is not a valid 3.0 unit.
+    /// Empty content is refused - a zero-length payload is not a valid 3.0 unit.
     Empty,
     /// Content or declared `orig_len` exceeds [`MAX_PAYLOAD_CONTENT`].
     TooLarge {
@@ -260,9 +260,9 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Altın vektör: sabit bir gövde için tel baytlarının birebir dökümü.
-    /// Vektör commit anındaki kodlayıcı çıktısından üretildi; tel düzenine
-    /// dokunan her değişiklik bu testi bilinçli güncelleme olmadan kırar.
+    /// Golden vector: the exact wire byte dump for a fixed body.
+    /// Produced from the encoder output at commit time; any change to the wire layout
+    /// breaks this test unless it is updated deliberately.
     #[test]
     fn wire_bytes_match_the_golden_vector() {
         let packed = pack_payload(PayloadKind::ContentBytes, b"Budlum vektor 3.").unwrap();

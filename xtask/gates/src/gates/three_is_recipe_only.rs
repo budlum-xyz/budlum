@@ -1,7 +1,7 @@
 //! BUD edition Three is recipe-only: no body, no deal, sealed or public recipe.
 //!
 //! Hardens the product claim: 3.0 means tarif. Bodies are Classic/2.0. A public
-//! seed is the "herkese açık" surface; SealedGenerated is the private surface
+//! seed is the public surface; SealedGenerated is the private surface
 //! (seed off-chain under view-grants). Opening a deal on Three is refused.
 
 use std::path::Path;
@@ -33,7 +33,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if !gen.contains("SealedGenerated") {
         return Err(
-            "SealedGenerated source missing — private Three recipes need sealed form".into(),
+            "SealedGenerated source missing - private Three recipes need sealed form".into(),
         );
     }
     if !gen.contains("struct SealedGeneratedSpec") {
@@ -41,7 +41,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if !gen.contains("recipe_seed_is_public") {
         return Err(
-            "recipe_seed_is_public missing — must distinguish public vs sealed seed".into(),
+            "recipe_seed_is_public missing - must distinguish public vs sealed seed".into(),
         );
     }
     // Three check_source must allow SealedGenerated
@@ -52,7 +52,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     // open_deal must refuse Three
     if !deal_code.contains("admits_body()") {
-        return Err("open_deal must call admits_body() — Three must not open storage deals".into());
+        return Err("open_deal must call admits_body() - Three must not open storage deals".into());
     }
     if !deal.contains("Three admits no storage deal") && !deal.contains("admits no storage deal") {
         return Err("open_deal must state Three admits no storage deal".into());

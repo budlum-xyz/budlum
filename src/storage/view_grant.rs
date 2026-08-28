@@ -5,7 +5,7 @@
 //! - **B.U.D. 3.0 (Three / R1):** the durable object is a recipe. A view-key
 //!   unlocks *production* (or decryption of an encrypted recipe blob), not a
 //!   stored body. QR frames stay derivative-only.
-//! - **B.U.D. 2.0 (Classic body / R2–R3 cost regimes):** the durable object is
+//! - **B.U.D. 2.0 (Classic body / R2-R3 cost regimes):** the durable object is
 //!   held bytes. Privacy is **client-side encryption**
 //!   ([`crate::storage::ContentEncryption::ClientSide`]) plus this grant layer
 //!   for key delivery. Operators hold ciphertext; they do not hold the key.
@@ -19,7 +19,7 @@
 //!
 //! A grant is an on-chain record: `(content, grantee, key_id, policy)` with an
 //! open epoch and optional revoke epoch. The **key material is never stored
-//! here** — putting a key in a public commitment publishes the key. Delivery
+//! here** - putting a key in a public commitment publishes the key. Delivery
 //! is out of band (DM, device keystore, sealed channel). This registry only
 //! answers: "does grantee G still have permission to use key_id K on content C?"
 //!
@@ -38,7 +38,7 @@
 //!   the chip vendor + side-channel history (SGX breaks are real). Our
 //!   `tee_attestation` module signs quotes; vendor chain verify is unwired
 //!   (no trust root).
-//! - **Hybrid (industry default 2025–26):** chain holds commitments + grants;
+//! - **Hybrid (industry default 2025-26):** chain holds commitments + grants;
 //!   ZK for public verifiability of proofs; TEE optional for private compute.
 //!   Validity of a proof ≠ authorization to view (Aleo/snarkVM lesson).
 

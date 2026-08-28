@@ -190,7 +190,7 @@ pub fn frame_digest(stream_commitment: &[u8; 32], seq: u32, drop_wire: &[u8]) ->
 ///
 /// # Errors
 ///
-/// Empty `frame_digests` is refused — a zero-frame stream is not an address.
+/// Empty `frame_digests` is refused - a zero-frame stream is not an address.
 pub fn fold_frame_digests(frame_digests: &[[u8; 4]]) -> Result<[u8; 32], FrameError> {
     if frame_digests.is_empty() {
         return Err(FrameError::Truncated);

@@ -99,7 +99,7 @@ use crate::storage::fixed_point::{
 /// **Three (edition three)** is recipe-only. The durable object on the network is a
 /// generative recipe; QR-video and other presentations are derivatives and are
 /// not stored. A validator unplugging cannot "lose the file" because there is
-/// no file body to lose — only a recipe everyone can re-run. Bodies are not
+/// no file body to lose - only a recipe everyone can re-run. Bodies are not
 /// banned from the project; they are banned from *this* edition.
 ///
 /// The default is `Classic` so every manifest written before this field keeps
@@ -177,16 +177,16 @@ pub enum ContentSource {
     /// running it, checked against `manifest_id` before it is handed back.
     ///
     /// **Public recipe.** The seed is on chain; anyone who reads the manifest
-    /// can regenerate. That is the "herkese açık" Three surface.
+    /// can regenerate. That is the publicly readable Three surface.
     Generated(GeneratedSpec),
     /// Three private recipe: the network holds a **commitment** to the full
     /// `GeneratedSpec`, not the seed.
     ///
-    /// Anyone who sees the chain learns generator class, length and budget —
-    /// enough to meter and refuse DoS — but cannot regenerate the object
+    /// Anyone who sees the chain learns generator class, length and budget -
+    /// enough to meter and refuse DoS - but cannot regenerate the object
     /// without the seed. The seed is delivered off-chain under a view-grant
     /// (`ViewGrantRegistry`). Putting the seed on a public chain under Three
-    /// would make "gizli" a lie (threat T1).
+    /// would make the "private" label a lie (threat T1).
     ///
     /// Registration does **not** run the recipe (no seed). Reveal-time
     /// `generate_and_verify` with the granted seed is the check that the

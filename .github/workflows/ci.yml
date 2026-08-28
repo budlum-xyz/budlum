@@ -37,6 +37,12 @@ jobs:
           shared-key: budlum-core
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Format (kani proof harnesses)
+        # kani/ is not a member of the root workspace, so the step above never
+        # walks it: two drift hunks sat in kani/src/lib.rs while the root fmt
+        # step stayed green. Measured 2026-08-28 and pinned here so the gap
+        # cannot reopen.
+        run: cargo fmt --manifest-path kani/Cargo.toml --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy pedantic/nursery ratchet (izleme modu)

@@ -527,7 +527,7 @@ pub enum ReallocationStatus {
 /// and the ticket names the deal that failed. `NeverPlaced` is the bootstrap
 /// path: the manifest lists a shard, the repair band sees zero live replicas,
 /// and no deal has ever been opened for that shard. The two are not the same
-/// obligation — one replaces a holder, the other places the first one — so the
+/// obligation - one replaces a holder, the other places the first one - so the
 /// cause is part of the ticket, not a comment next to a zeroed deal id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReallocationCause {
@@ -2678,7 +2678,7 @@ impl StorageRegistry {
     /// forever under a warning that looks like progress.
     ///
     /// Dedup key is `(manifest_id, shard_id, replica_index)` among pending /
-    /// under-replicated never-placed tickets — the same slot must not pay two
+    /// under-replicated never-placed tickets - the same slot must not pay two
     /// operators for the first copy. `failed_deal_id` is 0 and is not a lookup
     /// key for this cause.
     ///

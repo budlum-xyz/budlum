@@ -1,4 +1,4 @@
-//! T4 / CH.4 — Three derivatives are not durable storage.
+//! T4 / CH.4 - Three derivatives are not durable storage.
 //!
 //! WIRING: unwired - staged 3.0 guard; no production write path accepts a
 //! Three derivative yet, so there is nothing to intercept until the emit
@@ -22,7 +22,7 @@ pub enum ThreeBlobKind {
     OpticalFrame,
     /// A4 raw frame concat (`BDLR`).
     RawConcat,
-    /// A4 QR-video container (`BDLV`) — recipe holds the pin; blob is derivative.
+    /// A4 QR-video container (`BDLV`) - recipe holds the pin; blob is derivative.
     QrVideo,
     /// Unknown / not a Three transport magic.
     Other,
@@ -31,19 +31,19 @@ pub enum ThreeBlobKind {
 /// Classify a blob by magic (cheap prefix check).
 #[must_use]
 pub fn classify_three_blob(bytes: &[u8]) -> ThreeBlobKind {
-    if bytes.len() >= 4 && bytes[0..4] == *b"BDL3" {
+    if bytes.starts_with(b"BDL3") {
         return ThreeBlobKind::PackedPayload;
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"BDLD" {
+    if bytes.starts_with(b"BDLD") {
         return ThreeBlobKind::CarouselDrop;
     }
-    if bytes.len() >= 2 && bytes[0] == 0xBD && bytes[1] == 0x3A {
+    if bytes.starts_with(&[0xBD, 0x3A]) {
         return ThreeBlobKind::OpticalFrame;
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"BDLR" {
+    if bytes.starts_with(b"BDLR") {
         return ThreeBlobKind::RawConcat;
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"BDLV" {
+    if bytes.starts_with(b"BDLV") {
         return ThreeBlobKind::QrVideo;
     }
     ThreeBlobKind::Other
@@ -123,7 +123,7 @@ mod tests {
             }
             kept.push(fr.clone());
         }
-        // may need full set under high loss — feed a second pass of survivors
+        // may need full set under high loss - feed a second pass of survivors
         // by also taking repair half if first incomplete
         let result = decode_frames(&enc.stream_commitment, &kept);
         if let Ok((kind, raw)) = result {

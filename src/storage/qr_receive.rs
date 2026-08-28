@@ -110,7 +110,7 @@ impl ProgressiveReceiver {
         let body_tag = fnv1a32_local(&drop.body);
         if let Some(prev) = self.seen.get(&drop.seq) {
             if *prev == body_tag {
-                // exact duplicate — ignore
+                // exact duplicate - ignore
                 return Ok(());
             }
             // conflict: drop both (do not push)
@@ -140,7 +140,7 @@ impl ProgressiveReceiver {
     /// K-QR-KARUSEL: systematic scan makes this climb early under low loss.
     #[must_use]
     pub fn solid_prefix_blocks(&self) -> usize {
-        // CarouselDecoder does not expose solved directly — use finish attempt
+        // CarouselDecoder does not expose solved directly - use finish attempt
         // on a clone only when complete; otherwise we need an accessor.
         // We added no public solved view; approximate via missing==0 full else 0
         // until we expose prefix. For real progressive, query decoder.

@@ -440,7 +440,7 @@ would bound total load directly and is the better long-term shape.
 2. **Gap 3** (erasure coding): **closed**: schema, coder, and verified
    reconstruction.
 3. **Gap 1** (real storage proof): blocked on `VerifyMerkle`.
-4. **Gap 4** (repair): **closed** — predicates, coder, and maintenance wiring landed; residual never-placed shard ticket type remains. Prior note was:
+4. **Gap 4** (repair): **closed** - predicates, coder, and maintenance wiring landed; residual never-placed shard ticket type remains. Prior note was:
    the deal lifecycle remains.
 5. **Gap 5** (bond calibration): measured; the range-proportional bond has
    landed, calibrating `OPENER_BOND_PER_KIB` and moving the rate limit to a

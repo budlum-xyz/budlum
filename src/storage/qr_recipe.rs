@@ -2,7 +2,7 @@
 //!
 //! Binds the A1 payload commitment, A2 carousel parameters, and the A3
 //! optical stream id so a holder of the recipe (public or sealed) can
-//! regenerate the same drop/frame sequence — or verify a stream — without
+//! regenerate the same drop/frame sequence - or verify a stream - without
 //! holding the body as storage.
 //!
 //! This is **not** the catalogue [`crate::storage::generated::GeneratedSpec`]
@@ -78,7 +78,7 @@ pub fn three_sealed_recipe_commitment(s: &ThreeRecipeSealed) -> [u8; 32] {
 }
 
 impl ThreeRecipePublic {
-    /// Build from pipe pieces after A1–A3.
+    /// Build from pipe pieces after A1-A3.
     #[must_use]
     pub fn new(
         payload_commitment: [u8; 32],
@@ -145,7 +145,7 @@ impl ThreeRecipe {
     }
 }
 
-/// G2 — may the actor open/re-emit a Three recipe right now?
+/// G2 - may the actor open/re-emit a Three recipe right now?
 ///
 /// - [`ThreeRecipe::Public`]: yes (V2).
 /// - [`ThreeRecipe::Sealed`]: only when `grant_allows` is true (caller already
@@ -161,8 +161,8 @@ pub fn may_open_three_recipe(recipe: &ThreeRecipe, grant_allows: bool) -> bool {
     }
 }
 
-// CarouselParams needs serde — check if it has derives; if not, add manually in tests only via fields.
-// We derived Serialize on CarouselParams? Check — we only have Debug Clone Copy PartialEq Eq.
+// CarouselParams needs serde - check if it has derives; if not, add manually in tests only via fields.
+// We derived Serialize on CarouselParams? Check - we only have Debug Clone Copy PartialEq Eq.
 // Fix: implement serde on CarouselParams in qr_carousel or store raw fields only.
 
 #[cfg(test)]

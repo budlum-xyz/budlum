@@ -5,7 +5,7 @@
 //! combination. The receiver peels degree-1 equations as they arrive and can
 //! finish with GF(2) elimination on the residual system.
 //!
-//! # Composition (şartname §3-yeni)
+//! # Composition (spec section 3-new)
 //!
 //! ```text
 //! pos = seq mod 2k
@@ -27,14 +27,14 @@
 use crate::core::hash::hash_fields_bytes;
 use sha2::{Digest, Sha256};
 
-/// Wire magic for a single carousel drop: "BDLD" — B.U.D. Layer Drop.
+/// Wire magic for a single carousel drop: "BDLD" - B.U.D. Layer Drop.
 pub const DROP_MAGIC: [u8; 4] = *b"BDLD";
 /// Drop header version.
 pub const DROP_VERSION: u8 = 1;
-/// Default source-block size used by the 3.0 lab measurements (şartname §6).
+/// Default source-block size used by the 3.0 lab measurements (spec section 6).
 pub const DEFAULT_BLOCK_LEN: u16 = 200;
 /// Hard ceiling on the number of source blocks in one carousel segment.
-/// Above this the caller must segment (şartname §13); elimination cost grows
+/// Above this the caller must segment (spec section 13); elimination cost grows
 /// with k² in the residual path.
 pub const MAX_K: u16 = 4096;
 /// Maximum original payload accepted by one carousel segment (not consensus).
@@ -378,8 +378,8 @@ impl CarouselEncoder {
 /// How many drops a fixed-length channel should carry for loss rate `p_milli`
 /// (loss probability in thousandths, e.g. 300 = 30%).
 ///
-/// Formula (şartname K-QR-FAZLALIK, carousel): `n ≥ k · T · 1.02` with
-/// `T ≥ 1/(1−p)`, floored as integer arithmetic in milli-units.
+/// Formula (spec K-QR-FAZLALIK, carousel): `n >= k * T * 1.02` with
+/// `T ≥ 1/(1-p)`, floored as integer arithmetic in milli-units.
 #[must_use]
 pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {
     let k = u32::from(k);
@@ -442,10 +442,10 @@ pub fn oneshot_drop_count(k: u16, p_milli: u32) -> u32 {
 ///
 /// Measured at k=101: a pure repair stream decoded 5/5 from `1.10k` frames and
 /// 3/5 from `1.05k`, and a 15% budget at 8% loss (about 7 spare) failed 1 trial
-/// in 12 — consistent with `2^-7`.
+/// in 12 - consistent with `2^-7`.
 ///
-/// * `p_milli` — expected frame loss, permillage.
-/// * `spare_frames` — reliability exponent: failure about `2^-spare_frames`.
+/// * `p_milli` - expected frame loss, permillage.
+/// * `spare_frames` - reliability exponent: failure about `2^-spare_frames`.
 #[must_use]
 pub fn repair_margin_for(k: u16, p_milli: u32, spare_frames: u32) -> u32 {
     let k = u32::from(k);
@@ -575,7 +575,7 @@ impl CarouselDecoder {
             }
         }
         if degree == 0 {
-            // Fully reduced — nothing new (or consistency check omitted).
+            // Fully reduced - nothing new (or consistency check omitted).
             return Ok(());
         }
         if self.solved.iter().all(Option::is_some) {
@@ -628,7 +628,7 @@ impl CarouselDecoder {
     ///
     /// This is the whole fountain decoder. The basis is kept in RREF
     /// incrementally, so `m` repair frames over `k` unknowns fail only when
-    /// the coefficient matrix is rank deficient — for random rows that is
+    /// the coefficient matrix is rank deficient - for random rows that is
     /// about `2^-(m-k)`, a sharp threshold rather than a tuned constant.
     ///
     /// The design this replaced rebuilt the basis from scratch on every frame
@@ -827,7 +827,7 @@ fn is_systematic_seq(seq: u32, k: u16) -> bool {
 /// Why not a soliton degree distribution: the peeling-friendly shapes only pay
 /// off when the receiver relies on peeling. This decoder runs Gauss-Jordan
 /// over the residuals, and for a random matrix the failure probability is
-/// about `2^-(m-k)` — a sharp, provable threshold instead of a distribution
+/// about `2^-(m-k)` - a sharp, provable threshold instead of a distribution
 /// tuned by measurement. It replaced a uniform degree over `4..=24`, which
 /// measured as decoration rather than a fountain: at k=101 with 8% frame loss
 /// and a 15% frame budget, all five trials came back incomplete.
@@ -844,7 +844,7 @@ fn repair_selection(seq: u32, k: u16) -> (u8, Vec<usize>) {
     // d uniform over 1..=k; k=1 means "this frame is one source block".
     let d = 1 + (rng.next_u32() as usize % k_usize);
     let mut chosen = Vec::with_capacity(d);
-    // Sample without replacement via partial Fisher–Yates on indices 0..k.
+    // Sample without replacement via partial Fisher-Yates on indices 0..k.
     let mut pool: Vec<usize> = (0..k_usize).collect();
     for i in 0..d {
         let remain = k_usize - i;
@@ -862,7 +862,7 @@ fn repair_selection(seq: u32, k: u16) -> (u8, Vec<usize>) {
     (degree, chosen)
 }
 
-/// SHA-256 counter PRNG seeded by absolute seq (şartname §3 PRNG discipline).
+/// SHA-256 counter PRNG seeded by absolute seq (spec section 3 PRNG discipline).
 struct SeqRng {
     block: [u8; 32],
     idx: usize,
@@ -1001,10 +1001,10 @@ mod tests {
             .collect()
     }
 
-    /// Altın vektörler: 24 baytlık gövde, k=3, block_len=8. `drop_at(0)`
-    /// sistematik damla, `drop_at(3)` ilk onarım damlasıdır (derece 3).
-    /// Vektörler commit anındaki kodlayıcıdan üretildi; PRNG tohumu, başlık
-    /// düzeni veya FNV özeti değişirse test kırılır.
+    /// Golden vectors: 24-byte body, k=3, block_len=8. `drop_at(0)`
+    /// is the systematic drop, `drop_at(3)` the first repair drop (degree 3).
+    /// Vectors were produced by the encoder at commit time; changing the PRNG seed, header
+    /// layout or the FNV digest breaks this test.
     #[test]
     fn drop_wire_matches_the_golden_vectors() {
         assert_eq!(DROP_HEADER_LEN, 24);
@@ -1242,7 +1242,7 @@ mod tests {
         );
     }
 
-    /// Bagimsiz RREF: decoder koduna hic dokunmaz, yalniz matris rutbesi.
+    /// Independent RREF: never touches the decoder code, only the matrix rank.
     fn ref_rank(masks: &[Vec<bool>], k: usize) -> usize {
         let mut rows: Vec<Vec<bool>> = masks.to_vec();
         let mut rank = 0usize;
@@ -1330,7 +1330,7 @@ mod tests {
     /// of margin helps: the decoder cannot solve what the coefficient matrix
     /// does not span. This is the check that separates "the margin is too
     /// small" from "the distribution is broken", and it is what showed the
-    /// uniform `4..=24` degree was never the real problem — the decoder was.
+    /// uniform `4..=24` degree was never the real problem - the decoder was.
     #[test]
     fn repair_equations_are_near_independent() {
         for k in [16u16, 64, 101, 257] {

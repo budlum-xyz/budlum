@@ -130,16 +130,16 @@ fn zlib_stored(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 16);
     out.push(0x78);
     out.push(0x01);
-    let mut pos = 0usize;
-    while pos < data.len() {
-        let final_block = pos + 65535 >= data.len();
-        let block_len = (data.len() - pos).min(65535);
+    // IDAT chunks hold at most 65535 bytes; `chunks` bounds every slice so no
+    // cursor arithmetic can index past the payload.
+    let chunk_count = data.len().div_ceil(65535);
+    for (idx, chunk) in data.chunks(65535).enumerate() {
+        let final_block = idx + 1 == chunk_count;
         out.push(u8::from(final_block));
-        let block16 = block_len as u16;
+        let block16 = chunk.len() as u16;
         out.extend_from_slice(&block16.to_le_bytes());
         out.extend_from_slice(&(!block16).to_le_bytes());
-        out.extend_from_slice(&data[pos..pos + block_len]);
-        pos += block_len;
+        out.extend_from_slice(chunk);
     }
     let mut a = 1u32;
     let mut b = 0u32;

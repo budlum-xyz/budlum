@@ -1679,7 +1679,7 @@ mod integration_tests {
             "no locked bridge inventory at genesis"
         );
         // finality_lag = height - finalized; genesis shape is whatever the
-        // chain recorded — just must be a finite scrape value.
+        // chain recorded - just must be a finite scrape value.
         let _ = metrics.finality_lag.get();
     }
 

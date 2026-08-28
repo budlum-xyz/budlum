@@ -1,12 +1,12 @@
 //! Real ISO QR module matrix for Three optical frames (plan §CI / K-QR §7).
 //!
-//! Pin: byte mode, EC=L, mask 0 — matrices come from our own `qr_encode`, so a
+//! Pin: byte mode, EC=L, mask 0 - matrices come from our own `qr_encode`, so a
 //! recipe regenerates the exact same modules on every machine and every future
 //! dependency bump.
 //! `block_len` 200 lab default stays on the carousel side; here we encode one
 //! A3 optical frame wire into one QR symbol.
 //!
-//! Decimen/AGPL source is not copied — only the measured rules.
+//! Decimen/AGPL source is not copied - only the measured rules.
 
 use qrcode::types::EcLevel;
 

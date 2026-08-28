@@ -1,7 +1,7 @@
 //! Operator-kill chaos skeleton for the B.U.D. all_three baraj.
 //!
-//! Baraj (PLAN §BY): "≥3 operatörlü mini-ağ; bir operatör ölünce repair gerçekten
-//! açılsın." This file is the **in-tree** half of that claim: the registry path
+//! Dam (PLAN BY): "a mini network with 3 or more operators; when one operator dies
+//! the repair really opens." This file is the **in-tree** half of that claim: the registry path
 //! from multi-operator placement through kill → ticket → accept → live count.
 //!
 //! What it is **not** yet:

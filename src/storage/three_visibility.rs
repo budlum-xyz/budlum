@@ -12,12 +12,12 @@ use crate::storage::view_grant::ViewPolicy;
 /// Product default at upload time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UploadVisibility {
-    /// V0 — sealed recipe; only owner keystore opens.
+    /// V0 - sealed recipe; only owner keystore opens.
     #[default]
     SealedOwner,
-    /// V1 — will attach NamedGrantee grants after upload.
+    /// V1 - will attach NamedGrantee grants after upload.
     Restricted,
-    /// V2 — public recipe on chain.
+    /// V2 - public recipe on chain.
     Public,
 }
 

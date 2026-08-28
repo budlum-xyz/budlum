@@ -1,4 +1,4 @@
-//! A8 — Three NFT metadata pin (plan §CH A8 / G4).
+//! A8 - Three NFT metadata pin (plan §CH A8 / G4).
 //!
 //! WIRING: unwired - staged 3.0 metadata pin; minting is not in production
 //! yet, so nothing emits a pin (plan §A8).

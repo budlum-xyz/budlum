@@ -1,4 +1,4 @@
-//! G5 — revoke / social event hooks (plan §CH G5).
+//! G5 - revoke / social event hooks (plan §CH G5).
 //!
 //! The chain already revokes grants (`ViewGrantRegistry`). Product surfaces
 //! (DM delete, social fi, UI toast) need a **callback** when revoke happens so
@@ -11,7 +11,7 @@ use crate::storage::content_id::ContentId;
 /// Why a Three-related social/privacy event fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreeHookKind {
-    /// Grant revoked — no new opens.
+    /// Grant revoked - no new opens.
     GrantRevoked,
     /// Owner rotated payload key id (off-chain); old sessions should die.
     KeyRotated,

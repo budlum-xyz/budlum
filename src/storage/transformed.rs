@@ -12,7 +12,7 @@
 //!
 //! Real 2.0 codecs elsewhere still exist; new call sites must enter here so
 //! 3.0 never greps scattered helpers. Entropy-coded types **do not** try zlib
-//! (K-QR-SIKISTIR / şartname §16).
+//! (K-QR-SIKISTIR / spec section 16).
 
 use crate::core::hash::calculate_hash_bytes;
 use flate2::write::ZlibEncoder;
@@ -48,7 +48,7 @@ impl CodecFlags {
     }
 }
 
-/// Content class for transform policy (şartname format taraması özeti).
+/// Content class for transform policy (spec format scan summary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum ContentClass {
@@ -108,8 +108,8 @@ impl ContentClass {
                 || m.starts_with("video/")
                 || m.starts_with("audio/")
             {
-                // PNG gövdesi zaten deflate taşır: ölçüm zlib denemesinin
-                // kazandırmadığını gösterdi, EntropyMedia tarafında kalır.
+                // A PNG body already carries deflate: the measurement showed a zlib
+                // attempt buys nothing, so it stays on the EntropyMedia side.
                 return Self::EntropyMedia;
             }
             if m.contains("zip") || m.contains("gzip") || m.contains("zstd") {
@@ -136,51 +136,49 @@ impl ContentClass {
 }
 
 fn sniff_magic(bytes: &[u8]) -> ContentClass {
-    if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         return ContentClass::EntropyMedia; // JPEG
     }
-    if bytes.get(0..4) == Some(b"\x89PNG") {
-        return ContentClass::EntropyMedia; // govde zaten deflate; zlib kazandirmiyor
+    if bytes.starts_with(b"\x89PNG") {
+        return ContentClass::EntropyMedia; // the body is already deflated; zlib buys nothing
     }
-    if bytes.len() >= 4
-        && (bytes[0..4] == *b"ftyp" || (bytes.len() >= 8 && &bytes[4..8] == b"ftyp"))
-    {
+    if bytes.get(0..4) == Some(b"ftyp") || bytes.get(4..8) == Some(b"ftyp") {
         return ContentClass::EntropyMedia; // ISO BMFF
     }
-    if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WAVE" {
-        return ContentClass::AudioPcm; // WAV: PCM ornekleri, dusuk entropi
+    if bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
+        return ContentClass::AudioPcm; // WAV: PCM samples, low entropy
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"RIFF" {
+    if bytes.starts_with(b"RIFF") {
         return ContentClass::EntropyMedia;
     }
-    if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
         return ContentClass::EntropyArchive; // gzip
     }
-    if bytes.len() >= 4 && bytes[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+    if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         return ContentClass::EntropyArchive; // zstd
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"PK\x03\x04" {
-        // OOXML paketi ilk girdi olarak [Content_Types].xml tasir; duz zip
-        // EntropyArchive kalir, ofis belge sikistirilabilir organic sayilir.
-        let head = &bytes[..bytes.len().min(512)];
+    if bytes.starts_with(b"PK\x03\x04") {
+        // An OOXML package carries [Content_Types].xml as its first entry; a plain zip
+        // The archive class stays; an office document is compressed but organic.
+        let head = bytes.split_at(bytes.len().min(512)).0;
         if head.windows(19).any(|w| w == b"[Content_Types].xml") {
             return ContentClass::DocumentOrganic;
         }
         return ContentClass::EntropyArchive; // zip
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"\x7fELF" {
+    if bytes.starts_with(b"\x7fELF") {
         return ContentClass::Exec; // ELF
     }
-    if bytes.len() >= 2 && bytes[0..2] == *b"MZ" {
+    if bytes.starts_with(b"MZ") {
         return ContentClass::Exec; // PE
     }
-    if bytes.len() >= 2 && bytes[0..2] == *b"BM" {
+    if bytes.starts_with(b"BM") {
         return ContentClass::RasterFlat; // bitmap
     }
     if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
         return ContentClass::VectorOrganic;
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"BDLC" {
+    if bytes.starts_with(b"BDLC") {
         return ContentClass::Ciphertext;
     }
     // High printable ratio → text organic
@@ -414,10 +412,10 @@ mod tests {
         assert_eq!(t.bytes, jpeg);
     }
 
-    /// Görev 3 adım 1: on format sınıfının kokusu ve zlib politikası.
+    /// Task 3 step 1: front format-class sniffing and the zlib policy.
     #[test]
     fn format_matrix_ten_classes_sniffed() {
-        // (girdi, beklenen sınıf, beklenen may_try_zlib)
+        // (name, input, expected class, expected may_try_zlib)
         let cases: Vec<(&str, Vec<u8>, ContentClass, bool)> = vec![
             (
                 "generic",
@@ -551,16 +549,16 @@ mod tests {
                 false,
             ),
         ];
-        for (ad, girdi, sinif, zlib) in cases {
-            let got = ContentClass::classify(&girdi, None);
-            assert_eq!(got, sinif, "sniff yanlis: {ad}");
-            assert_eq!(got.may_try_zlib(), zlib, "zlib politikasi yanlis: {ad}");
+        for (name, input, expected_class, zlib) in cases {
+            let got = ContentClass::classify(&input, None);
+            assert_eq!(got, expected_class, "wrong sniff: {name}");
+            assert_eq!(got.may_try_zlib(), zlib, "wrong zlib policy: {name}");
         }
-        // RecipeWire koklanmaz; zorla secilir ve zlib deneyebilir.
+        // RecipeWire is never sniffed; it is picked explicitly and may try zlib.
         assert!(ContentClass::RecipeWire.may_try_zlib());
     }
 
-    /// Görev 3 adım 6: entropi siniflarinda PRE_SHRUNK asla kalkmaz.
+    /// Task 3 step 6: PRE_SHRUNK is never lifted on the entropy classes.
     #[test]
     fn matrix_zlib_never_grows_entropy() {
         let entropy_inputs: Vec<Vec<u8>> = vec![
@@ -599,18 +597,21 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(!t.class.may_try_zlib(), "entropi sinifi zlib istedi");
+            assert!(
+                !t.class.may_try_zlib(),
+                "entropy class must not ask for zlib"
+            );
             assert!(!t.codec_flags.contains(CodecFlags::PRE_SHRUNK));
-            assert_eq!(t.bytes, girdi);
+            assert_eq!(t.bytes, input);
         }
     }
 
-    /// Görev 3 adım 7: her sinif QR-video zincirinden bayt esit geri doner.
+    /// Task 3 step 7: every class comes back byte-identical through the QR-video chain.
     #[test]
     fn matrix_e2e_each_class_round_trips() {
         use crate::storage::three_pipe::{decode_qr_video, encode_qr_video};
         let inputs: Vec<(&str, Vec<u8>)> = vec![
-            ("metin", b"log satiri ".repeat(300)),
+            ("text", b"journal line ".repeat(300)),
             (
                 "svg",
                 b"<svg><path d=\"M0 0L10 10\"/></svg><!-- ".repeat(80),
@@ -657,10 +658,13 @@ mod tests {
                 (0..3000u32).map(|i| ((i * 37) % 256) as u8).collect(),
             ),
         ];
-        for (ad, icerik) in inputs {
-            let enc = encode_qr_video(&icerik, 64, None).unwrap();
+        for (name, content) in inputs {
+            let enc = encode_qr_video(&content, 64, None).unwrap();
             let (_kind, raw, _v) = decode_qr_video(&enc.video_blob).unwrap();
-            assert_eq!(raw, icerik, "sinif zincirden bozuk cikti: {ad}");
+            assert_eq!(
+                raw, content,
+                "class came back broken through the chain: {name}"
+            );
         }
     }
 

@@ -415,8 +415,8 @@ mod proofs {
     use super::{
         bitmap_voted_stake, classify_pq_signature_len, merkle_parent_layer_fold,
         merkle_rebuild_root_u64, merkle_root_u64, merkle_sibling_index, penalty_for,
-        pq_signature_len_acceptable, raw_quotient, saturating_stake_sum, FIXED_POINT_SCALE,
-        MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS, PqSigClass, PQ_SIG_LEN_DILITHIUM5,
+        pq_signature_len_acceptable, raw_quotient, saturating_stake_sum, PqSigClass,
+        FIXED_POINT_SCALE, MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS, PQ_SIG_LEN_DILITHIUM5,
         PQ_SIG_LEN_ML_DSA_65, PQ_SIG_LEN_ML_DSA_87,
     };
 
@@ -848,8 +848,7 @@ mod proofs {
         let rebuilt = merkle_rebuild_root_u64(&leaves, len, leaf_index);
         let root = merkle_root_u64(&leaves, len);
         assert_eq!(
-            rebuilt,
-            root,
+            rebuilt, root,
             "walking the sibling path from a valid leaf must reach the root"
         );
     }

@@ -1,15 +1,15 @@
-//! A4 — optical channel codec gate (plan §CH A4, K-QR-KODEK).
+//! A4 - optical channel codec gate (plan §CH A4, K-QR-KODEK).
 //!
 //! In-tree we do **not** ship an H.264/VP9 muxer. What we can pin now is the
-//! *policy* measured in the 3.0 şartname: which codecs are allowed to carry
+//! *policy* measured in the 3.0 spec: which codecs are allowed to carry
 //! QR frames without destroying module readability, and that a mux step is
-//! optional and versioned separately from A1–A3.
+//! optional and versioned separately from A1-A3.
 //!
-//! # Measured posture (şartname K4/K5/K9)
+//! # Measured posture (spec K4/K5/K9)
 //!
 //! - H.264 CRF ≤ 28: lab green for fountain recovery (lossy on modules, fountain repairs).
 //! - VP9: green at high CRF in the measurement environment.
-//! - AV1: no decoder in the measurement environment — **red** until proven.
+//! - AV1: no decoder in the measurement environment - **red** until proven.
 //! - Raw frame list / live carousel: always allowed (no mux).
 //!
 //! A future mux adapter implements [`FrameMux`] and is refused unless
@@ -19,7 +19,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum CodecKind {
-    /// No container — ordered frame blobs (lab default).
+    /// No container - ordered frame blobs (lab default).
     RawFrames = 1,
     /// Live infinite carousel over a network/optical link.
     LiveCarousel = 2,
@@ -27,7 +27,7 @@ pub enum CodecKind {
     H264 = 3,
     /// VP9.
     Vp9 = 4,
-    /// AV1 — not allowed until a lab decoder proves recovery.
+    /// AV1 - not allowed until a lab decoder proves recovery.
     Av1 = 5,
 }
 
@@ -84,7 +84,7 @@ pub fn gate_codec(kind: CodecKind) -> Result<(), CodecError> {
     }
 }
 
-/// Optional mux trait — implement out-of-tree or behind a feature later.
+/// Optional mux trait - implement out-of-tree or behind a feature later.
 pub trait FrameMux {
     /// Mux optical frames into a container file/stream.
     ///

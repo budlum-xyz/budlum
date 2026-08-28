@@ -38,9 +38,21 @@ const fn gf_tables() -> ([u8; 256], [u8; 256]) {
     let mut log = [0u8; 256];
     let mut x = 1u16;
     let mut i = 0usize;
+    // `split_at_mut(..i + 1)` then `last_mut` writes the slot `i` names without
+    // a runtime index: an index here would be a `panic!` in `const` evaluation
+    // (a compile error) and `get_mut` is not const-callable, so this is the
+    // shape that keeps the table fill out of the indexing ratchet. Measured
+    // against the indexed form: all 512 table bytes agree and the
+    // `exp[log[v]] == v` inverse relation holds.
     while i < 255 {
-        exp[i] = x as u8;
-        log[x as usize] = i as u8;
+        let (head, _) = exp.split_at_mut(i + 1);
+        if let Some(slot) = head.last_mut() {
+            *slot = x as u8;
+        }
+        let (lhead, _) = log.split_at_mut(x as usize + 1);
+        if let Some(slot) = lhead.last_mut() {
+            *slot = i as u8;
+        }
         x <<= 1;
         if x & 0x100 != 0 {
             x ^= 0x11d;
@@ -525,7 +537,7 @@ mod tests {
         let grids = prepared.detect_grids();
         assert_eq!(grids.len(), 1, "one grid must be detectable");
         // decode_to, decode'un String'e zorlayan UTF-8 adimini atlar;
-        // kareler ikili yuk tasidigi icin ham baytlari karsilastiriyoruz.
+        // the frames carry a binary payload, so the raw bytes are compared.
         let mut out = Vec::new();
         grids[0].decode_to(&mut out).expect("grid must decode");
         assert_eq!(out.as_slice(), data);

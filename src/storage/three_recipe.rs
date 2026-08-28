@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 — the recipe that **produces the QR-video**.
+//! B.U.D. 3.0 - the recipe that **produces the QR-video**.
 //!
 //! WIRING: unwired - staged 3.0 core; the production caller is the reveal
 //! session's emit path (plan §A5), wired at the final integration step.
@@ -664,7 +664,7 @@ mod tests {
 
     /// The first frame is what a phone shows first, so its cost must be one
     /// frame, not `n` videos. Frames must be handed over *progressively*: one at a time, in order,
-    /// and — this is the point of the whole shape — **without re-encoding the
+    /// and - this is the point of the whole shape - **without re-encoding the
     /// whole video for each frame**. The first frame is what a phone shows
     /// first, so its cost must be one frame, not `n` videos.
     #[test]
