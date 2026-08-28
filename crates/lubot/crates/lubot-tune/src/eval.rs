@@ -259,6 +259,15 @@ impl EvalDataSet {
     pub fn is_empty(&self) -> bool {
         self.cases.is_empty()
     }
+
+    /// Whether this set's digest is among the hashes a [`crate::plan::TunePlan`]
+    /// is tuned on. This pins the train/eval identity: the content we grade is
+    /// the same content the plan registered, so a model cannot be "tuned on X,
+    /// graded on Y".
+    #[must_use]
+    pub fn registered_in(&self, plan: &crate::plan::TunePlan) -> bool {
+        plan.dataset_hashes.contains(&self.digest())
+    }
 }
 
 #[cfg(test)]
@@ -396,5 +405,35 @@ mod tests {
         assert_eq!(set.cases[0].prompt, "soru");
         // Whitespace-insensitive golden grading.
         assert_eq!(set.cases[0].check.apply("  doğru   cevap  "), CheckOutcome::Pass);
+    }
+
+    #[test]
+    fn eval_set_binds_to_the_plan_it_is_registered_in() {
+        let recs = vec![lubot_data::jsonl::InstructionRecord {
+            system: None,
+            user: "soru".to_string(),
+            assistant: "cevap".to_string(),
+        }];
+        let set = EvalDataSet::from_golden("t", &recs);
+        let digest = set.digest();
+
+        // Plane the plan does NOT contain the eval hash -> not registered.
+        let mut plan = crate::plan::TunePlan::lora(lubot_core::model::ModelId([2; 32]), 2_000);
+        assert!(!set.registered_in(&plan));
+
+        // Register the eval set's digest in the plan -> train/eval identity.
+        plan.dataset_hashes.push(digest);
+        assert!(set.registered_in(&plan));
+
+        // A different plan, or a tampered content set, no longer binds.
+        let other = EvalDataSet::from_golden(
+            "t",
+            &[lubot_data::jsonl::InstructionRecord {
+                system: None,
+                user: "soru".to_string(),
+                assistant: "farklı cevap".to_string(),
+            }],
+        );
+        assert!(!other.registered_in(&plan));
     }
 }
