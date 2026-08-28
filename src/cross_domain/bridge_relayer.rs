@@ -195,14 +195,18 @@ impl BridgeRelayerPipeline {
     // ─── Stage 3: Mint (target domain) ────
 
     /// After relay verification, mint the asset on the target domain.
-    pub fn mint(&mut self, message: &CrossDomainMessage) -> Result<(), PipelineError> {
+    pub fn mint(
+        &mut self,
+        message: &CrossDomainMessage,
+        current_height: u64,
+    ) -> Result<(), PipelineError> {
         if !matches!(message.kind, MessageKind::BridgeLock) {
             return Err(PipelineError::UnexpectedMessageKind {
                 expected: "BridgeLock",
                 got: "other",
             });
         }
-        self.bridge.mint(message)?;
+        self.bridge.mint(message, current_height)?;
         Ok(())
     }
 
@@ -331,7 +335,7 @@ mod tests {
         assert_eq!(p.relayer().pending_count(), 0);
 
         // Stage 3: Mint on target domain
-        p.mint(&relayed_msg).unwrap();
+        p.mint(&relayed_msg, 0).unwrap();
         let transfer = p.bridge_state().get_transfer(&msg_id).unwrap();
         assert_eq!(
             transfer.status,
@@ -357,7 +361,7 @@ mod tests {
         let mint_msg = p
             .relay(lock_msg_id, relayer_addr(), &lock_proof, 1, 150)
             .unwrap();
-        p.mint(&mint_msg).unwrap();
+        p.mint(&mint_msg, 0).unwrap();
 
         // Burn on target domain (sends back to source)
         let burn_event = p.burn(lock_msg_id, 2, 200, 1000).unwrap();
@@ -415,7 +419,7 @@ mod tests {
 
         // Tamper the message kind
         relayed.kind = MessageKind::BridgeBurn;
-        let err = p.mint(&relayed).unwrap_err();
+        let err = p.mint(&relayed, 0).unwrap_err();
         assert!(matches!(err, PipelineError::UnexpectedMessageKind { .. }));
     }
 
