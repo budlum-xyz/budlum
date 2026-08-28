@@ -241,7 +241,7 @@ the registration (`ai_exec_program_hash`), a non-zero exit code
 (`ai_exec_chain_id`), and finally the STARK itself against the rebuilt program
 (`ai_exec_stark`). Structural checks (commitments, model id, weights digest)
 still run for every model; they bind the claim but do **not** prove that the
-claimed computation happened — the STARK is what does that, and only for
+claimed computation happened - the STARK is what does that, and only for
 proof-required models.
 
 ## Code that is present but unreachable
@@ -249,7 +249,7 @@ proof-required models.
 These functions compile and are unit-tested, but nothing in a production path
 calls them. They are the scaffolding for the feature, not the feature:
 
-- `src/ai/execution/verify.rs::verify_execution_proof_full`, no callers — the
+- `src/ai/execution/verify.rs::verify_execution_proof_full`, no callers - the
   executor performs the same bundle (structural + STARK) in separate steps
 - `src/lubot/verify.rs::verify_inference_stark`: only its own tests
 - `src/lubot/verify.rs::generate_and_verify_proof`: only its own tests
@@ -271,7 +271,7 @@ default.
 
 The original five-step plan, with what has since landed:
 
-1. ~~Store the guest program words in `AiModelSpec` at registration~~ —
+1. ~~Store the guest program words in `AiModelSpec` at registration~~ -
    **done**: `execution_dims` + `execution_program_hash` +
    `execution_weights_digest`; the node rebuilds the words with
    `guest_program_for_model`.
@@ -284,15 +284,15 @@ The original five-step plan, with what has since landed:
    without a hashing gadget the trace cannot afford (~400 more columns). The
    defence is `expected_initial_state_root`, which rebuilds the memory image
    from the registered model and refuses a proof whose claim disagrees.
-3. ~~Re-derive `ExecutionPublicInputs` on the transaction path~~ — **done**:
+3. ~~Re-derive `ExecutionPublicInputs` on the transaction path~~ - **done**:
    the proof carries them and the envelope commits to them; the executor
    binds `program_hash`, `chain_id` and `exit_code` to the registration and
    the transaction before the STARK.
-4. ~~Call the STARK verifier on the transaction path~~ — **done**:
+4. ~~Call the STARK verifier on the transaction path~~ - **done**:
    `verify_execution_proof_stark` runs against the rebuilt program for
    proof-required models (the executor performs the structural and STARK
    halves separately rather than through `verify_execution_proof_full`).
-5. ~~Replace the fail-closed branch~~ — **done**: `ai_exec_verifier_unavailable`
+5. ~~Replace the fail-closed branch~~ - **done**: `ai_exec_verifier_unavailable`
    is gone; named refusals take its place, and the locking tests pin the
    direction.
 

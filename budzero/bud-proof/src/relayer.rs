@@ -87,7 +87,7 @@ pub struct CanonicalRelayReport {
     pub canonical_set_digest: [u8; 32],
     pub proof: ProofFingerprint,
     pub alarm: Option<AlarmDetail>,
-    /// Keccak-256 over `canonical_payload()` — recomputable by anyone.
+    /// Keccak-256 over `canonical_payload()` - recomputable by anyone.
     #[serde(with = "hex_ser")]
     pub report_sig: [u8; 32],
 }
@@ -160,7 +160,11 @@ impl CanonicalRelayReport {
         p.extend_from_slice(&self.proof.degree_bits.to_le_bytes());
         p.extend_from_slice(&self.proof.public_inputs_hash);
         p.extend_from_slice(&(self.proof.proof_bytes_len as u32).to_le_bytes());
-        for s in [&self.proof.backend, &self.proof.p3_version, &self.proof.fri_params_id] {
+        for s in [
+            &self.proof.backend,
+            &self.proof.p3_version,
+            &self.proof.fri_params_id,
+        ] {
             p.extend_from_slice(s.as_bytes());
             p.push(0);
         }
@@ -229,13 +233,18 @@ pub fn now_unix() -> u64 {
 
 fn alarm_from_verify_error(e: &VerifyError) -> AlarmDetail {
     let (code, detail) = match e {
-        VerifyError::NonCanonicalProgram(h) => {
-            (AlarmCode::NonCanonicalProgram, format!("program hash {}", hex32(h)))
-        }
-        VerifyError::InvalidProof => (AlarmCode::InvalidProof, String::from("STARK verification failed")),
-        VerifyError::PublicInputsMismatch => {
-            (AlarmCode::PublicInputsMismatch, String::from("public inputs mismatch"))
-        }
+        VerifyError::NonCanonicalProgram(h) => (
+            AlarmCode::NonCanonicalProgram,
+            format!("program hash {}", hex32(h)),
+        ),
+        VerifyError::InvalidProof => (
+            AlarmCode::InvalidProof,
+            String::from("STARK verification failed"),
+        ),
+        VerifyError::PublicInputsMismatch => (
+            AlarmCode::PublicInputsMismatch,
+            String::from("public inputs mismatch"),
+        ),
         VerifyError::InvalidEnvelope(msg) => (AlarmCode::InvalidEnvelope, msg.clone()),
         VerifyError::DeserializationError(msg) => (AlarmCode::DeserializationError, msg.clone()),
         other => (AlarmCode::InvalidProof, format!("{other:?}")),
@@ -310,14 +319,13 @@ pub fn verify_and_report_at(
     program: &[u64],
     at_unix: u64,
 ) -> CanonicalRelayReport {
-    let verified = <crate::plonky3_prover::Plonky3Adapter as ProverAdapter>::verify(
-        envelope,
-        pi,
-        program,
-    )
-    .and_then(|_| {
-        crate::plonky3_prover::Plonky3Adapter::verify_canonical_program(envelope, pi, program)
-    });
+    let verified =
+        <crate::plonky3_prover::Plonky3Adapter as ProverAdapter>::verify(envelope, pi, program)
+            .and_then(|_| {
+                crate::plonky3_prover::Plonky3Adapter::verify_canonical_program(
+                    envelope, pi, program,
+                )
+            });
     CanonicalRelayReport::from_outcome(envelope, pi, verified, at_unix)
 }
 
@@ -329,13 +337,23 @@ mod tests {
     use bud_vm::Vm;
 
     fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
-        Instruction { opcode, rd, rs1, rs2, imm }.encode()
+        Instruction {
+            opcode,
+            rd,
+            rs1,
+            rs2,
+            imm,
+        }
+        .encode()
     }
 
     /// A canonical program: the storage challenge is produced by
     /// `canonical_set`'s own helper (used by gate tests as well).
     fn storage_challenge_program() -> Vec<u64> {
-        vec![inst(Opcode::VerifyMerkle, 1, 2, 3, 256), inst(Opcode::Halt, 0, 0, 0, 0)]
+        vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ]
     }
 
     fn dummy_pi(vm: &Vm, program: &[u64]) -> ExecutionPublicInputs {
@@ -393,7 +411,10 @@ mod tests {
 
     #[test]
     fn non_canonical_program_produces_alarm_report() {
-        let program = vec![inst(Opcode::Add, 1, 2, 3, 4), inst(Opcode::Halt, 0, 0, 0, 0)];
+        let program = vec![
+            inst(Opcode::Add, 1, 2, 3, 4),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
         let mut vm = Vm::new(1024);
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
@@ -418,7 +439,7 @@ mod tests {
         let report = verify_and_report_at(&envelope, &pi, &program, 1_700_000_000);
         assert_eq!(report.status, RelayStatus::Alarm);
         // Flipping the first byte may break postcard deserialization (or
-        // produce a structurally valid proof that fails STARK verification) —
+        // produce a structurally valid proof that fails STARK verification) -
         // either way it is an alarm, and the report stays signed.
         assert!(
             matches!(

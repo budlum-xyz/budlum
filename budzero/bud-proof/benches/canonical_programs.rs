@@ -8,7 +8,7 @@
 // The matmul stream is reproduced here by a small independent emitter (the
 // layout and emission rules of `build_matmul_guest_program`), so this file
 // stays free of the `budlum-core` dependency; it is a measurement harness,
-// not a fourth producer — the canonical identity is pinned in the tree and
+// not a fourth producer - the canonical identity is pinned in the tree and
 // the regeneration gate, not here.
 //
 // Output is one JSON line per program so CI or the workspace can record the

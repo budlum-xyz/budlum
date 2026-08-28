@@ -494,6 +494,18 @@ const BUDGETS: &[Budget] = &[
         count: 3,
         reason: "Pact::new, is_residual_only and PactRegistry::new cannot be const: the nightly jobs (udeps, determinism) reject trait calls inside const fns with E0658, and these fns were reverted from const in c72b911 for exactly that reason",
     },
+    Budget {
+        file: "budzero/bud-proof/benches/canonical_programs.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the bench run, which is the reporting channel a benchmark is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/benches/canonical_programs.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the bench run, which is the reporting channel a benchmark is supposed to use",
+    },
 ];
 
 /// Lints that may never be suppressed anywhere.

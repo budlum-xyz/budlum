@@ -9,7 +9,7 @@
 //!
 //! The instruction stream is canonical (the immediates and registers are
 //! fixed); the *values* come from the `Context` the VM is run with, which is
-//! exactly the point — the same program, run over a different context, proves
+//! exactly the point - the same program, run over a different context, proves
 //! a different context in the trace.
 
 use bud_isa::{Instruction, Opcode};

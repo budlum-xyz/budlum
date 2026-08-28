@@ -1,7 +1,7 @@
 //! Canonical private-transfer verification program.
 //!
-//! The privacy trio — `PrivacyCommit` (0x20), `SumConservation` (0x22),
-//! `NullifierCheck` (0x21) — is fully supported by the VM and the AIR, but no
+//! The privacy trio - `PrivacyCommit` (0x20), `SumConservation` (0x22),
+//! `NullifierCheck` (0x21) - is fully supported by the VM and the AIR, but no
 //! production code ever combined them into a canonical program. This module
 //! fixes that: a single canonical program that exercises all three in order,
 //! so the AIR rows that implement them are attested by the regeneration gate
@@ -10,8 +10,8 @@
 //! The program is a *schema*: the amounts, blinding, recipient tag, sums,
 //! claimed nullifier and secret are canonical constants, so every node
 //! reproduces the same instruction stream (convergence). Parameterising the
-//! values from memory is a later slice; the identity of the program — the
-//! instruction stream — is what the canonical hash binds.
+//! values from memory is a later slice; the identity of the program - the
+//! instruction stream - is what the canonical hash binds.
 //!
 //! Register allocation (all below the 32-bit `imm` ceiling on purpose):
 //!   r1 = amount, r2 = blinding, r3 = recipient tag (imm of PrivacyCommit)

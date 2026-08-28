@@ -71,7 +71,7 @@ use std::path::Path;
 ///    copy and turns red with the exact path and expected hash.
 ///
 /// An attacker who can rewrite the gate's own source can rewrite these
-/// embeddings too — that is why the gate is compiled from source in CI by
+/// embeddings too - that is why the gate is compiled from source in CI by
 /// two independent compilers (diverse-double-compiling) and why the
 /// `canonical-set` token is compared across them.
 const EMBEDDED_PRIVATE_TRANSFER_SRC: &str =
@@ -221,7 +221,7 @@ const GUEST_MEMORY_BYTES: usize = 8192;
 /// the word offsets where each region starts.
 ///
 /// Note: fields are named without a common suffix (`weights`, `biases`,
-/// `act_in`, `act_out`, `output`) on purpose — they are word offsets, and the
+/// `act_in`, `act_out`, `output`) on purpose - they are word offsets, and the
 /// clippy `struct_field_names` rule refuses a shared `_base` postfix.
 struct MatmulGuestLayout {
     weights: usize,
@@ -802,7 +802,7 @@ fn verify_canonical_parts(root: &Path) -> Result<Vec<String>, String> {
 
 /// Verify the ZKVM-side canonical table (`budzero/bud-proof/src/canonical_set.rs`)
 /// still lists exactly the four hashes this gate pins. If the proof side
-/// drifts away from the gate — or the gate from the proof side — one of them
+/// drifts away from the gate - or the gate from the proof side - one of them
 /// is no longer canonical, and the pair must be re-pinned together.
 fn verify_proof_side_canonical_set(root: &Path) -> Result<(), String> {
     let path = root.join("budzero/bud-proof/src/canonical_set.rs");

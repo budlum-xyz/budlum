@@ -1,4 +1,4 @@
-//! Tree-pin gate (sertleştirme derinliği, 2026-08-28): integrity pins for the
+//! Tree-pin gate (hardening depth, 2026-08-28): integrity pins for the
 //! whole budzero source tree.
 //!
 //! The regeneration gate embeds canonical content for two producer files and
@@ -13,7 +13,7 @@
 //! it describes; CI runs the gate without `--pin`, so an unpinned edit is a
 //! red relay.
 //!
-//! Per `ask_user` 9, detection and reporting only — repair is manual.
+//! Per `ask_user` 9, detection and reporting only - repair is manual.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -90,7 +90,7 @@ fn read_pins(root: &Path) -> Result<BTreeMap<String, String>, String> {
     }
     if pins.is_empty() {
         return Err(String::from(
-            "tree-pin: the pin file lists no files — either the tree is empty or the \
+            "tree-pin: the pin file lists no files - either the tree is empty or the \
              scan is blind; neither may pass silently",
         ));
     }

@@ -1,8 +1,8 @@
-//! CI workflow guards gate (sertleştirme vektör 3, 2026-08-28): the critical
+//! CI workflow guards gate (hardening vector 3, 2026-08-28): the critical
 //! security gates must actually run in CI.
 //!
 //! The failure this closes: a gate can be deleted from `ci.yml` (or its
-//! `run:` block emptied) and nothing complains — the repo's other checks
+//! `run:` block emptied) and nothing complains - the repo's other checks
 //! still pass, the gate's `self_test` still works, and the protection is
 //! silently gone. `gates_are_wired` only checks that scripts in `scripts/`
 //! are named somewhere; it does not check that the *Rust* gates run, and it
@@ -152,7 +152,7 @@ fn check_workflow(path: &Path, require_self_test: bool) -> Result<Vec<String>, S
             .count();
         if plain == 0 {
             findings.push(format!(
-                "{}: gate `{gate}` is not invoked in any run block — the protection is not live",
+                "{}: gate `{gate}` is not invoked in any run block - the protection is not live",
                 path.display()
             ));
         }
@@ -162,7 +162,7 @@ fn check_workflow(path: &Path, require_self_test: bool) -> Result<Vec<String>, S
         // canary requirement is scoped to ci.yml.
         if require_self_test && self_test == 0 {
             findings.push(format!(
-                "{}: gate `{gate}` has no `--self-test` canary — a broken gate can pass",
+                "{}: gate `{gate}` has no `--self-test` canary - a broken gate can pass",
                 path.display()
             ));
         }
@@ -192,7 +192,7 @@ fn check_workflow(path: &Path, require_self_test: bool) -> Result<Vec<String>, S
             }
             match (first_self_test, first_plain) {
                 (Some(st), Some(p)) if st > p => findings.push(format!(
-                    "{}: gate `{gate}` runs before its `--self-test` canary — \
+                    "{}: gate `{gate}` runs before its `--self-test` canary - \
                      a broken gate could pass without being noticed",
                     path.display()
                 )),

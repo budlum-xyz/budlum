@@ -7,7 +7,7 @@ use tiny_keccak::{Hasher, Keccak};
 /// Every `ProofEnvelope` carries it; the verifier rejects anything else
 /// (older bytes are not migrated, newer bytes are not understood). Bump this
 /// constant together with any change to the serialized proof shape,
-/// transcript, public inputs, or envelope fields — never edit the literals
+/// transcript, public inputs, or envelope fields - never edit the literals
 /// scattered across the codebase, or a bump is silently half-applied.
 pub const PROOF_FORMAT_VERSION: u32 = 1;
 

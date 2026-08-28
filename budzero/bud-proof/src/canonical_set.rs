@@ -1,8 +1,8 @@
-//! Canonical program set — the ZKVM-side half of the regeneration gate.
+//! Canonical program set - the ZKVM-side half of the regeneration gate.
 //!
 //! The regeneration gate (xtask) independently reproduces the canonical
 //! programs and pins their hashes. This module holds the same set on the
-//! proof side, so the verifier can warn — or refuse — when a proof was
+//! proof side, so the verifier can warn - or refuse - when a proof was
 //! produced for a program that is not part of the canonical set. The two
 //! sides are cross-pinned: the gate checks that this file still lists the
 //! exact values it pins, and `prove_and_verify_canonical_program` proves
@@ -32,7 +32,7 @@ pub fn program_hash_of(program: &[u64]) -> [u8; 32] {
 /// syscall-context check.
 ///
 /// Pinned 2026-08-28. If a canonical program changes, BOTH this table and
-/// the gate's pins must change together — the gate asserts that.
+/// the gate's pins must change together - the gate asserts that.
 pub const CANONICAL_PROGRAM_HASHES: [&str; 4] = [
     // Storage challenge: [VerifyMerkle rd=1 rs1=2 rs2=3 imm=256, Halt].
     "3adbf9c8e6afb8ef243e9063ad25ccd2b890d91e2bd88816a1a909ce2c5b15d4",

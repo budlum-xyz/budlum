@@ -11,7 +11,7 @@
 //!      `canonical-set`).
 //!   2. Independently recomputes the proof-side canonical-set digest from
 //!      `budzero/bud-proof/src/canonical_set.rs` (reading the pins out of the
-//!      source file with its own Keccak-256 — a third path, not the gate's
+//!      source file with its own Keccak-256 - a third path, not the gate's
 //!      in-memory pins and not the prover's runtime table).
 //!   3. Compares the two (diverse double compiling): the gate token and the
 //!      proof-side digest must agree, otherwise the relay is red.
@@ -34,8 +34,8 @@ use super::regeneration::{hex32, hex_decode, keccak256};
 
 /// Schema version of the relay status report.
 ///
-/// v2 added the gate-binary hash to the signed payload (kapı binary'sine
-/// müdahale vektörü): the status now covers which exact binary produced it,
+/// v2 added the gate-binary hash to the signed payload (gate-binary
+/// tampering vector): the status now covers which exact binary produced it,
 /// so an external monitor can compare binaries across reports.
 pub const RELAY_STATUS_SCHEMA_VERSION: u32 = 2;
 
@@ -55,7 +55,7 @@ fn proof_side_canonical_digest(root: &Path) -> Result<[u8; 32], String> {
 }
 
 /// Extract the `CANONICAL_PROGRAM_HASHES` pins from the source text and
-/// compute Keccak-256 over their concatenated raw bytes — the same value the
+/// compute Keccak-256 over their concatenated raw bytes - the same value the
 /// prover's `canonical_set::canonical_set_digest` computes at runtime.
 ///
 /// Only the table declaration block is scanned (`CANONICAL_PROGRAM_HASHES:
@@ -87,7 +87,7 @@ fn digest_from_canonical_set_source(text: &str) -> Result<[u8; 32], String> {
     if pins.len() != 4 {
         return Err(format!(
             "relay: expected exactly 4 canonical program-hash pins in canonical_set.rs, \
-             found {} — the proof-side table has drifted or the scan is blind",
+             found {} - the proof-side table has drifted or the scan is blind",
             pins.len()
         ));
     }
@@ -201,8 +201,8 @@ fn status_payload(
     p
 }
 
-/// Keccak-256 of the gate binary currently executing. This is the "kapı
-/// binary'sine müdahale" tripwire: the signed report names its producer, so
+/// Keccak-256 of the gate binary currently executing. This is the gate-binary
+/// tampering tripwire: the signed report names its producer, so
 /// an externally mounted monitor can compare the binary across reports and
 /// detect a swapped or patched gate binary.
 fn gate_binary_hash() -> Result<[u8; 32], String> {
@@ -276,8 +276,8 @@ fn write_status_report(
 ///
 /// The proof side writes the report wherever its workspace target lives; the
 /// relay tries the known layouts (workspace-root target, crate target) and
-/// uses the first one that exists. Every found report is validated in full —
-/// signature and canonical-set digest — before it is trusted.
+/// uses the first one that exists. Every found report is validated in full -
+/// signature and canonical-set digest - before it is trusted.
 fn read_live_proof_side_report(root: &Path) -> Option<Result<LiveProofSideReport, String>> {
     let candidates = [
         root.join("budzero/target/relay/relay-report.json"),

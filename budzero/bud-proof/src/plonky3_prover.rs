@@ -692,7 +692,12 @@ pub fn trace_matrix(
                 Some([
                     step.inference_model_commitment.unwrap_or(0),
                     step.inference_input_commitment.unwrap_or(0),
-                    0, 0, 0, 0, 0, 0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
                 ])
             }
             bud_isa::Opcode::SWrite => {
@@ -831,7 +836,6 @@ pub fn trace_matrix(
                 };
                 values[row_start + COL_EQ_DIFF_INV] = Goldilocks::new(inv);
             }
-
         }
 
         // VerifyInference (kademe 3a): equality witness for
@@ -1540,8 +1544,7 @@ fn aux_trace_generator(
             // COL_INFERENCE_IS_EXPAND here, 8 phantom demands per step were
             // added to the program LogUp partial sum while the AIR excluded
             // them, and every clean VerifyInference proof failed at OOD.
-            let is_expand_row =
-                row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND];
+            let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND];
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
@@ -1825,7 +1828,7 @@ mod tests {
     }
 
     /// Prove a program, verify it, and return the envelope together with the
-    /// public inputs — for tests that must tamper with the envelope after a
+    /// public inputs - for tests that must tamper with the envelope after a
     /// successful round-trip.
     fn prove_and_verify_full(
         program: Vec<u64>,
@@ -1874,7 +1877,7 @@ mod tests {
             state_writes_digest: receipt.state_writes_digest,
         };
 
-                let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
         let verify_res = Plonky3Adapter::verify(&envelope, &pi, &program);
         if let Err(ref e) = verify_res {
             eprintln!("Verification error: {:?}", e);
@@ -8671,7 +8674,7 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
             res.is_ok(),
@@ -8789,7 +8792,7 @@ let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
         );
     }
 
-    /// Kademe 2 (2026-08-28): the AIR refuses an undefined proof type —
+    /// Kademe 2 (2026-08-28): the AIR refuses an undefined proof type -
     /// imm=2 is neither STARK (0) nor SNARK wrap (1). Pinned by the
     /// `imm * (imm - 1)` constraint on non-expansion VerifyInference rows.
     #[test]
