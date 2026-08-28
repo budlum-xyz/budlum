@@ -166,6 +166,101 @@ where
     EvalReport { cases: reports }
 }
 
+// ---------------------------------------------------------------------------
+// An educational/evaluation data set: the "learning content" side of Lubot.
+// ---------------------------------------------------------------------------
+
+impl Check {
+    /// A deterministic, human-readable representation used for hashing the
+    /// data set. Two [`EvalCase`]s that grade identically hash identically.
+    #[must_use]
+    pub fn canonical(&self) -> String {
+        match self {
+            Check::Exact(s) => format!("exact:{}", s),
+            Check::ExactTrimmed(s) => format!("exact_trimmed:{}", s),
+            Check::ContainsAll(xs) => format!("contains_all:{}", xs.join("|")),
+            Check::Excludes(xs) => format!("excludes:{}", xs.join("|")),
+        }
+    }
+}
+
+impl EvalCase {
+    /// The deterministic record for this case (name / prompt / rule).
+    #[must_use]
+    pub fn canonical(&self) -> String {
+        format!("{}\n{}\n{}\n", self.name, self.prompt, self.check.canonical())
+    }
+}
+
+/// A named data set of behaviour cases. This is the unit that is *registered*
+/// (its SHA-256 binds it, mirroring [`crate::plan::TunePlan`]'s
+/// `dataset_hashes`), so the same content can be trained on and later graded -
+/// the data-set hash makes "the content we graded" and "the content we tuned
+/// on" the same object.
+#[derive(Debug, Clone)]
+pub struct EvalDataSet {
+    pub name: String,
+    pub cases: Vec<EvalCase>,
+}
+
+impl EvalDataSet {
+    /// Build a data set where each record's `assistant` is the golden answer
+    /// (whitespace-insensitive) and `user` is the prompt.
+    ///
+    /// This is the bridge between the SFT training set (`InstructionRecord`)
+    /// and the evaluation set: the same golden content is both the training
+    /// target and the correctness oracle.
+    #[must_use]
+    pub fn from_golden(
+        name: impl Into<String>,
+        records: &[lubot_data::jsonl::InstructionRecord],
+    ) -> Self {
+        let cases = records
+            .iter()
+            .map(|r| EvalCase {
+                name: String::new(),
+                prompt: r.user.clone(),
+                check: Check::ExactTrimmed(r.assistant.clone()),
+            })
+            .collect();
+        Self {
+            name: name.into(),
+            cases,
+        }
+    }
+
+    /// The content hash (SHA-256, [`lubot_data::verify::content_id_of`]) of the
+    /// deterministic record list. Changing any case changes the hash, so the
+    /// hash pins *this* exact behaviour set.
+    #[must_use]
+    pub fn digest(&self) -> lubot_core::model::Hash32 {
+        let mut canon = String::with_capacity(self.cases.len() * 64);
+        for c in &self.cases {
+            canon.push_str(&c.canonical());
+        }
+        lubot_data::verify::content_id_of(canon.as_bytes())
+    }
+
+    /// Grade every case with `respond` and return the scored report.
+    #[must_use]
+    pub fn run<F>(&self, respond: F) -> EvalReport
+    where
+        F: Fn(&str) -> String,
+    {
+        run_eval(&self.cases, respond)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cases.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cases.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +346,55 @@ mod tests {
         let report = run_eval(&[], |_: &str| "x".into());
         assert_eq!(report.total(), 0);
         assert_eq!(report.score(), 0.0);
+    }
+
+    #[test]
+    fn curriculum_dataset_has_a_stable_digest_and_is_graded_end_to_end() {
+        // The educational content for this system (EKSIK D): golden Q/A pairs.
+        const CURRICULUM: &str = include_str!("../data/lubot-davranis-curriculum.jsonl");
+        let mut records = Vec::new();
+        for line in CURRICULUM.lines() {
+            records.push(lubot_data::jsonl::decode(line).expect("valid JSONL line"));
+        }
+
+        let set = EvalDataSet::from_golden("lubot-davranis-curriculum", &records);
+        assert_eq!(set.len(), 10);
+
+        // The digest is deterministic and, crucially, matches the digest of an
+        // identical set built from scratch (so it can be registered in B.U.D.
+        // and the same object later re-graded).
+        let d1 = set.digest();
+        assert_eq!(d1, EvalDataSet::from_golden("lubot-davranis-curriculum", &records).digest());
+        assert_eq!(d1.len(), 32);
+
+        // An oracle that answers the golden text: 100% pass.
+        // Map prompt -> golden so the responder is deterministic, then verify
+        // the *harness* scores a perfect set as 1.0.
+        let goldens: std::collections::HashMap<String, String> = records
+            .iter()
+            .map(|r| (r.user.clone(), r.assistant.clone()))
+            .collect();
+        let perfect = set.run(|p| goldens.get(p).cloned().unwrap_or_default());
+        assert_eq!(perfect.passed(), 10);
+        assert!((perfect.score() - 1.0).abs() < f64::EPSILON);
+        assert!(perfect.all_passed());
+
+        // A bad responder that always evades: the harness must flag failures.
+        let bad = set.run(|_| "emin değilim, bilinmiyor".to_string());
+        assert_eq!(bad.passed(), 0);
+        assert!((bad.score()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn from_golden_maps_user_become_prompt_and_assistant_becomes_rule() {
+        let recs = vec![lubot_data::jsonl::InstructionRecord {
+            system: None,
+            user: "soru".to_string(),
+            assistant: "doğru cevap".to_string(),
+        }];
+        let set = EvalDataSet::from_golden("t", &recs);
+        assert_eq!(set.cases[0].prompt, "soru");
+        // Whitespace-insensitive golden grading.
+        assert_eq!(set.cases[0].check.apply("  doğru   cevap  "), CheckOutcome::Pass);
     }
 }

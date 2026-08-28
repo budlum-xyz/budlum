@@ -533,6 +533,71 @@ mod tests {
         assert_eq!(plan.semantics, asked);
     }
 
+    /// Load/admission: a budget that holds the routed footprint *exactly* is
+    /// accepted; one byte short is refused (fail-closed, no silent overflow).
+    #[test]
+    fn disk_budget_boundary_accepts_at_exact_fit_and_refuses_one_byte_over() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1200,
+        };
+        // 4 x 500 = 2000 bytes routed -> disk. Exactly fits.
+        let plan = ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 2000).unwrap();
+        assert_eq!(plan.bytes_in(Tier::Disk), 2000);
+
+        // One byte short is a hard refusal, not a degradation.
+        let err = ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 1999)
+            .expect_err("1999 bytes cannot hold a 2000-byte disk footprint");
+        assert_eq!(
+            err,
+            PlanError::DiskPartDoesNotFit {
+                needed: 2000,
+                available: 1999
+            }
+        );
+    }
+
+    /// Load/debounce: repeated admission decisions are stable - the same
+    /// input never flips between accept and refuse under load.
+    #[test]
+    fn disk_admission_is_deterministic_and_does_not_flap_under_repeated_calls() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1200,
+        };
+        // Under the budget: every call refuses, no flapping.
+        for _ in 0..25 {
+            assert!(ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 1500).is_err());
+        }
+        // At the budget: every call accepts, no flapping.
+        for _ in 0..25 {
+            assert!(ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 2000).is_ok());
+        }
+    }
+
+    /// Load/saturation: a disk that is already full refuses an additional
+    /// model fail-closed, rather than admitting it and reading it off a disk it
+    /// does not own.
+    #[test]
+    fn a_full_disk_refuses_an_additional_model_fail_closed() {
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1200,
+        };
+        // The dense shard needs no disk, so it is admitted with disk=0.
+        let dense_only = vec![model()[0].clone()];
+        assert!(ResidencyPlan::plan_bounded_by_disk(&dense_only, budget, profile(), 0).is_ok());
+
+        // The full model needs 2000 bytes of disk; a disk with 0 free cannot
+        // host it and the plan refuses, never silently spilling.
+        assert!(matches!(
+            ResidencyPlan::plan_bounded_by_disk(&model(), budget, profile(), 0),
+            Err(PlanError::DiskPartDoesNotFit { .. })
+        ));
+    }
+
     /// A device too small for the dense part is refused, not degraded.
     #[test]
     fn a_device_that_cannot_hold_the_dense_part_is_refused() {
