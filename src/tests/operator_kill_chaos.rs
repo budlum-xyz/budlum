@@ -5,8 +5,8 @@
 //! from multi-operator placement through kill → ticket → accept → live count.
 //!
 //! What it is **not** yet:
-//! - a multi-process network with real disks and bonds (baraj item 1),
-//! - an adversarial suite (lazy / Sybil / outsourcing — baraj item 3).
+//!   - a multi-process network with real disks and bonds (baraj item 1),
+//!   - an adversarial suite (lazy / Sybil / outsourcing — baraj item 3).
 //! Those stay open. A skeleton that pretends they are closed is a lie; the
 //! module doc names the gap so a green test cannot be read as all_three.
 //!

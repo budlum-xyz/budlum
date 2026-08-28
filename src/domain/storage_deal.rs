@@ -529,21 +529,14 @@ pub enum ReallocationStatus {
 /// and no deal has ever been opened for that shard. The two are not the same
 /// obligation — one replaces a holder, the other places the first one — so the
 /// cause is part of the ticket, not a comment next to a zeroed deal id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReallocationCause {
     /// A prior deal on this slot ended (slash or expiry). `failed_deal_id` is set.
+    #[default]
     FailedDeal,
     /// The shard was registered and never held a deal. `failed_deal_id` is 0 and
     /// is not a lookup key.
     NeverPlaced,
-}
-
-impl Default for ReallocationCause {
-    fn default() -> Self {
-        // Wire default for tickets serialised before this field existed: every
-        // historic ticket named a failed deal.
-        Self::FailedDeal
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2699,9 +2692,7 @@ impl StorageRegistry {
         replica_index: u8,
         now_epoch: u64,
     ) -> Option<u64> {
-        if self.manifests.get(&manifest_id).is_none() {
-            return None;
-        }
+        self.manifests.get(&manifest_id)?;
         // Refuse when the slot already has a live deal: a never-placed ticket
         // is only for the empty case the repair band already filtered.
         if self.active_replica_count(&manifest_id, &shard_id) > 0 {

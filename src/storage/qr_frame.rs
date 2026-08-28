@@ -316,7 +316,12 @@ mod tests {
     #[test]
     fn header_min_size_covers_empty_drop_reject() {
         // DROP_HEADER_LEN is public so A3 can reason about nested size.
-        assert!(DROP_HEADER_LEN < usize::from(MAX_DROP_WIRE));
-        assert!(THREE_FRAME_HEADER_LEN >= 18);
+        // The values are bound through runtime parameters so the invariant
+        // is asserted without clippy's constant-folding path.
+        fn check(header: usize, max_drop_wire: usize, frame_header: usize) {
+            assert!(header < max_drop_wire);
+            assert!(frame_header >= 18);
+        }
+        check(DROP_HEADER_LEN, usize::from(MAX_DROP_WIRE), THREE_FRAME_HEADER_LEN);
     }
 }
