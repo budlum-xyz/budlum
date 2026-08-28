@@ -21,8 +21,6 @@ pub enum UploadVisibility {
     Public,
 }
 
-
-
 /// Build on-chain recipe form from the full public pipe recipe.
 #[must_use]
 pub fn recipe_for_upload(full: &ThreeRecipePublic, vis: UploadVisibility) -> ThreeRecipe {
