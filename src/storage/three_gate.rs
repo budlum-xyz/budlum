@@ -1,5 +1,9 @@
 //! T4 / CH.4 — Three derivatives are not durable storage.
 //!
+//! WIRING: unwired - staged 3.0 guard; no production write path accepts a
+//! Three derivative yet, so there is nothing to intercept until the emit
+//! path lands (plan §CH.4).
+//!
 //! Optical frames, carousel drops, and raw-concat mux blobs are **transport**.
 //! A node that writes them into the content-addressed body store is lying about
 //! the edition-Three model (recipe + optional sealed body, zero QR-as-storage).
