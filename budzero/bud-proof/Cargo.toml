@@ -34,6 +34,10 @@ tiny-keccak = { version = "2.0", features = ["keccak"] }
 name = "proof_baseline"
 harness = false
 
+[[bench]]
+name = "canonical_programs"
+harness = false
+
 [dev-dependencies]
 # For the compiled branching test (tests/compiled_branching.rs): it drives the proof
 # pipeline with the compiler's real output rather than a hand built instruction sequence
