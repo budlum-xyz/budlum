@@ -27,7 +27,7 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 # ISO QR encode for Three optical frames (K-QR: EC=L, mask pin). MIT/Apache.
 qrcode = { version = "0.14", default-features = false, features = [] }
 # Decode QR modules from our deterministic PNGs (MIT/Apache).
-rqrr = "0.9"
+rqrr = "0.10"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
