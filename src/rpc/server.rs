@@ -1001,6 +1001,10 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
         "videoBlobKind": format!("{:?}", feed.video_blob_kind),
         "seedIsPublic": feed.seed_is_public,
         "regeneratedLen": feed.regenerated_len,
+        "sealedRecipe": format!("0x{}", hex::encode(feed.sealed_recipe)),
+        "publiclyReemitable": feed.publicly_reemitable,
+        "decodedBodyLen": feed.decoded_body_len,
+        "videoBodyLen": feed.video_body_len,
     })
 }
 
@@ -2027,6 +2031,17 @@ impl BudlumApiServer for RpcServer {
         let data = hex::decode(hex).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
         })?;
+        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body of {} bytes over emit cap {}",
+                    data.len(),
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
         let policy = crate::storage::emit::EmitPolicy {
             block_len,
             ..crate::storage::emit::EmitPolicy::default()
@@ -2047,6 +2062,17 @@ impl BudlumApiServer for RpcServer {
         let data = hex::decode(hex).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
         })?;
+        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body of {} bytes over emit cap {}",
+                    data.len(),
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
         let policy = crate::storage::emit::EmitPolicy {
             block_len,
             ..crate::storage::emit::EmitPolicy::default()
