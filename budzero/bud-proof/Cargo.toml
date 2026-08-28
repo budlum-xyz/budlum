@@ -40,7 +40,7 @@ harness = false
 
 [dev-dependencies]
 # For the compiled branching test (tests/compiled_branching.rs): it drives the proof
-# pipeline with the compiler's real output rather than a hand built instruction sequence
-# besler. Mevcut 106 prover testinin tamami elle kurulmus dizi kullaniyordu.
+# pipeline with the compiler's real output rather than a hand-built instruction
+# sequence (the other prover tests build their arrays by hand).
 bud-compiler = { path = "../bud-compiler" }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
