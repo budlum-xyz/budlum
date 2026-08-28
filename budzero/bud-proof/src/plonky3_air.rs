@@ -1602,8 +1602,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // events, and nothing in the AIR says that number is at most the
         // number of CPU rows.
         //
-        // It happens to be, today. Measured: four opcodes set `memory_addr`
-        // on their step (`Load`, `Store`, `VerifyMerkle`, `SumConservation`)
+        // It happens to be, today. Measured: three opcodes set `memory_addr`
+        // on their step (`Load`, `Store`, `VerifyMerkle`; `SumConservation`
+        // reads no memory despite carrying a memory slot in older comments)
         // and six push an extra event from the stack or storage buffers
         // (`Push`, `Pop`, `Call`, `Ret`, `SRead`, `SWrite`); the two sets do
         // not intersect, so one step contributes at most one memory event and
