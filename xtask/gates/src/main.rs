@@ -53,6 +53,7 @@ mod gates {
     pub mod budscan_parity;
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
+    pub mod ci_workflow_guards;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
     pub mod clippy_extra;
@@ -535,6 +536,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::relay::self_test,
+    },
+    Gate {
+        name: "ci-workflow-guards",
+        replaces: None,
+        run: gates::ci_workflow_guards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::ci_workflow_guards::self_test,
     },
     Gate {
         name: "tree-pin",

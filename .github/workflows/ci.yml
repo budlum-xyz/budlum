@@ -1503,6 +1503,13 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin
+      # CI workflow guards: the protected gates must be invoked with their
+      # self-test canaries in the workflows (deleting a gate from CI or
+      # dropping its canary is a red relay, not a silent pass).
+      - name: ci-workflow-guards (security gates are live in CI) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;
