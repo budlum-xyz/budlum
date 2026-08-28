@@ -92,8 +92,7 @@ fn rs_generator(ec_len: usize) -> [u8; MAX_EC + 1] {
     );
     let mut g = [0u8; MAX_EC + 1];
     g[0] = 1;
-    let mut deg = 0usize;
-    for &root in GF_EXP.iter().take(ec_len) {
+    for (deg, &root) in GF_EXP.iter().take(ec_len).enumerate() {
         let mut k = deg + 1;
         while k > 0 {
             // `g[k] ^= gf_mul(g[k - 1], root)`: the previous coefficient is
@@ -104,7 +103,6 @@ fn rs_generator(ec_len: usize) -> [u8; MAX_EC + 1] {
             }
             k -= 1;
         }
-        deg += 1;
     }
     g
 }
