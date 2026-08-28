@@ -327,18 +327,29 @@ mod tests {
             usize::from(MAX_DROP_WIRE),
             THREE_FRAME_HEADER_LEN,
         );
-        // The name promised a rejection, so both refusals are measured. An
-        // empty drop serialises to a zero-length wire and the unpacker
-        // refuses it; a frame shorter than the header cannot be parsed at all.
+        // The name promised a rejection, so each refusal the header can carry
+        // is measured on bytes a real packer produced. An emptied drop body
+        // keeps a non-zero wire length, so the header accepts it and the
+        // nested parse refuses it; zeroing the length field reaches the header
+        // rule directly; a length above the wire cap reaches it the same way;
+        // a frame shorter than the header cannot be parsed at all.
         let packed = pack_payload(PayloadKind::ContentBytes, b"empty-and-truncate").unwrap();
         let (stream, enc) = stream_for(&packed);
         let mut empty = enc.drop_at(0);
         empty.body = Vec::new();
         assert_eq!(
             unpack_frame(&stream, &pack_frame(&stream, &empty)).unwrap_err(),
-            FrameError::BadDropLen(0)
+            FrameError::BadDrop
         );
         let frame = pack_frame(&stream, &enc.drop_at(0));
+        for declared in [0u16, MAX_DROP_WIRE + 1] {
+            let mut bad = frame.clone();
+            bad[12..14].copy_from_slice(&declared.to_le_bytes());
+            assert_eq!(
+                unpack_frame(&stream, &bad).unwrap_err(),
+                FrameError::BadDropLen(declared)
+            );
+        }
         let short = frame.get(..DROP_HEADER_LEN).unwrap_or(frame.as_slice());
         assert_eq!(
             unpack_frame(&stream, short).unwrap_err(),
