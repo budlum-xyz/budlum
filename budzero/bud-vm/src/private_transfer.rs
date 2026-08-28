@@ -74,13 +74,7 @@ pub fn build_private_transfer_check_program() -> Result<Vec<u64>, String> {
 
     prog.push(inst(Opcode::Load, 1, 0, 0, CANONICAL_AMOUNT));
     prog.push(inst(Opcode::Load, 2, 0, 0, CANONICAL_BLINDING));
-    prog.push(inst(
-        Opcode::PrivacyCommit,
-        4,
-        1,
-        2,
-        CANONICAL_RECIPIENT,
-    ));
+    prog.push(inst(Opcode::PrivacyCommit, 4, 1, 2, CANONICAL_RECIPIENT));
     prog.push(inst(Opcode::Load, 5, 0, 0, CANONICAL_SUM_IN));
     prog.push(inst(Opcode::Load, 6, 0, 0, CANONICAL_SUM_OUT));
     prog.push(inst(Opcode::SumConservation, 7, 5, 6, 0));
@@ -131,8 +125,7 @@ mod tests {
         // The nullifier verdict is deterministic for the canonical constants:
         // measured once on 2026-08-27 (30-round Poseidon, DOMAIN_NULLIFIER).
         assert_eq!(
-            vm.registers[10],
-            0,
+            vm.registers[10], 0,
             "claimed nullifier does not derive from the canonical secret"
         );
         assert_eq!(
