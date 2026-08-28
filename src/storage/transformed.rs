@@ -58,6 +58,16 @@ pub enum ContentClass {
     Ciphertext = 4,
     /// Generative recipe wire (catalogue) — usually tiny; still may zlib.
     RecipeWire = 5,
+    /// SVG / XML vector document — organic text underneath.
+    VectorOrganic = 6,
+    /// Raw / lightly packed bitmap (BMP) — piece-constant, zlib helps.
+    RasterFlat = 7,
+    /// PCM audio (WAV) — low entropy samples, zlib helps.
+    AudioPcm = 8,
+    /// Office / OOXML package — zip container but measurably shrinkable.
+    DocumentOrganic = 9,
+    /// Executable image (ELF / PE) — zlib refused.
+    Exec = 10,
 }
 
 impl ContentClass {
@@ -73,6 +83,18 @@ impl ContentClass {
             {
                 return Self::TextOrganic;
             }
+            if m.starts_with("image/svg") {
+                return Self::VectorOrganic;
+            }
+            if m.starts_with("image/bmp") {
+                return Self::RasterFlat;
+            }
+            if m.starts_with("audio/wav") || m.starts_with("audio/x-wav") {
+                return Self::AudioPcm;
+            }
+            if m.contains("officedocument") || m.starts_with("application/msword") {
+                return Self::DocumentOrganic;
+            }
             if m.starts_with("image/jpeg")
                 || m.starts_with("image/png")
                 || m.starts_with("image/gif")
@@ -80,11 +102,8 @@ impl ContentClass {
                 || m.starts_with("video/")
                 || m.starts_with("audio/")
             {
-                // PNG can be compressible; JPEG/MP4 entropy. Be conservative:
-                // PNG → Generic (allow zlib try); jpeg/mp4 → entropy.
-                if m.starts_with("image/png") {
-                    return Self::Generic;
-                }
+                // PNG gövdesi zaten deflate taşır: ölçüm zlib denemesinin
+                // kazandırmadığını gösterdi, EntropyMedia tarafında kalır.
                 return Self::EntropyMedia;
             }
             if m.contains("zip") || m.contains("gzip") || m.contains("zstd") {
@@ -98,8 +117,14 @@ impl ContentClass {
     #[must_use]
     pub const fn may_try_zlib(self) -> bool {
         match self {
-            Self::EntropyMedia | Self::EntropyArchive | Self::Ciphertext => false,
-            Self::Generic | Self::TextOrganic | Self::RecipeWire => true,
+            Self::EntropyMedia | Self::EntropyArchive | Self::Ciphertext | Self::Exec => false,
+            Self::Generic
+            | Self::TextOrganic
+            | Self::RecipeWire
+            | Self::VectorOrganic
+            | Self::RasterFlat
+            | Self::AudioPcm
+            | Self::DocumentOrganic => true,
         }
     }
 }
@@ -109,12 +134,15 @@ fn sniff_magic(bytes: &[u8]) -> ContentClass {
         return ContentClass::EntropyMedia; // JPEG
     }
     if bytes.len() >= 4 && bytes[0..4] == *b"\x89PNG" {
-        return ContentClass::Generic; // try zlib; often already deflated inside
+        return ContentClass::EntropyMedia; // govde zaten deflate; zlib kazandirmiyor
     }
     if bytes.len() >= 4
         && (bytes[0..4] == *b"ftyp" || (bytes.len() >= 8 && &bytes[4..8] == b"ftyp"))
     {
         return ContentClass::EntropyMedia; // ISO BMFF
+    }
+    if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WAVE" {
+        return ContentClass::AudioPcm; // WAV: PCM ornekleri, dusuk entropi
     }
     if bytes.len() >= 4 && bytes[0..4] == *b"RIFF" {
         return ContentClass::EntropyMedia;
@@ -122,8 +150,29 @@ fn sniff_magic(bytes: &[u8]) -> ContentClass {
     if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
         return ContentClass::EntropyArchive; // gzip
     }
+    if bytes.len() >= 4 && bytes[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+        return ContentClass::EntropyArchive; // zstd
+    }
     if bytes.len() >= 4 && bytes[0..4] == *b"PK\x03\x04" {
+        // OOXML paketi ilk girdi olarak [Content_Types].xml tasir; duz zip
+        // EntropyArchive kalir, ofis belge sikistirilabilir organic sayilir.
+        let head = &bytes[..bytes.len().min(512)];
+        if head.windows(19).any(|w| w == b"[Content_Types].xml") {
+            return ContentClass::DocumentOrganic;
+        }
         return ContentClass::EntropyArchive; // zip
+    }
+    if bytes.len() >= 4 && bytes[0..4] == *b"\x7fELF" {
+        return ContentClass::Exec; // ELF
+    }
+    if bytes.len() >= 2 && bytes[0..2] == *b"MZ" {
+        return ContentClass::Exec; // PE
+    }
+    if bytes.len() >= 2 && bytes[0..2] == *b"BM" {
+        return ContentClass::RasterFlat; // bitmap
+    }
+    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+        return ContentClass::VectorOrganic;
     }
     if bytes.len() >= 4 && bytes[0..4] == *b"BDLC" {
         return ContentClass::Ciphertext;
@@ -259,11 +308,15 @@ pub fn transform_content(
         .unwrap_or_else(|| ContentClass::classify(input, opts.mime_hint));
     let mut flags = CodecFlags::NONE;
     match class {
-        ContentClass::EntropyMedia | ContentClass::EntropyArchive => {
+        ContentClass::EntropyMedia | ContentClass::EntropyArchive | ContentClass::Exec => {
             flags = flags.union(CodecFlags::ENTROPY_CODED);
         }
         ContentClass::Ciphertext => flags = flags.union(CodecFlags::CIPHERTEXT),
-        ContentClass::TextOrganic => flags = flags.union(CodecFlags::ORGANIC_COMPRESSIBLE),
+        ContentClass::TextOrganic
+        | ContentClass::VectorOrganic
+        | ContentClass::RasterFlat
+        | ContentClass::AudioPcm
+        | ContentClass::DocumentOrganic => flags = flags.union(CodecFlags::ORGANIC_COMPRESSIBLE),
         ContentClass::Generic | ContentClass::RecipeWire => {}
     }
 
@@ -348,6 +401,256 @@ mod tests {
         assert!(t.codec_flags.contains(CodecFlags::ENTROPY_CODED));
         assert!(!t.codec_flags.contains(CodecFlags::PRE_SHRUNK));
         assert_eq!(t.bytes, jpeg);
+    }
+
+    /// Görev 3 adım 1: on format sınıfının kokusu ve zlib politikası.
+    #[test]
+    fn format_matrix_ten_classes_sniffed() {
+        // (girdi, beklenen sınıf, beklenen may_try_zlib)
+        let cases: Vec<(&str, Vec<u8>, ContentClass, bool)> = vec![
+            (
+                "generic",
+                vec![0x01u8, 0x02, 0x00, 0xfe, 0x03, 0x80, 0x00, 0x99],
+                ContentClass::Generic,
+                true,
+            ),
+            (
+                "metin",
+                b"the quick brown fox jumps over the lazy dog ".repeat(4),
+                ContentClass::TextOrganic,
+                true,
+            ),
+            (
+                "svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>".to_vec(),
+                ContentClass::VectorOrganic,
+                true,
+            ),
+            (
+                "xml-bildirimi",
+                b"<?xml version=\"1.0\"?><doc><a/></doc>".to_vec(),
+                ContentClass::VectorOrganic,
+                true,
+            ),
+            (
+                "bmp",
+                {
+                    let mut v = b"BM".to_vec();
+                    v.extend_from_slice(&[0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+                    v.extend(std::iter::repeat_n(0x7fu8, 64));
+                    v
+                },
+                ContentClass::RasterFlat,
+                true,
+            ),
+            (
+                "wav",
+                {
+                    let mut v = b"RIFF".to_vec();
+                    v.extend_from_slice(&[0x24, 0x00, 0x00, 0x00]);
+                    v.extend_from_slice(b"WAVEfmt ");
+                    v.extend(std::iter::repeat_n(0x10u8, 48));
+                    v
+                },
+                ContentClass::AudioPcm,
+                true,
+            ),
+            (
+                "ooxml",
+                {
+                    let mut v = b"PK\x03\x04".to_vec();
+                    v.extend(std::iter::repeat_n(0u8, 26));
+                    v.extend_from_slice(b"[Content_Types].xml");
+                    v.extend(std::iter::repeat_n(0u8, 64));
+                    v
+                },
+                ContentClass::DocumentOrganic,
+                true,
+            ),
+            (
+                "elf",
+                {
+                    let mut v = b"\x7fELF".to_vec();
+                    v.extend(std::iter::repeat_n(0x00u8, 60));
+                    v
+                },
+                ContentClass::Exec,
+                false,
+            ),
+            (
+                "pe",
+                {
+                    let mut v = b"MZ".to_vec();
+                    v.extend(std::iter::repeat_n(0x90u8, 62));
+                    v
+                },
+                ContentClass::Exec,
+                false,
+            ),
+            (
+                "zip",
+                {
+                    let mut v = b"PK\x03\x04".to_vec();
+                    v.extend(std::iter::repeat_n(0u8, 26));
+                    v.extend_from_slice(b"data.bin");
+                    v.extend(std::iter::repeat_n(0u8, 64));
+                    v
+                },
+                ContentClass::EntropyArchive,
+                false,
+            ),
+            (
+                "gzip",
+                {
+                    let mut v = vec![0x1fu8, 0x8b, 0x08];
+                    v.extend(std::iter::repeat_n(0x33u8, 64));
+                    v
+                },
+                ContentClass::EntropyArchive,
+                false,
+            ),
+            (
+                "jpeg",
+                {
+                    let mut v = vec![0xffu8, 0xd8, 0xff, 0xe0];
+                    v.extend(std::iter::repeat_n(0xABu8, 64));
+                    v
+                },
+                ContentClass::EntropyMedia,
+                false,
+            ),
+            (
+                "png",
+                {
+                    let mut v = b"\x89PNG".to_vec();
+                    v.extend(std::iter::repeat_n(0x0Du8, 64));
+                    v
+                },
+                ContentClass::EntropyMedia,
+                false,
+            ),
+            (
+                "ciphertext",
+                {
+                    let mut v = b"BDLC".to_vec();
+                    v.extend(std::iter::repeat_n(0x5Au8, 64));
+                    v
+                },
+                ContentClass::Ciphertext,
+                false,
+            ),
+        ];
+        for (ad, girdi, sinif, zlib) in cases {
+            let got = ContentClass::classify(&girdi, None);
+            assert_eq!(got, sinif, "sniff yanlis: {ad}");
+            assert_eq!(got.may_try_zlib(), zlib, "zlib politikasi yanlis: {ad}");
+        }
+        // RecipeWire koklanmaz; zorla secilir ve zlib deneyebilir.
+        assert!(ContentClass::RecipeWire.may_try_zlib());
+    }
+
+    /// Görev 3 adım 6: entropi siniflarinda PRE_SHRUNK asla kalkmaz.
+    #[test]
+    fn matrix_zlib_never_grows_entropy() {
+        let entropy_inputs: Vec<Vec<u8>> = vec![
+            {
+                let mut v = vec![0xffu8, 0xd8, 0xff, 0xe0];
+                v.extend(std::iter::repeat_n(0xABu8, 2000));
+                v
+            },
+            {
+                let mut v = b"\x89PNG".to_vec();
+                v.extend(std::iter::repeat_n(0x0Du8, 2000));
+                v
+            },
+            {
+                let mut v = vec![0x1fu8, 0x8b, 0x08];
+                v.extend(std::iter::repeat_n(0x33u8, 2000));
+                v
+            },
+            {
+                let mut v = b"\x7fELF".to_vec();
+                v.extend(std::iter::repeat_n(0x00u8, 2000));
+                v
+            },
+            {
+                let mut v = b"BDLC".to_vec();
+                v.extend(std::iter::repeat_n(0x5Au8, 2000));
+                v
+            },
+        ];
+        for girdi in entropy_inputs {
+            let t = transform_content(
+                &girdi,
+                TransformOpts {
+                    apply_zlib: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!t.class.may_try_zlib(), "entropi sinifi zlib istedi");
+            assert!(!t.codec_flags.contains(CodecFlags::PRE_SHRUNK));
+            assert_eq!(t.bytes, girdi);
+        }
+    }
+
+    /// Görev 3 adım 7: her sinif QR-video zincirinden bayt esit geri doner.
+    #[test]
+    fn matrix_e2e_each_class_round_trips() {
+        use crate::storage::three_pipe::{decode_qr_video, encode_qr_video};
+        let inputs: Vec<(&str, Vec<u8>)> = vec![
+            ("metin", b"log satiri ".repeat(300)),
+            (
+                "svg",
+                b"<svg><path d=\"M0 0L10 10\"/></svg><!-- ".repeat(80),
+            ),
+            ("bmp", {
+                let mut v = b"BM".to_vec();
+                v.extend(std::iter::repeat_n(0x7fu8, 3000));
+                v
+            }),
+            ("wav", {
+                let mut v = b"RIFF".to_vec();
+                v.extend_from_slice(&[0x00, 0x0c, 0x00, 0x00]);
+                v.extend_from_slice(b"WAVEfmt ");
+                v.extend(std::iter::repeat_n(0x10u8, 3000));
+                v
+            }),
+            ("jpeg", {
+                let mut v = vec![0xffu8, 0xd8, 0xff, 0xe0];
+                v.extend((0..3000u32).map(|i| (i % 251) as u8));
+                v
+            }),
+            ("png", {
+                let mut v = b"\x89PNG".to_vec();
+                v.extend((0..3000u32).map(|i| (i % 199) as u8));
+                v
+            }),
+            ("gzip", {
+                let mut v = vec![0x1fu8, 0x8b, 0x08];
+                v.extend((0..3000u32).map(|i| (i % 173) as u8));
+                v
+            }),
+            ("elf", {
+                let mut v = b"\x7fELF".to_vec();
+                v.extend((0..3000u32).map(|i| (i % 131) as u8));
+                v
+            }),
+            ("ciphertext", {
+                let mut v = b"BDLC".to_vec();
+                v.extend((0..3000u32).map(|i| (i % 97) as u8));
+                v
+            }),
+            (
+                "generic",
+                (0..3000u32).map(|i| ((i * 37) % 256) as u8).collect(),
+            ),
+        ];
+        for (ad, icerik) in inputs {
+            let enc = encode_qr_video(&icerik, 64, None).unwrap();
+            let (_kind, raw, _v) = decode_qr_video(&enc.video_blob).unwrap();
+            assert_eq!(raw, icerik, "sinif zincirden bozuk cikti: {ad}");
+        }
     }
 
     #[test]
