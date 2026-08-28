@@ -5,7 +5,7 @@
 //! Simple byte slicing) is **off-chain** - the chain only sees the
 //! Per-shard `ContentId`s and a deterministic `manifest_id` derived from
 //! Them. This matches the existing project rule "the chain carries the
-//! Proof/address of data, not the data itself" (BudZKVM STARK proof
+//! Proof/address of data, not the data itself" (`BudZKVM` STARK proof
 //! Analogy, plan §3.1).
 //!
 //! Per the data-sovereignty rule (plan §0.5): the manifest is
@@ -50,7 +50,7 @@ impl ShardRef {
     /// Computed deterministically; `index` is assigned by the caller
     /// (e.g. the off-chain chunker).
     pub fn from_bytes(index: u32, chunk: &[u8]) -> Self {
-        ShardRef {
+        Self {
             kind: ShardKind::Data,
             index,
             shard_id: ContentId::of(chunk),
@@ -217,14 +217,14 @@ pub struct ErasureScheme {
 
 impl ErasureScheme {
     /// Plain replication: every shard is data, nothing reconstructs anything.
-    pub fn replication(shard_count: u32) -> Self {
+    pub const fn replication(shard_count: u32) -> Self {
         Self {
             k: shard_count,
             n: shard_count,
         }
     }
 
-    pub fn parity_count(&self) -> u32 {
+    pub const fn parity_count(&self) -> u32 {
         self.n.saturating_sub(self.k)
     }
 
@@ -285,13 +285,16 @@ impl ErasureScheme {
 
     /// Bytes stored per byte of content, as a ratio scaled by 1000 to stay in
     /// integer arithmetic. Replication of 3 is 3000; a (4,6) code is 1500.
-    pub fn overhead_per_mille(&self) -> u32 {
+    pub const fn overhead_per_mille(&self) -> u32 {
         if self.k == 0 {
             return u32::MAX;
         }
         (self.n.saturating_mul(1000)) / self.k
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn validate(&self) -> Result<(), String> {
         if self.k == 0 {
             return Err("erasure scheme k must be at least 1".into());
@@ -447,6 +450,9 @@ pub struct ContentManifest {
 }
 
 impl ContentManifest {
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Build a manifest from a pre-computed set of shards. Validates that
     /// The shard list is non-empty, indices are unique, sizes are non-zero,
     /// And the total size matches the sum of shard sizes.
@@ -467,7 +473,7 @@ impl ContentManifest {
                 return Err(format!("Duplicate shard index {}", s.index));
             }
             total = total
-                .checked_add(s.size as u64)
+                .checked_add(u64::from(s.size))
                 .ok_or_else(|| "ContentManifest total size overflow".to_string())?;
         }
         let shard_count = shards.len() as u32;
@@ -480,7 +486,7 @@ impl ContentManifest {
         let encryption = ContentEncryption::Plaintext;
         let manifest_id =
             manifest_id_from_parts_stored(&shards, &erasure, &encryption, total, total);
-        Ok(ContentManifest {
+        Ok(Self {
             manifest_id,
             owner,
             dictionary_id: None,
@@ -567,7 +573,7 @@ impl ContentManifest {
     /// `content_size` existed. Those were replication-only, where the two are
     /// the same number, so the fallback is their actual meaning rather than a
     /// guess.
-    pub fn content_size(&self) -> u64 {
+    pub const fn content_size(&self) -> u64 {
         if self.content_size == 0 {
             self.total_size
         } else {
@@ -575,6 +581,9 @@ impl ContentManifest {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Record the object's byte length, for manifests whose stored bytes
     /// exceed their content (erasure coding, or a padded tail stripe).
     ///
@@ -596,6 +605,9 @@ impl ContentManifest {
         Ok(self)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Recompute the canonical id and check it against the one carried.
     ///
     /// `manifest_id` is the key every registry, deal and challenge indexes
@@ -628,6 +640,9 @@ impl ContentManifest {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Full structural check: the id matches, the shard list is coherent, and
     /// the declared erasure scheme is one the shard list can deliver.
     ///
@@ -656,7 +671,7 @@ impl ContentManifest {
                 return Err(format!("Duplicate shard index {}", s.index));
             }
             total = total
-                .checked_add(s.size as u64)
+                .checked_add(u64::from(s.size))
                 .ok_or_else(|| "ContentManifest total size overflow".to_string())?;
         }
         if total != self.total_size {
@@ -716,6 +731,9 @@ impl ContentManifest {
         self.verify_id()
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Attach an erasure scheme, validating it against the shard list.
     ///
     /// The counts have to line up: `n` is every shard, `k` is the data shards,
@@ -759,7 +777,7 @@ impl ContentManifest {
     }
 
     /// Whether an object is still reconstructible with `live` shards left.
-    pub fn is_recoverable(&self, live: u32) -> bool {
+    pub const fn is_recoverable(&self, live: u32) -> bool {
         live >= self.erasure.k
     }
 
@@ -773,7 +791,7 @@ impl ContentManifest {
     /// Returns false once the object is already unrecoverable: there is
     /// nothing to reconstruct from, and a repair deal opened then would just
     /// burn an operator bond.
-    pub fn needs_repair(&self, live: u32, margin: u32) -> bool {
+    pub const fn needs_repair(&self, live: u32, margin: u32) -> bool {
         if live < self.erasure.k {
             return false;
         }
@@ -820,11 +838,14 @@ impl ContentManifest {
     /// F01: set the real owner, after `from_shards`. If `manifest_id` were bound
     /// to the owner it would have to be recomputed; for now `manifest_id` is
     /// shards-only, which is F01 task 2.
-    pub fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
+    pub const fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Convenience: build a manifest by slicing `data` into equal-sized
     /// Chunks. The default chunk size is `DEFAULT_CHUNK_SIZE_BYTES`.
     /// The last shard may be smaller.

@@ -1,7 +1,7 @@
 //! Default visibility for Three uploads (user 2026-08-27).
 //!
 //! **Start sealed (V0).** Owner later opens via key infrastructure to everyone
-//! (PublicKeyId) or named people (NamedGrantee). When the owner deletes from
+//! (`PublicKeyId`) or named people (`NamedGrantee`). When the owner deletes from
 //! social/DM, the key id rotates / grant revokes → content stops being
 //! openable for **new** sessions (T3 honesty: devices already holding frames
 //! are not clawed back).
@@ -15,7 +15,7 @@ pub enum UploadVisibility {
     /// V0 - sealed recipe; only owner keystore opens.
     #[default]
     SealedOwner,
-    /// V1 - will attach NamedGrantee grants after upload.
+    /// V1 - will attach `NamedGrantee` grants after upload.
     Restricted,
     /// V2 - public recipe on chain.
     Public,
@@ -32,7 +32,7 @@ pub fn recipe_for_upload(full: &ThreeRecipePublic, vis: UploadVisibility) -> Thr
     }
 }
 
-/// ViewPolicy to pair with the upload (grant layer).
+/// `ViewPolicy` to pair with the upload (grant layer).
 #[must_use]
 pub const fn policy_for_upload(vis: UploadVisibility) -> ViewPolicy {
     match vis {

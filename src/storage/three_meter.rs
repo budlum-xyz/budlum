@@ -70,7 +70,7 @@ impl ThreeMeter {
             .saturating_add(self.seals.saturating_mul(4))
     }
 
-    fn charge(&mut self, add_weight: u64) -> Result<(), MeterError> {
+    const fn charge(&mut self, add_weight: u64) -> Result<(), MeterError> {
         let used = self.weight().saturating_add(add_weight);
         if let Some(b) = self.budget {
             if used > b {
@@ -80,6 +80,9 @@ impl ThreeMeter {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
     /// Record one pack.
     pub fn record_pack(&mut self) -> Result<(), MeterError> {
         self.charge(1)?;
@@ -87,6 +90,9 @@ impl ThreeMeter {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
     /// Record `n` drops.
     pub fn record_drops(&mut self, n: u64) -> Result<(), MeterError> {
         self.charge(n)?;
@@ -94,6 +100,9 @@ impl ThreeMeter {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
     /// Record `n` frames.
     pub fn record_frames(&mut self, n: u64) -> Result<(), MeterError> {
         self.charge(n.saturating_mul(2))?;
@@ -101,6 +110,9 @@ impl ThreeMeter {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `MeterError` from the step that failed; its variants name the refused conditions.
     /// Record one seal/open.
     pub fn record_seal(&mut self) -> Result<(), MeterError> {
         self.charge(4)?;

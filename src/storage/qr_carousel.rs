@@ -18,7 +18,7 @@
 //! # What this module does not claim
 //!
 //! - It does not draw QR modules (A3) or mux video (A4).
-//! - It does not write a ContentQrRecipe (A5).
+//! - It does not write a `ContentQrRecipe` (A5).
 //! - Decimen / AGPL source is not present; only the measured carousel rule.
 //! - Live infinite carousel is modeled by letting the caller keep requesting
 //!   `drop_at(seq)` for increasing `seq`; a fixed-length file uses
@@ -56,7 +56,7 @@ pub const MAX_CAROUSEL_BYTES: usize = 64 * 1024 * 1024;
 pub const ONESHOT_REPAIR_PERMILLAGE: u32 = 150;
 
 /// Fixed drop header length before the body:
-/// magic4 + ver1 + flags1 + seq4 + k2 + block_len2 + total_len4 + degree1 + pad1 + body_hash4.
+/// magic4 + ver1 + flags1 + seq4 + k2 + `block_len2` + `total_len4` + degree1 + pad1 + `body_hash4`.
 pub const DROP_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 2 + 2 + 4 + 1 + 1 + 4;
 
 /// Errors from carousel encode / decode.
@@ -90,7 +90,7 @@ pub enum CarouselError {
     },
     /// Body FNV-1a short hash mismatch.
     BodyHashMismatch,
-    /// Stream parameters disagree across drops (k / block_len / total_len).
+    /// Stream parameters disagree across drops (k / `block_len` / `total_len`).
     ParamMismatch,
     /// Decoder finished without recovering every source block.
     Incomplete {
@@ -182,7 +182,7 @@ impl CarouselParams {
         })
     }
 
-    /// Commitment binding the stream identity (for A3 stream_id later).
+    /// Commitment binding the stream identity (for A3 `stream_id` later).
     #[must_use]
     pub fn stream_commitment(self, payload_commitment: &[u8; 32]) -> [u8; 32] {
         hash_fields_bytes(&[
@@ -202,7 +202,7 @@ pub struct Drop {
     pub seq: u32,
     /// Stream parameters.
     pub params: CarouselParams,
-    /// Number of source blocks XORed into the body (1 for systematic).
+    /// Number of source blocks `XORed` into the body (1 for systematic).
     pub degree: u8,
     /// Drop body, length == `params.block_len`.
     pub body: Vec<u8>,
@@ -566,12 +566,11 @@ impl CarouselDecoder {
             if idx >= usize::from(k) {
                 continue;
             }
-            match self.solved.get(idx).and_then(|s| s.as_ref()) {
-                Some(known) => xor_into(&mut rhs, known),
-                None => {
-                    bitset_set(&mut mask, idx);
-                    degree = degree.saturating_add(1);
-                }
+            if let Some(known) = self.solved.get(idx).and_then(|s| s.as_ref()) {
+                xor_into(&mut rhs, known)
+            } else {
+                bitset_set(&mut mask, idx);
+                degree = degree.saturating_add(1);
             }
         }
         if degree == 0 {
@@ -750,19 +749,18 @@ impl CarouselDecoder {
                     continue;
                 }
                 let (idx, body) = match self.residuals.get(i) {
-                    Some(r) => match bitset_first(&r.mask) {
-                        Some(idx) => {
+                    Some(r) => {
+                        if let Some(idx) = bitset_first(&r.mask) {
                             let mut b = r.rhs.clone();
                             if b.len() != bl {
                                 b.resize(bl, 0);
                             }
                             (idx, b)
-                        }
-                        None => {
+                        } else {
                             i += 1;
                             continue;
                         }
-                    },
+                    }
                     None => break,
                 };
                 // Dropping the row shifts later indices, so the pivot map is

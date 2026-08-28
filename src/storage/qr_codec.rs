@@ -81,7 +81,7 @@ impl std::error::Error for CodecError {}
 /// # Errors
 ///
 /// [`CodecError::Forbidden`] when the kind is not allowed.
-pub fn gate_codec(kind: CodecKind) -> Result<(), CodecError> {
+pub const fn gate_codec(kind: CodecKind) -> Result<(), CodecError> {
     if kind.is_allowed() {
         Ok(())
     } else {

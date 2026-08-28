@@ -24,7 +24,7 @@ pub enum QrError {
 impl std::fmt::Display for QrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            QrError::TooLong(len) => write!(f, "payload of {len} bytes exceeds {MAX_DATA_BYTES}"),
+            Self::TooLong(len) => write!(f, "payload of {len} bytes exceeds {MAX_DATA_BYTES}"),
         }
     }
 }
@@ -266,7 +266,7 @@ struct BitWriter {
 }
 
 impl BitWriter {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             bytes: Vec::new(),
             len: 0,
@@ -305,7 +305,7 @@ fn build_codewords(data: &[u8]) -> Result<(Vec<u8>, u8), QrError> {
     bits.push(0b0100, 4);
     bits.push(data.len() as u32, count_bits);
     for &b in data {
-        bits.push(b as u32, 8);
+        bits.push(u32::from(b), 8);
     }
     let term = core::cmp::min(4, dcw * 8 - bits.len);
     bits.push(0, term as u32);
@@ -422,11 +422,11 @@ pub struct EncodedMatrix {
 }
 
 impl EncodedMatrix {
-    pub fn version(&self) -> u8 {
+    pub const fn version(&self) -> u8 {
         self.version
     }
 
-    pub fn side_len(&self) -> usize {
+    pub const fn side_len(&self) -> usize {
         self.dark.len()
     }
 
@@ -440,6 +440,9 @@ impl EncodedMatrix {
     }
 }
 
+/// # Errors
+///
+/// Propagates `QrError` from the step that failed; its variants name the refused conditions.
 /// Encodes a byte-mode, level-L, mask-0 symbol for `data`.
 pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     let (stream, version) = build_codewords(data)?;
@@ -516,11 +519,11 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
 
     // version information, versions 7 and up
     if version >= 7 {
-        let mut rem = version as u32;
+        let mut rem = u32::from(version);
         for _ in 0..12 {
             rem = (rem << 1) ^ ((rem >> 11) * 0x1f25);
         }
-        let word = ((version as u32) << 12) | (rem & 0xfff);
+        let word = (u32::from(version) << 12) | (rem & 0xfff);
         for i in 0..18 {
             let bit = (word >> i) & 1 != 0;
             set(&mut dark, &mut reserved, side - 11 + i % 3, i / 3, bit);

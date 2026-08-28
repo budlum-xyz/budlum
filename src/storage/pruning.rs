@@ -28,7 +28,7 @@ impl NodeMode {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Full => "full",
             Self::Archive => "archive",
@@ -55,7 +55,7 @@ pub struct PruningPolicy {
 }
 
 impl PruningPolicy {
-    pub fn full_node_default() -> Self {
+    pub const fn full_node_default() -> Self {
         Self {
             mode: NodeMode::Full,
             pruning_enabled: true,
@@ -66,7 +66,7 @@ impl PruningPolicy {
         }
     }
 
-    pub fn archive_node_default() -> Self {
+    pub const fn archive_node_default() -> Self {
         Self {
             mode: NodeMode::Archive,
             pruning_enabled: false,
@@ -77,6 +77,9 @@ impl PruningPolicy {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == NodeMode::Archive && self.pruning_enabled {
             return Err("archive nodes must not enable pruning".into());

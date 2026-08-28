@@ -100,7 +100,7 @@ impl From<QrVideoError> for PipeError {
 pub struct EncodedPipe {
     /// A1 packed container.
     pub packed: Vec<u8>,
-    /// Public recipe (stream_id = frame-fold when frames were emitted).
+    /// Public recipe (`stream_id` = frame-fold when frames were emitted).
     pub recipe: ThreeRecipePublic,
     /// Optical frames (A3).
     pub frames: Vec<Vec<u8>>,
@@ -187,6 +187,9 @@ pub fn decode_frames(
     Ok(rx.finish_unpacked()?)
 }
 
+/// # Errors
+///
+/// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
 /// Optional A4 raw concat of already-built frames.
 pub fn mux_raw(frames: &[Vec<u8>]) -> Result<Vec<u8>, PipeError> {
     Ok(RawFrameConcat.mux(CodecKind::RawFrames, frames)?)
@@ -212,6 +215,9 @@ pub struct EncodedQrVideo {
     pub video_blob: Vec<u8>,
 }
 
+/// # Errors
+///
+/// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
 /// Root 3.0 encode: content → (optional seal) → A1…A3 → QR matrices → BDLV video.
 pub fn encode_qr_video(
     content: &[u8],
@@ -233,6 +239,9 @@ pub fn encode_qr_video(
     })
 }
 
+/// # Errors
+///
+/// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
 /// Root 3.0 decode: BDLV → optical frames → content body (kind + bytes).
 pub fn decode_qr_video(video_blob: &[u8]) -> Result<(PayloadKind, Vec<u8>, QrVideo), PipeError> {
     let video = QrVideo::from_bytes(video_blob)?;

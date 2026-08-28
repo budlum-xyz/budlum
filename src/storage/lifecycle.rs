@@ -21,7 +21,7 @@ pub enum StorageLifecycleState {
 }
 
 impl StorageLifecycleState {
-    pub fn is_terminal(self) -> bool {
+    pub const fn is_terminal(self) -> bool {
         matches!(
             self,
             Self::Settled
@@ -32,7 +32,7 @@ impl StorageLifecycleState {
         )
     }
 
-    pub fn can_transition_to(self, next: Self) -> bool {
+    pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
             (Self::Open, Self::Proving)
@@ -64,6 +64,9 @@ pub enum StorageLifecycleError {
     },
 }
 
+/// # Errors
+///
+/// Propagates `StorageLifecycleError` from the step that failed; its variants name the refused conditions.
 pub fn transition(
     from: StorageLifecycleState,
     to: StorageLifecycleState,

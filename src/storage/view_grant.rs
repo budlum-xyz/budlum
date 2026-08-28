@@ -21,7 +21,7 @@
 //! open epoch and optional revoke epoch. The **key material is never stored
 //! here** - putting a key in a public commitment publishes the key. Delivery
 //! is out of band (DM, device keystore, sealed channel). This registry only
-//! answers: "does grantee G still have permission to use key_id K on content C?"
+//! answers: "does grantee G still have permission to use `key_id` K on content C?"
 //!
 //! # Revocation honesty
 //!
@@ -55,7 +55,7 @@ pub enum ViewPolicy {
     OwnerOnly,
     /// A single grantee address (DM-style).
     NamedGrantee,
-    /// Anyone who presents the matching key_id (public link).
+    /// Anyone who presents the matching `key_id` (public link).
     PublicKeyId,
 }
 
@@ -78,7 +78,7 @@ pub struct ViewGrant {
 
 impl ViewGrant {
     #[must_use]
-    pub fn is_live(&self) -> bool {
+    pub const fn is_live(&self) -> bool {
         self.revoked_epoch.is_none()
     }
 
@@ -263,8 +263,8 @@ impl ViewGrantRegistry {
 
     /// Whether `viewer` may use `key_id` on `content` at this moment.
     ///
-    /// Owner is always allowed (root). PublicKeyId live rows allow anyone with
-    /// the key handle. NamedGrantee requires address match.
+    /// Owner is always allowed (root). `PublicKeyId` live rows allow anyone with
+    /// the key handle. `NamedGrantee` requires address match.
     #[must_use]
     pub fn may_view(
         &self,
@@ -339,7 +339,7 @@ impl ConfidentialBodyCommit {
     ///
     /// Plaintext encryption claim is refused: a "confidential" commit that
     /// advertises plaintext is the T1 threat (on-chain clear body).
-    pub fn new(
+    pub const fn new(
         content_id: ContentId,
         encryption: crate::storage::ContentEncryption,
         ciphertext_root: [u8; 32],

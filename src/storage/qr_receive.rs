@@ -77,7 +77,7 @@ pub struct ProgressiveReceiver {
 impl ProgressiveReceiver {
     /// Bind to an expected A2/A3 stream commitment (from the recipe).
     #[must_use]
-    pub fn new(stream_commitment: [u8; 32]) -> Self {
+    pub const fn new(stream_commitment: [u8; 32]) -> Self {
         Self {
             stream_commitment,
             decoder: CarouselDecoder::new(),
@@ -105,6 +105,9 @@ impl ProgressiveReceiver {
         self.push_drop(drop)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `ReceiveError` from the step that failed; its variants name the refused conditions.
     /// Ingest a raw A2 drop (already authenticated by the caller).
     pub fn push_drop(&mut self, drop: Drop) -> Result<(), ReceiveError> {
         let body_tag = fnv1a32_local(&drop.body);

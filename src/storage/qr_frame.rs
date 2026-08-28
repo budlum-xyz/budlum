@@ -40,7 +40,7 @@ use crate::storage::qr_carousel::Drop;
 pub const THREE_FRAME_MAGIC: [u8; 2] = [0xBD, 0x3A];
 /// Frame header version.
 pub const THREE_FRAME_VERSION: u8 = 1;
-/// Bytes before the drop wire: magic2 + ver + flags + seq4 + stream_prefix4 + drop_len2 + digest4.
+/// Bytes before the drop wire: magic2 + ver + flags + seq4 + `stream_prefix4` + `drop_len2` + digest4.
 pub const THREE_FRAME_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 4 + 2 + 4;
 
 /// Errors packing or checking a Three optical frame.
@@ -86,7 +86,7 @@ impl std::fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-/// Lab hard cap on nested drop wire size (header + one block_len body, with margin).
+/// Lab hard cap on nested drop wire size (header + one `block_len` body, with margin).
 pub const MAX_DROP_WIRE: u16 = 8 * 1024;
 
 /// Pack a carousel drop into a Three optical frame.

@@ -29,7 +29,7 @@ pub const VIDEO_MAGIC: [u8; 4] = *b"BDLV";
 pub const VIDEO_VERSION: u8 = 1;
 /// Default fps for progressive playback pacing (display hint; not consensus time).
 pub const DEFAULT_FPS: u16 = 10;
-/// Max frames in one lab video (DoS bound).
+/// Max frames in one lab video (`DoS` bound).
 pub const MAX_VIDEO_FRAMES: u32 = 50_000;
 
 /// Errors.
@@ -81,6 +81,9 @@ pub struct QrVideo {
 }
 
 impl QrVideo {
+    /// # Errors
+    ///
+    /// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
     /// Mux optical A3 frames into QR PNGs + BDLV blob fields.
     pub fn from_optical_frames(
         recipe: &ThreeRecipePublic,
@@ -125,6 +128,9 @@ impl QrVideo {
         out
     }
 
+    /// # Errors
+    ///
+    /// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
     /// Parse BDLV.
     pub fn from_bytes(blob: &[u8]) -> Result<Self, QrVideoError> {
         if blob.len() < 4 + 1 + 1 + 2 + 4 + 32 + 32 {
@@ -185,6 +191,9 @@ fn u32_le(b: &[u8], off: usize) -> Result<u32, QrVideoError> {
     Ok(u32::from_le_bytes(a))
 }
 
+/// # Errors
+///
+/// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
 /// Decode one QR PNG back to optical frame bytes via rqrr.
 pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrVideoError> {
     let (w, h, grey) = decode_png_grey(png).map_err(QrVideoError::Decode)?;
@@ -206,6 +215,9 @@ pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrVideoError> {
     Ok(data)
 }
 
+/// # Errors
+///
+/// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
 /// Demux BDLV → optical frames (ordered).
 pub fn demux_optical_frames(video: &QrVideo) -> Result<Vec<Vec<u8>>, QrVideoError> {
     let mut out = Vec::with_capacity(video.png_frames.len());

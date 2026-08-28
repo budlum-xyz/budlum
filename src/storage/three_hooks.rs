@@ -26,7 +26,7 @@ pub struct ThreeHookEvent {
     pub content_id: ContentId,
     pub actor: Address,
     pub epoch: u64,
-    /// Optional grant id when kind is GrantRevoked.
+    /// Optional grant id when kind is `GrantRevoked`.
     pub grant_id: Option<u64>,
 }
 

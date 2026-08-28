@@ -85,7 +85,7 @@ impl ThreeNftMeta {
 
     /// Attach QR-video blob commitment (still no seed / no BDLV body on chain).
     #[must_use]
-    pub fn with_video_commitment(mut self, video_blob_commitment: [u8; 32]) -> Self {
+    pub const fn with_video_commitment(mut self, video_blob_commitment: [u8; 32]) -> Self {
         self.video_commitment = Some(video_blob_commitment);
         self
     }

@@ -126,7 +126,7 @@ struct GfMatrix {
 
 impl GfMatrix {
     fn zero(rows: usize, cols: usize) -> Self {
-        GfMatrix {
+        Self {
             rows,
             cols,
             data: vec![0u8; rows * cols],
@@ -154,13 +154,13 @@ impl GfMatrix {
     /// Gauss-Jordan inverse over GF(2^8). Returns `None` if singular, which
     /// for a Cauchy submatrix should be unreachable, the caller treats it as
     /// a hard error rather than a recoverable case.
-    fn invert(&self) -> Option<GfMatrix> {
+    fn invert(&self) -> Option<Self> {
         if self.rows != self.cols {
             return None;
         }
         let n = self.rows;
         let mut work = self.clone();
-        let mut inv = GfMatrix::identity(n);
+        let mut inv = Self::identity(n);
 
         for col in 0..n {
             // Find a pivot.
@@ -255,17 +255,17 @@ pub enum ErasureError {
 impl std::fmt::Display for ErasureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ErasureError::InvalidScheme(m) => write!(f, "invalid erasure scheme: {m}"),
-            ErasureError::ShardMismatch(m) => write!(f, "shard mismatch: {m}"),
-            ErasureError::NotEnoughShards { have, need } => write!(
+            Self::InvalidScheme(m) => write!(f, "invalid erasure scheme: {m}"),
+            Self::ShardMismatch(m) => write!(f, "shard mismatch: {m}"),
+            Self::NotEnoughShards { have, need } => write!(
                 f,
                 "cannot reconstruct: {have} shards survived, {need} are required"
             ),
-            ErasureError::IntegrityFailure { index } => write!(
+            Self::IntegrityFailure { index } => write!(
                 f,
                 "reconstructed shard {index} does not match its manifest ContentId"
             ),
-            ErasureError::SingularMatrix => {
+            Self::SingularMatrix => {
                 write!(f, "decode matrix was singular; the generator is broken")
             }
         }
@@ -286,6 +286,9 @@ pub struct ReedSolomon {
 }
 
 impl ReedSolomon {
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
     /// `data_shards` is `k`, `parity_shards` is `n - k`.
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self, ErasureError> {
         if data_shards == 0 {
@@ -301,13 +304,16 @@ impl ReedSolomon {
                 "{total} total shards exceeds the {MAX_TOTAL_SHARDS} that GF(2^8) admits"
             )));
         }
-        Ok(ReedSolomon {
+        Ok(Self {
             k: data_shards,
             m: parity_shards,
             generator: generator_matrix(data_shards, parity_shards),
         })
     }
 
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
     /// Build a coder for a manifest's declared scheme.
     pub fn for_scheme(scheme: &ErasureScheme) -> Result<Self, ErasureError> {
         scheme.validate().map_err(ErasureError::InvalidScheme)?;
@@ -329,6 +335,9 @@ impl ReedSolomon {
         self.k + self.m
     }
 
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
     /// Compute the parity shards for `data`.
     ///
     /// Every data shard must be the same length, Reed-Solomon works
@@ -437,6 +446,9 @@ impl ReedSolomon {
         acc == parity_byte
     }
 
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
     /// Rebuild all `n` shards from any `k` survivors.
     ///
     /// `present` is indexed by shard index over the whole code word (data
@@ -553,6 +565,9 @@ impl EncodedObject {
             .collect()
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Build the on-chain manifest for this encoding.
     ///
     /// The shard sizes recorded are the padded stripe sizes, which is what an
@@ -576,6 +591,9 @@ impl EncodedObject {
     }
 }
 
+/// # Errors
+///
+/// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
 /// Split `data` into `k` equal stripes, pad the tail, and append `n - k`
 /// parity shards.
 pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject, ErasureError> {
@@ -661,6 +679,9 @@ pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<
     Ok(())
 }
 
+/// # Errors
+///
+/// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
 /// Rebuild the original bytes from whatever shards survived.
 ///
 /// `present` is the full code word with `None` for lost shards. Recovered

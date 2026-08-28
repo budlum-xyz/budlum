@@ -1,4 +1,4 @@
-//! StorageProvider trait and deterministic mock implementation.
+//! `StorageProvider` trait and deterministic mock implementation.
 //!
 //! This is the off-chain/on-chain boundary described in
 //! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
@@ -71,30 +71,45 @@ pub enum StorageProviderError {
 }
 
 pub trait StorageProvider {
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the refused conditions.
     fn put(
         &mut self,
         manifest: &ContentManifest,
         bytes: &[u8],
     ) -> Result<PutReceipt, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the refused conditions.
     fn get(
         &self,
         content_id: &ContentId,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the refused conditions.
     fn prove(
         &self,
         deal_id: DealId,
         challenge: &RetrievalChallenge,
     ) -> Result<StorageProof, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the refused conditions.
     fn challenge(
         &mut self,
         deal_id: DealId,
         challenge: RetrievalChallenge,
     ) -> Result<ChallengeId, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the refused conditions.
     fn settle(
         &mut self,
         challenge_id: ChallengeId,
@@ -130,7 +145,7 @@ impl InMemoryStorageProvider {
     }
 
     /// The identity this provider's challenge answers are bound to.
-    pub fn operator(&self) -> &[u8; 32] {
+    pub const fn operator(&self) -> &[u8; 32] {
         &self.operator
     }
 

@@ -230,7 +230,7 @@ impl VideoRecipe {
             &self.block_len.to_le_bytes(),
             &self.repair_permillage.to_le_bytes(),
             &[self.payload_kind],
-            &[self.transform.apply_zlib as u8],
+            &[u8::from(self.transform.apply_zlib)],
             &[self
                 .transform
                 .force_class

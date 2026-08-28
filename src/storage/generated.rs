@@ -183,7 +183,7 @@ pub enum ContentSource {
     /// `GeneratedSpec`, not the seed.
     ///
     /// Anyone who sees the chain learns generator class, length and budget -
-    /// enough to meter and refuse DoS - but cannot regenerate the object
+    /// enough to meter and refuse `DoS` - but cannot regenerate the object
     /// without the seed. The seed is delivered off-chain under a view-grant
     /// (`ViewGrantRegistry`). Putting the seed on a public chain under Three
     /// would make the "private" label a lie (threat T1).
@@ -299,7 +299,7 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
 /// generator. Granting a partial discount would treat an unprotected byte as
 /// though it were protected.
 #[must_use]
-pub fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
+pub const fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
     match source {
         ContentSource::Generated(_) | ContentSource::SealedGenerated(_) => 1,
         // No discount. The recipe depends on a master, so the durability
@@ -424,13 +424,13 @@ pub fn sealed_generated_commitment(sealed: &SealedGeneratedSpec) -> [u8; 32] {
 
 /// Whether this source puts a regenerating seed on the public chain.
 #[must_use]
-pub fn recipe_seed_is_public(source: &ContentSource) -> bool {
+pub const fn recipe_seed_is_public(source: &ContentSource) -> bool {
     matches!(source, ContentSource::Generated(_))
 }
 
 /// Whether this source is a Three-compatible recipe (public or sealed).
 #[must_use]
-pub fn is_three_recipe(source: &ContentSource) -> bool {
+pub const fn is_three_recipe(source: &ContentSource) -> bool {
     matches!(
         source,
         ContentSource::Generated(_) | ContentSource::SealedGenerated(_)
@@ -615,7 +615,7 @@ pub const MAX_STEPS_PER_OUTPUT_BYTE: u32 = 8;
 /// `base + size * ratio`. Small outputs therefore have their setup cost
 /// covered, on large outputs the base becomes negligible and the ratio again
 /// decides the bound, which means the bound tightens rather than loosens as the
-/// DoS surface grows.
+/// `DoS` surface grows.
 pub const STEP_BUDGET_BASE: u32 = 4096;
 
 /// A step meter.

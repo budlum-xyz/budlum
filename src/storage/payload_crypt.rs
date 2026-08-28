@@ -19,7 +19,7 @@
 //!
 //! # What this module does not claim
 //!
-//! - Key distribution / view-grants (separate; view_grant already exists).
+//! - Key distribution / view-grants (separate; `view_grant` already exists).
 //! - Consensus verification of plaintext (chain never sees content).
 //! - Decimen source.
 

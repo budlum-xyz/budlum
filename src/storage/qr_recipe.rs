@@ -21,7 +21,7 @@ pub struct ThreeRecipePublic {
     pub carousel: CarouselParams,
     /// A3 folded frame-digest stream id (or zeros if frames not yet folded).
     pub stream_id: [u8; 32],
-    /// Block length used at encode (mirrors carousel.block_len; pinned twice
+    /// Block length used at encode (mirrors `carousel.block_len`; pinned twice
     /// so a partial decode of old recipes stays honest).
     pub block_len: u16,
 }
@@ -34,7 +34,7 @@ pub struct ThreeRecipePublic {
 pub struct ThreeRecipeSealed {
     /// `three_recipe_digest` of the full [`ThreeRecipePublic`].
     pub recipe_commitment: [u8; 32],
-    /// Declared original content length (from carousel.total_len).
+    /// Declared original content length (from `carousel.total_len`).
     pub total_len: u32,
     /// Source block count.
     pub k: u16,
@@ -80,7 +80,7 @@ pub fn three_sealed_recipe_commitment(s: &ThreeRecipeSealed) -> [u8; 32] {
 impl ThreeRecipePublic {
     /// Build from pipe pieces after A1-A3.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         payload_commitment: [u8; 32],
         carousel: CarouselParams,
         stream_id: [u8; 32],
@@ -154,7 +154,7 @@ impl ThreeRecipe {
 /// This does **not** deliver key material; it only answers the authorization
 /// question so reveal RPC cannot skip the grant check (T14).
 #[must_use]
-pub fn may_open_three_recipe(recipe: &ThreeRecipe, grant_allows: bool) -> bool {
+pub const fn may_open_three_recipe(recipe: &ThreeRecipe, grant_allows: bool) -> bool {
     match recipe {
         ThreeRecipe::Public(_) => true,
         ThreeRecipe::Sealed(_) => grant_allows,
