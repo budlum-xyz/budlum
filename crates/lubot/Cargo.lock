@@ -104,6 +104,7 @@ name = "lubot-ops"
 version = "0.1.0"
 dependencies = [
  "lubot-core",
+ "lubot-data",
  "lubot-serve",
  "lubot-tune",
  "serde",
