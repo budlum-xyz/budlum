@@ -151,13 +151,18 @@ const GUEST_MEMORY_BYTES: usize = 8192;
 
 /// The memory map the canonical guest reads from (independent copy of the
 /// documented layout rule): input at word 0, then weights, biases, two
-/// MAX_MLP_WIDTH scratch regions, then the output region.
+/// `MAX_MLP_WIDTH` scratch regions, then the output region. The fields are
+/// the word offsets where each region starts.
+///
+/// Note: fields are named without a common suffix (`weights`, `biases`,
+/// `act_in`, `act_out`, `output`) on purpose — they are word offsets, and the
+/// clippy `struct_field_names` rule refuses a shared `_base` postfix.
 struct MatmulGuestLayout {
-    weight_base: usize,
-    bias_base: usize,
-    act_in_base: usize,
-    act_out_base: usize,
-    output_base: usize,
+    weights: usize,
+    biases: usize,
+    act_in: usize,
+    act_out: usize,
+    output: usize,
 }
 
 fn matmul_guest_layout(dims: &[u16]) -> Result<MatmulGuestLayout, String> {
@@ -175,12 +180,12 @@ fn matmul_guest_layout(dims: &[u16]) -> Result<MatmulGuestLayout, String> {
         weights += w[0] as usize * w[1] as usize;
         biases += w[1] as usize;
     }
-    let weight_base = dims[0] as usize;
-    let bias_base = weight_base + weights;
-    let act_in_base = bias_base + biases;
-    let act_out_base = act_in_base + GUEST_MAX_MLP_WIDTH;
-    let output_base = act_out_base + GUEST_MAX_MLP_WIDTH;
-    let total_words = output_base + *dims.last().unwrap() as usize;
+    let weights_at = dims[0] as usize;
+    let biases_at = weights_at + weights;
+    let act_in_at = biases_at + biases;
+    let act_out_at = act_in_at + GUEST_MAX_MLP_WIDTH;
+    let output_at = act_out_at + GUEST_MAX_MLP_WIDTH;
+    let total_words = output_at + *dims.last().unwrap() as usize;
     if total_words * GUEST_WORD_BYTES > GUEST_MEMORY_BYTES {
         return Err(format!(
             "guest layout needs {} bytes > GUEST_MEMORY_BYTES {GUEST_MEMORY_BYTES}",
@@ -188,11 +193,11 @@ fn matmul_guest_layout(dims: &[u16]) -> Result<MatmulGuestLayout, String> {
         ));
     }
     Ok(MatmulGuestLayout {
-        weight_base,
-        bias_base,
-        act_in_base,
-        act_out_base,
-        output_base,
+        weights: weights_at,
+        biases: biases_at,
+        act_in: act_in_at,
+        act_out: act_out_at,
+        output: output_at,
     })
 }
 
@@ -220,16 +225,56 @@ fn matmul_emit_half(prog: &mut Vec<u64>) {
     prog.push(encode_instruction(OP_SUB, GR_HALF, GR_HALF, GR_T, 0)); // 2^63 - 2^31
 }
 
+/// Emit one output neuron: bias load, then per input a weight load, an
+/// activation load, a multiply and an add, then (for hidden layers) a
+/// branchless `ReLU`, then the store into the next layer's scratch.
+///
+/// `w_off`/`b_off` are the layer's weight/bias region offsets; `o` is the
+/// neuron index within the layer; `in_d` is the layer's input width.
+fn matmul_emit_neuron(
+    prog: &mut Vec<u64>,
+    layout: &MatmulGuestLayout,
+    w_off: usize,
+    b_off: usize,
+    o: usize,
+    in_d: usize,
+    hidden: bool,
+) -> Result<(), String> {
+    let bias_addr = matmul_byte_addr(layout.biases + b_off + o)?;
+    prog.push(encode_instruction(OP_LOAD, GR_ACC, GR_ZERO, 0, bias_addr));
+
+    for i in 0..in_d {
+        let w_addr = matmul_byte_addr(layout.weights + w_off + o * in_d + i)?;
+        let x_addr = matmul_byte_addr(layout.act_in + i)?;
+        prog.push(encode_instruction(OP_LOAD, GR_W, GR_ZERO, 0, w_addr));
+        prog.push(encode_instruction(OP_LOAD, GR_X, GR_ZERO, 0, x_addr));
+        prog.push(encode_instruction(OP_MUL, GR_T, GR_W, GR_X, 0));
+        prog.push(encode_instruction(OP_ADD, GR_ACC, GR_ACC, GR_T, 0));
+    }
+
+    if hidden {
+        // Branchless ReLU: acc *= 1 - (acc > HALF).
+        prog.push(encode_instruction(OP_GT, GR_SEL, GR_ACC, GR_HALF, 0));
+        prog.push(encode_instruction(OP_SUB, GR_SEL, GR_ONE, GR_SEL, 0));
+        prog.push(encode_instruction(OP_MUL, GR_ACC, GR_ACC, GR_SEL, 0));
+    }
+
+    // Store the neuron into the next layer's scratch.
+    let dst = matmul_byte_addr(layout.act_out + o)?;
+    prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_ACC, dst));
+    Ok(())
+}
+
 /// Reproduce `build_matmul_guest_program` from the specification.
 ///
 /// Per output neuron: bias load, then per input a weight load, an activation
-/// load, a multiply and an add; hidden layers get a branchless ReLU
+/// load, a multiply and an add; hidden layers get a branchless `ReLU`
 /// (`acc *= 1 - (acc > HALF)`) and a pong->ping copy; the final layer stores
-/// into the output region and folds each output into the rolling Poseidon
+/// into the output region and folds each output into the rolling `Poseidon`
 /// commitment, which is logged before `Halt`.
 fn regenerate_matmul_guest_program(dims: &[u16]) -> Result<Vec<u64>, String> {
     let layout = matmul_guest_layout(dims)?;
-    let mut prog: Vec<u64> = Vec::new();
+    let mut prog: Vec<u64> = Vec::with_capacity(16);
 
     // Prologue: constants and the rolling commitment at zero.
     prog.push(encode_instruction(OP_LOAD, GR_ZERO, 0, 0, 0));
@@ -247,31 +292,10 @@ fn regenerate_matmul_guest_program(dims: &[u16]) -> Result<Vec<u64>, String> {
         let hidden = layer_idx + 1 < n_layers;
 
         for o in 0..out_d {
-            let bias_addr = matmul_byte_addr(layout.bias_base + b_off + o)?;
-            prog.push(encode_instruction(OP_LOAD, GR_ACC, GR_ZERO, 0, bias_addr));
-
-            for i in 0..in_d {
-                let w_addr = matmul_byte_addr(layout.weight_base + w_off + o * in_d + i)?;
-                let x_addr = matmul_byte_addr(layout.act_in_base + i)?;
-                prog.push(encode_instruction(OP_LOAD, GR_W, GR_ZERO, 0, w_addr));
-                prog.push(encode_instruction(OP_LOAD, GR_X, GR_ZERO, 0, x_addr));
-                prog.push(encode_instruction(OP_MUL, GR_T, GR_W, GR_X, 0));
-                prog.push(encode_instruction(OP_ADD, GR_ACC, GR_ACC, GR_T, 0));
-            }
-
-            if hidden {
-                // Branchless ReLU: acc *= 1 - (acc > HALF).
-                prog.push(encode_instruction(OP_GT, GR_SEL, GR_ACC, GR_HALF, 0));
-                prog.push(encode_instruction(OP_SUB, GR_SEL, GR_ONE, GR_SEL, 0));
-                prog.push(encode_instruction(OP_MUL, GR_ACC, GR_ACC, GR_SEL, 0));
-            }
-
-            // Store the neuron into the next layer's scratch.
-            let dst = matmul_byte_addr(layout.act_out_base + o)?;
-            prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_ACC, dst));
+            matmul_emit_neuron(&mut prog, &layout, w_off, b_off, o, in_d, hidden)?;
 
             if !hidden {
-                let out_addr = matmul_byte_addr(layout.output_base + o)?;
+                let out_addr = matmul_byte_addr(layout.output + o)?;
                 prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_ACC, out_addr));
                 // Fold the output into the rolling Poseidon commitment so the
                 // logged value depends on every output.
@@ -280,10 +304,10 @@ fn regenerate_matmul_guest_program(dims: &[u16]) -> Result<Vec<u64>, String> {
         }
 
         if hidden {
-            // pong -> ping, so the next layer reads from act_in_base.
+            // pong -> ping, so the next layer reads from act_in.
             for o in 0..out_d {
-                let src = matmul_byte_addr(layout.act_out_base + o)?;
-                let dst = matmul_byte_addr(layout.act_in_base + o)?;
+                let src = matmul_byte_addr(layout.act_out + o)?;
+                let dst = matmul_byte_addr(layout.act_in + o)?;
                 prog.push(encode_instruction(OP_LOAD, GR_T, GR_ZERO, 0, src));
                 prog.push(encode_instruction(OP_STORE, 0, GR_ZERO, GR_T, dst));
             }
@@ -299,7 +323,7 @@ fn regenerate_matmul_guest_program(dims: &[u16]) -> Result<Vec<u64>, String> {
 }
 
 /// The canonical hash of the matmul guest program: every word little-endian,
-/// no tag, through this gate's own Keccak-256 (the same rule the verifier
+/// no tag, through this gate's own `Keccak-256` (the same rule the verifier
 /// binds and `stark_program_hash_from_words` implements).
 fn matmul_guest_program_hash(dims: &[u16]) -> Result<[u8; 32], String> {
     let prog = regenerate_matmul_guest_program(dims)?;
@@ -355,20 +379,20 @@ const PT_SECRET: i32 = 0x0bad_c0de;
 /// conservation flag, load claimed/secret, nullifier flag, log both flags,
 /// halt. Register allocation is part of the schema, exactly as in the tree.
 fn regenerate_private_transfer_check_program() -> Vec<u64> {
-    let mut prog = Vec::with_capacity(12);
-    prog.push(encode_instruction(OP_LOAD, 1, 0, 0, PT_AMOUNT));
-    prog.push(encode_instruction(OP_LOAD, 2, 0, 0, PT_BLINDING));
-    prog.push(encode_instruction(OP_PRIVACY_COMMIT, 4, 1, 2, PT_RECIPIENT));
-    prog.push(encode_instruction(OP_LOAD, 5, 0, 0, PT_SUM_IN));
-    prog.push(encode_instruction(OP_LOAD, 6, 0, 0, PT_SUM_OUT));
-    prog.push(encode_instruction(OP_SUM_CONSERVATION, 7, 5, 6, 0));
-    prog.push(encode_instruction(OP_LOAD, 8, 0, 0, PT_CLAIMED_NULLIFIER));
-    prog.push(encode_instruction(OP_LOAD, 9, 0, 0, PT_SECRET));
-    prog.push(encode_instruction(OP_NULLIFIER_CHECK, 10, 8, 9, 0));
-    prog.push(encode_instruction(OP_LOG, 0, 7, 0, 0));
-    prog.push(encode_instruction(OP_LOG, 0, 10, 0, 0));
-    prog.push(encode_instruction(OP_HALT, 0, 0, 0, 0));
-    prog
+    vec![
+        encode_instruction(OP_LOAD, 1, 0, 0, PT_AMOUNT),
+        encode_instruction(OP_LOAD, 2, 0, 0, PT_BLINDING),
+        encode_instruction(OP_PRIVACY_COMMIT, 4, 1, 2, PT_RECIPIENT),
+        encode_instruction(OP_LOAD, 5, 0, 0, PT_SUM_IN),
+        encode_instruction(OP_LOAD, 6, 0, 0, PT_SUM_OUT),
+        encode_instruction(OP_SUM_CONSERVATION, 7, 5, 6, 0),
+        encode_instruction(OP_LOAD, 8, 0, 0, PT_CLAIMED_NULLIFIER),
+        encode_instruction(OP_LOAD, 9, 0, 0, PT_SECRET),
+        encode_instruction(OP_NULLIFIER_CHECK, 10, 8, 9, 0),
+        encode_instruction(OP_LOG, 0, 7, 0, 0),
+        encode_instruction(OP_LOG, 0, 10, 0, 0),
+        encode_instruction(OP_HALT, 0, 0, 0, 0),
+    ]
 }
 
 /// Pin of the canonical private-transfer check program hash, measured on
@@ -701,6 +725,40 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let checked = producers.len();
 
+    // The other two canonical programs are reproduced from their
+    // specifications and pinned here, exactly like the storage challenge
+    // above. These are the values `src/ai/execution/guest.rs` and
+    // `budzero/bud-vm/src/private_transfer.rs` build; if either builder
+    // drifts, the pin comparison turns the release red.
+    for (name, dims, pin) in [
+        (
+            "matmul guest [2,3,2]",
+            &[2u16, 3, 2][..],
+            PINNED_MATMUL_PROGRAM_HASHES[0].1,
+        ),
+        (
+            "private-transfer check",
+            &[][..],
+            PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
+        ),
+    ] {
+        let got = if dims.is_empty() {
+            hex32(&keccak256(&canonical_program_bytes(
+                &regenerate_private_transfer_check_program(),
+            )))
+        } else {
+            hex32(&matmul_guest_program_hash(dims)?)
+        };
+        if got != pin {
+            return Err(format!(
+                "regeneration: the canonical {name} program drifted. The tree's \
+                 builder no longer reproduces the pinned stream (got {got}, \
+                 expected {pin}). Re-measure the pin from the tree's builder \
+                 and update both sides together."
+            ));
+        }
+    }
+
     if !findings.is_empty() {
         return Err(format!(
             "regeneration: the canonical program-hash surface has drifted.\n  {}\n\n\
@@ -1029,11 +1087,11 @@ mod tests {
         // dims [2,3,2]: input=0, weights=2..14 (2*3+3*2=12 words), biases=14..19
         // (3+2=5 words), act_in=19, act_out=83, output=147, total=149 words.
         let l = matmul_guest_layout(&[2, 3, 2]).unwrap();
-        assert_eq!(l.weight_base, 2);
-        assert_eq!(l.bias_base, 14);
-        assert_eq!(l.act_in_base, 19);
-        assert_eq!(l.act_out_base, 19 + GUEST_MAX_MLP_WIDTH);
-        assert_eq!(l.output_base, 19 + 2 * GUEST_MAX_MLP_WIDTH);
+        assert_eq!(l.weights, 2);
+        assert_eq!(l.biases, 14);
+        assert_eq!(l.act_in, 19);
+        assert_eq!(l.act_out, 19 + GUEST_MAX_MLP_WIDTH);
+        assert_eq!(l.output, 19 + 2 * GUEST_MAX_MLP_WIDTH);
         let prog = regenerate_matmul_guest_program(&[2, 3, 2]).unwrap();
         // 11 (prologue) + 45 (hidden layer 2x3) + 32 (final layer 3x2) + 2 (Log, Halt)
         assert_eq!(
