@@ -69,6 +69,10 @@ pub enum Tier {
     System,
     /// Local storage. Always present: a device with no disk cannot hold a
     /// model at all, so there is no plan to make.
+    ///
+    /// [`ResidencyPlan::plan`] treats it as unbounded; the operator's real,
+    /// finite disk is bound by [`ResidencyPlan::plan_bounded_by_disk`], which
+    /// refuses fail-closed when the routed part would not fit on it.
     Disk,
 }
 
@@ -104,9 +108,11 @@ impl DeviceBudget {
         match tier {
             Tier::Accelerator => self.accelerator_bytes,
             Tier::System => self.system_bytes,
-            // Disk is the overflow tier; the planner never has to ask how
-            // much of it there is, because a shard that does not fit on disk
-            // was never downloaded in the first place.
+            // Disk is the overflow tier, treated as without limit so the
+            // planner's own arithmetic never has to know a disk size. A real
+            // operator's finite disk is bound afterwards by
+            // [`ResidencyPlan::plan_bounded_by_disk`], which refuses fail-closed
+            // when the routed part would not fit.
             Tier::Disk => u64::MAX,
         }
     }
@@ -169,6 +175,16 @@ pub enum PlanError {
     DensePartDoesNotFit { needed: u64, available: u64 },
     /// A model with no shards.
     NothingToPlace,
+    /// The routed part does not fit on the disk budget.
+    ///
+    /// Distinct from [`DensePartDoesNotFit`](Self::DensePartDoesNotFit):
+    /// the dense part failing is a refusal that happens at planning; this one
+    /// happens when the operator has stated a disk budget and the routed
+    /// experts, pushed to disk by [`ResidencyPlan::plan`], exceed it. The
+    /// consequence is the same - this machine cannot serve this model - but
+    /// reporting the shortfall separately tells the operator the overshoot is
+    /// on the disk side, not the fast-memory side.
+    DiskPartDoesNotFit { needed: u64, available: u64 },
 }
 
 /// Where one shard was placed.
@@ -289,6 +305,45 @@ impl ResidencyPlan {
             placements,
             semantics,
         })
+    }
+
+    /// Plan onto a device whose disk is **not** unbounded.
+    ///
+    /// [`ResidencyPlan::plan`] treats disk as the overflow tier with no
+    /// capacity limit: a shard that does not fit in fast memory is placed on
+    /// disk no matter how large the model is. That is right for the tier
+    /// arithmetic, but it is not a faithful model of a real operator's machine,
+    /// which has a finite disk. A phone that owns 64 GiB of storage cannot
+    /// stage a 1.6T-parameter model any more than it can hold it in RAM.
+    ///
+    /// This bounds the plan by the operator's stated disk budget. It runs the
+    /// same placement as [`ResidencyPlan::plan`] and then refuses the plan
+    /// fail-closed if the bytes the placement would read from disk exceed
+    /// `disk_bytes`. The placement itself is unchanged - disk pressure must
+    /// never change which tier a shard lands in, because a placement that
+    /// moved a shard to fast memory to stay under a disk budget would be a
+    /// placement that changed semantics - so the plan that passes is the same
+    /// plan [`ResidencyPlan::plan`] would have produced for an unbounded disk.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::DiskPartDoesNotFit`] when the disk footprint exceeds the
+    /// budget.
+    pub fn plan_bounded_by_disk(
+        shards: &[WeightShard],
+        budget: DeviceBudget,
+        semantics: SemanticProfile,
+        disk_bytes: u64,
+    ) -> Result<Self, PlanError> {
+        let plan = Self::plan(shards, budget, semantics)?;
+        let disk_footprint = plan.bytes_in(Tier::Disk);
+        if disk_footprint > disk_bytes {
+            return Err(PlanError::DiskPartDoesNotFit {
+                needed: disk_footprint,
+                available: disk_bytes,
+            });
+        }
+        Ok(plan)
     }
 
     /// Bytes placed in a tier.
@@ -416,6 +471,66 @@ mod tests {
             .find(|p| p.content_id == id(0))
             .expect("the dense shard vanished from the plan");
         assert_ne!(dense.tier, Tier::Disk);
+    }
+
+    /// A disk budget that holds the routed part is accepted, with the same
+    /// placement as an unbounded-disk plan (disk pressure must never change
+    /// placement semantics).
+    #[test]
+    fn a_disk_budget_that_holds_the_routed_part_is_accepted() {
+        let shards = model(); // 1000 dense + four 500-byte routed experts
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1200,
+        };
+        let unbounded = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        let bounded =
+            ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 2000).unwrap();
+
+        // The dense part (1000 B) fits in 1200 B of system memory; the four
+        // 500-B routed experts (2000 B total) land on disk. A 2000-B disk
+        // budget holds it exactly; accepted.
+        assert_eq!(bounded.bytes_in(Tier::Disk), 2000);
+        // The placement is identical to the unbounded plan.
+        assert_eq!(bounded, unbounded);
+    }
+
+    /// A disk budget too small for the routed part is refused fail-closed,
+    /// not silently moved onto fast memory (which would change semantics).
+    #[test]
+    fn a_disk_budget_too_small_for_the_routed_part_is_refused() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1200,
+        };
+        let err = ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 1000)
+            .expect_err("2000 bytes of routed experts cannot fit in a 1000-byte disk");
+        assert_eq!(
+            err,
+            PlanError::DiskPartDoesNotFit {
+                needed: 2000,
+                available: 1000
+            }
+        );
+    }
+
+    /// A zero disk budget refuses anything with a routed footprint, and the
+    /// semantics that came in are the semantics returned by a passing plan.
+    #[test]
+    fn a_zero_disk_budget_refuses_a_disk_footprint() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1200,
+        };
+        assert!(ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 0).is_err());
+
+        // A model with nothing on disk passes with semantics intact.
+        let dense_only = vec![shards[0].clone()];
+        let asked = profile();
+        let plan = ResidencyPlan::plan_bounded_by_disk(&dense_only, budget, asked, 0).unwrap();
+        assert_eq!(plan.semantics, asked);
     }
 
     /// A device too small for the dense part is refused, not degraded.

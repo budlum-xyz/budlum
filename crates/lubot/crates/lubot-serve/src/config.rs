@@ -360,6 +360,10 @@ pub fn assert_consensus_ready_on_device(
         PlanError::NothingToPlace => {
             String::from("no weight shards were given, so there is nothing to serve")
         }
+        PlanError::DiskPartDoesNotFit { needed, available } => format!(
+            "the routed part does not fit on this device's disk: {needed} B needed, \
+             {available} B of disk available"
+        ),
     })?;
 
     if plan.streams_from_disk() {
