@@ -1524,6 +1524,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_poseidon.clone() * ten.clone()
             // Expansion rows reuse opcode 0x1E but must not re-charge gas.
             + is_verify_merkle.clone() * (one.clone() - is_expand.clone()) * ten.clone()
+            // VerifyInference: same cost (10) as VerifyMerkle, charged on
+            // the original row only. (2026-08-28) This term was missing:
+            // the VM charged 10 but the AIR fell through to the unit-cost
+            // fallback, so every VerifyInference proof failed at OOD.
+            + is_verify_inference.clone()
+                * (one.clone() - cur[COL_INFERENCE_IS_EXPAND].into())
+                * ten.clone()
             // Privacy opcodes share Poseidon gas cost (10).
             + is_privacy_commit.clone() * ten.clone()
             + is_nullifier_check.clone() * ten.clone()
@@ -1540,6 +1547,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 - is_swrite.clone()
                 - is_poseidon.clone()
                 - is_verify_merkle.clone()
+                - is_verify_inference.clone()
                 - is_privacy_commit.clone()
                 - is_nullifier_check.clone()
                 - is_sum_conservation.clone()
@@ -2308,10 +2316,16 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let s_reg_nxt: AB::ExprEF = perm_nxt[0].into();
             let is_real_op_ext: AB::ExprEF = is_real_op.into();
             // Register LogUp must also
-            // Exclude VerifyMerkle expansion rows (same multiplicity mismatch
-            // As Program CTL). The trace_matrix correctly skips register events
-            // For expansion rows, so the CPU side must match.
-            let is_expand_ext_reg: AB::ExprEF = cur[COL_VM_MERKLE_IS_EXPAND].into().into();
+            // Exclude VerifyMerkle AND VerifyInference expansion rows (same
+            // multiplicity mismatch As Program CTL). The trace_matrix
+            // correctly skips register events For expansion rows, so the CPU
+            // side must match. (2026-08-28: COL_INFERENCE_IS_EXPAND was
+            // missing here — every clean VerifyInference proof failed with
+            // InvalidProof because 1+8 CPU rows claimed register events that
+            // were never supplied.)
+            let is_expand_ext_reg: AB::ExprEF = (cur[COL_VM_MERKLE_IS_EXPAND].into()
+                + cur[COL_INFERENCE_IS_EXPAND].into())
+            .into();
             let is_reg_active: AB::ExprEF =
                 is_real_op_ext.clone() * (AB::ExprEF::ONE - is_expand_ext_reg);
             builder.when_transition().assert_zero_ext(
@@ -2528,7 +2542,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // Map to 1 preprocessed row → Program CTL LogUp multiplicity
             // Mismatch → InvalidProof. Register LogUp already correctly
             // Skips expansion rows; Program CTL must do the same.
-            let is_expand: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
+            // (2026-08-28) Same exclusion for VerifyInference expansion rows:
+            // 1 original + 8 expansion rows map to 1 preprocessed ROM row;
+            // without COL_INFERENCE_IS_EXPAND here the LogUp multiplicity
+            // never balances and every VerifyInference proof is InvalidProof.
+            let is_expand: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into()
+                + cur[COL_INFERENCE_IS_EXPAND].into();
             let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_expand);
             let prog_active_ext: AB::ExprEF = prog_active.into();
             // A row outside the program can lend nothing: the multiplicity can be
@@ -2766,6 +2785,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .when(is_verify_inference.clone())
                 .assert_zero(rd_val_new.clone());
 
+            // Proof-type pinning (imm in {0,1}) lives in 2b below; expansion
+            // rows carry imm = round 0..7 and are excluded there via
+            // (1 - inf_is_expand).
+
             // 3. Expansion row witness columns
             let inf_is_expand: AB::Expr = cur[COL_INFERENCE_IS_EXPAND].into();
             let inf_model: AB::Expr = cur[COL_INFERENCE_MODEL_COMMIT].into();
@@ -2791,6 +2814,18 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder.assert_zero(both_expand.clone() * (inf_model.clone() - nxt_inf_model.clone()));
             builder.assert_zero(both_expand.clone() * (inf_input.clone() - nxt_inf_input.clone()));
             builder.assert_zero(both_expand * (inf_output.clone() - nxt_inf_output.clone()));
+
+            // 2b. Proof-type pinning (2026-08-28): on non-expansion
+            // VerifyInference rows the immediate must be 0 (STARK) or 1
+            // (SNARK wrap) — any other value is an undefined proof type and
+            // is rejected. Expansion rows carry imm = round 0..7 and are
+            // excluded via (1 - inf_is_expand); the proof type is only
+            // meaningful on the original row.
+            let imm_col: AB::Expr = cur[COL_IMM].into();
+            let vi_main = is_verify_inference.clone() * (one.clone() - inf_is_expand.clone());
+            builder
+                .when(vi_main)
+                .assert_zero(imm_col.clone() * (imm_col.clone() - one.clone()));
         }
 
         // --- Poseidon hash gadget (4 rounds, alpha=7) ---
