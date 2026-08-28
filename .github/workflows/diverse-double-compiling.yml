@@ -100,13 +100,19 @@ jobs:
           (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/proghash.txt 2>&1
           PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${PROGRAM}"
+          # The matmul guest is the largest canonical program; its hash is the
+          # most sensitive to code-generation drift, so it is compared across
+          # compilers just like the storage-challenge token above.
+          MATMUL=$(grep -oE "matmul-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${MATMUL}"
 
           {
             echo "genesis=${GENESIS}"
             echo "program=${PROGRAM}"
+            echo "matmul=${MATMUL}"
           } >> "$GITHUB_OUTPUT"
 
-          printf 'genesis=%s\nprogram=%s\n' "${GENESIS}" "${PROGRAM}" > "digests-${{ matrix.label }}.txt"
+          printf 'genesis=%s\nprogram=%s\nmatmul=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" > "digests-${{ matrix.label }}.txt"
           cat "digests-${{ matrix.label }}.txt"
 
       - name: Upload digests

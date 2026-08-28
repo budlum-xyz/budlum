@@ -778,12 +778,20 @@ pub fn run(root: &Path) -> Result<String, String> {
     // read an empty value, and stage 1 failed with nothing to point at. The
     // token is now kept apart from the sentence so rewording the prose cannot
     // take it away, and `regeneration_hash_token_is_greppable` locks the shape.
+    // A second machine-readable token for the diverse-double-compiling
+    // workflow: the matmul guest is the largest canonical program, so its
+    // hash is the most sensitive to code-generation drift. `program-hash`
+    // stays the first token (the storage-challenge value); `matmul-hash`
+    // is grepped the same way and compared across compilers too.
+    let matmul_token = hex32(&matmul_guest_program_hash(&[2, 3, 2])?)[..16].to_string();
+
     Ok(format!(
         "regeneration OK: program-hash {} reproduced, \
          convergence (idempotence + repair) was verified, and all {checked} \
          production points found by discovery are canonical (verified with an \
-         independent Keccak-256 and an independent ISA encoding).",
-        &hex32(&regenerated)[..16]
+         independent Keccak-256 and an independent ISA encoding). matmul-hash {}",
+        &hex32(&regenerated)[..16],
+        matmul_token,
     ))
 }
 
@@ -980,25 +988,33 @@ mod tests {
             "the DDC workflow no longer greps for `program-hash <hex>`; if the \
              extraction changed, update this test with it rather than deleting it"
         );
+        assert!(
+            workflow.contains(r#"grep -oE "matmul-hash [0-9a-f]+""#),
+            "the DDC workflow no longer greps for `matmul-hash <hex>`; if the \
+             extraction changed, update this test with it rather than deleting it"
+        );
 
         // The message the gate actually emits on success, rebuilt here.
         let message = format!(
-            "regeneration OK: program-hash {} reproduced, and the rest is prose.",
-            &hex32(&[0xabu8; 32])[..16]
+            "regeneration OK: program-hash {} reproduced, and the rest is prose. matmul-hash {}",
+            &hex32(&[0xabu8; 32])[..16],
+            &hex32(&[0xcdu8; 32])[..16],
         );
 
-        // The workflow's own extraction, applied to it.
-        let token = message
-            .split_whitespace()
-            .skip_while(|w| *w != "program-hash")
-            .nth(1)
-            .expect("the success message must carry a `program-hash <hex>` token");
-        assert_eq!(token.len(), 16, "the token must be the 16-hex-digit prefix");
-        assert!(
-            token.chars().all(|c| c.is_ascii_hexdigit()),
-            "the token must be bare lowercase hex with nothing attached: the \
-             workflow feeds it straight into a bit-for-bit comparison"
-        );
+        // The workflow's own extraction, applied to both tokens.
+        for needle in ["program-hash", "matmul-hash"] {
+            let token = message
+                .split_whitespace()
+                .skip_while(|w| *w != needle)
+                .nth(1)
+                .expect("the success message must carry a `{needle} <hex>` token");
+            assert_eq!(token.len(), 16, "the token must be the 16-hex-digit prefix");
+            assert!(
+                token.chars().all(|c| c.is_ascii_hexdigit()),
+                "the token must be bare lowercase hex with nothing attached: the \
+                 workflow feeds it straight into a bit-for-bit comparison"
+            );
+        }
     }
 
     #[test]
