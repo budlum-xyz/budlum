@@ -79,8 +79,6 @@ mod gates {
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
-    pub mod qr_is_derivative_only;
-    pub mod three_is_recipe_only;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
@@ -107,6 +105,7 @@ mod gates {
     pub mod pinned_downloads;
     pub mod poa_compliance_gate;
     pub mod proof_deps_are_exactly_pinned;
+    pub mod qr_is_derivative_only;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
@@ -130,6 +129,7 @@ mod gates {
     pub mod tee_trust_boundary_is_structural;
     pub mod test_modules_can_see_what_they_test;
     pub mod the_image_builds_what_the_manifest_declares;
+    pub mod three_is_recipe_only;
     pub mod threshold_rates;
     pub mod timing_safe;
     pub mod transcript_mirrors;
@@ -754,7 +754,6 @@ const GATES: &[Gate] = &[
         self_test: gates::three_is_recipe_only::self_test,
         run_log: None,
     },
-
     Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),

@@ -32,13 +32,17 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err("admits_body missing".into());
     }
     if !gen.contains("SealedGenerated") {
-        return Err("SealedGenerated source missing — private Three recipes need sealed form".into());
+        return Err(
+            "SealedGenerated source missing — private Three recipes need sealed form".into(),
+        );
     }
     if !gen.contains("struct SealedGeneratedSpec") {
         return Err("SealedGeneratedSpec missing".into());
     }
     if !gen.contains("recipe_seed_is_public") {
-        return Err("recipe_seed_is_public missing — must distinguish public vs sealed seed".into());
+        return Err(
+            "recipe_seed_is_public missing — must distinguish public vs sealed seed".into(),
+        );
     }
     // Three check_source must allow SealedGenerated
     if !gen.contains("ContentSource::Generated(_) | ContentSource::SealedGenerated(_)")
@@ -48,13 +52,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     // open_deal must refuse Three
     if !deal_code.contains("admits_body()") {
-        return Err(
-            "open_deal must call admits_body() — Three must not open storage deals".into(),
-        );
+        return Err("open_deal must call admits_body() — Three must not open storage deals".into());
     }
-    if !deal.contains("Three admits no storage deal")
-        && !deal.contains("admits no storage deal")
-    {
+    if !deal.contains("Three admits no storage deal") && !deal.contains("admits no storage deal") {
         return Err("open_deal must state Three admits no storage deal".into());
     }
     // confidential body refuse Three
@@ -76,10 +76,8 @@ pub fn self_test() -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-three-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("budlum-gates-three-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(dir.join("src/storage")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("src/domain")).map_err(|e| e.to_string())?;
 
