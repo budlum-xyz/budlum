@@ -270,6 +270,50 @@ impl EvalDataSet {
     }
 }
 
+/// A success threshold. "Lubot is usable and successful" is not a feeling - it
+/// is a gate: a [`EvalReport`] either clears `min_score` or it does not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EvalGate {
+    /// The minimum [`EvalReport::score`] the report must reach, in `0.0..=1.0`.
+    pub min_score: f64,
+}
+
+impl EvalGate {
+    /// The strict gate: every case must pass.
+    #[must_use]
+    pub fn perfect() -> Self {
+        Self { min_score: 1.0 }
+    }
+
+    /// A gate with the given minimum score, clamped into `0.0..=1.0`.
+    #[must_use]
+    pub fn at_least(min_score: f64) -> Self {
+        Self {
+            min_score: min_score.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Whether the report clears the gate.
+    #[must_use]
+    pub fn passes(&self, report: &EvalReport) -> bool {
+        report.score() >= self.min_score
+    }
+
+    /// The short verdict string used by the CLI.
+    #[must_use]
+    pub fn verdict(&self, report: &EvalReport) -> String {
+        if self.passes(report) {
+            format!("PASS ({:.0}%)", report.score() * 100.0)
+        } else {
+            format!(
+                "REFUSED ({:.0}% < {:.0}% required)",
+                report.score() * 100.0,
+                self.min_score * 100.0
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +479,38 @@ mod tests {
             }],
         );
         assert!(!other.registered_in(&plan));
+    }
+
+    #[test]
+    fn gate_clears_only_at_or_above_the_threshold() {
+        let perfect = EvalGate::perfect();
+        assert!(perfect.passes(&EvalReport {
+            cases: vec![CaseReport {
+                name: "a".into(),
+                passed: true,
+                reason: None,
+            }],
+        }));
+
+        let strict = EvalGate::at_least(0.8);
+        // 3/4 = 0.75 clears a 0.8 gate? No.
+        let ok = EvalReport {
+            cases: vec![
+                CaseReport { name: "a".into(), passed: true, reason: None },
+                CaseReport { name: "b".into(), passed: true, reason: None },
+                CaseReport { name: "c".into(), passed: true, reason: None },
+                CaseReport { name: "d".into(), passed: true, reason: None },
+            ],
+        };
+        assert!(strict.passes(&ok));
+        let half = EvalReport {
+            cases: vec![
+                CaseReport { name: "a".into(), passed: true, reason: None },
+                CaseReport { name: "b".into(), passed: false, reason: Some("x".into()) },
+            ],
+        };
+        assert!(!strict.passes(&half));
+        assert!(strict.verdict(&half).contains("REFUSED"));
+        assert!(perfect.verdict(&ok).contains("PASS"));
     }
 }
