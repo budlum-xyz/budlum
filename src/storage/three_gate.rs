@@ -126,7 +126,10 @@ mod tests {
         // may need full set under high loss — feed a second pass of survivors
         // by also taking repair half if first incomplete
         let result = decode_frames(&enc.stream_commitment, &kept);
-        if result.is_err() {
+        if let Ok((kind, raw)) = result {
+            assert_eq!(kind, PayloadKind::ContentBytes);
+            assert_eq!(raw, content.as_slice());
+        } else {
             // feed all non-multiples of 5 from original (different pattern)
             let mut kept2: Vec<_> = enc
                 .frames
@@ -136,11 +139,8 @@ mod tests {
                 .map(|(_, f)| f.clone())
                 .collect();
             kept2.extend(kept);
-            let (kind, raw) = decode_frames(&enc.stream_commitment, &kept2).unwrap();
-            assert_eq!(kind, PayloadKind::ContentBytes);
-            assert_eq!(raw, content.as_slice());
-        } else {
-            let (kind, raw) = result.unwrap();
+            let (kind, raw) = decode_frames(&enc.stream_commitment, &kept2)
+                .expect("second pass with the original pattern must decode");
             assert_eq!(kind, PayloadKind::ContentBytes);
             assert_eq!(raw, content.as_slice());
         }

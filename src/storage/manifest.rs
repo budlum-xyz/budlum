@@ -513,9 +513,11 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
-            &source,
-            self.dictionary_id.as_ref(),
-            self.edition,
+            ManifestProvenance {
+                source: &source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition: self.edition,
+            },
         );
         self.source = source;
         self
@@ -534,9 +536,11 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
-            &self.source,
-            self.dictionary_id.as_ref(),
-            edition,
+            ManifestProvenance {
+                source: &self.source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition,
+            },
         );
         self.edition = edition;
         self
@@ -549,9 +553,11 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
-            &self.source,
-            self.dictionary_id.as_ref(),
-            self.edition,
+            ManifestProvenance {
+                source: &self.source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition: self.edition,
+            },
         );
     }
 
@@ -606,9 +612,11 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
-            &self.source,
-            self.dictionary_id.as_ref(),
-            self.edition,
+            ManifestProvenance {
+                source: &self.source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition: self.edition,
+            },
         );
         if expected != self.manifest_id {
             return Err(format!(
@@ -892,16 +900,32 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// manifest reading `Plaintext` at the same id, and a reader concludes the
 /// bytes it pulled were never protected.
 #[must_use]
+/// Registration provenance grouped so the id preimage stays a single call:
+/// source, dictionary binding and edition are one concept — where the bytes
+/// came from and under which claim they are registered.
+#[derive(Debug, Clone, Copy)]
+pub struct ManifestProvenance<'a> {
+    /// Where the bytes came from (the upload path).
+    pub source: &'a crate::storage::generated::ContentSource,
+    /// Optional dictionary binding (dedup) the manifest commits to.
+    pub dictionary_id: Option<&'a ContentId>,
+    /// The B.U.D. edition; `Three` binds bytes, `Classic` does not.
+    pub edition: crate::storage::generated::BudStorageEdition,
+}
+
 pub fn manifest_id_from_parts(
     shards: &[ShardRef],
     erasure: &ErasureScheme,
     encryption: &ContentEncryption,
     content_size: u64,
     total_size: u64,
-    source: &crate::storage::generated::ContentSource,
-    dictionary_id: Option<&ContentId>,
-    edition: crate::storage::generated::BudStorageEdition,
+    provenance: ManifestProvenance<'_>,
 ) -> ContentId {
+    let ManifestProvenance {
+        source,
+        dictionary_id,
+        edition,
+    } = provenance;
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
     buf.extend_from_slice(&(shards.len() as u32).to_le_bytes());
@@ -958,9 +982,11 @@ pub fn manifest_id_from_parts_stored(
         encryption,
         content_size,
         total_size,
-        &crate::storage::generated::ContentSource::Stored,
-        None,
-        crate::storage::generated::BudStorageEdition::Classic,
+        ManifestProvenance {
+            source: &crate::storage::generated::ContentSource::Stored,
+            dictionary_id: None,
+            edition: crate::storage::generated::BudStorageEdition::Classic,
+        },
     )
 }
 

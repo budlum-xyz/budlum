@@ -386,10 +386,10 @@ pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {
     let p = p_milli.min(999);
     // T_milli = 1000 / (1000 - p), rounded up.
     let denom = 1000u32.saturating_sub(p).max(1);
-    let t_milli = (1000 + denom - 1) / denom * 1000;
+    let t_milli = 1000u32.div_ceil(denom) * 1000;
     // n = ceil(k * T * 1.02) = ceil(k * t_milli * 1020 / 1_000_000)
     let num = u64::from(k) * u64::from(t_milli) * 1020;
-    let n = (num + 1_000_000 - 1) / 1_000_000;
+    let n = num.div_ceil(1_000_000);
     // At least one full carousel cycle (2k) so systematic pass is covered.
     n.max(u64::from(k).saturating_mul(2))
         .min(u64::from(u32::MAX)) as u32
@@ -1248,16 +1248,16 @@ mod tests {
         let mut rank = 0usize;
         for c in 0..k {
             let mut piv = None;
-            for r in rank..rows.len() {
-                if rows[r].get(c).copied().unwrap_or(false) {
+            for (r, row) in rows.iter().enumerate().skip(rank) {
+                if row.get(c).copied().unwrap_or(false) {
                     piv = Some(r);
                     break;
                 }
             }
             let Some(pr) = piv else { continue };
             rows.swap(rank, pr);
-            for r in 0..rows.len() {
-                if r != rank && rows[r].get(c).copied().unwrap_or(false) {
+            for (r, row) in rows.iter().enumerate() {
+                if r != rank && row.get(c).copied().unwrap_or(false) {
                     for j in 0..k {
                         let v = rows[rank].get(j).copied().unwrap_or(false);
                         if let Some(cell) = rows[r].get_mut(j) {
