@@ -1715,6 +1715,30 @@ impl ProverAdapter for Plonky3Adapter {
     }
 }
 
+impl Plonky3Adapter {
+    /// Verify a proof exactly as [`ProverAdapter::verify`] does, and
+    /// additionally require the proven program to be part of the canonical
+    /// set ([`crate::canonical_set`]).
+    ///
+    /// This is the ZKVM-side alarm of the regeneration gate: a proof for a
+    /// program outside the canonical set is refused with
+    /// `VerifyError::NonCanonicalProgram`, which is a different, explicit
+    /// failure than a bogus proof.
+    pub fn verify_canonical_program(
+        envelope: &ProofEnvelope,
+        expected_inputs: &ExecutionPublicInputs,
+        program: &[u64],
+    ) -> Result<(), VerifyError> {
+        <Self as ProverAdapter>::verify(envelope, expected_inputs, program)?;
+        if !crate::canonical_set::is_canonical_program_hash(&expected_inputs.program_hash) {
+            return Err(VerifyError::NonCanonicalProgram(
+                expected_inputs.program_hash,
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -110,15 +110,21 @@ jobs:
           # compilers like the other tokens.
           SYSCALL=$(grep -oE "syscall-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${SYSCALL}"
+          # The canonical-set digest ties the whole canonical program set to
+          # one value; the regeneration gate and the ZKVM verifier must agree
+          # on it, so it is compared across compilers like the other tokens.
+          SET=$(grep -oE "canonical-set [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${SET}"
 
           {
             echo "genesis=${GENESIS}"
             echo "program=${PROGRAM}"
             echo "matmul=${MATMUL}"
             echo "syscall=${SYSCALL}"
+            echo "set=${SET}"
           } >> "$GITHUB_OUTPUT"
 
-          printf 'genesis=%s\nprogram=%s\nmatmul=%s\nsyscall=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" "${SYSCALL}" > "digests-${{ matrix.label }}.txt"
+          printf 'genesis=%s\nprogram=%s\nmatmul=%s\nsyscall=%s\nset=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" "${SYSCALL}" "${SET}" > "digests-${{ matrix.label }}.txt"
           cat "digests-${{ matrix.label }}.txt"
 
       - name: Upload digests

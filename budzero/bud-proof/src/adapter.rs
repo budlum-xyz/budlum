@@ -209,6 +209,10 @@ pub enum VerifyError {
     DeserializationError(String),
     InvalidEnvelope(String),
     PublicInputsMismatch,
+    /// The proof's program hash is not part of the canonical program set
+    /// (see `canonical_set`). Raised by `verify_canonical_program`; the
+    /// ordinary `verify` path still accepts any well-formed program.
+    NonCanonicalProgram([u8; 32]),
     InvalidProof,
 }
 
