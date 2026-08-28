@@ -247,7 +247,6 @@ fn alarm_from_verify_error(e: &VerifyError) -> AlarmDetail {
         ),
         VerifyError::InvalidEnvelope(msg) => (AlarmCode::InvalidEnvelope, msg.clone()),
         VerifyError::DeserializationError(msg) => (AlarmCode::DeserializationError, msg.clone()),
-        other => (AlarmCode::InvalidProof, format!("{other:?}")),
     };
     AlarmDetail { code, detail }
 }

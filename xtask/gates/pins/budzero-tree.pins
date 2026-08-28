@@ -1,7 +1,7 @@
 # budzero source-tree integrity pins (Keccak-256)
 # Regenerate with: cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin --pin
 # Commit the new pins together with the change they describe.
-bud-cli/src/main.rs 79f5dfe77529b55d438175fa91dcc97207dfaa96fe7def160275ede88bfa961e
+bud-cli/src/main.rs 56746dd68dd4b82387acfe1b7b5348191e085218fbd6ed88c9d95083168d2e0b
 bud-cli/tests/toolchain_end_to_end.rs a9d8c434e68cb8c43797bcb44f501c1da7bb70bc420ebd92a5f50ad53a1870c4
 bud-compiler/src/ast.rs 61cc1ab6ccba12729d9ed1a8a64921136810f2bfda039af6c79b9a36175fd9a5
 bud-compiler/src/codegen.rs b0052a115a3d8b82e17e30577d1bffa3ec15f24bacc30a89fc2295852aadd4cb
@@ -31,7 +31,7 @@ bud-proof/src/canonical_set.rs 023a56a6029a1d48a9b21f506424da5af0cf3f0057adfa63e
 bud-proof/src/lib.rs 4baf2d74098bf32c533b8f7c67dea7897cc9f42c1090a117fa76d22c5a2c92ea
 bud-proof/src/plonky3_air.rs d12c2e828d47094e3f56e27f4cb264174ce2e87fca0bb62a68542969ee7fcbb3
 bud-proof/src/plonky3_prover.rs 0213c0c238555018a721bd42d72defa8aee4bc21086ad4eda435f070420354fd
-bud-proof/src/relayer.rs 5a8b6f6db6d30b6fc351ed9f7ac84b70f47dcf7bfa3ff7f44a6694ce1c11e836
+bud-proof/src/relayer.rs c08b4128564aec668648705433dc9d2f2282741d424729f832dd529b694bf5ef
 bud-proof/src/trace_layout_tests.rs f7493fa69a0573acf38ed1a615f2fcf532a881498fdfcaae29c9a004bc7d97e6
 bud-proof/tests/compiled_branching.rs fb5cef5788686f6a86b9dd3171f7c21551d120b8c298fe3c32e7d94a4aa16d7f
 bud-proof/tests/fiat_shamir_binding.rs bf9b62dd46da40d949b5b429cabfbed8e01dc80e414c5aa882aa6c7317d76553
