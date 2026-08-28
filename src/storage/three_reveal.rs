@@ -78,6 +78,12 @@ impl RevealSession {
             }
         };
         let emitter = RecipeEmitter::open(public, packed)?;
+        // The recipe's pinned stream identity is checked against a fold
+        // recomputed from the frames this session will emit, so a recipe
+        // pointing at another stream refuses here rather than at the first
+        // frame a receiver tries to decode.
+        let (_, fold) = emitter.emit_frames(0, 1)?;
+        emitter.verify_stream_id(&fold)?;
         Ok(Self { emitter })
     }
 

@@ -1,13 +1,14 @@
-//! A0 — 2.0 → 3.0 transform contract (plan §CH A0 / §CJ.6).
+//! A0 - 2.0 → 3.0 transform contract (plan §CH A0 / §CJ.6).
 //!
 //! User product: content is **transformed** (format + ops) before the Three
 //! QR-video pipe. This module is the single mouth: classify → optional
 //! shrink-only zlib → pin sha256 → [`TransformedPayload`].
 //!
-//! WIRING: unwired - `verify_hash` is the one refusal here no production path
-//! calls: the emit path pins the digest in `from_bytes` and does not re-read
-//! the body afterwards, so the check only protects the class tests. It moves
-//! to the A1 handoff when the 2.0 unified transform lands (plan §CK.6.5).
+//! [`TransformedPayload::verify_hash`] is the digest half of the A1 handoff:
+//! `three_pipe::encode_plain` refuses a payload whose body no longer matches
+//! the pinned sha256 before the bytes move into the packed carousel. That path
+//! is not yet reachable from a binary, so the guard counts as unwired until the
+//! reveal session gains a caller.
 //!
 //! Real 2.0 codecs elsewhere still exist; new call sites must enter here so
 //! 3.0 never greps scattered helpers. Entropy-coded types **do not** try zlib
@@ -25,7 +26,7 @@ pub struct CodecFlags(pub u32);
 impl CodecFlags {
     /// No special marking.
     pub const NONE: Self = Self(0);
-    /// Input was already entropy-coded (jpeg/mp4/zip/cipher) — zlib not tried.
+    /// Input was already entropy-coded (jpeg/mp4/zip/cipher) - zlib not tried.
     pub const ENTROPY_CODED: Self = Self(1 << 0);
     /// This transform applied shrink-only zlib.
     pub const PRE_SHRUNK: Self = Self(1 << 1);
@@ -51,9 +52,9 @@ impl CodecFlags {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum ContentClass {
-    /// Unknown — try zlib-if-shrinks.
+    /// Unknown - try zlib-if-shrinks.
     Generic = 0,
-    /// utf8 / json / xml / plain — zlib likely helps.
+    /// utf8 / json / xml / plain - zlib likely helps.
     TextOrganic = 1,
     /// Already compressed media container.
     EntropyMedia = 2,
@@ -61,17 +62,17 @@ pub enum ContentClass {
     EntropyArchive = 3,
     /// Caller-sealed ciphertext.
     Ciphertext = 4,
-    /// Generative recipe wire (catalogue) — usually tiny; still may zlib.
+    /// Generative recipe wire (catalogue) - usually tiny; still may zlib.
     RecipeWire = 5,
-    /// SVG / XML vector document — organic text underneath.
+    /// SVG / XML vector document - organic text underneath.
     VectorOrganic = 6,
-    /// Raw / lightly packed bitmap (BMP) — piece-constant, zlib helps.
+    /// Raw / lightly packed bitmap (BMP) - piece-constant, zlib helps.
     RasterFlat = 7,
-    /// PCM audio (WAV) — low entropy samples, zlib helps.
+    /// PCM audio (WAV) - low entropy samples, zlib helps.
     AudioPcm = 8,
-    /// Office / OOXML package — zip container but measurably shrinkable.
+    /// Office / OOXML package - zip container but measurably shrinkable.
     DocumentOrganic = 9,
-    /// Executable image (ELF / PE) — zlib refused.
+    /// Executable image (ELF / PE) - zlib refused.
     Exec = 10,
 }
 
@@ -138,7 +139,7 @@ fn sniff_magic(bytes: &[u8]) -> ContentClass {
     if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
         return ContentClass::EntropyMedia; // JPEG
     }
-    if bytes.len() >= 4 && bytes[0..4] == *b"\x89PNG" {
+    if bytes.get(0..4) == Some(b"\x89PNG") {
         return ContentClass::EntropyMedia; // govde zaten deflate; zlib kazandirmiyor
     }
     if bytes.len() >= 4
@@ -249,6 +250,8 @@ impl TransformedPayload {
 pub enum TransformError {
     /// Empty transform refused.
     Empty,
+    /// Pinned digest no longer matches the body at the A1 handoff.
+    HashMismatch,
     /// Input larger than lab hard cap.
     TooLarge {
         /// Observed.
@@ -262,6 +265,9 @@ impl std::fmt::Display for TransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "transformed payload refuses empty bytes"),
+            Self::HashMismatch => {
+                write!(f, "transformed payload body does not match its pinned hash")
+            }
             Self::TooLarge { len, max } => {
                 write!(f, "transform input {len} exceeds max {max}")
             }

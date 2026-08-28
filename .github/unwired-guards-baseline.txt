@@ -46,8 +46,30 @@
 #       that context from registry state. Calling this would satisfy the gate
 #       and weaken the chain.
 #
-# Three closed since this file was last written, recorded so the direction is
-# visible rather than only the number:
+# Two call sites closed since this file was last written, and the count is
+# still five: the callers exist but sit behind code that main never reaches.
+# Recorded exactly as measured, because both gates disagree and the
+# disagreement is the finding.
+#
+#   src/storage/qr_reemit.rs   verify_stream_id
+#       Now called by `RevealSession::open` against a fold recomputed from the
+#       emitted frames. The module's `WIRING: unwired` declaration was deleted:
+#       `capability-modules-are-wired` measures whether any other production
+#       module names the surface, and `three_reveal` does. `guards-are-reachable`
+#       still counts the guard, because `RevealSession` itself is only re-exported
+#       from `src/storage/mod.rs` and nothing under `src/bin` or `src/cli` opens a
+#       reveal session. The count falls when the reveal session gains a caller,
+#       not before.
+#
+#   src/storage/transformed.rs   verify_hash
+#       Now called by `three_pipe::encode_plain` before the body moves into the
+#       A1 pack, refusing a payload whose bytes no longer match the digest the
+#       transform pinned. Same accounting: `guards-are-reachable` counts it while
+#       `encode_plain` stays out of main's reach.
+#
+# The stale declarations were deleted rather than kept. A `WIRING: unwired` note
+# that contradicts the caller graph is worse than no note: it tells the next
+# reader not to look.
 #
 #   src/lubot/mod.rs             validate_inference_grant
 #       Wired into `build_lubot_request`, which now takes the grant as a

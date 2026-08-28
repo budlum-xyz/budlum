@@ -130,6 +130,12 @@ pub fn encode_plain(
 ) -> Result<EncodedPipe, PipeError> {
     // A0: classify + zlib-if-shrinks (entropy types skip zlib).
     let transformed = transform_content(content, TransformOpts::default())?;
+    // A1 handoff: the body that goes into the carousel must still carry the
+    // digest this transform pinned. A stale or forged payload is refused here,
+    // before a commitment is computed over bytes nobody verified.
+    if !transformed.verify_hash() {
+        return Err(TransformError::HashMismatch.into());
+    }
     let (kind, body) = if let Some(key) = seal_key {
         let sealed = seal_payload(key, &derived_nonce(b"three_pipe"), &transformed.bytes)?;
         (PayloadKind::EncryptedContent, sealed)
