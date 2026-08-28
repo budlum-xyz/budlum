@@ -20,6 +20,17 @@ pub enum Command {
     Status,
     /// Run a JSONL data file through the schema gate (lubot-tune::schema).
     Validate { path: Option<String> },
+    /// Grade a golden dataset against produced responses and report the score,
+    /// the gate verdict and the dataset digest (lubot-tune::eval).
+    ///
+    /// `dataset` is a JSONL of `InstructionRecord`s (the golden answers are the
+    /// grading rule). `responses` is a JSONL of the produced prompt/answer
+    /// pairs; when omitted the command reports the dataset identity only (it
+    /// cannot grade without model output).
+    Eval {
+        dataset: Option<String>,
+        responses: Option<String>,
+    },
     /// Print the verified system prompt this bridge will serve.
     ///
     /// The prompt is a `const`; an operator serves the same text every other
@@ -50,6 +61,10 @@ pub fn parse(argv: &[String]) -> Command {
         "validate" => Command::Validate {
             path: argv.get(1).cloned(),
         },
+        "eval" => Command::Eval {
+            dataset: argv.get(1).cloned(),
+            responses: argv.get(2).cloned(),
+        },
         "prompt" => Command::Prompt,
         _ => Command::Help,
     }
@@ -67,6 +82,8 @@ Usage:
   lubot-ops status                    health summary
   lubot-ops validate [JSONL_FILE]     data set schema gate (empty field, byte
                                       ceiling, line-numbered error, TR ratio)
+  lubot-ops eval [DATASET] [RESPONSES] grade a golden set against produced
+                                      responses (score, gate verdict, digest)
   lubot-ops prompt                    print the verified serving system prompt
   lubot-ops help                      this text
 
