@@ -993,6 +993,60 @@ fn bitset_xor(dst: &mut [u64], src: &[u64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Altın vektörler: 24 baytlık gövde, k=3, block_len=8. `drop_at(0)`
+    /// sistematik damla, `drop_at(3)` ilk onarım damlasıdır (derece 3).
+    /// Vektörler commit anındaki kodlayıcıdan üretildi; PRNG tohumu, başlık
+    /// düzeni veya FNV özeti değişirse test kırılır.
+    #[test]
+    fn drop_wire_matches_the_golden_vectors() {
+        assert_eq!(DROP_HEADER_LEN, 24);
+        assert_eq!(DROP_VERSION, 1);
+        let enc = CarouselEncoder::new(b"ABCDEFGHIJKLMNOPQRSTUVWX", 8).unwrap();
+        assert_eq!(
+            enc.drop_at(0).to_bytes(),
+            unhex("42444c44010000000000030008001800000001008d7b3d954142434445464748")
+        );
+        let d3 = enc.drop_at(3);
+        assert_eq!(d3.degree, 3);
+        assert_eq!(
+            d3.to_bytes(),
+            unhex("42444c4401000300000003000800180000000300bd9e04e8595a5b5c5d5e5f40")
+        );
+    }
+
+    #[test]
+    fn stream_commitment_matches_the_golden_vector() {
+        let enc = CarouselEncoder::new(b"ABCDEFGHIJKLMNOPQRSTUVWX", 8).unwrap();
+        let payload_commitment = [
+            0x7eu8, 0x38, 0x0b, 0x6b, 0x1a, 0x1e, 0x98, 0x17, 0x93, 0xbc, 0x14, 0xe8, 0x97, 0x0f,
+            0xef, 0xe3, 0xa2, 0x5c, 0xff, 0x38, 0x95, 0xba, 0xc6, 0x5b, 0x5e, 0x5c, 0xc2, 0xc9,
+            0xf8, 0x55, 0xac, 0x0d,
+        ];
+        let got = enc.params().stream_commitment(&payload_commitment);
+        assert_eq!(
+            got.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "4f36fbd124f6493230e876fe083a76b6a1c90fd4ad214cfd6babf60d7f9758ce"
+        );
+    }
+
+    #[test]
+    fn foreign_drop_version_is_gated() {
+        let enc = CarouselEncoder::new(b"ABCDEFGHIJKLMNOPQRSTUVWX", 8).unwrap();
+        let mut bytes = enc.drop_at(0).to_bytes();
+        bytes[4] = 2;
+        assert_eq!(
+            Drop::from_bytes(&bytes).unwrap_err(),
+            CarouselError::BadVersion(2)
+        );
+    }
     use crate::storage::qr_payload::{pack_payload, unpack_payload, PayloadKind};
 
     #[test]
