@@ -59,6 +59,71 @@
 use std::fs;
 use std::path::Path;
 
+/// Canonical producer sources, embedded into the gate at compile time.
+///
+/// Embedding them means two things:
+///
+/// 1. If a part is **deleted** from the tree, the gate still holds its
+///    canonical content and writes it back (`run` repairs the file from
+///    this embedded copy and reports the repair).
+/// 2. If a part is **modified** (an outside attack, or an uncoordinated
+///    drift), `run` compares the on-disk content against this embedded
+///    copy and turns red with the exact path and expected hash.
+///
+/// An attacker who can rewrite the gate's own source can rewrite these
+/// embeddings too — that is why the gate is compiled from source in CI by
+/// two independent compilers (diverse-double-compiling) and why the
+/// `canonical-set` token is compared across them.
+const EMBEDDED_PRIVATE_TRANSFER_SRC: &str =
+    include_str!("../../../../budzero/bud-vm/src/private_transfer.rs");
+const EMBEDDED_SYSCALL_CONTEXT_SRC: &str =
+    include_str!("../../../../budzero/bud-vm/src/syscall_context.rs");
+
+/// Decode a lowercase hex string into bytes. Only used for the canonical-set
+/// digest, where the inputs are the gate's own 64-char pins.
+fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 {
+        return Err(format!("odd hex length: {}", hex.len()));
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|_| format!("bad hex byte: {}", &hex[i..i + 2]))
+        })
+        .collect()
+}
+
+/// The canonical program hashes, in the gate's own pin order.
+///
+/// This is the gate-side twin of `budzero/bud-proof/src/canonical_set.rs`:
+/// the ZKVM verifies proofs against that table, the gate reproduces and pins
+/// the same four values here, and `run` cross-checks that the proof-side
+/// table still lists exactly these values.
+fn canonical_program_hash_pins() -> [&'static str; 4] {
+    [
+        // Storage challenge [VerifyMerkle rd=1 rs1=2 rs2=3 imm=256, Halt].
+        "3adbf9c8e6afb8ef243e9063ad25ccd2b890d91e2bd88816a1a909ce2c5b15d4",
+        // Matmul guest [2,3,2].
+        "4c4e86b4d34230df02acb991eb3111e459fb8bf06dd2b65b78c143b7f8b7e8c7",
+        // Private-transfer check (12 instructions).
+        "313a4da25d92952dbd14ce71c2f30fdab7cd47a397a612403f7da1562dabf154",
+        // Syscall-context check (7 instructions).
+        "30cf71d4f910cd7f8adf8178e0f2c44ec9c4209252212ff4a0a74f3c6a15fd69",
+    ]
+}
+
+/// The canonical-set digest: Keccak-256 over the concatenated raw canonical
+/// hashes. `run` emits it as its `canonical-set <hex>` token; the proof side
+/// computes the identical value (`canonical_set::canonical_set_digest`).
+fn canonical_set_digest() -> Result<[u8; 32], String> {
+    let mut acc: Vec<u8> = Vec::new();
+    for hex in canonical_program_hash_pins() {
+        acc.extend_from_slice(&hex_decode(hex)?);
+    }
+    Ok(keccak256(&acc))
+}
+
 /// If the number of canonical production points drops below this, the scan has
 /// gone blind. At measurement time there were six canonical points; the
 /// threshold was chosen high enough to catch a single surface being deleted and
@@ -676,6 +741,87 @@ fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
     }
 }
 
+/// A canonical part: the path of a producer source in the tree plus its
+/// canonical content embedded in this gate.
+struct CanonicalPart {
+    rel_path: &'static str,
+    embedded: &'static str,
+}
+
+/// The canonical parts the gate defends. `run` checks each one; a deleted
+/// part is repaired from its embedding, a modified part turns the gate red.
+fn canonical_parts() -> [CanonicalPart; 2] {
+    [
+        CanonicalPart {
+            rel_path: "budzero/bud-vm/src/private_transfer.rs",
+            embedded: EMBEDDED_PRIVATE_TRANSFER_SRC,
+        },
+        CanonicalPart {
+            rel_path: "budzero/bud-vm/src/syscall_context.rs",
+            embedded: EMBEDDED_SYSCALL_CONTEXT_SRC,
+        },
+    ]
+}
+
+/// Verify the canonical parts: each producer source must be present and
+/// byte-identical to the embedded canonical content. A **deleted** part is
+/// written back from the embedding (self-repair) and reported; a
+/// **modified** part is an integrity breach and turns the gate red.
+fn verify_canonical_parts(root: &Path) -> Result<Vec<String>, String> {
+    let mut repairs: Vec<String> = Vec::new();
+    for part in canonical_parts() {
+        let path = root.join(part.rel_path);
+        let on_disk = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Deleted: repair from the embedded canonical content. The
+                // write itself is the recovery; the gate then re-checks.
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::write(&path, part.embedded).map_err(|e| e.to_string())?;
+                repairs.push(part.rel_path.to_string());
+                continue;
+            }
+            Err(e) => return Err(format!("cannot read {}: {e}", part.rel_path)),
+        };
+        if on_disk != part.embedded {
+            return Err(format!(
+                "regeneration: canonical part {} was MODIFIED. The on-disk content no \
+                 longer matches the content this gate was compiled with. If this is an \
+                 intentional change, rebuild and re-pin; if not, an outside attacker \
+                 changed a canonical producer. expected hash {}, got {}",
+                part.rel_path,
+                &hex32(&keccak256(part.embedded.as_bytes()))[..16],
+                &hex32(&keccak256(on_disk.as_bytes()))[..16],
+            ));
+        }
+    }
+    Ok(repairs)
+}
+
+/// Verify the ZKVM-side canonical table (`budzero/bud-proof/src/canonical_set.rs`)
+/// still lists exactly the four hashes this gate pins. If the proof side
+/// drifts away from the gate — or the gate from the proof side — one of them
+/// is no longer canonical, and the pair must be re-pinned together.
+fn verify_proof_side_canonical_set(root: &Path) -> Result<(), String> {
+    let path = root.join("budzero/bud-proof/src/canonical_set.rs");
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read the proof-side canonical set: {e}"))?;
+    for (i, pin) in canonical_program_hash_pins().iter().enumerate() {
+        if !text.contains(pin) {
+            return Err(format!(
+                "regeneration: the ZKVM-side canonical set (canonical_set.rs) no longer \
+                 contains hash #{} ({}) that this gate pins. The gate and the verifier \
+                 must agree on the canonical set; re-pin both sides together.",
+                i + 1,
+                &pin[..16],
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// # Errors
 ///
 /// Returns a finding if it cannot reproduce the canonical value, if the
@@ -683,6 +829,8 @@ fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
 pub fn run(root: &Path) -> Result<String, String> {
     verify_own_keccak()?;
     let first = verify_convergence()?;
+    let repairs = verify_canonical_parts(root)?;
+    verify_proof_side_canonical_set(root)?;
 
     // Reproduce the storage challenge program from the ISA rule and compare it
     //    with what is written in the tree.
@@ -830,16 +978,28 @@ pub fn run(root: &Path) -> Result<String, String> {
             ..16
         ]
         .to_string();
+    let set_token = &hex32(&canonical_set_digest()?)[..16].to_string();
+    let repair_note = if repairs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " repaired {} part(s): {}",
+            repairs.len(),
+            repairs.join(", ")
+        )
+    };
 
     Ok(format!(
         "regeneration OK: program-hash {} reproduced, \
          convergence (idempotence + repair) was verified, and all {checked} \
          production points found by discovery are canonical (verified with an \
          independent Keccak-256 and an independent ISA encoding). matmul-hash {} \
-         syscall-hash {}",
+         syscall-hash {} canonical-set {}{}",
         &hex32(&regenerated)[..16],
         matmul_token,
         syscall_token,
+        set_token,
+        repair_note,
     ))
 }
 
@@ -921,7 +1081,38 @@ fn write_good(tmp: &Path) -> Result<(), String> {
             "let mut hasher = Keccak256::new();\nfor word in program { hasher.update(word.to_le_bytes()); }\n",
         )
         .map_err(|e| e.to_string())?;
+    // The canonical parts (the gate's embedded copies of the canonical
+    // producers) and the proof-side canonical table, so the good tree passes
+    // without triggering a repair.
+    fs::create_dir_all(tmp.join("budzero/bud-vm/src"))
+        .map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("budzero/bud-vm/src/private_transfer.rs"),
+        EMBEDDED_PRIVATE_TRANSFER_SRC,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("budzero/bud-vm/src/syscall_context.rs"),
+        EMBEDDED_SYSCALL_CONTEXT_SRC,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("budzero/bud-proof/src/canonical_set.rs"),
+        canonical_set_source_fixture(),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// A minimal, correct copy of the proof-side canonical table, good enough for
+/// the canary tree: it must contain all four pinned hashes.
+fn canonical_set_source_fixture() -> String {
+    let mut s = String::from("// fixture canonical set\npub const CANONICAL_PROGRAM_HASHES: [&str; 4] = [\n");
+    for pin in canonical_program_hash_pins() {
+        s.push_str(&format!("    \"{pin}\",\n"));
+    }
+    s.push_str("];\n");
+    s
 }
 
 /// Tries the canary drifts one by one.
@@ -982,6 +1173,60 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "self-test: a changed storage challenge program was not caught",
+        ));
+    }
+
+    // Drift 4b: a canonical part is MODIFIED - the outside-attack vector the
+    // embedded parts defend against. The gate must turn red and must NOT
+    // silently repair a modification (only deletions are repaired).
+    write_good(tmp)?;
+    let pt_path = tmp.join("budzero/bud-vm/src/private_transfer.rs");
+    let mut tampered = fs::read_to_string(&pt_path).map_err(|e| e.to_string())?;
+    tampered.push_str("\n// injected outside content\n");
+    fs::write(&pt_path, tampered).map_err(|e| e.to_string())?;
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: a MODIFIED canonical part was not caught (outside attack)",
+        ));
+    }
+
+    // Drift 4c: a canonical part is DELETED - the self-repair vector. The gate
+    // must restore the file from its embedding and pass, reporting the repair.
+    write_good(tmp)?;
+    let sc_path = tmp.join("budzero/bud-vm/src/syscall_context.rs");
+    fs::remove_file(&sc_path).map_err(|e| e.to_string())?;
+    let out = run(tmp).map_err(|e| {
+        let _ = fs::remove_dir_all(tmp);
+        format!("self-test: a DELETED canonical part should have been repaired: {e}")
+    })?;
+    if fs::read_to_string(&sc_path).map_err(|e| e.to_string())? != EMBEDDED_SYSCALL_CONTEXT_SRC {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: the repaired part differs from the embedded canonical content",
+        ));
+    }
+    if !out.contains("repaired") {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: the repair was not reported in the gate output",
+        ));
+    }
+
+    // Drift 4d: the proof-side canonical set drifts away from the gate's pins -
+    // the gate and the verifier must agree on what is canonical.
+    write_good(tmp)?;
+    let cs_path = tmp.join("budzero/bud-proof/src/canonical_set.rs");
+    let mut cs = fs::read_to_string(&cs_path).map_err(|e| e.to_string())?;
+    cs = cs.replace(
+        "3adbf9c8e6afb8ef243e9063ad25ccd2b890d91e2bd88816a1a909ce2c5b15d4",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    fs::write(&cs_path, cs).map_err(|e| e.to_string())?;
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: a drifted proof-side canonical set was not caught",
         ));
     }
 
@@ -1046,18 +1291,24 @@ mod tests {
             "the DDC workflow no longer greps for `syscall-hash <hex>`; if the \
              extraction changed, update this test with it rather than deleting it"
         );
+        assert!(
+            workflow.contains(r#"grep -oE "canonical-set [0-9a-f]+""#),
+            "the DDC workflow no longer greps for `canonical-set <hex>`; if the \
+             extraction changed, update this test with it rather than deleting it"
+        );
 
         // The message the gate actually emits on success, rebuilt here.
         let message = format!(
             "regeneration OK: program-hash {} reproduced, and the rest is prose. matmul-hash {} \
-             syscall-hash {}",
+             syscall-hash {} canonical-set {}",
             &hex32(&[0xabu8; 32])[..16],
             &hex32(&[0xcdu8; 32])[..16],
             &hex32(&[0xefu8; 32])[..16],
+            &hex32(&[0x12u8; 32])[..16],
         );
 
-        // The workflow's own extraction, applied to all three tokens.
-        for needle in ["program-hash", "matmul-hash", "syscall-hash"] {
+        // The workflow's own extraction, applied to all four tokens.
+        for needle in ["program-hash", "matmul-hash", "syscall-hash", "canonical-set"] {
             let token = message
                 .split_whitespace()
                 .skip_while(|w| *w != needle)
