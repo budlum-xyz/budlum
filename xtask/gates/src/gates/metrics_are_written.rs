@@ -269,7 +269,6 @@ fn strip_comments_and_strings(src: &str) -> String {
 
 /// Collapse runs of whitespace so multi-line calls still match.
 fn flatten(src: &str) -> String {
-
     let mut out = String::with_capacity(src.len());
     let mut was_ws = false;
     for ch in src.chars() {
@@ -501,11 +500,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
         for (i, k) in stale.iter().enumerate() {
             if i >= report_limit() {
-                let _ = writeln!(
-                    msg,
-                    "  ... and {} more",
-                    stale.len() - i
-                );
+                let _ = writeln!(msg, "  ... and {} more", stale.len() - i);
                 break;
             }
             let _ = writeln!(msg, "  {k}");
@@ -517,10 +512,8 @@ pub fn run(root: &Path) -> Result<String, String> {
 // ─── self-test ───────────────────────────────────────────────────────────────
 
 fn scratch_dir() -> Result<PathBuf, String> {
-    let base = std::env::temp_dir().join(format!(
-        "budlum-metrics-are-written-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("budlum-metrics-are-written-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).map_err(|e| format!("scratch: {e}"))?;
     Ok(base)
@@ -558,7 +551,9 @@ fn clean_tree_files() -> Vec<(&'static str, &'static str)> {
         inits.push_str(&format!(
             "        let {name} = IntGauge::new(\"budlum_{name}\", \"h\")?;\n"
         ));
-        registers.push_str(&format!("        registry.register(Box::new({name}.clone()))?;\n"));
+        registers.push_str(&format!(
+            "        registry.register(Box::new({name}.clone()))?;\n"
+        ));
         struct_init.push_str(&format!("            {name},\n"));
     }
     let metrics = format!(
@@ -619,9 +614,7 @@ pub fn self_test() -> Result<String, String> {
     fs::write(bad.join("src/writer.rs"), writer).map_err(|e| e.to_string())?;
     if accepts(&bad)? {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: an unwritten metric was accepted",
-        ));
+        return Err(String::from("canary: an unwritten metric was accepted"));
     }
 
     // Baseline exempts the unwritten field.
@@ -629,11 +622,7 @@ pub fn self_test() -> Result<String, String> {
     write_tree(&baselined, &files)?;
     fs::write(baselined.join("src/writer.rs"), writer).map_err(|e| e.to_string())?;
     fs::create_dir_all(baselined.join(".github")).map_err(|e| e.to_string())?;
-    fs::write(
-        baselined.join(BASELINE_PATH),
-        "IntGauge\tm11\n",
-    )
-    .map_err(|e| e.to_string())?;
+    fs::write(baselined.join(BASELINE_PATH), "IntGauge\tm11\n").map_err(|e| e.to_string())?;
     if !accepts(&baselined)? {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
