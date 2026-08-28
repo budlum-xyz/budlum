@@ -81,7 +81,7 @@ const EMBEDDED_SYSCALL_CONTEXT_SRC: &str =
 
 /// Decode a lowercase hex string into bytes. Only used for the canonical-set
 /// digest, where the inputs are the gate's own 64-char pins.
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     if hex.len() % 2 != 0 {
         return Err(format!("odd hex length: {}", hex.len()));
     }
@@ -566,7 +566,7 @@ fn keccak_f(a: &mut [u64; 25]) {
 }
 
 /// Keccak-256 (orijinal padding 0x01), Ethereum'un kullandigi.
-fn keccak256(input: &[u8]) -> [u8; 32] {
+pub(crate) fn keccak256(input: &[u8]) -> [u8; 32] {
     const RATE: usize = 136;
     let mut state = [0u64; 25];
     let mut padded = input.to_vec();
@@ -593,7 +593,7 @@ fn keccak256(input: &[u8]) -> [u8; 32] {
     out
 }
 
-fn hex32(b: &[u8; 32]) -> String {
+pub(crate) fn hex32(b: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(64);
     for x in b {

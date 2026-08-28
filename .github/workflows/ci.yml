@@ -1487,6 +1487,15 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration
+      # Relay: ships the regeneration consensus (tokens + proof-side canonical
+      # set + signed relay-status.json) to external consumers. Runs after
+      # regeneration because it consumes its output line; the proof-side
+      # live report is picked up from budzero's target/relay when the
+      # bud-proof suite published one in this run.
+      - name: relay (signed canonical-production status report) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- relay --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- relay
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;
