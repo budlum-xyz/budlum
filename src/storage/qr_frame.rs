@@ -23,7 +23,7 @@
 //! The frame digest preimage is:
 //! `BDLM_THREE_QR_FRAME_V1 ‖ stream_commitment ‖ seq ‖ drop_wire`.
 //!
-//! `stream_commitment` comes from [`CarouselParams::stream_commitment`] over
+//! `stream_commitment` comes from [`crate::storage::qr_carousel::CarouselParams::stream_commitment`] over
 //! the A1 payload commitment, so a foreign stream cannot splice drops in.
 //!
 //! # What this module does not claim
