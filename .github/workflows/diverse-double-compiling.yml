@@ -116,15 +116,31 @@ jobs:
           SET=$(grep -oE "canonical-set [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${SET}"
 
+          # The relay gate ships the same consensus as a signed status report;
+          # its token is produced here too so the two compilers must agree on
+          # the relay outcome as well (regeneration is a dependency of relay).
+          (cd xtask/gates && cargo run --release --quiet -- relay) > /tmp/relay.txt 2>&1
+          RELAYTOK=$(grep -oE "relay-token [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          test -n "${RELAYTOK}"
+
+          # The tree-pin gate attests the whole budzero source tree; the pins
+          # are committed with the tree, so both compilers must see the same
+          # tree hash state. The gate prints the pinned-file count on success.
+          (cd xtask/gates && cargo run --release --quiet -- tree-pin) > /tmp/treepin.txt 2>&1
+          TREEPIN_OK=$(grep -oE "all [0-9]+ files match their pins" /tmp/treepin.txt | tail -1)
+          test -n "${TREEPIN_OK}"
+
           {
             echo "genesis=${GENESIS}"
             echo "program=${PROGRAM}"
             echo "matmul=${MATMUL}"
             echo "syscall=${SYSCALL}"
             echo "set=${SET}"
+            echo "relay=${RELAYTOK}"
+            echo "treepin=${TREEPIN_OK}"
           } >> "$GITHUB_OUTPUT"
 
-          printf 'genesis=%s\nprogram=%s\nmatmul=%s\nsyscall=%s\nset=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" "${SYSCALL}" "${SET}" > "digests-${{ matrix.label }}.txt"
+          printf 'genesis=%s\nprogram=%s\nmatmul=%s\nsyscall=%s\nset=%s\nrelay=%s\ntreepin=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" "${SYSCALL}" "${SET}" "${RELAYTOK}" "${TREEPIN_OK}" > "digests-${{ matrix.label }}.txt"
           cat "digests-${{ matrix.label }}.txt"
 
       - name: Upload digests
