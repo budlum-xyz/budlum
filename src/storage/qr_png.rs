@@ -41,10 +41,10 @@ impl From<QrMatrixError> for QrPngError {
     }
 }
 
+/// Render matrix to a deterministic RGB8 PNG.
 /// # Errors
 ///
 /// Propagates `QrPngError` from the step that failed; its variants name the refused conditions.
-/// Render matrix to a deterministic RGB8 PNG.
 pub fn matrix_to_png(matrix: &QrMatrix) -> Result<Vec<u8>, QrPngError> {
     let side_m = matrix.raster_modules();
     let side_px = side_m.saturating_mul(MODULE_PX);
@@ -78,10 +78,10 @@ pub fn matrix_to_png(matrix: &QrMatrix) -> Result<Vec<u8>, QrPngError> {
     Ok(write_png_rgb8(side_px, side_px, &raw))
 }
 
+/// Encode optical frame bytes → QR → PNG in one step.
 /// # Errors
 ///
 /// Propagates `QrPngError` from the step that failed; its variants name the refused conditions.
-/// Encode optical frame bytes → QR → PNG in one step.
 pub fn frame_to_qr_png(frame: &[u8]) -> Result<Vec<u8>, QrPngError> {
     let m = QrMatrix::encode(frame)?;
     matrix_to_png(&m)

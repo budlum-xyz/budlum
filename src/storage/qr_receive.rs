@@ -105,10 +105,11 @@ impl ProgressiveReceiver {
         self.push_drop(drop)
     }
 
+    /// Ingest a raw A2 drop (already authenticated by the caller).
     /// # Errors
     ///
-    /// Propagates `ReceiveError` from the step that failed; its variants name the refused conditions.
-    /// Ingest a raw A2 drop (already authenticated by the caller).
+    /// Propagates `ReceiveError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn push_drop(&mut self, drop: Drop) -> Result<(), ReceiveError> {
         let body_tag = fnv1a32_local(&drop.body);
         if let Some(prev) = self.seen.get(&drop.seq) {

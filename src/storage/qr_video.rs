@@ -81,10 +81,11 @@ pub struct QrVideo {
 }
 
 impl QrVideo {
+    /// Mux optical A3 frames into QR PNGs + BDLV blob fields.
     /// # Errors
     ///
-    /// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
-    /// Mux optical A3 frames into QR PNGs + BDLV blob fields.
+    /// Propagates `QrVideoError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn from_optical_frames(
         recipe: &ThreeRecipePublic,
         stream_commitment: &[u8; 32],
@@ -128,10 +129,11 @@ impl QrVideo {
         out
     }
 
+    /// Parse BDLV.
     /// # Errors
     ///
-    /// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
-    /// Parse BDLV.
+    /// Propagates `QrVideoError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn from_bytes(blob: &[u8]) -> Result<Self, QrVideoError> {
         if blob.len() < 4 + 1 + 1 + 2 + 4 + 32 + 32 {
             return Err(QrVideoError::BadBlob);
@@ -191,10 +193,11 @@ fn u32_le(b: &[u8], off: usize) -> Result<u32, QrVideoError> {
     Ok(u32::from_le_bytes(a))
 }
 
+/// Decode one QR PNG back to optical frame bytes via rqrr.
 /// # Errors
 ///
-/// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
-/// Decode one QR PNG back to optical frame bytes via rqrr.
+/// Propagates `QrVideoError` from the step that failed; its variants name the refused
+/// conditions.
 pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrVideoError> {
     let (w, h, grey) = decode_png_grey(png).map_err(QrVideoError::Decode)?;
     // rqrr wants a flat grid; use PreparedImage
@@ -215,10 +218,11 @@ pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrVideoError> {
     Ok(data)
 }
 
+/// Demux BDLV → optical frames (ordered).
 /// # Errors
 ///
-/// Propagates `QrVideoError` from the step that failed; its variants name the refused conditions.
-/// Demux BDLV → optical frames (ordered).
+/// Propagates `QrVideoError` from the step that failed; its variants name the refused
+/// conditions.
 pub fn demux_optical_frames(video: &QrVideo) -> Result<Vec<Vec<u8>>, QrVideoError> {
     let mut out = Vec::with_capacity(video.png_frames.len());
     for png in &video.png_frames {

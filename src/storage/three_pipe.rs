@@ -187,10 +187,10 @@ pub fn decode_frames(
     Ok(rx.finish_unpacked()?)
 }
 
+/// Optional A4 raw concat of already-built frames.
 /// # Errors
 ///
 /// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
-/// Optional A4 raw concat of already-built frames.
 pub fn mux_raw(frames: &[Vec<u8>]) -> Result<Vec<u8>, PipeError> {
     Ok(RawFrameConcat.mux(CodecKind::RawFrames, frames)?)
 }
@@ -215,10 +215,10 @@ pub struct EncodedQrVideo {
     pub video_blob: Vec<u8>,
 }
 
+/// Root 3.0 encode: content → (optional seal) → A1…A3 → QR matrices → BDLV video.
 /// # Errors
 ///
 /// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
-/// Root 3.0 encode: content → (optional seal) → A1…A3 → QR matrices → BDLV video.
 pub fn encode_qr_video(
     content: &[u8],
     block_len: u16,
@@ -239,10 +239,10 @@ pub fn encode_qr_video(
     })
 }
 
+/// Root 3.0 decode: BDLV → optical frames → content body (kind + bytes).
 /// # Errors
 ///
 /// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
-/// Root 3.0 decode: BDLV → optical frames → content body (kind + bytes).
 pub fn decode_qr_video(video_blob: &[u8]) -> Result<(PayloadKind, Vec<u8>, QrVideo), PipeError> {
     let video = QrVideo::from_bytes(video_blob)?;
     let optical = demux_optical_frames(&video)?;

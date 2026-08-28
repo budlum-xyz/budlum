@@ -150,7 +150,8 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
 impl Storage {
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn new(path: &str) -> std::io::Result<Self> {
         let db = sled_open_with_retry(path)?;
         let storage = Self { db };
@@ -159,11 +160,12 @@ impl Storage {
         Ok(storage)
     }
 
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
     /// Approximate on-disk size of the sled database, for the
     /// `storage_db_size_bytes` gauge.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// Sled's own `size_on_disk` walks the file set; it can fail under lock
     /// contention. Callers treat `Err` as "leave the last scrape".
@@ -173,7 +175,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn apply_migrations(&self) -> std::io::Result<()> {
         const CURRENT_SCHEMA_VERSION: u64 = 1;
         let current = self.schema_version()?;
@@ -187,10 +190,11 @@ impl Storage {
         Ok(())
     }
 
+    /// Read the on-disk schema version.
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
-    /// Read the on-disk schema version.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// A stored value that does not parse used to become `0` through
     /// `unwrap_or(0)`, and `0` is exactly the value that means "fresh
@@ -220,10 +224,11 @@ impl Storage {
         }
     }
 
+    /// Create an atomic, self-contained database backup.
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
-    /// Create an atomic, self-contained database backup.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// The temporary file is written beside the destination and renamed only
     /// After all bytes are durable, so a crash never presents a partial file as
@@ -269,10 +274,11 @@ impl Storage {
         Ok(())
     }
 
+    /// Validate backup framing and key uniqueness without modifying a database.
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
-    /// Validate backup framing and key uniqueness without modifying a database.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn verify_snapshot<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<usize> {
         let bytes = std::fs::read(path)?;
         let backup = decode_database_backup(&bytes)?;
@@ -302,11 +308,12 @@ impl Storage {
         Ok(entries.len())
     }
 
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
     /// Restore an offline backup into a new, empty sled directory and run the
     /// Normal migration/integrity checks before reporting success.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn restore_snapshot<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
         snapshot_path: P,
         target_db_path: Q,
@@ -373,7 +380,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn insert_block(&self, block: &Block) -> std::io::Result<()> {
         let key = block.hash.clone();
         let val = encode(block)?;
@@ -388,7 +396,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn commit_block(&self, block: &Block, state_root: &str) -> std::io::Result<()> {
         let mut batch = sled::Batch::default();
 
@@ -417,7 +426,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn recover_interrupted_commit(&self) -> std::io::Result<()> {
         if let Some(height_bytes) = self.db.get(b"IN_PROGRESS_HEIGHT")? {
             let height_str = from_utf8(&height_bytes)
@@ -489,7 +499,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
         // Write IN_PROGRESS_HEIGHT marker and flush it
         self.db.insert(
@@ -581,7 +592,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_block(&self, hash: &str) -> std::io::Result<Option<Block>> {
         if let Some(val) = self.db.get(hash)? {
             let block: Block = decode(&val)?;
@@ -592,7 +604,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_block_by_height(&self, height: u64) -> std::io::Result<Option<Block>> {
         let height_key = format!("HEIGHT:{height}");
         if let Some(hash_bytes) = self.db.get(height_key.as_bytes())? {
@@ -606,7 +619,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_canonical_height(&self) -> std::io::Result<u64> {
         if let Some(val) = self.db.get("CANONICAL_HEIGHT")? {
             let s = from_utf8(&val)
@@ -619,7 +633,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_block(&self, height: u64) -> std::io::Result<()> {
         let key = format!("HEIGHT:{height}");
         if let Some(hash_val) = self.db.get(key.as_bytes())? {
@@ -636,7 +651,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_qc_blob(
         &self,
         height: u64,
@@ -650,7 +666,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_qc_blob(
         &self,
         height: u64,
@@ -665,7 +682,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_qc_blob(&self, height: u64) -> std::io::Result<()> {
         let key = format!("QC_BLOB:{height}");
         self.db.remove(key.as_bytes())?;
@@ -755,7 +773,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_finality_cert(
         &self,
         height: u64,
@@ -770,7 +789,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_finality_cert(&self, height: u64) -> std::io::Result<()> {
         let key = format!("FINALITY_CERT:{height}");
         self.db.remove(key.as_bytes())?;
@@ -779,7 +799,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_canonical_height(&self, height: u64) -> std::io::Result<()> {
         self.db
             .insert("CANONICAL_HEIGHT", height.to_string().as_bytes())?;
@@ -788,7 +809,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_state_root(&self, height: u64, state_root: &str) -> std::io::Result<()> {
         let key = format!("STATE_ROOT:{height}");
         self.db.insert(key.as_bytes(), state_root.as_bytes())?;
@@ -798,7 +820,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
         let key = format!("DOMAIN:{}", domain.id);
         let val = encode(domain)?;
@@ -809,7 +832,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
         let mut domains: Vec<ConsensusDomain> = Vec::new();
         for item in self.db.scan_prefix(b"DOMAIN:") {
@@ -829,7 +853,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
         let key = format!(
             "DOMAIN_COMMITMENT:{}:{}:{}",
@@ -843,7 +868,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_domain_commitment_batch(
         &self,
         commitment: &DomainCommitment,
@@ -870,7 +896,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
         let mut commitments: Vec<DomainCommitment> = Vec::new();
         for item in self.db.scan_prefix(b"DOMAIN_COMMITMENT:") {
@@ -889,7 +916,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()> {
         let key = format!("GLOBAL_HEADER:{}", header.global_height);
         let hash_key = format!("GLOBAL_HEADER_HASH:{}", header.calculate_hash());
@@ -912,7 +940,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
         let key = format!("GLOBAL_HEADER:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -924,7 +953,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_global_headers(&self) -> std::io::Result<Vec<GlobalBlockHeader>> {
         let mut headers: Vec<GlobalBlockHeader> = Vec::new();
         for item in self.db.scan_prefix(b"GLOBAL_HEADER:") {
@@ -937,7 +967,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
         let val = encode(bridge_state)?;
         self.db.insert(b"BRIDGE_STATE", val)?;
@@ -947,7 +978,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
         if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
             let decoded = decode(&val)?;
@@ -959,7 +991,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_universal_relayer(
         &self,
         relayer: &crate::cross_domain::relayer::UniversalRelayer,
@@ -972,7 +1005,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_universal_relayer(
         &self,
     ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
@@ -986,7 +1020,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_storage_registry(
         &self,
         registry: &crate::domain::storage_deal::StorageRegistry,
@@ -999,7 +1034,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_storage_registry(
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
@@ -1013,7 +1049,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_proof_claim_registry(
         &self,
         registry: &crate::prover::ProofClaimRegistry,
@@ -1026,7 +1063,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_proof_claim_registry(
         &self,
     ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
@@ -1040,7 +1078,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
@@ -1053,7 +1092,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_storage_economics_state(
         &self,
     ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
@@ -1067,7 +1107,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
         let key = format!("XDOMAIN_MSG:{}", hex::encode(message.message_id));
         let val = encode(message)?;
@@ -1078,7 +1119,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
         let mut messages: Vec<CrossDomainMessage> = Vec::new();
         for item in self.db.scan_prefix(b"XDOMAIN_MSG:") {
@@ -1090,7 +1132,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_state_root(&self, height: u64) -> std::io::Result<Option<String>> {
         let key = format!("STATE_ROOT:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1104,7 +1147,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_last_hash(&self, hash: &str) -> std::io::Result<()> {
         self.db.insert("LAST", hash.as_bytes())?;
         self.db.flush()?;
@@ -1112,7 +1156,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_last_hash(&self) -> std::io::Result<Option<String>> {
         if let Some(val) = self.db.get("LAST")? {
             let hash = from_utf8(&val)
@@ -1125,7 +1170,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_chain(&self) -> std::io::Result<Vec<Block>> {
         let mut chain = Vec::new();
         if let Some(mut current_hash) = self.get_last_hash()? {
@@ -1145,7 +1191,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_tx_index(&self, tx_hash: &str, block_height: u64) -> std::io::Result<()> {
         let key = format!("TX_IDX:{tx_hash}");
         self.db
@@ -1154,7 +1201,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_tx_block_height(&self, tx_hash: &str) -> std::io::Result<Option<u64>> {
         let key = format!("TX_IDX:{tx_hash}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1167,7 +1215,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_tx_index(&self, tx_hash: &str) -> std::io::Result<()> {
         let key = format!("TX_IDX:{tx_hash}");
         self.db.remove(key.as_bytes())?;
@@ -1175,7 +1224,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_account(&self, pubkey: &Address, account: &Account) -> std::io::Result<()> {
         let key = format!("ACCT:{pubkey}");
         let val = encode(account)?;
@@ -1184,7 +1234,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_all_accounts(
         &self,
     ) -> std::io::Result<std::collections::HashMap<Address, Account>> {
@@ -1203,7 +1254,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_mempool_tx(&self, tx: &Transaction) -> std::io::Result<()> {
         let key = format!("MEMPOOL:{}", tx.hash);
         let val = encode(tx)?;
@@ -1212,7 +1264,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn remove_mempool_tx(&self, tx_hash: &str) -> std::io::Result<()> {
         let key = format!("MEMPOOL:{tx_hash}");
         self.db.remove(key.as_bytes())?;
@@ -1220,7 +1273,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_mempool_txs(&self) -> std::io::Result<Vec<Transaction>> {
         let mut txs = Vec::new();
         let mut removed_corrupt = false;
@@ -1246,7 +1300,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_checkpoint(
         &self,
         checkpoint: &crate::consensus::pos::Checkpoint,
@@ -1265,7 +1320,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_checkpoints(&self) -> std::io::Result<Vec<crate::consensus::pos::Checkpoint>> {
         let mut cps = Vec::new();
         for item in self.db.scan_prefix(b"CP:") {
@@ -1278,7 +1334,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_seen_block(
         &self,
         header: &crate::core::block::BlockHeader,
@@ -1295,7 +1352,8 @@ impl Storage {
     }
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap> {
         let mut seen = std::collections::HashMap::new();
         for item in self.db.scan_prefix(b"SEEN:") {
@@ -1319,7 +1377,8 @@ impl Storage {
 
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn flush_batch(&self) -> std::io::Result<usize> {
         Ok(self.db.flush()?)
     }
@@ -1423,10 +1482,11 @@ impl Storage {
         format!("CONTENT:{}", hex::encode(cid.0))
     }
 
+    /// Store raw content bytes by their canonical `ContentId`.
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
-    /// Store raw content bytes by their canonical `ContentId`.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn put_content(
         &self,
         cid: &crate::storage::content_id::ContentId,
@@ -1444,10 +1504,11 @@ impl Storage {
         Ok(())
     }
 
+    /// Retrieve raw content bytes by `ContentId`.
     /// # Errors
     ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused conditions.
-    /// Retrieve raw content bytes by `ContentId`.
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_content(
         &self,
         cid: &crate::storage::content_id::ContentId,

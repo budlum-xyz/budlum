@@ -440,10 +440,10 @@ impl EncodedMatrix {
     }
 }
 
+/// Encodes a byte-mode, level-L, mask-0 symbol for `data`.
 /// # Errors
 ///
 /// Propagates `QrError` from the step that failed; its variants name the refused conditions.
-/// Encodes a byte-mode, level-L, mask-0 symbol for `data`.
 pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     let (stream, version) = build_codewords(data)?;
     let side = side_len(version);

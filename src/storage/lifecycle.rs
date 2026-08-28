@@ -66,7 +66,8 @@ pub enum StorageLifecycleError {
 
 /// # Errors
 ///
-/// Propagates `StorageLifecycleError` from the step that failed; its variants name the refused conditions.
+/// Propagates `StorageLifecycleError` from the step that failed; its variants name the refused
+/// conditions.
 pub fn transition(
     from: StorageLifecycleState,
     to: StorageLifecycleState,

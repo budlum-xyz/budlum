@@ -286,10 +286,11 @@ pub struct ReedSolomon {
 }
 
 impl ReedSolomon {
+    /// `data_shards` is `k`, `parity_shards` is `n - k`.
     /// # Errors
     ///
-    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
-    /// `data_shards` is `k`, `parity_shards` is `n - k`.
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self, ErasureError> {
         if data_shards == 0 {
             return Err(ErasureError::InvalidScheme(
@@ -311,10 +312,11 @@ impl ReedSolomon {
         })
     }
 
+    /// Build a coder for a manifest's declared scheme.
     /// # Errors
     ///
-    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
-    /// Build a coder for a manifest's declared scheme.
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn for_scheme(scheme: &ErasureScheme) -> Result<Self, ErasureError> {
         scheme.validate().map_err(ErasureError::InvalidScheme)?;
         Self::new(scheme.k as usize, scheme.parity_count() as usize)
@@ -335,10 +337,11 @@ impl ReedSolomon {
         self.k + self.m
     }
 
+    /// Compute the parity shards for `data`.
     /// # Errors
     ///
-    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
-    /// Compute the parity shards for `data`.
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// Every data shard must be the same length, Reed-Solomon works
     /// symbol-wise across the shards, so column `c` of the code word is built
@@ -446,10 +449,11 @@ impl ReedSolomon {
         acc == parity_byte
     }
 
+    /// Rebuild all `n` shards from any `k` survivors.
     /// # Errors
     ///
-    /// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
-    /// Rebuild all `n` shards from any `k` survivors.
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// `present` is indexed by shard index over the whole code word (data
     /// shards first, then parity, matching the generator's row order).
@@ -565,10 +569,10 @@ impl EncodedObject {
             .collect()
     }
 
+    /// Build the on-chain manifest for this encoding.
     /// # Errors
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
-    /// Build the on-chain manifest for this encoding.
     ///
     /// The shard sizes recorded are the padded stripe sizes, which is what an
     /// operator actually stores and what a challenge will hash. `total_size`
@@ -591,11 +595,12 @@ impl EncodedObject {
     }
 }
 
-/// # Errors
-///
-/// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
 /// Split `data` into `k` equal stripes, pad the tail, and append `n - k`
 /// parity shards.
+/// # Errors
+///
+/// Propagates `ErasureError` from the step that failed; its variants name the refused
+/// conditions.
 pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject, ErasureError> {
     scheme
         .validate()
@@ -679,10 +684,11 @@ pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<
     Ok(())
 }
 
+/// Rebuild the original bytes from whatever shards survived.
 /// # Errors
 ///
-/// Propagates `ErasureError` from the step that failed; its variants name the refused conditions.
-/// Rebuild the original bytes from whatever shards survived.
+/// Propagates `ErasureError` from the step that failed; its variants name the refused
+/// conditions.
 ///
 /// `present` is the full code word with `None` for lost shards. Recovered
 /// shards are checked against the manifest's `ContentId`s before the object

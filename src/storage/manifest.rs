@@ -450,12 +450,12 @@ pub struct ContentManifest {
 }
 
 impl ContentManifest {
-    /// # Errors
-    ///
-    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Build a manifest from a pre-computed set of shards. Validates that
     /// The shard list is non-empty, indices are unique, sizes are non-zero,
     /// And the total size matches the sum of shard sizes.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// `owner` defaults to the zero address, for F01 backward compatibility; a
     /// caller can set the real owner with `with_owner`.
@@ -533,7 +533,7 @@ impl ContentManifest {
     /// bytes (`Three`); `Classic` is a no-op on the preimage.
     ///
     /// Does not check source compatibility - that is
-    /// [`BudStorageEdition::check_source`] at registration time.
+    /// [`crate::storage::generated::BudStorageEdition::check_source`] at registration time.
     #[must_use]
     pub fn with_edition(mut self, edition: crate::storage::generated::BudStorageEdition) -> Self {
         self.manifest_id = manifest_id_from_parts(
@@ -581,11 +581,11 @@ impl ContentManifest {
         }
     }
 
+    /// Record the object's byte length, for manifests whose stored bytes
+    /// exceed their content (erasure coding, or a padded tail stripe).
     /// # Errors
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
-    /// Record the object's byte length, for manifests whose stored bytes
-    /// exceed their content (erasure coding, or a padded tail stripe).
     ///
     /// Refuses a length larger than the stored bytes: an object cannot be
     /// bigger than the shards holding it, and a reconstructor trusting such a
@@ -605,10 +605,10 @@ impl ContentManifest {
         Ok(self)
     }
 
+    /// Recompute the canonical id and check it against the one carried.
     /// # Errors
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
-    /// Recompute the canonical id and check it against the one carried.
     ///
     /// `manifest_id` is the key every registry, deal and challenge indexes
     /// by, and it arrives over RPC inside a caller-supplied struct. Nothing
@@ -640,11 +640,11 @@ impl ContentManifest {
         Ok(())
     }
 
+    /// Full structural check: the id matches, the shard list is coherent, and
+    /// the declared erasure scheme is one the shard list can deliver.
     /// # Errors
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
-    /// Full structural check: the id matches, the shard list is coherent, and
-    /// the declared erasure scheme is one the shard list can deliver.
     ///
     /// This is what an untrusted manifest has to pass before the chain stores
     /// it. The individual checks already existed on the construction paths;
@@ -731,10 +731,10 @@ impl ContentManifest {
         self.verify_id()
     }
 
+    /// Attach an erasure scheme, validating it against the shard list.
     /// # Errors
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
-    /// Attach an erasure scheme, validating it against the shard list.
     ///
     /// The counts have to line up: `n` is every shard, `k` is the data shards,
     /// and the difference is the parity shards actually present. A manifest
@@ -843,12 +843,12 @@ impl ContentManifest {
         self
     }
 
-    /// # Errors
-    ///
-    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     /// Convenience: build a manifest by slicing `data` into equal-sized
     /// Chunks. The default chunk size is `DEFAULT_CHUNK_SIZE_BYTES`.
     /// The last shard may be smaller.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn from_bytes_sliced(data: &[u8], chunk_size: u32) -> Result<Self, String> {
         if chunk_size == 0 {
             return Err("ContentManifest chunk_size must be > 0".into());
