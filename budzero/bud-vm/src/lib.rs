@@ -1092,6 +1092,11 @@ impl Vm {
             | Opcode::SumConservation => 10,
             Opcode::Call | Opcode::Ret | Opcode::Push | Opcode::Pop => 2,
             Opcode::Syscall => 5,
+            // `Div` is a binary long division: the AIR expands one row per bit
+            // (up to 64), so leaving it on the cheap default would be a cheap
+            // call that forces expensive proof work. Priced with the heavy
+            // ops, not the arithmetic default.
+            Opcode::Div => 10,
             _ => 1,
         }
     }
@@ -2197,6 +2202,11 @@ mod tests {
         assert!(Vm::gas_cost(Opcode::SRead) > Vm::gas_cost(Opcode::Load));
         assert!(Vm::gas_cost(Opcode::SWrite) > Vm::gas_cost(Opcode::Store));
         assert!(Vm::gas_cost(Opcode::SWrite) > Vm::gas_cost(Opcode::SRead));
+        // Gas calibration: an opcode whose proof expands to many trace rows
+        // must not sit at the cheap arithmetic default. `Div` is a 64-row
+        // binary long division, so it is priced with the heavy ops.
+        assert!(Vm::gas_cost(Opcode::Div) > 1, "long-division must not be cheap");
+        assert_eq!(Vm::gas_cost(Opcode::Div), 10);
     }
 
     /// Lock Poseidon MDS and RC constants.
