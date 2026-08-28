@@ -105,14 +105,20 @@ jobs:
           # compilers just like the storage-challenge token above.
           MATMUL=$(grep -oE "matmul-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${MATMUL}"
+          # The syscall-context check is the canonical program attesting the
+          # AIR's syscall context bindings; its hash is compared across
+          # compilers like the other tokens.
+          SYSCALL=$(grep -oE "syscall-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${SYSCALL}"
 
           {
             echo "genesis=${GENESIS}"
             echo "program=${PROGRAM}"
             echo "matmul=${MATMUL}"
+            echo "syscall=${SYSCALL}"
           } >> "$GITHUB_OUTPUT"
 
-          printf 'genesis=%s\nprogram=%s\nmatmul=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" > "digests-${{ matrix.label }}.txt"
+          printf 'genesis=%s\nprogram=%s\nmatmul=%s\nsyscall=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" "${SYSCALL}" > "digests-${{ matrix.label }}.txt"
           cat "digests-${{ matrix.label }}.txt"
 
       - name: Upload digests
