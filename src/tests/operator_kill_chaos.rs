@@ -331,19 +331,40 @@ fn never_placed_shard_on_coded_object_is_ticketed() {
 /// A test named "baraj" that only exercises the registry would be a false
 /// green. This one fails the build if someone deletes the module-level warning
 /// without replacing it with the multi-node / adversarial halves.
+/// The leading `//!` block only. A claim pinned to the whole file is not a
+/// claim: a test that searches the whole file writes the very string it looks
+/// for, so it stays green after the module doc is deleted.
+fn module_doc(source: &str) -> &str {
+    let mut cut = None;
+    for marker in ["\nuse ", "\npub ", "\nfn "] {
+        if let Some(at) = source.find(marker) {
+            let keep = at + 1;
+            cut = Some(cut.map_or(keep, |c: usize| c.min(keep)));
+        }
+    }
+    match cut {
+        Some(keep) => source.split_at(keep).0,
+        None => source,
+    }
+}
+
 #[test]
 fn all_three_baraj_is_not_claimed_by_this_skeleton() {
-    let doc = include_str!("operator_kill_chaos.rs");
+    let source = include_str!("operator_kill_chaos.rs");
+    let doc = module_doc(source);
+    let not_yet = "What it is ".to_string() + "**not** yet";
+    let multiproc = "multi".to_string() + "-process network";
+    let adversarial = "adversarial".to_string() + " suite";
     assert!(
-        doc.contains("What it is **not** yet"),
+        doc.contains(&not_yet),
         "the skeleton must keep naming the open halves of all_three"
     );
     assert!(
-        doc.contains("multi-process network"),
+        doc.contains(&multiproc),
         "baraj item 1 (real disks/bonds across nodes) must stay listed as open"
     );
     assert!(
-        doc.contains("adversarial suite"),
+        doc.contains(&adversarial),
         "baraj item 3 (lazy/Sybil/outsourcing) must stay listed as open"
     );
 }

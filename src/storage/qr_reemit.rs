@@ -1,5 +1,9 @@
 //! B.U.D. 3.0 recipe → stream re-emit (plan §CH A6, K-QR-GERIDONUS).
 //!
+//! WIRING: unwired - `verify_stream_id` is called only by this module's test;
+//! the production caller is the reveal session's emit path (plan §A9), which
+//! is not wired yet, so the pin currently guards the tests.
+//!
 //! Given a [`ThreeRecipePublic`] and the packed A1 bytes whose commitment the
 //! recipe pins, regenerate carousel drops and optical frames **bit-equal** to
 //! the original encode. Sealed recipes must be opened first (holder of the

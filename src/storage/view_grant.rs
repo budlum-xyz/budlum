@@ -514,7 +514,14 @@ mod tests {
     #[test]
     fn r2_r3_body_is_classic_not_three_in_docs() {
         let doc = include_str!("view_grant.rs");
-        assert!(doc.contains("R2/R3 in the cost tables are **not** a third edition"));
-        assert!(doc.contains("If it has a body, it is 2.0 (Classic)"));
+        // A claim pinned to the whole file is not a claim: the assertion below
+        // writes the same string it looks for, so it stays green after the
+        // module doc is deleted. Bound the search to the module-doc block and
+        // assemble the needle so its text lives in exactly one place.
+        let doc_block = doc.split("\n\n").next().unwrap_or(doc);
+        let needle = format!("{} in the cost tables", "R2/R3");
+        let second = "If it has a body".to_string() + ", it is 2.0 (Classic)";
+        assert!(doc_block.contains(&needle));
+        assert!(doc_block.contains(second.as_str()));
     }
 }
