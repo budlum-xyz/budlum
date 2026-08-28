@@ -24,6 +24,8 @@ pub enum Check {
     Excludes(Vec<String>),
     /// Same as [`Check::Exact`] after trimming + collapsing whitespace.
     ExactTrimmed(String),
+    /// Both sides must pass (used to combine facts + a hedge ban).
+    And(Box<Check>, Box<Check>),
 }
 
 /// One evaluation example: a prompt and how to grade its answer.
@@ -43,6 +45,33 @@ impl EvalCase {
             prompt: prompt.into(),
             check: Check::Exact(golden.into()),
         }
+    }
+
+    /// A case graded by required facts ([`Check::ContainsAll`]) and banned
+    /// hedges ([`Check::Excludes`]). This is the form that tolerates real,
+    /// free-form model output (which almost never matches a golden string
+    /// exactly) while still rejecting a hallucinated or evasive answer.
+    #[must_use]
+    pub fn facts(
+        name: impl Into<String>,
+        prompt: impl Into<String>,
+        contains_all: impl IntoIterator<Item = impl Into<String>>,
+        excludes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            prompt: prompt.into(),
+            check: Check::ContainsAll(contains_all.into_iter().map(Into::into).collect()),
+        }
+        .plus_excludes(excludes)
+    }
+
+    fn plus_excludes(mut self, excludes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let banned: Vec<String> = excludes.into_iter().map(Into::into).collect();
+        if !banned.is_empty() {
+            self.check = Check::And(Box::new(self.check), Box::new(Check::Excludes(banned)));
+        }
+        self
     }
 }
 
@@ -98,6 +127,10 @@ impl Check {
                 }
                 CheckOutcome::Pass
             }
+            Check::And(a, b) => match a.apply(response) {
+                CheckOutcome::Pass => b.apply(response),
+                fail => fail,
+            },
         }
     }
 }
@@ -180,6 +213,7 @@ impl Check {
             Check::ExactTrimmed(s) => format!("exact_trimmed:{}", s),
             Check::ContainsAll(xs) => format!("contains_all:{}", xs.join("|")),
             Check::Excludes(xs) => format!("excludes:{}", xs.join("|")),
+            Check::And(a, b) => format!("and:{}|{}", a.canonical(), b.canonical()),
         }
     }
 }
@@ -479,6 +513,32 @@ mod tests {
             }],
         );
         assert!(!other.registered_in(&plan));
+    }
+
+    #[test]
+    fn facts_grades_a_realistic_freeform_answer() {
+        // A free-form answer that names the right facts but is not a verbatim
+        // golden string - the form a real model actually produces.
+        let c = EvalCase::facts(
+            "budama",
+            "Bridge replay ne zaman budanır?",
+            ["mark_processed_at", "finality"],
+            ["bilmiyorum", "emin değilim", "belki"],
+        );
+        assert_eq!(
+            c.check.apply("Budama, finality derinliğini geçtikten sonra mark_processed_at ile yapılır."),
+            CheckOutcome::Pass
+        );
+        // Missing a fact fails.
+        assert!(matches!(
+            c.check.apply("mark_processed_at ile yapılır."),
+            CheckOutcome::Fail { .. }
+        ));
+        // A hedge is refused even if the facts are present.
+        assert!(matches!(
+            c.check.apply("emin değilim ama mark_processed_at ile finality sonrası budanır."),
+            CheckOutcome::Fail { .. }
+        ));
     }
 
     #[test]
