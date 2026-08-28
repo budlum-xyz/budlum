@@ -256,6 +256,33 @@ fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Altın vektör: sabit bir gövde için tel baytlarının birebir dökümü.
+    /// Vektör commit anındaki kodlayıcı çıktısından üretildi; tel düzenine
+    /// dokunan her değişiklik bu testi bilinçli güncelleme olmadan kırar.
+    #[test]
+    fn wire_bytes_match_the_golden_vector() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"Budlum vektor 3.").unwrap();
+        assert_eq!(THREE_PAYLOAD_HEADER_LEN, 47);
+        assert_eq!(THREE_PAYLOAD_VERSION, 1);
+        assert_eq!(
+            hex(&packed),
+            "42444c330100011000000000000000edbc6650424a4f77d77c00681351af4d801ac3bb67be9acd08a682a7cd26ece64275646c756d2076656b746f7220332e"
+        );
+    }
+
+    #[test]
+    fn commitment_matches_the_golden_vector() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"Budlum vektor 3.").unwrap();
+        assert_eq!(
+            hex(&payload_commitment(&packed)),
+            "7e380b6b1a1e981793bc14e8970fefe3a25cff3895bac65b5e5cc2c9f855ac0d"
+        );
+    }
+
     #[test]
     fn round_trip_raw_when_random_does_not_shrink() {
         let mut content = vec![0u8; 2048];

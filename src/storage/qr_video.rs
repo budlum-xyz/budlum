@@ -296,7 +296,70 @@ fn inflate_zlib_stored(z: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::qr_carousel::CarouselParams;
     use crate::storage::three_pipe::{encode_plain, PIPE_DEFAULT_BLOCK_LEN};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Altın vektör: tek karelik BDLV blobunun başlığı ve tam sha256'sı.
+    /// PNG baytları qr bağımlılığından geldiği için bu vektör bağımlılık
+    /// sürümündeki davranış değişimini de yakalar.
+    #[test]
+    fn video_wire_matches_the_golden_vectors() {
+        let pc = [
+            0x7eu8, 0x38, 0x0b, 0x6b, 0x1a, 0x1e, 0x98, 0x17, 0x93, 0xbc, 0x14, 0xe8, 0x97, 0x0f,
+            0xef, 0xe3, 0xa2, 0x5c, 0xff, 0x38, 0x95, 0xba, 0xc6, 0x5b, 0x5e, 0x5c, 0xc2, 0xc9,
+            0xf8, 0x55, 0xac, 0x0d,
+        ];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 3,
+                block_len: 8,
+                total_len: 24,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"vektor kare".to_vec()], 10).unwrap();
+        let blob = v.to_bytes();
+        assert_eq!(blob.len(), 506);
+        assert_eq!(
+            hex(&blob[..76]),
+            "42444c5601000a00010000007e380b6b1a1e981793bc14e8970fefe3a25cff3895bac65b5e5cc2c9f855ac0dba46b1eab74314497ca00de7ae9ee2d4976fdaa64bd1e51f397c7eedcbce8962"
+        );
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        h.update(&blob);
+        assert_eq!(
+            hex(&h.finalize()),
+            "8fde83a711af91e00b3a54b99a45a40c7bb6f3eccf2bca03e79144ad03f0f4d0"
+        );
+    }
+
+    #[test]
+    fn foreign_video_version_is_gated() {
+        let pc = [0u8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 1,
+                block_len: 8,
+                total_len: 8,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"kare".to_vec()], 10).unwrap();
+        let mut blob = v.to_bytes();
+        blob[4] = 2;
+        assert_eq!(
+            QrVideo::from_bytes(&blob).unwrap_err(),
+            QrVideoError::BadBlob
+        );
+    }
 
     #[test]
     fn video_round_trip_optical() {
