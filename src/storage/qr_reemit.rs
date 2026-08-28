@@ -1,8 +1,10 @@
 //! B.U.D. 3.0 recipe → stream re-emit (plan §CH A6, K-QR-GERIDONUS).
 //!
-//! WIRING: unwired - `verify_stream_id` is called only by this module's test;
-//! the production caller is the reveal session's emit path (plan §A9), which
-//! is not wired yet, so the pin currently guards the tests.
+//! The stream pin is verified on the reveal path: the reveal session in
+//! `crate::storage::three_reveal` calls [`RecipeEmitter::verify_stream_id`]
+//! with a fold recomputed from the emitted frames, so a recipe that pins a
+//! different stream cannot open a session. That path is not yet reachable
+//! from a binary, so the guard still counts as unwired.
 //!
 //! Given a [`ThreeRecipePublic`] and the packed A1 bytes whose commitment the
 //! recipe pins, regenerate carousel drops and optical frames **bit-equal** to
@@ -11,9 +13,9 @@
 //!
 //! # What this module does not claim
 //!
-//! - Video mux (A4) — frames are optical payloads, not a container file.
-//! - Progressive decode UX (A7) — that is the receiver side.
-//! - Catalogue avatar re-render (`render.rs`) — different address space.
+//! - Video mux (A4) - frames are optical payloads, not a container file.
+//! - Progressive decode UX (A7) - that is the receiver side.
+//! - Catalogue avatar re-render (`render.rs`) - different address space.
 
 use crate::storage::qr_carousel::{CarouselEncoder, CarouselError, Drop};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
@@ -33,7 +35,7 @@ pub enum ReemitError {
     Carousel(CarouselError),
     /// Nested frame error.
     Frame(FrameError),
-    /// Nested payload error (if caller asked us to pack — not used on re-emit path).
+    /// Nested payload error (if caller asked us to pack - not used on re-emit path).
     Payload(PayloadError),
 }
 
@@ -85,7 +87,7 @@ impl RecipeEmitter {
     ///
     /// On open we recompute the A2 stream commitment and require the recipe's
     /// carousel/payload fields to match; `stream_id` is checked only when the
-    /// caller asks [`Self::verify_frame_fold`] after emitting frames.
+    /// caller asks [`Self::verify_stream_id`] after emitting frames.
     ///
     /// # Errors
     ///

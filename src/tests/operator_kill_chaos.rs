@@ -6,9 +6,9 @@
 //!
 //! What it is **not** yet:
 //!   - a multi-process network with real disks and bonds (baraj item 1),
-//!   - an adversarial suite (lazy / Sybil / outsourcing — baraj item 3).
-//! Those stay open. A skeleton that pretends they are closed is a lie; the
-//! module doc names the gap so a green test cannot be read as all_three.
+//!   - an adversarial suite (lazy / Sybil / outsourcing - baraj item 3).
+//!     Those stay open. A skeleton that pretends they are closed is a lie; the
+//!     module doc names the gap so a green test cannot be read as all_three.
 //!
 //! Wiring checked here:
 //! 1. Three operators hold distinct replica slots of one shard.
