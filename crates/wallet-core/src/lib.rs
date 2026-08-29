@@ -503,6 +503,11 @@ pub struct Wallet {
     /// the seal happened; the measurement is the wallet's root of trust
     /// (CWE-347).
     trusted_tee_measurement: Option<[u8; 32]>,
+    /// The smallest blinding counter this wallet will still hand out. Two notes
+    /// that share a blinding share a commitment, which both links them on-chain
+    /// and can make the second one unspendable, so a counter may only be used
+    /// once even though the caller picks it.
+    next_blinding_counter: u64,
 }
 
 // Zeroize sensitive material on drop.
@@ -921,6 +926,7 @@ impl Wallet {
             signing_key,
             privacy: WalletPrivacyConfig::default(),
             trusted_tee_measurement: None,
+            next_blinding_counter: 0,
         })
     }
 
@@ -945,6 +951,7 @@ impl Wallet {
             signing_key,
             privacy: WalletPrivacyConfig::default(),
             trusted_tee_measurement: None,
+            next_blinding_counter: 0,
         })
     }
 
@@ -1261,7 +1268,7 @@ impl Wallet {
     /// Convenience: create a fresh output note commitment for receiving funds
     /// (wallet is recipient). Returns (blinding, commitment_fe, commitment_hash).
     pub fn prepare_receive_note(
-        &self,
+        &mut self,
         amount: u64,
         blinding_counter: u64,
     ) -> Result<(u64, u64, [u8; 32]), WalletError> {
@@ -1273,6 +1280,18 @@ impl Wallet {
                 "amount must be > 0".into(),
             ));
         }
+        // The caller picks the counter, so the wallet is the one that has to
+        // remember it. Two notes sharing a blinding share a commitment, which
+        // links them on-chain and can make the second one unspendable; a
+        // counter may therefore be used once and only forwards.
+        if blinding_counter < self.next_blinding_counter {
+            return Err(WalletError::InvalidPrivateTransfer(format!(
+                "blinding counter {blinding_counter} was already used (next usable is {}); \
+                 reusing a blinding links the two notes and can make the second unspendable",
+                self.next_blinding_counter
+            )));
+        }
+        self.next_blinding_counter = blinding_counter.saturating_add(1);
         let blinding = derive_blinding(&self.seed, blinding_counter);
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
@@ -2027,6 +2046,29 @@ mod tests {
         let rt = w.default_tee_runtime();
         let err = w.build_private_transfer(req, &rt).unwrap_err();
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
+    }
+
+    /// Two notes that share a blinding share a commitment: an observer learns
+    /// they carry the same amount and the nullifier set rejects the second
+    /// spend. The caller picks the counter, so the wallet has to be the one
+    /// that refuses a counter it already handed out.
+    #[test]
+    fn a_reused_blinding_counter_is_refused() {
+        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
+        let first = w.prepare_receive_note(100, 7).unwrap();
+        let err = w.prepare_receive_note(100, 7).unwrap_err();
+        assert!(
+            matches!(err, WalletError::InvalidPrivateTransfer(_)),
+            "reusing a blinding counter must be refused, got ok with blinding {}",
+            first.0
+        );
+        // A fresh counter still works, and it gives a different blinding.
+        let second = w.prepare_receive_note(100, 8).unwrap();
+        assert_ne!(
+            first.0, second.0,
+            "different counters must derive different blindings"
+        );
     }
 
     #[test]
