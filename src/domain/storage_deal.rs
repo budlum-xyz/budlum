@@ -1418,7 +1418,11 @@ impl StorageRegistry {
         self.manifests.get(manifest_id)
     }
 
-    /// Issue a view grant. Key material stays off-chain.
+    /// Issue a view grant. Key material stays off-chain. The manifest is the
+    /// authority on who may give a grant: the `issuer` field is checked against
+    /// the recorded owner instead of being believed, because a caller that could
+    /// name any issuer could hand out public view access to bytes it does not
+    /// own.
     pub fn issue_view_grant(
         &mut self,
         content_id: ContentId,
@@ -1428,6 +1432,13 @@ impl StorageRegistry {
         policy: crate::storage::ViewPolicy,
         opened_epoch: u64,
     ) -> Result<u64, crate::storage::ViewGrantError> {
+        let owner = self
+            .get_manifest(&content_id)
+            .map(|m| m.owner)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        if issuer != owner {
+            return Err(crate::storage::ViewGrantError::NotOwner { issuer, owner });
+        }
         self.view_grants
             .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
     }
@@ -1441,6 +1452,10 @@ impl StorageRegistry {
         self.view_grants.revoke(grant_id, caller, at_epoch)
     }
 
+    /// Whether `viewer` may open `content_id` with `key_id`. `owner` is a claim,
+    /// not an authority: it is checked against the manifest, and a query naming
+    /// itself as the owner of somebody else's content is refused rather than
+    /// served. Content with no manifest has no owner and opens for nobody.
     #[must_use]
     pub fn may_view(
         &self,
@@ -1449,6 +1464,12 @@ impl StorageRegistry {
         key_id: &[u8; 32],
         owner: &Address,
     ) -> bool {
+        let Some(manifest) = self.get_manifest(content_id) else {
+            return false;
+        };
+        if manifest.owner != *owner {
+            return false;
+        }
         self.view_grants.may_view(content_id, viewer, key_id, owner)
     }
 
@@ -3253,6 +3274,57 @@ mod tests {
             m.verify_id(),
             Ok(()),
             "the old identity must verify unchanged"
+        );
+    }
+
+    /// A view grant follows the manifest's owner, not the caller's word.
+    ///
+    /// Both halves are needed: `issue_view_grant` refuses a stranger, and
+    /// `may_view` refuses a query that claims to be the owner. Measured against
+    /// the code before the fix, each half alone left the other open.
+    #[test]
+    fn view_grants_are_the_manifest_owners_to_give() {
+        let mut reg = StorageRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let stranger = Address::from([7u8; 32]);
+        let bob = Address::from([2u8; 32]);
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let content = m.manifest_id;
+        let key = [5u8; 32];
+        let err = reg
+            .issue_view_grant(
+                content,
+                stranger,
+                None,
+                key,
+                crate::storage::ViewPolicy::PublicKeyId,
+                1,
+            )
+            .expect_err("a stranger cannot hand out grants");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::NotOwner { .. }
+        ));
+        reg.issue_view_grant(
+            content,
+            owner,
+            None,
+            key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        )
+        .expect("the owner's own grant must be accepted");
+        assert!(reg.may_view(&content, &bob, &key, &owner));
+        assert!(
+            !reg.may_view(&content, &bob, &key, &stranger),
+            "naming oneself the owner is not being the owner"
+        );
+        let yok = ContentId([42u8; 32]);
+        assert!(
+            !reg.may_view(&yok, &bob, &key, &owner),
+            "content no manifest describes opens for nobody"
         );
     }
 

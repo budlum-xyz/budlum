@@ -125,6 +125,16 @@ pub enum ViewGrantError {
     NamedPolicyNeedsGrantee,
     OwnerOnlyMustNotNameGrantee,
     DuplicateLiveGrant,
+    /// The address named as issuer is not the owner of the content, so it has
+    /// no word to give about who may view it.
+    NotOwner {
+        /// Address the caller claimed as issuer.
+        issuer: Address,
+        /// Address the content belongs to.
+        owner: Address,
+    },
+    /// No manifest describes the content, so there is no owner to authorise.
+    UnknownContent,
 }
 
 impl std::fmt::Display for ViewGrantError {
@@ -142,6 +152,11 @@ impl std::fmt::Display for ViewGrantError {
             Self::OwnerOnlyMustNotNameGrantee => {
                 write!(f, "OwnerOnly grants must not name a grantee")
             }
+            Self::NotOwner { issuer, owner } => write!(
+                f,
+                "view grants belong to the content owner {owner}, not {issuer}"
+            ),
+            Self::UnknownContent => write!(f, "no manifest describes this content"),
             Self::DuplicateLiveGrant => {
                 write!(
                     f,
@@ -264,7 +279,10 @@ impl ViewGrantRegistry {
     /// Whether `viewer` may use `key_id` on `content` at this moment.
     ///
     /// Owner is always allowed (root). `PublicKeyId` live rows allow anyone with
-    /// the key handle. `NamedGrantee` requires address match.
+    /// the key handle. `NamedGrantee` requires address match. A row counts only
+    /// when its issuer is that owner: a grant is the owner's word, so a row
+    /// minted by anybody else is inert here even if it reached the book, and the
+    /// `StorageRegistry` decides who the owner is from the manifest.
     #[must_use]
     pub fn may_view(
         &self,
@@ -277,6 +295,9 @@ impl ViewGrantRegistry {
             return true;
         }
         self.live_for_content(content_id).into_iter().any(|g| {
+            if g.issuer != *owner {
+                return false;
+            }
             if &g.key_id != key_id {
                 return false;
             }
@@ -426,6 +447,31 @@ mod tests {
             .unwrap();
         assert!(reg.may_view(&content, &addr(99), &key, &owner));
         assert!(!reg.may_view(&content, &addr(99), &[0u8; 32], &owner));
+    }
+
+    /// A grant minted by somebody else opens nothing.
+    ///
+    /// The `issuer` field is not a claim the book waves through: without this
+    /// rule any caller could hand out public view access to content it does not
+    /// own, and the access model would be decoration.
+    #[test]
+    fn a_grant_from_a_stranger_opens_nothing() {
+        let mut reg = ViewGrantRegistry::new();
+        let owner = addr(1);
+        let stranger = addr(7);
+        let bob = addr(2);
+        let content = cid(9);
+        let key = [6u8; 32];
+        reg.issue(content, stranger, None, key, ViewPolicy::PublicKeyId, 1)
+            .expect("the book records rows by shape");
+        assert!(
+            !reg.may_view(&content, &bob, &key, &owner),
+            "a row issued by a stranger must not open the owner's content"
+        );
+        // The same row does open when the query names the stranger as owner: the
+        // rule binds a grant to an owner, it is `StorageRegistry` that decides
+        // which owner is real.
+        assert!(reg.may_view(&content, &bob, &key, &stranger));
     }
 
     #[test]
