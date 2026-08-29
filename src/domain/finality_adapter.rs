@@ -393,8 +393,7 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
             })?;
         let mut snapshot_set_hash = [0u8; 32];
         snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-        if domain.validator_set_hash != [0u8; 32]
-            && snapshot_set_hash != domain.validator_set_hash
+        if domain.validator_set_hash != [0u8; 32] && snapshot_set_hash != domain.validator_set_hash
         {
             return Ok(FinalityStatus::Rejected(
                 "PoS validator snapshot does not match registered domain set".into(),
@@ -1376,9 +1375,9 @@ mod tests {
         let commitment = commitment(ConsensusKind::PoS);
         let adapter = PoSFinalityAdapter;
 
-        for unparseable in ["", "zz", "abcd", &"ab".repeat(31)] {
+        for unparsable in ["", "zz", "abcd", &"ab".repeat(31)] {
             let mut snapshot = ValidatorSetSnapshot::new(0, vec![]);
-            snapshot.set_hash = unparseable.to_string();
+            snapshot.set_hash = unparsable.to_string();
             let cert = FinalityCert {
                 epoch: 0,
                 checkpoint_height: commitment.domain_height,
@@ -1399,7 +1398,7 @@ mod tests {
                 .expect_err("a set hash that cannot be decoded must not reach the cert");
             assert!(
                 err.0.contains("set hash"),
-                "set hash {unparseable:?} is not 32 bytes of hex; it has to be refused as such, \
+                "set hash {unparsable:?} is not 32 bytes of hex; it has to be refused as such, \
                  but the proof fell through to: {}",
                 err.0
             );

@@ -92,7 +92,7 @@ mod tests {
     use crate::storage::qr_codec::{CodecKind, FrameMux, RawFrameConcat};
     use crate::storage::qr_frame::pack_frame;
     use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
-    use crate::storage::three_pipe::{decode_frames, encode_plain, PIPE_DEFAULT_BLOCK_LEN};
+    use crate::storage::three_pipe::{decode_frames, encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
 
     #[test]
     fn frames_and_drops_refused() {

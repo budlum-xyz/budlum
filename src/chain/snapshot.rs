@@ -620,7 +620,10 @@ impl std::fmt::Display for SnapshotAuthError {
             }
             SnapshotAuthError::SignerNotTrusted => write!(f, "manifest signer not in trust list"),
             SnapshotAuthError::NoTrustList => {
-                write!(f, "RequireSigned: no trust list was supplied to check the signer against")
+                write!(
+                    f,
+                    "RequireSigned: no trust list was supplied to check the signer against"
+                )
             }
             SnapshotAuthError::InvalidSignerKey => write!(f, "invalid signer pubkey"),
             SnapshotAuthError::InvalidSignatureLength => write!(f, "invalid signature length"),
