@@ -911,25 +911,34 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                             .into(),
                     ));
                 }
-                if let Ok(decoded_set_hash) = hex::decode(&validator_snapshot.set_hash) {
-                    if decoded_set_hash.len() == 32 {
-                        let mut snapshot_set_hash = [0u8; 32];
-                        snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-                        if domain.validator_set_hash != [0u8; 32]
-                            && snapshot_set_hash != domain.validator_set_hash
-                        {
-                            return Ok(FinalityStatus::Rejected(
-                                "Storage attestation PoS validator snapshot does not match registered domain set".into(),
-                            ));
-                        }
-                        if commitment.validator_set_hash != [0u8; 32]
-                            && commitment.validator_set_hash != snapshot_set_hash
-                        {
-                            return Ok(FinalityStatus::Rejected(
-                                "Storage attestation PoS commitment validator set does not match finality proof".into(),
-                            ));
-                        }
-                    }
+                // A set hash that cannot be decoded is a refusal, not a step
+                // To fall through: these two checks are the only things binding
+                // The proof's validator set to the registered one, and the
+                // String arrives inside the proof.
+                let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
+                    .ok()
+                    .filter(|bytes| bytes.len() == 32)
+                    .ok_or_else(|| {
+                        FinalityError(format!(
+                            "storage attestation PoS finality proof validator set hash is not 32 bytes of hex: {:?}",
+                            validator_snapshot.set_hash
+                        ))
+                    })?;
+                let mut snapshot_set_hash = [0u8; 32];
+                snapshot_set_hash.copy_from_slice(&decoded_set_hash);
+                if domain.validator_set_hash != [0u8; 32]
+                    && snapshot_set_hash != domain.validator_set_hash
+                {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation PoS validator snapshot does not match registered domain set".into(),
+                    ));
+                }
+                if commitment.validator_set_hash != [0u8; 32]
+                    && commitment.validator_set_hash != snapshot_set_hash
+                {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation PoS commitment validator set does not match finality proof".into(),
+                    ));
                 }
                 cert.verify(validator_snapshot).map_err(|e| {
                     FinalityError(format!(
@@ -974,25 +983,34 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                             .into(),
                     ));
                 }
-                if let Ok(decoded_set_hash) = hex::decode(&validator_snapshot.set_hash) {
-                    if decoded_set_hash.len() == 32 {
-                        let mut snapshot_set_hash = [0u8; 32];
-                        snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-                        if domain.validator_set_hash != [0u8; 32]
-                            && snapshot_set_hash != domain.validator_set_hash
-                        {
-                            return Ok(FinalityStatus::Rejected(
-                                "Storage attestation BFT validator snapshot does not match registered domain set".into(),
-                            ));
-                        }
-                        if commitment.validator_set_hash != [0u8; 32]
-                            && commitment.validator_set_hash != snapshot_set_hash
-                        {
-                            return Ok(FinalityStatus::Rejected(
-                                "Storage attestation BFT commitment validator set does not match finality proof".into(),
-                            ));
-                        }
-                    }
+                // A set hash that cannot be decoded is a refusal, not a step
+                // To fall through: these two checks are the only things binding
+                // The proof's validator set to the registered one, and the
+                // String arrives inside the proof.
+                let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
+                    .ok()
+                    .filter(|bytes| bytes.len() == 32)
+                    .ok_or_else(|| {
+                        FinalityError(format!(
+                            "storage attestation BFT finality proof validator set hash is not 32 bytes of hex: {:?}",
+                            validator_snapshot.set_hash
+                        ))
+                    })?;
+                let mut snapshot_set_hash = [0u8; 32];
+                snapshot_set_hash.copy_from_slice(&decoded_set_hash);
+                if domain.validator_set_hash != [0u8; 32]
+                    && snapshot_set_hash != domain.validator_set_hash
+                {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation BFT validator snapshot does not match registered domain set".into(),
+                    ));
+                }
+                if commitment.validator_set_hash != [0u8; 32]
+                    && commitment.validator_set_hash != snapshot_set_hash
+                {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation BFT commitment validator set does not match finality proof".into(),
+                    ));
                 }
                 cert.verify(validator_snapshot).map_err(|e| {
                     FinalityError(format!(
@@ -1438,6 +1456,88 @@ mod tests {
                 .unwrap(),
             FinalityStatus::Rejected(_)
         ));
+    }
+
+    /// The two certificate branches of the storage-attestation adapter carry
+    /// The same silent fall-through as
+    /// `pos_finality_refuses_a_set_hash_it_cannot_decode`: the checks that bind
+    /// The proof's validator set to the registered one sit inside a
+    /// `hex::decode(..).len() == 32` guard with no else, and the string arrives
+    /// Inside the proof.
+    #[test]
+    fn storage_attestation_refuses_a_set_hash_it_cannot_decode() {
+        use crate::chain::finality::ValidatorEntry;
+        use crate::crypto::primitives::KeyPair;
+
+        let adapter = StorageAttestationFinalityAdapter;
+        let domain = default_domain(
+            5,
+            ConsensusKind::StorageAttestation(crate::domain::StorageDomainParams::default()),
+            45262,
+            crate::domain::types::STORAGE_ATTESTATION_ADAPTER,
+            0,
+        );
+        let mut commitment = commitment(ConsensusKind::StorageAttestation(
+            crate::domain::StorageDomainParams::default(),
+        ));
+        commitment.domain_id = 5;
+
+        let kp = KeyPair::generate().unwrap();
+        let mut snapshot = ValidatorSetSnapshot::new(
+            0,
+            vec![ValidatorEntry {
+                address: crate::core::address::Address::from(kp.public_key_bytes()),
+                stake: 1,
+                bls_public_key: vec![],
+                pop_signature: vec![],
+                pq_public_key: vec![],
+            }],
+        );
+        // Not hex, so not 32 bytes of it: the old guard skipped every binding
+        // That depends on it.
+        snapshot.set_hash = "zz".to_string();
+        let cert_for = |checkpoint_hash: String| FinalityCert {
+            epoch: 0,
+            checkpoint_height: commitment.domain_height,
+            checkpoint_hash,
+            agg_sig_bls: vec![],
+            bitmap: vec![0b1],
+            set_hash: snapshot.set_hash.clone(),
+        };
+
+        let err = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::PoS {
+                    cert: cert_for(hex::encode(commitment.domain_block_hash)),
+                    validator_snapshot: snapshot.clone(),
+                },
+            )
+            .expect_err("storage attestation PoS must not fall through an undecodable set hash");
+        assert!(
+            err.0.contains("set hash"),
+            "storage attestation PoS branch fell through to: {}",
+            err.0
+        );
+
+        let err = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::Bft {
+                    round: 0,
+                    commit_hash: commitment.domain_block_hash,
+                    cert: cert_for(hex::encode(commitment.domain_block_hash)),
+                    validator_snapshot: snapshot,
+                },
+            )
+            .expect_err("storage attestation BFT must not fall through an undecodable set hash");
+        assert!(
+            err.0.contains("set hash"),
+            "storage attestation BFT branch fell through to: {}",
+            err.0
+        );
     }
 
     #[test]
