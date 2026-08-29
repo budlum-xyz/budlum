@@ -1037,6 +1037,26 @@ impl StorageRegistry {
             hasher
                 .update(bincode::serialize(manifest).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
         }
+        // A confidential body and the address that speaks for it decide whether a
+        // view grant opens bytes, so two nodes disagreeing about either would
+        // accept different blocks. Both maps are `BTreeMap`, keyed by the content
+        // id, so every node hashes the same bytes in the same order. The commit is
+        // folded through `commitment()` rather than its serialization: the
+        // commitment is the value the chain promised, and pinning the serialized
+        // struct would make a field that cannot change the promise (a re-ordered
+        // enum variant, say) change the state root.
+        //
+        // An empty pair of maps contributes no bytes, which is what keeps a chain
+        // that has never held a confidential body at exactly the root it had
+        // before this fold existed.
+        for (content_id, commit) in &self.confidential_commits {
+            hasher.update(content_id.0);
+            hasher.update(commit.commitment());
+        }
+        for (content_id, owner) in &self.confidential_owners {
+            hasher.update(content_id.0);
+            hasher.update(owner.as_bytes());
+        }
         hasher.finalize().into()
     }
 
@@ -4184,6 +4204,56 @@ mod tests {
         let before = reg.root();
         reg.begin_operator_cooldown(operator(), 1_000);
         assert_ne!(before, reg.root(), "the cooldown must reach the root");
+    }
+
+    /// The confidential record must reach the state root, both halves of it.
+    ///
+    /// A commitment that nobody can point at is not a promise, and an owner that
+    /// lives only in a node's local map is exactly the record a second node would
+    /// disagree about: a grant is checked against it, and the chain's answer must
+    /// not depend on which node replayed the block.
+    #[test]
+    fn a_confidential_commit_changes_the_registry_root() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let mut reg = StorageRegistry::new();
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        reg.register_manifest(&m);
+        let before = reg.root();
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let bir = operator();
+        reg.register_confidential_commit(commit, bir).unwrap();
+        let after = reg.root();
+        assert_ne!(before, after, "the body commit must reach the root");
+
+        // The owner alone moves the root too: same commitment, different
+        // speaker. A fold over the commitments only would let a node swap who
+        // owns an object without any state-root change.
+        let mut other_registry = StorageRegistry::new();
+        other_registry.register_manifest(&m);
+        let commit2 = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        other_registry
+            .register_confidential_commit(commit2, opener())
+            .unwrap();
+        assert_ne!(
+            after,
+            other_registry.root(),
+            "the recorded owner must reach the root"
+        );
     }
 
     // === B76: a phone may hold a copy, never the only one =================
