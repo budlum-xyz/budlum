@@ -8,8 +8,21 @@ use serde_json;
 
 pub struct Executor;
 
+/// The only execution-proof backend this path accepts.
+///
+/// It is matched exactly, and the comparison lives here so the name has one
+/// home. The string arrives inside the transaction envelope
+/// (`ProofEnvelope.backend`), so a substring test is not an allow-list: any
+/// name that merely mentions Plonky3 - `"Plonky3-nightly"`,
+/// `"Plonky3 with a local patch"` - used to be accepted, and what the gate
+/// guards is only checked structurally downstream.
+///
+/// The gate is deliberately the same on every network (`_chain_id` is
+/// unread): an unproven execution is as worthless on devnet as on mainnet.
+pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3";
+
 fn ai_execution_backend_allowed(_chain_id: u64, backend: &str) -> bool {
-    backend.contains("Plonky3")
+    backend == AI_EXECUTION_BACKEND_PLONKY3
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
@@ -2251,6 +2264,31 @@ mod tests {
         assert!(!ai_execution_backend_allowed(mainnet, "test-backend"));
         assert!(ai_execution_backend_allowed(mainnet, "Plonky3"));
         assert!(!ai_execution_backend_allowed(devnet, "test"));
+    }
+
+    /// The backend name arrives inside the transaction envelope, so a
+    /// substring test is not an allow-list: anything that merely mentions
+    /// Plonky3 passes it. What sits behind the gate is
+    /// `verify_execution_proof_structural_with_model` - the proof bytes are
+    /// never verified cryptographically - so the name is the only thing
+    /// separating an attached proof from an invented one.
+    #[test]
+    fn a_backend_that_only_names_plonky3_is_not_plonky3() {
+        let devnet = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+        assert!(ai_execution_backend_allowed(devnet, "Plonky3"));
+        for spoofed in [
+            "Plonky3-nightly",
+            "not-really-Plonky3-at-all",
+            "Plonky3 with a local patch",
+            "xPlonky3x",
+        ] {
+            assert!(
+                !ai_execution_backend_allowed(devnet, spoofed),
+                "backend {spoofed} is not Plonky3 but passed the allow-list"
+            );
+        }
     }
 
     /// The gate has to be an allowlist. Ownership (the nullifier binding
