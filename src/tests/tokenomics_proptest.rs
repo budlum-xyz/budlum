@@ -175,8 +175,8 @@ mod tests {
 
         /// INVARIANT 5: validator reward consistency.
         ///
-        /// calculate_epoch_reward(0) is trivial, and a positive stake gives a
-        /// positive reward.
+        /// calculate_epoch_reward(0) is nothing at all, and a positive stake
+        /// gives a positive reward.
         #[test]
         fn epoch_reward_consistency(
             stake in 0..100_000_000_000u64,
@@ -185,7 +185,7 @@ mod tests {
             let reward = params.calculate_epoch_reward(stake);
 
             if stake == 0 {
-                assert!(reward <= 1, "Zero stake should produce trivial reward");
+                assert_eq!(reward, 0, "Zero stake must produce no reward at all");
             } else {
                 assert!(reward > 0, "Positive stake should produce positive reward");
             }
