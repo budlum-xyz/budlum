@@ -379,13 +379,17 @@ impl MobileNodeProfile {
     }
 
     /// Updates the battery state and retunes the challenge policy.
-    pub fn update_battery(&mut self, level_pct: u8, charging: bool, estimated_minutes: u32) {
-        self.battery = BatteryStatus {
-            level_pct,
-            charging,
-            estimated_minutes,
-        };
-        self.challenge_policy = ChallengePolicy::from_power_mode(self.battery.power_mode());
+    pub fn update_battery(
+        &mut self,
+        level_pct: u8,
+        charging: bool,
+        estimated_minutes: u32,
+    ) -> Result<(), String> {
+        // One door, not two. The body used to be the same write as
+        // `try_update_battery` minus the `validate()` call, so this setter
+        // accepted a battery level of 101 while the fallible one refused it.
+        // The policy is then rebuilt from an impossible battery state.
+        self.try_update_battery(level_pct, charging, estimated_minutes)
     }
 
     /// Updates the NAT state.
@@ -486,13 +490,28 @@ mod tests {
         assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 50);
 
         // Pil kritik
-        profile.update_battery(5, false, 15);
+        profile.update_battery(5, false, 15).unwrap();
         assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 0);
         assert!(!profile.can_accept_tasks());
 
         // Plug it in to charge
-        profile.update_battery(5, true, 60);
+        profile.update_battery(5, true, 60).unwrap();
         assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 100);
+    }
+
+    /// `update_battery` and `try_update_battery` are two doors into the same
+    /// Field, and one of them used to check nothing: `update_battery(101, ..)`
+    /// Wrote a battery level that cannot exist, and `power_mode()` then read
+    /// It as a healthy device - handing the profile the peer budget and the
+    /// Challenge policy of a state it is not in.
+    #[test]
+    fn update_battery_refuses_a_level_over_100() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        assert!(profile.try_update_battery(101, false, 1).is_err());
+        assert!(
+            profile.update_battery(101, false, 1).is_err(),
+            "two doors into the battery field must agree on what a battery level is"
+        );
     }
 
     #[test]
