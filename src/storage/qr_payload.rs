@@ -135,7 +135,9 @@ impl std::error::Error for PayloadError {}
 /// Pack original content into the A1 container.
 ///
 /// Zlib level 9 is applied **only** when it strictly shrinks; otherwise the
-/// raw bytes are stored and [`FLAG_ZLIB`] is clear (K-QR-SIKISTIR).
+/// raw bytes are stored and the container's flag byte keeps bit 0 clear
+/// (K-QR-SIKISTIR). The flag is private to this module, so it is named by its
+/// position in the packed bytes rather than by a link.
 ///
 /// # Errors
 ///
