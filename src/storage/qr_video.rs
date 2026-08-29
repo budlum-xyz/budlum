@@ -424,8 +424,10 @@ mod tests {
         use crate::storage::qr_carousel::{CarouselDecoder, CarouselEncoder};
 
         // (a) The low-level half: 4000 bytes per drop body, no container.
-        let block = 4000usize;
-        let payload: Vec<u8> = (0..block * 16).map(|i| (i % 251) as u8).collect();
+        let block: u16 = 4000;
+        let payload: Vec<u8> = (0..usize::from(block) * 16)
+            .map(|i| (i % 251) as u8)
+            .collect();
         let enc = CarouselEncoder::new(&payload, block).unwrap();
         let k = usize::from(enc.params().k);
         assert_eq!(k, 16, "sixteen blocks of 4000 bytes is the claim's k");
