@@ -13,10 +13,23 @@ fn ai_execution_backend_allowed(_chain_id: u64, backend: &str) -> bool {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    chain_id
-        != crate::core::chain_config::Network::Mainnet
-            .chain_id()
-            .value()
+    // Allowlist, not a denylist.
+    //
+    // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
+    // takes the nullifier the submitter hands it: the binding check
+    // `nullifier == derive_nullifier(commitment, proof)` only runs when
+    // `apply_transfer_with_proofs` is called with proofs, and nothing in the
+    // tree calls it that way. So today a transfer proves who signed the
+    // transaction, never that the signer owns the note; value conservation and
+    // membership are unwired too. That is survivable on the two networks where
+    // the notes are worth nothing.
+    //
+    // The old test was `chain_id != Mainnet`, which answers "is this not the
+    // one network we care about" instead of "is this a network where losing the
+    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
+    // a public testnet that grows real value - came back enabled.
+    chain_id == crate::core::chain_config::Network::Devnet.chain_id().value()
+        || chain_id == crate::core::chain_config::Network::Testnet.chain_id().value()
 }
 
 impl Executor {
@@ -2238,6 +2251,36 @@ mod tests {
         assert!(!ai_execution_backend_allowed(mainnet, "test-backend"));
         assert!(ai_execution_backend_allowed(mainnet, "Plonky3"));
         assert!(!ai_execution_backend_allowed(devnet, "test"));
+    }
+
+    /// The gate has to be an allowlist. Ownership (the nullifier binding
+    /// proof), value conservation and membership are not wired, so this
+    /// surface is only ever on where losing the notes costs nothing.
+    /// `chain_id != Mainnet` answers the wrong question: it turns the feature
+    /// ON for every id nobody has claimed yet, including a second mainnet or a
+    /// public testnet that grows real value.
+    #[test]
+    fn privacy_transfers_stay_off_for_an_unclaimed_chain_id() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        let devnet = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+
+        assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
+        assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
+        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+
+        for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
+            assert!(
+                !privacy_transfers_enabled(unclaimed),
+                "chain id {unclaimed} has no ownership proof wired; the surface must stay off"
+            );
+        }
     }
 
     #[test]
