@@ -94,10 +94,14 @@ impl std::error::Error for SealError {}
 
 /// Seal plaintext under `key` with the given 24-byte nonce.
 ///
+/// Module-internal on purpose: a caller-chosen nonce under a reused key is the
+/// keystream-reuse footgun the format forbids, so the only sealing entry point
+/// outside this file is `seal_payload_csprng`, which draws the nonce itself.
+///
 /// # Errors
 ///
 /// Empty / oversized plaintext, bad nonce length, or AEAD failure.
-pub fn seal_payload(
+fn seal_payload(
     key: &PayloadKey,
     nonce24: &[u8; SEALED_NONCE_LEN],
     plaintext: &[u8],
@@ -126,14 +130,14 @@ pub fn seal_payload(
 
 /// Seal plaintext under `key` with a fresh CSPRNG nonce.
 ///
-/// XChaCha20-Poly1305'te bir (anahtar, nonce) cifti bir kez kullanilabilir:
-/// tekrari keystream tekraridir ve iki sifreli cikti XOR'landiginda geriye
-/// duz metinlerin XOR'u kalir. Bu yuzden uretim yolu nonce'u CSPRNG'den alir;
-/// `derived_nonce` yalnizca lab/test baglaminda deterministik cikti icindir.
+/// XChaCha20-Poly1305 lets a (key, nonce) pair be used once: a repeat is a
+/// keystream repeat, and XORing the two ciphertexts leaves the XOR of the
+/// plaintexts behind. So the production path takes its nonce from a CSPRNG;
+/// the deterministic nonce below exists for lab and test fixtures only.
 ///
 /// # Errors
 ///
-/// `seal_payload` ile ayni kosullar (bos/asiri buyuk duz metin, AEAD hatasi).
+/// Same conditions as `seal_payload`: empty or oversized plaintext, AEAD failure.
 pub fn seal_payload_csprng(key: &PayloadKey, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
     let mut nonce = [0u8; SEALED_NONCE_LEN];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
@@ -170,12 +174,13 @@ pub fn open_payload(key: &PayloadKey, sealed: &[u8]) -> Result<Vec<u8>, SealErro
 
 /// Deterministic nonce from stream context.
 ///
-/// Yalnizca lab/test icin: uretim yolu `seal_payload_csprng` kullanir.
-///
-/// Domain-separated so two different contexts never collide accidentally when
-/// the same key seals two payloads.
+/// Test-only by construction: a deterministic nonce under a reused key is the
+/// repeat the format forbids, so nothing outside this module's tests may reach
+/// it. Domain-separated so two different contexts never collide accidentally
+/// when the same key seals two payloads.
+#[cfg(test)]
 #[must_use]
-pub fn derived_nonce(context: &[u8]) -> [u8; SEALED_NONCE_LEN] {
+fn derived_nonce(context: &[u8]) -> [u8; SEALED_NONCE_LEN] {
     let h = hash_fields_bytes(&[b"BDLM_THREE_SEAL_NONCE_V1", context]);
     // `split_at` on the 32-byte digest cannot reach out of range, so the two
     // halves are taken without an index; the zip below is the measurement that
@@ -190,6 +195,32 @@ pub fn derived_nonce(context: &[u8]) -> [u8; SEALED_NONCE_LEN] {
         *slot = *byte;
     }
     n
+}
+
+#[cfg(test)]
+/// The deterministic half of this module, reachable from this crate's tests only.
+///
+/// A caller-chosen nonce under a reused key is the repeat the format forbids, so
+/// `seal_payload` and `derived_nonce` are not public API. A test that has to
+/// reproduce a fixed sealed blob needs them, and this is that door: it exists
+/// under `cfg(test)` and grants nothing to a node binary.
+pub(crate) mod test_seam {
+    use super::{PayloadKey, SealError, SEALED_NONCE_LEN};
+
+    /// Deterministic nonce for a fixture that must reproduce a fixed blob.
+    #[must_use]
+    pub(crate) fn derived_nonce(context: &[u8]) -> [u8; SEALED_NONCE_LEN] {
+        super::derived_nonce(context)
+    }
+
+    /// Seal with a caller-supplied nonce, for fixtures only.
+    pub(crate) fn seal_payload(
+        key: &PayloadKey,
+        nonce24: &[u8; SEALED_NONCE_LEN],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SealError> {
+        super::seal_payload(key, nonce24, plaintext)
+    }
 }
 
 #[cfg(test)]

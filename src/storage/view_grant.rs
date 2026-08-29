@@ -247,10 +247,7 @@ pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u
 /// signature could be lifted from one commit and replayed under another body,
 /// another cipher or another object.
 #[must_use]
-pub fn confidential_commit_digest(
-    commit: &ConfidentialBodyCommit,
-    owner: &Address,
-) -> [u8; 32] {
+pub fn confidential_commit_digest(commit: &ConfidentialBodyCommit, owner: &Address) -> [u8; 32] {
     let enc_byte: u8 = match commit.encryption {
         crate::storage::ContentEncryption::Plaintext => 0,
         crate::storage::ContentEncryption::ClientSide(cipher) => match cipher {

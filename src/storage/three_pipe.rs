@@ -137,8 +137,8 @@ pub fn encode_plain(
         return Err(TransformError::HashMismatch.into());
     }
     let (kind, body) = if let Some(key) = seal_key {
-        // Nonce her cagri icin CSPRNG'den: ayni anahtarla yinelenen muhur,
-        // keystream tekrarina (ve duz metin XOR sizintisina) yol acmamali.
+        // A fresh CSPRNG nonce per call: two seals under the same key would share a
+        // keystream, and XORing their ciphertexts leaks the plaintexts.
         let sealed = seal_payload_csprng(key, &transformed.bytes)?;
         (PayloadKind::EncryptedContent, sealed)
     } else {
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(enc.video_blob, again.video_blob);
     }
 
-    /// Muhurlu govdenin nonce'u: 4 B magic + 1 B surum + 24 B nonce.
+    /// The sealed body's nonce: 4 B magic + 1 B version + 24 B nonce.
     fn sealed_nonce_of(enc: &EncodedPipe) -> [u8; SEALED_NONCE_LEN] {
         let (_, body) = unpack_payload(&enc.packed).unwrap();
         let mut n = [0u8; SEALED_NONCE_LEN];
@@ -376,10 +376,10 @@ mod tests {
         body
     }
 
-    /// XChaCha20-Poly1305'te (anahtar, nonce) ciftinin tekrari keystream
-    /// tekraridir: ayni anahtarla uretilen iki sifreli cikti XOR'lanirsa geriye
-    /// duz metinlerin XOR'u kalir. Bu yuzden her muhur taze nonce tasimak
-    /// zorunda; uretim yolunda `derived_nonce` (deterministik) kullanilamaz.
+    /// In XChaCha20-Poly1305 a repeated (key, nonce) pair is a keystream repeat:
+    /// two ciphertexts under the same key XOR into the XOR of their plaintexts.
+    /// So every seal must carry a fresh nonce, and the deterministic `derived_nonce`
+    /// is not available to the production path.
     #[test]
     fn sealed_pipe_uses_a_fresh_nonce_per_call() {
         let key = PayloadKey::derive(b"facade-key");
@@ -389,7 +389,7 @@ mod tests {
         assert_ne!(
             sealed_nonce_of(&a),
             sealed_nonce_of(&b),
-            "ayni anahtarla iki muhur ayni nonce'u kullandi: keystream tekrari"
+            "the same key sealed twice with the same nonce: keystream repeat"
         );
         assert_ne!(
             sealed_body_of(&a),

@@ -185,7 +185,8 @@ impl RecipeEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::payload_crypt::{derived_nonce, open_payload, seal_payload, PayloadKey};
+    use crate::storage::payload_crypt::test_seam::{derived_nonce, seal_payload};
+    use crate::storage::payload_crypt::{open_payload, PayloadKey};
     use crate::storage::qr_carousel::{planned_drop_count, CarouselDecoder, DEFAULT_BLOCK_LEN};
     use crate::storage::qr_frame::unpack_frame;
     use crate::storage::qr_payload::{pack_payload, unpack_payload, PayloadKind};

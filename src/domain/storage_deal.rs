@@ -1473,9 +1473,9 @@ impl StorageRegistry {
             .view_grants
             .get(grant_id)
             .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?;
-        let owner = self
-            .owner_of(&grant.content_id)
-            .unwrap_or_else(|| grant.issuer);
+        // `unwrap_or`, not `unwrap_or_else`: the fallback is a field read, and a
+        // closure there is what CI's Clippy step refuses under `-D warnings`.
+        let owner = self.owner_of(&grant.content_id).unwrap_or(grant.issuer);
         auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.view_grants.revoke(grant_id, caller, at_epoch)

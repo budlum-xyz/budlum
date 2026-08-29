@@ -2167,6 +2167,11 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
         let auth = parse_grant_auth(authorization.as_ref())?;
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code.
+        auth.derived_owner().map_err(grant_auth_error)?;
         let grantee = match grantee {
             None => None,
             Some(g) if g.is_empty() => None,
@@ -2206,6 +2211,11 @@ impl BudlumApiServer for RpcServer {
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let auth = parse_grant_auth(authorization.as_ref())?;
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code.
+        auth.derived_owner().map_err(grant_auth_error)?;
         self.chain
             .revoke_view_grant(grant_id, auth, at_epoch)
             .await
@@ -2248,6 +2258,11 @@ impl BudlumApiServer for RpcServer {
         // only a derived address here is what would let a holder of somebody
         // else's public key register a commit under that address.
         let auth = parse_grant_auth(authorization.as_ref())?;
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code.
+        auth.derived_owner().map_err(grant_auth_error)?;
         let encryption = match encryption.to_ascii_lowercase().as_str() {
             "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
                 crate::storage::ContentCipher::Aes256Gcm,
