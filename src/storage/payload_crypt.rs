@@ -124,6 +124,22 @@ pub fn seal_payload(
     Ok(out)
 }
 
+/// Seal plaintext under `key` with a fresh CSPRNG nonce.
+///
+/// XChaCha20-Poly1305'te bir (anahtar, nonce) cifti bir kez kullanilabilir:
+/// tekrari keystream tekraridir ve iki sifreli cikti XOR'landiginda geriye
+/// duz metinlerin XOR'u kalir. Bu yuzden uretim yolu nonce'u CSPRNG'den alir;
+/// `derived_nonce` yalnizca lab/test baglaminda deterministik cikti icindir.
+///
+/// # Errors
+///
+/// `seal_payload` ile ayni kosullar (bos/asiri buyuk duz metin, AEAD hatasi).
+pub fn seal_payload_csprng(key: &PayloadKey, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+    let mut nonce = [0u8; SEALED_NONCE_LEN];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
+    seal_payload(key, &nonce, plaintext)
+}
+
 /// Open a sealed blob.
 ///
 /// # Errors
@@ -152,7 +168,9 @@ pub fn open_payload(key: &PayloadKey, sealed: &[u8]) -> Result<Vec<u8>, SealErro
     cipher.decrypt(nonce, ct).map_err(|_| SealError::Decrypt)
 }
 
-/// Deterministic nonce from stream context (lab/tests; production should use CSPRNG).
+/// Deterministic nonce from stream context.
+///
+/// Yalnizca lab/test icin: uretim yolu `seal_payload_csprng` kullanir.
 ///
 /// Domain-separated so two different contexts never collide accidentally when
 /// the same key seals two payloads.

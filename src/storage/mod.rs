@@ -115,7 +115,8 @@ pub use view_grant::{
 };
 
 pub use payload_crypt::{
-    derived_nonce, open_payload, seal_payload, PayloadKey, SealError, MAX_SEAL_PLAINTEXT,
+    derived_nonce, open_payload, seal_payload, seal_payload_csprng, PayloadKey, SealError,
+    MAX_SEAL_PLAINTEXT,
     SEALED_HEADER_LEN, SEALED_MAGIC, SEALED_NONCE_LEN, SEALED_VERSION,
 };
 pub use qr_carousel::{

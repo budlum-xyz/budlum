@@ -3,7 +3,7 @@
 //! Keeps callers from wiring every stage by hand in the common case while
 //! each stage stays independently testable.
 
-use crate::storage::payload_crypt::{derived_nonce, seal_payload, PayloadKey, SealError};
+use crate::storage::payload_crypt::{seal_payload_csprng, PayloadKey, SealError};
 use crate::storage::qr_carousel::{
     oneshot_drop_count, CarouselEncoder, CarouselError, DEFAULT_BLOCK_LEN,
     ONESHOT_REPAIR_PERMILLAGE,
@@ -137,7 +137,9 @@ pub fn encode_plain(
         return Err(TransformError::HashMismatch.into());
     }
     let (kind, body) = if let Some(key) = seal_key {
-        let sealed = seal_payload(key, &derived_nonce(b"three_pipe"), &transformed.bytes)?;
+        // Nonce her cagri icin CSPRNG'den: ayni anahtarla yinelenen muhur,
+        // keystream tekrarina (ve duz metin XOR sizintisina) yol acmamali.
+        let sealed = seal_payload_csprng(key, &transformed.bytes)?;
         (PayloadKind::EncryptedContent, sealed)
     } else {
         (PayloadKind::ContentBytes, transformed.bytes)
@@ -253,8 +255,9 @@ pub fn decode_qr_video(video_blob: &[u8]) -> Result<(PayloadKind, Vec<u8>, QrVid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::payload_crypt::{open_payload, PayloadKey};
+    use crate::storage::payload_crypt::{open_payload, PayloadKey, SEALED_NONCE_LEN};
     use crate::storage::qr_carousel::{oneshot_drop_count, planned_drop_count};
+    use crate::storage::qr_payload::unpack_payload;
 
     /// Incompressible bytes, so `k` is large enough that `k + repair` and the
     /// `2k` carousel floor are different numbers. A repeated-text payload
@@ -358,6 +361,41 @@ mod tests {
         // re-emit video from recipe path must match blob commitment if same frames
         let again = encode_qr_video(&content, 64, None).unwrap();
         assert_eq!(enc.video_blob, again.video_blob);
+    }
+
+    /// Muhurlu govdenin nonce'u: 4 B magic + 1 B surum + 24 B nonce.
+    fn sealed_nonce_of(enc: &EncodedPipe) -> [u8; SEALED_NONCE_LEN] {
+        let (_, body) = unpack_payload(&enc.packed).unwrap();
+        let mut n = [0u8; SEALED_NONCE_LEN];
+        n.copy_from_slice(&body[5..5 + SEALED_NONCE_LEN]);
+        n
+    }
+
+    fn sealed_body_of(enc: &EncodedPipe) -> Vec<u8> {
+        let (_, body) = unpack_payload(&enc.packed).unwrap();
+        body
+    }
+
+    /// XChaCha20-Poly1305'te (anahtar, nonce) ciftinin tekrari keystream
+    /// tekraridir: ayni anahtarla uretilen iki sifreli cikti XOR'lanirsa geriye
+    /// duz metinlerin XOR'u kalir. Bu yuzden her muhur taze nonce tasimak
+    /// zorunda; uretim yolunda `derived_nonce` (deterministik) kullanilamaz.
+    #[test]
+    fn sealed_pipe_uses_a_fresh_nonce_per_call() {
+        let key = PayloadKey::derive(b"facade-key");
+        let content = b"facade-secret-payload";
+        let a = encode_plain(content, 64, Some(&key)).unwrap();
+        let b = encode_plain(content, 64, Some(&key)).unwrap();
+        assert_ne!(
+            sealed_nonce_of(&a),
+            sealed_nonce_of(&b),
+            "ayni anahtarla iki muhur ayni nonce'u kullandi: keystream tekrari"
+        );
+        assert_ne!(
+            sealed_body_of(&a),
+            sealed_body_of(&b),
+            "ciphertext ayni kalmis: muhur hala deterministik"
+        );
     }
 
     #[test]
