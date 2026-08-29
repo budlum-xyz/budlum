@@ -18,6 +18,28 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// `fn root(`'s body, braces counted.
+fn root_body(src: &str) -> Option<String> {
+    let at = src.find("fn root(")?;
+    let open = src[at..].find('{')? + at;
+    let mut depth = 0usize;
+    let mut body = String::new();
+    for ch in src[open..].chars() {
+        body.push(ch);
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(body);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -39,30 +61,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    let at = src.find("fn root(").ok_or_else(|| {
-        "no `fn root(` in `BridgeState`; without a single commitment the two ledgers can be \
-         agreed about separately, which is not the same thing"
-            .to_string()
-    })?;
-    let open = src[at..]
-        .find('{')
-        .map(|o| at + o)
-        .ok_or("unterminated `fn root(`")?;
-    let mut depth = 0usize;
-    let mut body = String::new();
-    for ch in src[open..].chars() {
-        body.push(ch);
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
+    let body = root_body(&src).ok_or_else(|| "`fn root(` has no body to read".to_string())?;
     for (ledger, why) in [
         (
             "asset_locations",

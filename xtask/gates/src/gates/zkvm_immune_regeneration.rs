@@ -47,6 +47,25 @@ fn code_is_a_rejection(src: &str, code: &str) -> bool {
     false
 }
 
+/// The five rejections the executor may not skip.
+fn rejections(exec: &str) -> (usize, Vec<String>) {
+    let mut found = 0usize;
+    let mut problems = Vec::new();
+    for code in CODES {
+        if code_is_a_rejection(exec, code) {
+            found += 1;
+        } else {
+            problems.push(format!(
+                "`{code}` is no longer a validation rejection in `executor.rs`. Each of the \
+                 five codes marks a check the executor cannot skip: chain binding, program \
+                 rebuild, STARK verify, structural report, size bound. A path that accepts a \
+                 proof without one of them is a proof the node did not check."
+            ));
+        }
+    }
+    (found, problems)
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -57,19 +76,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    for code in CODES {
-        if code_is_a_rejection(&exec, code) {
-            checked += 1;
-        } else {
-            problems.push(format!(
-                "`{code}` is no longer a validation rejection in `executor.rs`. Each of \
-                 the five codes marks a check the executor cannot skip: chain binding, \
-                 program rebuild, STARK verify, structural report, size bound. A path \
-                 that accepts a proof without one of them is a proof the node did not \
-                 check."
-            ));
-        }
-    }
+    let (bulunan, reddi) = rejections(&exec);
+    checked += bulunan;
+    problems.extend(reddi);
 
     if exec.contains("proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES") {
         checked += 1;

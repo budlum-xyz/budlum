@@ -41,6 +41,25 @@ fn body_of(src: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Any new ordering index keyed on a bid, a boost or a priority: the pool may
+/// order by fee and hash, nothing else.
+fn bidding_index(src: &str) -> Vec<String> {
+    let mut widen = Vec::new();
+    for l in src.lines() {
+        let line = l.trim_start();
+        if !line.contains(": HashMap<") && !line.contains(": BTreeMap<") {
+            continue;
+        }
+        let name = line.split(':').next().unwrap_or_default().trim();
+        if name.starts_with("by_")
+            && (name.contains("priority") || name.contains("boost") || name.contains("bid"))
+        {
+            widen.push(name.to_string());
+        }
+    }
+    widen
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -110,25 +129,13 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .to_string(),
         );
     }
-    let mut widen: Vec<String> = Vec::new();
-    for l in src.lines() {
-        let t = l.trim_start();
-        if !t.contains(": HashMap<") && !t.contains(": BTreeMap<") {
-            continue;
-        }
-        let name = t.split(':').next().unwrap_or_default().trim();
-        if name.starts_with("by_")
-            && (name.contains("priority") || name.contains("boost") || name.contains("bid"))
-        {
-            widen.push(name.to_string());
-        }
-    }
+    let widen = bidding_index(&src);
     if widen.is_empty() {
         checked += 1;
     } else {
         problems.push(format!(
-            "a bidding index appeared in the pool: {}. The pool orders by fee and hash only; a \
-             per-sender or per-block bid index is a private auction for whoever can watch it.",
+            "a bidding index appeared in the pool: {}. The pool orders by fee and hash only; \
+             a per-sender or per-block bid index is a private auction for whoever can watch it.",
             widen.join(", ")
         ));
     }

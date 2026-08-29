@@ -82,6 +82,31 @@ fn candidates(body: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Shape of the list itself: not emptied, and every format class still offered.
+fn sayim(body: &str, list: &[(usize, String)], arms: usize) -> (usize, Vec<String>) {
+    let mut ok = 0usize;
+    let mut problems = Vec::new();
+    if list.len() < 4 {
+        problems.push(format!(
+            "the candidate list has {} entries; a consensus over fewer than four ratios is not \
+             a choice, so the function has probably been emptied rather than narrowed.",
+            list.len()
+        ));
+    } else {
+        ok += 1;
+    }
+    if arms < 4 {
+        problems.push(format!(
+            "only {arms} format classes offer candidates. `BudFormatClass` has more; a class \
+             with no list silently falls through to whatever the caller does with an empty vote."
+        ));
+    } else {
+        ok += 1;
+    }
+    let _ = body;
+    (ok, problems)
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -97,24 +122,10 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    if list.len() < 4 {
-        problems.push(format!(
-            "the candidate list has {} entries; a consensus over fewer than four ratios is \
-             not a choice, so the function has probably been emptied rather than narrowed.",
-            list.len()
-        ));
-    } else {
-        checked += 1;
-    }
     let arms = body.matches("=> vec![").count();
-    if arms < 4 {
-        problems.push(format!(
-            "only {arms} format classes offer candidates. `BudFormatClass` has more; a class \
-             with no list silently falls through to whatever the caller does with an empty vote."
-        ));
-    } else {
-        checked += 1;
-    }
+    let (bulunan, sorunlar) = sayim(&body, &list, arms);
+    checked += bulunan;
+    problems.extend(sorunlar);
     let mut ids: Vec<u64> = Vec::new();
     for (n, (start, c)) in list.iter().enumerate() {
         let is_fallback = body[..*start]
