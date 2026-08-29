@@ -110,7 +110,8 @@ pub use render::{render, render_and_verify, RenderError, RenderFormat};
 
 pub mod pact_binding;
 pub use view_grant::{
-    grant_issue_digest, grant_revoke_digest, ConfidentialBodyCommit, ConfidentialProofKind,
+    confidential_commit_digest, grant_issue_digest, grant_revoke_digest, ConfidentialBodyCommit,
+    ConfidentialProofKind,
     GrantAuthError, GrantAuthorization, ViewGrant, ViewGrantError, ViewGrantRegistry, ViewPolicy,
 };
 

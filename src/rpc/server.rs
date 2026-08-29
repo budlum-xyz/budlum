@@ -2243,11 +2243,11 @@ impl BudlumApiServer for RpcServer {
         authorization: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
-        // The recorded owner is derived from the signing key, not typed: this is
-        // the address whose word later opens the body.
-        let owner = parse_grant_auth(authorization.as_ref())?
-            .derived_owner()
-            .map_err(grant_auth_error)?;
+        // The recorded owner is never typed by the caller: it is derived from
+        // the key and then proven by the signature the registry checks. Handing
+        // only a derived address here is what would let a holder of somebody
+        // else's public key register a commit under that address.
+        let auth = parse_grant_auth(authorization.as_ref())?;
         let encryption = match encryption.to_ascii_lowercase().as_str() {
             "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
                 crate::storage::ContentCipher::Aes256Gcm,
@@ -2302,7 +2302,7 @@ impl BudlumApiServer for RpcServer {
         .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
         let commitment = self
             .chain
-            .register_confidential_commit(commit, owner)
+            .register_confidential_commit(commit, auth)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
         Ok(serde_json::json!({

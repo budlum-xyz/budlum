@@ -1507,11 +1507,30 @@ impl StorageRegistry {
     /// when one is already registered for this id (body vs recipe category).
     /// The `owner` is the address the commit is recorded for: an unattributed
     /// body commit would leave later view grants with nobody whose word counts.
+    /// Register a confidential body commit under the address that signed it.
+    ///
+    /// The owner is not a field the caller types: it is derived from the key
+    /// and then proven by a signature over [`crate::storage::confidential_commit_digest`].
+    /// Derivation alone would let anybody holding Alice's public key register a
+    /// commit under her address and, by registering first, lock her own commit
+    /// out of an object she already sealed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses Three (recipe-only) manifests, a body already committed under a
+    /// different commitment, an object another address spoke for, and any
+    /// authorisation whose signature does not verify for the derived owner.
     pub fn register_confidential_commit(
         &mut self,
         commit: crate::storage::ConfidentialBodyCommit,
-        owner: crate::core::address::Address,
+        auth: &crate::storage::GrantAuthorization,
     ) -> Result<[u8; 32], String> {
+        let owner = auth
+            .derived_owner()
+            .map_err(|e| format!("confidential commit authorization: {e}"))?;
+        let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+        auth.verify(&digest, &owner)
+            .map_err(|e| format!("confidential commit authorization: {e}"))?;
         if let Some(m) = self.manifests.get(&commit.content_id) {
             if !m.edition.admits_body() {
                 return Err(String::from(
@@ -3408,6 +3427,45 @@ mod tests {
     /// valid authorisation cannot be moved to another object or reshaped into a
     /// wider one; and a caller that cannot derive the owner from its key never
     /// reaches the registry at all.
+    /// A confidential commit must carry proof that the key signing it is held
+    /// by the address it is registered under.
+    ///
+    /// Deriving an address from a public key is not an identity check: the
+    /// public key is public. If the signature is never verified, anybody who
+    /// has seen Alice's key can register a commit under her address - and by
+    /// registering first, lock her out of her own object, since a second
+    /// commit under a different body is refused.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_confidential_commit_is_refused_when_nothing_signed_it() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let commit = crate::storage::ConfidentialBodyCommit {
+            content_id: ContentId([11u8; 32]),
+            encryption: crate::storage::ContentEncryption::Plaintext,
+            ciphertext_root: [3u8; 32],
+            proof_kind: crate::storage::ConfidentialProofKind::RetrievalChallenge,
+        };
+        // The victim's public key, and a signature that is not a signature.
+        let forged = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: vec![0u8; 16],
+        };
+        assert_eq!(
+            forged.derived_owner().ok(),
+            Some(owner),
+            "the public key alone must derive the victim address, or this test proves nothing"
+        );
+        let res = reg.register_confidential_commit(commit, &forged);
+        assert!(
+            res.is_err(),
+            "a commit under an address whose key signed nothing was accepted"
+        );
+    }
+
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_signed_grant_opens_only_the_object_it_names() {
@@ -5933,8 +5991,10 @@ mod demand_driven_replication_tests {
         );
     }
 
+    #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn confidential_commit_refuses_three_edition_manifest() {
+        use crate::crypto::primitives::WalletKeyPair;
         use crate::storage::generated::{
             generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
         };
@@ -5963,14 +6023,25 @@ mod demand_driven_replication_tests {
             ConfidentialProofKind::ZkStorageProof,
         )
         .expect("client-side ok");
+        // Signed by a real key, so the refusal that follows is the edition rule
+        // and not a missing authorisation.
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
         let err = reg
-            .register_confidential_commit(commit, Address::from([1u8; 32]))
+            .register_confidential_commit(commit, &auth)
             .expect_err("Three must not take a body commit");
         assert!(err.contains("Three") || err.contains("recipe"), "got {err}");
     }
 
+    #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn confidential_commit_accepts_classic_encrypted_body() {
+        use crate::crypto::primitives::WalletKeyPair;
         use crate::storage::{
             ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
         };
@@ -5985,14 +6056,60 @@ mod demand_driven_replication_tests {
             ConfidentialProofKind::HybridZkTee,
         )
         .unwrap();
-        let owner = Address::from([1u8; 32]);
-        let c = reg.register_confidential_commit(commit, owner).unwrap();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        let c = reg.register_confidential_commit(commit, &auth).unwrap();
         assert_eq!(c.len(), 32);
         assert!(reg.get_confidential_commit(&m.manifest_id).is_some());
-        // The commit is worthless without a recorded owner: whoever signs a grant
-        // later is checked against this address, so a commit that named nobody
-        // could be opened by anybody's word.
-        assert_eq!(reg.owner_of(&m.manifest_id), Some(owner));
+        // The commit is worthless without a recorded owner: whoever signs a
+        // grant later is checked against this address, so a commit that named
+        // nobody could be opened by anybody's word. `owner_of` answers the
+        // manifest first, so the address the commit was registered under is
+        // measured where it is recorded.
+        assert_eq!(
+            reg.confidential_owners.get(&m.manifest_id).copied(),
+            Some(owner),
+            "the commit must be recorded under the address that signed it"
+        );
+    }
+
+    /// Without the ML-DSA verifier nothing can prove an authorisation, so a
+    /// commit is refused rather than registered on trust. The gate must fail
+    /// closed: a build that cannot check signatures must not accept any.
+    #[cfg(not(feature = "wallet-ml-dsa"))]
+    #[test]
+    fn confidential_commit_fails_closed_without_a_verifier() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: [9u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: vec![1, 2, 3, 4],
+        };
+        let err = reg
+            .register_confidential_commit(commit, &auth)
+            .expect_err("a build without a verifier must register nothing");
+        assert!(
+            err.contains("authorization"),
+            "the refusal must name the authorisation, got {err}"
+        );
+        assert!(reg.get_confidential_commit(&m.manifest_id).is_none());
     }
 
     fn generated_registry() -> (StorageRegistry, ContentId) {

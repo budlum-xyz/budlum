@@ -377,7 +377,7 @@ pub enum ChainCommand {
     /// Classic/2.0 confidential body commit (not Three).
     RegisterConfidentialCommit {
         commit: crate::storage::ConfidentialBodyCommit,
-        owner: crate::core::address::Address,
+        auth: crate::storage::GrantAuthorization,
         response: oneshot::Sender<Result<[u8; 32], String>>,
     },
     GetConfidentialCommit {
@@ -1021,14 +1021,14 @@ impl ChainHandle {
     pub async fn register_confidential_commit(
         &self,
         commit: crate::storage::ConfidentialBodyCommit,
-        owner: crate::core::address::Address,
+        auth: crate::storage::GrantAuthorization,
     ) -> Result<[u8; 32], String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ChainCommand::RegisterConfidentialCommit {
                 commit,
-                owner,
+                auth,
                 response: tx,
             })
             .await;
@@ -3752,7 +3752,7 @@ impl ChainActor {
                 }
                 ChainCommand::RegisterConfidentialCommit {
                     commit,
-                    owner,
+                    auth,
                     response,
                 } => {
                     if self.storage_economics_disabled_on_mainnet() {
@@ -3763,7 +3763,7 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .register_confidential_commit(commit, owner);
+                        .register_confidential_commit(commit, &auth);
                     let _ = response.send(res);
                 }
                 ChainCommand::GetConfidentialOwner {

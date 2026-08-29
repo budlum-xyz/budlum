@@ -240,6 +240,41 @@ pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u
     ])
 }
 
+/// Digest a confidential body commit is signed over.
+///
+/// The object, the owner deriving from the signing key, the cipher, the
+/// ciphertext root and the proof kind all enter: without this binding a
+/// signature could be lifted from one commit and replayed under another body,
+/// another cipher or another object.
+#[must_use]
+pub fn confidential_commit_digest(
+    commit: &ConfidentialBodyCommit,
+    owner: &Address,
+) -> [u8; 32] {
+    let enc_byte: u8 = match commit.encryption {
+        crate::storage::ContentEncryption::Plaintext => 0,
+        crate::storage::ContentEncryption::ClientSide(cipher) => match cipher {
+            crate::storage::ContentCipher::Aes256Gcm => 1,
+            crate::storage::ContentCipher::ChaCha20Poly1305 => 2,
+            crate::storage::ContentCipher::XChaCha20Poly1305 => 3,
+        },
+    };
+    let proof_byte: u8 = match commit.proof_kind {
+        ConfidentialProofKind::RetrievalChallenge => 1,
+        ConfidentialProofKind::ZkStorageProof => 2,
+        ConfidentialProofKind::TeeAttested => 3,
+        ConfidentialProofKind::HybridZkTee => 4,
+    };
+    hash_fields_bytes(&[
+        b"BDLM_CONFIDENTIAL_COMMIT_V1",
+        commit.content_id.as_bytes(),
+        owner.as_bytes(),
+        &[enc_byte],
+        &commit.ciphertext_root,
+        &[proof_byte],
+    ])
+}
+
 /// Errors for the grant registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewGrantError {
