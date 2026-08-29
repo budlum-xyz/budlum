@@ -60,6 +60,7 @@ use crate::storage::qr_reemit::{RecipeEmitter, ReemitError};
 use crate::storage::qr_video::{QrVideo, QrVideoError, DEFAULT_FPS, VIDEO_VERSION};
 use crate::storage::three_gate::{classify_three_blob, is_transport_derivative, ThreeBlobKind};
 use crate::storage::three_meter::{MeterError, ThreeMeter};
+use crate::storage::three_nft::{meta_tracks_public_recipe, PreviewMode, ThreeNftMeta};
 use crate::storage::three_pipe::{
     decode_frames, decode_qr_video, encode_qr_video, recipe_commitment, PipeError,
 };
@@ -201,6 +202,9 @@ pub struct FeedPreview {
     /// frames. `false` means the feed is sealed and the measurement is not
     /// available to anyone holding the public recipe.
     pub a4_agreement: bool,
+    /// Domain-separated commitment of the NFT metadata this feed would mint
+    /// against: what a marketplace pins, measured here rather than assumed.
+    pub nft_meta: [u8; 32],
 }
 
 /// Errors from the emit path.
@@ -383,6 +387,9 @@ pub enum EmitError {
     /// Two independent decode paths of the same feed disagree, so one of them is
     /// not decoding what was encoded.
     DecodePathMismatch,
+    /// The NFT metadata does not track the recipe it was built from. The mint
+    /// and the feed would name different objects.
+    MetaDrift,
     /// The manifest names a sealed recipe. Its public fields are metered, and
     /// then the emit stops: without the seed nobody can say which bytes this
     /// feed carries.
@@ -491,6 +498,7 @@ impl std::fmt::Display for EmitError {
                 want,
             } => write!(f, "{stage} carries version {found}, this build emits {want}"),
             Self::FlagMismatch => write!(f, "a1 zlib flag disagrees with the container report"),
+            Self::MetaDrift => write!(f, "nft metadata does not track its recipe"),
             Self::DecodePathMismatch => {
                 write!(f, "two decode paths of one feed disagreed about the body")
             }
@@ -1008,6 +1016,24 @@ pub fn qr_feed_preview(
     }
     let publicly_reemitable = ThreeRecipe::Public(pipe.recipe.clone()).is_publicly_reemitable();
 
+    // The metadata a mint would pin, built here and checked against this feed
+    // rather than trusted: a token whose recipe commitment is not the feed's
+    // recipe is a token for a different object, and nothing else in the pipeline
+    // would notice.
+    let meta = ThreeNftMeta::from_recipe(
+        &ThreeRecipe::Public(pipe.recipe.clone()),
+        if publicly_reemitable {
+            PreviewMode::PublicStill
+        } else {
+            PreviewMode::Gated
+        },
+    )
+    .with_video_commitment(QrVideo::blob_commitment(&encoded.video_blob));
+    if !meta_tracks_public_recipe(&meta, &pipe.recipe) {
+        return Err(EmitError::MetaDrift);
+    }
+    let nft_meta = meta.commitment();
+
     let (content_id, provider_commitment) = if let Some(manifest) = manifest {
         let mut scratch = InMemoryStorageProvider::with_operator(feed_id);
         let receipt = scratch.put(manifest, &pipe.packed)?;
@@ -1130,6 +1156,7 @@ pub fn qr_feed_preview(
         video_body_len,
         recipe_class,
         a4_agreement,
+        nft_meta,
     })
 }
 
@@ -1237,6 +1264,10 @@ mod tests {
             qr_feed_preview(&body(2048), &EmitPolicy::default(), None).expect("plain preview");
         assert!(acik.a4_agreement);
         assert_eq!(acik.recipe_class, p.recipe_class);
+        // A mint and its feed must not disagree about the object, and the seal
+        // must not change that: both previews carry the same metadata pin.
+        assert_ne!(acik.nft_meta, [0u8; 32]);
+        assert_eq!(acik.nft_meta, p.nft_meta);
     }
 
     #[test]
