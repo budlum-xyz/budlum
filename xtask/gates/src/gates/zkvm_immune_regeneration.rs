@@ -81,7 +81,10 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .to_string(),
         );
     }
-    if let Some(line) = verifier.lines().find(|l| l.contains("pub const MAX_PROOF_BYTES")) {
+    if let Some(line) = verifier
+        .lines()
+        .find(|l| l.contains("pub const MAX_PROOF_BYTES"))
+    {
         if line.contains("1 << 20") {
             checked += 1;
         } else {
@@ -143,7 +146,8 @@ pub fn self_test() -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-zkvm-{}-{nanos}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("budlum-gates-zkvm-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(dir.join("src/execution")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("src/rpc")).map_err(|e| e.to_string())?;
 
@@ -164,7 +168,8 @@ pub fn self_test() -> Result<String, String> {
     let verifier = "pub const MAX_PROOF_BYTES: usize = 1 << 20;\n";
     let zkvm = "pub fn execute_bytecode_ungated(b: &[u8]) {}\npub fn execute_bytecode_mainnet(b: &[u8]) {}\n";
     std::fs::write(dir.join("src/execution/executor.rs"), exec).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("src/execution/proof_verifier.rs"), verifier).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/execution/proof_verifier.rs"), verifier)
+        .map_err(|e| e.to_string())?;
     std::fs::write(dir.join("src/execution/zkvm.rs"), zkvm).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
@@ -176,7 +181,9 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/execution/executor.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a proof path missing a rejection passed"));
+        return Err(String::from(
+            "canary: a proof path missing a rejection passed",
+        ));
     }
     std::fs::write(dir.join("src/execution/executor.rs"), exec).map_err(|e| e.to_string())?;
     std::fs::write(
@@ -186,14 +193,22 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a raised size ceiling passed silently"));
+        return Err(String::from(
+            "canary: a raised size ceiling passed silently",
+        ));
     }
-    std::fs::write(dir.join("src/execution/proof_verifier.rs"), verifier).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("src/rpc/server.rs"), "fn h() { execute_bytecode_ungated(&b); }\n")
+    std::fs::write(dir.join("src/execution/proof_verifier.rs"), verifier)
         .map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("src/rpc/server.rs"),
+        "fn h() { execute_bytecode_ungated(&b); }\n",
+    )
+    .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: an RPC path reaching the un-gated executor passed"));
+        return Err(String::from(
+            "canary: an RPC path reaching the un-gated executor passed",
+        ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(

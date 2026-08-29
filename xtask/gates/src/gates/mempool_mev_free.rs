@@ -72,8 +72,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         problems.push(format!(
             "the fee index is `{}` rather than `BTreeMap<u64, BTreeSet<String>>`. The inner set \
              is what makes a same-fee tie canonical: an unordered collection hands block \
-             construction to whatever the allocator's iteration order happens to be."
-            , line.trim()
+             construction to whatever the allocator's iteration order happens to be.",
+            line.trim()
         ));
     }
     let sender = src
@@ -86,8 +86,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         problems.push(format!(
             "`by_sender` no longer holds an ordered nonce index (`{}`). Nonce order inside one \
              sender is consensus-visible: an unordered index lets a node pack a sender's \
-             transactions in a chosen order and skip the one it does not like."
-            , sender.trim()
+             transactions in a chosen order and skip the one it does not like.",
+            sender.trim()
         ));
     }
     let sorted = body_of(&src, "get_sorted_transactions").unwrap_or_default();
@@ -128,8 +128,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     } else {
         problems.push(format!(
             "a bidding index appeared in the pool: {}. The pool orders by fee and hash only; a \
-             per-sender or per-block bid index is a private auction for whoever can watch it."
-            , widen.join(", ")
+             per-sender or per-block bid index is a private auction for whoever can watch it.",
+            widen.join(", ")
         ));
     }
     for need in ["min_fee: u64", "fn charged_bytes"] {
@@ -163,7 +163,8 @@ pub fn self_test() -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-pool-{}-{nanos}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("budlum-gates-pool-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(dir.join("src/mempool")).map_err(|e| e.to_string())?;
     let good = "pub struct Pool {\n    by_sender: HashMap<Address, BTreeMap<u64, String>>,\n    by_fee: BTreeMap<u64, BTreeSet<String>>,\n    min_fee: u64,\n}\n\nfn charged_bytes(tx: &Transaction) -> usize { tx.data.len() }\n\nimpl Pool {\n    pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {\n        for (_, hashes) in self.by_fee.iter().rev() { for h in hashes { push(h); } }\n        out\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn test_same_fee_canonical_order_by_hash() {}\n}\n";
     std::fs::write(dir.join("src/mempool/pool.rs"), good).map_err(|e| e.to_string())?;
@@ -171,13 +172,19 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a canonical pool was refused"));
     }
-    let unordered = good.replace("by_fee: BTreeMap<u64, BTreeSet<String>>", "by_fee: HashMap<u64, BTreeSet<String>>");
+    let unordered = good.replace(
+        "by_fee: BTreeMap<u64, BTreeSet<String>>",
+        "by_fee: HashMap<u64, BTreeSet<String>>",
+    );
     std::fs::write(dir.join("src/mempool/pool.rs"), unordered).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: an unordered fee index passed"));
     }
-    let bid = good.replace("min_fee: u64,", "min_fee: u64,\n    by_priority: HashMap<u64, String>,");
+    let bid = good.replace(
+        "min_fee: u64,",
+        "min_fee: u64,\n    by_priority: HashMap<u64, String>,",
+    );
     std::fs::write(dir.join("src/mempool/pool.rs"), bid).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);

@@ -41,9 +41,13 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let at = src.find("fn root(").ok_or_else(|| {
         "no `fn root(` in `BridgeState`; without a single commitment the two ledgers can be \
-         agreed about separately, which is not the same thing".to_string()
+         agreed about separately, which is not the same thing"
+            .to_string()
     })?;
-    let open = src[at..].find('{').map(|o| at + o).ok_or("unterminated `fn root(`")?;
+    let open = src[at..]
+        .find('{')
+        .map(|o| at + o)
+        .ok_or("unterminated `fn root(`")?;
     let mut depth = 0usize;
     let mut body = String::new();
     for ch in src[open..].chars() {
@@ -92,7 +96,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     let struct_at = src
         .find("pub struct BridgeState")
         .ok_or_else(|| "no `pub struct BridgeState`".to_string())?;
-    let struct_end = src[struct_at..].find('}').map_or(src.len(), |i| struct_at + i);
+    let struct_end = src[struct_at..]
+        .find('}')
+        .map_or(src.len(), |i| struct_at + i);
     let struct_body = &src[struct_at..struct_end];
     for field in ["asset_locations", "transfers", "expiry_queue"] {
         let line = struct_body
@@ -119,8 +125,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     } else {
         problems.push(format!(
             "the expiry queue is no longer indexed by height (`{}`). It used to be swept over \
-             every transfer, which made the expiry path O(N) per block and a free DoS lever."
-        , expiry.trim()));
+             every transfer, which made the expiry path O(N) per block and a free DoS lever.",
+            expiry.trim()
+        ));
     }
 
     if checked == 0 {
@@ -143,7 +150,10 @@ pub fn self_test() -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-bridge-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "budlum-gates-bridge-{}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(dir.join("src/cross_domain")).map_err(|e| e.to_string())?;
     let good = "pub struct BridgeState {\n    asset_locations: BTreeMap<AssetId, BridgeStatus>,\n    transfers: BTreeMap<MessageId, BridgeTransfer>,\n    expiry_queue: BTreeMap<u64, Vec<MessageId>>,\n}\n\nimpl BridgeState {\n    pub fn root(&self) -> Hash32 {\n        let mut leaves = self.asset_locations.iter().map(hash_it).collect::<Vec<_>>();\n        for t in &self.transfers { leaves.push(hash_it(t)); }\n        crate::settlement::commitment_tree::merkle_root(&leaves)\n    }\n}\n";
     std::fs::write(dir.join("src/cross_domain/bridge.rs"), good).map_err(|e| e.to_string())?;
@@ -151,13 +161,19 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a dual-tree bridge was refused"));
     }
-    let one = good.replace("for t in &self.transfers { leaves.push(hash_it(t)); }\n        ", "");
+    let one = good.replace(
+        "for t in &self.transfers { leaves.push(hash_it(t)); }\n        ",
+        "",
+    );
     std::fs::write(dir.join("src/cross_domain/bridge.rs"), one).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a one-ledger root passed"));
     }
-    let unordered = good.replace("transfers: BTreeMap<MessageId", "transfers: HashMap<MessageId");
+    let unordered = good.replace(
+        "transfers: BTreeMap<MessageId",
+        "transfers: HashMap<MessageId",
+    );
     std::fs::write(dir.join("src/cross_domain/bridge.rs"), unordered).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);

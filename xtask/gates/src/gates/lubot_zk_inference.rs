@@ -58,7 +58,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         "no `pub enum ModelTier` in tier.rs; the tier is what the served name is derived from"
             .to_string()
     })?;
-    let enum_end = tier[enum_at..].find('}').map_or(tier.len(), |i| enum_at + i);
+    let enum_end = tier[enum_at..]
+        .find('}')
+        .map_or(tier.len(), |i| enum_at + i);
     let enum_body = &tier[enum_at..enum_end];
     let variants: Vec<&str> = enum_body
         .lines()
@@ -71,7 +73,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         })
         .collect();
     if variants.is_empty() {
-        problems.push(String::from("`ModelTier` has no variants, so every served name is a guess."));
+        problems.push(String::from(
+            "`ModelTier` has no variants, so every served name is a guess.",
+        ));
     } else {
         checked += 1;
     }
@@ -144,11 +148,15 @@ pub fn self_test() -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-lubot-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(dir.join("crates/lubot/crates/lubot-core/src")).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(dir.join("crates/lubot/crates/lubot-data/src")).map_err(|e| e.to_string())?;
+    let dir =
+        std::env::temp_dir().join(format!("budlum-gates-lubot-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(dir.join("crates/lubot/crates/lubot-core/src"))
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join("crates/lubot/crates/lubot-data/src"))
+        .map_err(|e| e.to_string())?;
     let good = "pub enum ModelTier {\n    /// Everyday use.\n    Light,\n    /// Highest capacity.\n    Normal,\n}\n\nimpl ModelTier {\n    pub fn served_model_name(self, version: &str) -> String {\n        format!(\"lubot-{}-{version}\", self.name())\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn served_names_follow_tier_naming() {}\n    fn tier_names_contain_no_multiplier_labels() {}\n}\n";
-    std::fs::write(dir.join("crates/lubot/crates/lubot-core/src/tier.rs"), good).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/lubot/crates/lubot-core/src/tier.rs"), good)
+        .map_err(|e| e.to_string())?;
     std::fs::write(
         dir.join("crates/lubot/crates/lubot-data/src/verify.rs"),
         "pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), DataError> { Ok(()) }\n",
@@ -159,13 +167,19 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: a contained tier file was refused"));
     }
     let bad = good.replace("    Normal,", "    Normal,\n    X10x,");
-    std::fs::write(dir.join("crates/lubot/crates/lubot-core/src/tier.rs"), bad).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/lubot/crates/lubot-core/src/tier.rs"), bad)
+        .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a `10x` tier label passed"));
     }
-    std::fs::write(dir.join("crates/lubot/crates/lubot-core/src/tier.rs"), good).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("crates/lubot/crates/lubot-data/src/verify.rs"), "// gone\n").map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/lubot/crates/lubot-core/src/tier.rs"), good)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("crates/lubot/crates/lubot-data/src/verify.rs"),
+        "// gone\n",
+    )
+    .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: an unverified dataset surface passed"));

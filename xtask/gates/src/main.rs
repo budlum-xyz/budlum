@@ -181,7 +181,7 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
-Gate {
+    Gate {
         name: "zkvm-immune-regeneration",
         replaces: None,
         run: gates::zkvm_immune_regeneration::run,
@@ -189,7 +189,7 @@ Gate {
         run_args: None,
         self_test: gates::zkvm_immune_regeneration::self_test,
     },
-Gate {
+    Gate {
         name: "quantum-account",
         replaces: None,
         run: gates::quantum_account::run,
@@ -197,7 +197,7 @@ Gate {
         run_args: None,
         self_test: gates::quantum_account::self_test,
     },
-Gate {
+    Gate {
         name: "parallel-execution",
         replaces: None,
         run: gates::parallel_execution::run,
@@ -205,7 +205,7 @@ Gate {
         run_args: None,
         self_test: gates::parallel_execution::self_test,
     },
-Gate {
+    Gate {
         name: "multi-ratio-consensus",
         replaces: None,
         run: gates::multi_ratio_consensus::run,
@@ -213,7 +213,7 @@ Gate {
         run_args: None,
         self_test: gates::multi_ratio_consensus::self_test,
     },
-Gate {
+    Gate {
         name: "mempool-mev-free",
         replaces: None,
         run: gates::mempool_mev_free::run,
@@ -221,7 +221,7 @@ Gate {
         run_args: None,
         self_test: gates::mempool_mev_free::self_test,
     },
-Gate {
+    Gate {
         name: "lubot-zk-inference",
         replaces: None,
         run: gates::lubot_zk_inference::run,
@@ -229,7 +229,7 @@ Gate {
         run_args: None,
         self_test: gates::lubot_zk_inference::self_test,
     },
-Gate {
+    Gate {
         name: "bridge-dual-tree",
         replaces: None,
         run: gates::bridge_dual_tree::run,

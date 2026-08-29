@@ -46,7 +46,11 @@ fn span_of(src: &str, name: &str) -> Option<(usize, usize)> {
     let mut esc = false;
     while i < bytes.len() {
         let c = bytes[i];
-        let next = if i + 1 < bytes.len() { bytes[i + 1] } else { ' ' };
+        let next = if i + 1 < bytes.len() {
+            bytes[i + 1]
+        } else {
+            ' '
+        };
         if in_line {
             if c == '\n' {
                 in_line = false;
@@ -116,7 +120,9 @@ fn map_fields(struct_body: &str) -> Vec<String> {
         let name = name.trim_start_matches("pub ").trim();
         if (rest.contains("BTreeMap<") || rest.contains("BTreeSet<"))
             && !name.is_empty()
-            && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         {
             out.push(name.to_string());
         }
@@ -228,7 +234,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         if alone {
             excused += 1;
         } else {
-            missing.push(format!("{name} (claimed exception, its writes are not in one place)"));
+            missing.push(format!(
+                "{name} (claimed exception, its writes are not in one place)"
+            ));
         }
     }
     if !missing.is_empty() {
@@ -301,7 +309,9 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/domain/storage_deal.rs"), added).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a new table nobody folds passed silently"));
+        return Err(String::from(
+            "canary: a new table nobody folds passed silently",
+        ));
     }
     let second = good.replace(
         "        self.access_events.entry(id).or_default();",

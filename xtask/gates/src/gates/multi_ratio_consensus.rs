@@ -18,7 +18,12 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 const FORBIDDEN: [&str; 6] = [
-    "optical", "carousel", "diffusion", "regenerat", "fountain", "prompt",
+    "optical",
+    "carousel",
+    "diffusion",
+    "regenerat",
+    "fountain",
+    "prompt",
 ];
 
 /// The source of one function, by name, from `pub fn name` to the matching
@@ -52,7 +57,9 @@ fn candidates(body: &str) -> Vec<(usize, String)> {
     let mut i = 0usize;
     while let Some(j) = body[i..].find("RatioCandidate {") {
         let start = i + j;
-        let Some(rel) = body[start..].find('{') else { break };
+        let Some(rel) = body[start..].find('{') else {
+            break;
+        };
         let open = start + rel;
         let mut depth = 0usize;
         let mut k = open;
@@ -93,8 +100,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     if list.len() < 4 {
         problems.push(format!(
             "the candidate list has {} entries; a consensus over fewer than four ratios is \
-             not a choice, so the function has probably been emptied rather than narrowed."
-        , list.len()));
+             not a choice, so the function has probably been emptied rather than narrowed.",
+            list.len()
+        ));
     } else {
         checked += 1;
     }
@@ -134,8 +142,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 problems.push(format!(
                     "candidate #{n} offers a pipeline named in the generative family \
                      (`{bad}`): `{}`. Its payload cannot be re-derived from the commitment, \
-                     so a winning vote on it settles bytes no verifier can reproduce."
-                    ,
+                     so a winning vote on it settles bytes no verifier can reproduce.",
                     c.lines()
                         .find(|l| l.contains("pipe_name"))
                         .unwrap_or("candidate")
@@ -166,7 +173,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
     if ids.is_empty() {
-        problems.push(String::from("no pipe id could be read from the candidate list."));
+        problems.push(String::from(
+            "no pipe id could be read from the candidate list.",
+        ));
     }
     if checked == 0 {
         return Err(String::from("gate checked nothing"));
@@ -202,7 +211,9 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("bud/src/bud_format.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a contained candidate list was refused"));
+        return Err(String::from(
+            "canary: a contained candidate list was refused",
+        ));
     }
     let bad = good.replace("pipe_name: \"xz9\"", "pipe_name: \"optical-carousel\"");
     std::fs::write(dir.join("bud/src/bud_format.rs"), bad).map_err(|e| e.to_string())?;
