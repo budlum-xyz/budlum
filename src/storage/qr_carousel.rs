@@ -1071,11 +1071,11 @@ mod tests {
         let enc = CarouselEncoder::new(&payload, DEFAULT_BLOCK_LEN).unwrap();
         let k = enc.params().k;
         let mut dec = CarouselDecoder::new();
-        let mut ilk: Option<u32> = None;
+        let mut first: Option<u32> = None;
         for seq in 0..u32::from(k) {
             dec.push(&enc.drop_at(seq)).unwrap();
-            if ilk.is_none() && dec.solid_prefix_blocks() * 10 >= usize::from(k) {
-                ilk = Some(seq + 1);
+            if first.is_none() && dec.solid_prefix_blocks() * 10 >= usize::from(k) {
+                first = Some(seq + 1);
             }
         }
         assert!(dec.is_complete(), "missing {}", dec.missing());
@@ -1085,8 +1085,8 @@ mod tests {
             "zero loss must be byte-exact"
         );
         assert!(
-            ilk.is_some_and(|n| u64::from(n) * 10 <= u64::from(k) + 10),
-            "a tenth of the stream must already carry a tenth of the source, measured {ilk:?} for k={k}"
+            first.is_some_and(|n| u64::from(n) * 10 <= u64::from(k) + 10),
+            "a tenth of the stream must already carry a tenth of the source, measured {first:?} for k={k}"
         );
     }
 

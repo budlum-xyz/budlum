@@ -400,4 +400,134 @@ mod tests {
         let got0 = png_to_optical_frame(&parsed.png_frames[0]).unwrap();
         assert_eq!(got0, frames[0]);
     }
+
+    /// The lossy half of the K10 claim, measured here rather than asserted.
+    ///
+    /// Two things are checked, because the claim has two halves and they run
+    /// through different code. A drop's body is 4000 bytes at the low level, so
+    /// that half is measured on the drop stream itself; the container half is
+    /// measured at the block length the QR PNG encoder can actually carry.
+    ///
+    /// The channel model is deterministic: one frame in ten is gone, and half of
+    /// those are gone because a flipped bit inside the body tripped the drop's
+    /// FNV check, which is what a frame that arrives damaged does. Under that
+    /// channel a single cycle of `k` frames cannot finish, and the redundancy
+    /// `CarouselFrame::drops_for_loss` prescribes does.
+    ///
+    /// Not measured here, and not claimed: what an H.264 encoder at CRF 28 keeps
+    /// of a QR frame. This container muxes PNGs, so no codec sits on this path.
+    /// The prescribed redundancy for a given loss rate is `CarouselFrame`'s own
+    /// claim and is measured in the `bud` crate, which owns that type.
+    #[test]
+    fn k10_channel_loss_survives_the_video_container() {
+        use crate::storage::qr_carousel::{CarouselDecoder, CarouselEncoder, CarouselError, Drop};
+
+        // (a) The low-level half: 4000 bytes per drop body, no container.
+        let block = 4000usize;
+        let payload: Vec<u8> = (0..block * 16).map(|i| (i % 251) as u8).collect();
+        let enc = CarouselEncoder::new(&payload, block).unwrap();
+        let k = usize::from(enc.params().k);
+        assert_eq!(k, 16, "sixteen blocks of 4000 bytes is the claim's k");
+        let raw: Vec<Vec<u8>> = (0..(4 * k) as u32)
+            .map(|s| enc.drop_at(s).to_bytes())
+            .collect();
+        let (survivors, dropped, refused) = channel(&raw);
+        assert!(
+            dropped + refused >= 3,
+            "the channel must actually damage the stream, measured {dropped} dropped and {refused} refused"
+        );
+        assert!(
+            refused > 0,
+            "a flipped body bit must be refused by the drop's own check"
+        );
+        let mut tek = CarouselDecoder::new();
+        for f in survivors.iter().take(k) {
+            if let Ok(d) = Drop::from_bytes(f) {
+                let _ = tek.push(&d);
+            }
+        }
+        assert!(
+            !tek.is_complete(),
+            "k frames with a tenth lost cannot be complete; that is what the factor is for"
+        );
+        let mut cift = CarouselDecoder::new();
+        for f in &survivors {
+            if let Ok(d) = Drop::from_bytes(f) {
+                let _ = cift.push(&d);
+            }
+        }
+        assert!(cift.is_complete(), "missing {}", cift.missing());
+        assert_eq!(
+            cift.finish().unwrap(),
+            payload,
+            "recovery must be byte-exact"
+        );
+
+        // (b) The container half: the same channel applied after a BDLV mux, so
+        // the mux itself is proven lossless and the frames that arrive are the
+        // frames that were sent.
+        let small = CarouselEncoder::new(&payload, 1000).unwrap();
+        let frames: Vec<Vec<u8>> = (0..(4 * usize::from(small.params().k)) as u32)
+            .map(|s| small.drop_at(s).to_bytes())
+            .collect();
+        let pc = [0x5au8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: *small.params(),
+            stream_id: [0u8; 32],
+            block_len: 1000,
+        };
+        let video = QrVideo::from_optical_frames(&recipe, &pc, &frames, DEFAULT_FPS).unwrap();
+        let parsed = QrVideo::from_bytes(&video.to_bytes()).unwrap();
+        let demuxed = demux_optical_frames(&parsed).unwrap();
+        assert_eq!(demuxed.len(), frames.len(), "the mux loses a frame");
+        for (got, sent) in demuxed.iter().zip(&frames) {
+            assert_eq!(got, sent, "a frame must come back byte-identical");
+        }
+        let (survivors, _, _) = channel(&demuxed);
+        let mut dec = CarouselDecoder::new();
+        for f in &survivors {
+            if let Ok(d) = Drop::from_bytes(f) {
+                let _ = dec.push(&d);
+            }
+        }
+        assert!(
+            dec.is_complete(),
+            "the same loss through the container must still recover, missing {}",
+            dec.missing()
+        );
+        assert_eq!(
+            dec.finish().unwrap(),
+            payload,
+            "container recovery must be exact"
+        );
+    }
+
+    /// One frame in ten is taken by the channel: every other one by bit rot in
+    /// the body, the rest by disappearing. Returns what a receiver would hand to
+    /// the decoder plus the two counts.
+    fn channel(frames: &[Vec<u8>]) -> (Vec<Vec<u8>>, usize, usize) {
+        let mut out = Vec::with_capacity(frames.len());
+        let mut dropped = 0usize;
+        let mut refused = 0usize;
+        for (i, f) in frames.iter().enumerate() {
+            if i % 10 != 0 {
+                out.push(f.clone());
+                continue;
+            }
+            if (i / 10) % 2 == 0 {
+                dropped += 1;
+                continue;
+            }
+            let mut hurt = f.clone();
+            let mid = hurt.len() / 2;
+            hurt[mid] ^= 0x80;
+            match Drop::from_bytes(&hurt) {
+                Err(CarouselError::BodyHashMismatch) => refused += 1,
+                Err(other) => panic!("a flipped body bit must fail the hash, not {other:?}"),
+                Ok(_) => panic!("a flipped body bit slipped past the drop check"),
+            }
+        }
+        (out, dropped, refused)
+    }
 }
