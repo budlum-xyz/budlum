@@ -354,7 +354,7 @@ pub enum ChainCommand {
     /// View-key permission book (Classic private body or Three encrypted recipe).
     IssueViewGrant {
         content_id: crate::storage::ContentId,
-        issuer: crate::core::address::Address,
+        auth: crate::storage::GrantAuthorization,
         grantee: Option<crate::core::address::Address>,
         key_id: [u8; 32],
         policy: crate::storage::ViewPolicy,
@@ -363,7 +363,7 @@ pub enum ChainCommand {
     },
     RevokeViewGrant {
         grant_id: u64,
-        caller: crate::core::address::Address,
+        auth: crate::storage::GrantAuthorization,
         at_epoch: u64,
         response: oneshot::Sender<Result<(), String>>,
     },
@@ -377,11 +377,17 @@ pub enum ChainCommand {
     /// Classic/2.0 confidential body commit (not Three).
     RegisterConfidentialCommit {
         commit: crate::storage::ConfidentialBodyCommit,
+        owner: crate::core::address::Address,
         response: oneshot::Sender<Result<[u8; 32], String>>,
     },
     GetConfidentialCommit {
         content_id: crate::storage::ContentId,
         response: oneshot::Sender<Option<crate::storage::ConfidentialBodyCommit>>,
+    },
+    /// Who the chain believes speaks for a confidential object.
+    GetConfidentialOwner {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::core::address::Address>>,
     },
     OpenStorageChallenge {
         request: crate::domain::storage_deal::RetrievalChallengeRequest,
@@ -948,7 +954,7 @@ impl ChainHandle {
     pub async fn issue_view_grant(
         &self,
         content_id: crate::storage::ContentId,
-        issuer: crate::core::address::Address,
+        auth: crate::storage::GrantAuthorization,
         grantee: Option<crate::core::address::Address>,
         key_id: [u8; 32],
         policy: crate::storage::ViewPolicy,
@@ -959,7 +965,7 @@ impl ChainHandle {
             .tx
             .send(ChainCommand::IssueViewGrant {
                 content_id,
-                issuer,
+                auth,
                 grantee,
                 key_id,
                 policy,
@@ -974,7 +980,7 @@ impl ChainHandle {
     pub async fn revoke_view_grant(
         &self,
         grant_id: u64,
-        caller: crate::core::address::Address,
+        auth: crate::storage::GrantAuthorization,
         at_epoch: u64,
     ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
@@ -982,7 +988,7 @@ impl ChainHandle {
             .tx
             .send(ChainCommand::RevokeViewGrant {
                 grant_id,
-                caller,
+                auth,
                 at_epoch,
                 response: tx,
             })
@@ -1015,17 +1021,38 @@ impl ChainHandle {
     pub async fn register_confidential_commit(
         &self,
         commit: crate::storage::ConfidentialBodyCommit,
+        owner: crate::core::address::Address,
     ) -> Result<[u8; 32], String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ChainCommand::RegisterConfidentialCommit {
                 commit,
+                owner,
                 response: tx,
             })
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Who speaks for `content_id`: the manifest owner or the address that
+    /// registered the confidential commit. Read-only, and the reason it exists is
+    /// that a grant signature is checked against this address; a wallet has to be
+    /// able to see what the chain will compare before it spends a key on signing.
+    pub async fn confidential_owner(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<Option<crate::core::address::Address>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConfidentialOwner {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
     pub async fn get_confidential_commit(
@@ -3671,7 +3698,7 @@ impl ChainActor {
                 }
                 ChainCommand::IssueViewGrant {
                     content_id,
-                    issuer,
+                    auth,
                     grantee,
                     key_id,
                     policy,
@@ -3686,13 +3713,13 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .issue_view_grant(content_id, issuer, grantee, key_id, policy, opened_epoch)
+                        .issue_view_grant(content_id, &auth, grantee, key_id, policy, opened_epoch)
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
                 ChainCommand::RevokeViewGrant {
                     grant_id,
-                    caller,
+                    auth,
                     at_epoch,
                     response,
                 } => {
@@ -3704,7 +3731,7 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .revoke_view_grant(grant_id, caller, at_epoch)
+                        .revoke_view_grant(grant_id, &auth, at_epoch)
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
@@ -3723,7 +3750,11 @@ impl ChainActor {
                     );
                     let _ = response.send(ok);
                 }
-                ChainCommand::RegisterConfidentialCommit { commit, response } => {
+                ChainCommand::RegisterConfidentialCommit {
+                    commit,
+                    owner,
+                    response,
+                } => {
                     if self.storage_economics_disabled_on_mainnet() {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
@@ -3732,8 +3763,15 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .register_confidential_commit(commit);
+                        .register_confidential_commit(commit, owner);
                     let _ = response.send(res);
+                }
+                ChainCommand::GetConfidentialOwner {
+                    content_id,
+                    response,
+                } => {
+                    let _ =
+                        response.send(self.blockchain.state.storage_registry.owner_of(&content_id));
                 }
                 ChainCommand::GetConfidentialCommit {
                     content_id,

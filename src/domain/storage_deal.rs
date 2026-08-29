@@ -670,6 +670,10 @@ pub struct StorageRegistry {
     /// Three/R1 has no body; this map is the private-body surface only.
     #[serde(default)]
     pub confidential_commits: BTreeMap<ContentId, crate::storage::ConfidentialBodyCommit>,
+    /// The address each confidential commit was recorded for. Grants are signed
+    /// authorisations, and a signature needs somebody whose word it is.
+    #[serde(default)]
+    pub confidential_owners: BTreeMap<ContentId, crate::core::address::Address>,
 }
 
 use std::collections::BTreeMap;
@@ -1426,19 +1430,31 @@ impl StorageRegistry {
     pub fn issue_view_grant(
         &mut self,
         content_id: ContentId,
-        issuer: Address,
+        auth: &crate::storage::GrantAuthorization,
         grantee: Option<Address>,
         key_id: [u8; 32],
         policy: crate::storage::ViewPolicy,
         opened_epoch: u64,
     ) -> Result<u64, crate::storage::ViewGrantError> {
         let owner = self
-            .get_manifest(&content_id)
-            .map(|m| m.owner)
+            .owner_of(&content_id)
             .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        let issuer = auth
+            .derived_owner()
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
         if issuer != owner {
             return Err(crate::storage::ViewGrantError::NotOwner { issuer, owner });
         }
+        let digest = crate::storage::grant_issue_digest(
+            &content_id,
+            &issuer,
+            grantee.as_ref(),
+            &key_id,
+            policy,
+            opened_epoch,
+        );
+        auth.verify(&digest, &owner)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.view_grants
             .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
     }
@@ -1446,9 +1462,22 @@ impl StorageRegistry {
     pub fn revoke_view_grant(
         &mut self,
         grant_id: u64,
-        caller: Address,
+        auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
     ) -> Result<(), crate::storage::ViewGrantError> {
+        let caller = auth
+            .derived_owner()
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        let digest = crate::storage::grant_revoke_digest(grant_id, &caller, at_epoch);
+        let grant = self
+            .view_grants
+            .get(grant_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?;
+        let owner = self
+            .owner_of(&grant.content_id)
+            .unwrap_or_else(|| grant.issuer);
+        auth.verify(&digest, &owner)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.view_grants.revoke(grant_id, caller, at_epoch)
     }
 
@@ -1464,10 +1493,10 @@ impl StorageRegistry {
         key_id: &[u8; 32],
         owner: &Address,
     ) -> bool {
-        let Some(manifest) = self.get_manifest(content_id) else {
+        let Some(recorded) = self.owner_of(content_id) else {
             return false;
         };
-        if manifest.owner != *owner {
+        if recorded != *owner {
             return false;
         }
         self.view_grants.may_view(content_id, viewer, key_id, owner)
@@ -1476,9 +1505,12 @@ impl StorageRegistry {
     /// Record a Classic confidential body commit. Refuses plaintext encryption
     /// (see ConfidentialBodyCommit::new) and refuses a Three edition manifest
     /// when one is already registered for this id (body vs recipe category).
+    /// The `owner` is the address the commit is recorded for: an unattributed
+    /// body commit would leave later view grants with nobody whose word counts.
     pub fn register_confidential_commit(
         &mut self,
         commit: crate::storage::ConfidentialBodyCommit,
+        owner: crate::core::address::Address,
     ) -> Result<[u8; 32], String> {
         if let Some(m) = self.manifests.get(&commit.content_id) {
             if !m.edition.admits_body() {
@@ -1488,7 +1520,30 @@ impl StorageRegistry {
             }
         }
         let commitment = commit.commitment();
-        self.confidential_commits.insert(commit.content_id, commit);
+        let content_id = commit.content_id;
+        // Registering a commit for an object somebody else already spoke for
+        // would move the view authority of a live object to the newcomer, and a
+        // grant issued under the old owner would silently start meaning the new
+        // one. Overwriting an already-open commitment is refused outright:
+        // whoever holds an object holds it until the object is closed.
+        if let Some(prev) = self.confidential_commits.get(&content_id) {
+            return Err(if prev.commitment() == commitment {
+                format!("confidential body commit already registered for 0x{content_id:?}")
+            } else {
+                format!(
+                    "confidential body commit refused: 0x{content_id:?} is already committed under a different body"
+                )
+            });
+        }
+        if let Some(prev_owner) = self.confidential_owners.get(&content_id) {
+            if *prev_owner != owner {
+                return Err(format!(
+                    "confidential body commit refused: 0x{content_id:?} is spoken for by {prev_owner:?}"
+                ));
+            }
+        }
+        self.confidential_commits.insert(content_id, commit);
+        self.confidential_owners.insert(content_id, owner);
         Ok(commitment)
     }
 
@@ -1498,6 +1553,22 @@ impl StorageRegistry {
         content_id: &ContentId,
     ) -> Option<&crate::storage::ConfidentialBodyCommit> {
         self.confidential_commits.get(content_id)
+    }
+
+    /// Who may speak for this content: the manifest owner, or the address that
+    /// registered a Classic confidential commit when there is no manifest. One
+    /// authority per object, and it is looked up rather than believed.
+    ///
+    /// The read path for wallets and auditors: before signing a grant, a holder
+    /// has to be able to ask who the chain believes owns an object. The refusals
+    /// of `issue_view_grant` are the write-side half; this is the same authority
+    /// made visible, so the two cannot disagree.
+    #[must_use]
+    pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
+        self.manifests
+            .get(content_id)
+            .map(|m| m.owner)
+            .or_else(|| self.confidential_owners.get(content_id).copied())
     }
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
@@ -3293,30 +3364,33 @@ mod tests {
         reg.register_manifest(&m);
         let content = m.manifest_id;
         let key = [5u8; 32];
+        // An authorisation no key signed is refused before the registry looks at
+        // what the grant would allow. Which refusal it is depends on the build:
+        // with the wallet verifier the fabricated key derives to an address that
+        // is not the owner, without it nothing can be derived at all. Both are
+        // refusals, and only those two are accepted here.
+        let unsigned = crate::storage::GrantAuthorization {
+            owner_key: [7u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: Vec::new(),
+        };
         let err = reg
             .issue_view_grant(
                 content,
-                stranger,
+                &unsigned,
                 None,
                 key,
                 crate::storage::ViewPolicy::PublicKeyId,
                 1,
             )
             .expect_err("a stranger cannot hand out grants");
-        assert!(matches!(
-            err,
-            crate::storage::ViewGrantError::NotOwner { .. }
-        ));
-        reg.issue_view_grant(
-            content,
-            owner,
-            None,
-            key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
-        )
-        .expect("the owner's own grant must be accepted");
-        assert!(reg.may_view(&content, &bob, &key, &owner));
+        assert!(
+            matches!(
+                err,
+                crate::storage::ViewGrantError::NotOwner { .. }
+                    | crate::storage::ViewGrantError::Authorization(_)
+            ),
+            "an unsigned grant must be refused as one of the two, got {err:?}"
+        );
         assert!(
             !reg.may_view(&content, &bob, &key, &stranger),
             "naming oneself the owner is not being the owner"
@@ -3325,6 +3399,163 @@ mod tests {
         assert!(
             !reg.may_view(&yok, &bob, &key, &owner),
             "content no manifest describes opens for nobody"
+        );
+    }
+
+    /// A signed grant opens the object it names and nothing else.
+    ///
+    /// The signature binds content, grantee, key handle, policy and epoch, so a
+    /// valid authorisation cannot be moved to another object or reshaped into a
+    /// wider one; and a caller that cannot derive the owner from its key never
+    /// reaches the registry at all.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_signed_grant_opens_only_the_object_it_names() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let bob = Address::from([2u8; 32]);
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let content = m.manifest_id;
+        let mut other = ContentManifest::from_bytes_sliced(b"another private body bytes...", 8)
+            .expect("second manifest");
+        other.owner = owner;
+        reg.register_manifest(&other);
+        let other = other.manifest_id;
+        assert_ne!(content, other, "the two objects must be distinct");
+
+        let key = [5u8; 32];
+        let digest = crate::storage::grant_issue_digest(
+            &content,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        reg.issue_view_grant(
+            content,
+            &auth,
+            None,
+            key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        )
+        .expect("the owner's own signed grant must be accepted");
+        assert!(reg.may_view(&content, &bob, &key, &owner));
+        assert!(
+            !reg.may_view(&content, &bob, &key, &bob),
+            "a grantee is not an owner and must not be treated as one"
+        );
+
+        // The same signature, offered for the other object: the content is inside
+        // the digest, so it verifies as nothing.
+        let err = reg
+            .issue_view_grant(
+                other,
+                &auth,
+                None,
+                key,
+                crate::storage::ViewPolicy::PublicKeyId,
+                1,
+            )
+            .expect_err("a grant signature is bound to the object it names");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::Authorization(
+                crate::storage::GrantAuthError::BadSignature
+            )
+        ));
+        // The same signature, offered as a different grant: policy and grantee are
+        // in the digest too.
+        let err = reg
+            .issue_view_grant(
+                content,
+                &auth,
+                Some(bob),
+                key,
+                crate::storage::ViewPolicy::OwnerOnly,
+                1,
+            )
+            .expect_err("a grant signature is bound to the policy it names");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::Authorization(
+                crate::storage::GrantAuthError::BadSignature
+            )
+        ));
+    }
+
+    /// A revocation needs the owner's word as much as an issuance does.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_grant_is_revoked_only_by_a_signed_revocation() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [6u8; 32];
+        let issue_digest = crate::storage::grant_issue_digest(
+            &m.manifest_id,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let issue = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&issue_digest).to_vec(),
+        };
+        let grant = reg
+            .issue_view_grant(
+                m.manifest_id,
+                &issue,
+                None,
+                key,
+                crate::storage::ViewPolicy::PublicKeyId,
+                1,
+            )
+            .expect("signed issuance");
+        assert!(reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner));
+
+        // Revoking with the issuance signature still attached is not revoking.
+        let err = reg
+            .revoke_view_grant(grant, &issue, 4)
+            .expect_err("a revocation needs its own signature");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::Authorization(
+                crate::storage::GrantAuthError::BadSignature
+            )
+        ));
+        assert!(
+            reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner),
+            "a refused revocation must leave the grant standing"
+        );
+
+        let revoke_digest = crate::storage::grant_revoke_digest(grant, &owner, 4);
+        let revoke = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&revoke_digest).to_vec(),
+        };
+        reg.revoke_view_grant(grant, &revoke, 4)
+            .expect("the owner's signed revocation");
+        assert!(
+            !reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner),
+            "a revoked grant opens nothing"
         );
     }
 
@@ -5733,7 +5964,7 @@ mod demand_driven_replication_tests {
         )
         .expect("client-side ok");
         let err = reg
-            .register_confidential_commit(commit)
+            .register_confidential_commit(commit, Address::from([1u8; 32]))
             .expect_err("Three must not take a body commit");
         assert!(err.contains("Three") || err.contains("recipe"), "got {err}");
     }
@@ -5754,9 +5985,14 @@ mod demand_driven_replication_tests {
             ConfidentialProofKind::HybridZkTee,
         )
         .unwrap();
-        let c = reg.register_confidential_commit(commit).unwrap();
+        let owner = Address::from([1u8; 32]);
+        let c = reg.register_confidential_commit(commit, owner).unwrap();
         assert_eq!(c.len(), 32);
         assert!(reg.get_confidential_commit(&m.manifest_id).is_some());
+        // The commit is worthless without a recorded owner: whoever signs a grant
+        // later is checked against this address, so a commit that named nobody
+        // could be opened by anybody's word.
+        assert_eq!(reg.owner_of(&m.manifest_id), Some(owner));
     }
 
     fn generated_registry() -> (StorageRegistry, ContentId) {

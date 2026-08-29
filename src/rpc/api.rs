@@ -379,7 +379,7 @@ pub trait BudlumApi {
     async fn storage_issue_view_grant(
         &self,
         content_id: String,
-        issuer: String,
+        authorization: Option<serde_json::Value>,
         grantee: Option<String>,
         key_id: String,
         policy: String,
@@ -390,7 +390,7 @@ pub trait BudlumApi {
     async fn storage_revoke_view_grant(
         &self,
         grant_id: u64,
-        caller: String,
+        authorization: Option<serde_json::Value>,
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -411,6 +411,7 @@ pub trait BudlumApi {
         encryption: String,
         ciphertext_root: String,
         proof_kind: String,
+        authorization: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_storageGetConfidentialCommit")]

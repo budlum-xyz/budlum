@@ -958,6 +958,69 @@ fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorO
     Ok(arr)
 }
 
+/// Parses a signed grant authorisation: `{"ownerPublicKey": "0x…", "signature":
+/// "0x…"}`, the public key being the FIPS 204 ML-DSA-87 key of the account whose
+/// word the mutation is. The address the key derives to is the only identity the
+/// registry believes: `issuer` and `caller` used to be strings a caller typed,
+/// which let anybody mint or revoke grants on somebody else's content.
+/// Map a grant authorisation failure onto a JSON-RPC error code.
+///
+/// A node built without the wallet verifier cannot check a grant signature at
+/// all. That is an operator problem and gets the internal-error code, so a
+/// client does not retry it with a different key; every other refusal is about
+/// what the caller supplied and gets the invalid-params code.
+fn grant_auth_error(e: crate::storage::GrantAuthError) -> ErrorObjectOwned {
+    let code = match e {
+        crate::storage::GrantAuthError::VerifierUnavailable => -32603,
+        crate::storage::GrantAuthError::BadSignature
+        | crate::storage::GrantAuthError::WrongOwner => -32602,
+    };
+    ErrorObjectOwned::owned(code, e.to_string(), None::<()>)
+}
+
+fn parse_grant_auth(
+    v: Option<&serde_json::Value>,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    let Some(v) = v else {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            "authorization object required: ownerPublicKey + signature",
+            None::<()>,
+        ));
+    };
+    let al = |k: &str| -> Result<Vec<u8>, ErrorObjectOwned> {
+        let ham = v
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("authorization.{k} must be a hex string"),
+                    None::<()>,
+                )
+            })?;
+        hex::decode(ham.strip_prefix("0x").unwrap_or(ham)).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("authorization.{k}: {e}"), None::<()>)
+        })
+    };
+    let owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN] =
+        al("ownerPublicKey")?.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "authorization.ownerPublicKey must be {} bytes",
+                    crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN
+                ),
+                None::<()>,
+            )
+        })?;
+    let signature = al("signature")?;
+    Ok(crate::storage::GrantAuthorization {
+        owner_key,
+        signature,
+    })
+}
+
 fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
     Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
 }
@@ -2096,15 +2159,14 @@ impl BudlumApiServer for RpcServer {
     async fn storage_issue_view_grant(
         &self,
         content_id: String,
-        issuer: String,
+        authorization: Option<serde_json::Value>,
         grantee: Option<String>,
         key_id: String,
         policy: String,
         opened_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
-        let issuer = Address::from_hex(issuer.strip_prefix("0x").unwrap_or(&issuer))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("issuer: {e}"), None::<()>))?;
+        let auth = parse_grant_auth(authorization.as_ref())?;
         let grantee = match grantee {
             None => None,
             Some(g) if g.is_empty() => None,
@@ -2131,7 +2193,7 @@ impl BudlumApiServer for RpcServer {
         };
         let grant_id = self
             .chain
-            .issue_view_grant(content_id, issuer, grantee, key_id, policy, opened_epoch)
+            .issue_view_grant(content_id, auth, grantee, key_id, policy, opened_epoch)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
         Ok(serde_json::json!({ "grantId": grant_id }))
@@ -2140,13 +2202,12 @@ impl BudlumApiServer for RpcServer {
     async fn storage_revoke_view_grant(
         &self,
         grant_id: u64,
-        caller: String,
+        authorization: Option<serde_json::Value>,
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let caller = Address::from_hex(caller.strip_prefix("0x").unwrap_or(&caller))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("caller: {e}"), None::<()>))?;
+        let auth = parse_grant_auth(authorization.as_ref())?;
         self.chain
-            .revoke_view_grant(grant_id, caller, at_epoch)
+            .revoke_view_grant(grant_id, auth, at_epoch)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
         Ok(serde_json::json!({ "revoked": true, "grantId": grant_id }))
@@ -2179,8 +2240,14 @@ impl BudlumApiServer for RpcServer {
         encryption: String,
         ciphertext_root: String,
         proof_kind: String,
+        authorization: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
+        // The recorded owner is derived from the signing key, not typed: this is
+        // the address whose word later opens the body.
+        let owner = parse_grant_auth(authorization.as_ref())?
+            .derived_owner()
+            .map_err(grant_auth_error)?;
         let encryption = match encryption.to_ascii_lowercase().as_str() {
             "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
                 crate::storage::ContentCipher::Aes256Gcm,
@@ -2235,7 +2302,7 @@ impl BudlumApiServer for RpcServer {
         .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
         let commitment = self
             .chain
-            .register_confidential_commit(commit)
+            .register_confidential_commit(commit, owner)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
         Ok(serde_json::json!({
@@ -2254,6 +2321,15 @@ impl BudlumApiServer for RpcServer {
             .get_confidential_commit(content_id)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        // The address whose signature opens this body, read from the registry
+        // rather than echoed back from the request. A wallet signs a grant
+        // against exactly this value, so the node that will refuse the grant has
+        // to be the node that can report it.
+        let owner = self
+            .chain
+            .confidential_owner(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
         match commit {
             None => Ok(serde_json::json!({ "found": false })),
             Some(c) => Ok(serde_json::json!({
@@ -2263,6 +2339,7 @@ impl BudlumApiServer for RpcServer {
                 "ciphertextRoot": format!("0x{}", hex::encode(c.ciphertext_root)),
                 "proofKind": format!("{:?}", c.proof_kind),
                 "commitment": format!("0x{}", hex::encode(c.commitment())),
+                "owner": owner.map(|a| a.to_hex()),
             })),
         }
     }

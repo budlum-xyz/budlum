@@ -115,6 +115,130 @@ fn issuer_bytes(a: &Address) -> &[u8; 32] {
     a.as_bytes()
 }
 
+/// Refusal of a signed authorisation over a grant mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantAuthError {
+    /// The signature does not verify under the supplied key.
+    BadSignature,
+    /// The key speaks for an address that is not the owner named in the request.
+    WrongOwner,
+    /// The signature cannot be checked at all, because this binary was built
+    /// without the ML-DSA-87 wallet verifier.
+    VerifierUnavailable,
+}
+
+impl std::fmt::Display for GrantAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadSignature => write!(f, "grant authorization signature does not verify"),
+            Self::WrongOwner => write!(f, "grant authorization key is not the content owner"),
+            Self::VerifierUnavailable => {
+                write!(f, "grant signatures need the wallet-ml-dsa verifier")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GrantAuthError {}
+
+/// Signed authorisation for a view-grant mutation.
+///
+/// The registry knows which address owns content; it does not know who is
+/// calling. This closes that gap: the caller supplies the owner's FIPS 204
+/// ML-DSA-87 public key and a signature over the domain-tagged digest of the
+/// mutation, and the address the key derives to is the only identity the
+/// registry believes. Before this existed, `issuer` and `caller` were strings a
+/// caller typed into an RPC field, so any caller could hand out view grants for
+/// content it does not own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantAuthorization {
+    /// Account public key whose word this is.
+    pub owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+    /// ML-DSA-87 signature over the mutation digest.
+    pub signature: Vec<u8>,
+}
+
+impl GrantAuthorization {
+    /// The address this authorisation speaks for: derived from the key, never
+    /// read from a field.
+    ///
+    /// The derivation is
+    /// [`wallet_address_from_ml_dsa_87_public_key`](crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key),
+    /// the one the chain already uses to bind a transaction signature to the
+    /// spend authority that produced it. Choosing it is what makes a grant mean
+    /// "the wallet holding this key allowed this": a key cannot sign its way to
+    /// an address the wallet itself does not own, and a grant could not be issued
+    /// under one derivation and spent under another. A binary without the
+    /// `wallet-ml-dsa` feature derives nothing and refuses everything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantAuthError::VerifierUnavailable`] when this build cannot
+    /// check ML-DSA-87 keys.
+    pub fn derived_owner(&self) -> Result<Address, GrantAuthError> {
+        crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&self.owner_key)
+            .map_err(|_| GrantAuthError::VerifierUnavailable)
+    }
+
+    /// Whether `digest` is signed by `owner`'s key.
+    ///
+    /// # Errors
+    ///
+    /// [`GrantAuthError::WrongOwner`] when the key derives to another address,
+    /// [`GrantAuthError::BadSignature`] when the signature does not verify, which
+    /// includes a binary built without the `wallet-ml-dsa` feature.
+    pub fn verify(&self, digest: &[u8; 32], owner: &Address) -> Result<(), GrantAuthError> {
+        if &self.derived_owner()? != owner {
+            return Err(GrantAuthError::WrongOwner);
+        }
+        crate::crypto::primitives::verify_ml_dsa_87_signature(
+            digest,
+            &self.signature,
+            &self.owner_key,
+        )
+        .map_err(|_| GrantAuthError::BadSignature)
+    }
+}
+
+/// Digest a grant issuance is signed over. The content, the derived `issuer`,
+/// the grantee, the key handle, the policy and the opening epoch all enter: a
+/// signature cannot be moved to another object, another key or another grant.
+#[must_use]
+pub fn grant_issue_digest(
+    content_id: &ContentId,
+    issuer: &Address,
+    grantee: Option<&Address>,
+    key_id: &[u8; 32],
+    policy: ViewPolicy,
+    opened_epoch: u64,
+) -> [u8; 32] {
+    let policy_byte = [match policy {
+        ViewPolicy::OwnerOnly => 1u8,
+        ViewPolicy::NamedGrantee => 2u8,
+        ViewPolicy::PublicKeyId => 3u8,
+    }];
+    hash_fields_bytes(&[
+        b"BDLM_GRANT_ISSUE_V1",
+        content_id.as_bytes(),
+        issuer.as_bytes(),
+        grantee.map_or(&[0u8; 32][..], |g| g.as_bytes()),
+        key_id,
+        &policy_byte,
+        &opened_epoch.to_le_bytes(),
+    ])
+}
+
+/// Digest a grant revocation is signed over.
+#[must_use]
+pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_GRANT_REVOKE_V1",
+        &grant_id.to_le_bytes(),
+        caller.as_bytes(),
+        &at_epoch.to_le_bytes(),
+    ])
+}
+
 /// Errors for the grant registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewGrantError {
@@ -135,6 +259,8 @@ pub enum ViewGrantError {
     },
     /// No manifest describes the content, so there is no owner to authorise.
     UnknownContent,
+    /// The signed authorisation is not the owner's word over this mutation.
+    Authorization(GrantAuthError),
 }
 
 impl std::fmt::Display for ViewGrantError {
@@ -157,6 +283,7 @@ impl std::fmt::Display for ViewGrantError {
                 "view grants belong to the content owner {owner}, not {issuer}"
             ),
             Self::UnknownContent => write!(f, "no manifest describes this content"),
+            Self::Authorization(e) => write!(f, "grant authorization refused: {e}"),
             Self::DuplicateLiveGrant => {
                 write!(
                     f,
