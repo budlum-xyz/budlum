@@ -700,7 +700,6 @@ pub fn self_test() -> Result<String, String> {
 
     empty_case(&tmp)?;
 
-
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
         "metrics-are-written canary OK (written PASSes, unwritten FAILs, baseline exempts, \
@@ -759,7 +758,6 @@ pub struct Metrics {
         ));
     }
     Ok(())
-
 }
 
 fn empty_case(tmp: &Path) -> Result<(), String> {
@@ -784,7 +782,6 @@ fn empty_case(tmp: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
-
 }
 /// The shape that must pass before any refusal means something: a tree whose every
 /// metric is written in production.
@@ -835,4 +832,3 @@ fn baseline_case(tmp: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
