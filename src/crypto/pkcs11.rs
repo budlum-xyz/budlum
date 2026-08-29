@@ -5,9 +5,9 @@ use std::sync::Mutex;
 const BLS_DATA_LABEL: &str = "BUD_BLS_KEY";
 const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";
 
-/// HSM'deki ozel anahtarin okunan acik anahtara ait oldugunu baslangicta
-/// kanitlamak icin kullanilan sabit test mesaji.
-pub const ED25519_BINDING_TEST_MESSAGE: &[u8] = b"BUDLUM_PKCS11_ED25519_BINDING_V1";
+/// The fixed test message used at startup to prove that the private key held in the
+/// HSM belongs to the public key that was read.
+const ED25519_BINDING_TEST_MESSAGE: &[u8] = b"BUDLUM_PKCS11_ED25519_BINDING_V1";
 
 pub struct Pkcs11Signer {
     #[allow(dead_code)]
@@ -16,7 +16,7 @@ pub struct Pkcs11Signer {
     slot_id: u64,
     #[allow(dead_code)]
     token_pin_env: String,
-    /// Birden fazla Ed25519 cifti varsa konsensuis anahtarini secen etiket.
+    /// Label that picks the consensus key when the slot holds more than one Ed25519 pair.
     key_label: Option<String>,
     public_key_bytes: [u8; 32],
     bls_key: Mutex<Option<BlsKeypair>>,
@@ -109,8 +109,8 @@ impl Pkcs11Signer {
             .map_err(|e| {
                 CryptoError::KeyGeneration(format!("Failed to extract Ed25519 key from HSM: {e}"))
             })?;
-        // Okunan acik anahtarin, imzalamada kullanilacak ozel anahtarla ayni
-        // cifte ait oldugunu baslangicta bir test imzasiyla kanitla.
+        // Prove up front, with a test signature, that the public key read here and the
+        // private key that will do the signing belong to the same pair.
         Self::verify_key_binding(&session, key_label.as_deref(), &public_key_bytes)
             .map_err(CryptoError::KeyGeneration)?;
         let bls_key = None;
@@ -152,7 +152,7 @@ impl Pkcs11Signer {
         self
     }
 
-    /// Slot'ta birden fazla Ed25519 cifti varsa konsensuis anahtarini etiketiyle secer.
+    /// When the slot holds more than one Ed25519 pair, the label selects the consensus key.
     #[must_use]
     pub fn with_key_label(mut self, label: Option<String>) -> Self {
         self.key_label = label;
@@ -271,8 +271,8 @@ impl Pkcs11Signer {
             .find_objects(&template)
             .map_err(|e| format!("Ed25519 key search failed: {e}"))?;
 
-        // Birden fazla anahtar varsa tahmin edilmez: ilan edilen kimlik ile
-        // imzalayan anahtarin farkli olmasi konsensuis hatasidir.
+        // More than one key is never guessed: announcing one identity and signing with a
+        // different key is a consensus fault.
         Self::require_single_key("public", objects.len())?;
 
         let attr = session
@@ -288,9 +288,9 @@ impl Pkcs11Signer {
         Err("Failed to extract public key bytes".into())
     }
 
-    /// Slot'ta tam olarak bir Ed25519 anahtari olmali. Eski davranis
-    /// `objects[0]` ile tahmin ediyordu; birden fazla anahtar varsa dugumun
-    /// ilan ettigi kimlik ile imzaladigi anahtar farkli olabilir.
+    /// The slot must hold exactly one Ed25519 key. The older behaviour guessed with
+    /// `objects[0]`, so with several keys the identity a node announced and the key it
+    /// signed with could differ.
     fn require_single_key(kind: &str, count: usize) -> Result<(), String> {
         match count {
             0 => Err(format!("No Ed25519 {kind} key found in HSM")),
@@ -345,9 +345,9 @@ impl Pkcs11Signer {
         Ok(sig[..64].to_vec())
     }
 
-    /// Okunan acik anahtarin, slot'ta imzalayacak ozel anahtarla ayni cifte
-    /// ait oldugunu sabit bir test mesaji uzerinde dogrular. Uymuyorsa dugum
-    /// acilmaz: yanlis eslesme her blokta gecersiz imza uretir.
+    /// Checks the read public key against the private key that will sign in the slot, over
+    /// a fixed test message. On a mismatch the node does not start: a wrong pairing
+    /// produces an invalid signature on every block.
     fn verify_key_binding(
         session: &cryptoki::session::Session,
         key_label: Option<&str>,
@@ -358,10 +358,8 @@ impl Pkcs11Signer {
             .try_into()
             .map_err(|_| "HSM returned an unexpected signature length".to_string())?;
 
-        let verifying_key =
-            ed25519_dalek::VerifyingKey::from_bytes(public_key_bytes).map_err(|e| {
-                format!("HSM public key is not a valid Ed25519 verifying key: {e}")
-            })?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(public_key_bytes)
+            .map_err(|e| format!("HSM public key is not a valid Ed25519 verifying key: {e}"))?;
         let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
 
         verifying_key
@@ -955,8 +953,8 @@ mod vendor_tests {
         assert!(err.contains("No Ed25519 private key"), "{err}");
     }
 
-    /// Eski davranis `objects[0]` ile tahmin ediyordu: birden fazla anahtar
-    /// varsa ilan edilen kimlik ile imzalayan anahtar farkli olabilir.
+    /// The older behaviour guessed with `objects[0]`: with more than one key the
+    /// announced identity and the signing key could differ.
     #[test]
     fn an_ambiguous_ed25519_key_selection_is_refused() {
         let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();

@@ -264,8 +264,8 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_token_pin_env: Option<String>,
 
-    /// Slot'ta birden fazla Ed25519 cifti varsa konsensuis anahtarinin etiketi.
-    /// Verilmezse slot'ta tam olarak bir Ed25519 cifti olmasi gerekir.
+    /// Label that picks the consensus key when the slot holds more than one Ed25519 pair.
+    /// Without it the slot must hold exactly one Ed25519 pair.
     #[arg(long)]
     pub pkcs11_key_label: Option<String>,
 

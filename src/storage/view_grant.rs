@@ -217,11 +217,12 @@ pub fn grant_issue_digest(
         ViewPolicy::NamedGrantee => 2u8,
         ViewPolicy::PublicKeyId => 3u8,
     }];
+    let absent_grantee = [0u8; 32];
     hash_fields_bytes(&[
         b"BDLM_GRANT_ISSUE_V1",
         content_id.as_bytes(),
         issuer.as_bytes(),
-        grantee.map_or(&[0u8; 32][..], |g| g.as_bytes()),
+        grantee.map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
         key_id,
         &policy_byte,
         &opened_epoch.to_le_bytes(),
