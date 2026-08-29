@@ -1,7 +1,9 @@
 //! A8 - Three NFT metadata pin (plan §CH A8 / G4).
 //!
-//! WIRING: unwired - staged 3.0 metadata pin; minting is not in production
-//! yet, so nothing emits a pin (plan §A8).
+//! WIRING: `storage::emit::qr_feed_preview` builds the pin from the recipe it
+//! just metered and refuses a feed whose pin does not track that recipe, so a
+//! token and its feed cannot end up naming different objects. The minting
+//! transaction still has to carry the same commitment (plan §A8).
 //!
 //! On-chain / marketplace metadata must never carry a raw seed or payload key.
 //! It pins the recipe commitment, visibility policy label, and an optional
