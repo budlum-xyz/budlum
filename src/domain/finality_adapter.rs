@@ -375,25 +375,37 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
             ));
         }
 
-        if let Ok(decoded_set_hash) = hex::decode(&validator_snapshot.set_hash) {
-            if decoded_set_hash.len() == 32 {
-                let mut snapshot_set_hash = [0u8; 32];
-                snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-                if domain.validator_set_hash != [0u8; 32]
-                    && snapshot_set_hash != domain.validator_set_hash
-                {
-                    return Ok(FinalityStatus::Rejected(
-                        "PoS validator snapshot does not match registered domain set".into(),
-                    ));
-                }
-                if commitment.validator_set_hash != [0u8; 32]
-                    && commitment.validator_set_hash != snapshot_set_hash
-                {
-                    return Ok(FinalityStatus::Rejected(
-                        "PoS commitment validator set does not match finality proof".into(),
-                    ));
-                }
-            }
+        // A set hash that cannot be decoded is a refusal, not a step to fall
+        // Through. These two checks are the only things binding the proof's
+        // Validator set to the one the domain registered and the one the
+        // Commitment names; `FinalityCertificate::verify` compares the cert's
+        // String to the snapshot's and never re-derives either, so a proof
+        // Whose set hash parses to nothing would otherwise name its own
+        // Validator set. The string arrives inside the proof.
+        let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
+            .ok()
+            .filter(|bytes| bytes.len() == 32)
+            .ok_or_else(|| {
+                FinalityError(format!(
+                    "PoS finality proof validator set hash is not 32 bytes of hex: {:?}",
+                    validator_snapshot.set_hash
+                ))
+            })?;
+        let mut snapshot_set_hash = [0u8; 32];
+        snapshot_set_hash.copy_from_slice(&decoded_set_hash);
+        if domain.validator_set_hash != [0u8; 32]
+            && snapshot_set_hash != domain.validator_set_hash
+        {
+            return Ok(FinalityStatus::Rejected(
+                "PoS validator snapshot does not match registered domain set".into(),
+            ));
+        }
+        if commitment.validator_set_hash != [0u8; 32]
+            && commitment.validator_set_hash != snapshot_set_hash
+        {
+            return Ok(FinalityStatus::Rejected(
+                "PoS commitment validator set does not match finality proof".into(),
+            ));
         }
 
         cert.verify(validator_snapshot)
@@ -1330,6 +1342,50 @@ mod tests {
                 .unwrap(),
             FinalityStatus::Rejected(_)
         ));
+    }
+
+    /// The snapshot's `set_hash` arrives inside the proof, and the two checks
+    /// that bind it to the registered validator set used to sit inside
+    /// `if let Ok(decoded) = hex::decode(..) { if decoded.len() == 32 { .. } }`
+    /// with no else. A set hash that does not parse therefore skipped both
+    /// bindings silently, and `FinalityCertificate::verify` only compares the
+    /// two strings to each other - it never re-derives one from the snapshot's
+    /// validators - so a proof could name its own validator set. A set hash
+    /// that cannot be checked is a refusal, not a step to fall through.
+    #[test]
+    fn pos_finality_refuses_a_set_hash_it_cannot_decode() {
+        let domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
+        let commitment = commitment(ConsensusKind::PoS);
+        let adapter = PoSFinalityAdapter;
+
+        for unparseable in ["", "zz", "abcd", &"ab".repeat(31)] {
+            let mut snapshot = ValidatorSetSnapshot::new(0, vec![]);
+            snapshot.set_hash = unparseable.to_string();
+            let cert = FinalityCert {
+                epoch: 0,
+                checkpoint_height: commitment.domain_height,
+                checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                agg_sig_bls: vec![],
+                bitmap: vec![],
+                set_hash: snapshot.set_hash.clone(),
+            };
+            let err = adapter
+                .verify_finality(
+                    &domain,
+                    &commitment,
+                    &FinalityProof::PoS {
+                        cert,
+                        validator_snapshot: snapshot,
+                    },
+                )
+                .expect_err("a set hash that cannot be decoded must not reach the cert");
+            assert!(
+                err.0.contains("set hash"),
+                "set hash {unparseable:?} is not 32 bytes of hex; it has to be refused as such, \
+                 but the proof fell through to: {}",
+                err.0
+            );
+        }
     }
 
     #[test]
