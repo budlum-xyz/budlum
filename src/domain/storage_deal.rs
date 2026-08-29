@@ -4212,8 +4212,68 @@ mod tests {
     /// lives only in a node's local map is exactly the record a second node would
     /// disagree about: a grant is checked against it, and the chain's answer must
     /// not depend on which node replayed the block.
+    ///
+    /// Both registries are filled by a key that actually signs, because the
+    /// owner recorded is the one derived from the signing key; two different
+    /// speakers means two different keys, not two typed addresses.
+    #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_confidential_commit_changes_the_registry_root() {
+        use crate::crypto::primitives::WalletKeyPair;
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let signed_commit = |kp: &WalletKeyPair| {
+            let commit = ConfidentialBodyCommit::new(
+                m.manifest_id,
+                ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+                [4u8; 32],
+                ConfidentialProofKind::HybridZkTee,
+            )
+            .unwrap();
+            let owner = kp.address();
+            let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+            (
+                commit,
+                crate::storage::GrantAuthorization {
+                    owner_key: kp.public_key_bytes(),
+                    signature: kp.sign(&digest).to_vec(),
+                },
+            )
+        };
+
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let before = reg.root();
+        let (commit, auth) = signed_commit(&WalletKeyPair::generate());
+        reg.register_confidential_commit(commit, &auth).unwrap();
+        let after = reg.root();
+        assert_ne!(before, after, "the body commit must reach the root");
+
+        // The owner alone moves the root too: same commitment, different
+        // speaker. A fold over the commitments only would let a node swap who
+        // owns an object without any state-root change.
+        let mut other_registry = StorageRegistry::new();
+        other_registry.register_manifest(&m);
+        let (commit2, auth2) = signed_commit(&WalletKeyPair::generate());
+        other_registry
+            .register_confidential_commit(commit2, &auth2)
+            .unwrap();
+        assert_ne!(
+            after,
+            other_registry.root(),
+            "the recorded owner must reach the root"
+        );
+    }
+
+    /// Without a verifier nothing can prove an owner, so nothing is recorded
+    /// and the root holds. Fail-closed is the point: a build that cannot check
+    /// signatures must not write an owner nobody proved into the state root.
+    #[cfg(not(feature = "wallet-ml-dsa"))]
+    #[test]
+    fn a_confidential_commit_is_refused_so_the_root_holds() {
         use crate::storage::{
             ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
         };
@@ -4229,32 +4289,22 @@ mod tests {
             ConfidentialProofKind::HybridZkTee,
         )
         .unwrap();
-        let bir = operator();
-        reg.register_confidential_commit(commit, bir).unwrap();
-        let after = reg.root();
-        assert_ne!(before, after, "the body commit must reach the root");
-
-        // The owner alone moves the root too: same commitment, different
-        // speaker. A fold over the commitments only would let a node swap who
-        // owns an object without any state-root change.
-        let mut other_registry = StorageRegistry::new();
-        other_registry.register_manifest(&m);
-        let commit2 = ConfidentialBodyCommit::new(
-            m.manifest_id,
-            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
-            [4u8; 32],
-            ConfidentialProofKind::HybridZkTee,
-        )
-        .unwrap();
-        other_registry
-            .register_confidential_commit(commit2, opener())
-            .unwrap();
-        assert_ne!(
-            after,
-            other_registry.root(),
-            "the recorded owner must reach the root"
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: [9u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: vec![1, 2, 3, 4],
+        };
+        assert!(
+            reg.register_confidential_commit(commit, &auth).is_err(),
+            "a commit whose owner signed nothing must be refused"
+        );
+        assert_eq!(
+            before,
+            reg.root(),
+            "a refused commit must not move the state root"
         );
     }
+
+
 
     // === B76: a phone may hold a copy, never the only one =================
 
