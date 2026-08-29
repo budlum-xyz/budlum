@@ -1,5 +1,7 @@
 //! Lubot's tier story and its dataset hash have to stay checkable.
 //!
+//! Kapı kodu: `K-AI-VERIFIABLE-INFERENCE-MESH`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//!
 //! The invention text promises a ZK-checked inference path for Lubot. Two
 //! things make that promise falsifiable today, and both are the surface a
 //! prover would have to lie about: the served model name (a tier label the

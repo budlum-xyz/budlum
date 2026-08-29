@@ -1,5 +1,7 @@
 //! The execution proof path refuses rather than trusting.
 //!
+//! Kapı kodu: `K-ZKVM-IMMUNE-REGENERATION`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//!
 //! The invention text promises that a regenerated artifact cannot bring a
 //! proof with it: what the chain accepts is the check, not the claim. This
 //! gate pins the five fail-closed checks the executor runs on an AI

@@ -1,5 +1,7 @@
 //! The bridge root commits to both trees, not one.
 //!
+//! Kapı kodu: `K-CROSS-DOMAIN-DUAL-TREE`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//!
 //! `BridgeState` holds two independent ledgers: where every asset currently
 //! sits (`asset_locations`) and what is moving (`transfers`). A root over the
 //! first alone lets a node hide an in-flight transfer, claim a matching root,

@@ -1,5 +1,7 @@
 //! What the ratio consensus is allowed to offer.
 //!
+//! Kapı kodu: `K-MULTI-RATIO-FRACTAL`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//!
 //! `MultiRatioConsensus::candidates_for_format` is the list a node votes on.
 //! The invariant that keeps the vote honest is not a number in that list, it
 //! is what the list may contain: no candidate may be a generative or optical

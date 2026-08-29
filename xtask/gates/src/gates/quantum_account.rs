@@ -1,4 +1,6 @@
 //! A post-quantum account is only as real as the checks that let it exist.
+//!
+//! Kapı kodu: `K-CRYPTO-QUANTUM-THRESHOLD`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
 
 //!
 //! `QuantumAccount` is an ML-DSA-87 key with a guardian set. The address is

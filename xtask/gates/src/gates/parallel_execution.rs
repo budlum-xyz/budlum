@@ -1,5 +1,7 @@
 //! Every node must reach the same root from the same block.
 //!
+//! Kapı kodu: `K-EXECUTION-PARALLEL-DETERMINISTIC`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//!
 //! Parallel execution is promised in the fourth phase, and the property that
 //! makes it possible is already required: the state root must be a fold whose
 //! input order is fixed by the data. `StorageRegistry::root()` is that fold.

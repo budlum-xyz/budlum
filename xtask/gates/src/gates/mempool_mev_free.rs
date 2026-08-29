@@ -1,5 +1,7 @@
 //! The mempool may not be a market.
 //!
+//! Kapı kodu: `K-NETWORK-MEV-FREE`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//!
 //! `pool.rs` states why the ordering is what it is: transactions sharing a fee
 //! used to arrive in insertion order, so two nodes produced two different
 //! blocks from the same pool, and a node could reshuffle a tie to its own
