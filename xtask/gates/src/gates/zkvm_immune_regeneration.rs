@@ -1,6 +1,6 @@
 //! The execution proof path refuses rather than trusting.
 //!
-//! Kapı kodu: `K-ZKVM-IMMUNE-REGENERATION`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//! Gate code: `K-ZKVM-IMMUNE-REGENERATION`. A finding or a document that names this code resolves here.
 //!
 //! The invention text promises that a regenerated artifact cannot bring a
 //! proof with it: what the chain accepts is the check, not the claim. This

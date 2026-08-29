@@ -1,6 +1,6 @@
 //! What the ratio consensus is allowed to offer.
 //!
-//! Kapı kodu: `K-MULTI-RATIO-FRACTAL`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//! Gate code: `K-MULTI-RATIO-FRACTAL`. A finding or a document that names this code resolves here.
 //!
 //! `MultiRatioConsensus::candidates_for_format` is the list a node votes on.
 //! The invariant that keeps the vote honest is not a number in that list, it

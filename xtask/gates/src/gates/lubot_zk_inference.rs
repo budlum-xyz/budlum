@@ -1,6 +1,6 @@
 //! Lubot's tier story and its dataset hash have to stay checkable.
 //!
-//! Kapı kodu: `K-AI-VERIFIABLE-INFERENCE-MESH`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//! Gate code: `K-AI-VERIFIABLE-INFERENCE-MESH`. A finding or a document that names this code resolves here.
 //!
 //! The invention text promises a ZK-checked inference path for Lubot. Two
 //! things make that promise falsifiable today, and both are the surface a

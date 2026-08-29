@@ -1,6 +1,6 @@
 //! Every node must reach the same root from the same block.
 //!
-//! Kapı kodu: `K-EXECUTION-PARALLEL-DETERMINISTIC`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//! Gate code: `K-EXECUTION-PARALLEL-DETERMINISTIC`. A finding or a document that names this code resolves here.
 //!
 //! Parallel execution is promised in the fourth phase, and the property that
 //! makes it possible is already required: the state root must be a fold whose
@@ -126,7 +126,7 @@ fn map_fields(struct_body: &str) -> Vec<String> {
 
 /// The three properties the fold must keep about *how* it folds, not what it
 /// folds: a domain tag, the confidential pair, and no unordered container.
-fn ek_denetim(body: &str) -> (usize, Vec<String>) {
+fn extra_checks(body: &str) -> (usize, Vec<String>) {
     let mut ok = 0usize;
     let mut problems = Vec::new();
     if body.contains("BDLM_STORAGE_REGISTRY_V1") {
@@ -166,7 +166,7 @@ fn ek_denetim(body: &str) -> (usize, Vec<String>) {
 ///
 /// Returns the list of violated claims.
 /// Formats the findings the way every gate in this crate reports them.
-fn yayla(problems: &[String]) -> String {
+fn report(problems: &[String]) -> String {
     let mut msg = String::new();
     for p in problems {
         writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
@@ -239,14 +239,14 @@ pub fn run(root: &Path) -> Result<String, String> {
             missing.join(", ")
         ));
     }
-    let (ek_yas, sorun) = ek_denetim(&body);
-    checked += ek_yas;
+    let (extra, sorun) = extra_checks(&body);
+    checked += extra;
     problems.extend(sorun);
     if checked == 0 {
         return Err(String::from("gate checked nothing"));
     }
     if !problems.is_empty() {
-        return Err(yayla(&problems));
+        return Err(report(&problems));
     }
     Ok(format!(
         "state-root determinism OK: {checked} checks, {} ordered maps folded, {excused} \

@@ -1,6 +1,6 @@
 //! The mempool may not be a market.
 //!
-//! Kapı kodu: `K-NETWORK-MEV-FREE`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//! Gate code: `K-NETWORK-MEV-FREE`. A finding or a document that names this code resolves here.
 //!
 //! `pool.rs` states why the ordering is what it is: transactions sharing a fee
 //! used to arrive in insertion order, so two nodes produced two different
@@ -45,7 +45,7 @@ fn body_of(src: &str, name: &str) -> Option<String> {
 ///
 /// Returns the list of violated claims.
 /// Formats the findings the way every gate in this crate reports them.
-fn yayla(problems: &[String]) -> String {
+fn report(problems: &[String]) -> String {
     let mut msg = String::new();
     for p in problems {
         writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
@@ -147,7 +147,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(String::from("gate checked nothing"));
     }
     if !problems.is_empty() {
-        return Err(yayla(&problems));
+        return Err(report(&problems));
     }
     Ok(format!(
         "mempool ordering OK: {checked} checks, canonical fee-DESC/hash-ASC order held in \

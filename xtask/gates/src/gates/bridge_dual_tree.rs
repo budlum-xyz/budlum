@@ -1,6 +1,6 @@
 //! The bridge root commits to both trees, not one.
 //!
-//! Kapı kodu: `K-CROSS-DOMAIN-DUAL-TREE`. Bir bulgu veya belge bu adla arama yaptığında buraya düşer.
+//! Gate code: `K-CROSS-DOMAIN-DUAL-TREE`. A finding or a document that names this code resolves here.
 //!
 //! `BridgeState` holds two independent ledgers: where every asset currently
 //! sits (`asset_locations`) and what is moving (`transfers`). A root over the
@@ -22,7 +22,7 @@ use std::path::Path;
 ///
 /// Returns the list of violated claims.
 /// Formats the findings the way every gate in this crate reports them.
-fn yayla(problems: &[String]) -> String {
+fn report(problems: &[String]) -> String {
     let mut msg = String::new();
     for p in problems {
         writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
@@ -127,7 +127,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(String::from("gate checked nothing"));
     }
     if !problems.is_empty() {
-        return Err(yayla(&problems));
+        return Err(report(&problems));
     }
     Ok(format!(
         "bridge dual-tree root OK: {checked} checks, both ledgers folded through merkle_root \
