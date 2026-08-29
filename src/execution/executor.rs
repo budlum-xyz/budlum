@@ -17,6 +17,16 @@ pub struct Executor;
 /// `"Plonky3 with a local patch"` - used to be accepted, and what the gate
 /// guards is only checked structurally downstream.
 ///
+/// The value is not a label this node invented: it is the id the proof library
+/// compares against before it decodes anything
+/// (`bud_proof::plonky3_prover`, `"Plonky3-Keccak-Goldilocks"`). The exact match
+/// was briefly `"Plonky3"`, which is a name no prover emits, and the result was a
+/// path that could not be satisfied from either side - an envelope the verifier
+/// would have opened was refused in the mempool, and an envelope shaped for the
+/// mempool's word was refused by the verifier. Both gates now read this
+/// constant: `ProofVerifier::validate_envelope_structure` refuses any other
+/// backend, so the two cannot drift into two different acceptances again.
+///
 /// The gate is deliberately the same on every network (`_chain_id` is
 /// unread): an unproven execution is as worthless on devnet as on mainnet.
 pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3";
@@ -41,8 +51,14 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // one network we care about" instead of "is this a network where losing the
     // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
     // a public testnet that grows real value - came back enabled.
-    chain_id == crate::core::chain_config::Network::Devnet.chain_id().value()
-        || chain_id == crate::core::chain_config::Network::Testnet.chain_id().value()
+    chain_id
+        == crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value()
+        || chain_id
+            == crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value()
 }
 
 impl Executor {
