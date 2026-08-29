@@ -2623,6 +2623,17 @@ impl StorageRegistry {
                 .deals
                 .get_mut(&deal_id)
                 .ok_or(StorageError::UnknownDeal(deal_id))?;
+            // The answer path refuses a deal that has left `Active`; the
+            // Missed path has to ask the same question. Up to
+            // `MAX_OPEN_CHALLENGES_PER_DEAL` challenges can be open against one
+            // Deal, and every one of them used to reach this line and record
+            // The bond again: a wrong answer on challenge one and silence on
+            // Challenge two produced two slash events for one failure. This
+            // Layer does not burn the bond, it hands the amount to the
+            // `Blockchain` accounting path, which counts events, not deals.
+            if !deal.is_active() {
+                return Err(StorageError::DealNotActive(deal_id));
+            }
             let slash_amount = deal.economics.operator_bond;
             deal.status = DealStatus::Slashed;
             let existing_ticket = self
@@ -5250,6 +5261,39 @@ mod tests {
         let ticket = reg.all_reallocation_tickets()[0];
         assert_eq!(ticket.cause, ReallocationCause::FailedDeal);
         assert_eq!(ticket.failed_deal_id, deal_id);
+    }
+
+    /// A deal is slashed once. `answer_challenge` refuses a deal that has left
+    /// `Active` (`DealNotActive`); `finalize_missed_challenge` never asked that
+    /// Question, so a second open challenge on the same deal - up to
+    /// `MAX_OPEN_CHALLENGES_PER_DEAL` of them - recorded the bond as slashed
+    /// Again. This layer does not burn the bond, it hands the amount to the
+    /// `Blockchain` accounting path, and that path counts events, not deals:
+    /// The operator would pay twice for one failure.
+    #[test]
+    fn a_deal_that_has_already_been_slashed_is_not_slashed_twice() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+
+        let first = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        let second = reg
+            .open_challenge(deal_id, 0, 4, 121, 140, opener(), 50)
+            .unwrap();
+
+        let first_result = reg.finalize_missed_challenge(first, 130).unwrap();
+        assert!(
+            first_result.slashed_bond > 0,
+            "the first miss has to slash the bond"
+        );
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+
+        assert!(
+            reg.finalize_missed_challenge(second, 150).is_err(),
+            "the bond of a deal that is already `Slashed` must not be recorded a second time"
+        );
     }
 
     #[test]
