@@ -1060,6 +1060,35 @@ mod tests {
         assert!(dec.is_complete(), "missing {}", dec.missing());
         assert_eq!(dec.finish().unwrap(), payload);
     }
+    /// The K10 claim, measured in-tree: at zero loss the systematic pass closes
+    /// the whole payload, and a tenth of the stream is enough to hold a tenth of
+    /// the source contiguously. `BUD-3.0-SARTNAME.md` item 8 asserted this from a
+    /// Python harness that is in no repo; the assertion below is the reproducible
+    /// form of the same claim.
+    #[test]
+    fn carousel_k10_prefix_needs_no_redundancy_at_zero_loss() {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let enc = CarouselEncoder::new(&payload, DEFAULT_BLOCK_LEN).unwrap();
+        let k = enc.params().k;
+        let mut dec = CarouselDecoder::new();
+        let mut ilk: Option<u32> = None;
+        for seq in 0..u32::from(k) {
+            dec.push(&enc.drop_at(seq)).unwrap();
+            if ilk.is_none() && dec.solid_prefix_blocks() * 10 >= usize::from(k) {
+                ilk = Some(seq + 1);
+            }
+        }
+        assert!(dec.is_complete(), "missing {}", dec.missing());
+        assert_eq!(
+            dec.finish().unwrap(),
+            payload,
+            "zero loss must be byte-exact"
+        );
+        assert!(
+            ilk.is_some_and(|n| u64::from(n) * 10 <= u64::from(k) + 10),
+            "a tenth of the stream must already carry a tenth of the source, measured {ilk:?} for k={k}"
+        );
+    }
 
     #[test]
     fn repair_path_recovers_with_gaps() {
