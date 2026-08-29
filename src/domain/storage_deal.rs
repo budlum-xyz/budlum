@@ -3587,6 +3587,48 @@ mod tests {
     }
 
     /// A revocation needs the owner's word as much as an issuance does.
+    /// An issued view grant reaches the state root.
+    ///
+    /// Measured with a real ML-DSA-87 signature, because a grant the registry
+    /// refused must not move the root either: the assertion below is about the
+    /// accepted row, and the refusal case has its own test.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn an_issued_view_grant_reaches_the_registry_root() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [5u8; 32];
+        let digest = crate::storage::grant_issue_digest(
+            &m.manifest_id,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        let before = reg.root();
+        reg.issue_view_grant(
+            m.manifest_id,
+            &auth,
+            None,
+            key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        )
+        .expect("the owner's signed grant");
+        assert_ne!(before, reg.root(), "a live grant must reach the state root");
+    }
+
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_grant_is_revoked_only_by_a_signed_revocation() {
@@ -6171,48 +6213,6 @@ mod demand_driven_replication_tests {
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
-    /// An issued view grant reaches the state root.
-    ///
-    /// Measured with a real ML-DSA-87 signature, because a grant the registry
-    /// refused must not move the root either: the assertion below is about the
-    /// accepted row, and the refusal case has its own test.
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn an_issued_view_grant_reaches_the_registry_root() {
-        use crate::crypto::primitives::WalletKeyPair;
-
-        let mut reg = StorageRegistry::new();
-        let kp = WalletKeyPair::generate();
-        let owner = kp.address();
-        let mut m = good_manifest();
-        m.owner = owner;
-        reg.register_manifest(&m);
-        let key = [5u8; 32];
-        let digest = crate::storage::grant_issue_digest(
-            &m.manifest_id,
-            &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
-        );
-        let auth = crate::storage::GrantAuthorization {
-            owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
-        };
-        let before = reg.root();
-        reg.issue_view_grant(
-            m.manifest_id,
-            &auth,
-            None,
-            key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
-        )
-        .expect("the owner's signed grant");
-        assert_ne!(before, reg.root(), "a live grant must reach the state root");
-    }
-
     #[test]
     fn confidential_commit_accepts_classic_encrypted_body() {
         use crate::crypto::primitives::WalletKeyPair;
