@@ -67,6 +67,9 @@ use crate::storage::three_pipe::{
 use crate::storage::three_recipe::{
     recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, RECIPE_VIDEO_MAGIC,
 };
+use crate::storage::three_visibility::{
+    delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
+};
 use crate::storage::transformed::{transform_content, TransformError, TransformOpts};
 use crate::storage::{ContentId, ContentManifest};
 
@@ -205,6 +208,14 @@ pub struct FeedPreview {
     /// Domain-separated commitment of the NFT metadata this feed would mint
     /// against: what a marketplace pins, measured here rather than assumed.
     pub nft_meta: [u8; 32],
+    /// Which on-chain recipe form a mint would name for this feed, and with it
+    /// the grant class the upload path pairs: `OwnerOnly` opens nobody,
+    /// `NamedGrantee` the named, `PublicKeyId` everyone.
+    pub visibility: String,
+    /// Whether deleting the content from social/DM is treated as a key rotation
+    /// signal. Frames already handed to a device are not clawed back; this says
+    /// the *new* sessions stop opening.
+    pub rotate_key_on_delete: bool,
 }
 
 /// Errors from the emit path.
@@ -1016,23 +1027,40 @@ pub fn qr_feed_preview(
     }
     let publicly_reemitable = ThreeRecipe::Public(pipe.recipe.clone()).is_publicly_reemitable();
 
+    // Which on-chain form a mint would name. This is not invented here: the
+    // upload path has a product default (start sealed, open later through key
+    // infrastructure), and a preview that reported a different form than the
+    // upload would write would pin metadata nobody can open.
+    let vis = if seed_is_public {
+        UploadVisibility::Public
+    } else {
+        UploadVisibility::default()
+    };
+    let grant_policy = policy_for_upload(vis);
+    let recipe_form = recipe_for_upload(&pipe.recipe, vis);
     // The metadata a mint would pin, built here and checked against this feed
     // rather than trusted: a token whose recipe commitment is not the feed's
     // recipe is a token for a different object, and nothing else in the pipeline
     // would notice.
     let meta = ThreeNftMeta::from_recipe(
-        &ThreeRecipe::Public(pipe.recipe.clone()),
-        if publicly_reemitable {
+        &recipe_form,
+        if matches!(vis, UploadVisibility::Public) {
             PreviewMode::PublicStill
         } else {
             PreviewMode::Gated
         },
     )
     .with_video_commitment(QrVideo::blob_commitment(&encoded.video_blob));
-    if !meta_tracks_public_recipe(&meta, &pipe.recipe) {
+    // Two ways this can be wrong and both are refused: a public upload has to
+    // track the recipe the chain names, and a sealed one must not let its pin be
+    // matched against a candidate public recipe, which is the whole point of the
+    // seal.
+    if meta_tracks_public_recipe(&meta, &pipe.recipe) != matches!(vis, UploadVisibility::Public) {
         return Err(EmitError::MetaDrift);
     }
     let nft_meta = meta.commitment();
+    let visibility = format!("{vis:?} + {grant_policy:?}");
+    let rotate_key_on_delete = delete_implies_key_rotate();
 
     let (content_id, provider_commitment) = if let Some(manifest) = manifest {
         let mut scratch = InMemoryStorageProvider::with_operator(feed_id);
@@ -1157,6 +1185,8 @@ pub fn qr_feed_preview(
         recipe_class,
         a4_agreement,
         nft_meta,
+        visibility,
+        rotate_key_on_delete,
     })
 }
 
@@ -1271,6 +1301,10 @@ mod tests {
         // Measured, not assumed - the first version of this assert asked for the
         // two to be equal and CI named the two digests (emit.rs:1270).
         assert_ne!(acik.nft_meta, p.nft_meta);
+        // Neither preview was metered against a public form, so both carry the
+        // gated preview mode and the same visibility word.
+        assert_eq!(acik.visibility, p.visibility);
+        assert!(acik.rotate_key_on_delete);
     }
 
     #[test]

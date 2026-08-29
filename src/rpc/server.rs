@@ -1008,6 +1008,8 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
         "recipeClass": feed.recipe_class,
         "a4Agreement": feed.a4_agreement,
         "nftMeta": format!("0x{}", hex::encode(feed.nft_meta)),
+        "visibility": feed.visibility.clone(),
+        "deleteRotatesKey": feed.rotate_key_on_delete,
     })
 }
 
