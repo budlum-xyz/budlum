@@ -1264,10 +1264,13 @@ mod tests {
             qr_feed_preview(&body(2048), &EmitPolicy::default(), None).expect("plain preview");
         assert!(acik.a4_agreement);
         assert_eq!(acik.recipe_class, p.recipe_class);
-        // A mint and its feed must not disagree about the object, and the seal
-        // must not change that: both previews carry the same metadata pin.
         assert_ne!(acik.nft_meta, [0u8; 32]);
-        assert_eq!(acik.nft_meta, p.nft_meta);
+        assert_ne!(p.nft_meta, [0u8; 32]);
+        // The pin follows the recipe, and the recipe pins the A1 kind: a sealed
+        // feed and a plain feed of one body are two objects to a marketplace.
+        // Measured, not assumed - the first version of this assert asked for the
+        // two to be equal and CI named the two digests (emit.rs:1270).
+        assert_ne!(acik.nft_meta, p.nft_meta);
     }
 
     #[test]
