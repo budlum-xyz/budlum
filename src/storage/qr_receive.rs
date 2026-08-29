@@ -139,15 +139,14 @@ impl ProgressiveReceiver {
         self.decoder.missing()
     }
 
-    /// Leading contiguous solved blocks (progressive prefix length in blocks).
+    /// Leading contiguous solved blocks: how far a viewer can play without
+    /// waiting for the carousel to close.
     ///
-    /// K-QR-KARUSEL: systematic scan makes this climb early under low loss.
+    /// K-QR-KARUSEL: the systematic pass makes this climb early under low loss,
+    /// which is the whole reason for that ordering. The count comes from the
+    /// decoder's own solved slots, not from a completion flag.
     #[must_use]
-    pub fn solid_prefix_blocks(&self) -> usize {
-        // CarouselDecoder does not expose solved directly - use finish attempt
-        // on a clone only when complete; otherwise we need an accessor.
-        // We added no public solved view; approximate via missing==0 full else 0
-        // until we expose prefix. For real progressive, query decoder.
+    pub fn progressive_prefix_blocks(&self) -> usize {
         self.decoder.solid_prefix_blocks()
     }
 
@@ -211,7 +210,7 @@ mod tests {
             rx.push_frame(&pack_frame(&stream, &enc.drop_at(seq)))
                 .unwrap();
         }
-        let prefix = rx.solid_prefix_blocks();
+        let prefix = rx.progressive_prefix_blocks();
         assert!(
             prefix >= first as usize || rx.is_complete(),
             "prefix {prefix} after {first} systematic"

@@ -344,12 +344,15 @@ mod tests {
     /// and the packed container that they are all derived from is accepted.
     #[test]
     fn a_provider_put_refuses_a_transport_derivative() {
+        use crate::storage::qr_codec::{CodecKind, FrameMux, RawFrameConcat};
         use crate::storage::three_gate::ThreeBlobKind;
-        use crate::storage::three_pipe::{encode_qr_video, mux_raw, PIPE_DEFAULT_BLOCK_LEN};
+        use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
 
         let (manifest, body) = manifest_and_bytes();
         let enc = encode_qr_video(&body, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
-        let concat = mux_raw(&enc.pipe.frames).unwrap();
+        let concat = RawFrameConcat
+            .mux(CodecKind::RawFrames, &enc.pipe.frames)
+            .unwrap();
 
         let refused = [
             (enc.video_blob.clone(), ThreeBlobKind::QrVideo),

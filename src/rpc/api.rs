@@ -394,6 +394,15 @@ pub trait BudlumApi {
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Every view-grant row of a confidential object, with the count the node
+    /// treats as live. `liveOnly` asks for the live rows alone.
+    #[method(name = "bud_storageListViewGrants")]
+    async fn storage_list_view_grants(
+        &self,
+        content_id: String,
+        live_only: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_storageMayView")]
     async fn storage_may_view(
         &self,

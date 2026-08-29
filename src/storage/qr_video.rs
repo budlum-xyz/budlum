@@ -313,7 +313,7 @@ fn inflate_zlib_stored(z: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use crate::storage::qr_carousel::CarouselParams;
-    use crate::storage::three_pipe::{encode_plain, PIPE_DEFAULT_BLOCK_LEN};
+    use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -380,7 +380,9 @@ mod tests {
     #[test]
     fn video_round_trip_optical() {
         let content = b"qr-video-root-content".repeat(8);
-        let enc = encode_plain(&content, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
         // Use a short prefix of frames for speed in unit test (systematic enough for small)
         let frames: Vec<_> = enc
             .frames

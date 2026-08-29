@@ -44,13 +44,17 @@ impl ThreeEventHook for NopThreeHook {
     fn on_three_event(&mut self, _event: &ThreeHookEvent) {}
 }
 
-/// Recording hook for tests.
+/// Recording hook for tests. A fixture, not a product sink: a node that kept
+/// every event in memory would trade an audit trail for unbounded growth, so the
+/// type exists only where a test can drain it.
+#[cfg(test)]
 #[derive(Debug, Default, Clone)]
 pub struct RecordingThreeHook {
     /// Captured events.
     pub events: Vec<ThreeHookEvent>,
 }
 
+#[cfg(test)]
 impl ThreeEventHook for RecordingThreeHook {
     fn on_three_event(&mut self, event: &ThreeHookEvent) {
         self.events.push(event.clone());

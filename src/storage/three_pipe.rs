@@ -8,13 +8,15 @@ use crate::storage::qr_carousel::{
     oneshot_drop_count, CarouselEncoder, CarouselError, DEFAULT_BLOCK_LEN,
     ONESHOT_REPAIR_PERMILLAGE,
 };
-use crate::storage::qr_codec::{CodecError, CodecKind, FrameMux, RawFrameConcat};
+use crate::storage::qr_codec::{CodecError, CodecKind, FrameMux};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
 use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
 use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
 use crate::storage::qr_video::{demux_optical_frames, QrVideo, QrVideoError, DEFAULT_FPS};
-use crate::storage::transformed::{transform_content, ContentClass, TransformError, TransformOpts};
+use crate::storage::transformed::{
+    transform_content, CodecFlags, ContentClass, TransformError, TransformOpts, TransformedPayload,
+};
 
 /// Errors from the facade.
 #[derive(Debug)]
@@ -108,6 +110,11 @@ pub struct EncodedPipe {
     pub stream_commitment: [u8; 32],
     /// A0 content class after transform.
     pub class: ContentClass,
+    /// A0 codec flags of the same pass: whether zlib bought anything, whether the
+    /// input was already entropy-coded. Reported next to `class` because A1 runs
+    /// its own compression pass over the result, so a caller that wants to know
+    /// what A0 did cannot read it back out of the container.
+    pub flags: CodecFlags,
 }
 
 impl EncodedPipe {
@@ -123,28 +130,47 @@ impl EncodedPipe {
 /// # Errors
 ///
 /// Any stage failure.
-pub fn encode_plain(
+fn encode_plain(
     content: &[u8],
     block_len: u16,
     seal_key: Option<&PayloadKey>,
 ) -> Result<EncodedPipe, PipeError> {
     // A0: classify + zlib-if-shrinks (entropy types skip zlib).
     let transformed = transform_content(content, TransformOpts::default())?;
+    encode_payload(transformed, block_len, seal_key)
+}
+
+/// A1-A5 over an already transformed payload.
+///
+/// Exists so a caller that produced the A0 pass itself (a recipe that pins its
+/// knobs, a re-emission that must reproduce byte for byte) hands the same payload
+/// to the container instead of transforming the content a second time and hoping
+/// two implementations agree.
+///
+/// # Errors
+///
+/// Digest mismatch, seal or container failure.
+fn encode_payload(
+    prepared: TransformedPayload,
+    block_len: u16,
+    seal_key: Option<&PayloadKey>,
+) -> Result<EncodedPipe, PipeError> {
     // A1 handoff: the body that goes into the carousel must still carry the
     // digest this transform pinned. A stale or forged payload is refused here,
     // before a commitment is computed over bytes nobody verified.
-    if !transformed.verify_hash() {
+    if !prepared.verify_hash() {
         return Err(TransformError::HashMismatch.into());
     }
+    let class = prepared.class;
+    let flags = prepared.codec_flags;
     let (kind, body) = if let Some(key) = seal_key {
         // A fresh CSPRNG nonce per call: two seals under the same key would share a
         // keystream, and XORing their ciphertexts leaks the plaintexts.
-        let sealed = seal_payload_csprng(key, &transformed.bytes)?;
+        let sealed = seal_payload_csprng(key, &prepared.bytes)?;
         (PayloadKind::EncryptedContent, sealed)
     } else {
-        (PayloadKind::ContentBytes, transformed.bytes)
+        (PayloadKind::ContentBytes, prepared.bytes)
     };
-    let class = transformed.class;
     let packed = pack_payload(kind, &body)?;
     let commit = payload_commitment(&packed);
     let enc = CarouselEncoder::new(&packed, block_len)?;
@@ -167,6 +193,7 @@ pub fn encode_plain(
         frames,
         stream_commitment,
         class,
+        flags,
     })
 }
 
@@ -189,12 +216,24 @@ pub fn decode_frames(
     Ok(rx.finish_unpacked()?)
 }
 
-/// Optional A4 raw concat of already-built frames.
+/// Mux a frame list through `M` and split the blob back, returning the frames the
+/// container hands an ordinary reader.
+///
+/// This is the only A4 entry point the crate writes: a container is usable when
+/// its own reader finds what its own writer put in, so the pair is offered
+/// together and a caller cannot pin a blob nobody can split. A linked container
+/// reaches the same path by implementing [`FrameMux`].
+///
 /// # Errors
 ///
-/// Propagates `PipeError` from the step that failed; its variants name the refused conditions.
-pub fn mux_raw(frames: &[Vec<u8>]) -> Result<Vec<u8>, PipeError> {
-    Ok(RawFrameConcat.mux(CodecKind::RawFrames, frames)?)
+/// Propagates `PipeError` from either half.
+pub fn concat_round_trip<M>(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, PipeError>
+where
+    M: Default + FrameMux,
+{
+    let muxer = M::default();
+    let blob = muxer.mux(CodecKind::RawFrames, frames)?;
+    Ok(muxer.split(CodecKind::RawFrames, &blob)?)
 }
 
 /// Recipe commitment helper.
@@ -257,6 +296,7 @@ mod tests {
     use super::*;
     use crate::storage::payload_crypt::{open_payload, PayloadKey, SEALED_NONCE_LEN};
     use crate::storage::qr_carousel::{oneshot_drop_count, planned_drop_count};
+    use crate::storage::qr_codec::{FrameMux, RawFrameConcat};
     use crate::storage::qr_payload::unpack_payload;
 
     /// Incompressible bytes, so `k` is large enough that `k + repair` and the
@@ -346,7 +386,9 @@ mod tests {
         assert_eq!(kind, PayloadKind::ContentBytes);
         assert_eq!(raw, content.as_slice());
         let _ = recipe_commitment(&enc.recipe);
-        let blob = mux_raw(&enc.frames).unwrap();
+        let blob = RawFrameConcat
+            .mux(CodecKind::RawFrames, &enc.frames)
+            .unwrap();
         assert!(blob.starts_with(b"BDLR"));
     }
 

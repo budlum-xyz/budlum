@@ -31,7 +31,9 @@ use crate::storage::qr_png::frame_to_qr_png;
 use crate::storage::qr_recipe::ThreeRecipePublic;
 use crate::storage::qr_video::{QrVideo, QrVideoError, MAX_VIDEO_FRAMES, VIDEO_MAGIC};
 use crate::storage::three_pipe::{EncodedPipe, EncodedQrVideo, PipeError};
-use crate::storage::transformed::{transform_content, ContentClass, TransformError, TransformOpts};
+use crate::storage::transformed::{
+    transform_content, CodecFlags, ContentClass, TransformError, TransformOpts,
+};
 
 /// Errors from the recipe layer.
 #[derive(Debug)]
@@ -359,6 +361,12 @@ impl VideoRecipeSealed {
 struct RecipeCore {
     /// The packed A1 body, owned so the encoder can borrow it.
     packed: Vec<u8>,
+    /// A0 class the pinned knobs produced, carried so the pipe reports the
+    /// transform that actually ran instead of a re-classification of the packed
+    /// bytes.
+    class: ContentClass,
+    /// A0 codec flags of the same pass.
+    flags: CodecFlags,
     /// Carousel encoder over `packed`.
     enc: CarouselEncoder,
     /// Stream binding every frame carries.
@@ -409,6 +417,8 @@ impl RecipeCore {
 
         Ok(Self {
             packed,
+            class: transformed.class,
+            flags: transformed.codec_flags,
             enc,
             stream_commitment,
             n,
@@ -445,10 +455,11 @@ impl RecipeCore {
                 recipe: pipe_recipe,
                 frames,
                 stream_commitment: self.stream_commitment,
-                // Overwritten by the caller, which knows the real A0 class;
-                // this default is never observable because both production
-                // paths set it before returning.
-                class: ContentClass::classify(&self.packed, None),
+                // The core carries what A0 decided, so the pipe cannot be built
+                // from a re-classification of the packed container: that number
+                // is a different measurement and would be reported as the A0 one.
+                class: self.class,
+                flags: self.flags,
             },
             video,
             video_blob,
@@ -466,7 +477,7 @@ impl RecipeCore {
 /// # Errors
 ///
 /// Any pipe failure.
-pub fn encode_qr_video_internal(
+fn encode_qr_video_internal(
     content: &[u8],
     transform: RecipeTransform,
     payload_kind: u8,
@@ -475,7 +486,6 @@ pub fn encode_qr_video_internal(
     fps: u16,
 ) -> Result<EncodedQrVideo, VideoRecipeError> {
     let opts = transform.as_opts();
-    let class = transform_content(content, opts)?.class;
     let core = RecipeCore::from_body(
         content,
         opts,
@@ -484,9 +494,7 @@ pub fn encode_qr_video_internal(
         repair_permillage,
         fps,
     )?;
-    let mut encoded = core.finish()?;
-    encoded.pipe.class = class;
-    Ok(encoded)
+    core.finish()
 }
 
 /// Frames of one produced video, handed over one at a time.

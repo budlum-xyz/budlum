@@ -25,15 +25,15 @@ pub struct CodecFlags(pub u32);
 
 impl CodecFlags {
     /// No special marking.
-    pub const NONE: Self = Self(0);
+    const NONE: Self = Self(0);
     /// Input was already entropy-coded (jpeg/mp4/zip/cipher) - zlib not tried.
-    pub const ENTROPY_CODED: Self = Self(1 << 0);
+    const ENTROPY_CODED: Self = Self(1 << 0);
     /// This transform applied shrink-only zlib.
     pub const PRE_SHRUNK: Self = Self(1 << 1);
     /// Bytes are ciphertext (G1 seal typically follows).
-    pub const CIPHERTEXT: Self = Self(1 << 2);
+    const CIPHERTEXT: Self = Self(1 << 2);
     /// Caller declared organic compressible (text/json/…).
-    pub const ORGANIC_COMPRESSIBLE: Self = Self(1 << 3);
+    const ORGANIC_COMPRESSIBLE: Self = Self(1 << 3);
 
     /// Bit test.
     #[must_use]
@@ -43,7 +43,7 @@ impl CodecFlags {
 
     /// Union.
     #[must_use]
-    pub const fn union(self, other: Self) -> Self {
+    const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 }
@@ -121,7 +121,7 @@ impl ContentClass {
 
     /// Whether zlib-if-shrinks may run.
     #[must_use]
-    pub const fn may_try_zlib(self) -> bool {
+    const fn may_try_zlib(self) -> bool {
         match self {
             Self::EntropyMedia | Self::EntropyArchive | Self::Ciphertext | Self::Exec => false,
             Self::Generic
@@ -276,7 +276,7 @@ impl std::fmt::Display for TransformError {
 impl std::error::Error for TransformError {}
 
 /// Lab hard cap (same order as A1).
-pub const MAX_TRANSFORM_IN: usize = 64 * 1024 * 1024;
+const MAX_TRANSFORM_IN: usize = 64 * 1024 * 1024;
 
 /// Options for [`transform_content`].
 #[derive(Debug, Clone, Copy, Default)]

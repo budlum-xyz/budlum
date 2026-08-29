@@ -1493,12 +1493,21 @@ impl StorageRegistry {
             .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
     }
 
+    /// Revoke one grant. Returns the row that was revoked, because whatever has
+    /// to react to a revocation (a gateway dropping session keys, a wallet
+    /// showing what it gave up) needs to know which content it was about; echo
+    /// back the content id from the request and the reply becomes a claim.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for an unknown id, a caller who is not
+    /// the owner, or an unreadable authorisation.
     pub fn revoke_view_grant(
         &mut self,
         grant_id: u64,
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
-    ) -> Result<(), crate::storage::ViewGrantError> {
+    ) -> Result<crate::storage::ViewGrant, crate::storage::ViewGrantError> {
         let caller = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
@@ -1506,13 +1515,33 @@ impl StorageRegistry {
         let grant = self
             .view_grants
             .get(grant_id)
-            .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?;
+            .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?
+            .clone();
         // `unwrap_or`, not `unwrap_or_else`: the fallback is a field read, and a
         // closure there is what CI's Clippy step refuses under `-D warnings`.
         let owner = self.owner_of(&grant.content_id).unwrap_or(grant.issuer);
         auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        self.view_grants.revoke(grant_id, caller, at_epoch)
+        self.view_grants.revoke(grant_id, caller, at_epoch)?;
+        Ok(grant)
+    }
+
+    /// Every view-grant row of one content, revoked ones included.
+    #[must_use]
+    pub fn view_grants_for(&self, content_id: &ContentId) -> Vec<crate::storage::ViewGrant> {
+        self.view_grants
+            .rows_for_content(content_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// How many rows of one content are live right now. Read through the
+    /// registry's own live index rather than by filtering `view_grants_for`, so
+    /// the number a wallet is shown is the number `may_view` will honour.
+    #[must_use]
+    pub fn live_view_grant_count(&self, content_id: &ContentId) -> usize {
+        self.view_grants.live_for_content(content_id).len()
     }
 
     /// Whether `viewer` may open `content_id` with `key_id`. `owner` is a claim,

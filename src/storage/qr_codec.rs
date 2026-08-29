@@ -90,6 +90,12 @@ pub const fn gate_codec(kind: CodecKind) -> Result<(), CodecError> {
 }
 
 /// Optional mux trait - implement out-of-tree or behind a feature later.
+///
+/// A container is a pair of operations, not one: whoever links an encoder has to
+/// supply the reader too, because the durable path refuses a blob it cannot split
+/// back into frames. That is why `split` is on the trait rather than a free
+/// function beside the raw placeholder, and why every consumer of the A4 carrier
+/// goes through a `FrameMux` bound instead of the raw helpers.
 pub trait FrameMux {
     /// Mux optical frames into a container file/stream.
     ///
@@ -97,6 +103,14 @@ pub trait FrameMux {
     ///
     /// Implementation-defined; gate must pass first.
     fn mux(&self, kind: CodecKind, frames: &[Vec<u8>]) -> Result<Vec<u8>, CodecError>;
+
+    /// Read the frames back out of a container this type wrote.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError::EmptyFrames`] when the blob is shorter than its own header or
+    /// a length prefix runs past the end.
+    fn split(&self, kind: CodecKind, blob: &[u8]) -> Result<Vec<Vec<u8>>, CodecError>;
 }
 
 /// In-tree placeholder mux: only [`CodecKind::RawFrames`] concatenates with a length prefix.
@@ -121,39 +135,37 @@ impl FrameMux for RawFrameConcat {
         }
         Ok(out)
     }
-}
-
-/// Split a [`RawFrameConcat`] blob back into frames.
-///
-/// # Errors
-///
-/// Malformed blob.
-pub fn split_raw_concat(blob: &[u8]) -> Result<Vec<Vec<u8>>, CodecError> {
-    if blob.len() < 8 || blob.get(0..4) != Some(RAW_CONCAT_MAGIC.as_slice()) {
-        return Err(CodecError::EmptyFrames);
+    fn split(&self, kind: CodecKind, blob: &[u8]) -> Result<Vec<Vec<u8>>, CodecError> {
+        gate_codec(kind)?;
+        if kind != CodecKind::RawFrames {
+            return Err(CodecError::MuxNotLinked);
+        }
+        if blob.len() < 8 || blob.get(0..4) != Some(RAW_CONCAT_MAGIC.as_slice()) {
+            return Err(CodecError::EmptyFrames);
+        }
+        let n = {
+            let s = blob.get(4..8).ok_or(CodecError::EmptyFrames)?;
+            let mut a = [0u8; 4];
+            a.copy_from_slice(s);
+            u32::from_le_bytes(a) as usize
+        };
+        let mut out = Vec::with_capacity(n);
+        let mut off = 8usize;
+        for _ in 0..n {
+            let s = blob.get(off..off + 4).ok_or(CodecError::EmptyFrames)?;
+            let mut a = [0u8; 4];
+            a.copy_from_slice(s);
+            let len = u32::from_le_bytes(a) as usize;
+            off += 4;
+            let fr = blob
+                .get(off..off + len)
+                .ok_or(CodecError::EmptyFrames)?
+                .to_vec();
+            off += len;
+            out.push(fr);
+        }
+        Ok(out)
     }
-    let n = {
-        let s = blob.get(4..8).ok_or(CodecError::EmptyFrames)?;
-        let mut a = [0u8; 4];
-        a.copy_from_slice(s);
-        u32::from_le_bytes(a) as usize
-    };
-    let mut out = Vec::with_capacity(n);
-    let mut off = 8usize;
-    for _ in 0..n {
-        let s = blob.get(off..off + 4).ok_or(CodecError::EmptyFrames)?;
-        let mut a = [0u8; 4];
-        a.copy_from_slice(s);
-        let len = u32::from_le_bytes(a) as usize;
-        off += 4;
-        let fr = blob
-            .get(off..off + len)
-            .ok_or(CodecError::EmptyFrames)?
-            .to_vec();
-        off += len;
-        out.push(fr);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -182,6 +194,22 @@ mod tests {
     fn raw_concat_round_trip() {
         let frames = vec![vec![1, 2, 3], vec![4, 5]];
         let blob = RawFrameConcat.mux(CodecKind::RawFrames, &frames).unwrap();
-        assert_eq!(split_raw_concat(&blob).unwrap(), frames);
+        assert_eq!(
+            RawFrameConcat.split(CodecKind::RawFrames, &blob).unwrap(),
+            frames
+        );
+    }
+
+    #[test]
+    fn split_refuses_a_container_it_did_not_write() {
+        // The reader is the writer's mirror, so a foreign blob (right length, wrong
+        // magic) has to be refused rather than half-parsed.
+        let blob = vec![b'X', b'Y', b'Z', b'Q', 1, 0, 0, 0, 3, 0, 0, 0, 9, 9, 9];
+        assert_eq!(
+            RawFrameConcat
+                .split(CodecKind::RawFrames, &blob)
+                .unwrap_err(),
+            CodecError::EmptyFrames
+        );
     }
 }

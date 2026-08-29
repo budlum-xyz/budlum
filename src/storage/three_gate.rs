@@ -122,7 +122,9 @@ mod tests {
     fn lossy_pipe_still_recovers() {
         // CH.4: round-trip with simulated frame loss.
         let content = b"lossy-channel-content-bytes".repeat(25);
-        let enc = encode_plain(&content, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
         let mut kept = Vec::new();
         for (i, fr) in enc.frames.iter().enumerate() {
             // drop ~25% of frames

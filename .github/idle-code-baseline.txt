@@ -35,7 +35,6 @@ bud/src/bud_format.rs	const	VIDEO_REVOLUTIONARY
 bud/src/bud_format.rs	fn	decode_streaming
 bud/src/bud_format.rs	fn	is_byte_identical
 bud/src/bud_format.rs	fn	is_delta
-bud/src/bud_format.rs	fn	is_encrypted
 bud/src/bud_format.rs	fn	is_pq_signed
 bud/src/bud_format.rs	fn	is_resolution_preserved
 bud/src/bud_format.rs	fn	is_video_revolutionary
@@ -201,7 +200,6 @@ bud/src/bud_format_exepdf.rs	struct	ExeSectionSplit
 bud/src/bud_format_exepdf.rs	struct	PdfStreamSplit
 bud/src/bud_format_fastcdc.rs	const	FASTCDC_MAGIC
 bud/src/bud_format_fastcdc.rs	const	FASTCDC_VERSION
-bud/src/bud_format_fastcdc.rs	fn	stats
 bud/src/bud_format_fidelitygate.rs	const	AVIF_CRF_VISUALLY_LOSSLESS
 bud/src/bud_format_fidelitygate.rs	const	FID_MAGIC
 bud/src/bud_format_fidelitygate.rs	const	SZ_REL_ERROR_BOUND
@@ -449,8 +447,6 @@ bud/src/bud_format_qos.rs	fn	qos_digest
 bud/src/bud_format_qrmatrix.rs	const	QRM_MAGIC
 bud/src/bud_format_qrmatrix.rs	const	QRM_VERSION
 bud/src/bud_format_qrmatrix.rs	fn	frames_from_drops
-bud/src/bud_format_qrmatrix.rs	fn	version_for
-bud/src/bud_format_qrmatrix.rs	struct	QrMatrix
 bud/src/bud_format_qrvideo.rs	const	BLOCK
 bud/src/bud_format_qrvideo.rs	const	DAMLA_HDR_LEN
 bud/src/bud_format_qrvideo.rs	const	QRV_MAGIC
@@ -461,7 +457,6 @@ bud/src/bud_format_qrvideo.rs	fn	assemble
 bud/src/bud_format_qrvideo.rs	fn	composition
 bud/src/bud_format_qrvideo.rs	fn	derivative_growth
 bud/src/bud_format_qrvideo.rs	fn	derive_stream
-bud/src/bud_format_qrvideo.rs	fn	is_complete
 bud/src/bud_format_qrvideo.rs	fn	qr_cannot_be_stored
 bud/src/bud_format_qrvideo.rs	fn	qrv_digest
 bud/src/bud_format_qrvideo.rs	fn	repair_drop
@@ -472,7 +467,6 @@ bud/src/bud_format_r3fix.rs	const	R3F_MAGIC
 bud/src/bud_format_r3fix.rs	const	R3F_VERSION
 bud/src/bud_format_r3fix.rs	const	R3_MEASURED_RATIOS
 bud/src/bud_format_r3fix.rs	fn	for_mime
-bud/src/bud_format_r3fix.rs	fn	held_bytes
 bud/src/bud_format_r3fix.rs	fn	qr_is_not_stored
 bud/src/bud_format_r3fix.rs	fn	r3_measured_ratio
 bud/src/bud_format_r3fix.rs	fn	r3f_digest
@@ -501,7 +495,6 @@ bud/src/bud_format_recipe_record.rs	const	RECIPE_MAGIC
 bud/src/bud_format_recipe_record.rs	const	RECIPE_VERSION
 bud/src/bud_format_recipe_record.rs	fn	bodied
 bud/src/bud_format_recipe_record.rs	fn	generative
-bud/src/bud_format_recipe_record.rs	fn	held_bytes
 bud/src/bud_format_recipe_record.rs	fn	recipe_cannot_be_forged
 bud/src/bud_format_recipe_record.rs	fn	rent_within_ceiling
 bud/src/bud_format_regeneration.rs	const	DOMAIN
@@ -745,7 +738,6 @@ bud/src/provider.rs	struct	MediaDeviceOnlyPolicy
 bud/src/provider.rs	struct	MobileSelfProvider
 bud/src/provider.rs	struct	NetworkFullProvider
 bud/src/provider.rs	struct	SocialMediaProvider
-bud/src/provider.rs	trait	Provider
 bud/src/quantum.rs	enum	QuantumError
 bud/src/quantum_chain.rs	const	MAX_BLOCK_BYTES
 bud/src/quantum_chain.rs	const	MAX_TX_PER_BLOCK_ML_DSA_87
@@ -755,7 +747,6 @@ bud/src/quantum_chain.rs	fn	handshake_ml_kem_ok
 bud/src/quantum_chain.rs	fn	has_dual
 bud/src/quantum_chain.rs	fn	hash_fields
 bud/src/quantum_chain.rs	fn	is_below_threshold
-bud/src/quantum_chain.rs	fn	is_complete
 bud/src/quantum_chain.rs	fn	is_online
 bud/src/quantum_chain.rs	fn	kq_block
 bud/src/quantum_chain.rs	fn	kq_feat
@@ -784,7 +775,6 @@ bud/src/quantum_chain.rs	struct	SnowHybrid
 bud/src/ratio.rs	const	BEST_PIPES
 bud/src/ratio.rs	enum	FormatClass
 bud/src/ratio.rs	fn	from_best
-bud/src/ratio.rs	struct	Pipe
 bud/src/ratio.rs	struct	RatioResult
 budzero/bud-compiler/src/parser.rs	const	MAX_NESTING_DEPTH
 budzero/bud-compiler/src/sema.rs	enum	Type
@@ -793,7 +783,6 @@ budzero/bud-isa/src/lib.rs	enum	DecodeError
 budzero/bud-isa/src/lib.rs	fn	allows
 budzero/bud-isa/src/lib.rs	fn	decode_for_profile
 budzero/bud-isa/src/lib.rs	fn	requires_mainnet_activation
-budzero/bud-node/src/bitswap.rs	enum	CodecError
 budzero/bud-node/src/bitswap.rs	fn	decode_request
 budzero/bud-node/src/bitswap.rs	fn	decode_response
 budzero/bud-node/src/bitswap.rs	fn	encode_request
@@ -809,7 +798,6 @@ budzero/bud-node/src/discovery.rs	fn	mark_announced
 budzero/bud-node/src/discovery.rs	fn	should_announce
 budzero/bud-node/src/discovery.rs	fn	with_defaults
 budzero/bud-node/src/discovery.rs	struct	DiscoveryConfig
-budzero/bud-node/src/discovery.rs	struct	Provider
 budzero/bud-node/src/sharding.rs	fn	is_resource_buffer_sufficient
 budzero/bud-node/src/sharding.rs	fn	should_cache
 budzero/bud-node/src/sharding.rs	fn	xor_distance
@@ -1859,7 +1847,6 @@ src/registry/poa_compliance.rs	struct	TravelRuleRecord
 src/registry/poa_membership.rs	fn	add_admin
 src/registry/poa_membership.rs	fn	approve
 src/registry/poa_membership.rs	fn	reject
-src/registry/poa_membership.rs	fn	revoke
 src/registry/poa_membership.rs	fn	submit_application
 src/registry/poa_membership.rs	struct	PoaMember
 src/registry/poa_onboarding.rs	const	DEFAULT_KYC_HORIZON
@@ -1871,7 +1858,6 @@ src/registry/poa_onboarding.rs	fn	kyc_expiry_of
 src/registry/poa_onboarding.rs	fn	registry_mut
 src/registry/poa_onboarding.rs	fn	reject
 src/registry/poa_onboarding.rs	fn	renew_kyc
-src/registry/poa_onboarding.rs	fn	revoke
 src/registry/poa_onboarding.rs	fn	submit_application
 src/registry/poa_onboarding.rs	struct	OnboardingEvent
 src/registry/poa_onboarding.rs	struct	PoAWhitelist
@@ -1919,7 +1905,6 @@ src/settlement/proof_market.rs	fn	is_payable
 src/settlement/proof_market.rs	fn	mark_paid
 src/settlement/proof_market.rs	fn	pay_receipt
 src/settlement/proof_market.rs	fn	prune_paid_receipts
-src/settlement/proof_market.rs	fn	revoke
 src/settlement/proof_market.rs	fn	validate_for_task
 src/settlement/proof_market.rs	struct	ProofReceipt
 src/settlement/proof_market.rs	struct	ProofTask
@@ -1993,7 +1978,6 @@ src/storage/generated.rs	const	MAX_STEPS_PER_OUTPUT_BYTE
 src/storage/generated.rs	const	STEP_BUDGET_BASE
 src/storage/generated.rs	enum	GeneratorId
 src/storage/generated.rs	fn	generator_commitment_tag
-src/storage/generated.rs	fn	held_bytes
 src/storage/lifecycle.rs	enum	StorageLifecycleError
 src/storage/lifecycle.rs	fn	can_transition_to
 src/storage/lifecycle.rs	fn	is_terminal
@@ -2021,12 +2005,8 @@ src/storage/lrc.rs	fn	lrc_parity_shards
 src/storage/lrc.rs	fn	lrc_total_shards
 src/storage/lrc.rs	fn	new_lrc_group
 src/storage/manifest.rs	const	MIN_AEAD_CIPHERTEXT_BYTES
-src/storage/manifest.rs	enum	ContentCipher
-src/storage/manifest.rs	fn	commitment_tag
 src/storage/manifest.rs	fn	is_client_encrypted
-src/storage/manifest.rs	fn	is_encrypted
 src/storage/manifest.rs	fn	loss_tolerance
-src/storage/manifest.rs	fn	manifest_id_from_parts
 src/storage/manifest.rs	fn	manifest_id_from_parts_stored
 src/storage/manifest.rs	fn	manifest_id_from_shards
 src/storage/manifest.rs	fn	overhead_per_mille
@@ -2053,10 +2033,7 @@ src/storage/pact_binding.rs	fn	kq_storage_pact
 src/storage/pact_binding.rs	fn	recompute_root
 src/storage/pact_binding.rs	fn	verify_commitment
 src/storage/pact_binding.rs	struct	PactGates
-src/storage/provider.rs	enum	StorageProviderError
 src/storage/provider.rs	fn	provider_challenge_id
-src/storage/provider.rs	fn	with_operator
-src/storage/provider.rs	struct	InMemoryStorageProvider
 src/storage/provider.rs	struct	ProviderChallengeResult
 src/storage/provider.rs	struct	PutReceipt
 src/storage/provider.rs	struct	StorageProof
@@ -2066,7 +2043,6 @@ src/storage/provider.rs	type	DealId
 src/storage/pruning.rs	fn	archive_node_default
 src/storage/pruning.rs	fn	full_node_default
 src/storage/render.rs	enum	RenderError
-src/storage/render.rs	fn	commitment_bytes
 src/storage/render.rs	fn	format_tag
 src/storage/render.rs	fn	qr_stream_content_id
 src/storage/render.rs	fn	render_and_verify

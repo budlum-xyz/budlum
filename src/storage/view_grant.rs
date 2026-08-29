@@ -424,6 +424,18 @@ impl ViewGrantRegistry {
         self.grants.get(&grant_id)
     }
 
+    /// Every row this content has, revoked ones included: what an owner reads
+    /// when auditing who was ever let in, as opposed to who can open it now.
+    #[must_use]
+    pub fn rows_for_content(&self, content_id: &ContentId) -> Vec<&ViewGrant> {
+        self.by_content
+            .get(content_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.grants.get(id))
+            .collect()
+    }
+
     /// Live grants for content (revoked excluded).
     #[must_use]
     pub fn live_for_content(&self, content_id: &ContentId) -> Vec<&ViewGrant> {

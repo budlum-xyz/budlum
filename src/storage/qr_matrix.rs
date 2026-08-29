@@ -10,7 +10,7 @@
 
 use qrcode::types::EcLevel;
 
-use super::qr_encode;
+use super::qr_encode::{self, EncodedMatrix, QrError};
 
 /// Lab-default: EC level L (fountain handles erasure; QR ECC handles damage).
 pub const THREE_QR_EC: EcLevel = EcLevel::L;
@@ -33,8 +33,15 @@ pub enum QrMatrixError {
         /// Max.
         max: usize,
     },
-    /// qrcode crate refused the data.
-    Encode(String),
+    /// The encoder refused the payload. Carried as the encoder's own error so the
+    /// reason (which version was reached, how long the payload was) survives to
+    /// the caller instead of being flattened into a string.
+    Encode(QrError),
+    /// A level other than the pinned one was asked for. The encoder carries one
+    /// capacity table, so another level cannot be honoured: refusing is the only
+    /// honest answer, and it is what keeps a report from naming a level the
+    /// symbol does not carry.
+    UnsupportedEc(EcLevel),
     /// Matrix geometry inconsistent.
     Geometry,
 }
@@ -44,7 +51,13 @@ impl std::fmt::Display for QrMatrixError {
         match self {
             Self::Empty => write!(f, "qr matrix empty payload"),
             Self::TooLarge { len, max } => write!(f, "qr payload {len} > max {max}"),
-            Self::Encode(s) => write!(f, "qr encode: {s}"),
+            Self::Encode(e) => write!(f, "qr encode: {e}"),
+            Self::UnsupportedEc(got) => {
+                write!(
+                    f,
+                    "qr encoder is pinned to {THREE_QR_EC:?}, {got:?} was asked"
+                )
+            }
             Self::Geometry => write!(f, "qr matrix geometry"),
         }
     }
@@ -61,6 +74,10 @@ pub struct QrMatrix {
     pub width: u32,
     /// Row-major colors: true = dark module.
     pub dark: Vec<bool>,
+    /// Error-correction level the symbol was actually built at. Carried on the
+    /// matrix so a report describes the symbol rather than the level someone
+    /// intended, which is what the pinned constant alone could not promise.
+    pub ec: EcLevel,
 }
 
 impl QrMatrix {
@@ -70,6 +87,21 @@ impl QrMatrix {
     ///
     /// Empty / oversized / encode failure.
     pub fn encode(payload: &[u8]) -> Result<Self, QrMatrixError> {
+        Self::encode_at(payload, THREE_QR_EC)
+    }
+
+    /// Encode at a caller-named EC level, refusing one this encoder cannot honour.
+    ///
+    /// A caller that reports the level names it here, so the reported symbol and
+    /// the requested one are one object rather than two claims about a table.
+    ///
+    /// # Errors
+    ///
+    /// Empty / oversized / encode failure / [`QrMatrixError::UnsupportedEc`].
+    pub fn encode_at(payload: &[u8], ec: EcLevel) -> Result<Self, QrMatrixError> {
+        if ec != THREE_QR_EC {
+            return Err(QrMatrixError::UnsupportedEc(ec));
+        }
         if payload.is_empty() {
             return Err(QrMatrixError::Empty);
         }
@@ -79,20 +111,51 @@ impl QrMatrix {
                 max: MAX_QR_PAYLOAD,
             });
         }
-        let m = qr_encode::encode(payload).map_err(|e| QrMatrixError::Encode(e.to_string()))?;
-        let version = i16::from(m.version());
-        let width = m.side_len() as u32;
-        let mut dark = Vec::with_capacity((width * width) as usize);
-        for y in 0..m.side_len() {
-            for x in 0..m.side_len() {
+        Self::from_encoded(
+            qr_encode::encode(payload).map_err(QrMatrixError::Encode)?,
+            ec,
+        )
+    }
+
+    /// Flatten the encoder's own grid into the row-major form a raster wants.
+    ///
+    /// # Errors
+    ///
+    /// [`QrMatrixError::Geometry`] when the symbol has no modules.
+    #[must_use]
+    fn rows_of(m: &EncodedMatrix) -> Vec<bool> {
+        let side = m.side_len();
+        let mut dark = Vec::with_capacity(side * side);
+        for y in 0..side {
+            for x in 0..side {
                 dark.push(m.is_dark(y, x));
             }
         }
+        dark
+    }
+
+    /// Build a matrix from the encoder's symbol at the level it was asked for.
+    ///
+    /// # Errors
+    ///
+    /// [`QrMatrixError::Geometry`] when the grid is empty.
+    fn from_encoded(m: EncodedMatrix, ec: EcLevel) -> Result<Self, QrMatrixError> {
+        let side = m.side_len();
+        if side == 0 {
+            return Err(QrMatrixError::Geometry);
+        }
         Ok(Self {
-            version,
-            width,
-            dark,
+            version: i16::from(m.version()),
+            width: side as u32,
+            dark: Self::rows_of(&m),
+            ec,
         })
+    }
+
+    /// Level this symbol carries.
+    #[must_use]
+    pub const fn ec_level(&self) -> EcLevel {
+        self.ec
     }
 
     /// Module at (x,y) dark?

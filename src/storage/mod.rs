@@ -90,9 +90,8 @@ pub use living_threshold::{
 };
 pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
-    manifest_id_from_parts, manifest_id_from_parts_stored, manifest_id_from_shards, ContentCipher,
-    ContentEncryption, ContentManifest, ErasureScheme, ShardKind, ShardRef,
-    MIN_AEAD_CIPHERTEXT_BYTES,
+    manifest_id_from_parts_stored, manifest_id_from_shards, ContentCipher, ContentEncryption,
+    ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
     MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
@@ -130,8 +129,7 @@ pub use qr_frame::{
 };
 pub use qr_payload::{
     pack_payload, packed_is_zlib, payload_commitment, unpack_payload, PayloadError, PayloadKind,
-    FLAG_ZLIB, MAX_PAYLOAD_CONTENT, THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_MAGIC,
-    THREE_PAYLOAD_VERSION,
+    MAX_PAYLOAD_CONTENT, THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_MAGIC, THREE_PAYLOAD_VERSION,
 };
 pub use qr_receive::{ProgressiveReceiver, ReceiveError};
 pub use qr_recipe::{
@@ -140,29 +138,26 @@ pub use qr_recipe::{
 };
 pub use qr_reemit::{RecipeEmitter, ReemitError};
 
-pub use qr_codec::{gate_codec, split_raw_concat, CodecError, CodecKind, FrameMux, RawFrameConcat};
+pub use qr_codec::{gate_codec, CodecError, CodecKind, FrameMux, RawFrameConcat};
 pub use three_pipe::{
-    decode_frames, decode_qr_video, encode_plain, encode_qr_video, mux_raw, recipe_commitment,
+    concat_round_trip, decode_frames, decode_qr_video, encode_qr_video, recipe_commitment,
     EncodedPipe, EncodedQrVideo, PipeError, PIPE_DEFAULT_BLOCK_LEN,
 };
 pub use transformed::{
     transform_content, CodecFlags, ContentClass, TransformError, TransformOpts, TransformedPayload,
-    MAX_TRANSFORM_IN,
 };
 
 pub use three_nft::{meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta};
 pub use three_recipe::{
-    encode_qr_video_internal, recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError,
-    VideoRecipeSealed, RECIPE_VIDEO_MAGIC,
+    recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, VideoRecipeSealed,
+    RECIPE_VIDEO_MAGIC,
 };
 pub use three_reveal::{RevealError, RevealSession};
 
 pub use three_gate::{
     classify_three_blob, is_transport_derivative, refuse_durable_derivative, ThreeBlobKind,
 };
-pub use three_hooks::{
-    emit_hook, NopThreeHook, RecordingThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind,
-};
+pub use three_hooks::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 pub use three_meter::{MeterError, ThreeMeter};
 
 pub use qr_matrix::{QrMatrix, QrMatrixError, MAX_QR_PAYLOAD, MODULE_PX, QUIET_ZONE, THREE_QR_EC};

@@ -8,6 +8,7 @@ use crate::domain::storage_deal::{
 };
 use crate::network::node::NodeClient;
 use crate::storage::content_id::ContentId;
+use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 use bincode;
 use futures::future::BoxFuture;
 use hex;
@@ -1031,12 +1032,40 @@ fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorO
     )?))
 }
 
+/// One view-grant row as a client reads it. `live` is the registry's own answer
+/// for this moment, so a revoked row still appears with its history instead of
+/// vanishing from the listing that explains why a viewer was refused.
+fn view_grant_json(g: &crate::storage::ViewGrant) -> serde_json::Value {
+    serde_json::json!({
+        "grantId": g.grant_id,
+        "contentId": format!("0x{}", hex::encode(g.content_id.0)),
+        "issuer": g.issuer.to_hex(),
+        "grantee": g.grantee.map(|a| a.to_hex()),
+        "keyId": format!("0x{}", hex::encode(g.key_id)),
+        "policy": format!("{:?}", g.policy),
+        "openedEpoch": g.opened_epoch,
+        "revokedEpoch": g.revoked_epoch,
+        "live": g.is_live(),
+    })
+}
+
+/// Hand one Three event to the sink this node was started with.
+///
+/// A trait object rather than a concrete type, so a gateway's sink and a headless
+/// node's discarding one share a call site: the revoke path cannot end up
+/// reporting to a sink only one of them has.
+fn fire_three_event(sink: &mut dyn ThreeEventHook, event: ThreeHookEvent) {
+    emit_hook(sink, event);
+}
+
 fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
     serde_json::json!({
         "contentId": format!("0x{}", hex::encode(feed.content_id.as_bytes())),
         "providerCommitment": format!("0x{}", hex::encode(feed.provider_commitment)),
         "packedLen": feed.packed_len,
         "packedIsZlib": feed.packed_is_zlib,
+        "transformShrank": feed.transform_shrank,
+        "progressivePrefixBlocks": feed.progressive_prefix_blocks,
         "k": feed.k,
         "preflightK": feed.preflight_k,
         "plannedDrops": feed.planned_drops,
@@ -2214,13 +2243,57 @@ impl BudlumApiServer for RpcServer {
         // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
         // that is an operator fault, and a client must not be told to fix a key
         // it did get right. The registry derives the same address again; this
-        // pre-flight only chooses the error code.
-        auth.derived_owner().map_err(grant_auth_error)?;
-        self.chain
+        // pre-flight only chooses the error code - and names the actor the revoke
+        // event is filed under, so a sink sees who spoke rather than a caller's
+        // claim about it.
+        let actor = auth.derived_owner().map_err(grant_auth_error)?;
+        let revoked = self
+            .chain
             .revoke_view_grant(grant_id, auth, at_epoch)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        Ok(serde_json::json!({ "revoked": true, "grantId": grant_id }))
+        // A revoke that only reaches the ledger leaves every product surface
+        // holding the session key it was promised. The hook is where that word is
+        // passed on: a headless node discards it, a gateway installs its own
+        // sink, and neither choice can change what a block commits.
+        fire_three_event(
+            &mut NopThreeHook,
+            ThreeHookEvent {
+                kind: ThreeHookKind::GrantRevoked,
+                content_id: revoked.content_id,
+                actor,
+                epoch: at_epoch,
+                grant_id: Some(grant_id),
+            },
+        );
+        Ok(serde_json::json!({
+            "revoked": true,
+            "grantId": grant_id,
+            "contentId": format!("0x{}", hex::encode(revoked.content_id.0)),
+        }))
+    }
+
+    async fn storage_list_view_grants(
+        &self,
+        content_id: String,
+        live_only: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let (rows, live) = self
+            .chain
+            .view_grants(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        let kept: Vec<serde_json::Value> = rows
+            .iter()
+            .filter(|g| !live_only || g.is_live())
+            .map(view_grant_json)
+            .collect();
+        Ok(serde_json::json!({
+            "grants": kept,
+            "liveCount": live,
+            "count": kept.len(),
+        }))
     }
 
     async fn storage_may_view(

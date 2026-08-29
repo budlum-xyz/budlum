@@ -365,7 +365,13 @@ pub enum ChainCommand {
         grant_id: u64,
         auth: crate::storage::GrantAuthorization,
         at_epoch: u64,
-        response: oneshot::Sender<Result<(), String>>,
+        response: oneshot::Sender<Result<crate::storage::ViewGrant, String>>,
+    },
+    /// Every grant row of one content, with how many of them are live. A read
+    /// command: it moves nothing and cannot be refused by the mainnet guard.
+    GetViewGrants {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<(Vec<crate::storage::ViewGrant>, usize)>,
     },
     MayViewContent {
         content_id: crate::storage::ContentId,
@@ -982,7 +988,7 @@ impl ChainHandle {
         grant_id: u64,
         auth: crate::storage::GrantAuthorization,
         at_epoch: u64,
-    ) -> Result<(), String> {
+    ) -> Result<crate::storage::ViewGrant, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -995,6 +1001,22 @@ impl ChainHandle {
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Grant rows of one content and how many of them are live.
+    pub async fn view_grants(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<(Vec<crate::storage::ViewGrant>, usize), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetViewGrants {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
     pub async fn may_view_content(
@@ -3735,6 +3757,15 @@ impl ChainActor {
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
+                ChainCommand::GetViewGrants {
+                    content_id,
+                    response,
+                } => {
+                    let registry = &self.blockchain.state.storage_registry;
+                    let rows = registry.view_grants_for(&content_id);
+                    let live = registry.live_view_grant_count(&content_id);
+                    let _ = response.send((rows, live));
+                }
                 ChainCommand::MayViewContent {
                     content_id,
                     viewer,
@@ -4097,6 +4128,16 @@ impl ChainActor {
                                 == crate::domain::storage_deal::ReallocationStatus::ActiveReplacement
                         })
                         .count();
+                    // A ticket's cause is the part of the incident an operator acts
+                    // on, and status alone cannot show it: a never-placed shard needs
+                    // a first deal opened, a failed one needs a holder replaced.
+                    let never_placed_tickets = reallocation_tickets
+                        .iter()
+                        .filter(|ticket| {
+                            ticket.cause
+                                == crate::domain::storage_deal::ReallocationCause::NeverPlaced
+                        })
+                        .count();
                     let stats_epoch = self.blockchain.last_block().index
                         / crate::core::chain_config::epoch_len_for_chain_id(
                             self.blockchain.chain_id,
@@ -4117,6 +4158,7 @@ impl ChainActor {
                         "underReplicatedTickets": under_replicated_tickets,
                         "activeReplacements": active_replacements,
                         "underReplicatedShards": under_replicated_shards,
+                        "neverPlacedTickets": never_placed_tickets,
                     }));
                 }
                 ChainCommand::GetStorageOperatorEconomics { operator, response } => {

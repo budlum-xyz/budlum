@@ -529,6 +529,10 @@ impl ContentManifest {
         self
     }
 
+    /// Test-only until a mint path exists: nothing on the live upload path writes an
+    /// edition, and a public setter no product calls is how a client is told an
+    /// `editionId` is pinned when it is not.
+    #[cfg(test)]
     /// Declare the B.U.D. edition. Recomputes the id when the edition binds
     /// bytes (`Three`); `Classic` is a no-op on the preimage.
     ///
@@ -925,7 +929,7 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// source, dictionary binding and edition are one concept - where the bytes
 /// came from and under which claim they are registered.
 #[derive(Debug, Clone, Copy)]
-pub struct ManifestProvenance<'a> {
+struct ManifestProvenance<'a> {
     /// Where the bytes came from (the upload path).
     pub source: &'a crate::storage::generated::ContentSource,
     /// Optional dictionary binding (dedup) the manifest commits to.
@@ -934,7 +938,7 @@ pub struct ManifestProvenance<'a> {
     pub edition: crate::storage::generated::BudStorageEdition,
 }
 
-pub fn manifest_id_from_parts(
+fn manifest_id_from_parts(
     shards: &[ShardRef],
     erasure: &ErasureScheme,
     encryption: &ContentEncryption,

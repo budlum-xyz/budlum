@@ -93,6 +93,24 @@ impl RevealSession {
         self.emitter.frame_at(seq)
     }
 
+    /// Frames `seq_start..seq_start + count` with the fold a client checks them
+    /// against, under the gate this session already applied.
+    ///
+    /// A read path that wants a range asks for it here instead of opening an
+    /// emitter beside the session, which is how a range used to bypass the
+    /// sealed-recipe and grant rules the session exists to enforce.
+    ///
+    /// # Errors
+    ///
+    /// The emitter's own range failures, wrapped as [`RevealError::Reemit`].
+    pub fn frames_with_fold(
+        &self,
+        seq_start: u32,
+        count: u32,
+    ) -> Result<(Vec<Vec<u8>>, [u8; 32]), RevealError> {
+        Ok(self.emitter.emit_frames(seq_start, count)?)
+    }
+
     /// Stream commitment for receivers.
     #[must_use]
     pub const fn stream_commitment(&self) -> [u8; 32] {

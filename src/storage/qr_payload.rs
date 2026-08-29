@@ -40,7 +40,7 @@ pub const THREE_PAYLOAD_MAGIC: [u8; 4] = *b"BDL3";
 /// Current header version. Unknown versions refuse on unpack.
 pub const THREE_PAYLOAD_VERSION: u8 = 1;
 /// `flags` bit0: body is zlib-compressed; clear means body is raw original.
-pub const FLAG_ZLIB: u8 = 1 << 0;
+const FLAG_ZLIB: u8 = 1 << 0;
 
 /// Fixed header size before the body: magic4 + ver + flags + kind + `orig_len8` + sha32.
 pub const THREE_PAYLOAD_HEADER_LEN: usize = 4 + 1 + 1 + 1 + 8 + 32;

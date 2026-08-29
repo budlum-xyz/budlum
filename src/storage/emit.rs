@@ -29,7 +29,7 @@
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::generated::{
     generate_content, held_bytes, is_three_recipe, recipe_seed_is_public, ContentSource,
-    GenerateError,
+    GenerateError, SealedGeneratedSpec,
 };
 use crate::storage::payload_crypt::{
     open_payload, PayloadKey, SealError, MAX_SEAL_PLAINTEXT, SEALED_HEADER_LEN, SEALED_MAGIC,
@@ -41,36 +41,41 @@ use crate::storage::qr_carousel::{
     CarouselParams, DROP_HEADER_LEN, DROP_VERSION, MAX_CAROUSEL_BYTES, MAX_K,
     ONESHOT_REPAIR_PERMILLAGE,
 };
-use crate::storage::qr_codec::{
-    gate_codec, split_raw_concat, CodecError, CodecKind, FrameMux, RawFrameConcat,
-};
+use crate::storage::qr_codec::{gate_codec, CodecError, CodecKind, RawFrameConcat};
 use crate::storage::qr_encode::MAX_DATA_BYTES;
 use crate::storage::qr_frame::{
     stream_id_prefix, FrameError, MAX_DROP_WIRE, THREE_FRAME_HEADER_LEN, THREE_FRAME_VERSION,
 };
 use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MAX_QR_PAYLOAD, THREE_QR_EC};
 use crate::storage::qr_payload::{
-    pack_payload, packed_is_zlib, unpack_payload, PayloadError, PayloadKind, FLAG_ZLIB,
-    MAX_PAYLOAD_CONTENT, THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_VERSION,
+    pack_payload, packed_is_zlib, unpack_payload, PayloadError, PayloadKind, MAX_PAYLOAD_CONTENT,
+    THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_VERSION,
 };
 use crate::storage::qr_png::{frame_to_qr_png, matrix_to_png, QrPngError};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
-use crate::storage::qr_recipe::{three_sealed_recipe_commitment, ThreeRecipe};
+use crate::storage::qr_recipe::{three_sealed_recipe_commitment, ThreeRecipe, ThreeRecipeSealed};
 use crate::storage::qr_reemit::{RecipeEmitter, ReemitError};
-use crate::storage::qr_video::{QrVideo, QrVideoError, DEFAULT_FPS, VIDEO_VERSION};
+use crate::storage::qr_video::{
+    png_to_optical_frame, QrVideo, QrVideoError, DEFAULT_FPS, VIDEO_VERSION,
+};
 use crate::storage::three_gate::{classify_three_blob, is_transport_derivative, ThreeBlobKind};
 use crate::storage::three_meter::{MeterError, ThreeMeter};
-use crate::storage::three_nft::{meta_tracks_public_recipe, PreviewMode, ThreeNftMeta};
+use crate::storage::three_nft::{
+    meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta,
+};
 use crate::storage::three_pipe::{
-    decode_frames, decode_qr_video, encode_qr_video, recipe_commitment, PipeError,
+    concat_round_trip, decode_frames, decode_qr_video, encode_qr_video, recipe_commitment,
+    PipeError,
 };
 use crate::storage::three_recipe::{
-    recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, RECIPE_VIDEO_MAGIC,
+    recipe_class, RecipeTransform, VideoFrameStream, VideoRecipe, VideoRecipeError,
+    VideoRecipeSealed, RECIPE_VIDEO_MAGIC,
 };
+use crate::storage::three_reveal::{RevealError, RevealSession};
 use crate::storage::three_visibility::{
     delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
 };
-use crate::storage::transformed::{transform_content, TransformError, TransformOpts};
+use crate::storage::transformed::{transform_content, CodecFlags, TransformError, TransformOpts};
 use crate::storage::{ContentId, ContentManifest};
 
 /// Largest body this path will encode in one call.
@@ -126,6 +131,13 @@ pub struct FeedPreview {
     pub packed_len: usize,
     /// Whether A1 zlib-compressed the body.
     pub packed_is_zlib: bool,
+    /// Whether A0's own zlib pass shrank the content. A1 compresses again over
+    /// whatever A0 returned, so the two answers are different measurements and
+    /// only the first one says what the transform did to the upload.
+    pub transform_shrank: bool,
+    /// Leading contiguous solved blocks after the feed was replayed frame by
+    /// frame: how far a viewer plays before the carousel closes.
+    pub progressive_prefix_blocks: usize,
     /// A2 source block count the carousel locked over the packed container.
     pub k: u16,
     /// Blocks the pre-flight bound put on the request, before anything was
@@ -303,6 +315,10 @@ pub enum EmitError {
     },
     /// Frame zero rebuilt from the recipe alone is not frame zero as emitted.
     ReemitMismatch,
+    /// The reveal gate refused to open the session this read path needed: either
+    /// the bytes are sealed without an opening, or the caller may not view them.
+    /// Reported as its own failure because a refused read is not a broken feed.
+    Reveal(RevealError),
     /// The renderer reports fewer pixels than the modules it must draw, so a
     /// client sizing a canvas from this preview would size the wrong one.
     RasterDegenerate {
@@ -456,6 +472,7 @@ impl std::fmt::Display for EmitError {
                 write!(f, "frame {seq} past a feed of {len} frames")
             }
             Self::ReemitMismatch => write!(f, "recipe re-emitted a frame the pipe did not produce"),
+            Self::Reveal(e) => write!(f, "three reveal gate refused the read: {e}"),
             Self::RasterDegenerate { modules, side } => {
                 write!(f, "raster side {side} cannot hold {modules} modules")
             }
@@ -566,6 +583,19 @@ impl From<StorageProviderError> for EmitError {
     fn from(e: StorageProviderError) -> Self {
         Self::Provider(e)
     }
+}
+
+impl From<RevealError> for EmitError {
+    fn from(e: RevealError) -> Self {
+        Self::Reveal(e)
+    }
+}
+
+/// The two numbers a sealed-generated record exposes for metering before anyone
+/// knows the seed: the declared output length and the step budget.
+#[must_use]
+fn sealed_generated_meters(sealed: &SealedGeneratedSpec) -> (u32, u32) {
+    (sealed.output_len, sealed.step_budget)
 }
 
 impl From<VideoRecipeError> for EmitError {
@@ -729,6 +759,11 @@ pub fn qr_feed_preview(
     }
     let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
     let pipe = &encoded.pipe;
+    // A0 measured here on purpose: the pipe keeps the payload it built, and the
+    // preview reports the transform's own answer next to the container's. One
+    // pass serves both the report and the cross-check below, so the two cannot
+    // describe different encodes.
+    let a0 = transform_content(content, TransformOpts::default())?;
     // The carousel locks `k` over the packed container, so that is what the
     // plan is measured against here; `k` from the request is only ever a bound.
     let params = CarouselParams::from_payload(&pipe.packed, policy.block_len)?;
@@ -743,10 +778,10 @@ pub fn qr_feed_preview(
     if actual != planned || actual > ceiling || actual > drop_bound {
         return Err(EmitError::PlanMismatch { planned, actual });
     }
-    if params.k != pipe.recipe.carousel.k {
+    if params.k != pipe.pipe_recipe_k() {
         return Err(EmitError::PlanMismatch {
             planned: u32::from(params.k),
-            actual: u32::from(pipe.recipe.carousel.k),
+            actual: u32::from(pipe.pipe_recipe_k()),
         });
     }
 
@@ -761,11 +796,14 @@ pub fn qr_feed_preview(
             .ok_or(EmitError::SelfContradictingSource)?;
         seed_is_public = recipe_seed_is_public(&manifest.source);
         if let ContentSource::SealedGenerated(sealed) = &manifest.source {
-            // The public fields of a sealed spec exist so a validator can meter
-            // it and refuse an absurd budget without learning the seed. The
-            // ceiling is checked here for exactly that reason, and then the
-            // emit stops: nobody can say which bytes a sealed recipe carries.
-            let plan_len = usize::try_from(sealed.output_len).unwrap_or(usize::MAX);
+            // The public fields of a sealed spec exist so a validator can meter it
+            // and refuse an absurd budget without learning the seed. Both numbers a
+            // refusal reports are the numbers the ceiling was judged on, read once:
+            // an error text disagreeing with the bound that fired is a bug in the
+            // one direction nobody checks. Then the emit stops: nobody can say
+            // which bytes a sealed recipe carries.
+            let (output_len, step_budget) = sealed_generated_meters(sealed);
+            let plan_len = usize::try_from(output_len).unwrap_or(usize::MAX);
             if plan_len > MAX_PREVIEW_CONTENT_BYTES {
                 return Err(EmitError::TooLarge {
                     len: plan_len,
@@ -773,8 +811,8 @@ pub fn qr_feed_preview(
                 });
             }
             return Err(EmitError::SealedRecipe {
-                output_len: sealed.output_len,
-                step_budget: sealed.step_budget,
+                output_len,
+                step_budget,
             });
         }
         if !manifest.edition.admits_body() {
@@ -812,6 +850,9 @@ pub fn qr_feed_preview(
             break;
         }
     }
+    // How far a viewer can play from what has arrived so far, measured on the
+    // receiver this feed just produced rather than promised by the ordering.
+    let prefix = rx.progressive_prefix_blocks();
     let (got, rejected) = rx.stats();
     if !rx.is_complete() {
         return Err(EmitError::Incomplete {
@@ -865,8 +906,18 @@ pub fn qr_feed_preview(
     if packed_kind != kind {
         return Err(EmitError::DecodePathMismatch);
     }
-    if pipe.packed.get(5).is_some_and(|f| (f & FLAG_ZLIB) != 0) != packed_is_zlib(&pipe.packed) {
-        return Err(EmitError::FlagMismatch);
+    // The flag byte and the helper that reads it look at the same offset, so the
+    // comparison that used to sit here could not fail: it reported a cross-layer
+    // agreement it never measured. What can disagree is the container against the
+    // payload it wraps. A1 stores A0's bytes as its body, compressing them only if
+    // that shrinks, so unpacking must return exactly what A0 produced. A sealed
+    // feed is excluded: its A1 body is the ciphertext, and the seal branch below
+    // measures that case against the key.
+    if key.is_none() {
+        let (_, a1_body) = unpack_payload(&pipe.packed)?;
+        if a1_body.len() != a0.bytes.len() {
+            return Err(EmitError::FlagMismatch);
+        }
     }
     if let Some(key) = key.as_ref() {
         let (_, body) = unpack_payload(&pipe.packed)?;
@@ -881,8 +932,7 @@ pub fn qr_feed_preview(
             return Err(EmitError::SealMismatch);
         }
         let clear = open_payload(key, &body)?;
-        let again = transform_content(content, TransformOpts::default())?;
-        if ContentId::of(&clear) != ContentId::of(&again.bytes) {
+        if ContentId::of(&clear) != ContentId::of(&a0.bytes) {
             return Err(EmitError::SealMismatch);
         }
     }
@@ -969,7 +1019,7 @@ pub fn qr_feed_preview(
 
     // Frame zero as the thing a browser scans, plus the raster a client sizes a
     // canvas from.
-    let matrix = QrMatrix::encode(&frame0)?;
+    let matrix = QrMatrix::encode_at(&frame0, THREE_QR_EC)?;
     if matrix.pixel_side() < matrix.raster_modules() {
         return Err(EmitError::RasterDegenerate {
             modules: matrix.raster_modules(),
@@ -983,19 +1033,31 @@ pub fn qr_feed_preview(
     if matrix_to_png(&matrix)? != png {
         return Err(EmitError::DecodePathMismatch);
     }
+    // Scanning the poster has to give the frame back, so the frame is read out of
+    // the PNG and compared. The two render paths agreeing above says nothing
+    // about whether the optical frame survives the container a browser sees.
+    if png_to_optical_frame(&png).map_err(EmitError::Video)? != frame0 {
+        return Err(EmitError::DecodePathMismatch);
+    }
     let raster_modules = matrix.raster_modules();
     let raster_side = matrix.pixel_side();
     let png_len = png.len();
-    let ec_level = format!("{THREE_QR_EC:?}");
+    // The level the symbol carries, not the level this file pins: a report that
+    // names an intention is how a silent table change would go unnoticed.
+    let ec_level = format!("{:?}", matrix.ec_level());
 
     // The optional A4 concat, produced only when it is allowed and split back
     // here so the muxer is not trusted on its word alone.
     let codec_allowed = CodecKind::RawFrames.is_allowed();
     if codec_allowed {
-        let blob =
-            <RawFrameConcat as FrameMux>::mux(&RawFrameConcat, CodecKind::RawFrames, &pipe.frames)?;
-        let back = split_raw_concat(&blob)?;
+        let back = concat_round_trip::<RawFrameConcat>(&pipe.frames)?;
         if back.len() != pipe.frames.len() {
+            return Err(EmitError::ConcatMismatch {
+                want: pipe.frames.len(),
+                got: back.len(),
+            });
+        }
+        if back != pipe.frames {
             return Err(EmitError::ConcatMismatch {
                 want: pipe.frames.len(),
                 got: back.len(),
@@ -1017,7 +1079,7 @@ pub fn qr_feed_preview(
         &actual.to_le_bytes(),
         &encoded.video_blob.len().to_le_bytes(),
     ]);
-    let sealed_capsule = pipe.recipe.seal();
+    let sealed_capsule: ThreeRecipeSealed = pipe.recipe.seal();
     let sealed_recipe = three_sealed_recipe_commitment(&sealed_capsule);
     if sealed_capsule.k != params.k || sealed_capsule.block_len != policy.block_len {
         return Err(EmitError::PlanMismatch {
@@ -1025,6 +1087,10 @@ pub fn qr_feed_preview(
             actual: u32::from(sealed_capsule.k),
         });
     }
+    // Reported as the recipe's own answer about its visibility form: a sealed A3
+    // recipe can be pinned on chain while the frames it describes are nobody's to
+    // rebuild, and a client choosing a marketplace listing off that difference
+    // needs the flag to mean the form rather than a hope.
     let publicly_reemitable = ThreeRecipe::Public(pipe.recipe.clone()).is_publicly_reemitable();
 
     // Which on-chain form a mint would name. This is not invented here: the
@@ -1058,6 +1124,15 @@ pub fn qr_feed_preview(
     if meta_tracks_public_recipe(&meta, &pipe.recipe) != matches!(vis, UploadVisibility::Public) {
         return Err(EmitError::MetaDrift);
     }
+    // The second half of the same promise: the metadata's own recorded
+    // visibility has to say what the upload mode says. A token pinned as `Gated`
+    // on a public upload tells a buyer to hunt for a key that does not exist, and
+    // the recipe commitment check above cannot notice, because a public recipe
+    // opens either way.
+    let meta_vis: MetadataVisibility = meta.visibility;
+    if (meta_vis == MetadataVisibility::Public) != matches!(vis, UploadVisibility::Public) {
+        return Err(EmitError::MetaDrift);
+    }
     let nft_meta = meta.commitment();
     let visibility = format!("{vis:?} + {grant_policy:?}");
     let rotate_key_on_delete = delete_implies_key_rotate();
@@ -1088,7 +1163,7 @@ pub fn qr_feed_preview(
         policy.fps,
         &encoded,
     );
-    let sealed = recipe.seal();
+    let sealed: VideoRecipeSealed = recipe.seal();
     if sealed.frame_count != actual {
         return Err(EmitError::PlanMismatch {
             planned: actual,
@@ -1117,7 +1192,31 @@ pub fn qr_feed_preview(
     // agreement is skipped there and reported as skipped, not passed.
     let mut a4_agreement = false;
     if kind != PayloadKind::EncryptedContent {
-        let mut stream = recipe.frame_stream(content)?;
+        // The recipe's promise is a reproduction, not a description: the body
+        // plus the knobs it pins must rebuild this exact BDLV blob. Frames
+        // agreeing is weaker than the blob agreeing - a header or a commitment
+        // field could drift while every frame matched - so the whole container is
+        // compared, through the sealed form as well, which is the only form a
+        // marketplace holds.
+        let again = recipe.reemit(content)?;
+        if again.video_blob != encoded.video_blob {
+            return Err(EmitError::ReemitMismatch);
+        }
+        let via_sealed = sealed.reemit_with(&recipe, content)?;
+        if via_sealed.video_blob != encoded.video_blob {
+            return Err(EmitError::ReemitMismatch);
+        }
+        // And the knobs the recipe pinned are the knobs this preview ran under:
+        // two transform option sets agreeing on the payload hash is what lets the
+        // reported class describe the feed a reader would rebuild.
+        let pinned = transform_content(content, recipe.transform.as_opts())?;
+        if pinned.content_sha256 != a0.content_sha256 {
+            return Err(EmitError::PlanMismatch {
+                planned: actual,
+                actual,
+            });
+        }
+        let mut stream: VideoFrameStream = recipe.frame_stream(content)?;
         if stream.len() != actual {
             return Err(EmitError::PlanMismatch {
                 planned: stream.len(),
@@ -1151,6 +1250,8 @@ pub fn qr_feed_preview(
         provider_commitment,
         packed_len: pipe.packed.len(),
         packed_is_zlib: packed_is_zlib(&pipe.packed),
+        transform_shrank: a0.codec_flags.contains(CodecFlags::PRE_SHRUNK),
+        progressive_prefix_blocks: prefix,
         k: params.k,
         preflight_k,
         drop_bound,
@@ -1226,9 +1327,14 @@ pub fn qr_feed_frames_burst(
     if u32::from(preflight_k) == 0 {
         return Err(EmitError::Empty);
     }
-    let emitter = RecipeEmitter::open(encoded.pipe.recipe.clone(), &encoded.pipe.packed)?;
-    let (frames, fold) = emitter.emit_frames(seq_start, count)?;
-    emitter.verify_stream_id(&encoded.pipe.recipe.stream_id)?;
+    // The read path goes through the reveal session rather than opening an
+    // emitter beside it: the session is what decides whether these bytes may be
+    // re-emitted at all, and it refuses a sealed recipe nobody opened. A public
+    // feed needs no grant, so `true` here names that fact; the day this path
+    // carries a sealed recipe the same argument is what makes it refuse.
+    let recipe = ThreeRecipe::Public(encoded.pipe.recipe.clone());
+    let session = RevealSession::open(&recipe, None, &encoded.pipe.packed, true)?;
+    let (frames, fold) = session.frames_with_fold(seq_start, count)?;
     if frames.first() != encoded.pipe.frames.get(seq_start as usize) {
         return Err(EmitError::ReemitMismatch);
     }
