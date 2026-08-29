@@ -420,7 +420,8 @@ mod tests {
     /// claim and is measured in the `bud` crate, which owns that type.
     #[test]
     fn k10_channel_loss_survives_the_video_container() {
-        use crate::storage::qr_carousel::{CarouselDecoder, CarouselEncoder, CarouselError, Drop};
+        use crate::storage::qr_carousel::Drop as CarouselDrop;
+        use crate::storage::qr_carousel::{CarouselDecoder, CarouselEncoder};
 
         // (a) The low-level half: 4000 bytes per drop body, no container.
         let block = 4000usize;
@@ -442,7 +443,7 @@ mod tests {
         );
         let mut tek = CarouselDecoder::new();
         for f in survivors.iter().take(k) {
-            if let Ok(d) = Drop::from_bytes(f) {
+            if let Ok(d) = CarouselDrop::from_bytes(f) {
                 let _ = tek.push(&d);
             }
         }
@@ -452,7 +453,7 @@ mod tests {
         );
         let mut cift = CarouselDecoder::new();
         for f in &survivors {
-            if let Ok(d) = Drop::from_bytes(f) {
+            if let Ok(d) = CarouselDrop::from_bytes(f) {
                 let _ = cift.push(&d);
             }
         }
@@ -473,7 +474,7 @@ mod tests {
         let pc = [0x5au8; 32];
         let recipe = ThreeRecipePublic {
             payload_commitment: pc,
-            carousel: *small.params(),
+            carousel: small.params(),
             stream_id: [0u8; 32],
             block_len: 1000,
         };
@@ -487,7 +488,7 @@ mod tests {
         let (survivors, _, _) = channel(&demuxed);
         let mut dec = CarouselDecoder::new();
         for f in &survivors {
-            if let Ok(d) = Drop::from_bytes(f) {
+            if let Ok(d) = CarouselDrop::from_bytes(f) {
                 let _ = dec.push(&d);
             }
         }
@@ -507,6 +508,8 @@ mod tests {
     /// the body, the rest by disappearing. Returns what a receiver would hand to
     /// the decoder plus the two counts.
     fn channel(frames: &[Vec<u8>]) -> (Vec<Vec<u8>>, usize, usize) {
+        use crate::storage::qr_carousel::CarouselError;
+        use crate::storage::qr_carousel::Drop as CarouselDrop;
         let mut out = Vec::with_capacity(frames.len());
         let mut dropped = 0usize;
         let mut refused = 0usize;
@@ -522,7 +525,7 @@ mod tests {
             let mut hurt = f.clone();
             let mid = hurt.len() / 2;
             hurt[mid] ^= 0x80;
-            match Drop::from_bytes(&hurt) {
+            match CarouselDrop::from_bytes(&hurt) {
                 Err(CarouselError::BodyHashMismatch) => refused += 1,
                 Err(other) => panic!("a flipped body bit must fail the hash, not {other:?}"),
                 Ok(_) => panic!("a flipped body bit slipped past the drop check"),
