@@ -469,7 +469,20 @@ impl ViewGrantRegistry {
         })
     }
 
-    /// Domain-tagged digest of the whole book (for future state roots).
+    /// How many grant ids this book has handed out, including the revoked ones.
+    ///
+    /// The storage registry folds the book into its own root only after the first
+    /// id exists, so this is what decides whether a fold contributes bytes: an
+    /// issue-then-revoke sequence must still move the root, while a book nobody
+    /// ever wrote to must not.
+    #[must_use]
+    pub fn issued(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Domain-tagged digest of the whole book: the next id and every row's
+    /// commitment. The storage registry folds this into `StorageRegistry::root`
+    /// once an id has been issued, so the grant set is state-root committed.
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut fields: Vec<Vec<u8>> = vec![b"BDLM_VIEW_GRANT_REG_V1".to_vec()];

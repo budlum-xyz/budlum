@@ -1057,6 +1057,20 @@ impl StorageRegistry {
             hasher.update(content_id.0);
             hasher.update(owner.as_bytes());
         }
+        // A live view grant decides whether bytes are opened, and a self-host
+        // declaration decides whether an object may sit on a device without paid
+        // replicas. Both are enforced while a block is applied, so a node holding
+        // a different book accepts a block its peers reject. The grant book is
+        // folded through its own digest, and only after the first id was handed
+        // out: a chain that never issued a grant keeps the bytes it had, while an
+        // issue followed by a revoke still leaves its mark.
+        if self.view_grants.issued() > 0 {
+            hasher.update(self.view_grants.root());
+        }
+        for (content_id, policy) in &self.self_host_policies {
+            hasher.update(content_id.0);
+            hasher.update(bincode::serialize(policy).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
         hasher.finalize().into()
     }
 
@@ -4304,8 +4318,6 @@ mod tests {
         );
     }
 
-
-
     // === B76: a phone may hold a copy, never the only one =================
 
     /// The primary is what a reader reaches for and a repair rebuilds from.
@@ -6159,6 +6171,48 @@ mod demand_driven_replication_tests {
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
+    /// An issued view grant reaches the state root.
+    ///
+    /// Measured with a real ML-DSA-87 signature, because a grant the registry
+    /// refused must not move the root either: the assertion below is about the
+    /// accepted row, and the refusal case has its own test.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn an_issued_view_grant_reaches_the_registry_root() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [5u8; 32];
+        let digest = crate::storage::grant_issue_digest(
+            &m.manifest_id,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        let before = reg.root();
+        reg.issue_view_grant(
+            m.manifest_id,
+            &auth,
+            None,
+            key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        )
+        .expect("the owner's signed grant");
+        assert_ne!(before, reg.root(), "a live grant must reach the state root");
+    }
+
     #[test]
     fn confidential_commit_accepts_classic_encrypted_body() {
         use crate::crypto::primitives::WalletKeyPair;

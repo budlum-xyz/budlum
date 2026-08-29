@@ -1129,6 +1129,17 @@ impl Node {
                            // of this arm, which does chain and sync work.
                            self.peer_manager_lock().cleanup_expired_bans();
 
+                           // Expiring a ban only clears the flag; the record itself
+                           // is spent once no penalty is left. The tracking ceiling
+                           // reclaims on its own, but only when the table is already
+                           // full, so a peer id minted for free and then left behind
+                           // keeps the door shut for every peer not yet met. The
+                           // beat that expires bans is the beat that frees the slots.
+                           let reclaimed = self.peer_manager_lock().prune_spent_records();
+                           if reclaimed > 0 {
+                               info!("Reclaimed {reclaimed} spent peer records");
+                           }
+
                            // Auto-reset orphaned sync_state.
                            // If sync_state has been 1 for longer than SYNC_TIMEOUT_SECS,
                            // The sync cycle is considered stuck (e.g., peer disconnected
