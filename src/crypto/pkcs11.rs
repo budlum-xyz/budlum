@@ -5,6 +5,10 @@ use std::sync::Mutex;
 const BLS_DATA_LABEL: &str = "BUD_BLS_KEY";
 const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";
 
+/// HSM'deki ozel anahtarin okunan acik anahtara ait oldugunu baslangicta
+/// kanitlamak icin kullanilan sabit test mesaji.
+pub const ED25519_BINDING_TEST_MESSAGE: &[u8] = b"BUDLUM_PKCS11_ED25519_BINDING_V1";
+
 pub struct Pkcs11Signer {
     #[allow(dead_code)]
     module_path: String,
@@ -12,6 +16,8 @@ pub struct Pkcs11Signer {
     slot_id: u64,
     #[allow(dead_code)]
     token_pin_env: String,
+    /// Birden fazla Ed25519 cifti varsa konsensuis anahtarini secen etiket.
+    key_label: Option<String>,
     public_key_bytes: [u8; 32],
     bls_key: Mutex<Option<BlsKeypair>>,
     pq_key: Mutex<Option<PqKeyPair>>,
@@ -98,9 +104,15 @@ impl Pkcs11Signer {
         session
             .login(cryptoki::session::UserType::User, Some(&pin_secret))
             .map_err(|e| CryptoError::KeyGeneration(format!("PKCS#11 login failed: {e}")))?;
-        let public_key_bytes = Self::extract_ed25519_public_key(&session).map_err(|e| {
-            CryptoError::KeyGeneration(format!("Failed to extract Ed25519 key from HSM: {e}"))
-        })?;
+        let key_label: Option<String> = None;
+        let public_key_bytes = Self::extract_ed25519_public_key(&session, key_label.as_deref())
+            .map_err(|e| {
+                CryptoError::KeyGeneration(format!("Failed to extract Ed25519 key from HSM: {e}"))
+            })?;
+        // Okunan acik anahtarin, imzalamada kullanilacak ozel anahtarla ayni
+        // cifte ait oldugunu baslangicta bir test imzasiyla kanitla.
+        Self::verify_key_binding(&session, key_label.as_deref(), &public_key_bytes)
+            .map_err(CryptoError::KeyGeneration)?;
         let bls_key = None;
         let pq_key = None;
 
@@ -108,6 +120,7 @@ impl Pkcs11Signer {
             module_path,
             slot_id,
             token_pin_env,
+            key_label,
             public_key_bytes,
             bls_key: Mutex::new(bls_key),
             pq_key: Mutex::new(pq_key),
@@ -136,6 +149,13 @@ impl Pkcs11Signer {
         if let Some(id) = self.pq_mechanism {
             tracing::info!("PKCS#11: vendor PQ mechanism 0x{:08X}", id);
         }
+        self
+    }
+
+    /// Slot'ta birden fazla Ed25519 cifti varsa konsensuis anahtarini etiketiyle secer.
+    #[must_use]
+    pub fn with_key_label(mut self, label: Option<String>) -> Self {
+        self.key_label = label;
         self
     }
 
@@ -236,17 +256,25 @@ impl Pkcs11Signer {
 
     fn extract_ed25519_public_key(
         session: &cryptoki::session::Session,
+        key_label: Option<&str>,
     ) -> Result<[u8; 32], String> {
-        let template = &[
-            cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PUBLIC_KEY),
-            cryptoki::object::Attribute::KeyType(cryptoki::object::KeyType::EC_EDWARDS),
-        ];
+        let class = cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PUBLIC_KEY);
+        let key_type = cryptoki::object::Attribute::KeyType(cryptoki::object::KeyType::EC_EDWARDS);
+        let label = key_label.map(|l| cryptoki::object::Attribute::Label(l.into()));
+
+        let template: Vec<cryptoki::object::Attribute> = match &label {
+            Some(label) => vec![class, key_type, label.clone()],
+            None => vec![class, key_type],
+        };
+
         let objects = session
-            .find_objects(template)
+            .find_objects(&template)
             .map_err(|e| format!("Ed25519 key search failed: {e}"))?;
-        if objects.is_empty() {
-            return Err("No Ed25519 public key found in HSM".into());
-        }
+
+        // Birden fazla anahtar varsa tahmin edilmez: ilan edilen kimlik ile
+        // imzalayan anahtarin farkli olmasi konsensuis hatasidir.
+        Self::require_single_key("public", objects.len())?;
+
         let attr = session
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
             .map_err(|e| format!("Public key read failed: {e}"))?;
@@ -258,6 +286,90 @@ impl Pkcs11Signer {
             }
         }
         Err("Failed to extract public key bytes".into())
+    }
+
+    /// Slot'ta tam olarak bir Ed25519 anahtari olmali. Eski davranis
+    /// `objects[0]` ile tahmin ediyordu; birden fazla anahtar varsa dugumun
+    /// ilan ettigi kimlik ile imzaladigi anahtar farkli olabilir.
+    fn require_single_key(kind: &str, count: usize) -> Result<(), String> {
+        match count {
+            0 => Err(format!("No Ed25519 {kind} key found in HSM")),
+            1 => Ok(()),
+            n => Err(format!(
+                "{n} Ed25519 {kind} keys found in HSM slot; refusing to guess, set an explicit key label"
+            )),
+        }
+    }
+
+    fn private_key_handle(
+        session: &cryptoki::session::Session,
+        key_label: Option<&str>,
+    ) -> Result<cryptoki::object::ObjectHandle, String> {
+        let class = cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PRIVATE_KEY);
+        let key_type = cryptoki::object::Attribute::KeyType(cryptoki::object::KeyType::EC_EDWARDS);
+        let label = key_label.map(|l| cryptoki::object::Attribute::Label(l.into()));
+
+        let template: Vec<cryptoki::object::Attribute> = match &label {
+            Some(label) => vec![class, key_type, label.clone()],
+            None => vec![class, key_type],
+        };
+
+        let objects = session
+            .find_objects(&template)
+            .map_err(|e| format!("Ed25519 key search: {e}"))?;
+
+        Self::require_single_key("private", objects.len())?;
+        Ok(objects[0])
+    }
+
+    fn ed25519_mechanism() -> cryptoki::mechanism::Mechanism<'static> {
+        // Cryptoki 0.12 removed EddsaParams::default; parameterless pure
+        // Ed25519 is EddsaSignatureScheme::Pure.
+        cryptoki::mechanism::Mechanism::Eddsa(cryptoki::mechanism::eddsa::EddsaParams::new(
+            cryptoki::mechanism::eddsa::EddsaSignatureScheme::Pure,
+        ))
+    }
+
+    fn sign_ed25519(
+        session: &cryptoki::session::Session,
+        key_label: Option<&str>,
+        msg: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let key_handle = Self::private_key_handle(session, key_label)?;
+        let sig = session
+            .sign(&Self::ed25519_mechanism(), key_handle, msg)
+            .map_err(|e| format!("HSM sign: {e}"))?;
+        if sig.len() < 64 {
+            return Err(format!("Undersized sig: {} bytes", sig.len()));
+        }
+        Ok(sig[..64].to_vec())
+    }
+
+    /// Okunan acik anahtarin, slot'ta imzalayacak ozel anahtarla ayni cifte
+    /// ait oldugunu sabit bir test mesaji uzerinde dogrular. Uymuyorsa dugum
+    /// acilmaz: yanlis eslesme her blokta gecersiz imza uretir.
+    fn verify_key_binding(
+        session: &cryptoki::session::Session,
+        key_label: Option<&str>,
+        public_key_bytes: &[u8; 32],
+    ) -> Result<(), String> {
+        let signature = Self::sign_ed25519(session, key_label, ED25519_BINDING_TEST_MESSAGE)?;
+        let signature_bytes: [u8; 64] = signature[..64]
+            .try_into()
+            .map_err(|_| "HSM returned an unexpected signature length".to_string())?;
+
+        let verifying_key =
+            ed25519_dalek::VerifyingKey::from_bytes(public_key_bytes).map_err(|e| {
+                format!("HSM public key is not a valid Ed25519 verifying key: {e}")
+            })?;
+        let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+
+        verifying_key
+            .verify_strict(ED25519_BINDING_TEST_MESSAGE, &signature)
+            .map_err(|_| {
+                "HSM private key does not match the Ed25519 public key read from the slot"
+                    .to_string()
+            })
     }
 }
 
@@ -356,35 +468,9 @@ impl ConsensusSigner for Pkcs11Signer {
         let inner = guard
             .as_ref()
             .ok_or_else(|| CryptoError::Signing("HSM session closed".into()))?;
-        let template = &[
-            cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PRIVATE_KEY),
-            cryptoki::object::Attribute::KeyType(cryptoki::object::KeyType::EC_EDWARDS),
-        ];
-        let objects = inner
-            .session
-            .find_objects(template)
-            .map_err(|e| CryptoError::Signing(format!("Ed25519 key search: {e}")))?;
-        if objects.is_empty() {
-            return Err(CryptoError::Signing("No Ed25519 private key in HSM".into()));
-        }
-        let mechanism = cryptoki::mechanism::Mechanism::Eddsa(
-            // Cryptoki 0.12 removed EddsaParams::default; parameterless pure
-            // Ed25519 is EddsaSignatureScheme::Pure.
-            cryptoki::mechanism::eddsa::EddsaParams::new(
-                cryptoki::mechanism::eddsa::EddsaSignatureScheme::Pure,
-            ),
-        );
-        let sig = inner
-            .session
-            .sign(&mechanism, objects[0], block_hash)
-            .map_err(|e| CryptoError::Signing(format!("HSM sign: {e}")))?;
-        if sig.len() < 64 {
-            return Err(CryptoError::Signing(format!(
-                "Undersized sig: {} bytes",
-                sig.len()
-            )));
-        }
-        Ok(sig[..64].to_vec())
+
+        Self::sign_ed25519(&inner.session, self.key_label.as_deref(), block_hash)
+            .map_err(CryptoError::Signing)
     }
 
     fn bls_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
@@ -856,5 +942,24 @@ mod vendor_tests {
             check_mechanism_admissible_for_mainnet(id, &caps)
                 .expect("the vendor's own documented signing mechanisms must pass");
         }
+    }
+
+    #[test]
+    fn a_single_ed25519_key_is_accepted() {
+        assert!(Pkcs11Signer::require_single_key("private", 1).is_ok());
+    }
+
+    #[test]
+    fn a_missing_ed25519_key_is_rejected() {
+        let err = Pkcs11Signer::require_single_key("private", 0).unwrap_err();
+        assert!(err.contains("No Ed25519 private key"), "{err}");
+    }
+
+    /// Eski davranis `objects[0]` ile tahmin ediyordu: birden fazla anahtar
+    /// varsa ilan edilen kimlik ile imzalayan anahtar farkli olabilir.
+    #[test]
+    fn an_ambiguous_ed25519_key_selection_is_refused() {
+        let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();
+        assert!(err.contains("refusing to guess"), "{err}");
     }
 }

@@ -653,10 +653,12 @@ async fn main() {
             )
         };
         match signer_result.map(|s| {
-            let signer = s.with_vendor_mechanisms(
-                config.pkcs11_bls_mechanism.clone(),
-                config.pkcs11_pq_mechanism.clone(),
-            );
+            let signer = s
+                .with_vendor_mechanisms(
+                    config.pkcs11_bls_mechanism.clone(),
+                    config.pkcs11_pq_mechanism.clone(),
+                )
+                .with_key_label(config.pkcs11_key_label.clone());
             if strict_vendor_native {
                 signer.require_vendor_native_signing()
             } else {
