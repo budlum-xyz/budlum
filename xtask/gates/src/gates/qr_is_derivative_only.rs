@@ -93,12 +93,12 @@ pub fn self_test() -> Result<String, String> {
     std::fs::create_dir_all(dir.join("src/storage")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("src/domain")).map_err(|e| e.to_string())?;
 
-    let good_render = r#"
+    let good_render = r"
 //! `QrStream` is deliberately not reachable from the RPC. It is a transport
 enum RenderFormat { QrStream { seq: u32 } }
 /// This is not a proof of storage.
 fn qr_stream_content_id() {}
-"#;
+";
     let good_deal = "fn open_deal() {}\n";
     let good_gen = "enum BudStorageEdition { Classic, Three }\nfn admits_body() {}\n";
     std::fs::write(dir.join("src/storage/render.rs"), good_render).map_err(|e| e.to_string())?;

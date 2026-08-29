@@ -13,8 +13,8 @@
 //! is a call of the form `.<field>.<method>(...)` where `<method>` is one of
 //! the prometheus mutators this tree uses:
 //!
-//!   set, inc, dec, add, sub, observe, inc_by, add_by,
-//!   start_timer, observe_closure_duration
+//!   `set`, `inc`, `dec`, `add`, `sub`, `observe`, `inc_by`, `add_by`,
+//!   `start_timer`, `observe_closure_duration`
 //!
 //! The left side of the field is already bounded by the leading `.`. The right
 //! side must not continue as an identifier (`peer_count` must not match
@@ -547,14 +547,16 @@ fn clean_tree_files() -> Vec<(&'static str, &'static str)> {
     // 12 gauges so vacuity floor is cleared.
     for i in 0..12 {
         let name = format!("m{i}");
-        fields.push_str(&format!("    pub {name}: IntGauge,\n"));
-        inits.push_str(&format!(
-            "        let {name} = IntGauge::new(\"budlum_{name}\", \"h\")?;\n"
-        ));
-        registers.push_str(&format!(
-            "        registry.register(Box::new({name}.clone()))?;\n"
-        ));
-        struct_init.push_str(&format!("            {name},\n"));
+        let _ = writeln!(fields, "    pub {name}: IntGauge");
+        let _ = writeln!(
+            inits,
+            "        let {name} = IntGauge::new(\"budlum_{name}\", \"h\")?"
+        );
+        let _ = writeln!(
+            registers,
+            "        registry.register(Box::new({name}.clone()))?"
+        );
+        let _ = writeln!(struct_init, "            {name},");
     }
     let metrics = format!(
         "use prometheus::{{IntGauge, Registry}};\n\
@@ -575,7 +577,7 @@ fn clean_tree_files() -> Vec<(&'static str, &'static str)> {
     // Write every field in production.
     let mut writer = String::from("fn emit(m: &crate::core::metrics::Metrics) {\n");
     for i in 0..12 {
-        writer.push_str(&format!("    m.m{i}.set(1);\n"));
+        let _ = writeln!(writer, "    m.m{i}.set(1);");
     }
     writer.push_str("}\n");
     vec![
@@ -591,45 +593,8 @@ fn clean_tree_files() -> Vec<(&'static str, &'static str)> {
 /// Returns the first canary that misbehaves.
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
-    let clean = tmp.join("clean");
-    write_tree(&clean, &clean_tree_files())?;
-
-    if let Err(msg) = run(&clean) {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(format!("canary: fully written tree rejected: {msg}"));
-    }
-
-    // Unwritten field must fail.
-    let bad = tmp.join("unwritten");
-    let mut files = clean_tree_files();
-    // Drop writes for m11 only.
-    let writer = "fn emit(m: &crate::core::metrics::Metrics) {\n\
-                  m.m0.set(1); m.m1.set(1); m.m2.set(1); m.m3.set(1);\n\
-                  m.m4.set(1); m.m5.set(1); m.m6.set(1); m.m7.set(1);\n\
-                  m.m8.set(1); m.m9.set(1); m.m10.set(1);\n\
-                  }\n";
-    files.push(("src/writer.rs", writer));
-    // clean_tree_files already has writer; replace by writing after.
-    write_tree(&bad, &files)?;
-    fs::write(bad.join("src/writer.rs"), writer).map_err(|e| e.to_string())?;
-    if accepts(&bad)? {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: an unwritten metric was accepted"));
-    }
-
-    // Baseline exempts the unwritten field.
-    let baselined = tmp.join("baselined");
-    write_tree(&baselined, &files)?;
-    fs::write(baselined.join("src/writer.rs"), writer).map_err(|e| e.to_string())?;
-    fs::create_dir_all(baselined.join(".github")).map_err(|e| e.to_string())?;
-    fs::write(baselined.join(BASELINE_PATH), "IntGauge\tm11\n").map_err(|e| e.to_string())?;
-    if !accepts(&baselined)? {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: a baselined unwritten metric still failed",
-        ));
-    }
-
+    clean_case(&tmp)?;
+    baseline_case(&tmp)?;
     // Stale baseline (metric now written) must fail.
     let stale = tmp.join("stale");
     write_tree(&stale, &clean_tree_files())?;
@@ -659,55 +624,7 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    // start_timer counts as a write for histograms - use a dedicated tree.
-    let timer = tmp.join("timer");
-    let metrics_hist = r#"use prometheus::{Histogram, HistogramOpts, Registry};
-pub struct Metrics {
-    pub h0: Histogram,
-    pub h1: Histogram,
-    pub h2: Histogram,
-    pub h3: Histogram,
-    pub h4: Histogram,
-    pub h5: Histogram,
-    pub h6: Histogram,
-    pub h7: Histogram,
-    pub h8: Histogram,
-    pub h9: Histogram,
-    pub h10: Histogram,
-    pub h11: Histogram,
-}
-"#;
-    write_tree(
-        &timer,
-        &[
-            ("docs/ARCHITECTURE.md", "# a\n"),
-            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0\"\n"),
-            ("src/core/metrics.rs", metrics_hist),
-            (
-                "src/writer.rs",
-                "fn e(m: &crate::core::metrics::Metrics) {\n\
-                 let _ = m.h0.start_timer();\n\
-                 let _ = m.h1.start_timer();\n\
-                 let _ = m.h2.start_timer();\n\
-                 let _ = m.h3.start_timer();\n\
-                 let _ = m.h4.start_timer();\n\
-                 let _ = m.h5.start_timer();\n\
-                 let _ = m.h6.start_timer();\n\
-                 let _ = m.h7.start_timer();\n\
-                 let _ = m.h8.start_timer();\n\
-                 let _ = m.h9.start_timer();\n\
-                 let _ = m.h10.start_timer();\n\
-                 let _ = m.h11.start_timer();\n\
-                 }\n",
-            ),
-        ],
-    )?;
-    if !accepts(&timer)? {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: start_timer was not accepted as a write",
-        ));
-    }
+    timer_case(&tmp)?;
 
     // cfg(test) write must NOT count.
     let test_only = tmp.join("test_only");
@@ -781,6 +698,71 @@ pub struct Metrics {
         ));
     }
 
+    empty_case(&tmp)?;
+
+
+    let _ = fs::remove_dir_all(&tmp);
+    Ok(String::from(
+        "metrics-are-written canary OK (written PASSes, unwritten FAILs, baseline exempts, \
+         stale baseline FAILs, multi-line and start_timer count, cfg(test) does not, \
+         bodyless cfg(test) does not swallow, identity boundary holds, comment-only write FAILs, empty tree FAILs).",
+    ))
+}
+fn timer_case(tmp: &Path) -> Result<(), String> {
+    // start_timer counts as a write for histograms - use a dedicated tree.
+    let timer = tmp.join("timer");
+    let metrics_hist = r"use prometheus::{Histogram, HistogramOpts, Registry};
+pub struct Metrics {
+    pub h0: Histogram,
+    pub h1: Histogram,
+    pub h2: Histogram,
+    pub h3: Histogram,
+    pub h4: Histogram,
+    pub h5: Histogram,
+    pub h6: Histogram,
+    pub h7: Histogram,
+    pub h8: Histogram,
+    pub h9: Histogram,
+    pub h10: Histogram,
+    pub h11: Histogram,
+}
+";
+    write_tree(
+        &timer,
+        &[
+            ("docs/ARCHITECTURE.md", "# a\n"),
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0\"\n"),
+            ("src/core/metrics.rs", metrics_hist),
+            (
+                "src/writer.rs",
+                "fn e(m: &crate::core::metrics::Metrics) {\n\
+                 let _ = m.h0.start_timer();\n\
+                 let _ = m.h1.start_timer();\n\
+                 let _ = m.h2.start_timer();\n\
+                 let _ = m.h3.start_timer();\n\
+                 let _ = m.h4.start_timer();\n\
+                 let _ = m.h5.start_timer();\n\
+                 let _ = m.h6.start_timer();\n\
+                 let _ = m.h7.start_timer();\n\
+                 let _ = m.h8.start_timer();\n\
+                 let _ = m.h9.start_timer();\n\
+                 let _ = m.h10.start_timer();\n\
+                 let _ = m.h11.start_timer();\n\
+                 }\n",
+            ),
+        ],
+    )?;
+    if !accepts(&timer)? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: start_timer was not accepted as a write",
+        ));
+    }
+    Ok(())
+
+}
+
+fn empty_case(tmp: &Path) -> Result<(), String> {
     // Vacuity floor.
     let empty = tmp.join("empty");
     write_tree(
@@ -796,16 +778,61 @@ pub struct Metrics {
         ],
     )?;
     if accepts(&empty)? {
-        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "canary: a near-empty metrics struct passed, so the gate can be vacuous",
         ));
     }
+    Ok(())
 
-    let _ = fs::remove_dir_all(&tmp);
-    Ok(String::from(
-        "metrics-are-written canary OK (written PASSes, unwritten FAILs, baseline exempts, \
-         stale baseline FAILs, multi-line and start_timer count, cfg(test) does not, \
-         bodyless cfg(test) does not swallow, identity boundary holds, comment-only write FAILs, empty tree FAILs).",
-    ))
 }
+/// The shape that must pass before any refusal means something: a tree whose every
+/// metric is written in production.
+fn clean_case(tmp: &Path) -> Result<(), String> {
+    let clean = tmp.join("clean");
+    write_tree(&clean, &clean_tree_files())?;
+
+    if let Err(msg) = run(&clean) {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(format!("canary: fully written tree rejected: {msg}"));
+    }
+    Ok(())
+}
+
+/// The baseline can exempt an unwritten field, and must stop exempting it once the
+/// write exists; both directions are one fixture because the second tree is the
+/// first with a line added.
+fn baseline_case(tmp: &Path) -> Result<(), String> {
+    // Unwritten field must fail.
+    let bad = tmp.join("unwritten");
+    let mut files = clean_tree_files();
+    // Drop writes for m11 only.
+    let writer = "fn emit(m: &crate::core::metrics::Metrics) {\n\
+                  m.m0.set(1); m.m1.set(1); m.m2.set(1); m.m3.set(1);\n\
+                  m.m4.set(1); m.m5.set(1); m.m6.set(1); m.m7.set(1);\n\
+                  m.m8.set(1); m.m9.set(1); m.m10.set(1);\n\
+                  }\n";
+    files.push(("src/writer.rs", writer));
+    // clean_tree_files already has writer; replace by writing after.
+    write_tree(&bad, &files)?;
+    fs::write(bad.join("src/writer.rs"), writer).map_err(|e| e.to_string())?;
+    if accepts(&bad)? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from("canary: an unwritten metric was accepted"));
+    }
+
+    // Baseline exempts the unwritten field.
+    let baselined = tmp.join("baselined");
+    write_tree(&baselined, &files)?;
+    fs::write(baselined.join("src/writer.rs"), writer).map_err(|e| e.to_string())?;
+    fs::create_dir_all(baselined.join(".github")).map_err(|e| e.to_string())?;
+    fs::write(baselined.join(BASELINE_PATH), "IntGauge\tm11\n").map_err(|e| e.to_string())?;
+    if !accepts(&baselined)? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a baselined unwritten metric still failed",
+        ));
+    }
+    Ok(())
+}
+

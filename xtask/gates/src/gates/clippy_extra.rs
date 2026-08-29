@@ -83,9 +83,9 @@ pub fn run(root: &Path, json: &Path) -> Result<String, String> {
             STALL_SLACK_PERCENT
         ));
     }
+    let slack = STALL_SLACK_PERCENT;
     Ok(format!(
-        "{msg}\nOK: pedantic/nursery is at or below the baseline, and the baseline is within {}% of the measured count (the ratchet holds in both directions).",
-        STALL_SLACK_PERCENT
+        "{msg}\nOK: pedantic/nursery is at or below the baseline, and the baseline is within {slack}% of the measured count (the ratchet holds in both directions)."
     ))
 }
 

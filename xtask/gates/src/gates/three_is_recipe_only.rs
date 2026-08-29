@@ -1,7 +1,7 @@
 //! BUD edition Three is recipe-only: no body, no deal, sealed or public recipe.
 //!
-//! Hardens the product claim: 3.0 means tarif. Bodies are Classic/2.0. A public
-//! seed is the public surface; SealedGenerated is the private surface
+//! Hardens the product claim: `3.0` means `tarif`. Bodies are Classic/2.0. A public
+//! seed is the public surface; `SealedGenerated` is the private surface
 //! (seed off-chain under view-grants). Opening a deal on Three is refused.
 
 use std::path::Path;
@@ -81,14 +81,14 @@ pub fn self_test() -> Result<String, String> {
     std::fs::create_dir_all(dir.join("src/storage")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("src/domain")).map_err(|e| e.to_string())?;
 
-    let good_gen = r#"
+    let good_gen = r"
 enum BudStorageEdition { Classic, Three }
 fn admits_body() {}
 enum ContentSource { Generated(u8), SealedGenerated(u8), Stored }
 fn check() { ContentSource::Generated(_) | ContentSource::SealedGenerated(_) => Ok(()); }
 struct SealedGeneratedSpec {}
 fn recipe_seed_is_public() {}
-"#;
+";
     let good_deal = r#"
 fn open_deal() {
     if !manifest.edition.admits_body() {

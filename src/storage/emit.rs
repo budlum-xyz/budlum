@@ -1011,7 +1011,16 @@ pub fn qr_feed_preview(
         });
     }
     let (burst, burst_fold) = emitter.emit_frames(0, want)?;
-    emitter.verify_stream_id(&pipe.recipe.stream_id)?;
+    // The recipe pins the identity of the pass a reader can rebuild. Verified
+    // against the fold of the whole published frame list, which only this path
+    // holds: comparing the pinned word with itself, as an earlier shape of this
+    // line did, accepts any recipe. Reproducing every frame is also what makes
+    // the pin meaningful, so the frame list is compared, not just its digest.
+    let (pass, pass_fold) = emitter.emit_frames(0, actual)?;
+    if pass != pipe.frames {
+        return Err(EmitError::ReemitMismatch);
+    }
+    emitter.verify_stream_id(&pass_fold)?;
     let burst_len = burst.len();
     if burst.first() != Some(&frame0) {
         return Err(EmitError::ReemitMismatch);
