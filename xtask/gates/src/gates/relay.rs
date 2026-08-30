@@ -213,8 +213,9 @@ fn status_payload(
 /// executing image, never from a path the process itself chose to trust: a
 /// renamed or path-swapped binary is still read as it actually runs.
 fn gate_binary_hash() -> Result<[u8; 32], String> {
-    let bytes = std::fs::read("/proc/self/exe")
-        .map_err(|e| format!("relay: cannot read the executing gate binary via /proc/self/exe: {e}"))?;
+    let bytes = std::fs::read("/proc/self/exe").map_err(|e| {
+        format!("relay: cannot read the executing gate binary via /proc/self/exe: {e}")
+    })?;
     Ok(keccak256(&bytes))
 }
 
