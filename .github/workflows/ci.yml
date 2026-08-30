@@ -938,6 +938,11 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- timing-safe --self-test
       - name: Dudect-style statistical timing test
         run: cargo bench --bench timing_safe
+      # Ratio packing throughput with a determinism refusal: the step fails if the
+      # rayon path produces different bytes than the serial path, so the numbers
+      # printed here are measurements of a path that is provably equivalent.
+      - name: Ratio rayon vs serial throughput
+        run: cargo bench --bench ratio_rayon
 
   docker-security:
     # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.

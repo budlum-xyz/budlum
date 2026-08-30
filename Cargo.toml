@@ -181,6 +181,14 @@ name = "timing_safe"
 path = "benches/micro/timing_safe.rs"
 harness = false
 
+# Ratio-pipeline packing throughput, serial against rayon. Runs in CI as the
+# `Ratio rayon vs serial throughput` step; its numbers belong to the host that ran
+# the step, so nothing in the tree pins them.
+[[bench]]
+name = "ratio_rayon"
+path = "benches/micro/ratio_rayon.rs"
+harness = false
+
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]
 name = "domain_throughput"
