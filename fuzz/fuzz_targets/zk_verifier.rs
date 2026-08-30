@@ -121,6 +121,10 @@ fuzz_target!(|data: &[u8]| {
         Err(VerifyError::DeserializationError(_))
         | Err(VerifyError::InvalidEnvelope(_))
         | Err(VerifyError::PublicInputsMismatch)
-        | Err(VerifyError::InvalidProof) => {}
+        | Err(VerifyError::InvalidProof)
+        // A report pinned to a non-canonical program set is a legitimate
+        // rejection, not a sanitizer event; the relayer folds it into an
+        // alarm instead of panicking, so the fuzzer accepts it.
+        | Err(VerifyError::NonCanonicalProgram(_)) => {}
     }
 });
