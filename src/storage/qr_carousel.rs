@@ -1390,4 +1390,73 @@ mod tests {
         let c = enc.drop_at(43);
         assert_ne!(a.body, c.body);
     }
+    /// Loss, modelled the way this pipe loses: whole carousel drops disappear
+    /// and nothing about them is partial. `BUD-3.0-SARTNAME.md` item 8 quoted
+    /// H.264/CRF28 figures from a Python harness that is in no repo; what is
+    /// reproducible here is the loss behaviour underneath the codec, which is
+    /// what the doc now says.
+    #[test]
+    fn modelled_frame_loss_stalls_the_solid_prefix_at_the_hole() {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let enc = CarouselEncoder::new(&payload, 8).unwrap();
+        let k = enc.params().k;
+        let limit = u32::from(k / 4);
+        let mut dec = CarouselDecoder::new();
+        // One systematic drop in ten is lost on the way.
+        for seq in 0..limit {
+            if seq % 10 == 9 {
+                continue;
+            }
+            dec.push(&enc.drop_at(seq)).unwrap();
+        }
+        assert_eq!(
+            dec.solid_prefix_blocks(),
+            9,
+            "the solid prefix has to stop exactly at the first lost block"
+        );
+        assert!(!dec.is_complete(), "a lost tenth cannot complete");
+        assert!(dec.missing() > 0);
+    }
+
+    /// A drop altered in transit is refused by the digest in its own header, on
+    /// the systematic side and on the repair side alike. This is the half the
+    /// codec cannot show: a single flipped bit never becomes a silently wrong
+    /// block. `fnv1a32` is a chain of xor-then-multiply-by-an-odd-prime steps, so
+    /// changing the final body byte changes the digest by construction.
+    #[test]
+    fn flipped_body_byte_is_refused_on_systematic_and_repair_drops() {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let enc = CarouselEncoder::new(&payload, 8).unwrap();
+        let k = u32::from(enc.params().k);
+        for seq in [0u32, 1, k / 2, k, k + 13] {
+            let mut bytes = enc.drop_at(seq).to_bytes();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+            assert_eq!(
+                Drop::from_bytes(&bytes).unwrap_err(),
+                CarouselError::BodyHashMismatch,
+                "seq {seq}: a one-bit change in the body has to be visible"
+            );
+        }
+    }
+
+    /// Truncation moves the stream commitment: a shorter payload from a lossy
+    /// encoder is not the same stream, so a receiver cannot accept it as one.
+    #[test]
+    fn truncated_payload_changes_the_stream_commitment() {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let c = [7u8; 32];
+        let tam = CarouselEncoder::new(&payload, 8).unwrap();
+        let truncated = CarouselEncoder::new(&payload[..payload.len() - 400], 8).unwrap();
+        assert_ne!(
+            tam.params().stream_commitment(&c),
+            truncated.params().stream_commitment(&c),
+            "the commitment has to cover how much source the stream stands for"
+        );
+        assert_eq!(
+            tam.params().stream_commitment(&c),
+            tam.params().stream_commitment(&c),
+            "same input, same commitment"
+        );
+    }
 }
