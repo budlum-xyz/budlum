@@ -23,11 +23,7 @@ use std::path::Path;
 
 /// The gate subcommands CI must invoke for the protection to be live.
 /// Ordered; every entry is a real gate in `main.rs`'s GATES list.
-const PROTECTED_GATES: &[&str] = &[
-    "regeneration",
-    "relay",
-    "tree-pin",
-];
+const PROTECTED_GATES: &[&str] = &["regeneration", "relay", "tree-pin"];
 
 /// Workflow files that run gates.
 const WORKFLOWS: &[&str] = &[
@@ -74,8 +70,8 @@ fn run_blocks(text: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        if trimmed.starts_with("- name: ") {
-            current_step = trimmed["- name: ".len()..].to_string();
+        if let Some(step) = trimmed.strip_prefix("- name: ") {
+            current_step = step.to_string();
             i += 1;
             continue;
         }
@@ -118,7 +114,7 @@ fn invokes(run: &str, subcommand: &str) -> bool {
     // so `-- relayx` or `-- relayer` does not match `relay`.
     run.split(&needle)
         .skip(1)
-        .any(|tail| tail.chars().next().is_none_or(|c| c.is_whitespace()))
+        .any(|tail| tail.chars().next().is_none_or(char::is_whitespace))
 }
 
 /// True if the run text invokes the gate binary with the given subcommand in
@@ -145,7 +141,10 @@ fn check_workflow(path: &Path, require_self_test: bool) -> Result<Vec<String>, S
     let mut findings: Vec<String> = Vec::new();
 
     for gate in PROTECTED_GATES {
-        let plain = blocks.iter().filter(|(_, r)| invokes_anywhere(r, gate)).count();
+        let plain = blocks
+            .iter()
+            .filter(|(_, r)| invokes_anywhere(r, gate))
+            .count();
         let self_test = blocks
             .iter()
             .filter(|(_, r)| invokes_anywhere(r, gate) && r.contains("--self-test"))

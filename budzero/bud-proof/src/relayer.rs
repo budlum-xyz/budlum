@@ -143,8 +143,8 @@ impl CanonicalRelayReport {
     /// p3_version / fri_params_id as NUL-terminated ASCII, then the alarm:
     /// a single NUL byte when there is none, or code (NUL-terminated ASCII)
     /// + detail (NUL-terminated ASCII) when there is one. Backend strings
-    /// are ASCII by construction; anything else would trip the relay gate's
-    /// cross-check, not silently change the payload.
+    ///   are ASCII by construction; anything else would trip the relay gate's
+    ///   cross-check, not silently change the payload.
     pub fn canonical_payload(&self) -> Vec<u8> {
         let mut p: Vec<u8> = Vec::new();
         p.extend_from_slice(&self.schema_version.to_le_bytes());
@@ -192,8 +192,14 @@ impl CanonicalRelayReport {
     }
 
     /// Pretty JSON serialization (deterministic field order).
-    pub fn report_json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("relay report serializes")
+    ///
+    /// # Errors
+    ///
+    /// Propagates the serializer's error; every field of the report is a
+    /// plain integer, byte array or `String`, so the failure is a writer
+    /// problem, not a shape problem.
+    pub fn report_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
     }
 
     /// Machine-readable token line for grepping consumers:
@@ -215,11 +221,17 @@ impl CanonicalRelayReport {
 
     /// Write the JSON report to `path` (used by tooling/CI to publish the
     /// report for the gate-side relay).
+    ///
+    /// # Errors
+    ///
+    /// Reports a serializer failure as an `Other` io error, so a caller that
+    /// only handles io still sees why the file did not appear.
     pub fn write_report(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, self.report_json())
+        let json = self.report_json().map_err(std::io::Error::other)?;
+        std::fs::write(path, json)
     }
 }
 
@@ -273,13 +285,20 @@ impl CanonicalRelayReport {
         at_unix: u64,
     ) -> Self {
         let program_hash = pi.program_hash;
+        // A digest that cannot be assembled means the pinned table itself is
+        // broken; the report then claims nothing is canonical, which routes
+        // the proof through the existing NonCanonicalProgram alarm instead of
+        // a panic. The gate's canonical-set token pins the same value, so a
+        // broken table cannot pass silently.
+        let set_digest = canonical_set::canonical_set_digest();
         let mut report = CanonicalRelayReport {
             schema_version: RELAY_SCHEMA_VERSION,
             status: RelayStatus::Ok,
             verified_at_unix: at_unix,
             program_hash,
-            is_canonical: canonical_set::is_canonical_program_hash(&program_hash),
-            canonical_set_digest: canonical_set::canonical_set_digest(),
+            is_canonical: set_digest.is_some()
+                && canonical_set::is_canonical_program_hash(&program_hash),
+            canonical_set_digest: set_digest.unwrap_or([0u8; 32]),
             proof: fingerprint_of(envelope),
             alarm: None,
             report_sig: [0u8; 32],
@@ -356,7 +375,7 @@ mod tests {
     }
 
     fn dummy_pi(vm: &Vm, program: &[u64]) -> ExecutionPublicInputs {
-        use tiny_keccak::{Hasher as _, Keccak as _};
+        use tiny_keccak::Hasher as _;
         let mut hasher = Keccak::v256();
         for &w in program {
             hasher.update(&w.to_le_bytes());
@@ -486,7 +505,7 @@ mod tests {
     fn report_json_roundtrips() {
         let (envelope, pi, program) = prove_canonical();
         let report = verify_and_report_at(&envelope, &pi, &program, 1_700_000_000);
-        let json = report.report_json();
+        let json = report.report_json().expect("relay report serializes");
         let parsed: CanonicalRelayReport = serde_json::from_str(&json).expect("json parses");
         assert_eq!(parsed, report);
         assert!(parsed.verify_report_sig());

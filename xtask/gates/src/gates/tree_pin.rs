@@ -33,11 +33,7 @@ fn collect_tree_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(out.into_iter().collect())
 }
 
-fn collect_dir(
-    base: &Path,
-    dir: &Path,
-    out: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), String> {
+fn collect_dir(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("tree-pin: cannot read {}: {e}", dir.display()))?;
     for entry in entries {
@@ -114,7 +110,11 @@ fn write_pins(root: &Path) -> Result<String, String> {
     }
     std::fs::write(&path, text)
         .map_err(|e| format!("tree-pin: cannot write {}: {e}", path.display()))?;
-    Ok(format!("tree-pin: pinned {} files to {}", files.len(), PIN_FILE))
+    Ok(format!(
+        "tree-pin: pinned {} files to {}",
+        files.len(),
+        PIN_FILE
+    ))
 }
 
 /// Verify the tree against the pins.
@@ -123,8 +123,10 @@ fn verify_tree(root: &Path) -> Result<String, String> {
     let files = collect_tree_files(root)?;
     let mut findings: Vec<String> = Vec::new();
 
-    let by_rel: BTreeMap<&str, &[u8]> =
-        files.iter().map(|(rel, b)| (rel.as_str(), b.as_slice())).collect();
+    let by_rel: BTreeMap<&str, &[u8]> = files
+        .iter()
+        .map(|(rel, b)| (rel.as_str(), b.as_slice()))
+        .collect();
 
     // Every pinned file must still exist with the same hash.
     for (rel, pin_hex) in &pins {
@@ -158,7 +160,10 @@ fn verify_tree(root: &Path) -> Result<String, String> {
             findings.join("\n  ")
         ));
     }
-    Ok(format!("tree-pin: all {} files match their pins", pins.len()))
+    Ok(format!(
+        "tree-pin: all {} files match their pins",
+        pins.len()
+    ))
 }
 
 /// Run with optional extra arguments: `--pin` rewrites the pins, anything
@@ -202,18 +207,24 @@ pub fn self_test() -> Result<String, String> {
     // Modified file must be caught.
     std::fs::write(&a_path, "pub fn a() -> u64 { 7 }\n").unwrap();
     if verify_tree(&tmp).is_ok() {
-        return Err(String::from("tree-pin self-test: a modified file was accepted"));
+        return Err(String::from(
+            "tree-pin self-test: a modified file was accepted",
+        ));
     }
     // Deleted file must be caught.
     std::fs::remove_file(&a_path).unwrap();
     if verify_tree(&tmp).is_ok() {
-        return Err(String::from("tree-pin self-test: a deleted file was accepted"));
+        return Err(String::from(
+            "tree-pin self-test: a deleted file was accepted",
+        ));
     }
     // New unpinned file must be caught.
     std::fs::write(&a_path, "pub fn a() -> u64 { 1 }\n").unwrap();
     std::fs::write(tmp.join("budzero/bud-vm/src/evil.rs"), "pub fn evil() {}\n").unwrap();
     if verify_tree(&tmp).is_ok() {
-        return Err(String::from("tree-pin self-test: an unpinned new file was accepted"));
+        return Err(String::from(
+            "tree-pin self-test: an unpinned new file was accepted",
+        ));
     }
     std::fs::remove_file(tmp.join("budzero/bud-vm/src/evil.rs")).unwrap();
 
@@ -232,7 +243,9 @@ pub fn self_test() -> Result<String, String> {
     // A missing pin file must not pass silently.
     std::fs::remove_file(&pin_path).unwrap();
     if verify_tree(&tmp).is_ok() {
-        return Err(String::from("tree-pin self-test: a missing pin file was accepted"));
+        return Err(String::from(
+            "tree-pin self-test: a missing pin file was accepted",
+        ));
     }
 
     let _ = std::fs::remove_dir_all(&tmp);

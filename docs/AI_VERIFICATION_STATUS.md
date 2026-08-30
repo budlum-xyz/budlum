@@ -17,7 +17,7 @@ feature, while the code deliberately refuses to perform it.
 | Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `lubot::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
 | Model modality declaration checked against the read it is asked to serve | working | `AiModelSpec::modalities`, `ModalitySet` |
 | SocialFi bridge: finalized Lubot output minted as requester-owned NFT | working (best-effort) | `src/execution/executor.rs` → `lubot::social::lubot_output_to_nft` |
-| `VerifyInference` opcode (0x1F) inside the zkVM | **always returns 0** | `budzero/bud-vm/src/lib.rs` |
+| `VerifyInference` opcode (0x1F) inside the zkVM | **fail-closed Poseidon binding**: `rd = 1` iff `output_c == poseidon4_hash(model_c, input_c)` for a proof window that fits memory, else 0; mainnet decoding is gated off | `budzero/bud-vm/src/lib.rs` |
 
 ## Perception declaration (V3)
 
@@ -272,11 +272,18 @@ this document has to be updated with the change.
 
 ## The zkVM opcode
 
-`VerifyInference` (0x1F) is constrained in the AIR, but the constraint says the
-result is always zero (fail-closed), the AIR binds the selector to the opcode
-and forces `rd_val_new = 0`. There is no STARK-verification circuit behind it
-yet. The opcode is additionally gated by `MainnetActivation`, which is off by
-default.
+`VerifyInference` (0x1F) is no longer a hard-coded zero. The VM reads a
+32-byte proof window (model, input and output commitments) and sets `rd = 1`
+exactly when `output_c == poseidon4_hash(model_c, input_c)`; a window that
+does not fit in memory, and any binding mismatch, answer 0. The AIR carries
+the matching witnesses: `COL_IS_VERIFY_INFERENCE` is bound to opcode 0x1F and
+`inference_is_expand` rows feed the commitment chain into the trace.
+
+What is still open is the circuit half: nothing re-derives `output_c` from
+model weights yet, so no proof demonstrates the forward pass of an inference.
+Until that exists, mainnet keeps the opcode undecodable
+(`MainnetActivation::default()` sets `verify_inference_enabled = false`), and
+no production settlement can depend on an inference verification.
 
 ## What closing the gap requires (status)
 
@@ -302,9 +309,10 @@ The original five-step plan, with what has since landed:
 
 The honest claim is now "AI layer with data-sovereign access control, a guest
 that really computes the forward pass, and a transaction path that STARK-
-verifies proof-required executions against the registered program". The two
-remaining gaps are the Fiat-Shamir fold (step 2, argued above) and the
-`VerifyInference` opcode, which still has no verification circuit behind it.
+verifies proof-required executions against the registered program". The gap argued above stays open: the Fiat-Shamir fold (step 2). Behind the
+`VerifyInference` opcode the commitment binding is real in VM and AIR, while
+the circuit that re-derives the output from the weights (step 3b) is not
+written, and mainnet keeps the opcode undecodable until it is.
 
 ## RPC / economics audit (2026-08-14, skill §10.5 pass)
 

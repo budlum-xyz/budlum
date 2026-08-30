@@ -54,19 +54,22 @@ pub fn is_canonical_program_hash(hash: &[u8; 32]) -> bool {
 /// concatenated canonical hashes (raw bytes). The regeneration gate emits
 /// this as its `canonical-set` token, so a proof-side check and the gate
 /// agree on one value.
-pub fn canonical_set_digest() -> [u8; 32] {
+///
+/// Returns `None` if a pinned hash is not hex, which the canaries
+/// in `xtask/gates/src/gates/regeneration.rs` would surface immediately.
+pub fn canonical_set_digest() -> Option<[u8; 32]> {
     let mut hasher = Keccak::v256();
     for hex in CANONICAL_PROGRAM_HASHES {
-        let bytes = hex_bytes(hex).expect("canonical hash must be hex");
+        let bytes = hex_bytes(hex)?;
         hasher.update(&bytes);
     }
     let mut out = [0u8; 32];
     hasher.finalize(&mut out);
-    out
+    Some(out)
 }
 
 fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     (0..hex.len())
@@ -134,8 +137,12 @@ mod digest_crosscheck {
     fn gate_token_crosscheck() {
         // The regeneration gate emits `canonical-set <hex16>`; the first 16
         // hex chars must equal this. Measured 2026-08-28 from the gate run.
-        let d = canonical_set_digest();
-        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(&hex[..16], "7068f0e7209ca558");
+        let hex: String = canonical_set_digest()
+            .map(|d| d.iter().map(|b| format!("{b:02x}")).collect())
+            .unwrap_or_default();
+        assert!(
+            hex.starts_with("7068f0e7209ca558"),
+            "canonical-set digest must match the gate token (got {hex})"
+        );
     }
 }

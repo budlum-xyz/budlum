@@ -95,7 +95,7 @@ fuzz_target!(|data: &[u8]| {
             1 => {
                 // Mint via last lock message
                 if let Some(ref msg) = last_lock_msg {
-                    let _ = bridge.mint(msg, height);
+                    let _ = bridge.mint(msg);
                 }
             }
             2 => {

@@ -122,19 +122,36 @@ fn stark_verification_helpers_have_no_production_callers() {
     );
 }
 
-/// The zkVM opcode must keep returning zero until a verification circuit
-/// exists behind it.
+/// The opcode's only path to a non-zero answer is the Poseidon binding, and
+/// every shape outside that binding fails closed.
+///
+/// The old lock pinned a hard-coded zero while the opcode was a stub. The
+/// commitment binding is now real code in `budzero/bud-vm/src/lib.rs`, so the
+/// lock pins the binding itself: 1 is reachable exactly through
+/// `output_c == poseidon4_hash(model_c, input_c)`, the read-window guard
+/// stays, and no constant answer may return. The status document moves with
+/// this file, which is what the old failure message asked for.
 #[test]
-fn verify_inference_opcode_still_returns_zero() {
+fn verify_inference_opcode_is_the_fail_closed_binding() {
     let src = read("budzero/bud-vm/src/lib.rs");
-    let idx = src
-        .find("Opcode::VerifyInference =>")
-        .expect("VerifyInference arm must exist");
-    let arm = &src[idx..idx + 600.min(src.len() - idx)];
+    let head = "Opcode::VerifyInference => {";
+    let at = src.find(head).expect("VerifyInference arm must exist");
+    let arm = squash(block_after(&src[at + head.len()..]));
     assert!(
-        arm.contains("let result = 0u64;"),
-        "VerifyInference no longer hard-codes a failed verification - if a real \
-         circuit landed, update docs/AI_VERIFICATION_STATUS.md"
+        arm.contains("if output_c == poseidon4_hash(model_c, input_c)"),
+        "VerifyInference's only non-zero path must be the Poseidon binding of \
+         (model_c, input_c) against output_c; if the binding changed, update \
+         docs/AI_VERIFICATION_STATUS.md in the same change"
+    );
+    assert!(
+        !arm.contains("let result = 0u64;") && !arm.contains("let result = 1u64;"),
+        "VerifyInference carries a hard-coded answer again; the result must \
+         come from the binding check, not from a constant"
+    );
+    assert!(
+        arm.contains("checked_add(8 * 4)"),
+        "the read-window guard is gone: a proof window that runs past memory \
+         must answer 0, never panic"
     );
 }
 
@@ -295,6 +312,25 @@ fn weights_digest_binding_stays_wired() {
         proto.contains("bytes weights_digest = 9;"),
         "the proof digest must keep its wire field"
     );
+}
+
+/// The text up to and including the `}` that closes the block whose opening
+/// brace was already consumed before the slice.
+fn block_after(rest: &str) -> &str {
+    let mut depth = 1usize;
+    for (i, b) in rest.bytes().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[..=i];
+                }
+            }
+            _ => {}
+        }
+    }
+    rest
 }
 
 /// Collapse every run of whitespace to a single space so a doc-comment or a

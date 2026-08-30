@@ -54,9 +54,9 @@ mod gates {
     pub mod budscan_parity;
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
-    pub mod ci_workflow_guards;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
+    pub mod ci_workflow_guards;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
@@ -120,8 +120,8 @@ mod gates {
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
     pub mod regeneration;
-    pub mod relay;
     pub mod rejection_tests;
+    pub mod relay;
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
@@ -143,9 +143,9 @@ mod gates {
     pub mod three_is_recipe_only;
     pub mod threshold_rates;
     pub mod timing_safe;
-    pub mod tree_pin;
     pub mod transcript_mirrors;
     pub mod tree_is_english;
+    pub mod tree_pin;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;

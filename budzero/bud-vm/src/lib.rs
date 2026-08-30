@@ -40,8 +40,8 @@ pub struct ExecutionReceipt {
 // The defaults are not decorative. `verify_merkle_enabled: false` is there
 // because the path verification is unfinished, and
 // `verify_inference_enabled: false` is there because, in the words of
-// `docs/AI_VERIFICATION_STATUS.md`, there is no verification circuit behind
-// the opcode at all and it returns a hard-coded zero. README states plainly
+// `docs/AI_VERIFICATION_STATUS.md`, no circuit re-derives the verified output
+// from the model weights yet; the opcode only checks the commitment binding. README states plainly
 // that VerifyMerkle is "gated off in production until 64-depth soundness is
 // proven". With `full()`, both opcodes decode and execute on mainnet, and
 // nothing downstream stops them - the execute arm has no second check.

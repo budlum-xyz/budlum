@@ -82,7 +82,7 @@ const EMBEDDED_SYSCALL_CONTEXT_SRC: &str =
 /// Decode a lowercase hex string into bytes. Only used for the canonical-set
 /// digest, where the inputs are the gate's own 64-char pins.
 pub(crate) fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(format!("odd hex length: {}", hex.len()));
     }
     (0..hex.len())
@@ -246,12 +246,17 @@ fn matmul_guest_layout(dims: &[u16]) -> Result<MatmulGuestLayout, String> {
         weights += w[0] as usize * w[1] as usize;
         biases += w[1] as usize;
     }
-    let weights_at = dims[0] as usize;
+    let (Some(&first_dim), Some(&last_dim)) = (dims.first(), dims.last()) else {
+        return Err(String::from(
+            "guest layout needs at least one layer dimension",
+        ));
+    };
+    let weights_at = first_dim as usize;
     let biases_at = weights_at + weights;
     let act_in_at = biases_at + biases;
     let act_out_at = act_in_at + GUEST_MAX_MLP_WIDTH;
     let output_at = act_out_at + GUEST_MAX_MLP_WIDTH;
-    let total_words = output_at + *dims.last().unwrap() as usize;
+    let total_words = output_at + last_dim as usize;
     if total_words * GUEST_WORD_BYTES > GUEST_MEMORY_BYTES {
         return Err(format!(
             "guest layout needs {} bytes > GUEST_MEMORY_BYTES {GUEST_MEMORY_BYTES}",
@@ -903,50 +908,9 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let checked = producers.len();
 
-    // The other three canonical programs are reproduced from their
-    // specifications and pinned here, exactly like the storage challenge
-    // above. These are the values `src/ai/execution/guest.rs`,
-    // `budzero/bud-vm/src/private_transfer.rs` and
-    // `budzero/bud-vm/src/syscall_context.rs` build; if any builder drifts,
-    // the pin comparison turns the release red.
-    for (name, dims, pin) in [
-        (
-            "matmul guest [2,3,2]",
-            &[2u16, 3, 2][..],
-            PINNED_MATMUL_PROGRAM_HASHES[0].1,
-        ),
-        (
-            "private-transfer check",
-            &[][..],
-            PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
-        ),
-        (
-            "syscall-context check",
-            &[][..],
-            PINNED_SYSCALL_CONTEXT_PROGRAM_HASH,
-        ),
-    ] {
-        let got = if dims.is_empty() {
-            // Two canonical programs share the "no dims" shape; the pin
-            // itself disambiguates which producer must match.
-            let words = if pin == PINNED_PRIVATE_TRANSFER_PROGRAM_HASH {
-                regenerate_private_transfer_check_program()
-            } else {
-                regenerate_syscall_context_check_program()
-            };
-            hex32(&keccak256(&canonical_program_bytes(&words)))
-        } else {
-            hex32(&matmul_guest_program_hash(dims)?)
-        };
-        if got != pin {
-            return Err(format!(
-                "regeneration: the canonical {name} program drifted. The tree's \
-                 builder no longer reproduces the pinned stream (got {got}, \
-                 expected {pin}). Re-measure the pin from the tree's builder \
-                 and update both sides together."
-            ));
-        }
-    }
+    // The three pinned builder programs are checked against their pins; a
+    // drifted builder fails the release here, not in production.
+    check_pinned_programs()?;
 
     if !findings.is_empty() {
         return Err(format!(
@@ -973,10 +937,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     // stays the first token (the storage-challenge value); `matmul-hash`
     // is grepped the same way and compared across compilers too.
     let matmul_token = hex32(&matmul_guest_program_hash(&[2, 3, 2])?)[..16].to_string();
-    let syscall_token =
-        hex32(&keccak256(&canonical_program_bytes(&regenerate_syscall_context_check_program())))[
-            ..16
-        ]
+    let syscall_token = hex32(&keccak256(&canonical_program_bytes(
+        &regenerate_syscall_context_check_program(),
+    )))[..16]
         .to_string();
     let set_token = &hex32(&canonical_set_digest()?)[..16].to_string();
     let repair_note = if repairs.is_empty() {
@@ -1056,6 +1019,19 @@ fn canonical_loop(name: &str, arg: &str) -> String {
 
 /// Writes the healthy state of the canary tree.
 fn write_good(tmp: &Path) -> Result<(), String> {
+    // The storage-challenge check reads this file by shape, and the drift
+    // canaries tamper with it: a canary that only resets the files below
+    // would inherit the previous canary's tampered instruction form and the
+    // deletion-repair check would fail for the wrong reason (measured on
+    // `rejenerasyon-wheeler-matmul@08261be`: the repair canary died on the
+    // stale `imm: 512` line left behind by the tamper). Good tree means good
+    // in every checked file, so reset it here too.
+    fs::create_dir_all(tmp.join("src/domain")).map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("src/domain/storage_deal.rs"),
+        "Opcode::VerifyMerkle => Instruction { rd: 1, rs1: 2, rs2: 3, imm: 256 }.encode(),\n",
+    )
+    .map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("src/prover/mod.rs"),
         canonical_loop("zk_program_hash", "program"),
@@ -1084,8 +1060,7 @@ fn write_good(tmp: &Path) -> Result<(), String> {
     // The canonical parts (the gate's embedded copies of the canonical
     // producers) and the proof-side canonical table, so the good tree passes
     // without triggering a repair.
-    fs::create_dir_all(tmp.join("budzero/bud-vm/src"))
-        .map_err(|e| e.to_string())?;
+    fs::create_dir_all(tmp.join("budzero/bud-vm/src")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("budzero/bud-vm/src/private_transfer.rs"),
         EMBEDDED_PRIVATE_TRANSFER_SRC,
@@ -1104,15 +1079,136 @@ fn write_good(tmp: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The other three canonical programs are reproduced from their
+/// specifications and pinned here, exactly like the storage challenge above.
+/// These are the values `src/ai/execution/guest.rs`,
+/// `budzero/bud-vm/src/private_transfer.rs` and
+/// `budzero/bud-vm/src/syscall_context.rs` build; if any builder drifts,
+/// the pin comparison turns the release red.
+///
+/// Split out of [`run`] so the gate's main flow stays under the line ceiling
+/// `clippy::too_many_lines` enforces; the honest fix for a long function is
+/// fewer lines rather than an `#[allow]`.
+fn check_pinned_programs() -> Result<(), String> {
+    for (name, dims, pin) in [
+        (
+            "matmul guest [2,3,2]",
+            &[2u16, 3, 2][..],
+            PINNED_MATMUL_PROGRAM_HASHES[0].1,
+        ),
+        (
+            "private-transfer check",
+            &[][..],
+            PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
+        ),
+        (
+            "syscall-context check",
+            &[][..],
+            PINNED_SYSCALL_CONTEXT_PROGRAM_HASH,
+        ),
+    ] {
+        let got = if dims.is_empty() {
+            // Two canonical programs share the "no dims" shape; the pin
+            // itself disambiguates which producer must match.
+            let words = if pin == PINNED_PRIVATE_TRANSFER_PROGRAM_HASH {
+                regenerate_private_transfer_check_program()
+            } else {
+                regenerate_syscall_context_check_program()
+            };
+            hex32(&keccak256(&canonical_program_bytes(&words)))
+        } else {
+            hex32(&matmul_guest_program_hash(dims)?)
+        };
+        if got != pin {
+            return Err(format!(
+                "regeneration: the canonical {name} program drifted. The tree's \
+                 builder no longer reproduces the pinned stream (got {got}, \
+                 expected {pin}). Re-measure the pin from the tree's builder \
+                 and update both sides together."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// A minimal, correct copy of the proof-side canonical table, good enough for
 /// the canary tree: it must contain all four pinned hashes.
 fn canonical_set_source_fixture() -> String {
-    let mut s = String::from("// fixture canonical set\npub const CANONICAL_PROGRAM_HASHES: [&str; 4] = [\n");
+    let mut s = String::from(
+        "// fixture canonical set\npub const CANONICAL_PROGRAM_HASHES: [&str; 4] = [\n",
+    );
     for pin in canonical_program_hash_pins() {
-        s.push_str(&format!("    \"{pin}\",\n"));
+        s.push_str("    \"");
+        s.push_str(pin);
+        s.push_str("\",\n");
     }
     s.push_str("];\n");
     s
+}
+
+/// The canonical-part canaries: a modification is caught, a deletion
+/// self-repairs from the embedding, and the proof-side set keeps agreeing
+/// with the gate's pins.
+///
+/// Split out of [`run_drift_canaries`] for the same reason the other helpers
+/// were split: fewer lines, no `#[allow]`.
+fn run_part_drift_canaries(tmp: &Path) -> Result<(), String> {
+    // Drift 4b: a canonical part is MODIFIED - the outside-attack vector the
+    // embedded parts defend against. The gate must turn red and must NOT
+    // silently repair a modification (only deletions are repaired).
+    write_good(tmp)?;
+    let pt_path = tmp.join("budzero/bud-vm/src/private_transfer.rs");
+    let mut tampered = fs::read_to_string(&pt_path).map_err(|e| e.to_string())?;
+    tampered.push_str("\n// injected outside content\n");
+    fs::write(&pt_path, tampered).map_err(|e| e.to_string())?;
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: a MODIFIED canonical part was not caught (outside attack)",
+        ));
+    }
+
+    // Drift 4c: a canonical part is DELETED - the self-repair vector. The gate
+    // must restore the file from its embedding and pass, reporting the repair.
+    write_good(tmp)?;
+    let sc_path = tmp.join("budzero/bud-vm/src/syscall_context.rs");
+    fs::remove_file(&sc_path).map_err(|e| e.to_string())?;
+    let out = run(tmp).map_err(|e| {
+        let _ = fs::remove_dir_all(tmp);
+        format!("self-test: a DELETED canonical part should have been repaired: {e}")
+    })?;
+    if fs::read_to_string(&sc_path).map_err(|e| e.to_string())? != EMBEDDED_SYSCALL_CONTEXT_SRC {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: the repaired part differs from the embedded canonical content",
+        ));
+    }
+    if !out.contains("repaired") {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: the repair was not reported in the gate output",
+        ));
+    }
+
+    // Drift 4d: the proof-side canonical set drifts away from the gate's pins -
+    // the gate and the verifier must agree on what is canonical.
+    write_good(tmp)?;
+    let cs_path = tmp.join("budzero/bud-proof/src/canonical_set.rs");
+    let mut cs = fs::read_to_string(&cs_path).map_err(|e| e.to_string())?;
+    cs = cs.replace(
+        "3adbf9c8e6afb8ef243e9063ad25ccd2b890d91e2bd88816a1a909ce2c5b15d4",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    fs::write(&cs_path, cs).map_err(|e| e.to_string())?;
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: a drifted proof-side canonical set was not caught",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Tries the canary drifts one by one.
@@ -1176,59 +1272,7 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
         ));
     }
 
-    // Drift 4b: a canonical part is MODIFIED - the outside-attack vector the
-    // embedded parts defend against. The gate must turn red and must NOT
-    // silently repair a modification (only deletions are repaired).
-    write_good(tmp)?;
-    let pt_path = tmp.join("budzero/bud-vm/src/private_transfer.rs");
-    let mut tampered = fs::read_to_string(&pt_path).map_err(|e| e.to_string())?;
-    tampered.push_str("\n// injected outside content\n");
-    fs::write(&pt_path, tampered).map_err(|e| e.to_string())?;
-    if run(tmp).is_ok() {
-        let _ = fs::remove_dir_all(tmp);
-        return Err(String::from(
-            "self-test: a MODIFIED canonical part was not caught (outside attack)",
-        ));
-    }
-
-    // Drift 4c: a canonical part is DELETED - the self-repair vector. The gate
-    // must restore the file from its embedding and pass, reporting the repair.
-    write_good(tmp)?;
-    let sc_path = tmp.join("budzero/bud-vm/src/syscall_context.rs");
-    fs::remove_file(&sc_path).map_err(|e| e.to_string())?;
-    let out = run(tmp).map_err(|e| {
-        let _ = fs::remove_dir_all(tmp);
-        format!("self-test: a DELETED canonical part should have been repaired: {e}")
-    })?;
-    if fs::read_to_string(&sc_path).map_err(|e| e.to_string())? != EMBEDDED_SYSCALL_CONTEXT_SRC {
-        let _ = fs::remove_dir_all(tmp);
-        return Err(String::from(
-            "self-test: the repaired part differs from the embedded canonical content",
-        ));
-    }
-    if !out.contains("repaired") {
-        let _ = fs::remove_dir_all(tmp);
-        return Err(String::from(
-            "self-test: the repair was not reported in the gate output",
-        ));
-    }
-
-    // Drift 4d: the proof-side canonical set drifts away from the gate's pins -
-    // the gate and the verifier must agree on what is canonical.
-    write_good(tmp)?;
-    let cs_path = tmp.join("budzero/bud-proof/src/canonical_set.rs");
-    let mut cs = fs::read_to_string(&cs_path).map_err(|e| e.to_string())?;
-    cs = cs.replace(
-        "3adbf9c8e6afb8ef243e9063ad25ccd2b890d91e2bd88816a1a909ce2c5b15d4",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    );
-    fs::write(&cs_path, cs).map_err(|e| e.to_string())?;
-    if run(tmp).is_ok() {
-        let _ = fs::remove_dir_all(tmp);
-        return Err(String::from(
-            "self-test: a drifted proof-side canonical set was not caught",
-        ));
-    }
+    run_part_drift_canaries(tmp)?;
 
     // Drift 5: a NEW production point is added silently - this is exactly what the
     // old version could not see.
@@ -1308,7 +1352,12 @@ mod tests {
         );
 
         // The workflow's own extraction, applied to all four tokens.
-        for needle in ["program-hash", "matmul-hash", "syscall-hash", "canonical-set"] {
+        for needle in [
+            "program-hash",
+            "matmul-hash",
+            "syscall-hash",
+            "canonical-set",
+        ] {
             let token = message
                 .split_whitespace()
                 .skip_while(|w| *w != needle)

@@ -62,9 +62,9 @@ fn proof_side_canonical_digest(root: &Path) -> Result<[u8; 32], String> {
 /// [&str; 4] = [ ... ];`); the `assert_eq` copies further down in the file
 /// also contain 64-hex strings and must not be counted twice.
 fn digest_from_canonical_set_source(text: &str) -> Result<[u8; 32], String> {
-    let start = text
-        .find("CANONICAL_PROGRAM_HASHES:")
-        .ok_or_else(|| String::from("relay: canonical_set.rs has no CANONICAL_PROGRAM_HASHES table"))?;
+    let start = text.find("CANONICAL_PROGRAM_HASHES:").ok_or_else(|| {
+        String::from("relay: canonical_set.rs has no CANONICAL_PROGRAM_HASHES table")
+    })?;
     let table = &text[start..];
     let end = table
         .find("];")
@@ -114,14 +114,13 @@ struct RegenTokens {
 fn parse_regen_tokens(out: &str) -> Result<RegenTokens, String> {
     let token = |needle: &str| -> Result<String, String> {
         let Some(pos) = out.find(needle) else {
-            return Err(format!("relay: regeneration output has no `{needle}` token"));
+            return Err(format!(
+                "relay: regeneration output has no `{needle}` token"
+            ));
         };
         let rest = &out[pos + needle.len()..];
         let rest = rest.trim_start();
-        let hex: String = rest
-            .chars()
-            .take_while(char::is_ascii_hexdigit)
-            .collect();
+        let hex: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
         if hex.len() != 16 {
             return Err(format!(
                 "relay: `{needle}` token is not 16 hex characters (got {})",
@@ -151,7 +150,11 @@ struct LiveProofSideReport {
 }
 
 fn status_word(status_ok: bool) -> &'static str {
-    if status_ok { "ok" } else { "alarm" }
+    if status_ok {
+        "ok"
+    } else {
+        "alarm"
+    }
 }
 
 fn now_unix() -> u64 {
@@ -205,11 +208,13 @@ fn status_payload(
 /// tampering tripwire: the signed report names its producer, so
 /// an externally mounted monitor can compare the binary across reports and
 /// detect a swapped or patched gate binary.
+///
+/// The bytes come from `/proc/self/exe`, the kernel's own handle of the
+/// executing image, never from a path the process itself chose to trust: a
+/// renamed or path-swapped binary is still read as it actually runs.
 fn gate_binary_hash() -> Result<[u8; 32], String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("relay: cannot locate the gate binary: {e}"))?;
-    let bytes = std::fs::read(&exe)
-        .map_err(|e| format!("relay: cannot read the gate binary {}: {e}", exe.display()))?;
+    let bytes = std::fs::read("/proc/self/exe")
+        .map_err(|e| format!("relay: cannot read the executing gate binary via /proc/self/exe: {e}"))?;
     Ok(keccak256(&bytes))
 }
 
@@ -352,7 +357,9 @@ fn validate_live_report_text(text: &str) -> Result<LiveProofSideReport, String> 
 
     let hex_field = |s: &str, what: &str| -> Result<Vec<u8>, String> {
         if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!("relay: live report {what} is not 64 hex characters"));
+            return Err(format!(
+                "relay: live report {what} is not 64 hex characters"
+            ));
         }
         hex_decode(s)
     };
@@ -404,17 +411,16 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     // 2. Independent proof-side digest from the source tree.
     let proof_digest = proof_side_canonical_digest(root)?;
-    let proof_digest16 = &hex32(&proof_digest)[..16];
+    let proof_prefix = &hex32(&proof_digest)[..16];
 
     // 3. Diverse double compiling: the gate token must equal the proof-side
     //    digest. The other tokens were parsed (presence is required).
-    if tokens.canonical_set != proof_digest16 {
+    if tokens.canonical_set != proof_prefix {
         return Err(format!(
             "relay: canonical-set mismatch: regeneration gate token `{}` != \
              proof-side digest `{}` (computed from budzero/bud-proof/src/canonical_set.rs). \
              The two sides must move together.",
-            tokens.canonical_set,
-            proof_digest16
+            tokens.canonical_set, proof_prefix
         ));
     }
 
@@ -454,7 +460,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         "relay OK: relay-token {} relay-status {} relay-canonical-set {} relay-program-hash {}",
         &hex32(&sig)[..16],
         status_word,
-        proof_digest16,
+        proof_prefix,
         tokens.program_hash,
     ))
 }
@@ -539,7 +545,9 @@ pub const CANONICAL_PROGRAM_HASHES: [&str; 4] = [
     if digest_from_canonical_set_source("pub const CANONICAL_PROGRAM_HASHES: [&str; 4] = [];")
         .is_ok()
     {
-        return Err(String::from("relay self-test: an empty pin table was accepted"));
+        return Err(String::from(
+            "relay self-test: an empty pin table was accepted",
+        ));
     }
 
     Ok(clean_digest)
@@ -556,7 +564,9 @@ fn st_status_payload(digest: &[u8; 32]) -> Result<(), String> {
     let p1 = status_payload(true, 1_700_000_000, &t, digest, None, &[7u8; 32]);
     let p2 = status_payload(true, 1_700_000_000, &t, digest, None, &[7u8; 32]);
     if p1 != p2 {
-        return Err(String::from("relay self-test: status payload is not deterministic"));
+        return Err(String::from(
+            "relay self-test: status payload is not deterministic",
+        ));
     }
     let mut tampered = t.clone();
     tampered.canonical_set = String::from("7068f0e7209ca559");
@@ -601,12 +611,12 @@ fn st_live_report(digest: &[u8; 32]) -> Result<(), String> {
     p.extend_from_slice(&1u32.to_le_bytes());
     p.push(0);
     p.extend_from_slice(&1_700_000_000u64.to_le_bytes());
-    p.extend_from_slice(&hex_decode(&"ab".repeat(32)).unwrap());
+    p.extend_from_slice(&[0xab_u8; 32]);
     p.push(1);
     p.extend_from_slice(digest);
     p.extend_from_slice(&1u32.to_le_bytes());
     p.extend_from_slice(&16u32.to_le_bytes());
-    p.extend_from_slice(&hex_decode(&"cd".repeat(32)).unwrap());
+    p.extend_from_slice(&[0xcd_u8; 32]);
     p.extend_from_slice(&1234u32.to_le_bytes());
     for s in ["Plonky3-Keccak-Goldilocks", "0.5.2", "test_fri_params"] {
         p.extend_from_slice(s.as_bytes());

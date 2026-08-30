@@ -685,7 +685,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bytecode_file,
         } => {
             let (envelope, expected_inputs, program) =
-                load_verifier_inputs(&proof_file, &public_inputs_file, &bytecode_file)?;
+                load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
 
             match Prover::verify(&envelope, &expected_inputs, &program) {
                 Ok(_) => {
@@ -704,10 +704,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             strict,
         } => {
             let line = write_signed_relay_report(
-                &proof_file,
-                &public_inputs_file,
-                &bytecode_file,
-                &output,
+                proof_file,
+                public_inputs_file,
+                bytecode_file,
+                output,
                 *strict,
             )?;
             println!("{line}");
