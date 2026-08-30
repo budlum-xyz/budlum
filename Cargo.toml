@@ -189,6 +189,14 @@ name = "ratio_rayon"
 path = "benches/micro/ratio_rayon.rs"
 harness = false
 
+# Parity-row throughput and the generate-to-reference roundtrip, printed by
+# the CI step `Erasure parity rows rayon vs serial throughput`; its numbers
+# belong to the host that ran the step, so nothing in the tree pins them.
+[[bench]]
+name = "erasure_rows"
+path = "benches/micro/erasure_rows.rs"
+harness = false
+
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]
 name = "domain_throughput"

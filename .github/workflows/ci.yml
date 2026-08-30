@@ -943,6 +943,12 @@ jobs:
       # printed here are measurements of a path that is provably equivalent.
       - name: Ratio rayon vs serial throughput
         run: cargo bench --bench ratio_rayon
+      # Erasure parity rows: serial loop against the pool dispatch above the
+      # window, plus the encode->verify reference roundtrip. The step dies
+      # (exit 2, no numbers) if the pool result differs by any byte, so the
+      # printed MB/s always describe an equal-output path.
+      - name: Erasure parity rows rayon vs serial throughput
+        run: cargo bench --bench erasure_rows
 
   docker-security:
     # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.

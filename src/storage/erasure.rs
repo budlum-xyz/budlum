@@ -66,6 +66,13 @@ const GF_POLY: u16 = 0x11D;
 /// `k + m` distinct elements from GF(2^8), which has 256 of them.
 pub const MAX_TOTAL_SHARDS: usize = 255;
 
+/// Parity work (bytes, `shard length * m`) from which `encode_parity` hands
+/// the rows to a rayon pool instead of the calling thread. Below the window
+/// the pool round trip costs more than the row loop it replaces. The number
+/// is a host throughput observation logged by `benches/micro/erasure_rows.rs`
+/// in CI; it is not a protocol constant and moving it changes no bytes.
+const PARITY_ROW_WINDOW: usize = 256 * 1024;
+
 struct GfTables {
     exp: [u8; 512],
     log: [u8; 256],
@@ -373,20 +380,73 @@ impl ReedSolomon {
             )));
         }
 
-        let mut parity = vec![vec![0u8; len]; self.m];
-        for (i, out) in parity.iter_mut().enumerate() {
-            let row = self.k + i;
-            for (j, src) in data.iter().enumerate() {
-                let coeff = self.generator.get(row, j);
-                if coeff == 0 {
-                    continue;
-                }
-                for (o, s) in out.iter_mut().zip(src.iter()) {
-                    *o ^= gf_mul(coeff, *s);
-                }
+        let work = len.saturating_mul(self.m);
+        let parity = if work >= PARITY_ROW_WINDOW && self.m > 1 {
+            use rayon::prelude::*;
+            (0..self.m)
+                .into_par_iter()
+                .map(|i| self.parity_row(i, data))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            (0..self.m)
+                .map(|i| self.parity_row(i, data))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(parity)
+    }
+
+    /// One parity shard, computed from `data` under generator row
+    /// `k + parity_index`.
+    ///
+    /// Rows are independent: row `i` reads only `data` and its own generator
+    /// row, so any number of rows can run in any order and return the same
+    /// bytes. That property is what lets [`ReedSolomon::encode_parity`] hand
+    /// the row loop to a rayon pool without letting the schedule leak into the
+    /// commitments that fold over the parity.
+    /// # Errors
+    ///
+    /// The same refusals as [`ReedSolomon::encode_parity`]: a wrong shard
+    /// count, an empty shard, ragged shards. A `parity_index` at or above
+    /// `m` is refused too, because it has no generator row to read.
+    fn parity_row(&self, parity_index: usize, data: &[Vec<u8>]) -> Result<Vec<u8>, ErasureError> {
+        if data.len() != self.k {
+            return Err(ErasureError::ShardMismatch(format!(
+                "expected {} data shards, got {}",
+                self.k,
+                data.len()
+            )));
+        }
+        if parity_index >= self.m {
+            return Err(ErasureError::ShardMismatch(format!(
+                "parity index {parity_index} is outside 0..{}",
+                self.m
+            )));
+        }
+        let len = data[0].len();
+        if len == 0 {
+            return Err(ErasureError::ShardMismatch(
+                "data shards must be non-empty".into(),
+            ));
+        }
+        if let Some(bad) = data.iter().position(|s| s.len() != len) {
+            return Err(ErasureError::ShardMismatch(format!(
+                "shard {bad} is {} bytes but shard 0 is {len}; \
+                 Reed-Solomon needs equal-length shards",
+                data[bad].len()
+            )));
+        }
+        let mut out = vec![0u8; len];
+        let row = self.k + parity_index;
+        for (j, src) in data.iter().enumerate() {
+            let coeff = self.generator.get(row, j);
+            if coeff == 0 {
+                continue;
+            }
+            for (o, s) in out.iter_mut().zip(src.iter()) {
+                *o ^= gf_mul(coeff, *s);
             }
         }
-        Ok(parity)
+        Ok(out)
     }
 
     /// The generator coefficient a coding audit multiplies by.
@@ -1298,5 +1358,41 @@ mod tests {
             verify_object_encoding(&other, &manifest).is_err(),
             "a different payload under the same scheme must not verify"
         );
+    }
+
+    #[test]
+    fn encode_parity_matches_one_row_calls() {
+        let rs = ReedSolomon::new(4, 3).unwrap();
+        let data: Vec<Vec<u8>> = (0..4u8)
+            .map(|i| (0u8..=255).cycle().skip(i as usize).take(600).collect())
+            .collect();
+        let rows: Vec<Vec<u8>> = (0..3).map(|i| rs.parity_row(i, &data).unwrap()).collect();
+        assert_eq!(rs.encode_parity(&data).unwrap(), rows);
+        assert_eq!(
+            rs.encode_parity(&data).unwrap(),
+            rows,
+            "a second run must return the same bytes"
+        );
+    }
+
+    #[test]
+    fn parity_row_refuses_a_ragged_shard_set() {
+        let rs = ReedSolomon::new(4, 2).unwrap();
+        let mut data: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 64]).collect();
+        data[3].pop();
+        assert!(
+            matches!(rs.parity_row(0, &data), Err(ErasureError::ShardMismatch(_))),
+            "a short last shard must be refused, not read past its end"
+        );
+    }
+
+    #[test]
+    fn parity_row_refuses_an_index_outside_the_scheme() {
+        let rs = ReedSolomon::new(4, 2).unwrap();
+        let data: Vec<Vec<u8>> = (0..4).map(|_| vec![7u8; 32]).collect();
+        assert!(matches!(
+            rs.parity_row(2, &data),
+            Err(ErasureError::ShardMismatch(_))
+        ));
     }
 }
