@@ -217,14 +217,18 @@ commitment column in the AIR, or having the verifier rebuild the image and
 re-derive the trace itself. Until then the digest narrows the gap from "any
 weights" to "the registered weights, on the prover's word".
 
-## Why the transaction path fails closed
+## Why the transaction path refuses a proof it cannot check
 
-`src/execution/executor.rs` rejects any model that sets
-`require_execution_proof` with `ai_exec_verifier_unavailable`. This is
-intentional: full STARK verification needs the registered guest program words
-plus the canonical `ExecutionPublicInputs`, and the transaction carries
-neither. Accepting a proof envelope as evidence without checking it would be
-worse than refusing, so the path refuses.
+`src/execution/executor.rs` calls `verify_execution_proof_full` for every model
+that sets `require_execution_proof`, and refuses when the bundle says the proof
+does not hold. The refusal is per missing input rather than blanket: a proof
+without `public_inputs` is rejected with `ai_exec_no_public_inputs`, a model
+without a registered `execution_program_hash` with `ai_exec_no_program_hash`, a
+proof that names another chain with `ai_exec_chain_id`, and a program that
+cannot be rebuilt from the registration with `ai_exec_program_rebuild`. The
+older blanket refusal `ai_exec_verifier_unavailable` is gone: the two inputs it
+complained about (the guest program words, rebuilt from the registered model,
+and the canonical `ExecutionPublicInputs`, carried by the proof) both exist.
 
 Structural checks still run for models that do not require an execution proof.
 They bind commitments and the model id; they do **not** prove that the claimed
@@ -235,11 +239,16 @@ computation happened.
 These functions compile and are unit-tested, but nothing in a production path
 calls them. They are the scaffolding for the feature, not the feature:
 
-- `src/ai/execution/verify.rs::verify_execution_proof_stark`, only reached
-  through `verify_execution_proof_full`
-- `src/ai/execution/verify.rs::verify_execution_proof_full`, no callers
 - `src/lubot/verify.rs::verify_inference_stark`: only its own tests
 - `src/lubot/verify.rs::generate_and_verify_proof`: only its own tests
+
+`src/ai/execution/stark.rs::verify_execution_proof_stark` and
+`src/ai/execution/verify.rs::verify_execution_proof_full` are absent from the
+list because the transaction path reaches the STARK through the bundle. The two
+are deliberately one call rather than two: a caller that asks only for the
+structural checks accepts a proof it never checked cryptographically, and a
+caller that asks only for the STARK accepts a proof whose commitments belong to
+a different request.
 
 `src/tests/ai_verification_status_locks.rs` pins this: if any of them gains a
 production caller, or if the executor stops failing closed, those tests break
@@ -261,12 +270,15 @@ default.
    them. The initial-memory commitment is in the AIR now
    (`COL_MEM_INIT_ACC` against `initial_state_root`), but with constant
    `BETA`/`GAMMA` it is solvable rather than collision-resistant.
-3. Re-derive `ExecutionPublicInputs` on the transaction path from the request,
-   the result and the registered program.
-4. Call `verify_execution_proof_full` with that bundle and treat
-   `stark_ok == Some(true)` as the acceptance condition.
-5. Replace the fail-closed branch, and update this document together with the
-   locking tests.
+3. Done. The transaction path derives `ExecutionPublicInputs` from the proof's
+   own claim (`AiExecutionProof::public_inputs`), binds it to the registration
+   (program hash, `chain_id`, `exit_code`) and rebuilds the guest program from
+   the registered model.
+4. Done. The executor calls `verify_execution_proof_full` and accepts only with
+   `stark_ok == Some(true)` plus a structurally valid report; `stark_error`
+   carries the verifier's own reason into the rejection.
+5. Done. The blanket refusal is replaced by the per-input refusals above, and
+   `src/tests/ai_verification_status_locks.rs` pins the chain end to end.
 
 Until all five are done, the honest claim is "AI layer with data-sovereign
 access control, a guest that really computes the forward pass, and structural

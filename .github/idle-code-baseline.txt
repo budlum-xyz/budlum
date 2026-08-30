@@ -1146,7 +1146,6 @@ src/ai/execution/model_class.rs	const	DEFAULT_EXECUTION_CLASS
 src/ai/execution/model_class.rs	struct	ModelClassLimits
 src/ai/execution/verify.rs	fn	expected_initial_state_root
 src/ai/execution/verify.rs	fn	is_fully_valid
-src/ai/execution/verify.rs	fn	verify_execution_proof_full
 src/ai/execution/verify.rs	fn	verify_execution_proof_structural
 src/ai/execution/verify.rs	struct	ExecutionVerifyReport
 src/ai/registry.rs	const	DEFAULT_OPERATOR_CEILING

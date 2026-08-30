@@ -1925,6 +1925,7 @@ impl Executor {
                 // them cannot be verified, so a proof-required model still
                 // fails closed - but for a reason that names what is missing
                 // from the proof rather than what is missing from the node.
+                let mut stark_girisi: Option<(Vec<u64>, bud_proof::ExecutionPublicInputs)> = None;
                 if model
                     .as_ref()
                     .is_some_and(|spec| spec.require_execution_proof)
@@ -1976,23 +1977,42 @@ impl Executor {
                     let expected_inputs = claimed_inputs.to_execution_inputs();
                     let program = crate::ai::execution::guest_program_for_model(spec)
                         .map_err(|e| BudlumError::validation("ai_exec_program_rebuild", e))?;
-                    crate::ai::execution::verify_execution_proof_stark(
-                        proof,
-                        &program,
-                        &expected_inputs,
-                    )
-                    .map_err(|e| BudlumError::validation("ai_exec_stark", e))?;
+                    stark_girisi = Some((program, expected_inputs));
                 }
-                let report = crate::ai::execution::verify_execution_proof_structural_with_model(
-                    proof,
-                    &req,
-                    &res,
-                    model.as_ref(),
-                );
+                // One call for both halves. The bundle is the only shape this
+                // path can reach for, so a proof cannot clear the structural
+                // checks and skip the STARK, or clear the STARK while its
+                // commitments name a different request.
+                let giris = stark_girisi
+                    .as_ref()
+                    .map(|(program, inputs)| (program.as_slice(), inputs));
+                let report = match giris {
+                    Some((program, inputs)) => crate::ai::execution::verify_execution_proof_full(
+                        proof,
+                        &req,
+                        &res,
+                        model.as_ref(),
+                        Some((program, inputs)),
+                    ),
+                    None => crate::ai::execution::verify_execution_proof_structural_with_model(
+                        proof,
+                        &req,
+                        &res,
+                        model.as_ref(),
+                    ),
+                };
                 if !report.is_structurally_valid() {
                     return Err(BudlumError::validation(
                         "ai_exec_structural",
                         format!("execution proof structural check failed: {report:?}"),
+                    ));
+                }
+                if report.stark_ok == Some(false) {
+                    return Err(BudlumError::validation(
+                        "ai_exec_stark",
+                        report
+                            .stark_error
+                            .unwrap_or_else(|| "execution STARK verify failed".to_string()),
                     ));
                 }
                 // Attempt STARK verify of postcard envelope (fail closed if

@@ -3,7 +3,8 @@
 //! **This module is NOT the production path, but saying "verification is not
 //! wired" is no longer true either.** On-chain inference verification does not
 //! go through this file; the transaction path calls
-//! `verify_execution_proof_stark` in `src/ai/execution/verify.rs` and really
+//! `verify_execution_proof_full` in `src/ai/execution/verify.rs`, which reaches
+//! `verify_execution_proof_stark` in `src/ai/execution/stark.rs`, and really
 //! does verify the STARK (`src/execution/executor.rs`, for models with
 //! `require_execution_proof`). The `ai_exec_verifier_unavailable` refusal has
 //! been removed: the model records `execution_program_hash`,

@@ -36,9 +36,25 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
          deliberate, update docs/AI_VERIFICATION_STATUS.md in the same change"
     );
     assert!(
-        src.contains("verify_execution_proof_stark"),
-        "the transaction path must call the STARK verifier for \
-         require_execution_proof models"
+        src.contains("verify_execution_proof_full"),
+        "the transaction path must go through the bundled verifier for \
+         require_execution_proof models; the bundle is the only call shape that \
+         runs the structural checks and the STARK together"
+    );
+    let bundle = read("src/ai/execution/verify.rs");
+    let at = bundle
+        .find("pub fn verify_execution_proof_full")
+        .expect("verify_execution_proof_full must exist");
+    let govde = &bundle[at..];
+    assert!(
+        govde.contains("verify_execution_proof_stark(proof, program, pi)"),
+        "the bundle must reach the STARK verifier, otherwise the executor's single \
+         call checks nothing cryptographic"
+    );
+    assert!(
+        govde.contains("rep.stark_error = Some(e)"),
+        "the bundle must carry the verifier's own reason out, so the rejection the \
+         executor raises names the failing half instead of a bare false"
     );
     assert!(
         src.contains("guest_program_for_model"),
@@ -63,19 +79,13 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
 
 /// The remaining STARK helpers are still scaffolding.
 ///
-/// `verify_execution_proof_stark` is deliberately absent from this list: the
-/// transaction path calls it now, which is what
-/// `execution_path_verifies_the_stark_for_proof_required_models` pins. The
-/// three below are the ones with no caller - `verify_execution_proof_full`
-/// bundles the structural and STARK checks the executor performs separately,
-/// and the other two belong to paths that are not wired.
+/// Neither `verify_execution_proof_stark` nor `verify_execution_proof_full` is
+/// in this list: the transaction path reaches the STARK through the bundle,
+/// which is what `execution_path_verifies_the_stark_for_proof_required_models`
+/// pins end to end. The two below belong to Lubot paths that are not wired.
 #[test]
 fn stark_verification_helpers_have_no_production_callers() {
-    let scaffolding = [
-        "verify_execution_proof_full",
-        "verify_inference_stark",
-        "generate_and_verify_proof",
-    ];
+    let scaffolding = ["verify_inference_stark", "generate_and_verify_proof"];
 
     // Files that are allowed to mention them: their own definition sites, the
     // re-export modules, the status document and this lock file.
