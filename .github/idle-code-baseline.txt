@@ -422,7 +422,6 @@ bud/src/bud_format_pointcloud.rs	fn	pc_digest
 bud/src/bud_format_pointcloud.rs	fn	quantize
 bud/src/bud_format_pointcloud.rs	struct	PointCloud
 bud/src/bud_format_por.rs	const	DOMAIN
-bud/src/bud_format_por.rs	fn	respond
 bud/src/bud_format_por.rs	struct	PorChallenge
 bud/src/bud_format_por.rs	struct	PorKey
 bud/src/bud_format_por.rs	struct	PorResponse
@@ -815,7 +814,6 @@ budzero/bud-proof/src/plonky3_air.rs	const	POSEIDON_HALF_FULL
 budzero/bud-proof/src/plonky3_air.rs	const	PREPROCESSED_WIDTH
 budzero/bud-proof/src/plonky3_prover.rs	fn	to_public_values
 budzero/bud-proof/src/plonky3_prover.rs	fn	trace_matrix
-budzero/bud-proof/src/plonky3_prover.rs	struct	Plonky3Adapter
 budzero/bud-state/src/lib.rs	fn	get_empty_hash
 budzero/bud-state/src/lib.rs	fn	hash_account
 budzero/bud-state/src/lib.rs	fn	verify_account_proof
@@ -907,13 +905,10 @@ crates/budscan/src/search.rs	struct	SearchResult
 crates/budscan/src/search.rs	trait	ChainView
 crates/lubot/crates/lubot-core/src/dataset.rs	enum	DatasetKind
 crates/lubot/crates/lubot-core/src/dataset.rs	fn	inference_cache
-crates/lubot/crates/lubot-core/src/dataset.rs	fn	training
-crates/lubot/crates/lubot-core/src/dataset.rs	struct	DatasetMetadata
 crates/lubot/crates/lubot-data/src/source.rs	fn	assert_closed_loop
 crates/lubot/crates/lubot-data/src/source.rs	fn	reject_unknown_source
 crates/lubot/crates/lubot-data/src/source.rs	fn	require_source
 crates/lubot/crates/lubot-data/src/template.rs	fn	render_structural
-crates/lubot/crates/lubot-data/src/verify.rs	fn	content_id_of
 crates/lubot/crates/lubot-data/src/verify.rs	fn	verify_sha256
 crates/lubot/crates/lubot-integrations/src/lib.rs	fn	as_items
 crates/lubot/crates/lubot-integrations/src/lib.rs	fn	canonical_symbol
@@ -965,9 +960,7 @@ crates/lubot/crates/lubot-knowledge/src/memory.rs	struct	TaskMemory
 crates/lubot/crates/lubot-knowledge/src/memory.rs	struct	TaskRun
 crates/lubot/crates/lubot-knowledge/src/redact.rs	const	REDACTION_TOKEN
 crates/lubot/crates/lubot-knowledge/src/redact.rs	fn	as_map
-crates/lubot/crates/lubot-knowledge/src/redact.rs	fn	into_text
 crates/lubot/crates/lubot-knowledge/src/redact.rs	fn	looks_secretish
-crates/lubot/crates/lubot-knowledge/src/redact.rs	fn	redact_text
 crates/lubot/crates/lubot-knowledge/src/redact.rs	struct	RedactionReport
 crates/lubot/crates/lubot-knowledge/src/redact.rs	struct	RedactionResult
 crates/lubot/crates/lubot-ops/src/cli.rs	const	HELP
@@ -1459,7 +1452,6 @@ src/cross_domain/evm/sync_committee.rs	fn	rotate_period
 src/cross_domain/evm/verify.rs	struct	SyncAttestation
 src/cross_domain/message.rs	fn	calculate_message_id
 src/cross_domain/nonce.rs	const	MAX_PROCESSED_MESSAGES
-src/cross_domain/nonce.rs	fn	mark_processed_at
 src/cross_domain/nonce.rs	fn	processed_count
 src/cross_domain/nonce.rs	fn	prune_processed
 src/cross_domain/nonce.rs	fn	prune_processed_safe
@@ -1675,7 +1667,6 @@ src/lubot/mod.rs	fn	inference_cache
 src/lubot/mod.rs	fn	is_valid
 src/lubot/mod.rs	fn	operator_eligible
 src/lubot/mod.rs	fn	register_operator
-src/lubot/mod.rs	fn	training
 src/lubot/mod.rs	struct	TrainingDataGrant
 src/lubot/perception.rs	const	MAX_AUDIO_INPUT_MILLIS
 src/lubot/perception.rs	const	MAX_IMAGE_INPUT_PIXELS

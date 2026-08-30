@@ -296,8 +296,14 @@ mod tests {
         // The secret is assembled at run time so that no credential pattern
         // appears in the static source (a secret scan reads this file too).
         let secret = format!("sk-{}{}", "abcdefghijklmnopqrstuvwxyz", "123");
-        let dir = std::env::temp_dir().join(format!("lubot-memory-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "lubot-memory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
         let path = dir.join("memory.jsonl");
         let mut mem = TaskMemory::open(&path).unwrap();
         mem.append(MemoryRecord::Command(TaskCommand {
@@ -308,8 +314,14 @@ mod tests {
         }))
         .unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!on_disk.contains(&secret), "the credential was written verbatim");
-        assert!(on_disk.contains("<SECRET:MASKED>"), "nothing was masked: {on_disk}");
+        assert!(
+            !on_disk.contains(&secret),
+            "the credential was written verbatim"
+        );
+        assert!(
+            on_disk.contains("<SECRET:MASKED>"),
+            "nothing was masked: {on_disk}"
+        );
         // The line still parses, so masking did not corrupt the format.
         let again = TaskMemory::open(&path).unwrap();
         assert_eq!(again.commands.len(), 1);

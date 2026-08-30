@@ -175,9 +175,19 @@ mod tests {
         let secret = format!("ghp_{}{}", "0123456789abcdefghij", "0123456789");
         let doc = format!("title: notes\ntoken: {secret}\nbody: nothing else\n");
         let chunks = chunk_document("p", "d", "notes.md", &doc, None, None).unwrap();
-        let joined: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(!joined.contains(&secret), "the credential survived into the index");
-        assert!(joined.contains("<SECRET:MASKED>"), "nothing was masked: {joined}");
+        let joined: String = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains(&secret),
+            "the credential survived into the index"
+        );
+        assert!(
+            joined.contains("<SECRET:MASKED>"),
+            "nothing was masked: {joined}"
+        );
         // Shape is preserved: the line count and the ids do not move.
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1);

@@ -264,9 +264,9 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
         msg0.verify_id(),
         "an id derived from a real payload has to verify"
     );
-    assert!(store.mark_processed(msg0.message_id).is_ok());
+    assert!(store.mark_processed_at(msg0.message_id, 0).is_ok());
     assert_eq!(
-        store.mark_processed(msg0.message_id),
+        store.mark_processed_at(msg0.message_id, 0),
         Err("Cross-domain message was already processed".to_string()),
         "applying it twice has to be refused - a replay"
     );
@@ -278,7 +278,7 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
         msg0.message_id, msg1.message_id,
         "a different real payload gives a different id"
     );
-    assert!(store.mark_processed(msg1.message_id).is_ok());
+    assert!(store.mark_processed_at(msg1.message_id, 0).is_ok());
     assert_eq!(store.processed_count(), 2);
 }
 

@@ -342,7 +342,7 @@ impl BridgeState {
     /// lost on a message that is still within finality.
     ///
     /// Passing the height is what lets the store prune at all. The previous
-    /// call used [`ReplayNonceStore::mark_processed`], which never prunes and
+    /// call used a height-less `mark_processed`, which never prunes and
     /// records no height, so a long-running node leaked the processed-message
     /// set unboundedly (an OOM liveness failure) and had a count-based fallback
     /// whose own documentation warns it opens a replay window.

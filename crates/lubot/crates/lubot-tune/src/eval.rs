@@ -284,15 +284,6 @@ impl EvalDataSet {
         lubot_data::verify::content_id_of(canon.as_bytes())
     }
 
-    /// Grade every case with `respond` and return the scored report.
-    #[must_use]
-    pub fn run<F>(&self, respond: F) -> EvalReport
-    where
-        F: Fn(&str) -> String,
-    {
-        run_eval(&self.cases, respond)
-    }
-
     #[must_use]
     pub fn len(&self) -> usize {
         self.cases.len()
@@ -485,13 +476,13 @@ mod tests {
             .iter()
             .map(|r| (r.user.clone(), r.assistant.clone()))
             .collect();
-        let perfect = set.run(|p| goldens.get(p).cloned().unwrap_or_default());
+        let perfect = run_eval(&set.cases, |p| goldens.get(p).cloned().unwrap_or_default());
         assert_eq!(perfect.passed(), 10);
         assert!((perfect.score() - 1.0).abs() < f64::EPSILON);
         assert!(perfect.all_passed());
 
         // A bad responder that always evades: the harness must flag failures.
-        let bad = set.run(|_| "i am not sure, i do not know".to_string());
+        let bad = run_eval(&set.cases, |_| "i am not sure, i do not know".to_string());
         assert_eq!(bad.passed(), 0);
         assert!((bad.score()).abs() < f64::EPSILON);
     }

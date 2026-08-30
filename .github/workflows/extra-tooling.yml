@@ -24,7 +24,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main]
   schedule:
     - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:

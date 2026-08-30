@@ -111,6 +111,13 @@ pub struct ServeConfig {
     /// `None` means the bridge is for local/experimental use only and must not be put into
     /// consensus.
     pub determinism: Option<DeterminismProfile>,
+    /// The operator's disk budget in bytes. `None` bounds nothing and the
+    /// plan is accepted on placement alone. When it is set, the same plan is
+    /// run through `ResidencyPlan::plan_bounded_by_disk`: a placement that
+    /// would read more from disk than the budget allows is refused at
+    /// startup, fail-closed. The placement never moves - disk pressure must
+    /// not change which tier a shard lands in - only the verdict does.
+    pub disk_budget_bytes: Option<u64>,
 }
 
 impl Default for ServeConfig {
@@ -135,6 +142,7 @@ impl ServeConfig {
             port: 8000,
             base_url: "http://127.0.0.1:8000/v1".to_string(),
             determinism: None,
+            disk_budget_bytes: None,
         }
     }
 }
@@ -352,7 +360,11 @@ pub fn assert_consensus_ready_on_device(
     // a liveness problem rather than a configuration one.
     checked_system_prompt()?;
 
-    let plan = ResidencyPlan::plan(shards, budget, semantics).map_err(|e| match e {
+    let plan = match cfg.disk_budget_bytes {
+        Some(limit) => ResidencyPlan::plan_bounded_by_disk(shards, budget, semantics, limit),
+        None => ResidencyPlan::plan(shards, budget, semantics),
+    }
+    .map_err(|e| match e {
         PlanError::DensePartDoesNotFit { needed, available } => format!(
             "the per-token weights do not fit on this device: {needed} B needed, \
              {available} B of fast memory available"
@@ -547,6 +559,61 @@ mod tests {
         let mut cfg = ServeConfig::for_tier(ModelTier::Light, "v0.1");
         cfg.determinism = Some(DeterminismProfile::for_consensus(7));
         cfg
+    }
+
+    /// A one-byte disk budget cannot hold the routed part: the bounded plan
+    /// refuses before the streaming policy gets a vote, and the refusal names
+    /// the disk.
+    #[test]
+    fn a_disk_budget_below_the_footprint_is_refused() {
+        let mut cfg = consensus_cfg();
+        cfg.disk_budget_bytes = Some(1);
+        let shards = [
+            shard(1, 1_000, Demand::EveryToken),
+            shard(2, 8_000, Demand::WhenRouted),
+        ];
+        let err = assert_consensus_ready_on_device(
+            &cfg,
+            &shards,
+            DeviceBudget {
+                accelerator_bytes: 1_000,
+                system_bytes: 200,
+            },
+            semantics(),
+        )
+        .expect_err("one byte of disk fits nothing");
+        assert!(
+            err.contains("does not fit"),
+            "expected the bounded-disk refusal, got: {err}"
+        );
+    }
+
+    /// The budget changes the verdict, never the placement: with the same
+    /// shards and a sufficient budget the bounded path is exactly the plain
+    /// plan, and the streaming refusal that follows is the ordinary policy
+    /// answer, not a bounded-check artifact.
+    #[test]
+    fn a_sufficient_disk_budget_leaves_the_plan_unchanged() {
+        let mut cfg = consensus_cfg();
+        cfg.disk_budget_bytes = Some(20_000);
+        let shards = [
+            shard(1, 1_000, Demand::EveryToken),
+            shard(2, 8_000, Demand::WhenRouted),
+        ];
+        let err = assert_consensus_ready_on_device(
+            &cfg,
+            &shards,
+            DeviceBudget {
+                accelerator_bytes: 1_000,
+                system_bytes: 200,
+            },
+            semantics(),
+        )
+        .expect_err("the plan still streams from disk");
+        assert!(
+            err.contains("streams weights from disk"),
+            "expected the streaming refusal with a sufficient budget, got: {err}"
+        );
     }
 
     /// A device that holds everything in fast memory is allowed in.

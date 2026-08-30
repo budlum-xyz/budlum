@@ -116,12 +116,20 @@ jobs:
           SET=$(grep -oE "canonical-set [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${SET}"
 
-          # The relay gate ships the same consensus as a signed status report;
-          # its token is produced here too so the two compilers must agree on
-          # the relay outcome as well (regeneration is a dependency of relay).
+          # The relay gate ships the same consensus as a signed status report.
+          # The report signature itself covers the wall clock (freshness is its
+          # product), so it cannot be equal across two runs by design; what the
+          # two compilers must agree on is every deterministic part of the
+          # relay outcome: the canonical-set token, the status word and the
+          # program hash (regeneration is a dependency of relay).
           (cd xtask/gates && cargo run --release --quiet -- relay) > /tmp/relay.txt 2>&1
-          RELAYTOK=$(grep -oE "relay-token [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
-          test -n "${RELAYTOK}"
+          RELAYCANON=$(grep -oE "relay-canonical-set [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          RELAYSTATUS=$(grep -oE "relay-status [a-z]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          RELAYPROG=$(grep -oE "relay-program-hash [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          test -n "${RELAYCANON}"
+          test -n "${RELAYSTATUS}"
+          test -n "${RELAYPROG}"
+          RELAYTOK="${RELAYCANON}-${RELAYSTATUS}-${RELAYPROG}"
 
           # The tree-pin gate attests the whole budzero source tree; the pins
           # are committed with the tree, so both compilers must see the same

@@ -320,17 +320,13 @@ impl CanonicalRelayReport {
 }
 
 /// Verify `envelope` against `pi`/`program` with the canonical-program
-/// requirement and return the signed relay report. Uses the current time.
-pub fn verify_and_report(
-    envelope: &ProofEnvelope,
-    pi: &ExecutionPublicInputs,
-    program: &[u64],
-) -> CanonicalRelayReport {
-    verify_and_report_at(envelope, pi, program, now_unix())
-}
-
-/// Same as [`verify_and_report`] with an explicit timestamp (deterministic
-/// for tests).
+/// requirement and return the signed relay report, stamped at `at_unix`.
+///
+/// The clock is a parameter, not a hidden dependency: a re-run with the same
+/// timestamp and the same inputs reproduces the signature byte-for-byte,
+/// which is what makes the report auditable after the fact. `budcli relay`
+/// passes the live clock (`now_unix`) unless the operator pins the time with
+/// `--verified-at`.
 pub fn verify_and_report_at(
     envelope: &ProofEnvelope,
     pi: &ExecutionPublicInputs,

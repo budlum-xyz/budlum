@@ -162,6 +162,18 @@ enum Commands {
             help = "Exit non-zero when the report carries an alarm; the file is still written"
         )]
         strict: bool,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            help = "Pin the report timestamp to this unix time; a re-run with the same inputs and timestamp reproduces the signature byte-for-byte"
+        )]
+        verified_at: Option<u64>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Also write the exact canonical payload the signature covers, so a monitor can re-hash it without re-implementing the layout"
+        )]
+        payload_out: Option<String>,
     },
     #[command(about = "Run hardcoded smoke test of BudZKVM execution engine")]
     Test,
@@ -366,6 +378,22 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     })
 }
 
+/// The boot attestation: both canonical check programs are re-derived from
+/// the pinned operand values and compared against the pin table. Prints what
+/// was attested; any drift refuses the run before a proof is touched.
+fn attest_canonical_programs(
+) -> Result<Vec<bud_proof::canonical_boot::CanonicalCheckProgram>, Box<dyn std::error::Error>> {
+    let programs = bud_proof::canonical_boot::check_canonical_programs()
+        .map_err(|e| format!("canonical boot attestation refused: {e}"))?;
+    for p in &programs {
+        println!(
+            "canonical program {}: v{} {} ops, hash {}",
+            p.name, p.schema_version, p.ops, p.hash_hex
+        );
+    }
+    Ok(programs)
+}
+
 /// Read the three files a verification is made of: the proof envelope, the
 /// public inputs it claims, and the program bytes.
 ///
@@ -402,25 +430,37 @@ fn load_verifier_inputs(
     Ok((envelope, expected_inputs, program))
 }
 
+/// Everything one relay run needs. A bundle, not six positional arguments:
+/// the CLI fills it from parsed flags and the checks below read it in a
+/// fixed order.
+struct RelayRequest<'a> {
+    proof_file: &'a str,
+    public_inputs_file: &'a str,
+    bytecode_file: &'a str,
+    output: &'a str,
+    strict: bool,
+    verified_at: Option<u64>,
+    payload_out: Option<&'a str>,
+}
+
 /// Verify with the canonical-program requirement and publish the signed
 /// report, returning the token line for the caller to print.
 ///
 /// The file is re-read and the signature recomputed on the parsed copy: the
-/// relay's product is the file, so the file is what has to verify.
-fn write_signed_relay_report(
-    proof_file: &str,
-    public_inputs_file: &str,
-    bytecode_file: &str,
-    output: &str,
-    strict: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
+/// relay's product is the file, so the file is what has to verify. The
+/// pretty JSON is compared byte-for-byte to the writer's serialization, and
+/// the proof fingerprint is re-derived from the envelope that was loaded -
+/// a report can never describe a proof the verifier did not look at.
+fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn std::error::Error>> {
     use bud_proof::relayer::{
-        verify_and_report, AlarmCode, CanonicalRelayReport, RelayStatus, RELAY_SCHEMA_VERSION,
+        verify_and_report_at, AlarmCode, AlarmDetail, CanonicalRelayReport, ProofFingerprint,
+        RelayStatus, RELAY_SCHEMA_VERSION,
     };
     let (envelope, expected_inputs, program) =
-        load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
-    let report = verify_and_report(&envelope, &expected_inputs, &program);
-    let path = std::path::Path::new(output);
+        load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
+    let at = req.verified_at.unwrap_or_else(bud_proof::relayer::now_unix);
+    let report = verify_and_report_at(&envelope, &expected_inputs, &program, at);
+    let path = std::path::Path::new(req.output);
     report.write_report(path)?;
 
     let text = fs::read_to_string(path)
@@ -434,21 +474,50 @@ fn write_signed_relay_report(
         )
         .into());
     }
+    let canonical_json = report
+        .report_json()
+        .map_err(|e| format!("the relay JSON cannot be regenerated: {e}"))?;
+    if text != canonical_json {
+        return Err(
+            "the relay report file is not the canonical JSON of the verified report".into(),
+        );
+    }
     if !parsed.verify_report_sig() {
         return Err("Relay report signature does not match its canonical payload".into());
     }
-    if strict && parsed.status == RelayStatus::Alarm {
-        let reason = parsed
-            .alarm
-            .as_ref()
-            .map(|a| match a.code {
-                AlarmCode::NonCanonicalProgram => "non-canonical program",
-                AlarmCode::InvalidProof => "invalid proof",
-                AlarmCode::PublicInputsMismatch => "public inputs mismatch",
-                AlarmCode::InvalidEnvelope => "invalid envelope",
-                AlarmCode::DeserializationError => "deserialization error",
-            })
-            .unwrap_or("no alarm code recorded");
+    let expected_fingerprint = ProofFingerprint {
+        proof_format_version: envelope.proof_format_version,
+        backend: envelope.backend.clone(),
+        p3_version: envelope.p3_version.clone(),
+        fri_params_id: envelope.fri_params_id.clone(),
+        degree_bits: envelope.degree_bits,
+        public_inputs_hash: envelope.public_inputs_hash,
+        proof_bytes_len: envelope.proof_bytes.len(),
+    };
+    if parsed.proof != expected_fingerprint {
+        return Err(
+            "the relay report's proof fingerprint does not describe the envelope that was verified"
+                .into(),
+        );
+    }
+    if let Some(payload_path) = req.payload_out {
+        fs::write(payload_path, parsed.canonical_payload())
+            .map_err(|e| format!("cannot write the signed payload to {payload_path}: {e}"))?;
+    }
+    if req.strict && parsed.status == RelayStatus::Alarm {
+        let reason = match &parsed.alarm {
+            Some(AlarmDetail { code, detail }) => format!(
+                "{}: {detail}",
+                match code {
+                    AlarmCode::NonCanonicalProgram => "non-canonical program",
+                    AlarmCode::InvalidProof => "invalid proof",
+                    AlarmCode::PublicInputsMismatch => "public inputs mismatch",
+                    AlarmCode::InvalidEnvelope => "invalid envelope",
+                    AlarmCode::DeserializationError => "deserialization error",
+                }
+            ),
+            None => String::from("no alarm code recorded"),
+        };
         return Err(format!("relay report carries an alarm: {reason}").into());
     }
     Ok(parsed.relay_token_line())
@@ -460,6 +529,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
+
+    attest_canonical_programs()?;
 
     match &cli.command {
         Commands::Run {
@@ -702,14 +773,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bytecode_file,
             output,
             strict,
+            verified_at,
+            payload_out,
         } => {
-            let line = write_signed_relay_report(
+            let req = RelayRequest {
                 proof_file,
                 public_inputs_file,
                 bytecode_file,
                 output,
-                *strict,
-            )?;
+                strict: *strict,
+                verified_at: *verified_at,
+                payload_out: payload_out.as_deref(),
+            };
+            let line = write_signed_relay_report(&req)?;
             println!("{line}");
             info!(path = %output, "relay report written");
         }
@@ -837,6 +913,50 @@ mod tests {
         }
     }
 
+    /// The new relay flags have to reach the request: a pinned timestamp and
+    /// a payload path are the monitor's audit pair.
+    #[test]
+    fn relay_parses_a_pinned_timestamp_and_payload_path() {
+        let cli = Cli::try_parse_from([
+            "bud-cli",
+            "relay",
+            "--proof-file",
+            "p.json",
+            "--public-inputs-file",
+            "i.json",
+            "--bytecode-file",
+            "b.budc",
+            "--verified-at",
+            "42",
+            "--payload-out",
+            "sig.bin",
+        ])
+        .expect("the relay flags must parse");
+        match cli.command {
+            Commands::Relay {
+                verified_at,
+                payload_out,
+                ..
+            } => {
+                assert_eq!(verified_at, Some(42));
+                assert_eq!(payload_out.as_deref(), Some("sig.bin"));
+            }
+            other => {
+                let _ = other;
+                panic!("expected the relay subcommand");
+            }
+        }
+    }
+
+    /// The boot attestation accepts the checked-out tree; it is the same call
+    /// that refuses a run when a canonical pin drifts.
+    #[test]
+    fn boot_attestation_accepts_the_canonical_tree() {
+        let got = attest_canonical_programs().expect("the tree must attest at boot");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "private-transfer-check");
+    }
+
     /// A missing proof file is refused **before** any report is written: a
     /// published file describing nothing is worse to a monitor than a failed
     /// command.
@@ -848,13 +968,16 @@ mod tests {
             line!()
         ));
         let out = out.to_string_lossy().into_owned();
-        let r = write_signed_relay_report(
-            "/nonexistent/proof.json",
-            "/nonexistent/inputs.json",
-            "/nonexistent/program.budc",
-            &out,
-            true,
-        );
+        let req = RelayRequest {
+            proof_file: "/nonexistent/proof.json",
+            public_inputs_file: "/nonexistent/inputs.json",
+            bytecode_file: "/nonexistent/program.budc",
+            output: &out,
+            strict: true,
+            verified_at: Some(1_700_000_000),
+            payload_out: None,
+        };
+        let r = write_signed_relay_report(&req);
         assert!(r.is_err(), "a missing proof file had to be refused");
         assert!(
             !std::path::Path::new(&out).exists(),
