@@ -1583,9 +1583,9 @@ mod tests {
     }
 
     const ALPHABET: &[char] = &[
-        'a', 'b', 'c', '0', '1', '2', '3', '4', '5', ' ', '\n', '\t', '{', '}', '(', ')',
-        ':', ';', '+', '-', '*', '/', '=', '>', '<', '.', ',', '"', '\'', '|', '@', '$',
-        '%', '&', '!', '?', '_', '[', ']', '#', '~', '^', '\\',
+        'a', 'b', 'c', '0', '1', '2', '3', '4', '5', ' ', '\n', '\t', '{', '}', '(', ')', ':', ';',
+        '+', '-', '*', '/', '=', '>', '<', '.', ',', '"', '\'', '|', '@', '$', '%', '&', '!', '?',
+        '_', '[', ']', '#', '~', '^', '\\',
     ];
 
     fn random_garbage(rng: &mut Rng, max_len: usize) -> String {
@@ -1595,9 +1595,29 @@ mod tests {
 
     fn random_nested_contract(rng: &mut Rng) -> String {
         let tokens = [
-            "contract", "pub", "fn", "main", "let", "field", "u64", "Address", "Hash32",
-            "if", "else", "while", "for", "match", "return", "struct", "true", "false",
-            "Immutable", "operator", "=>", "::", ",",
+            "contract",
+            "pub",
+            "fn",
+            "main",
+            "let",
+            "field",
+            "u64",
+            "Address",
+            "Hash32",
+            "if",
+            "else",
+            "while",
+            "for",
+            "match",
+            "return",
+            "struct",
+            "true",
+            "false",
+            "Immutable",
+            "operator",
+            "=>",
+            "::",
+            ",",
         ];
         let mut s = String::new();
         let depth = 1 + rng.below(6) as usize;

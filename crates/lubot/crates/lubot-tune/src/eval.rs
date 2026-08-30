@@ -39,7 +39,11 @@ pub struct EvalCase {
 impl EvalCase {
     /// Build an [`EvalCase`] that grades a golden answer exactly.
     #[must_use]
-    pub fn exact(name: impl Into<String>, prompt: impl Into<String>, golden: impl Into<String>) -> Self {
+    pub fn exact(
+        name: impl Into<String>,
+        prompt: impl Into<String>,
+        golden: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             prompt: prompt.into(),
@@ -222,7 +226,12 @@ impl EvalCase {
     /// The deterministic record for this case (name / prompt / rule).
     #[must_use]
     pub fn canonical(&self) -> String {
-        format!("{}\n{}\n{}\n", self.name, self.prompt, self.check.canonical())
+        format!(
+            "{}\n{}\n{}\n",
+            self.name,
+            self.prompt,
+            self.check.canonical()
+        )
     }
 }
 
@@ -354,15 +363,15 @@ mod tests {
 
     #[test]
     fn exact_grades_a_correct_answer_as_pass() {
-        let c = EvalCase::exact("capital", "Başkent neresi?", "Ankara");
+        let c = EvalCase::exact("capital", "What is the capital of Turkey?", "Ankara");
         assert_eq!(c.check.apply("Ankara"), CheckOutcome::Pass);
     }
 
     #[test]
     fn exact_grades_a_different_answer_as_fail_with_surrounding() {
-        let c = EvalCase::exact("capital", "Başkent neresi?", "Ankara");
+        let c = EvalCase::exact("capital", "What is the capital of Turkey?", "Ankara");
         assert!(matches!(
-            c.check.apply("İstanbul"),
+            c.check.apply("Istanbul"),
             CheckOutcome::Fail { .. }
         ));
     }
@@ -371,11 +380,14 @@ mod tests {
     fn contains_all_requires_every_needle() {
         let c = EvalCase {
             name: "parts".into(),
-            prompt: "Lubot hangi katmanlardan oluşur?".into(),
+            prompt: "Which layers is Lubot built from?".into(),
             check: Check::ContainsAll(vec!["core".into(), "knowledge".into(), "serve".into()]),
         };
         assert_eq!(c.check.apply("core knowledge serve"), CheckOutcome::Pass);
-        assert!(matches!(c.check.apply("core serve"), CheckOutcome::Fail { .. }));
+        assert!(matches!(
+            c.check.apply("core serve"),
+            CheckOutcome::Fail { .. }
+        ));
     }
 
     #[test]
@@ -383,22 +395,31 @@ mod tests {
         let c = EvalCase {
             name: "no_halluc".into(),
             prompt: "x".into(),
-            check: Check::Excludes(vec!["bilinmiyor".into(), "emin değilim".into()]),
+            check: Check::Excludes(vec!["i do not know".into(), "i am not sure".into()]),
         };
-        assert_eq!(c.check.apply("cevap 42."), CheckOutcome::Pass);
-        assert!(matches!(c.check.apply("emin değilim ama 42."), CheckOutcome::Fail { .. }));
+        assert_eq!(c.check.apply("the answer is 42."), CheckOutcome::Pass);
+        assert!(matches!(
+            c.check.apply("i am not sure but 42."),
+            CheckOutcome::Fail { .. }
+        ));
     }
 
     #[test]
     fn exact_trimmed_ignores_whitespace_padding() {
-        let c = EvalCase::exact("t", "soru", "cevap bu");
-        assert!(matches!(c.check.apply("  cevap   bu  "), CheckOutcome::Fail { .. }));
+        let c = EvalCase::exact("t", "question", "the answer here");
+        assert!(matches!(
+            c.check.apply("  the answer   here  "),
+            CheckOutcome::Fail { .. }
+        ));
         let trimmed = EvalCase {
             name: "t".into(),
-            prompt: "soru".into(),
-            check: Check::ExactTrimmed("cevap bu".into()),
+            prompt: "question".into(),
+            check: Check::ExactTrimmed("the answer here".into()),
         };
-        assert_eq!(trimmed.check.apply("  cevap   bu  "), CheckOutcome::Pass);
+        assert_eq!(
+            trimmed.check.apply("  the answer   here  "),
+            CheckOutcome::Pass
+        );
     }
 
     #[test]
@@ -437,7 +458,7 @@ mod tests {
 
     #[test]
     fn curriculum_dataset_has_a_stable_digest_and_is_graded_end_to_end() {
-        // The educational content for this system (EKSIK D): golden Q/A pairs.
+        // The behaviour curriculum for this system: golden Q/A pairs.
         const CURRICULUM: &str = include_str!("../data/lubot-davranis-curriculum.jsonl");
         let mut records = Vec::new();
         for line in CURRICULUM.lines() {
@@ -451,7 +472,10 @@ mod tests {
         // identical set built from scratch (so it can be registered in B.U.D.
         // and the same object later re-graded).
         let d1 = set.digest();
-        assert_eq!(d1, EvalDataSet::from_golden("lubot-davranis-curriculum", &records).digest());
+        assert_eq!(
+            d1,
+            EvalDataSet::from_golden("lubot-davranis-curriculum", &records).digest()
+        );
         assert_eq!(d1.len(), 32);
 
         // An oracle that answers the golden text: 100% pass.
@@ -467,7 +491,7 @@ mod tests {
         assert!(perfect.all_passed());
 
         // A bad responder that always evades: the harness must flag failures.
-        let bad = set.run(|_| "emin değilim, bilinmiyor".to_string());
+        let bad = set.run(|_| "i am not sure, i do not know".to_string());
         assert_eq!(bad.passed(), 0);
         assert!((bad.score()).abs() < f64::EPSILON);
     }
@@ -476,21 +500,24 @@ mod tests {
     fn from_golden_maps_user_become_prompt_and_assistant_becomes_rule() {
         let recs = vec![lubot_data::jsonl::InstructionRecord {
             system: None,
-            user: "soru".to_string(),
-            assistant: "doğru cevap".to_string(),
+            user: "question".to_string(),
+            assistant: "correct answer".to_string(),
         }];
         let set = EvalDataSet::from_golden("t", &recs);
-        assert_eq!(set.cases[0].prompt, "soru");
+        assert_eq!(set.cases[0].prompt, "question");
         // Whitespace-insensitive golden grading.
-        assert_eq!(set.cases[0].check.apply("  doğru   cevap  "), CheckOutcome::Pass);
+        assert_eq!(
+            set.cases[0].check.apply("  correct   answer  "),
+            CheckOutcome::Pass
+        );
     }
 
     #[test]
     fn eval_set_binds_to_the_plan_it_is_registered_in() {
         let recs = vec![lubot_data::jsonl::InstructionRecord {
             system: None,
-            user: "soru".to_string(),
-            assistant: "cevap".to_string(),
+            user: "question".to_string(),
+            assistant: "answer".to_string(),
         }];
         let set = EvalDataSet::from_golden("t", &recs);
         let digest = set.digest();
@@ -508,8 +535,8 @@ mod tests {
             "t",
             &[lubot_data::jsonl::InstructionRecord {
                 system: None,
-                user: "soru".to_string(),
-                assistant: "farklı cevap".to_string(),
+                user: "question".to_string(),
+                assistant: "different answer".to_string(),
             }],
         );
         assert!(!other.registered_in(&plan));
@@ -520,23 +547,25 @@ mod tests {
         // A free-form answer that names the right facts but is not a verbatim
         // golden string - the form a real model actually produces.
         let c = EvalCase::facts(
-            "budama",
-            "Bridge replay ne zaman budanır?",
+            "pruning",
+            "When is a processed Bridge replay message pruned?",
             ["mark_processed_at", "finality"],
-            ["bilmiyorum", "emin değilim", "belki"],
+            ["i do not know", "i am not sure", "maybe"],
         );
         assert_eq!(
-            c.check.apply("Budama, finality derinliğini geçtikten sonra mark_processed_at ile yapılır."),
+            c.check
+                .apply("Pruning happens with mark_processed_at once the finality depth passes."),
             CheckOutcome::Pass
         );
         // Missing a fact fails.
         assert!(matches!(
-            c.check.apply("mark_processed_at ile yapılır."),
+            c.check.apply("It is done with mark_processed_at."),
             CheckOutcome::Fail { .. }
         ));
         // A hedge is refused even if the facts are present.
         assert!(matches!(
-            c.check.apply("emin değilim ama mark_processed_at ile finality sonrası budanır."),
+            c.check
+                .apply("i am not sure but pruning follows mark_processed_at after finality."),
             CheckOutcome::Fail { .. }
         ));
     }
@@ -556,17 +585,41 @@ mod tests {
         // 3/4 = 0.75 clears a 0.8 gate? No.
         let ok = EvalReport {
             cases: vec![
-                CaseReport { name: "a".into(), passed: true, reason: None },
-                CaseReport { name: "b".into(), passed: true, reason: None },
-                CaseReport { name: "c".into(), passed: true, reason: None },
-                CaseReport { name: "d".into(), passed: true, reason: None },
+                CaseReport {
+                    name: "a".into(),
+                    passed: true,
+                    reason: None,
+                },
+                CaseReport {
+                    name: "b".into(),
+                    passed: true,
+                    reason: None,
+                },
+                CaseReport {
+                    name: "c".into(),
+                    passed: true,
+                    reason: None,
+                },
+                CaseReport {
+                    name: "d".into(),
+                    passed: true,
+                    reason: None,
+                },
             ],
         };
         assert!(strict.passes(&ok));
         let half = EvalReport {
             cases: vec![
-                CaseReport { name: "a".into(), passed: true, reason: None },
-                CaseReport { name: "b".into(), passed: false, reason: Some("x".into()) },
+                CaseReport {
+                    name: "a".into(),
+                    passed: true,
+                    reason: None,
+                },
+                CaseReport {
+                    name: "b".into(),
+                    passed: false,
+                    reason: Some("x".into()),
+                },
             ],
         };
         assert!(!strict.passes(&half));

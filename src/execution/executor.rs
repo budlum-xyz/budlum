@@ -903,9 +903,12 @@ impl Executor {
                         match msg.kind {
                             crate::cross_domain::message::MessageKind::BridgeLock => {
                                 // Inbound lock from external chain -> Mint on Budlum
-                                state.bridge_state.mint(msg, state.current_block_height).map_err(|e| {
-                                    BudlumError::validation("bridge_mint_failed", e.0)
-                                })?;
+                                state
+                                    .bridge_state
+                                    .mint(msg, state.current_block_height)
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_mint_failed", e.0)
+                                    })?;
                                 // Previously a placeholder (nonce-based fee,
                                 // No recipient credit). Now uses the same logic as
                                 // Submit_relay_proof: fetch the transfer, deduct 1% relayer

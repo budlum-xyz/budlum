@@ -2205,7 +2205,10 @@ mod tests {
         // Gas calibration: an opcode whose proof expands to many trace rows
         // must not sit at the cheap arithmetic default. `Div` is a 64-row
         // binary long division, so it is priced with the heavy ops.
-        assert!(Vm::gas_cost(Opcode::Div) > 1, "long-division must not be cheap");
+        assert!(
+            Vm::gas_cost(Opcode::Div) > 1,
+            "long-division must not be cheap"
+        );
         assert_eq!(Vm::gas_cost(Opcode::Div), 10);
     }
 

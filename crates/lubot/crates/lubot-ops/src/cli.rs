@@ -36,7 +36,7 @@ pub enum Command {
     /// The prompt is a `const`; an operator serves the same text every other
     /// operator serves. This command runs the same startup check
     /// (`lubot_serve::config::checked_system_prompt`) and prints the verified
-    /// text, or a refusal — so an operator can audit what they are about to
+    /// text, or a refusal, so an operator can audit what they are about to
     /// serve before they commit, rather than discovering a refusal only at
     /// `Bridge::start`.
     Prompt,
