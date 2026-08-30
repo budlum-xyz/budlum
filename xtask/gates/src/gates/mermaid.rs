@@ -200,12 +200,12 @@ fn parse_nodes(line: &str) -> (Vec<(String, String)>, Vec<String>) {
             _ => None,
         };
 
-        if let (Some(_o), Some(c)) = (opener, closer) {
+        if let (Some(o), Some(c)) = (opener, closer) {
             let mut depth = 0i32;
             let label_start = i;
             let mut j = i;
             while j < chars.len() {
-                if chars[j] == opener.unwrap() {
+                if chars[j] == o {
                     depth += 1;
                 } else if chars[j] == c {
                     depth -= 1;
@@ -342,44 +342,75 @@ fn check(block: &Block) -> Vec<Finding> {
 /// # Errors
 ///
 /// Returns the rendered findings when any diagram carries one.
+/// The architecture documents this gate reads.
+///
+/// More than one, because the crate-level document was invisible to the gate
+/// while carrying diagrams of its own: a diagram nobody checks is exactly the
+/// kind that goes wrong, and the reason this gate exists is that two of the
+/// main document's diagrams were wrong in ways a reader does not notice.
+///
+/// Each entry carries a floor. A document that suddenly reports fewer diagrams
+/// than it is known to carry has usually moved or had its fences renamed, and
+/// reporting OK on nothing is the failure mode a gate must not have. The floors
+/// are deliberately below the current counts, so adding a diagram never needs
+/// an edit here, while deleting most of them does.
+///
+/// A floor of zero means "check whatever is here, and do not require any".
+/// The crate document is written on one branch and not another, and a gate
+/// whose verdict depends on which branch it runs from is a gate that teaches
+/// people to ignore it. What must not vary by branch is that the diagrams
+/// present are checked; how many exist is a property of the work in progress.
+const DOCUMENTS: &[(&str, usize)] = &[
+    ("docs/ARCHITECTURE.md", 50),
+    ("crates/lubot/ARCHITECTURE.md", 0),
+];
+
 pub fn run(root: &Path) -> Result<String, String> {
-    let path = root.join("docs/ARCHITECTURE.md");
-    let display = path.display().to_string();
-    let md = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {display}: {e}"))?;
+    let mut total = 0usize;
+    let mut all: Vec<(String, Finding)> = Vec::new();
+    let mut summary: Vec<String> = Vec::new();
 
-    let blocks = blocks_of(&md);
-    if blocks.is_empty() {
-        return Err(format!(
-            "{display} contains no mermaid diagrams. It carried fifty-one, so either \
-             the document moved or the fences changed, and this gate is now watching \
-             nothing."
-        ));
-    }
+    for (rel, floor) in DOCUMENTS {
+        let path = root.join(rel);
+        let display = path.display().to_string();
+        let md =
+            std::fs::read_to_string(&path).map_err(|e| format!("cannot read {display}: {e}"))?;
 
-    let mut all: Vec<Finding> = Vec::new();
-    for b in &blocks {
-        all.extend(check(b));
+        let blocks = blocks_of(&md);
+        if blocks.len() < *floor {
+            return Err(format!(
+                "{display} contains {} mermaid diagram(s), fewer than the {floor} it \
+                 is known to carry. Either the document moved or the fences changed, \
+                 and this gate is now watching less than it was.",
+                blocks.len()
+            ));
+        }
+
+        total += blocks.len();
+        summary.push(format!("{} in {rel}", blocks.len()));
+        for b in &blocks {
+            all.extend(check(b).into_iter().map(|f| (display.clone(), f)));
+        }
     }
 
     if all.is_empty() {
         return Ok(format!(
-            "Mermaid diagrams OK: {} diagrams in {display}, no node redeclared with a \
+            "Mermaid diagrams OK: {total} diagrams ({}), no node redeclared with a \
              second label and no node left dangling on one edge.",
-            blocks.len()
+            summary.join(", ")
         ));
     }
 
     let mut msg = String::new();
     let _ = writeln!(
         msg,
-        "{} finding(s) across {} mermaid diagrams in {display}.\n",
-        all.len(),
-        blocks.len()
+        "{} finding(s) across {total} mermaid diagrams.\n",
+        all.len()
     );
-    for f in &all {
+    for (doc, f) in &all {
         let _ = writeln!(
             msg,
-            "  diagram {} ({}), line {}\n    {}\n    {}\n",
+            "  {doc}: diagram {} ({}), line {}\n    {}\n    {}\n",
             f.diagram, f.heading, f.line, f.kind, f.detail
         );
     }

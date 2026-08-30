@@ -209,7 +209,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join(".github/workflows/ci.yml"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: repo-ici hash gecti"));
+        return Err(String::from("canary: an in-repo hash passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);

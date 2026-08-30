@@ -460,7 +460,9 @@ mod tests {
         // Serde binding (which also covers expiry_queue) must catch this.
         let mut bs = snap.bridge_state.clone().unwrap_or_default();
         let bogus_mid: [u8; 32] = [0x24u8; 32];
-        bs.replay.mark_processed(bogus_mid).expect("mark processed");
+        bs.replay
+            .mark_processed_at(bogus_mid, 0)
+            .expect("mark processed");
         snap.bridge_state = Some(bs);
 
         assert!(

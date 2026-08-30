@@ -163,9 +163,9 @@ impl SegmentLedger {
 #[cfg(test)]
 mod tests {
 
-    /// RAM DENETIMI (2026-08-21): sisirilmis `count`, 45 baytlik girdiyle
-    /// 103.079.215.080 baytlik ayirma talebi uretiyordu -> SIGABRT.
-    /// SHA3 alani korumaz (anahtarsiz ozet + public DOMAIN).
+    /// RAM AUDIT (2026-08-21): an inflated `count` turned a 45-byte input into
+    /// a 103,079,215,080-byte allocation request -> SIGABRT.
+    /// SHA3 does not protect the field (unkeyed digest + public DOMAIN).
     #[test]
     fn an_inflated_record_count_is_refused_before_allocating() {
         use sha3::{Digest, Sha3_256};

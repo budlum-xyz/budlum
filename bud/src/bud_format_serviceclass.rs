@@ -72,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn her_sinif_ic_yerlesimi_var() {
+    fn every_class_has_an_inner_placement() {
         for c in [
             ServiceClass::Hot,
             ServiceClass::Warm,

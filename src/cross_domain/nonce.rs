@@ -43,13 +43,6 @@ impl ReplayNonceStore {
         nonce
     }
 
-    pub fn mark_processed(&mut self, message_id: MessageId) -> Result<(), String> {
-        if !self.processed_messages.insert(message_id) {
-            return Err("Cross-domain message was already processed".into());
-        }
-        Ok(())
-    }
-
     /// Mark processed with block height for safe pruning.
     /// The height is recorded so that pruning only removes entries that are
     /// Deeper than FINALITY_PRUNE_DEPTH blocks, preventing replay within
@@ -153,10 +146,11 @@ mod tests {
         for i in 0..(MAX_PROCESSED_MESSAGES + 10) {
             let mut id = [0u8; 32];
             id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            store.mark_processed(id).unwrap();
+            store.mark_processed_at(id, 0).unwrap();
         }
-        // Mark_processed no longer auto-prunes (V4-13: height-aware pruning).
-        // Verify prune_processed (legacy) still caps correctly.
+        // Marking at height zero never triggers the height-aware prune
+        // (V4-13), so the set is allowed to grow here; this verifies the
+        // legacy prune_processed still caps correctly.
         store.prune_processed();
         assert!(
             store.processed_count() <= MAX_PROCESSED_MESSAGES,
@@ -168,9 +162,9 @@ mod tests {
     fn replay_protection_still_works_after_prune() {
         let mut store = ReplayNonceStore::new();
         let id = [42u8; 32];
-        store.mark_processed(id).unwrap();
+        store.mark_processed_at(id, 0).unwrap();
         assert!(store.is_processed(&id));
-        assert!(store.mark_processed(id).is_err()); // duplicate rejected
+        assert!(store.mark_processed_at(id, 0).is_err()); // duplicate rejected
     }
 }
 
@@ -182,18 +176,18 @@ mod audit_replay_regression {
     fn replay_store_rejects_duplicate_and_tracks_count() {
         let mut s = ReplayNonceStore::new();
         let id = [7u8; 32];
-        assert!(s.mark_processed(id).is_ok());
+        assert!(s.mark_processed_at(id, 0).is_ok());
         assert!(s.is_processed(&id));
         assert_eq!(s.processed_count(), 1);
-        assert!(s.mark_processed(id).is_err());
+        assert!(s.mark_processed_at(id, 0).is_err());
         let _ = s.root();
     }
 
     #[test]
     fn replay_store_distinct_ids_independent() {
         let mut s = ReplayNonceStore::new();
-        s.mark_processed([1u8; 32]).unwrap();
-        s.mark_processed([2u8; 32]).unwrap();
+        s.mark_processed_at([1u8; 32], 0).unwrap();
+        s.mark_processed_at([2u8; 32], 0).unwrap();
         assert_eq!(s.processed_count(), 2);
         assert!(s.is_processed(&[1u8; 32]));
         assert!(s.is_processed(&[2u8; 32]));

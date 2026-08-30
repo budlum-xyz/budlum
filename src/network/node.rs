@@ -935,7 +935,13 @@ impl Node {
         let Some(ref path) = self.vote_history_db else {
             return;
         };
-        match std::fs::read_to_string(path) {
+        // Bounded: the vote history is two integers. Anything larger is not
+        // a vote history, and reading it would be an allocation chosen by
+        // whatever wrote the file rather than by this node.
+        match crate::core::bounded_read::read_to_string_bounded(
+            path,
+            crate::core::bounded_read::MAX_CONTROL_FILE_BYTES,
+        ) {
             Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
                 Ok(v) => {
                     self.last_prevote_height = v.last_prevote_height;
@@ -949,7 +955,7 @@ impl Node {
                 Err(e) => warn!(error = %e, path = %path.display(),
                     "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)"),
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.is_not_found() => {}
             Err(e) => warn!(error = %e, path = %path.display(), "Vote history could not be read"),
         }
     }
@@ -983,7 +989,12 @@ impl Node {
         let Some(ref db_path) = self.banned_peer_db else {
             return;
         };
-        match std::fs::read_to_string(db_path) {
+        // Bounded: the ban list grows with the peer set, so it gets the
+        // larger ceiling - but it still gets one.
+        match crate::core::bounded_read::read_to_string_bounded(
+            db_path,
+            crate::core::bounded_read::MAX_BAN_LIST_BYTES,
+        ) {
             Ok(data) => {
                 // Prefer absolute-expiry records; accept legacy
                 // String-only lists for one-version migration.
@@ -1021,7 +1032,7 @@ impl Node {
                 }
             }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
+                if !e.is_not_found() {
                     warn!("Failed to read banned peer DB: {e}");
                 }
             }
@@ -1117,6 +1128,17 @@ impl Node {
                            // Scoped so the guard is not held across the rest
                            // of this arm, which does chain and sync work.
                            self.peer_manager_lock().cleanup_expired_bans();
+
+                           // Expiring a ban only clears the flag; the record itself
+                           // is spent once no penalty is left. The tracking ceiling
+                           // reclaims on its own, but only when the table is already
+                           // full, so a peer id minted for free and then left behind
+                           // keeps the door shut for every peer not yet met. The
+                           // beat that expires bans is the beat that frees the slots.
+                           let reclaimed = self.peer_manager_lock().prune_spent_records();
+                           if reclaimed > 0 {
+                               info!("Reclaimed {reclaimed} spent peer records");
+                           }
 
                            // Auto-reset orphaned sync_state.
                            // If sync_state has been 1 for longer than SYNC_TIMEOUT_SECS,
@@ -1510,6 +1532,22 @@ impl Node {
                                        }
                                        c
                                    };
+                                   // The peer is back: take its score record
+                                   // out of the eviction queue so a connected
+                                   // peer is never dropped while an idle
+                                   // record survives.
+                                   {
+                                       let mut dedup = self.gossip_dedup.lock().unwrap_or_else(
+                                           |poisoned| {
+                                               tracing::error!(
+                                                   "GossipDedup lock was poisoned by an earlier \
+                                                    panic; continuing with the recovered state"
+                                               );
+                                               poisoned.into_inner()
+                                           },
+                                       );
+                                       dedup.note_peer_connected(&peer_id);
+                                   }
                                    let count = if newly_connected {
                                        self.peer_count.fetch_add(1, Ordering::SeqCst) + 1
                                    } else {
@@ -1539,6 +1577,12 @@ impl Node {
                                    }
                                    if let Some(ref m) = self.metrics {
                                        m.p2p_peers_connected.set(count as i64);
+                                       let mean_quality = self
+                                           .gossip_dedup
+                                           .lock()
+                                           .map(|d| d.mean_peer_score_i64())
+                                           .unwrap_or_else(|p| p.into_inner().mean_peer_score_i64());
+                                       m.peer_connection_quality.set(mean_quality);
                                    }
                                    info!("Connected to {peer_id}, Peers: {count}");
 
@@ -1605,9 +1649,43 @@ impl Node {
                                            )
                                            .ok();
                                    }
+                                   // Mark the gossip score record evictable.
+                                   // It is NOT deleted: a peer one message
+                                   // from the ban threshold would otherwise
+                                   // clear its record by reconnecting. The
+                                   // record survives and is the first thing
+                                   // dropped when the table hits
+                                   // `MAX_SCORED_PEERS`. Before this call the
+                                   // table had no eviction path at all and
+                                   // grew once per distinct `PeerId` seen,
+                                   // which costs an attacker one key
+                                   // generation each.
+                                   {
+                                       let mut dedup = self.gossip_dedup.lock().unwrap_or_else(
+                                           |poisoned| {
+                                               tracing::error!(
+                                                   "GossipDedup lock was poisoned by an earlier \
+                                                    panic; continuing with the recovered state"
+                                               );
+                                               poisoned.into_inner()
+                                           },
+                                       );
+                                       dedup.note_peer_disconnected(&peer_id);
+                                   }
                                    if let Some(ref m) = self.metrics {
                                        m.p2p_peers_connected
                                            .set(self.peer_count.load(Ordering::SeqCst) as i64);
+                                       let (scored, mean_quality) = self
+                                           .gossip_dedup
+                                           .lock()
+                                           .map(|d| (d.scored_peer_count(), d.mean_peer_score_i64()))
+                                           .unwrap_or_else(|p| {
+                                               let d = p.into_inner();
+                                               (d.scored_peer_count(), d.mean_peer_score_i64())
+                                           });
+                                       m.gossip_scored_peers
+                                           .set(i64::try_from(scored).unwrap_or(i64::MAX));
+                                       m.peer_connection_quality.set(mean_quality);
                                    }
                                    warn!(
                                        "Disconnected from {}, Peers: {}",
@@ -1690,6 +1768,14 @@ impl Node {
                                        }
                                    };
                                    if let Some(should_ban) = duplicate_action {
+                                       // Event-local: one increment per duplicate
+                                       // observation. Setting from
+                                       // `total_duplicates()` would require a
+                                       // gauge and would hide the rate under a
+                                       // cumulative level.
+                                       if let Some(ref m) = self.metrics {
+                                           m.p2p_gossip_duplicates.inc();
+                                       }
                                        if should_ban {
                                            warn!("Duplicate gossip flood detected from {peer_id}; banning peer");
                                            {
@@ -2550,6 +2636,9 @@ impl Node {
                                                        warn!("Rejected sync request from unhandshaked/rate-limited/banned peer {peer}");
                                                        continue;
                                                    }
+                                                   if let Some(ref m) = self.metrics {
+                                                       m.p2p_sync_requests.inc();
+                                                   }
                                                    if let Ok(msg) = NetworkMessage::from_bytes_validated(&request) {
                                                        match msg {
                                                            NetworkMessage::GetHeaders { locator, limit } => {
@@ -2630,6 +2719,9 @@ impl Node {
                                                                            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                                                                            Ordering::SeqCst,
                                                                        );
+                                                                       if let Some(ref m) = self.metrics {
+                                                                           m.p2p_sync_requests.inc();
+                                                                       }
                                                                        let _ = self.swarm.behaviour_mut().sync.send_request(&peer, req.to_bytes());
                                                                    }
                                                                }
@@ -2740,7 +2832,7 @@ impl Node {
                                                request_response::Message::Response { response, .. } => {
                                                    let response_cid = response.cid;
                                                    let is_not_found = response.not_found;
-                                                   // Strix MEDIUM (CWE-345): yanit, istenen blok icin gelmeli.
+                                                   // Strix MEDIUM (CWE-345): the response must be for the requested block.
                                                    // Yanitin cid'i, istegini karsiladigi cid'dir (bitswap protokolu).
                                                    if let Err(e) = bitswap.handle_response(response_cid, response) {
                                                        warn!("Bitswap response from {peer} failed: {e}");

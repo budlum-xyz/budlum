@@ -271,9 +271,20 @@ impl PruningManager {
         let mut quarantined_any = false;
         for entry in &snapshots {
             let path = entry.path();
-            let data = match fs::read_to_string(&path) {
+            // Bounded: a snapshot directory is a directory, so the size of
+            // this allocation is decided by whatever placed the file there.
+            // An oversized candidate is skipped like an unreadable one - the
+            // next older snapshot is tried, which is what this loop already
+            // does for corruption.
+            let data = match crate::core::bounded_read::read_to_string_bounded(
+                &path,
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES,
+            ) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("V1 snapshot candidate skipped: {e}");
+                    continue;
+                }
             };
             if data.contains("\"schema_version\"") {
                 tracing::warn!(
@@ -366,9 +377,16 @@ impl PruningManager {
         let mut quarantined_any = false;
         for entry in &snapshots {
             let path = entry.path();
-            let data = match fs::read_to_string(&path) {
+            // Bounded, for the same reason as the V1 probe above.
+            let data = match crate::core::bounded_read::read_to_string_bounded(
+                &path,
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES,
+            ) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("V2 snapshot candidate skipped: {e}");
+                    continue;
+                }
             };
             let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
                 Ok(s) => s,
@@ -585,6 +603,8 @@ pub enum SnapshotAuthError {
     MissingSigner,
     MissingSignature,
     SignerNotTrusted,
+    /// `RequireSigned` but the caller named nobody to trust.
+    NoTrustList,
     InvalidSignerKey,
     InvalidSignatureLength,
     SignatureInvalid,
@@ -599,6 +619,12 @@ impl std::fmt::Display for SnapshotAuthError {
                 write!(f, "RequireSigned: manifest_signature missing")
             }
             SnapshotAuthError::SignerNotTrusted => write!(f, "manifest signer not in trust list"),
+            SnapshotAuthError::NoTrustList => {
+                write!(
+                    f,
+                    "RequireSigned: no trust list was supplied to check the signer against"
+                )
+            }
             SnapshotAuthError::InvalidSignerKey => write!(f, "invalid signer pubkey"),
             SnapshotAuthError::InvalidSignatureLength => write!(f, "invalid signature length"),
             SnapshotAuthError::SignatureInvalid => write!(f, "signature verification failed"),
@@ -930,10 +956,20 @@ impl StateSnapshotV2 {
                     .manifest_signature
                     .as_ref()
                     .ok_or(SnapshotAuthError::MissingSignature)?;
-                if let Some(list) = trust_list {
-                    if !list.iter().any(|pk| pk == &signer) {
-                        return Err(SnapshotAuthError::SignerNotTrusted);
-                    }
+                // A `RequireSigned` manifest with nobody named to trust is not
+                // "signed by someone we trust", it is "signed by anyone": a
+                // key generated a second ago clears it. Both production
+                // callers pass a list (`Blockchain` at :310 and :4771), so
+                // this is the shape of the API rather than a live hole - but
+                // the honest answer to "is this signer trusted?" is not "yes"
+                // when nobody said who to trust. The signer and signature
+                // checks stay above this: an unsigned manifest is still
+                // reported as missing, not as untrusted.
+                let Some(list) = trust_list else {
+                    return Err(SnapshotAuthError::NoTrustList);
+                };
+                if !list.iter().any(|pk| pk == &signer) {
+                    return Err(SnapshotAuthError::SignerNotTrusted);
                 }
                 // Ed25519 verify (ed25519-dalek; crypto crate reuse).
                 // `verify_strict` rejects weak (low-order) public keys, which
@@ -1452,6 +1488,45 @@ mod tests {
         assert!(snapshot.verify_authentic(None).is_ok());
     }
 
+    /// `RequireSigned` with no trust list to compare against means "signed by
+    /// Anyone who can sign": a key generated a second ago clears it. A
+    /// Signature proves the manifest was signed, never that the signer is one
+    /// We trust, so the honest answer to "is this signer trusted?" is not
+    /// "yes" when nobody said who to trust.
+    #[test]
+    fn test_require_signed_without_a_trust_list_is_refused() {
+        use ed25519_dalek::SigningKey;
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        snapshot.snapshot_hash = snapshot.calculate_hash();
+
+        let signing_key = SigningKey::from_bytes(&[2u8; 32]);
+        let verifying_key = ed25519_dalek::VerifyingKey::from(&signing_key);
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(verifying_key.as_bytes());
+        snapshot.sign_manifest(&signing_key, pk);
+
+        // The same signature still clears a list that names the key.
+        assert!(snapshot.verify_authentic(Some(&[pk])).is_ok());
+        assert_eq!(
+            snapshot.verify_authentic(None).unwrap_err(),
+            SnapshotAuthError::NoTrustList,
+            "a RequireSigned manifest must not be cleared by an arbitrary key"
+        );
+    }
+
     #[test]
     fn test_gap1_require_signed_sign_verify_roundtrip() {
         use ed25519_dalek::SigningKey;
@@ -1709,7 +1784,7 @@ mod tests {
     // `serde(default)` dolgusu hic sinanmiyordu. Gercek bir schema-2/3 disk
     // in a real record those fields are not present as bytes; what migration promises is exactly
     // o yokluga karsi davranistir. Iki test blobu bu yuzden `serde_json`
-    // ameliyatiyla kurar: kaynak blobda alan anahtari HIC yok.
+    // surgery: the field key is entirely ABSENT from the source blob.
     // The red evidence was taken in an isolated vault (the pd vault): an importer without the bump line
     // reported "migration done" while leaving the version at 2 and the test
     // failed; the variant with the bump passed the same test.
@@ -1718,16 +1793,16 @@ mod tests {
     fn legacy_params(height: u64) -> StateSnapshotV2Params {
         StateSnapshotV2Params {
             height,
-            block_hash: "blok-ozeti".into(),
-            genesis_hash: "genesis-ozeti".into(),
+            block_hash: "block-digest".into(),
+            genesis_hash: "genesis-digest".into(),
             chain_id: 42,
             finalized_height: 0,
-            finalized_hash: "fin-ozeti".into(),
+            finalized_hash: "fin-digest".into(),
             finality_certificates: vec![],
         }
     }
 
-    /// `snapshot`'i eski bir disk blobu gibi goster: verilen anahtarlari
+    /// Present `snapshot` as an old on-disk blob: the given keys are
     /// DELETES it from the serialized record and rewinds the version number.
     /// The deleted key is absent from the blob as bytes; the `serde(default)` fill-in
     /// can only be exercised with such a blob.
@@ -1791,7 +1866,7 @@ mod tests {
     const POA_ADMISSION_KEYS: &[&str] = &["poa_onboarding"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
-    /// kaybetmemesi gereken alanlar. `snapshot_hash` bilincli disarida:
+    /// the fields it must not lose. `snapshot_hash` is deliberately outside:
     /// the seal is recomputed because the version changed.
     const SCHEMA2_FIELDS: &[&str] = &[
         "height",
@@ -1872,7 +1947,7 @@ mod tests {
         }
     }
 
-    /// Serilestirilmis alan kumesinin kilidi: `StateSnapshotV2`'ye yeni bir
+    /// A lock on the serialised field set: adding a new field to
     /// this test must fail when a field is added, because the "every field" claim of the two
     /// old-blob tests only holds if this list is current. Whoever adds a field:
     /// add that field's behaviour to both old-blob tests, then update
@@ -2010,7 +2085,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(restored.tokenomics).unwrap(),
             serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
-            "blobda olmayan tokenomics default'a donmeli"
+            "tokenomics absent from the blob must fall back to the default"
         );
         // The seal must be recomputed and consistent with itself.
         assert!(
@@ -2022,7 +2097,7 @@ mod tests {
     /// schema-3 blobu: v3 alanlari veri TASIYOR, v4 alanlari yok.
     ///
     /// The other half of the loss distinction: the same `serde(default)` field, when present
-    /// veri tasidiginda, o veriyi birebir teslim etmek zorunda. Onceki test
+    /// carries data, it must deliver that data verbatim. The previous test
     /// hic-tasinmayan tarafi, bu test dolu-tasinan tarafi kilitler.
     #[test]
     fn a_legacy_schema3_blob_migrates_keeping_v3_data_and_defaulting_v4() {
@@ -2071,7 +2146,7 @@ mod tests {
         for key in SCHEMA4_ONLY_KEYS {
             assert!(
                 !obj.contains_key(*key),
-                "kaynak blobda olmamasi gereken v4 anahtari var: {key}"
+                "the source blob carries a v4 key it must not: {key}"
             );
         }
 
@@ -2138,7 +2213,7 @@ mod tests {
         for key in POA_ADMISSION_KEYS {
             assert!(
                 !obj.contains_key(*key),
-                "kaynak blobda olmamasi gereken kabul anahtari var: {key}"
+                "the source blob carries an acceptance key it must not: {key}"
             );
         }
         assert!(

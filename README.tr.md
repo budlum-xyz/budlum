@@ -11,7 +11,7 @@ hangi konsensüsün ürettiğini sormaz, yalnızca o olgunun kesinlik kanıtın�
 olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-2429%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-2621%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -31,6 +31,7 @@ olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasınd
 
 - [Budlum neden var](#budlum-neden-var)
 - [Uzlaşma nasıl çalışır](#uzlaşma-nasıl-çalışır)
+- [Operatör senaryoları](#operatör-senaryoları-ölçülmüş)
 - [Depo yerleşimi](#depo-yerleşimi)
 - [Başlarken](#başlarken)
 - [Düğüm çalıştırma](#düğüm-çalıştırma)
@@ -122,6 +123,38 @@ sanal makinesini, kanıtlayıcısını ve doğrulayıcısını ayrıca ele alır
 olgu koddur, diyagram ise hatadır.
 
 ---
+
+## Operatör senaryoları (ölçülmüş)
+
+Üç üretim yolu CI'da uç uca çalışır. Aşağıdaki her sayı bir CI günlüğünden
+okunmuştur; hiçbiri yerel ölçüm değildir.
+
+1. **Kanonik kanıt rölesi.** `bud-cli relay` önce iki kanonik kontrol programını
+   (private-transfer, syscall-context) sabitlenmiş işlenen değerlerden satır
+   satır yeniden türetir ve hesaplanan Keccak-256'yı pin tablosuyla
+   karşılaştırır: kaymış bir derleyici, kanıta dokunmadan önce koşumu reddeder.
+   İmzalı `relay_report.json` sonra diskten okunarak doğrulanır: JSON'un
+   biçimli hâli ayrıştırılmış kopyadan yeniden üretilip bayt bayt
+   karşılaştırılır, kanıt parmak izi yüklenen zarftan yeniden türetilir ve
+   `--payload-out` imzanın kapsadığı baytların tamını yazar; izleyici düzeni
+   yeniden yazmadan onları yeniden hash'leyebilir. `--verified-at <unix>` saati
+   sabitler ve yeniden koşum imzayı bayt-bayt üretir.
+2. **Lubot derecelendirme döngüsü.** `lubot-ops tune data.jsonl` veri seti
+   etiketini (hedef model, örnek sayısı) doğrular, müfredatın derecelendirme
+   seti özetini plana iliştirip bağı kontrol eder; `lubot-ops eval data.jsonl
+   responses.jsonl [MIN_SCORE]` altın kuralları boş yanıtta geçen bir
+   müfredatı reddeder, üretilen yanıtları altın kurallarla derecelendirir ve
+   rapor eşiği geçmezse sıfır olmayan çıkışla döner. Cihaz tarafında
+   `lubot-serve`, yerleşim planı operatörün `disk_budget_bytes` payından
+   fazlasını diskten akıtan köprüyü, akış politikası bir şeye karar
+   vermeden önce reddeder.
+3. **Depolama verimi.** `cargo bench --bench ratio_rayon`, QR yük paketleyicisini
+   96 x 65536 B'lik bir gövde üzerinde ölçer (6291456 B giriş, 7 tekrar, en
+   hızlısı bildirilir): seri 39.7 MB/s (158352 us), rayon havuzu 97.5 MB/s
+   (64539 us), hızlanma 2.45x. İki yolun paketli çıktıları bayt bayt
+   karşılaştırılır; uyuşmazlık sıfır olmayan çıkışla biter. CI'da
+   `usl@967acce4c` head'inde ölçüldü (`Timing-Safe Regression` işi,
+   `Ratio rayon vs serial throughput` adımı, 2026-08-30T06:18:49Z).
 
 ## Depo yerleşimi
 

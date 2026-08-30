@@ -25,20 +25,28 @@
 //!    the tier is inside what the requester signed, and rewriting it in flight
 //!    invalidates the id.
 //!
-//! 2. **Declared capability gates eligibility. Not enforced.**
+//! 2. **Declared capability gates eligibility. Enforced.**
 //!    [`tier_is_servable`] expresses the rule: an operator advertises the
 //!    highest tier its hardware can serve, and a request above every declared
 //!    ceiling must fail closed rather than be silently downgraded to a cheaper
-//!    answer. Nothing in the tree calls it, because no operator has anywhere to
-//!    advertise a ceiling: `LubotOperatorBond` carries an amount and nothing
-//!    else, and `AiRegistry` stores no per-operator capability. Wiring it needs
-//!    a place for the declaration to live, which is a consensus-surface
-//!    decision and not one to take in passing.
+//!    answer.
 //!
-//! Until then a `10.0x` request is admitted and priced as `10.0x`, and the only
-//! thing stopping a `0.5x` machine from answering it is that the answer has to
-//! agree with `agreement_threshold` other operators. That is a real check, but
-//! it is agreement, not capability, and the two are not the same.
+//!    The declaration lives in `AiRegistry::verifier_effort_ceilings`
+//!    (`declare_effort_ceiling`), and an operator that never declares defaults
+//!    to `DEFAULT_OPERATOR_CEILING` - baseline `1.0x` - so a machine that has
+//!    said nothing is never treated as eligible for a deeper request.
+//!    `AiRegistry::submit_request` calls `unservable_reason(request.effort)`,
+//!    which applies [`tier_is_servable`] over the *authorized* operators'
+//!    ceilings and refuses a request above every one of them.
+//!
+//!    Two bounds keep the gate sound rather than decorative. Only an operator
+//!    that is authorized (staked past the threshold, and whitelisted when
+//!    whitelist mode is on) may declare, so a zero-stake address cannot pollute
+//!    the ceiling set. And when there is no authorized operator at all the
+//!    request is *not* refused: operators may join after a request arrives, so
+//!    that case is a liveness problem, not an admission one, and what rule 2
+//!    guards is only the case where operators exist and none of them can reach
+//!    the requested depth.
 //!
 //! Deliberately *not* decided here: the fee multiplier. Lubot costs are paid to
 //! validators the same way consensus rewards are, and the current repository

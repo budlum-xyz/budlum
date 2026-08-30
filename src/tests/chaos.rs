@@ -167,13 +167,13 @@ mod chaos_tests {
             let mut tampered = message.clone();
             tampered.target_domain = 3;
             assert!(
-                bridge.mint(&tampered).is_err(),
+                bridge.mint(&tampered, 0).is_err(),
                 "tampered message must not mint"
             );
 
-            bridge.mint(&message).unwrap();
+            bridge.mint(&message, 0).unwrap();
             assert!(
-                bridge.mint(&message).is_err(),
+                bridge.mint(&message, 0).is_err(),
                 "replayed message must not mint twice"
             );
         }
@@ -886,6 +886,7 @@ mod chaos_tests {
             min_fee: 0,
             tx_ttl_secs: 3600,
             rbf_bump_percent: 10,
+            max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
         };
         let mut pool = Mempool::new(cfg);
 

@@ -435,7 +435,7 @@ mod poa_compliance_gate {
 
         // It passes before the freeze.
         bc.validate_sovereign_audit_export(&bundle)
-            .expect("dondurma yokken paket gecmeli");
+            .expect("with no freeze the packet must pass");
 
         // Operator dondurulur.
         bc.freeze_poa_account(11, true, operator, [8u8; 32])
@@ -459,7 +459,7 @@ mod poa_compliance_gate {
         let target = addr(0x46);
 
         bc.freeze_poa_account(10, true, target, [7u8; 32])
-            .expect("yetkili dondurma gecmeli");
+            .expect("an authorised freeze must pass");
 
         assert!(bc
             .poa_compliance

@@ -81,7 +81,7 @@ fn b58_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// multibase base32 (RFC 4648, kucuk harf, dolgusuz) coz.
+/// Decode multibase base32 (RFC 4648, lowercase, unpadded).
 fn b32_decode(s: &str) -> Option<Vec<u8>> {
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;

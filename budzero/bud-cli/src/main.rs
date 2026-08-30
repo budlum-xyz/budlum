@@ -140,6 +140,41 @@ enum Commands {
         )]
         bytecode_file: String,
     },
+    #[command(about = "Verify a proof and write the keccak-signed canonical relay report")]
+    Relay {
+        #[arg(long, help = "Path to the STARK proof envelope JSON file")]
+        proof_file: String,
+        #[arg(long, help = "Path to the execution public inputs JSON file")]
+        public_inputs_file: String,
+        #[arg(
+            long,
+            help = "Path to the compiled program bytecode (.budc or hex bytes)"
+        )]
+        bytecode_file: String,
+        #[arg(
+            long,
+            default_value = "relay_report.json",
+            help = "File path to write the signed relay report to"
+        )]
+        output: String,
+        #[arg(
+            long,
+            help = "Exit non-zero when the report carries an alarm; the file is still written"
+        )]
+        strict: bool,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            help = "Pin the report timestamp to this unix time; a re-run with the same inputs and timestamp reproduces the signature byte-for-byte"
+        )]
+        verified_at: Option<u64>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Also write the exact canonical payload the signature covers, so a monitor can re-hash it without re-implementing the layout"
+        )]
+        payload_out: Option<String>,
+    },
     #[command(about = "Run hardcoded smoke test of BudZKVM execution engine")]
     Test,
 }
@@ -185,7 +220,7 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
     let pre_root = state.root();
 
-    // Strix HIGH (2026-08-17): Vm::new mainnet_mode=false birakir; gated
+    // Strix HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
     // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
     // runs. The CLI default must be mainnet safe: mainnet_mode=true.
     let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, true);
@@ -300,14 +335,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         event_digest,
         // The storage write digest comes from the VM, not from a hardcoded zero.
         //
-        // Burada `[0u8; 32]` yaziliydi. Depolamaya dokunmayan programlarda
-        // that was the right answer and nothing broke; a program containing a single
-        // `storage::x = 5;` produced a proof and then failed **in its own
-        // verifier**, because the AIR binds this field to the real SWrite
-        // zincirine bagliyor (Strix HIGH CWE-345) ve kamu girdisi sifir
-        // kaliyordu. Kusur gorunmez kalmisti: sema `storage` alanlarini
-        // into the environment at all, a program using storage was already
-        // derlenemiyordu.
+        // This used to read `[0u8; 32]`. For programs that never touch storage
+        // that was the right answer and nothing broke; a program containing a
+        // single `storage::x = 5;` produced a proof and then failed **in its own
+        // verifier**, because the AIR binds this field to the real SWrite chain
+        // (Strix HIGH CWE-345) while the public input stayed zero. The flaw
+        // stayed invisible: the schema did not feed the `storage` fields into the
+        // environment at all, so a program that used storage could not compile.
         state_writes_digest: receipt.state_writes_digest,
     };
 
@@ -344,12 +378,159 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     })
 }
 
+/// The boot attestation: both canonical check programs are re-derived from
+/// the pinned operand values and compared against the pin table. Prints what
+/// was attested; any drift refuses the run before a proof is touched.
+fn attest_canonical_programs(
+) -> Result<Vec<bud_proof::canonical_boot::CanonicalCheckProgram>, Box<dyn std::error::Error>> {
+    let programs = bud_proof::canonical_boot::check_canonical_programs()
+        .map_err(|e| format!("canonical boot attestation refused: {e}"))?;
+    for p in &programs {
+        println!(
+            "canonical program {}: v{} {} ops, hash {}",
+            p.name, p.schema_version, p.ops, p.hash_hex
+        );
+    }
+    Ok(programs)
+}
+
+/// Read the three files a verification is made of: the proof envelope, the
+/// public inputs it claims, and the program bytes.
+///
+/// Shared by `verify` and `relay`. Two loaders would let a relay report
+/// describe a proof the verifier never looked at, which is precisely the
+/// drift the signed report exists to make visible.
+fn load_verifier_inputs(
+    proof_file: &str,
+    public_inputs_file: &str,
+    bytecode_file: &str,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), Box<dyn std::error::Error>> {
+    let env_data =
+        fs::read_to_string(proof_file).map_err(|e| format!("Failed to read proof file: {e}"))?;
+    let envelope: ProofEnvelope = serde_json::from_str(&env_data)
+        .map_err(|e| format!("Failed to parse proof envelope: {e}"))?;
+
+    let pi_data = fs::read_to_string(public_inputs_file)
+        .map_err(|e| format!("Failed to read public inputs file: {e}"))?;
+    let expected_inputs: ExecutionPublicInputs = serde_json::from_str(&pi_data)
+        .map_err(|e| format!("Failed to parse public inputs: {e}"))?;
+
+    let bytes = fs::read(bytecode_file).map_err(|e| format!("Failed to read bytecode: {e}"))?;
+    if bytes.len() % 8 != 0 {
+        return Err("Invalid bytecode: file size must be a multiple of 8 bytes".into());
+    }
+    let program: Vec<u64> = bytes
+        .chunks_exact(8)
+        .map(|chunk| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(chunk);
+            u64::from_le_bytes(b)
+        })
+        .collect();
+    Ok((envelope, expected_inputs, program))
+}
+
+/// Everything one relay run needs. A bundle, not six positional arguments:
+/// the CLI fills it from parsed flags and the checks below read it in a
+/// fixed order.
+struct RelayRequest<'a> {
+    proof_file: &'a str,
+    public_inputs_file: &'a str,
+    bytecode_file: &'a str,
+    output: &'a str,
+    strict: bool,
+    verified_at: Option<u64>,
+    payload_out: Option<&'a str>,
+}
+
+/// Verify with the canonical-program requirement and publish the signed
+/// report, returning the token line for the caller to print.
+///
+/// The file is re-read and the signature recomputed on the parsed copy: the
+/// relay's product is the file, so the file is what has to verify. The
+/// pretty JSON is compared byte-for-byte to the writer's serialization, and
+/// the proof fingerprint is re-derived from the envelope that was loaded -
+/// a report can never describe a proof the verifier did not look at.
+fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn std::error::Error>> {
+    use bud_proof::relayer::{
+        verify_and_report_at, AlarmCode, AlarmDetail, CanonicalRelayReport, ProofFingerprint,
+        RelayStatus, RELAY_SCHEMA_VERSION,
+    };
+    let (envelope, expected_inputs, program) =
+        load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
+    let at = req.verified_at.unwrap_or_else(bud_proof::relayer::now_unix);
+    let report = verify_and_report_at(&envelope, &expected_inputs, &program, at);
+    let path = std::path::Path::new(req.output);
+    report.write_report(path)?;
+
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read back the relay report: {e}"))?;
+    let parsed: CanonicalRelayReport =
+        serde_json::from_str(&text).map_err(|e| format!("Relay report does not parse: {e}"))?;
+    if parsed.schema_version != RELAY_SCHEMA_VERSION {
+        return Err(format!(
+            "Relay report schema {} does not match the writer's schema {RELAY_SCHEMA_VERSION}",
+            parsed.schema_version
+        )
+        .into());
+    }
+    let canonical_json = report
+        .report_json()
+        .map_err(|e| format!("the relay JSON cannot be regenerated: {e}"))?;
+    if text != canonical_json {
+        return Err(
+            "the relay report file is not the canonical JSON of the verified report".into(),
+        );
+    }
+    if !parsed.verify_report_sig() {
+        return Err("Relay report signature does not match its canonical payload".into());
+    }
+    let expected_fingerprint = ProofFingerprint {
+        proof_format_version: envelope.proof_format_version,
+        backend: envelope.backend.clone(),
+        p3_version: envelope.p3_version.clone(),
+        fri_params_id: envelope.fri_params_id.clone(),
+        degree_bits: envelope.degree_bits,
+        public_inputs_hash: envelope.public_inputs_hash,
+        proof_bytes_len: envelope.proof_bytes.len(),
+    };
+    if parsed.proof != expected_fingerprint {
+        return Err(
+            "the relay report's proof fingerprint does not describe the envelope that was verified"
+                .into(),
+        );
+    }
+    if let Some(payload_path) = req.payload_out {
+        fs::write(payload_path, parsed.canonical_payload())
+            .map_err(|e| format!("cannot write the signed payload to {payload_path}: {e}"))?;
+    }
+    if req.strict && parsed.status == RelayStatus::Alarm {
+        let reason = match &parsed.alarm {
+            Some(AlarmDetail { code, detail }) => format!(
+                "{}: {detail}",
+                match code {
+                    AlarmCode::NonCanonicalProgram => "non-canonical program",
+                    AlarmCode::InvalidProof => "invalid proof",
+                    AlarmCode::PublicInputsMismatch => "public inputs mismatch",
+                    AlarmCode::InvalidEnvelope => "invalid envelope",
+                    AlarmCode::DeserializationError => "deserialization error",
+                }
+            ),
+            None => String::from("no alarm code recorded"),
+        };
+        return Err(format!("relay report carries an alarm: {reason}").into());
+    }
+    Ok(parsed.relay_token_line())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
     let cli = Cli::parse();
+
+    attest_canonical_programs()?;
 
     match &cli.command {
         Commands::Run {
@@ -574,27 +755,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             public_inputs_file,
             bytecode_file,
         } => {
-            let env_data = fs::read_to_string(proof_file)
-                .map_err(|e| format!("Failed to read proof file: {e}"))?;
-            let envelope: ProofEnvelope = serde_json::from_str(&env_data)
-                .map_err(|e| format!("Failed to parse proof envelope: {e}"))?;
-
-            let pi_data = fs::read_to_string(public_inputs_file)
-                .map_err(|e| format!("Failed to read public inputs file: {e}"))?;
-            let expected_inputs: ExecutionPublicInputs = serde_json::from_str(&pi_data)
-                .map_err(|e| format!("Failed to parse public inputs: {e}"))?;
-
-            let bytes =
-                fs::read(bytecode_file).map_err(|e| format!("Failed to read bytecode: {e}"))?;
-            if bytes.len() % 8 != 0 {
-                return Err("Invalid bytecode: file size must be a multiple of 8 bytes".into());
-            }
-            let mut program = Vec::new();
-            for chunk in bytes.chunks_exact(8) {
-                let mut b = [0u8; 8];
-                b.copy_from_slice(chunk);
-                program.push(u64::from_le_bytes(b));
-            }
+            let (envelope, expected_inputs, program) =
+                load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
 
             match Prover::verify(&envelope, &expected_inputs, &program) {
                 Ok(_) => {
@@ -604,6 +766,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(format!("Result: INVALID ({:?})", e).into());
                 }
             }
+        }
+        Commands::Relay {
+            proof_file,
+            public_inputs_file,
+            bytecode_file,
+            output,
+            strict,
+            verified_at,
+            payload_out,
+        } => {
+            let req = RelayRequest {
+                proof_file,
+                public_inputs_file,
+                bytecode_file,
+                output,
+                strict: *strict,
+                verified_at: *verified_at,
+                payload_out: payload_out.as_deref(),
+            };
+            let line = write_signed_relay_report(&req)?;
+            println!("{line}");
+            info!(path = %output, "relay report written");
         }
         Commands::Test => {
             let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
@@ -697,6 +881,108 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The relay's argument set has to parse, and `--output` has to default:
+    /// a monitor that forgets the path must still land on a known file.
+    #[test]
+    fn relay_subcommand_parses_with_its_default_output() {
+        let cli = Cli::try_parse_from([
+            "bud-cli",
+            "relay",
+            "--proof-file",
+            "p.json",
+            "--public-inputs-file",
+            "i.json",
+            "--bytecode-file",
+            "b.budc",
+        ])
+        .expect("the relay subcommand must parse");
+        match cli.command {
+            Commands::Relay { output, strict, .. } => {
+                assert_eq!(output, "relay_report.json");
+                assert!(
+                    !strict,
+                    "strict is opt-in: an alarm is published by default"
+                );
+            }
+            other => {
+                let _ = other;
+                panic!("expected the relay subcommand");
+            }
+        }
+    }
+
+    /// The new relay flags have to reach the request: a pinned timestamp and
+    /// a payload path are the monitor's audit pair.
+    #[test]
+    fn relay_parses_a_pinned_timestamp_and_payload_path() {
+        let cli = Cli::try_parse_from([
+            "bud-cli",
+            "relay",
+            "--proof-file",
+            "p.json",
+            "--public-inputs-file",
+            "i.json",
+            "--bytecode-file",
+            "b.budc",
+            "--verified-at",
+            "42",
+            "--payload-out",
+            "sig.bin",
+        ])
+        .expect("the relay flags must parse");
+        match cli.command {
+            Commands::Relay {
+                verified_at,
+                payload_out,
+                ..
+            } => {
+                assert_eq!(verified_at, Some(42));
+                assert_eq!(payload_out.as_deref(), Some("sig.bin"));
+            }
+            other => {
+                let _ = other;
+                panic!("expected the relay subcommand");
+            }
+        }
+    }
+
+    /// The boot attestation accepts the checked-out tree; it is the same call
+    /// that refuses a run when a canonical pin drifts.
+    #[test]
+    fn boot_attestation_accepts_the_canonical_tree() {
+        let got = attest_canonical_programs().expect("the tree must attest at boot");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "private-transfer-check");
+    }
+
+    /// A missing proof file is refused **before** any report is written: a
+    /// published file describing nothing is worse to a monitor than a failed
+    /// command.
+    #[test]
+    fn relay_refuses_a_missing_proof_file_before_writing() {
+        let out = std::env::temp_dir().join(format!(
+            "budcli-relay-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let out = out.to_string_lossy().into_owned();
+        let req = RelayRequest {
+            proof_file: "/nonexistent/proof.json",
+            public_inputs_file: "/nonexistent/inputs.json",
+            bytecode_file: "/nonexistent/program.budc",
+            output: &out,
+            strict: true,
+            verified_at: Some(1_700_000_000),
+            payload_out: None,
+        };
+        let r = write_signed_relay_report(&req);
+        assert!(r.is_err(), "a missing proof file had to be refused");
+        assert!(
+            !std::path::Path::new(&out).exists(),
+            "a report was written for input that was never read"
+        );
     }
 
     /// A transaction for a sender absent from the state must be **refused**.

@@ -2,11 +2,10 @@
 # cargo-vet audits file
 #
 # This file holds Budlum's OWN audit records (added with `cargo vet certify`).
-# It is empty right now: cargo-vet ran in this repository for the first time on
-# 2026-07-27 (before that config.toml carried invented keys and could not even be
-# parsed), so not a single crate has been audited yet.
+# The first audits were recorded on 2026-08-28, covering the crates that the
+# QR pipeline and the lru bump pulled in since the baseline was measured.
 #
-# Audit debt: 437 crates (see .github/cargo-vet-baseline.txt).
+# Audit debt: see .github/cargo-vet-baseline.txt.
 # The priority for burning it down is the crypto/FFI surface: ring, pqcrypto-dilithium,
 # cryptoki, bls12_381, aes-gcm, chacha20.
 #
@@ -18,3 +17,87 @@
 #   notes    = "the FFI bindings were reviewed; no unsafe in the Rust layer."
 
 [audits]
+
+[[audits.bytemuck]]
+version = "1.25.2"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "pod-casting library whose entire purpose is checked reinterpret casts; reviewed 1.25.2 source: no build script, the unsafe inventory is the cast intrinsics themselves and each is behind an explicit alignment/size proof"
+
+[[audits.byteorder-lite]]
+version = "0.1.0"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "byte-swap helpers split out of byteorder; reviewed 1.0 source: no build script, four unsafe lines all inside from_le_bytes-style transmute wrappers over fixed-size arrays"
+
+[[audits.flate2]]
+version = "1.1.9"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "zlib/deflate facade; reviewed 1.1.9 source: no build script, and this workspace pins default-features=false with rust_backend, so the shipped path is pure-Rust miniz_oxide and the unsafe C-backend glue is not compiled"
+
+[[audits.g2gen]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "proc-macro code generator for bitvec; reviewed 1.2.2 source: no build script, zero unsafe, output is compile-time only"
+
+[[audits.g2p]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "proc-macro entry point of the bitvec g2 family; reviewed 1.2.2 source: no build script, zero unsafe, compile-time only"
+
+[[audits.g2poly]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "bitvec polynomial helper for the g2 macros; reviewed 1.2.2 source: no build script, zero unsafe, compile-time only"
+
+[[audits.hashbrown]]
+version = "0.16.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "the Rust-project hash map; reviewed 0.16.1: build.rs only probes compiler feature availability, unsafe is the table implementation itself (SSE2/group probes) maintained under the rust-lang umbrella"
+
+[[audits.image]]
+version = "0.25.10"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "image codec toolkit; reviewed 0.25.10: no build script, twelve unsafe lines confined to SIMD-adjacent pixel chunks, decoders are bounds-checked pure Rust"
+
+[[audits.lru]]
+version = "0.16.4"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "LRU cache over hashbrown; reviewed 0.16.4: no build script, unsafe is the intrusive linked-list pointer dance of the entry list, same shape audited in earlier 0.12 line"
+
+[[audits.moxcms]]
+version = "0.8.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "color-management transforms for image 0.25; reviewed 0.8.1: no build script, unsafe inventory is SIMD kernel intrinsics guarded by runtime feature detection; no FFI, no network"
+
+[[audits.pxfm]]
+version = "0.1.30"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "pixel-format conversion tables for image 0.25; reviewed 0.1.30: no build script, unsafe is SIMD conversion kernels behind is_x86_feature_detected guards; no FFI"
+
+[[audits.qrcode]]
+version = "0.14.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "QR encoder used by the qr_* modules; reviewed 0.14.1 in full during the 3.0 QR work: no build script, zero unsafe, pure-Rust matrix construction"
+
+[[audits.rqrr]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "QR decoder used as the independent read-back check in tests; reviewed 0.10.1: no build script, zero unsafe, pure-Rust detection and Reed-Solomon"
+
+[[audits.simd-adler32]]
+version = "0.3.10"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "adler32 with SIMD; reviewed 0.3.10: no build script, unsafe is the intrinsics kernels selected at runtime; reached only through the pure-Rust flate2 backend"

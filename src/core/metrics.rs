@@ -5,8 +5,23 @@ use std::sync::Arc;
 pub struct Metrics {
     pub registry: Arc<Registry>,
     pub chain_height: IntGauge,
-    pub peer_count: IntGauge,
     pub mempool_size: IntGauge,
+    /// Bytes of transaction bodies resident in the mempool.
+    ///
+    /// Exported beside the entry count rather than instead of it. The two can
+    /// diverge by four orders of magnitude - the same 20 000 entries are 20 MB
+    /// of ordinary transactions or 1.95 GB of maximum-size ones - and an
+    /// operator watching only the count cannot tell which of those is
+    /// happening until the process is killed.
+    pub mempool_bytes: IntGauge,
+    /// Peers holding a gossip score record.
+    ///
+    /// Separate from `p2p_peers_connected`: the score table deliberately outlives a
+    /// connection so that reconnecting does not clear a bad record, so this
+    /// gauge is expected to sit above the connected count. What it makes
+    /// visible is the gap - a table climbing toward `MAX_SCORED_PEERS` while
+    /// the connected count stays flat is peer-id churn.
+    pub gossip_scored_peers: IntGauge,
     pub blocks_produced: IntCounter,
     pub transactions_processed: IntCounter,
     pub reorgs_total: IntCounter,
@@ -23,6 +38,12 @@ pub struct Metrics {
     pub settlement_frozen_domains: IntGauge,
     pub settlement_global_headers_sealed: IntCounter,
     pub settlement_equivocations_detected: IntCounter,
+    /// Connected P2P peers.
+    ///
+    /// This is the single live peer-count gauge. A second `peer_count` field
+    /// used to export the same number under `budlum_peer_count` and was never
+    /// written in production, so scrapes saw a permanent zero next to a real
+    /// connected count. The duplicate was deleted rather than bound.
     pub p2p_peers_connected: IntGauge,
     pub p2p_messages_received: IntCounter,
     pub p2p_gossip_duplicates: IntCounter,
@@ -53,8 +74,15 @@ impl Metrics {
         let registry = Registry::new();
 
         let chain_height = IntGauge::new("budlum_chain_height", "Current chain height")?;
-        let peer_count = IntGauge::new("budlum_peer_count", "Connected peers")?;
         let mempool_size = IntGauge::new("budlum_mempool_size", "Pending transactions")?;
+        let mempool_bytes = IntGauge::new(
+            "budlum_mempool_bytes",
+            "Resident bytes of pending transaction bodies",
+        )?;
+        let gossip_scored_peers = IntGauge::new(
+            "budlum_gossip_scored_peers",
+            "Peers holding a gossip score record",
+        )?;
         let blocks_produced = IntCounter::new("budlum_blocks_produced", "Total blocks produced")?;
         let transactions_processed =
             IntCounter::new("budlum_transactions_processed", "Total transactions")?;
@@ -164,8 +192,9 @@ impl Metrics {
         )?;
 
         registry.register(Box::new(chain_height.clone()))?;
-        registry.register(Box::new(peer_count.clone()))?;
         registry.register(Box::new(mempool_size.clone()))?;
+        registry.register(Box::new(mempool_bytes.clone()))?;
+        registry.register(Box::new(gossip_scored_peers.clone()))?;
         registry.register(Box::new(blocks_produced.clone()))?;
         registry.register(Box::new(transactions_processed.clone()))?;
         registry.register(Box::new(reorgs_total.clone()))?;
@@ -201,8 +230,9 @@ impl Metrics {
         Ok(Metrics {
             registry: Arc::new(registry),
             chain_height,
-            peer_count,
             mempool_size,
+            mempool_bytes,
+            gossip_scored_peers,
             blocks_produced,
             transactions_processed,
             reorgs_total,
@@ -267,5 +297,46 @@ mod tests {
         assert!(encoded.contains("budlum_chain_height 42"));
         assert!(encoded.contains("budlum_blocks_produced 1"));
         assert!(encoded.contains("budlum_rpc_request_duration_seconds"));
+    }
+
+    /// Every series bound in the metrics-are-written pass must appear in a
+    /// live Prometheus scrape body. A gauge that exists only on the struct and
+    /// never in `encode()` is still a dashboard lie.
+    #[test]
+    fn prometheus_scrape_lists_every_bound_series() {
+        let metrics = Metrics::new().expect("metric names are literals in this file");
+        let scrape = metrics.encode();
+        assert!(
+            !scrape.is_empty(),
+            "encode must produce a body after registration"
+        );
+        for name in [
+            "budlum_chain_height",
+            "budlum_mempool_size",
+            "budlum_mempool_bytes",
+            "budlum_mempool_sender_count",
+            "budlum_bridge_amount_locked",
+            "budlum_storage_db_size_bytes",
+            "budlum_p2p_peers_connected",
+            "budlum_p2p_gossip_duplicates",
+            "budlum_p2p_sync_requests",
+            "budlum_peer_connection_quality",
+            "budlum_bns_names_registered",
+            "budlum_ai_requests_total",
+            "budlum_ai_outcomes_finalized",
+            "budlum_slashing_events_total",
+            "budlum_settlement_equivocations_detected",
+            "budlum_bridge_transfers_total",
+        ] {
+            assert!(
+                scrape.contains(name),
+                "scrape missing series {name}; body starts: {}",
+                scrape.chars().take(200).collect::<String>()
+            );
+        }
+        assert!(
+            !scrape.contains("budlum_peer_count"),
+            "deleted duplicate gauge must not reappear in scrapes"
+        );
     }
 }

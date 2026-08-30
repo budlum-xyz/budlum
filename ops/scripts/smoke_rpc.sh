@@ -26,7 +26,7 @@ if [[ -z "$BIN" ]]; then
     BIN="$ROOT/target/release/budlum-core"
   elif docker image inspect budlum-core:devnet >/dev/null 2>&1; then
     # docker-smoke workflow'u compose build ile budlum-core:devnet uretir
-    # (eski smoke-test tag'i buildx -f sorunu yuzunden terk edildi).
+    # (the old smoke-test tag was abandoned over a buildx -f problem).
     echo "[smoke] extracting binary from Docker image..."
     _SMOKE_DOCKER_ID=$(docker create budlum-core:devnet)
     BIN="/tmp/budlum-smoke-bin"

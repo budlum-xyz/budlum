@@ -147,23 +147,23 @@ fn has_file_level_unwired_marker(text: &str) -> bool {
 }
 
 /// Is `name(` called somewhere in `code`, other than at its own definition?
-/// Line-based so byte slicing never lands inside a multibyte character.
+/// Line-based so byte slicing never lands inside a multibyte character. Only
+/// the line that defines *this* name is skipped: skipping every line that
+/// starts with a function header hid the call in a one-line wrapper such as
+/// `pub fn a() { check_b(1) }`, so a wired guard was counted as unwired.
 fn is_called(name: &str, prod: &BTreeMap<String, String>) -> bool {
     let needle = format!("{name}(");
+    let def = format!("fn {name}(");
     for text in prod.values() {
         let c = code(text);
         for line in c.lines() {
             if !line.contains(&needle) {
                 continue;
             }
-            let t = line.trim_start();
-            let def_here = t.starts_with("fn ")
-                || t.starts_with("pub fn ")
-                || t.starts_with("pub(crate) fn ")
-                || t.starts_with("pub(super) fn ");
-            if !def_here {
-                return true;
+            if line.trim_start().contains(&def) {
+                continue;
             }
+            return true;
         }
     }
     false
@@ -276,17 +276,22 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: uncalled guard sayilmadi"));
     }
+    // The call sits on the same line as a function definition, which is the
+    // shape the old predicate swallowed. The baseline is lowered to zero
+    // before this phase, so the assertion is real: if a call site stops being
+    // seen, the count rises over that zero and the canary fires.
     std::fs::write(
         dir.join("src/lib.rs"),
         "pub mod guarded;\npub fn drive() { let _ = guarded::check_thing_is_allowed(1); }\n",
     )
     .map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(BASELINE_FILE), "0\n").map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a called guard was counted"));
+        return Err(String::from("canary: a wired guard stayed in the count"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "guards-reachable canary OK: an uncalled guard is counted and a called one is not.",
+        "guards-reachable canary OK: an uncalled guard is counted, a called one is not, and a call written on a definition line is not mistaken for a definition.",
     ))
 }

@@ -326,8 +326,16 @@ fn check_field(code: &str) -> Checks {
 fn check_binding(code: &str) -> Checks {
     let mut checked = 1;
     let mut problems = Vec::new();
-    let commit = body_of(code, "pub fn manifest_id_from_parts");
-    let sig = parens_of(code, "pub fn manifest_id_from_parts");
+    // Visibility is not the property: what must hold is that the binding reads the
+    // declaration's tag. The anchor is therefore the bare function name, which a
+    // private `fn` and a `pub fn` both contain. Pinning the anchor to
+    // `pub fn` let the check go quiet the moment the helper stopped being
+    // re-exported: an unread argument and a missing function produced the same
+    // verdict, so a rename or a visibility change was indistinguishable from a
+    // binding that stopped reading the tag. The first match is the function itself,
+    // which the `_stored` sibling follows.
+    let commit = body_of(code, "fn manifest_id_from_parts");
+    let sig = parens_of(code, "fn manifest_id_from_parts");
     let (Some(commit), Some(sig)) = (commit.as_deref(), sig.as_deref()) else {
         problems.push(String::from(
             "`manifest_id_from_parts` is gone; nothing binds the manifest's \

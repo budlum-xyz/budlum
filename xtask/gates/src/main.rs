@@ -49,12 +49,14 @@ mod gates {
     pub mod bit_decompositions;
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
+    pub mod bridge_dual_tree;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
+    pub mod ci_workflow_guards;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
@@ -74,7 +76,9 @@ mod gates {
     pub mod forgery_tests;
     pub mod fork_choice_gate;
     pub mod fuzz_targets_wired;
+    pub mod gas_calibration;
     pub mod gates_are_wired;
+    pub mod gates_do_not_panic;
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
@@ -87,10 +91,15 @@ mod gates {
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
+    pub mod lubot_prompt_is_true;
     pub mod lubot_reads;
+    pub mod lubot_zk_inference;
     pub mod master_derivation;
+    pub mod mempool_mev_free;
     pub mod mermaid;
+    pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod multi_ratio_consensus;
     pub mod named_tests;
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
@@ -98,16 +107,21 @@ mod gates {
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_unicode_dashes;
+    pub mod no_upstream_brands;
     pub mod node_classification_gate;
     pub mod paid_content;
+    pub mod parallel_execution;
     pub mod pinned_downloads;
     pub mod poa_compliance_gate;
     pub mod proof_deps_are_exactly_pinned;
+    pub mod qr_is_derivative_only;
+    pub mod quantum_account;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
     pub mod regeneration;
     pub mod rejection_tests;
+    pub mod relay;
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
@@ -126,10 +140,12 @@ mod gates {
     pub mod tee_trust_boundary_is_structural;
     pub mod test_modules_can_see_what_they_test;
     pub mod the_image_builds_what_the_manifest_declares;
+    pub mod three_is_recipe_only;
     pub mod threshold_rates;
     pub mod timing_safe;
     pub mod transcript_mirrors;
     pub mod tree_is_english;
+    pub mod tree_pin;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
@@ -142,6 +158,7 @@ mod gates {
     pub mod zero_storage_frozen;
     pub mod zero_tests_witness;
     pub mod zizmor;
+    pub mod zkvm_immune_regeneration;
 }
 
 /// A gate's plain run: inspect the repo root, return a verdict.
@@ -170,6 +187,62 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "zkvm-immune-regeneration",
+        replaces: None,
+        run: gates::zkvm_immune_regeneration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::zkvm_immune_regeneration::self_test,
+    },
+    Gate {
+        name: "quantum-account",
+        replaces: None,
+        run: gates::quantum_account::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::quantum_account::self_test,
+    },
+    Gate {
+        name: "parallel-execution",
+        replaces: None,
+        run: gates::parallel_execution::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::parallel_execution::self_test,
+    },
+    Gate {
+        name: "multi-ratio-consensus",
+        replaces: None,
+        run: gates::multi_ratio_consensus::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::multi_ratio_consensus::self_test,
+    },
+    Gate {
+        name: "mempool-mev-free",
+        replaces: None,
+        run: gates::mempool_mev_free::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::mempool_mev_free::self_test,
+    },
+    Gate {
+        name: "lubot-zk-inference",
+        replaces: None,
+        run: gates::lubot_zk_inference::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::lubot_zk_inference::self_test,
+    },
+    Gate {
+        name: "bridge-dual-tree",
+        replaces: None,
+        run: gates::bridge_dual_tree::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bridge_dual_tree::self_test,
+    },
     Gate {
         name: "minting-paths-are-counted",
         replaces: None,
@@ -387,6 +460,39 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "metrics-are-written",
+        replaces: None,
+        run: gates::metrics_are_written::run,
+        run_args: None,
+        self_test: gates::metrics_are_written::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "gates-do-not-panic",
+        replaces: None,
+        run: gates::gates_do_not_panic::run,
+        run_args: None,
+        self_test: gates::gates_do_not_panic::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "lubot-prompt-is-true",
+        replaces: None,
+        run: gates::lubot_prompt_is_true::run,
+        run_args: None,
+        self_test: gates::lubot_prompt_is_true::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-upstream-brands",
+        replaces: None,
+        run: gates::no_upstream_brands::run,
+        run_args: None,
+        self_test: gates::no_upstream_brands::self_test,
+
+        run_log: None,
+    },
+    Gate {
         name: "tree-is-english",
         replaces: None,
         run: gates::tree_is_english::run,
@@ -525,6 +631,30 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::regeneration::self_test,
+    },
+    Gate {
+        name: "relay",
+        replaces: None,
+        run: gates::relay::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::relay::self_test,
+    },
+    Gate {
+        name: "ci-workflow-guards",
+        replaces: None,
+        run: gates::ci_workflow_guards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "tree-pin",
+        replaces: None,
+        run: gates::tree_pin::run,
+        run_log: None,
+        run_args: Some(gates::tree_pin::run_with_args),
+        self_test: gates::tree_pin::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",
@@ -719,6 +849,22 @@ const GATES: &[Gate] = &[
         self_test: gates::generated_content::self_test,
     },
     Gate {
+        name: "qr-is-derivative-only",
+        replaces: None,
+        run: gates::qr_is_derivative_only::run,
+        run_args: None,
+        self_test: gates::qr_is_derivative_only::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "three-is-recipe-only",
+        replaces: None,
+        run: gates::three_is_recipe_only::run,
+        run_args: None,
+        self_test: gates::three_is_recipe_only::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),
         run: gates::storage_priced::run,
@@ -853,6 +999,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::fuzz_targets_wired::self_test,
+    },
+    Gate {
+        name: "gas-calibration",
+        replaces: None,
+        run: gates::gas_calibration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::gas_calibration::self_test,
     },
     Gate {
         name: "gates-are-wired",

@@ -8,15 +8,57 @@ use serde_json;
 
 pub struct Executor;
 
+/// The only execution-proof backend this path accepts.
+///
+/// It is matched exactly, and the comparison lives here so the name has one
+/// home. The string arrives inside the transaction envelope
+/// (`ProofEnvelope.backend`), so a substring test is not an allow-list: any
+/// name that merely mentions Plonky3 - `"Plonky3-nightly"`,
+/// `"Plonky3 with a local patch"` - used to be accepted, and what the gate
+/// guards is only checked structurally downstream.
+///
+/// The value is not a label this node invented: it is the id the proof library
+/// compares against before it decodes anything
+/// (`bud_proof::plonky3_prover`, `"Plonky3-Keccak-Goldilocks"`). The exact match
+/// was briefly `"Plonky3"`, which is a name no prover emits, and the result was a
+/// path that could not be satisfied from either side - an envelope the verifier
+/// would have opened was refused in the mempool, and an envelope shaped for the
+/// mempool's word was refused by the verifier. Both gates now read this
+/// constant: `ProofVerifier::validate_envelope_structure` refuses any other
+/// backend, so the two cannot drift into two different acceptances again.
+///
+/// The gate is deliberately the same on every network (`_chain_id` is
+/// unread): an unproven execution is as worthless on devnet as on mainnet.
+pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3";
+
 fn ai_execution_backend_allowed(_chain_id: u64, backend: &str) -> bool {
-    backend.contains("Plonky3")
+    backend == AI_EXECUTION_BACKEND_PLONKY3
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
+    // Allowlist, not a denylist.
+    //
+    // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
+    // takes the nullifier the submitter hands it: the binding check
+    // `nullifier == derive_nullifier(commitment, proof)` only runs when
+    // `apply_transfer_with_proofs` is called with proofs, and nothing in the
+    // tree calls it that way. So today a transfer proves who signed the
+    // transaction, never that the signer owns the note; value conservation and
+    // membership are unwired too. That is survivable on the two networks where
+    // the notes are worth nothing.
+    //
+    // The old test was `chain_id != Mainnet`, which answers "is this not the
+    // one network we care about" instead of "is this a network where losing the
+    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
+    // a public testnet that grows real value - came back enabled.
     chain_id
-        != crate::core::chain_config::Network::Mainnet
+        == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
+        || chain_id
+            == crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value()
 }
 
 impl Executor {
@@ -903,9 +945,12 @@ impl Executor {
                         match msg.kind {
                             crate::cross_domain::message::MessageKind::BridgeLock => {
                                 // Inbound lock from external chain -> Mint on Budlum
-                                state.bridge_state.mint(msg).map_err(|e| {
-                                    BudlumError::validation("bridge_mint_failed", e.0)
-                                })?;
+                                state
+                                    .bridge_state
+                                    .mint(msg, state.current_block_height)
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_mint_failed", e.0)
+                                    })?;
                                 // Previously a placeholder (nonce-based fee,
                                 // No recipient credit). Now uses the same logic as
                                 // Submit_relay_proof: fetch the transfer, deduct 1% relayer
@@ -1883,6 +1928,7 @@ impl Executor {
                 // them cannot be verified, so a proof-required model still
                 // fails closed - but for a reason that names what is missing
                 // from the proof rather than what is missing from the node.
+                let mut stark_girisi: Option<(Vec<u64>, bud_proof::ExecutionPublicInputs)> = None;
                 if model
                     .as_ref()
                     .is_some_and(|spec| spec.require_execution_proof)
@@ -1934,23 +1980,42 @@ impl Executor {
                     let expected_inputs = claimed_inputs.to_execution_inputs();
                     let program = crate::ai::execution::guest_program_for_model(spec)
                         .map_err(|e| BudlumError::validation("ai_exec_program_rebuild", e))?;
-                    crate::ai::execution::verify_execution_proof_stark(
-                        proof,
-                        &program,
-                        &expected_inputs,
-                    )
-                    .map_err(|e| BudlumError::validation("ai_exec_stark", e))?;
+                    stark_girisi = Some((program, expected_inputs));
                 }
-                let report = crate::ai::execution::verify_execution_proof_structural_with_model(
-                    proof,
-                    &req,
-                    &res,
-                    model.as_ref(),
-                );
+                // One call for both halves. The bundle is the only shape this
+                // path can reach for, so a proof cannot clear the structural
+                // checks and skip the STARK, or clear the STARK while its
+                // commitments name a different request.
+                let giris = stark_girisi
+                    .as_ref()
+                    .map(|(program, inputs)| (program.as_slice(), inputs));
+                let report = match giris {
+                    Some((program, inputs)) => crate::ai::execution::verify_execution_proof_full(
+                        proof,
+                        &req,
+                        &res,
+                        model.as_ref(),
+                        Some((program, inputs)),
+                    ),
+                    None => crate::ai::execution::verify_execution_proof_structural_with_model(
+                        proof,
+                        &req,
+                        &res,
+                        model.as_ref(),
+                    ),
+                };
                 if !report.is_structurally_valid() {
                     return Err(BudlumError::validation(
                         "ai_exec_structural",
                         format!("execution proof structural check failed: {report:?}"),
+                    ));
+                }
+                if report.stark_ok == Some(false) {
+                    return Err(BudlumError::validation(
+                        "ai_exec_stark",
+                        report
+                            .stark_error
+                            .unwrap_or_else(|| "execution STARK verify failed".to_string()),
                     ));
                 }
                 // Attempt STARK verify of postcard envelope (fail closed if
@@ -2238,6 +2303,61 @@ mod tests {
         assert!(!ai_execution_backend_allowed(mainnet, "test-backend"));
         assert!(ai_execution_backend_allowed(mainnet, "Plonky3"));
         assert!(!ai_execution_backend_allowed(devnet, "test"));
+    }
+
+    /// The backend name arrives inside the transaction envelope, so a
+    /// substring test is not an allow-list: anything that merely mentions
+    /// Plonky3 passes it. What sits behind the gate is
+    /// `verify_execution_proof_structural_with_model` - the proof bytes are
+    /// never verified cryptographically - so the name is the only thing
+    /// separating an attached proof from an invented one.
+    #[test]
+    fn a_backend_that_only_names_plonky3_is_not_plonky3() {
+        let devnet = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+        assert!(ai_execution_backend_allowed(devnet, "Plonky3"));
+        for spoofed in [
+            "Plonky3-nightly",
+            "not-really-Plonky3-at-all",
+            "Plonky3 with a local patch",
+            "xPlonky3x",
+        ] {
+            assert!(
+                !ai_execution_backend_allowed(devnet, spoofed),
+                "backend {spoofed} is not Plonky3 but passed the allow-list"
+            );
+        }
+    }
+
+    /// The gate has to be an allowlist. Ownership (the nullifier binding
+    /// proof), value conservation and membership are not wired, so this
+    /// surface is only ever on where losing the notes costs nothing.
+    /// `chain_id != Mainnet` answers the wrong question: it turns the feature
+    /// ON for every id nobody has claimed yet, including a second mainnet or a
+    /// public testnet that grows real value.
+    #[test]
+    fn privacy_transfers_stay_off_for_an_unclaimed_chain_id() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        let devnet = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+
+        assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
+        assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
+        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+
+        for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
+            assert!(
+                !privacy_transfers_enabled(unclaimed),
+                "chain id {unclaimed} has no ownership proof wired; the surface must stay off"
+            );
+        }
     }
 
     #[test]

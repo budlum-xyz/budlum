@@ -94,7 +94,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     for source in SOURCES {
         let text = std::fs::read_to_string(root.join(source))
-            .map_err(|e| format!("{source} okunamadi: {e}"))?;
+            .map_err(|e| format!("could not read {source}: {e}"))?;
         let lines = production_lines(&text);
 
         let found_move = lines

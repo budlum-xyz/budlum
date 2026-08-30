@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn decode_never_panics_on_arbitrary_bytes() {
         // Mini-fuzz (K38): every decode/parse path is panic-free on random byte strings.
-        // BudV2File::decode, BudV2Header::from_bytes, MultiHash::decode her girdide
+        // BudV2File::decode, BudV2Header::from_bytes and MultiHash::decode on every input
         // It must return Some/None and NEVER panic (evidence of a fuzz-safe design).
         struct Rng(u64);
         impl Rng {

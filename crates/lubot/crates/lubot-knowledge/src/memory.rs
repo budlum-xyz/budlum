@@ -114,8 +114,25 @@ impl TaskMemory {
     ///
     /// On a serialization or write error.
     pub fn append(&mut self, rec: MemoryRecord) -> Result<(), String> {
-        let line =
-            serde_json::to_string(&rec).map_err(|e| format!("could not encode the record: {e}"))?;
+        // The system prompt promises that no key, token, password or private key
+        // reaches an output, a cache or a log, and that masking happens before
+        // storage rather than after. This file is the log, so the promise is
+        // honoured here: the record is masked in the shape it is written in.
+        // A clean record serializes exactly as it did before, so nothing about
+        // the format moves for the ordinary case.
+        //
+        // The in-memory copy keeps what the caller handed over. That is not a
+        // leak: the caller already holds those strings, and `relevant_runs`
+        // scores them. What must not exist is the unmasked form on disk.
+        let value =
+            serde_json::to_value(&rec).map_err(|e| format!("could not encode the record: {e}"))?;
+        let redacted = crate::redact::redact_model_strings(&value);
+        let line = if redacted == value {
+            serde_json::to_string(&rec).map_err(|e| format!("could not encode the record: {e}"))?
+        } else {
+            serde_json::to_string(&redacted)
+                .map_err(|e| format!("could not encode the record: {e}"))?
+        };
         let mut text = std::fs::read_to_string(&self.path).unwrap_or_default();
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
@@ -271,6 +288,43 @@ mod tests {
         let mut mem = TaskMemory::open(&path).unwrap();
         sample_records(&mut mem);
         assert!(mem.relevant_runs("a totally unrelated topic", 5).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_credential_in_an_appended_record_never_reaches_the_disk() {
+        // The secret is assembled at run time so that no credential pattern
+        // appears in the static source (a secret scan reads this file too).
+        let secret = format!("sk-{}{}", "abcdefghijklmnopqrstuvwxyz", "123");
+        let dir = std::env::temp_dir().join(format!(
+            "lubot-memory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let path = dir.join("memory.jsonl");
+        let mut mem = TaskMemory::open(&path).unwrap();
+        mem.append(MemoryRecord::Command(TaskCommand {
+            task_id: "t1".into(),
+            command: "cat /etc/app/env".into(),
+            output: Some(format!("api_key: {secret}")),
+            status: "ok".into(),
+        }))
+        .unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains(&secret),
+            "the credential was written verbatim"
+        );
+        assert!(
+            on_disk.contains("<SECRET:MASKED>"),
+            "nothing was masked: {on_disk}"
+        );
+        // The line still parses, so masking did not corrupt the format.
+        let again = TaskMemory::open(&path).unwrap();
+        assert_eq!(again.commands.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
