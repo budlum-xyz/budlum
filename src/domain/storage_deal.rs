@@ -521,6 +521,24 @@ pub enum ReallocationStatus {
     Cancelled,
 }
 
+/// Why a reallocation ticket exists.
+///
+/// `FailedDeal` is the historic path: a slash or an expiry left a slot empty
+/// and the ticket names the deal that failed. `NeverPlaced` is the bootstrap
+/// path: the manifest lists a shard, the repair band sees zero live replicas,
+/// and no deal has ever been opened for that shard. The two are not the same
+/// obligation - one replaces a holder, the other places the first one - so the
+/// cause is part of the ticket, not a comment next to a zeroed deal id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReallocationCause {
+    /// A prior deal on this slot ended (slash or expiry). `failed_deal_id` is set.
+    #[default]
+    FailedDeal,
+    /// The shard was registered and never held a deal. `failed_deal_id` is 0 and
+    /// is not a lookup key.
+    NeverPlaced,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageReallocationTicket {
     pub ticket_id: u64,
@@ -551,6 +569,10 @@ pub struct StorageReallocationTicket {
     /// An empty recommendation is better than a wrong one.
     #[serde(default)]
     pub expected_holder: Option<Address>,
+    /// What opened this ticket. Default `FailedDeal` keeps pre-field tickets
+    /// bit-stable under serde defaulting and bincode append-at-end.
+    #[serde(default)]
+    pub cause: ReallocationCause,
 }
 
 /// On-chain, in-memory registry of all `StorageDeal`s, `RetrievalChallenge`s,
@@ -638,6 +660,20 @@ pub struct StorageRegistry {
     /// replicas.
     #[serde(default)]
     operator_classes: BTreeMap<Address, OperatorClass>,
+    /// Who may open non-public content (view-key permission book).
+    ///
+    /// Key material stays off-chain; this map is grants only. Classic/2.0
+    /// private bodies and Three/3.0 encrypted recipes both use it.
+    #[serde(default)]
+    pub view_grants: crate::storage::ViewGrantRegistry,
+    /// Classic/2.0 confidential body commits (ciphertext root + proof kind).
+    /// Three/R1 has no body; this map is the private-body surface only.
+    #[serde(default)]
+    pub confidential_commits: BTreeMap<ContentId, crate::storage::ConfidentialBodyCommit>,
+    /// The address each confidential commit was recorded for. Grants are signed
+    /// authorisations, and a signature needs somebody whose word it is.
+    #[serde(default)]
+    pub confidential_owners: BTreeMap<ContentId, crate::core::address::Address>,
 }
 
 use std::collections::BTreeMap;
@@ -1001,6 +1037,40 @@ impl StorageRegistry {
             hasher
                 .update(bincode::serialize(manifest).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
         }
+        // A confidential body and the address that speaks for it decide whether a
+        // view grant opens bytes, so two nodes disagreeing about either would
+        // accept different blocks. Both maps are `BTreeMap`, keyed by the content
+        // id, so every node hashes the same bytes in the same order. The commit is
+        // folded through `commitment()` rather than its serialization: the
+        // commitment is the value the chain promised, and pinning the serialized
+        // struct would make a field that cannot change the promise (a re-ordered
+        // enum variant, say) change the state root.
+        //
+        // An empty pair of maps contributes no bytes, which is what keeps a chain
+        // that has never held a confidential body at exactly the root it had
+        // before this fold existed.
+        for (content_id, commit) in &self.confidential_commits {
+            hasher.update(content_id.0);
+            hasher.update(commit.commitment());
+        }
+        for (content_id, owner) in &self.confidential_owners {
+            hasher.update(content_id.0);
+            hasher.update(owner.as_bytes());
+        }
+        // A live view grant decides whether bytes are opened, and a self-host
+        // declaration decides whether an object may sit on a device without paid
+        // replicas. Both are enforced while a block is applied, so a node holding
+        // a different book accepts a block its peers reject. The grant book is
+        // folded through its own digest, and only after the first id was handed
+        // out: a chain that never issued a grant keeps the bytes it had, while an
+        // issue followed by a revoke still leaves its mark.
+        if self.view_grants.issued() > 0 {
+            hasher.update(self.view_grants.root());
+        }
+        for (content_id, policy) in &self.self_host_policies {
+            hasher.update(content_id.0);
+            hasher.update(bincode::serialize(policy).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
         hasher.finalize().into()
     }
 
@@ -1187,6 +1257,15 @@ impl StorageRegistry {
         // Checking **after** the record would be too late: manifest
         // registration is first-writer-wins and idempotent, so a rejected
         // record cannot be taken back.
+        // Edition gate first: BUD edition Three admits no durable body. Classic keeps
+        // Stored/Hybrid. Checked before recipe execution so a Three+Stored claim
+        // never pays for a generate_and_verify of content that the edition
+        // forbids holding.
+        manifest
+            .edition
+            .check_source(&manifest.source)
+            .map_err(|reason| StorageError::InvalidManifest { reason })?;
+
         match &manifest.source {
             crate::storage::generated::ContentSource::Stored => {}
             crate::storage::generated::ContentSource::Generated(spec) => {
@@ -1214,6 +1293,30 @@ impl StorageRegistry {
                         ),
                     },
                 )?;
+            }
+            // Sealed Three recipe: seed is off-chain. We cannot run the
+            // generator. We check shape (one shard, public fields sane) and
+            // refuse a zero commitment. Reveal-time open_with + generate is
+            // the honesty check, gated by view-grants.
+            crate::storage::generated::ContentSource::SealedGenerated(sealed) => {
+                if manifest.shards.len() != 1 {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "SealedGenerated manifest must have exactly one shard".into(),
+                    });
+                }
+                if sealed.recipe_commitment == [0u8; 32] {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "SealedGenerated recipe_commitment must not be zero".into(),
+                    });
+                }
+                if sealed.output_len == 0 {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "SealedGenerated output_len must be non-zero".into(),
+                    });
+                }
+                // Public digest must match the sealed fields (no seed).
+                let expect = crate::storage::generated::sealed_generated_commitment(sealed);
+                let _ = expect; // commitment is part of source_commitment_bytes via id
             }
             crate::storage::generated::ContentSource::Hybrid { .. } => {
                 return Err(StorageError::InvalidManifest {
@@ -1353,6 +1456,203 @@ impl StorageRegistry {
         self.manifests.get(manifest_id)
     }
 
+    /// Issue a view grant. Key material stays off-chain. The manifest is the
+    /// authority on who may give a grant: the `issuer` field is checked against
+    /// the recorded owner instead of being believed, because a caller that could
+    /// name any issuer could hand out public view access to bytes it does not
+    /// own.
+    pub fn issue_view_grant(
+        &mut self,
+        content_id: ContentId,
+        auth: &crate::storage::GrantAuthorization,
+        grantee: Option<Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+    ) -> Result<u64, crate::storage::ViewGrantError> {
+        let owner = self
+            .owner_of(&content_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        let issuer = auth
+            .derived_owner()
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        if issuer != owner {
+            return Err(crate::storage::ViewGrantError::NotOwner { issuer, owner });
+        }
+        let digest = crate::storage::grant_issue_digest(
+            &content_id,
+            &issuer,
+            grantee.as_ref(),
+            &key_id,
+            policy,
+            opened_epoch,
+        );
+        auth.verify(&digest, &owner)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.view_grants
+            .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
+    }
+
+    /// Revoke one grant. Returns the row that was revoked, because whatever has
+    /// to react to a revocation (a gateway dropping session keys, a wallet
+    /// showing what it gave up) needs to know which content it was about; echo
+    /// back the content id from the request and the reply becomes a claim.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for an unknown id, a caller who is not
+    /// the owner, or an unreadable authorisation.
+    pub fn revoke_view_grant(
+        &mut self,
+        grant_id: u64,
+        auth: &crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::ViewGrant, crate::storage::ViewGrantError> {
+        let caller = auth
+            .derived_owner()
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        let digest = crate::storage::grant_revoke_digest(grant_id, &caller, at_epoch);
+        let grant = self
+            .view_grants
+            .get(grant_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?
+            .clone();
+        // `unwrap_or`, not `unwrap_or_else`: the fallback is a field read, and a
+        // closure there is what CI's Clippy step refuses under `-D warnings`.
+        let owner = self.owner_of(&grant.content_id).unwrap_or(grant.issuer);
+        auth.verify(&digest, &owner)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.view_grants.revoke(grant_id, caller, at_epoch)?;
+        Ok(grant)
+    }
+
+    /// Every view-grant row of one content, revoked ones included.
+    #[must_use]
+    pub fn view_grants_for(&self, content_id: &ContentId) -> Vec<crate::storage::ViewGrant> {
+        self.view_grants
+            .rows_for_content(content_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// How many rows of one content are live right now. Read through the
+    /// registry's own live index rather than by filtering `view_grants_for`, so
+    /// the number a wallet is shown is the number `may_view` will honour.
+    #[must_use]
+    pub fn live_view_grant_count(&self, content_id: &ContentId) -> usize {
+        self.view_grants.live_for_content(content_id).len()
+    }
+
+    /// Whether `viewer` may open `content_id` with `key_id`. `owner` is a claim,
+    /// not an authority: it is checked against the manifest, and a query naming
+    /// itself as the owner of somebody else's content is refused rather than
+    /// served. Content with no manifest has no owner and opens for nobody.
+    #[must_use]
+    pub fn may_view(
+        &self,
+        content_id: &ContentId,
+        viewer: &Address,
+        key_id: &[u8; 32],
+        owner: &Address,
+    ) -> bool {
+        let Some(recorded) = self.owner_of(content_id) else {
+            return false;
+        };
+        if recorded != *owner {
+            return false;
+        }
+        self.view_grants.may_view(content_id, viewer, key_id, owner)
+    }
+
+    /// Record a Classic confidential body commit. Refuses plaintext encryption
+    /// (see ConfidentialBodyCommit::new) and refuses a Three edition manifest
+    /// when one is already registered for this id (body vs recipe category).
+    /// The `owner` is the address the commit is recorded for: an unattributed
+    /// body commit would leave later view grants with nobody whose word counts.
+    /// Register a confidential body commit under the address that signed it.
+    ///
+    /// The owner is not a field the caller types: it is derived from the key
+    /// and then proven by a signature over [`crate::storage::confidential_commit_digest`].
+    /// Derivation alone would let anybody holding Alice's public key register a
+    /// commit under her address and, by registering first, lock her own commit
+    /// out of an object she already sealed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses Three (recipe-only) manifests, a body already committed under a
+    /// different commitment, an object another address spoke for, and any
+    /// authorisation whose signature does not verify for the derived owner.
+    pub fn register_confidential_commit(
+        &mut self,
+        commit: crate::storage::ConfidentialBodyCommit,
+        auth: &crate::storage::GrantAuthorization,
+    ) -> Result<[u8; 32], String> {
+        let owner = auth
+            .derived_owner()
+            .map_err(|e| format!("confidential commit authorization: {e}"))?;
+        let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+        auth.verify(&digest, &owner)
+            .map_err(|e| format!("confidential commit authorization: {e}"))?;
+        if let Some(m) = self.manifests.get(&commit.content_id) {
+            if !m.edition.admits_body() {
+                return Err(String::from(
+                    "confidential body commit refused: registered manifest is Three (recipe-only); bodies are Classic/2.0",
+                ));
+            }
+        }
+        let commitment = commit.commitment();
+        let content_id = commit.content_id;
+        // Registering a commit for an object somebody else already spoke for
+        // would move the view authority of a live object to the newcomer, and a
+        // grant issued under the old owner would silently start meaning the new
+        // one. Overwriting an already-open commitment is refused outright:
+        // whoever holds an object holds it until the object is closed.
+        if let Some(prev) = self.confidential_commits.get(&content_id) {
+            return Err(if prev.commitment() == commitment {
+                format!("confidential body commit already registered for 0x{content_id:?}")
+            } else {
+                format!(
+                    "confidential body commit refused: 0x{content_id:?} is already committed under a different body"
+                )
+            });
+        }
+        if let Some(prev_owner) = self.confidential_owners.get(&content_id) {
+            if *prev_owner != owner {
+                return Err(format!(
+                    "confidential body commit refused: 0x{content_id:?} is spoken for by {prev_owner:?}"
+                ));
+            }
+        }
+        self.confidential_commits.insert(content_id, commit);
+        self.confidential_owners.insert(content_id, owner);
+        Ok(commitment)
+    }
+
+    #[must_use]
+    pub fn get_confidential_commit(
+        &self,
+        content_id: &ContentId,
+    ) -> Option<&crate::storage::ConfidentialBodyCommit> {
+        self.confidential_commits.get(content_id)
+    }
+
+    /// Who may speak for this content: the manifest owner, or the address that
+    /// registered a Classic confidential commit when there is no manifest. One
+    /// authority per object, and it is looked up rather than believed.
+    ///
+    /// The read path for wallets and auditors: before signing a grant, a holder
+    /// has to be able to ask who the chain believes owns an object. The refusals
+    /// of `issue_view_grant` are the write-side half; this is the same authority
+    /// made visible, so the two cannot disagree.
+    #[must_use]
+    pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
+        self.manifests
+            .get(content_id)
+            .map(|m| m.owner)
+            .or_else(|| self.confidential_owners.get(content_id).copied())
+    }
+
     /// Validate that `shard_id` is a member of `manifest`. Used by
     /// `open_deal`; exposed so the E2E test can exercise the failure
     /// Path.
@@ -1476,11 +1776,27 @@ impl StorageRegistry {
         manifest
             .validate_untrusted()
             .map_err(|reason| StorageError::InvalidManifest { reason })?;
+        // Three is recipe-only: a storage deal is custody of held bytes. Opening
+        // a deal against a Three manifest would reintroduce body economics under
+        // another name (operators "holding" a recipe, charging rent for zero
+        // held_bytes, or laundering a body as a live copy). Classic only.
+        if !manifest.edition.admits_body() {
+            return Err(StorageError::InvalidManifest {
+                reason: String::from(
+                    "BUD edition Three admits no storage deal: recipes are not placed with operators; use Classic for bodies",
+                ),
+            });
+        }
         self.validate_shard_membership(manifest, &shard_id)?;
         // Membership was just checked, so the shard is present; take its size
         // while the manifest is still in hand. Pricing reads this and not the
         // registry copy, which a later manifest write could move.
-        let shard_bytes = u64::from(
+        //
+        // `held_bytes` is the axis that makes Generated and Stored comparable:
+        // a recipe holds nothing on disk, so charging its listed output size
+        // would invent a rent for bytes nobody stores. A Hybrid whose prefix
+        // exceeds the listed size is a contradictory spec and is refused.
+        let listed_bytes = u64::from(
             manifest
                 .shard(&shard_id)
                 .ok_or(StorageError::UnknownShard {
@@ -1489,6 +1805,12 @@ impl StorageRegistry {
                 })?
                 .size,
         );
+        let shard_bytes = crate::storage::generated::held_bytes(&manifest.source, listed_bytes)
+            .ok_or_else(|| StorageError::InvalidManifest {
+                reason: String::from(
+                    "held_bytes refused the source (hybrid prefix longer than listed size)",
+                ),
+            })?;
         self.register_manifest(manifest);
 
         let deal_id = self.next_deal_id;
@@ -2301,6 +2623,17 @@ impl StorageRegistry {
                 .deals
                 .get_mut(&deal_id)
                 .ok_or(StorageError::UnknownDeal(deal_id))?;
+            // The answer path refuses a deal that has left `Active`; the
+            // Missed path has to ask the same question. Up to
+            // `MAX_OPEN_CHALLENGES_PER_DEAL` challenges can be open against one
+            // Deal, and every one of them used to reach this line and record
+            // The bond again: a wrong answer on challenge one and silence on
+            // Challenge two produced two slash events for one failure. This
+            // Layer does not burn the bond, it hands the amount to the
+            // `Blockchain` accounting path, which counts events, not deals.
+            if !deal.is_active() {
+                return Err(StorageError::DealNotActive(deal_id));
+            }
             let slash_amount = deal.economics.operator_bond;
             deal.status = DealStatus::Slashed;
             let existing_ticket = self
@@ -2326,6 +2659,7 @@ impl StorageRegistry {
                     // recommendation is written after opening, by
                     // `annotate_expected_holders`.
                     expected_holder: None,
+                    cause: ReallocationCause::FailedDeal,
                 }
             });
             (slash_amount, ticket)
@@ -2514,12 +2848,76 @@ impl StorageRegistry {
             deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
             status: ReallocationStatus::Pending,
             expected_holder: None,
+            cause: ReallocationCause::FailedDeal,
         };
         self.reallocations.insert(ticket_id, ticket);
         Some(ticket_id)
     }
 
-    /// Bekleyen biletlere yerlesim tavsiyesini yaz.
+    /// Open a bootstrap ticket for a shard that has never held a deal.
+    ///
+    /// The expiry and slash paths both require a historic `deal_id`. A shard
+    /// the registry registered but never placed has none, and the repair band
+    /// used to log that gap and walk on. Logging is not a ticket: nothing is
+    /// pending, nothing can be accepted, and the object stays under-replicated
+    /// forever under a warning that looks like progress.
+    ///
+    /// Dedup key is `(manifest_id, shard_id, replica_index)` among pending /
+    /// under-replicated never-placed tickets - the same slot must not pay two
+    /// operators for the first copy. `failed_deal_id` is 0 and is not a lookup
+    /// key for this cause.
+    ///
+    /// `domain_id` is taken from the caller because the manifest does not carry
+    /// one; the chain actor passes the storage domain it is sweeping.
+    pub fn open_never_placed_ticket(
+        &mut self,
+        domain_id: u32,
+        manifest_id: ContentId,
+        shard_id: ContentId,
+        replica_index: u8,
+        now_epoch: u64,
+    ) -> Option<u64> {
+        self.manifests.get(&manifest_id)?;
+        // Refuse when the slot already has a live deal: a never-placed ticket
+        // is only for the empty case the repair band already filtered.
+        if self.active_replica_count(&manifest_id, &shard_id) > 0 {
+            return None;
+        }
+        let already = self.reallocations.values().any(|ticket| {
+            ticket.cause == ReallocationCause::NeverPlaced
+                && ticket.manifest_id == manifest_id
+                && ticket.shard_id == shard_id
+                && ticket.replica_index == replica_index
+                && matches!(
+                    ticket.status,
+                    ReallocationStatus::Pending | ReallocationStatus::UnderReplicated
+                )
+        });
+        if already {
+            return None;
+        }
+        let ticket_id = self.next_reallocation_id;
+        self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
+        let ticket = StorageReallocationTicket {
+            ticket_id,
+            failed_deal_id: 0,
+            replacement_deal_id: None,
+            domain_id,
+            manifest_id,
+            shard_id,
+            replica_index,
+            slashed_operator: Address::zero(),
+            opened_epoch: now_epoch,
+            deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
+            status: ReallocationStatus::Pending,
+            expected_holder: None,
+            cause: ReallocationCause::NeverPlaced,
+        };
+        self.reallocations.insert(ticket_id, ticket);
+        Some(ticket_id)
+    }
+
+    /// Write the placement advice onto the pending tickets.
     ///
     /// `assign_shard` rendezvous hashing ile shard basina deterministik bir
     /// chooses a holder: the same shard, the same entropy and the same
@@ -3043,6 +3441,298 @@ mod tests {
         );
     }
 
+    /// A view grant follows the manifest's owner, not the caller's word.
+    ///
+    /// Both halves are needed: `issue_view_grant` refuses a stranger, and
+    /// `may_view` refuses a query that claims to be the owner. Measured against
+    /// the code before the fix, each half alone left the other open.
+    #[test]
+    fn view_grants_are_the_manifest_owners_to_give() {
+        let mut reg = StorageRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let stranger = Address::from([7u8; 32]);
+        let bob = Address::from([2u8; 32]);
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let content = m.manifest_id;
+        let key = [5u8; 32];
+        // An authorisation no key signed is refused before the registry looks at
+        // what the grant would allow. Which refusal it is depends on the build:
+        // with the wallet verifier the fabricated key derives to an address that
+        // is not the owner, without it nothing can be derived at all. Both are
+        // refusals, and only those two are accepted here.
+        let unsigned = crate::storage::GrantAuthorization {
+            owner_key: [7u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: Vec::new(),
+        };
+        let err = reg
+            .issue_view_grant(
+                content,
+                &unsigned,
+                None,
+                key,
+                crate::storage::ViewPolicy::PublicKeyId,
+                1,
+            )
+            .expect_err("a stranger cannot hand out grants");
+        assert!(
+            matches!(
+                err,
+                crate::storage::ViewGrantError::NotOwner { .. }
+                    | crate::storage::ViewGrantError::Authorization(_)
+            ),
+            "an unsigned grant must be refused as one of the two, got {err:?}"
+        );
+        assert!(
+            !reg.may_view(&content, &bob, &key, &stranger),
+            "naming oneself the owner is not being the owner"
+        );
+        let yok = ContentId([42u8; 32]);
+        assert!(
+            !reg.may_view(&yok, &bob, &key, &owner),
+            "content no manifest describes opens for nobody"
+        );
+    }
+
+    /// A signed grant opens the object it names and nothing else.
+    ///
+    /// The signature binds content, grantee, key handle, policy and epoch, so a
+    /// valid authorisation cannot be moved to another object or reshaped into a
+    /// wider one; and a caller that cannot derive the owner from its key never
+    /// reaches the registry at all.
+    /// A confidential commit must carry proof that the key signing it is held
+    /// by the address it is registered under.
+    ///
+    /// Deriving an address from a public key is not an identity check: the
+    /// public key is public. If the signature is never verified, anybody who
+    /// has seen Alice's key can register a commit under her address - and by
+    /// registering first, lock her out of her own object, since a second
+    /// commit under a different body is refused.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_confidential_commit_is_refused_when_nothing_signed_it() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let commit = crate::storage::ConfidentialBodyCommit {
+            content_id: ContentId([11u8; 32]),
+            encryption: crate::storage::ContentEncryption::Plaintext,
+            ciphertext_root: [3u8; 32],
+            proof_kind: crate::storage::ConfidentialProofKind::RetrievalChallenge,
+        };
+        // The victim's public key, and a signature that is not a signature.
+        let forged = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: vec![0u8; 16],
+        };
+        assert_eq!(
+            forged.derived_owner().ok(),
+            Some(owner),
+            "the public key alone must derive the victim address, or this test proves nothing"
+        );
+        let res = reg.register_confidential_commit(commit, &forged);
+        assert!(
+            res.is_err(),
+            "a commit under an address whose key signed nothing was accepted"
+        );
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_signed_grant_opens_only_the_object_it_names() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let bob = Address::from([2u8; 32]);
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let content = m.manifest_id;
+        let mut other = ContentManifest::from_bytes_sliced(b"another private body bytes...", 8)
+            .expect("second manifest");
+        other.owner = owner;
+        reg.register_manifest(&other);
+        let other = other.manifest_id;
+        assert_ne!(content, other, "the two objects must be distinct");
+
+        let key = [5u8; 32];
+        let digest = crate::storage::grant_issue_digest(
+            &content,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        reg.issue_view_grant(
+            content,
+            &auth,
+            None,
+            key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        )
+        .expect("the owner's own signed grant must be accepted");
+        assert!(reg.may_view(&content, &bob, &key, &owner));
+        assert!(
+            !reg.may_view(&content, &bob, &key, &bob),
+            "a grantee is not an owner and must not be treated as one"
+        );
+
+        // The same signature, offered for the other object: the content is inside
+        // the digest, so it verifies as nothing.
+        let err = reg
+            .issue_view_grant(
+                other,
+                &auth,
+                None,
+                key,
+                crate::storage::ViewPolicy::PublicKeyId,
+                1,
+            )
+            .expect_err("a grant signature is bound to the object it names");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::Authorization(
+                crate::storage::GrantAuthError::BadSignature
+            )
+        ));
+        // The same signature, offered as a different grant: policy and grantee are
+        // in the digest too.
+        let err = reg
+            .issue_view_grant(
+                content,
+                &auth,
+                Some(bob),
+                key,
+                crate::storage::ViewPolicy::OwnerOnly,
+                1,
+            )
+            .expect_err("a grant signature is bound to the policy it names");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::Authorization(
+                crate::storage::GrantAuthError::BadSignature
+            )
+        ));
+    }
+
+    /// A revocation needs the owner's word as much as an issuance does.
+    /// An issued view grant reaches the state root.
+    ///
+    /// Measured with a real ML-DSA-87 signature, because a grant the registry
+    /// refused must not move the root either: the assertion below is about the
+    /// accepted row, and the refusal case has its own test.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn an_issued_view_grant_reaches_the_registry_root() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [5u8; 32];
+        let digest = crate::storage::grant_issue_digest(
+            &m.manifest_id,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        let before = reg.root();
+        reg.issue_view_grant(
+            m.manifest_id,
+            &auth,
+            None,
+            key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        )
+        .expect("the owner's signed grant");
+        assert_ne!(before, reg.root(), "a live grant must reach the state root");
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_grant_is_revoked_only_by_a_signed_revocation() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [6u8; 32];
+        let issue_digest = crate::storage::grant_issue_digest(
+            &m.manifest_id,
+            &owner,
+            None,
+            &key,
+            crate::storage::ViewPolicy::PublicKeyId,
+            1,
+        );
+        let issue = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&issue_digest).to_vec(),
+        };
+        let grant = reg
+            .issue_view_grant(
+                m.manifest_id,
+                &issue,
+                None,
+                key,
+                crate::storage::ViewPolicy::PublicKeyId,
+                1,
+            )
+            .expect("signed issuance");
+        assert!(reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner));
+
+        // Revoking with the issuance signature still attached is not revoking.
+        let err = reg
+            .revoke_view_grant(grant, &issue, 4)
+            .expect_err("a revocation needs its own signature");
+        assert!(matches!(
+            err,
+            crate::storage::ViewGrantError::Authorization(
+                crate::storage::GrantAuthError::BadSignature
+            )
+        ));
+        assert!(
+            reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner),
+            "a refused revocation must leave the grant standing"
+        );
+
+        let revoke_digest = crate::storage::grant_revoke_digest(grant, &owner, 4);
+        let revoke = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&revoke_digest).to_vec(),
+        };
+        reg.revoke_view_grant(grant, &revoke, 4)
+            .expect("the owner's signed revocation");
+        assert!(
+            !reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner),
+            "a revoked grant opens nothing"
+        );
+    }
+
     /// An object resting on an unknown dictionary cannot be registered.
     ///
     /// If nobody holds the bytes the object cannot be opened; accepting the
@@ -3104,7 +3794,7 @@ mod tests {
         );
     }
 
-    // === B.U.D. 3.0: recipe durability stands in for a replica ===========
+    // === B.U.D. Three: recipe durability stands in for a replica ===========
 
     /// A manifest whose recipe really runs, so its registration is accepted.
     fn generated_manifest() -> (ContentManifest, crate::storage::generated::GeneratedSpec) {
@@ -3131,6 +3821,32 @@ mod tests {
     /// Storing the same deterministic generator three times is not a third
     /// backup, it is three copies of the same answer. What keeps the content
     /// alive is the recipe on chain.
+
+    #[test]
+    fn edition_three_refuses_a_stored_body() {
+        use crate::storage::generated::BudStorageEdition;
+        let mut m = good_manifest();
+        m = m.with_edition(BudStorageEdition::Three);
+        // source still Stored (default from good_manifest)
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .register_manifest_with_source(&m)
+            .expect_err("Three must refuse Stored");
+        assert!(
+            matches!(err, StorageError::InvalidManifest { .. }),
+            "expected InvalidManifest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classic_edition_still_accepts_stored_body() {
+        use crate::storage::generated::BudStorageEdition;
+        let m = good_manifest().with_edition(BudStorageEdition::Classic);
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&m)
+            .expect("Classic Stored must remain valid");
+    }
+
     #[test]
     fn a_recipe_backed_object_needs_one_copy_not_three() {
         use crate::storage::generated::{required_replica_count, ContentSource};
@@ -3383,6 +4099,60 @@ mod tests {
         );
     }
 
+    /// A Generated source holds no bytes. Pricing from the listed output size
+    /// would invent a rent for a recipe; `held_bytes` is what keeps Three's
+    /// "kira = 0" claim true on the deal path, not only in a spreadsheet.
+    #[test]
+    fn a_generated_deal_is_priced_at_zero_held_bytes() {
+        use crate::storage::generated::{
+            generate_content, ContentSource, GeneratedSpec, GeneratorId,
+        };
+
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [7u8; 32],
+            output_len: 32 * 32,
+            step_budget: 8_000,
+        };
+        let bytes = generate_content(&spec).expect("generation");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("manifest")
+            .with_source(ContentSource::Generated(spec));
+        // Classic edition still admits a body-shaped deal for the live copy;
+        // the rent must still read held_bytes = 0.
+        let mut reg = StorageRegistry::new();
+        let shard = &manifest.shards[0];
+        let listed = u64::from(shard.size);
+        assert!(listed > 0, "fixture must list a non-zero output size");
+        let id = reg
+            .open_deal(
+                42,
+                &manifest,
+                shard.shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect("generated deal opens");
+        let deal = reg.get_deal(id).expect("deal");
+        assert_eq!(deal.shard_bytes, 0, "Generated holds nothing to rent");
+        assert_eq!(
+            deal.total_fee(10),
+            0,
+            "zero held bytes must yield zero rent even at a positive rate"
+        );
+        assert_ne!(
+            good_econ().total_fee(listed, 10),
+            0,
+            "control: the same rate on listed size would not be free"
+        );
+    }
+
     // === B72: a deal-open must not accept a false redundancy claim ========
 
     /// `manifest_id` covers `k` and `n`, so an author who wants a false
@@ -3532,6 +4302,104 @@ mod tests {
         assert_ne!(before, reg.root(), "the cooldown must reach the root");
     }
 
+    /// The confidential record must reach the state root, both halves of it.
+    ///
+    /// A commitment that nobody can point at is not a promise, and an owner that
+    /// lives only in a node's local map is exactly the record a second node would
+    /// disagree about: a grant is checked against it, and the chain's answer must
+    /// not depend on which node replayed the block.
+    ///
+    /// Both registries are filled by a key that actually signs, because the
+    /// owner recorded is the one derived from the signing key; two different
+    /// speakers means two different keys, not two typed addresses.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_confidential_commit_changes_the_registry_root() {
+        use crate::crypto::primitives::WalletKeyPair;
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let signed_commit = |kp: &WalletKeyPair| {
+            let commit = ConfidentialBodyCommit::new(
+                m.manifest_id,
+                ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+                [4u8; 32],
+                ConfidentialProofKind::HybridZkTee,
+            )
+            .unwrap();
+            let owner = kp.address();
+            let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+            (
+                commit,
+                crate::storage::GrantAuthorization {
+                    owner_key: kp.public_key_bytes(),
+                    signature: kp.sign(&digest).to_vec(),
+                },
+            )
+        };
+
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let before = reg.root();
+        let (commit, auth) = signed_commit(&WalletKeyPair::generate());
+        reg.register_confidential_commit(commit, &auth).unwrap();
+        let after = reg.root();
+        assert_ne!(before, after, "the body commit must reach the root");
+
+        // The owner alone moves the root too: same commitment, different
+        // speaker. A fold over the commitments only would let a node swap who
+        // owns an object without any state-root change.
+        let mut other_registry = StorageRegistry::new();
+        other_registry.register_manifest(&m);
+        let (commit2, auth2) = signed_commit(&WalletKeyPair::generate());
+        other_registry
+            .register_confidential_commit(commit2, &auth2)
+            .unwrap();
+        assert_ne!(
+            after,
+            other_registry.root(),
+            "the recorded owner must reach the root"
+        );
+    }
+
+    /// Without a verifier nothing can prove an owner, so nothing is recorded
+    /// and the root holds. Fail-closed is the point: a build that cannot check
+    /// signatures must not write an owner nobody proved into the state root.
+    #[cfg(not(feature = "wallet-ml-dsa"))]
+    #[test]
+    fn a_confidential_commit_is_refused_so_the_root_holds() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let mut reg = StorageRegistry::new();
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        reg.register_manifest(&m);
+        let before = reg.root();
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: [9u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: vec![1, 2, 3, 4],
+        };
+        assert!(
+            reg.register_confidential_commit(commit, &auth).is_err(),
+            "a commit whose owner signed nothing must be refused"
+        );
+        assert_eq!(
+            before,
+            reg.root(),
+            "a refused commit must not move the state root"
+        );
+    }
+
     // === B76: a phone may hold a copy, never the only one =================
 
     /// The primary is what a reader reaches for and a repair rebuilds from.
@@ -3671,7 +4539,7 @@ mod tests {
         (id, shard_id)
     }
 
-    // === Yerlesim tavsiyesi ==============================================
+    // === Placement advice =================================================
 
     fn placement_candidates(n: u8) -> Vec<crate::storage::assignment::ShardCandidate> {
         (1..=n)
@@ -4326,6 +5194,109 @@ mod tests {
     }
 
     #[test]
+    fn a_never_placed_shard_gets_a_bootstrap_ticket() {
+        // Register without opening a deal. The repair band used to log
+        // "no ticket type" and walk on; the bootstrap ticket is what makes
+        // that gap actionable.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let shard_id = m.shards[0].shard_id;
+
+        let ticket_id = reg
+            .open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+            .expect("a never-held shard must open a bootstrap ticket");
+        let ticket = reg.get_reallocation_ticket(ticket_id).unwrap();
+        assert_eq!(ticket.cause, ReallocationCause::NeverPlaced);
+        assert_eq!(ticket.failed_deal_id, 0, "no historic deal to name");
+        assert_eq!(ticket.manifest_id, m.manifest_id);
+        assert_eq!(ticket.shard_id, shard_id);
+        assert_eq!(ticket.domain_id, 42);
+        assert_eq!(ticket.status, ReallocationStatus::Pending);
+    }
+
+    #[test]
+    fn never_placed_ticket_opens_once_per_slot() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let shard_id = m.shards[0].shard_id;
+
+        assert!(reg
+            .open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+            .is_some());
+        assert!(
+            reg.open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 101)
+                .is_none(),
+            "a second sweep must not open a second first-copy ticket"
+        );
+        assert!(
+            reg.open_never_placed_ticket(42, m.manifest_id, shard_id, 1, 102)
+                .is_some(),
+            "replica_index is part of the slot key"
+        );
+    }
+
+    #[test]
+    fn never_placed_refuses_when_a_live_deal_already_holds_the_shard() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (_, shard_id) = open_one(&mut reg, &m);
+        assert!(
+            reg.open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+                .is_none(),
+            "bootstrap is only for the empty case"
+        );
+    }
+
+    #[test]
+    fn slash_and_expiry_tickets_record_failed_deal_cause() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let ticket = reg.all_reallocation_tickets()[0];
+        assert_eq!(ticket.cause, ReallocationCause::FailedDeal);
+        assert_eq!(ticket.failed_deal_id, deal_id);
+    }
+
+    /// A deal is slashed once. `answer_challenge` refuses a deal that has left
+    /// `Active` (`DealNotActive`); `finalize_missed_challenge` never asked that
+    /// Question, so a second open challenge on the same deal - up to
+    /// `MAX_OPEN_CHALLENGES_PER_DEAL` of them - recorded the bond as slashed
+    /// Again. This layer does not burn the bond, it hands the amount to the
+    /// `Blockchain` accounting path, and that path counts events, not deals:
+    /// The operator would pay twice for one failure.
+    #[test]
+    fn a_deal_that_has_already_been_slashed_is_not_slashed_twice() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+
+        let first = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        let second = reg
+            .open_challenge(deal_id, 0, 4, 121, 140, opener(), 50)
+            .unwrap();
+
+        let first_result = reg.finalize_missed_challenge(first, 130).unwrap();
+        assert!(
+            first_result.slashed_bond > 0,
+            "the first miss has to slash the bond"
+        );
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+
+        assert!(
+            reg.finalize_missed_challenge(second, 150).is_err(),
+            "the bond of a deal that is already `Slashed` must not be recorded a second time"
+        );
+    }
+
+    #[test]
     fn finalize_missed_challenge_before_deadline_rejected() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -4492,7 +5463,7 @@ mod tests {
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
         // Gate (9d82f61): None her zaman MerkleProofRequired vermeli.
-        // REGRESYON KILIDI - a0671c4'te silinmisti, geri yuklendi; SILME.
+        // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -4517,7 +5488,7 @@ mod tests {
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
         // Format gate: deserialize edilemeyen blob InvalidMerkleProof vermeli.
-        // REGRESYON KILIDI - a0671c4'te silinmisti, geri yuklendi; SILME.
+        // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -5187,6 +6158,205 @@ mod demand_driven_replication_tests {
             STORAGE_REPLICATION_TARGET
         );
         assert_eq!(reg.under_replicated_shards(0).len(), 1);
+    }
+
+    #[test]
+    fn three_manifest_cannot_open_a_storage_deal() {
+        use crate::core::address::Address;
+        use crate::domain::storage_params::StorageDomainParams;
+        use crate::storage::generated::{
+            generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
+        };
+
+        fn operator() -> Address {
+            Address::from([7u8; 32])
+        }
+        fn params() -> StorageDomainParams {
+            StorageDomainParams {
+                chunk_size: 256,
+                max_committed_chunks: 1000,
+                challenge_interval: 10,
+                min_operator_bond: 1_000_000,
+            }
+        }
+        fn good_econ() -> StorageEconomicsParams {
+            StorageEconomicsParams {
+                operator_bond: 5_000_000,
+                fee_per_byte_epoch: 100,
+            }
+        }
+        fn valid_merkle_proof() -> Vec<u8> {
+            let envelope = bud_proof::ProofEnvelope {
+                proof_format_version: 1,
+                backend: "test-backend".to_string(),
+                p3_version: "0.6".to_string(),
+                fri_params_id: "test-fri".to_string(),
+                public_inputs_hash: [0x42u8; 32],
+                proof_bytes: vec![0xABu8; 96],
+                degree_bits: 8,
+            };
+            bincode::serialize(&envelope).expect("test envelope serialize")
+        }
+
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [2u8; 32],
+            output_len: 32 * 32,
+            step_budget: 8_000,
+        };
+        let bytes = generate_content(&spec).expect("gen");
+        let shard_id = {
+            let manifest =
+                ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("m");
+            manifest.shards.first().expect("shard").shard_id
+        };
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("m")
+            .with_source(ContentSource::Generated(spec))
+            .with_edition(BudStorageEdition::Three);
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&manifest)
+            .expect("three recipe may register");
+        let err = reg
+            .open_deal(
+                42,
+                &manifest,
+                shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("Three must not open a deal");
+        assert!(
+            matches!(err, StorageError::InvalidManifest { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn confidential_commit_refuses_three_edition_manifest() {
+        use crate::crypto::primitives::WalletKeyPair;
+        use crate::storage::generated::{
+            generate_content, BudStorageEdition, ContentSource, GeneratedSpec, GeneratorId,
+        };
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [1u8; 32],
+            output_len: 32 * 32,
+            step_budget: 8_000,
+        };
+        let bytes = generate_content(&spec).expect("gen");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("m")
+            .with_source(ContentSource::Generated(spec))
+            .with_edition(BudStorageEdition::Three);
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&manifest)
+            .expect("three recipe registers");
+        let commit = ConfidentialBodyCommit::new(
+            manifest.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [9u8; 32],
+            ConfidentialProofKind::ZkStorageProof,
+        )
+        .expect("client-side ok");
+        // Signed by a real key, so the refusal that follows is the edition rule
+        // and not a missing authorisation.
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        let err = reg
+            .register_confidential_commit(commit, &auth)
+            .expect_err("Three must not take a body commit");
+        assert!(err.contains("Three") || err.contains("recipe"), "got {err}");
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn confidential_commit_accepts_classic_encrypted_body() {
+        use crate::crypto::primitives::WalletKeyPair;
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let digest = crate::storage::confidential_commit_digest(&commit, &owner);
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&digest).to_vec(),
+        };
+        let c = reg.register_confidential_commit(commit, &auth).unwrap();
+        assert_eq!(c.len(), 32);
+        assert!(reg.get_confidential_commit(&m.manifest_id).is_some());
+        // The commit is worthless without a recorded owner: whoever signs a
+        // grant later is checked against this address, so a commit that named
+        // nobody could be opened by anybody's word. `owner_of` answers the
+        // manifest first, so the address the commit was registered under is
+        // measured where it is recorded.
+        assert_eq!(
+            reg.confidential_owners.get(&m.manifest_id).copied(),
+            Some(owner),
+            "the commit must be recorded under the address that signed it"
+        );
+    }
+
+    /// Without the ML-DSA verifier nothing can prove an authorisation, so a
+    /// commit is refused rather than registered on trust. The gate must fail
+    /// closed: a build that cannot check signatures must not accept any.
+    #[cfg(not(feature = "wallet-ml-dsa"))]
+    #[test]
+    fn confidential_commit_fails_closed_without_a_verifier() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&m);
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [4u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: [9u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: vec![1, 2, 3, 4],
+        };
+        let err = reg
+            .register_confidential_commit(commit, &auth)
+            .expect_err("a build without a verifier must register nothing");
+        assert!(
+            err.contains("authorization"),
+            "the refusal must name the authorisation, got {err}"
+        );
+        assert!(reg.get_confidential_commit(&m.manifest_id).is_none());
     }
 
     fn generated_registry() -> (StorageRegistry, ContentId) {

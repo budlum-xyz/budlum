@@ -996,7 +996,7 @@ impl AiRegistry {
     ///
     /// `effort.rs` Kural 2: "a request above every declared ceiling must fail
     /// closed rather than be silently downgraded to a cheaper answer."
-    /// `None` = servis edilebilir.
+    /// `None` = serviceable.
     #[must_use]
     pub fn unservable_reason(&self, tier: EffortTier) -> Option<String> {
         let ceilings = self.authorized_ceilings();

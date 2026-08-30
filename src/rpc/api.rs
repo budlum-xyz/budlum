@@ -337,6 +337,98 @@ pub trait BudlumApi {
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Optional node-side encode path: re-encode `data` under the scheme the
+    /// client-built `manifest` claims and refuse a mismatch. Costly; the
+    /// client-built register path remains the default. Three/Generated has no
+    /// body to re-encode - callers should not send one.
+    #[method(name = "bud_storageVerifyEncoding")]
+    async fn storage_verify_encoding(
+        &self,
+        data_hex: String,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Measure a QR feed before publishing it: every ceiling the pipe enforces,
+    /// the drop and frame schedule, what a viewer can rebuild from those frames,
+    /// and the commitments a publish would pin. Bounded by
+    /// `MAX_PREVIEW_CONTENT_BYTES`, so it is a question an operator can ask
+    /// twice on the same body and get the same answer.
+    #[method(name = "bud_storageQrFeedPreview")]
+    async fn storage_qr_feed_preview(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        manifest: Option<crate::storage::ContentManifest>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-emit `count` frames of that feed from `seq`, with the fold a client
+    /// checks them against. The caller supplies the body, so this publishes no
+    /// handle into stored content and grants nothing: whoever holds the bytes
+    /// can already produce the frames.
+    #[method(name = "bud_storageQrFeedFrames")]
+    async fn storage_qr_feed_frames(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        first_frame: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Issue a view grant (key handle on-chain; key material off-chain).
+    #[method(name = "bud_storageIssueViewGrant")]
+    async fn storage_issue_view_grant(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        grantee: Option<String>,
+        key_id: String,
+        policy: String,
+        opened_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_storageRevokeViewGrant")]
+    async fn storage_revoke_view_grant(
+        &self,
+        grant_id: u64,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Every view-grant row of a confidential object, with the count the node
+    /// treats as live. `liveOnly` asks for the live rows alone.
+    #[method(name = "bud_storageListViewGrants")]
+    async fn storage_list_view_grants(
+        &self,
+        content_id: String,
+        live_only: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_storageMayView")]
+    async fn storage_may_view(
+        &self,
+        content_id: String,
+        viewer: String,
+        key_id: String,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Classic/2.0 confidential body commit. Three/recipe-only is refused.
+    #[method(name = "bud_storageRegisterConfidentialCommit")]
+    async fn storage_register_confidential_commit(
+        &self,
+        content_id: String,
+        encryption: String,
+        ciphertext_root: String,
+        proof_kind: String,
+        authorization: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_storageGetConfidentialCommit")]
+    async fn storage_get_confidential_commit(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Open a new `StorageDeal` for a specific shard of a registered manifest.
     #[method(name = "bud_storageOpenDeal")]
     async fn storage_open_deal(
@@ -643,7 +735,7 @@ pub trait BudlumApi {
 
     /// Prepare an authorization-backed Pollen purchase without mutating state.
     ///
-    /// `buyer_signature`: buyer'in satin alma parametrelerinin tamamina
+    /// `buyer_signature`: the buyer signs the whole set of purchase
     /// (authorization, fiyat, sure, max_reads, payment_commitment, expiry)
     /// baglanmis ed25519 imzasi - Strix #358: imzasiz purchase kabul
     /// edilmez.

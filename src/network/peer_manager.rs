@@ -305,9 +305,38 @@ impl PeerManager {
     /// accumulated penalty.
     fn get_or_create(&mut self, peer_id: &PeerId) -> Option<&mut PeerScore> {
         if !self.peers.contains_key(peer_id) && self.peers.len() >= self.max_tracked_peers {
-            return None;
+            self.prune_spent_records();
+            if self.peers.len() >= self.max_tracked_peers {
+                return None;
+            }
         }
         Some(self.peers.entry(*peer_id).or_default())
+    }
+
+    /// Reclaim records that carry nothing worth keeping.
+    ///
+    /// A record is spent when its ban, if it ever had one, has expired, and no
+    /// penalty is left on the score. Without this the ceiling is a one-way
+    /// door: a peer id is a public key hash, so an attacker mints ten thousand
+    /// of them for free, fills the table once, and every peer the node has
+    /// never seen is refused for the rest of its uptime.
+    ///
+    /// What makes this safe against being turned into a ban-clearing
+    /// primitive is what it refuses to touch: a record whose ban is still
+    /// running is kept, and a record still carrying a penalty is kept. The
+    /// entries an attacker mints arrive through `report_invalid_handshake` and
+    /// friends, so they are negative-scored the moment they exist and stay.
+    /// Only a peer that has served its time and owes nothing can be dropped,
+    /// and dropping that one costs nothing the node still needs.
+    pub fn prune_spent_records(&mut self) -> usize {
+        let before = self.peers.len();
+        self.peers.retain(|_, s| {
+            if s.is_banned() {
+                return true;
+            }
+            !(s.ban_expires_unix.is_some() && s.score >= 0)
+        });
+        before - self.peers.len()
     }
 
     /// Score entry for a peer whose entry is known to exist, or a refusal.
@@ -1160,6 +1189,79 @@ mod tests {
             "a ban was evicted to make room, which is a ban-clearing primitive"
         );
         assert!(manager.peers.len() <= 4);
+    }
+
+    /// The ceiling is a memory bound, not a life sentence.
+    ///
+    /// A record whose ban has expired and on which no penalty is left must be
+    /// reclaimable. Without that, ten thousand minted peer ids - and a peer id
+    /// is a public key hash, free to invent - fill the table once, after which
+    /// `check_rate_limit` refuses every peer the node has never seen, for the
+    /// rest of its uptime. Nothing short of a restart recovers it.
+    #[test]
+    fn h5_the_score_map_recovers_after_bans_expire() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 3;
+
+        let stale: Vec<_> = (0..3)
+            .map(|_| {
+                let p = test_peer_id();
+                manager.ban_peer(&p);
+                p
+            })
+            .collect();
+        assert_eq!(manager.tracked_peer_count(), 3, "table must be full");
+        assert_eq!(manager.get_score(&stale[0]), 0);
+
+        // The bans run out and no penalty is left on any of the records.
+        let past = Instant::now() - Duration::from_secs(1);
+        for p in &stale {
+            let entry = manager.peers.get_mut(p).expect("record");
+            entry.banned_until = Some(past);
+            entry.ban_expires_unix = Some(0);
+            entry.score = 0;
+        }
+        assert!(!manager.is_banned(&stale[0]), "the ban must have expired");
+
+        let fresh = test_peer_id();
+        assert!(
+            manager.check_rate_limit(&fresh),
+            "expired, penalty-free records were never reclaimed: a full table refuses every new peer for the rest of the uptime"
+        );
+    }
+
+    /// Reclaiming spent records must not become a way to clear a live ban.
+    ///
+    /// The two records an attacker would most like gone are exactly the two
+    /// the reclaim leaves alone: a running ban, and a penalty still on the
+    /// score. Minted peer ids always land in the second class, because they
+    /// arrive through a `report_*` path.
+    #[test]
+    fn h5_reclaim_never_touches_a_running_ban_or_a_live_penalty() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 2;
+
+        let banned = test_peer_id();
+        manager.ban_peer(&banned);
+        let penalised = test_peer_id();
+        manager.report_invalid_block(&penalised);
+        assert!(manager.is_banned(&banned));
+        assert!(manager.get_score(&penalised) < 0);
+
+        // The table is full; force the reclaim the same way a new peer would.
+        assert_eq!(manager.prune_spent_records(), 0, "nothing is spent yet");
+        assert!(manager.is_banned(&banned), "a running ban was reclaimed");
+        assert!(
+            manager.get_score(&penalised) < 0,
+            "a live penalty was reclaimed"
+        );
+
+        let fresh = test_peer_id();
+        assert!(
+            !manager.check_rate_limit(&fresh),
+            "a full table of unspent records still refuses new entries"
+        );
+        assert!(manager.is_banned(&banned), "refusal must not evict a ban");
     }
 
     /// A peer already tracked keeps working after the map fills.

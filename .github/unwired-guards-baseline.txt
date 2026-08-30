@@ -1,8 +1,8 @@
-5
+4
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
-# refuse/deny/guard is a refusal by its own naming. Five of them are
+# refuse/deny/guard is a refusal by its own naming. Four of them are
 # reachable only from tests, which means they protect the tests.
 #
 # The number may only go down. Wiring one up, or moving it into a module that
@@ -18,10 +18,9 @@
 # gets paid down; a number driven to zero by wiring refusals that exist to
 # stay unwired is worse than the number it replaced.
 #
-# The five, and why each one is still here rather than wired:
+# The four, and why each one is still here rather than wired:
 #
 #   src/ai/execution/verify.rs   verify_execution_proof_structural
-#   src/ai/execution/verify.rs   verify_execution_proof_full
 #   src/lubot/verify.rs          verify_inference_stark
 #       All three verify a STARK over an execution trace, and all three are
 #       blocked on the same gate: `MainnetActivation` ships with
@@ -46,8 +45,26 @@
 #       that context from registry state. Calling this would satisfy the gate
 #       and weaken the chain.
 #
-# Three closed since this file was last written, recorded so the direction is
-# visible rather than only the number:
+# Two call sites closed since this file was last written, and the number is
+# still five because the five listed below are different guards.
+#
+#   src/storage/qr_reemit.rs   verify_stream_id
+#       Called by `RevealSession::open` against a fold recomputed from the
+#       emitted frames. It left the count when that call landed: this gate
+#       measures call sites, so wiring removes a guard immediately. What it
+#       does not measure is whether the calling module is itself entered by a
+#       binary, and `RevealSession` is only re-exported from
+#       `src/storage/mod.rs`. That question is written here rather than hidden
+#       in the number.
+#
+#   src/storage/transformed.rs   verify_hash
+#       Called by `three_pipe::encode_plain` before the body moves into the A1
+#       pack, refusing a payload whose bytes no longer match the digest the
+#       transform pinned. Same accounting.
+#
+# The stale declarations were deleted rather than kept. A `WIRING: unwired` note
+# that contradicts the caller graph is worse than no note: it tells the next
+# reader not to look.
 #
 #   src/lubot/mod.rs             validate_inference_grant
 #       Wired into `build_lubot_request`, which now takes the grant as a

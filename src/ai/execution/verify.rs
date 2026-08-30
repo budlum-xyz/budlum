@@ -1,7 +1,8 @@
 //! Structural + cryptographic verification of AI execution proofs.
 
+use crate::ai::execution::stark::verify_execution_proof_stark;
 use crate::ai::types::{AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelSpec};
-use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
+use bud_proof::ExecutionPublicInputs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionVerifyReport {
@@ -18,6 +19,14 @@ pub struct ExecutionVerifyReport {
     /// field a prover could run the registered program over any weights.
     pub weights_bound: bool,
     pub stark_ok: Option<bool>,
+    /// Why the STARK attempt failed, kept verbatim from the verifier.
+    ///
+    /// `stark_ok` alone says that the proof was rejected; the string is what
+    /// a block producer or a relayer has to see to know which half of the
+    /// envelope to fix. `verify_execution_proof_full` fills it so the caller
+    /// that rejects the transaction can name the reason instead of reporting a
+    /// bare false.
+    pub stark_error: Option<String>,
 }
 
 impl ExecutionVerifyReport {
@@ -75,6 +84,7 @@ pub fn verify_execution_proof_structural_with_model(
         program_hash_matches_model,
         weights_bound,
         stark_ok: None,
+        stark_error: None,
     }
 }
 
@@ -116,28 +126,14 @@ pub fn expected_initial_state_root(
     ))
 }
 
-pub fn verify_execution_proof_stark(
-    proof: &AiExecutionProof,
-    program: &[u64],
-    expected_inputs: &ExecutionPublicInputs,
-) -> Result<(), String> {
-    if proof.proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES {
-        return Err("execution proof_bytes exceed MAX_PROOF_BYTES".into());
-    }
-    let envelope: ProofEnvelope = postcard::from_bytes(&proof.proof_bytes)
-        .map_err(|e| format!("execution proof deserialize: {e}"))?;
-    if envelope.public_inputs_hash != expected_inputs.hash() {
-        return Err("execution proof public_inputs_hash mismatch".into());
-    }
-    if expected_inputs.program_hash != proof.program_hash {
-        return Err("execution proof program_hash != public_inputs.program_hash".into());
-    }
-    Prover::verify(&envelope, expected_inputs, program)
-        .map_err(|e| format!("execution STARK verify failed: {e:?}"))?;
-    Ok(())
-}
-
-/// Full L1 path: structural + optional STARK when `program` is provided.
+/// Full L1 path: structural checks plus the STARK, one call, `program` and the
+/// public inputs supplied together.
+///
+/// This is the entry point the transaction path uses. It exists so the two
+/// halves cannot be taken apart by a caller: an executor that reaches for the
+/// structural function alone accepts a proof it never cryptographically
+/// checked, and one that reaches for the STARK alone accepts a proof whose
+/// commitments do not match the request it is attached to.
 pub fn verify_execution_proof_full(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,
@@ -149,7 +145,10 @@ pub fn verify_execution_proof_full(
     if let Some((program, pi)) = program_and_pi {
         match verify_execution_proof_stark(proof, program, pi) {
             Ok(()) => rep.stark_ok = Some(true),
-            Err(_) => rep.stark_ok = Some(false),
+            Err(e) => {
+                rep.stark_ok = Some(false);
+                rep.stark_error = Some(e);
+            }
         }
     }
     rep

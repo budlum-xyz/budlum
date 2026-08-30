@@ -1,5 +1,5 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe`
+// block enters, the build FAILS (regression gate). Same policy as the main crate.
 #![forbid(unsafe_code)]
 //! # lubot-serve - the serving bridge skeleton
 //!
@@ -9,6 +9,8 @@
 //! bridge connects to the a model vendor-compatible endpoint of a resident-batch engine or a resident-graph engine, and the
 //! chain queries are a fail-closed draft.
 
+pub mod bridge;
 pub mod chain;
 pub mod config;
 pub mod health;
+pub mod residency;

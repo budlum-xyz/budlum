@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 lubot-core = { path = "../lubot-core" }
+lubot-data = { path = "../lubot-data" }
+lubot-integrations = { path = "../lubot-integrations" }
 lubot-serve = { path = "../lubot-serve" }
 lubot-tune = { path = "../lubot-tune" }
 serde = { version = "1", features = ["derive"] }

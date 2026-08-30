@@ -20,6 +20,14 @@ p2p-mdns = ["libp2p/mdns"]
 
 [dependencies]
 sha2 = "0.11"
+# zlib for Three payload pack (K-QR-SIKISTIR: only when it shrinks).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# G1 payload AEAD (T11): content bytes encrypted before A1 pack.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# ISO QR encode for Three optical frames (K-QR: EC=L, mask pin). MIT/Apache.
+qrcode = { version = "0.14", default-features = false, features = [] }
+# Decode QR modules from our deterministic PNGs (MIT/Apache).
+rqrr = "0.10"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -171,6 +179,22 @@ path = "benches/single_node/internal_pipeline_tps.rs"
 [[bench]]
 name = "timing_safe"
 path = "benches/micro/timing_safe.rs"
+harness = false
+
+# Ratio-pipeline packing throughput, serial against rayon. Runs in CI as the
+# `Ratio rayon vs serial throughput` step; its numbers belong to the host that ran
+# the step, so nothing in the tree pins them.
+[[bench]]
+name = "ratio_rayon"
+path = "benches/micro/ratio_rayon.rs"
+harness = false
+
+# Parity-row throughput and the generate-to-reference roundtrip, printed by
+# the CI step `Erasure parity rows rayon vs serial throughput`; its numbers
+# belong to the host that ran the step, so nothing in the tree pins them.
+[[bench]]
+name = "erasure_rows"
+path = "benches/micro/erasure_rows.rs"
 harness = false
 
 # Domain throughput/latency benchmarks (criterion.rs)

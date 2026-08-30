@@ -6,7 +6,7 @@ use crate::storage::db::Storage;
 /// B.U.D. Universal Gateway.
 /// Resolves a BNS name (.bud) to content stored in B.U.D.
 ///
-/// Bitswap + ContentDiscovery P2P fetch entegre edildi.
+/// Bitswap + ContentDiscovery P2P fetch is integrated.
 pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 
 fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -32,6 +32,15 @@ fn render_from_recipe(
     use crate::storage::generated::ContentSource;
     let spec = match &manifest.source {
         ContentSource::Generated(spec) => spec,
+        // Sealed recipes have no seed on chain: regenerating here would be
+        // impossible, and falling through to stored bytes would serve the wrong
+        // category under a Three name.
+        ContentSource::SealedGenerated(_) => {
+            return Err(
+                "sealed recipe cannot be rendered without a view-granted seed; the chain holds no seed"
+                    .into(),
+            );
+        }
         // `Hybrid` and `Derived` cannot be produced from the recipe alone: the
         // first carries a prefix that cannot be regenerated, and the second
         // depends on the master's bytes. Both are left to the stored-byte
@@ -52,7 +61,7 @@ fn render_from_recipe(
     // would compare against the identity of the same bytes without a source, and
     // even a correct generation would be refused.
     //
-    // Dilim boyu: kimlik shard listesi uzerinden kurulur, dolayisiyla
+    // Slice length: identity is built over the shard list, so
     // the bytes must be sliced at the same size as the original. Assuming a single part
     // would refuse every multi-part object.
     let chunk_size = manifest
@@ -110,7 +119,7 @@ pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 /// cost.
 #[derive(Default)]
 struct GenerationCache {
-    /// Ekleme sirasinda tutulan girdiler.
+    /// The entries held in insertion order.
     entries: std::collections::VecDeque<(ContentId, Vec<u8>)>,
 }
 
@@ -293,12 +302,17 @@ impl BudGateway {
             .await
             .ok_or_else(|| format!("BNS name '{name}' resolves to no known manifest"))?;
 
-        let crate::storage::generated::ContentSource::Generated(ref spec) = manifest.source else {
-            return Err(
-                "only recipe-born content can be rendered into a requested format; \
-                 stored bytes already are their format"
-                    .into(),
-            );
+        let spec = match &manifest.source {
+            crate::storage::generated::ContentSource::Generated(spec) => spec,
+            crate::storage::generated::ContentSource::SealedGenerated(_) => {
+                return Err("sealed recipe cannot be rendered without a view-granted seed".into());
+            }
+            _ => {
+                return Err(
+                    "only recipe-born content can be rendered into a requested format;                      stored bytes already are their format"
+                        .into(),
+                );
+            }
         };
 
         let bytes = crate::storage::render::render(spec, format)

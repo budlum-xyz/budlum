@@ -8,7 +8,7 @@
 //! serbesttir: CVE-2026-46654 ve gnark'in Last Challenge Attack'i bu sinifin
 //! iki ornegi.
 //!
-//! Bugun bu aynalama iki dosyanin yorumlarinda anlatiliyor ("the verifier
+//! Today that mirroring is described in the comments of two files ("the verifier
 //! absorbs the same slice at the same point") and **nothing enforces it**.
 //! Adding an absorption on one side and forgetting the other is a silent
 //! change: the code compiles, the tests pass, and the transcripts drift
@@ -29,7 +29,7 @@
 //!
 //! It does not check the correctness of the absorbed **value** - if both sides absorb the wrong
 //! thing in the same order the gate stays silent. What it catches is divergence, and divergence is this family's
-//! bilinen giris kapisi.
+//! a known entry point.
 
 use std::path::Path;
 
@@ -104,12 +104,12 @@ fn absorptions(text: &str) -> Vec<Absorb> {
 
 /// # Errors
 ///
-/// Iki dosyanin emilim dizileri uzunlukta veya sirada ayrisirsa.
+/// When the two files' absorption sequences differ in length or order.
 pub fn run(root: &Path) -> Result<String, String> {
     let p = std::fs::read_to_string(root.join(PROVER))
-        .map_err(|e| format!("{PROVER} okunamadi: {e}"))?;
+        .map_err(|e| format!("could not read {PROVER}: {e}"))?;
     let v = std::fs::read_to_string(root.join(VERIFIER))
-        .map_err(|e| format!("{VERIFIER} okunamadi: {e}"))?;
+        .map_err(|e| format!("could not read {VERIFIER}: {e}"))?;
 
     let pa = absorptions(&p);
     let va = absorptions(&v);
@@ -174,7 +174,7 @@ pub fn self_test() -> Result<String, String> {
     // An example in a comment must not shift the sequence.
     let commented = r"
         challenger.observe(Val::<SC>::from_u8(log_degree as u8));
-        // challenger.observe(bir_ornek);
+        // challenger.observe(an_example);
         challenger.observe_slice(&config.security_parameters());
         challenger.observe(trace_commit.clone());
     ";

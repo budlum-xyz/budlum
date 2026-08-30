@@ -14,6 +14,13 @@ use std::collections::{BTreeMap, BTreeSet};
 pub type EmbeddingVector = Vec<f64>;
 
 /// Frequent English and Turkish words (they reduce the embedding noise).
+///
+/// The Turkish entries are data, not prose: they are the tokens this embedder
+/// must recognise in order to serve Turkish documents, so translating them
+/// would break the feature the list exists for. They are written without
+/// diacritics because the tokeniser folds to ASCII before lookup, and the
+/// `tree-is-english` baseline carries this file for that reason rather than as
+/// an untranslated comment.
 const STOPWORDS: &[&str] = &[
     "the", "is", "in", "it", "of", "and", "or", "to", "a", "an", "for", "on", "with", "as", "at",
     "be", "this", "that", "are", "was", "were", "by", "from", "not", "but", "if", "so", "do", "we",
@@ -214,8 +221,8 @@ mod tests {
     fn deterministic_embeddings() {
         let mut e = TfIdfEmbedder::new(32);
         e.fit(&[
-            "budlum depolama katmani".to_string(),
-            "lubot cikarim".to_string(),
+            "budlum storage layer".to_string(),
+            "lubot inference".to_string(),
         ]);
         assert_eq!(e.embed("budlum depolama"), e.embed("budlum depolama"));
     }

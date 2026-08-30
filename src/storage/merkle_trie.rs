@@ -85,7 +85,7 @@ pub struct MerkleTrie {
 }
 
 impl MerkleTrie {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             leaves: BTreeMap::new(),
         }
@@ -335,7 +335,7 @@ fn hash_leaves(leaves: &[([u8; 32], u64, u64)], from_bit: usize) -> [u8; 32] {
     combine_nodes(&l, &r)
 }
 
-fn get_bit(address: &[u8; 32], level: usize) -> bool {
+const fn get_bit(address: &[u8; 32], level: usize) -> bool {
     let byte_idx = level / 8;
     let bit_idx = 7 - (level % 8);
     if byte_idx >= 32 {

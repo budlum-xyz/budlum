@@ -294,6 +294,15 @@ impl ProofVerifier {
         if envelope.backend.is_empty() {
             return Err(ProofVerifyError::UnsupportedBackend("empty".into()));
         }
+        // The same word the transaction gate accepts. Checked here rather than
+        // trusted from there, because this function is the definition of a
+        // well-formed envelope and any other caller - a relayer, a test, a future
+        // entry point - has to be refused by the same rule, not by a copy of it.
+        if envelope.backend != crate::execution::executor::AI_EXECUTION_BACKEND_PLONKY3 {
+            return Err(ProofVerifyError::UnsupportedBackend(
+                envelope.backend.clone(),
+            ));
+        }
         if envelope.p3_version.is_empty() || envelope.fri_params_id.is_empty() {
             return Err(ProofVerifyError::InvalidProof(
                 "proof metadata incomplete (p3_version / fri_params_id)".into(),
@@ -332,7 +341,7 @@ mod tests {
     fn make_envelope(inputs: &ExecutionPublicInputs) -> ProofEnvelope {
         ProofEnvelope {
             proof_format_version: 1,
-            backend: "plonky3-stark".into(),
+            backend: crate::execution::executor::AI_EXECUTION_BACKEND_PLONKY3.into(),
             p3_version: "0.6".into(),
             fri_params_id: "test-fri".into(),
             public_inputs_hash: inputs.hash(),

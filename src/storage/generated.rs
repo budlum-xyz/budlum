@@ -4,7 +4,7 @@
 //! removes them: an object whose bytes follow from a short description does
 //! not need the bytes on disk at all, only the description. Measured against
 //! the alternatives, it is the only lever that reaches a zero multiplier,
-//! and every other lever is an asymptote that approaches 1.0 from above.
+//! and every other lever is an asymptote that approaches one from above.
 //!
 //! # Why the chain can trust a generated object
 //!
@@ -88,6 +88,79 @@ use crate::storage::fixed_point::{
     fixed_clamp_unit, fixed_div, fixed_from_int, fixed_mul, fixed_sqrt, fixed_to_int, FIXED_ONE,
 };
 
+/// Which B.U.D. storage edition a manifest claims.
+///
+/// # Why two editions
+///
+/// **Classic (editions one and two)** is the deal-and-body world: operators may hold real
+/// byte bodies under `Stored` or a `Hybrid` prefix. Users who want custody of
+/// irreproducible bytes stay here.
+///
+/// **Three (edition three)** is recipe-only. The durable object on the network is a
+/// generative recipe; QR-video and other presentations are derivatives and are
+/// not stored. A validator unplugging cannot "lose the file" because there is
+/// no file body to lose - only a recipe everyone can re-run. Bodies are not
+/// banned from the project; they are banned from *this* edition.
+///
+/// The default is `Classic` so every manifest written before this field keeps
+/// its meaning and its id (the commitment adds no bytes for Classic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum BudStorageEdition {
+    /// BUD Classic: bodies allowed (`Stored`, `Hybrid`, …).
+    #[default]
+    Classic = 1,
+    /// BUD edition Three: generative recipe only; no durable body.
+    Three = 3,
+}
+
+impl BudStorageEdition {
+    /// Whether this edition permits a durable byte body on the network.
+    #[must_use]
+    pub const fn admits_body(self) -> bool {
+        matches!(self, Self::Classic)
+    }
+
+    /// Bytes folded into the manifest id. `Classic` adds nothing so pre-edition
+    /// ids stay bit-identical; `Three` binds the claim so it cannot be rewritten
+    /// under a stable id.
+    #[must_use]
+    pub fn commitment_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Classic => Vec::new(),
+            Self::Three => b"BUD_EDITION_3".to_vec(),
+        }
+    }
+
+    /// Refuse source regimes that imply a durable body (or depend on one)
+    /// when the edition is Three.
+    ///
+    /// # Errors
+    ///
+    /// Returns a reason string when `Three` is paired with anything but
+    /// `Generated`.
+    pub fn check_source(self, source: &ContentSource) -> Result<(), String> {
+        match self {
+            Self::Classic => Ok(()),
+            Self::Three => match source {
+                ContentSource::Generated(_) | ContentSource::SealedGenerated(_) => Ok(()),
+                ContentSource::Stored => Err(
+                    "BUD edition Three admits no durable body: ContentSource::Stored is Classic-only"
+                        .into(),
+                ),
+                ContentSource::Hybrid { .. } => Err(
+                    "BUD edition Three admits no durable body: ContentSource::Hybrid is Classic-only"
+                        .into(),
+                ),
+                ContentSource::Derived(_) => Err(
+                    "BUD edition Three admits no durable body: Derived depends on a master body and is Classic-only"
+                        .into(),
+                ),
+            },
+        }
+    }
+}
+
 /// How the bytes behind a manifest come to exist.
 ///
 /// `Stored` is what every manifest written before this meant, so it is the
@@ -102,7 +175,23 @@ pub enum ContentSource {
     ///
     /// What is stored is this description. What is served is the output of
     /// running it, checked against `manifest_id` before it is handed back.
+    ///
+    /// **Public recipe.** The seed is on chain; anyone who reads the manifest
+    /// can regenerate. That is the publicly readable Three surface.
     Generated(GeneratedSpec),
+    /// Three private recipe: the network holds a **commitment** to the full
+    /// `GeneratedSpec`, not the seed.
+    ///
+    /// Anyone who sees the chain learns generator class, length and budget -
+    /// enough to meter and refuse `DoS` - but cannot regenerate the object
+    /// without the seed. The seed is delivered off-chain under a view-grant
+    /// (`ViewGrantRegistry`). Putting the seed on a public chain under Three
+    /// would make the "private" label a lie (threat T1).
+    ///
+    /// Registration does **not** run the recipe (no seed). Reveal-time
+    /// `generate_and_verify` with the granted seed is the check that the
+    /// commitment was honest.
+    SealedGenerated(SealedGeneratedSpec),
     /// A stored prefix, and the rest produced on read.
     ///
     /// The case the other two variants cannot express. A progressive JPEG's
@@ -148,7 +237,7 @@ pub enum ContentSource {
 /// Kaynak rejiminin taahhut baytlari.
 ///
 /// `Stored` **bos** dizi verir. Bu kasitli: kaynak alani manifest kimligine
-/// sonradan eklendi ve `Stored` bu alandan onceki her manifest'in anlamiydi.
+/// was added later, and `Stored` was the meaning of every manifest before it.
 /// Bos dizi, o manifest'lerin id'sinin birebir ayni kalmasini saglar - bir
 /// alan eklemek eski kimlikleri degistirmemeli.
 ///
@@ -162,6 +251,12 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
             let mut out = Vec::with_capacity(1 + 32);
             out.push(1u8);
             out.extend_from_slice(&generated_spec_digest(spec));
+            out
+        }
+        ContentSource::SealedGenerated(sealed) => {
+            let mut out = Vec::with_capacity(1 + 32);
+            out.push(4u8);
+            out.extend_from_slice(&sealed_generated_commitment(sealed));
             out
         }
         ContentSource::Hybrid { prefix_bytes, spec } => {
@@ -185,7 +280,7 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
 
 /// How many independent copies must be held for this source.
 ///
-/// **The core rule of B.U.D. 3.0.** Until now the replication target was a
+/// **The core rule of B.U.D. Three.** Until now the replication target was a
 /// fixed number, `STORAGE_REPLICATION_TARGET` = 3, and it did not ask what it
 /// was holding. Holding three copies of content that is born from a recipe is
 /// storing the same deterministic generator three times: the copies **add no
@@ -204,9 +299,9 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
 /// generator. Granting a partial discount would treat an unprotected byte as
 /// though it were protected.
 #[must_use]
-pub fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
+pub const fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
     match source {
-        ContentSource::Generated(_) => 1,
+        ContentSource::Generated(_) | ContentSource::SealedGenerated(_) => 1,
         // No discount. The recipe depends on a master, so the durability
         // argument that earns `Generated` its single replica does not apply:
         // losing the master loses the derivation too. The master carries its
@@ -231,7 +326,7 @@ pub fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
 pub fn held_bytes(source: &ContentSource, object_bytes: u64) -> Option<u64> {
     match source {
         ContentSource::Stored => Some(object_bytes),
-        ContentSource::Generated(_) => Some(0),
+        ContentSource::Generated(_) | ContentSource::SealedGenerated(_) => Some(0),
         ContentSource::Hybrid { prefix_bytes, .. } => {
             let prefix = u64::from(*prefix_bytes);
             if prefix > object_bytes {
@@ -265,6 +360,81 @@ pub struct GeneratedSpec {
     /// than storing it takes the storage path instead. What this bounds is
     /// the work an unpaid generator can extract from a reader.
     pub step_budget: u32,
+}
+
+/// On-chain shape of a **private** Three recipe: no seed bytes.
+///
+/// `recipe_commitment` MUST equal [`generated_spec_digest`] of the full
+/// off-chain `GeneratedSpec` (seed included). Public fields exist only so
+/// validators can meter and refuse absurd budgets without learning the seed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SealedGeneratedSpec {
+    pub generator: GeneratorId,
+    pub output_len: u32,
+    pub step_budget: u32,
+    /// `generated_spec_digest` of the full private `GeneratedSpec`.
+    pub recipe_commitment: [u8; 32],
+}
+
+impl SealedGeneratedSpec {
+    /// Build the sealed form from a full private recipe.
+    #[must_use]
+    pub fn seal(full: &GeneratedSpec) -> Self {
+        Self {
+            generator: full.generator,
+            output_len: full.output_len,
+            step_budget: full.step_budget,
+            recipe_commitment: generated_spec_digest(full),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Mismatch when the candidate seed/spec does not open this commitment,
+    /// or public fields disagree with the full spec.
+    pub fn open_with(&self, full: &GeneratedSpec) -> Result<(), String> {
+        if full.generator != self.generator {
+            return Err("sealed recipe generator mismatch".into());
+        }
+        if full.output_len != self.output_len {
+            return Err("sealed recipe output_len mismatch".into());
+        }
+        if full.step_budget != self.step_budget {
+            return Err("sealed recipe step_budget mismatch".into());
+        }
+        let d = generated_spec_digest(full);
+        if d != self.recipe_commitment {
+            return Err("sealed recipe commitment mismatch (wrong seed or fields)".into());
+        }
+        Ok(())
+    }
+}
+
+/// Commitment over the sealed public fields + recipe commitment.
+#[must_use]
+pub fn sealed_generated_commitment(sealed: &SealedGeneratedSpec) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_SEALED_GENERATED_V1",
+        &[sealed.generator.generator_commitment_tag()],
+        &sealed.output_len.to_le_bytes(),
+        &sealed.step_budget.to_le_bytes(),
+        &sealed.recipe_commitment,
+    ])
+}
+
+/// Whether this source puts a regenerating seed on the public chain.
+#[must_use]
+pub const fn recipe_seed_is_public(source: &ContentSource) -> bool {
+    matches!(source, ContentSource::Generated(_))
+}
+
+/// Whether this source is a Three-compatible recipe (public or sealed).
+#[must_use]
+pub const fn is_three_recipe(source: &ContentSource) -> bool {
+    matches!(
+        source,
+        ContentSource::Generated(_) | ContentSource::SealedGenerated(_)
+    )
 }
 
 /// Which generator to run.
@@ -445,7 +615,7 @@ pub const MAX_STEPS_PER_OUTPUT_BYTE: u32 = 8;
 /// `base + size * ratio`. Small outputs therefore have their setup cost
 /// covered, on large outputs the base becomes negligible and the ratio again
 /// decides the bound, which means the bound tightens rather than loosens as the
-/// DoS surface grows.
+/// `DoS` surface grows.
 pub const STEP_BUDGET_BASE: u32 = 4096;
 
 /// A step meter.
@@ -790,6 +960,38 @@ mod tests {
             output_len: len,
             step_budget: budget,
         }
+    }
+
+    #[test]
+    fn edition_three_rejects_every_body_regime() {
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [9u8; 32],
+            output_len: 64,
+            step_budget: 20_000,
+        };
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Generated(spec.clone()))
+            .is_ok());
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Stored)
+            .is_err());
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Hybrid {
+                prefix_bytes: 1,
+                spec: spec.clone(),
+            })
+            .is_err());
+        assert!(BudStorageEdition::Classic
+            .check_source(&ContentSource::Stored)
+            .is_ok());
+        assert!(!BudStorageEdition::Three.admits_body());
+        assert!(BudStorageEdition::Classic.admits_body());
+        assert!(BudStorageEdition::Classic.commitment_bytes().is_empty());
+        assert_eq!(
+            BudStorageEdition::Three.commitment_bytes(),
+            b"BUD_EDITION_3".to_vec()
+        );
     }
 
     #[test]
@@ -1340,5 +1542,59 @@ mod tests {
         };
         assert!(spec.check_master_is_stored(true).is_err());
         assert!(spec.check_master_is_stored(false).is_ok());
+    }
+    #[test]
+    fn sealed_recipe_hides_seed_and_opens_with_full_spec() {
+        let full = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [0xABu8; 32],
+            output_len: 32 * 32,
+            step_budget: 20_000,
+        };
+        let sealed = SealedGeneratedSpec::seal(&full);
+        assert_ne!(sealed.recipe_commitment, [0u8; 32]);
+        // On-chain shape has no seed field.
+        let _ = sealed.generator;
+        sealed.open_with(&full).expect("honest open");
+        let mut wrong = full.clone();
+        wrong.seed[0] ^= 1;
+        assert!(sealed.open_with(&wrong).is_err());
+    }
+
+    #[test]
+    fn three_accepts_sealed_and_public_recipes_only() {
+        let full = GeneratedSpec {
+            generator: GeneratorId::Gradient,
+            seed: [3u8; 32],
+            output_len: 64,
+            step_budget: 8_000,
+        };
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::SealedGenerated(SealedGeneratedSpec::seal(
+                &full
+            )))
+            .is_ok());
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Generated(full))
+            .is_ok());
+        assert!(BudStorageEdition::Three
+            .check_source(&ContentSource::Stored)
+            .is_err());
+    }
+
+    #[test]
+    fn public_generated_seed_is_marked_public() {
+        let full = GeneratedSpec {
+            generator: GeneratorId::Rings,
+            seed: [1u8; 32],
+            output_len: 16,
+            step_budget: 4_000,
+        };
+        assert!(recipe_seed_is_public(&ContentSource::Generated(
+            full.clone()
+        )));
+        assert!(!recipe_seed_is_public(&ContentSource::SealedGenerated(
+            SealedGeneratedSpec::seal(&full)
+        )));
     }
 }

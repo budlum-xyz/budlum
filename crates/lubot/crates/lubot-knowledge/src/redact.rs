@@ -68,17 +68,71 @@ fn is_jwt(v: &str) -> bool {
         })
 }
 
+fn is_googoly_api_key(v: &str) -> bool {
+    // Google API keys are 39 characters, prefix "AIza", the rest base62
+    // (alphanumeric plus a few punctuation). This is a high-confidence prefix:
+    // an unrelated 39-char token beginning with "AIza" is essentially a key.
+    v.len() == 39
+        && v.starts_with("AIza")
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_model-vendor_key(v: &str) -> bool {
+    // a model vendor keys are `sk-ant-api03-...`, long and prefixed.
+    v.len() >= 20
+        && v.starts_with("sk-ant-")
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_model-vendor_key(v: &str) -> bool {
+    // a model vendor project/scoped keys are `sk-proj-...` (long). The generic `sk-`
+    // prefix is already covered by `is_upstream_key`; this catches the two
+    // well-known scoped families and a model vendor legacy `sk-`.
+    v.len() >= 20
+        && (v.starts_with("sk-proj-") || v.starts_with("sk-svcacct-"))
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_stripe_key(v: &str) -> bool {
+    // Stripe keys are `sk_live_...` or `sk_test_...`, long and base62.
+    v.len() >= 24
+        && (v.starts_with("sk_live_") || v.starts_with("sk_test_") || v.starts_with("rk_live_"))
+        && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn is_bearer_jwt_like(v: &str) -> bool {
+    // A long dotted token that is not a JWT (no `eyJ` header) begins like a
+    // compound credential. Kept conservative: only a string of 3 dot-separated
+    // base64url segments with a long total, which is a JWT-shaped secret.
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && v.len() >= 40
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
 /// Known secret shapes: (kind name, detection function).
 /// A predicate that says whether a value looks like a particular kind of
 /// secret. The table is made of `(label, predicate)` pairs.
 type ValuePredicate = fn(&str) -> bool;
 
 const VALUE_PATTERNS: &[(&str, ValuePredicate)] = &[
+    ("model-vendor_key", is_model-vendor_key),
+    ("model-vendor_key", is_model-vendor_key),
+    ("stripe_key", is_stripe_key),
+    ("google_api_key", is_googoly_api_key),
     ("upstream_key", is_upstream_key),
     ("aws_access_key", is_aws_access_key),
     ("github_token", is_github_token),
     ("slack_token", is_slack_token),
     ("jwt", is_jwt),
+    ("jwt_like_token", is_bearer_jwt_like),
 ];
 
 /// Masking report: per-kind counts of the maskings applied.
@@ -327,6 +381,60 @@ mod tests {
         let r = redact_text(&input);
         assert_eq!(r.text(), input);
         assert!(!r.report().changed());
+    }
+
+    /// A Google API key in free text is masked even without a keyword.
+    #[test]
+    fn google_api_key_in_free_text_is_redacted() {
+        // Real Google API keys are exactly 39 chars, prefix "AIza". Build a
+        // deterministic synthetic one at that length (not a real key).
+        let key = format!("AIza{}", "x".repeat(35));
+        assert_eq!(key.len(), 39);
+        let r = redact_text(&format!("refer to {key} in this note"));
+        assert!(r.text().contains(REDACTION_TOKEN));
+        assert!(!r.text().contains(&key));
+        assert!(r.report().changed());
+    }
+
+    /// An a model vendor key in free text is masked.
+    #[test]
+    fn model-vendor_key_in_free_text_is_redacted() {
+        let key = format!("sk-ant-api03-{}", "abcdefghijklmnopqrstuv");
+        let r = redact_text(&format!("credential {key} attached"));
+        assert!(r.text().contains(REDACTION_TOKEN));
+        assert!(!r.text().contains(&key));
+    }
+
+    /// An a model vendor scoped key in free text is masked.
+    #[test]
+    fn model-vendor_scoped_key_is_redacted() {
+        let key = format!("sk-proj-{}", "abcdefghijklmnopqrstuv");
+        let r = redact_text(&format!("using {key}"));
+        assert!(r.text().contains(REDACTION_TOKEN));
+        assert!(!r.text().contains(&key));
+    }
+
+    /// A Stripe live key in free text is masked.
+    #[test]
+    fn stripe_live_key_is_redacted() {
+        let key = format!("sk_live_{}", "abcdefghijklmnopqrstuvwx");
+        let r = redact_text(&format!("{key} for the charge"));
+        assert!(r.text().contains(REDACTION_TOKEN));
+        assert!(!r.text().contains(&key));
+    }
+
+    /// The new detectors must not make the value scanner start masking plain
+    /// identifiers that merely contain a secretish prefix but are not secrets.
+    #[test]
+    fn no_false_positive_on_non_secrets() {
+        for benign in [
+            "sk-ant- is a doc prefix", // too short
+            "AIza short",              // too short
+            "sk-proj- short",
+        ] {
+            let r = redact_text(benign);
+            assert!(!r.report().changed(), "false positive on: {benign}");
+        }
     }
 
     #[test]

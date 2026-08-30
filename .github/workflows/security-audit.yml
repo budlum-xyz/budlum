@@ -79,10 +79,10 @@ jobs:
         with:
           persist-credentials: false
       # NOTE: `comment-on-pr` is NOT an input of this action, and on every run
-      # "Unexpected input(s) 'comment-on-pr'" uyarisi uretiyordu. v0.6.1'in
-      # Kabul ettigi girdiler: inputs, collect, online-audits, persona,
+      # raised an "Unexpected input(s) 'comment-on-pr'" warning. The inputs
+      # v0.6.1 accepts: inputs, collect, online-audits, persona,
       # Min-severity, min-confidence, version, token, advanced-security,
-      # Color, annotations, config, fail-on-no-inputs. Bilinmeyen girdiler
+      # color, annotations, config, fail-on-no-inputs. Unknown inputs
       # Unknown inputs are ignored silently, so the setting never applied.
       # Canary: a deliberately vulnerable workflow is written and zizmor is expected
       # to find it. If it does not, a clean report means nothing, and because this
@@ -256,7 +256,7 @@ jobs:
     # them alone.
     #
     # If it goes red the meaning is clear: a feature combination does not compile,
-    # ki bu main'e girmemesi gereken tek sey.
+    # which is the one thing that must not reach main.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

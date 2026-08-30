@@ -351,6 +351,50 @@ pub enum ChainCommand {
         manifest: crate::storage::ContentManifest,
         response: oneshot::Sender<Result<crate::storage::ContentId, String>>,
     },
+    /// View-key permission book (Classic private body or Three encrypted recipe).
+    IssueViewGrant {
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        grantee: Option<crate::core::address::Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    RevokeViewGrant {
+        grant_id: u64,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+        response: oneshot::Sender<Result<crate::storage::ViewGrant, String>>,
+    },
+    /// Every grant row of one content, with how many of them are live. A read
+    /// command: it moves nothing and cannot be refused by the mainnet guard.
+    GetViewGrants {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<(Vec<crate::storage::ViewGrant>, usize)>,
+    },
+    MayViewContent {
+        content_id: crate::storage::ContentId,
+        viewer: crate::core::address::Address,
+        key_id: [u8; 32],
+        owner: crate::core::address::Address,
+        response: oneshot::Sender<bool>,
+    },
+    /// Classic/2.0 confidential body commit (not Three).
+    RegisterConfidentialCommit {
+        commit: crate::storage::ConfidentialBodyCommit,
+        auth: crate::storage::GrantAuthorization,
+        response: oneshot::Sender<Result<[u8; 32], String>>,
+    },
+    GetConfidentialCommit {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::storage::ConfidentialBodyCommit>>,
+    },
+    /// Who the chain believes speaks for a confidential object.
+    GetConfidentialOwner {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::core::address::Address>>,
+    },
     OpenStorageChallenge {
         request: crate::domain::storage_deal::RetrievalChallengeRequest,
         response: oneshot::Sender<Result<u64, String>>,
@@ -911,6 +955,141 @@ impl ChainHandle {
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn issue_view_grant(
+        &self,
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        grantee: Option<crate::core::address::Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IssueViewGrant {
+                content_id,
+                auth,
+                grantee,
+                key_id,
+                policy,
+                opened_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn revoke_view_grant(
+        &self,
+        grant_id: u64,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::ViewGrant, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RevokeViewGrant {
+                grant_id,
+                auth,
+                at_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Grant rows of one content and how many of them are live.
+    pub async fn view_grants(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<(Vec<crate::storage::ViewGrant>, usize), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetViewGrants {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn may_view_content(
+        &self,
+        content_id: crate::storage::ContentId,
+        viewer: crate::core::address::Address,
+        key_id: [u8; 32],
+        owner: crate::core::address::Address,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::MayViewContent {
+                content_id,
+                viewer,
+                key_id,
+                owner,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn register_confidential_commit(
+        &self,
+        commit: crate::storage::ConfidentialBodyCommit,
+        auth: crate::storage::GrantAuthorization,
+    ) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterConfidentialCommit {
+                commit,
+                auth,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Who speaks for `content_id`: the manifest owner or the address that
+    /// registered the confidential commit. Read-only, and the reason it exists is
+    /// that a grant signature is checked against this address; a wallet has to be
+    /// able to see what the chain will compare before it spends a key on signing.
+    pub async fn confidential_owner(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<Option<crate::core::address::Address>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConfidentialOwner {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn get_confidential_commit(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<Option<crate::storage::ConfidentialBodyCommit>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConfidentialCommit {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
     /// Derive the coding audit for `manifest_id` at `challenge_id`.
@@ -2500,11 +2679,36 @@ impl ChainActor {
                         );
                     }
                 } else {
-                    tracing::warn!(
-                        "B.U.D. repair band: shard {} of {} has never had a deal; no ticket type exists for a never-placed shard",
-                        hex::encode(shard.shard_id.0),
-                        hex::encode(manifest_id.0)
-                    );
+                    // Bootstrap path: the shard is on the manifest and has never
+                    // held a deal. domain_id comes from any sibling deal on the
+                    // same object when one exists; otherwise the storage domain
+                    // this node is configured for (0 on a fresh registry).
+                    let domain_id = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_manifest(manifest_id)
+                        .first()
+                        .map(|d| d.domain_id)
+                        .unwrap_or(0);
+                    if let Some(ticket_id) = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .open_never_placed_ticket(
+                            domain_id,
+                            *manifest_id,
+                            shard.shard_id,
+                            0,
+                            current_epoch,
+                        )
+                    {
+                        tracing::info!(
+                            "B.U.D. opened never-placed ticket {ticket_id} for shard {} on {}",
+                            hex::encode(shard.shard_id.0),
+                            hex::encode(manifest_id.0)
+                        );
+                    }
                 }
             }
         }
@@ -3514,6 +3718,104 @@ impl ChainActor {
                         .map_err(|e| e.to_string());
                     let _ = response.send(persist.map(|_| manifest_id));
                 }
+                ChainCommand::IssueViewGrant {
+                    content_id,
+                    auth,
+                    grantee,
+                    key_id,
+                    policy,
+                    opened_epoch,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .issue_view_grant(content_id, &auth, grantee, key_id, policy, opened_epoch)
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::RevokeViewGrant {
+                    grant_id,
+                    auth,
+                    at_epoch,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .revoke_view_grant(grant_id, &auth, at_epoch)
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::GetViewGrants {
+                    content_id,
+                    response,
+                } => {
+                    let registry = &self.blockchain.state.storage_registry;
+                    let rows = registry.view_grants_for(&content_id);
+                    let live = registry.live_view_grant_count(&content_id);
+                    let _ = response.send((rows, live));
+                }
+                ChainCommand::MayViewContent {
+                    content_id,
+                    viewer,
+                    key_id,
+                    owner,
+                    response,
+                } => {
+                    let ok = self.blockchain.state.storage_registry.may_view(
+                        &content_id,
+                        &viewer,
+                        &key_id,
+                        &owner,
+                    );
+                    let _ = response.send(ok);
+                }
+                ChainCommand::RegisterConfidentialCommit {
+                    commit,
+                    auth,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .register_confidential_commit(commit, &auth);
+                    let _ = response.send(res);
+                }
+                ChainCommand::GetConfidentialOwner {
+                    content_id,
+                    response,
+                } => {
+                    let _ =
+                        response.send(self.blockchain.state.storage_registry.owner_of(&content_id));
+                }
+                ChainCommand::GetConfidentialCommit {
+                    content_id,
+                    response,
+                } => {
+                    let c = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_confidential_commit(&content_id)
+                        .cloned();
+                    let _ = response.send(c);
+                }
                 ChainCommand::OpenStorageChallenge { request, response } => {
                     if self.storage_economics_disabled_on_mainnet() {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
@@ -3826,6 +4128,16 @@ impl ChainActor {
                                 == crate::domain::storage_deal::ReallocationStatus::ActiveReplacement
                         })
                         .count();
+                    // A ticket's cause is the part of the incident an operator acts
+                    // on, and status alone cannot show it: a never-placed shard needs
+                    // a first deal opened, a failed one needs a holder replaced.
+                    let never_placed_tickets = reallocation_tickets
+                        .iter()
+                        .filter(|ticket| {
+                            ticket.cause
+                                == crate::domain::storage_deal::ReallocationCause::NeverPlaced
+                        })
+                        .count();
                     let stats_epoch = self.blockchain.last_block().index
                         / crate::core::chain_config::epoch_len_for_chain_id(
                             self.blockchain.chain_id,
@@ -3846,6 +4158,7 @@ impl ChainActor {
                         "underReplicatedTickets": under_replicated_tickets,
                         "activeReplacements": active_replacements,
                         "underReplicatedShards": under_replicated_shards,
+                        "neverPlacedTickets": never_placed_tickets,
                     }));
                 }
                 ChainCommand::GetStorageOperatorEconomics { operator, response } => {

@@ -398,7 +398,7 @@ fn a_proof_bound_to_another_chain_is_refused() {
 
 /// A proof produced for one height must not be submittable at another height.
 ///
-/// Kabul edilen iddianin anahtari `(alan, yukseklik)`. Baglama hash'i bu
+/// The accepted claim is keyed by `(domain, height)`. The binding hash
 /// does not cover both, a single valid proof can be submitted to every
 /// pair not yet claimed: the attacker only rebuilds the transport message and
 /// never touches the proof. A proof says "a program ran this way"; it does not say "this is
@@ -603,7 +603,7 @@ fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
 ///
 /// `gas_limit` and `gas_used` are inside the public inputs and the binding hash:
 /// the sender cannot change either afterwards. But nothing checked them **against each
-/// denetlenmezse tutarli sekilde imzalanmis bir asim kabul edilirdi.
+/// went unchecked, a consistently signed overrun would be accepted.
 ///
 /// The proof system does not constrain this relation - the STARK says "this program ran
 /// this way with these inputs", not that the declared ceiling was respected. Nor does the allowlist:
@@ -657,7 +657,7 @@ fn spending_exactly_the_declared_limit_is_allowed() {
     if let Err(e) = &outcome {
         assert!(
             !e.contains("declared limit"),
-            "tam tavanda harcama butce kapisina takilmamali: {e}"
+            "spending exactly at the ceiling must not trip the budget gate: {e}"
         );
     }
 }

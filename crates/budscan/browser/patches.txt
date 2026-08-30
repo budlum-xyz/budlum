@@ -3,8 +3,8 @@
 # The order matters: the protocol handler comes first, because the address-bar
 # badge reads the evidence object it produces.
 #
-# `!` oneki bir yamayi devre disi birakir. Satiri silmek yerine isaretlemek
-# kasitli: silinen bir satir, neden silindigini soylemeyen bir satirdir.
+# A `!` prefix disables a patch. Marking the line instead of deleting it is
+# deliberate: a deleted line is a line that does not say why it went.
 patches/bud-protocol-handler.patch
 patches/address-bar-verification-badge.patch
 patches/name-bar-punycode.patch

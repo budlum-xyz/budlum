@@ -431,6 +431,55 @@ mod tests {
         };
         assert!(bad.validate().is_err());
     }
+
+    /// Wheeler DDC pin: the canonical matmul guest program hash.
+    ///
+    /// The same pins are asserted in `xtask/gates/src/gates/regeneration.rs`,
+    /// where the program is reproduced independently from the specification.
+    /// The tree produces it here; the gate reproduces it there; both must land
+    /// on the same value. If this builder drifts, this test turns red and the
+    /// release gate keeps the drift away from production.
+    #[test]
+    fn canonical_matmul_program_hash_pins() {
+        let cases: &[(&[u16], &str)] = &[
+            (
+                &[2, 3, 2],
+                "4c4e86b4d34230df02acb991eb3111e459fb8bf06dd2b65b78c143b7f8b7e8c7",
+            ),
+            (
+                &[3, 4, 2],
+                "0d3fac206034bd666834220cb4a6b29e9aeda4c9124a02914cce74ad8d29f541",
+            ),
+            (
+                &[1, 1],
+                "2216a1ff61cda10e45cf6a98b124895913dd04d37eb67eeb5e475774e8e04799",
+            ),
+            (
+                &[4, 4, 4, 4, 2],
+                "de98ca525e706cb13eaa267cc815d608d5366de43b462085e4615c74d6a555ad",
+            ),
+        ];
+        for (dims, pin) in cases {
+            let mut weights = 0usize;
+            let mut biases = 0usize;
+            for w in dims.windows(2) {
+                weights += w[0] as usize * w[1] as usize;
+                biases += w[1] as usize;
+            }
+            let spec = FixedPointMlpSpec {
+                dims: dims.to_vec(),
+                weights: vec![0; weights],
+                biases: vec![0; biases],
+            };
+            let words = build_matmul_guest_program(&spec).unwrap();
+            let hash = stark_program_hash_from_words(&words);
+            let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(
+                &hex, pin,
+                "canonical matmul guest program drifted for dims {dims:?}"
+            );
+        }
+    }
 }
 
 // ── (2026-07-23): Production gas metering for AI execution proofs ──

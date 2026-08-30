@@ -771,7 +771,7 @@ mod tests {
         assert_ne!(
             a.get(12..16),
             c.get(12..16),
-            "yuk ozete girmeye devam etmeli"
+            "the payload must keep entering the digest"
         );
 
         // Determinism holds: same stream, same payload, same frame.

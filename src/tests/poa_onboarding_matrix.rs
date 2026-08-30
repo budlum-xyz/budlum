@@ -50,7 +50,7 @@ mod tests {
         poa.submit_application(DOMAIN, member, kyc(1), 10).unwrap();
         assert!(!poa.whitelist(DOMAIN, 10).contains(&member));
 
-        // Onay: whitelist'e girdi
+        // Approval: the member is on the whitelist
         poa.approve(DOMAIN, admin, member, 20, 1_000).unwrap();
         assert!(poa.whitelist(DOMAIN, 20).contains(&member));
 

@@ -290,7 +290,7 @@ impl AccessEstimate {
     /// loop below at 64 iterations, after which the value is zero anyway, and
     /// integer halving is exactly reproducible on every machine where a
     /// floating exponential would not be.
-    fn decayed_to(self, epoch: u64) -> u64 {
+    const fn decayed_to(self, epoch: u64) -> u64 {
         let elapsed = epoch.saturating_sub(self.last_epoch);
         let halvings = elapsed / ACCESS_HALF_LIFE_EPOCHS;
         if halvings >= 64 {

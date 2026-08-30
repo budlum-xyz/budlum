@@ -40,6 +40,9 @@ pub struct MobileSelfProfile {
 }
 
 impl MobileSelfProfile {
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn validate(&self) -> Result<(), String> {
         if self.owner == Address::zero() {
             return Err("MobileSelfProfile owner cannot be zero".into());
@@ -53,7 +56,7 @@ impl MobileSelfProfile {
         Ok(())
     }
 
-    pub fn recommendation_for_content(
+    pub const fn recommendation_for_content(
         &self,
         content_size: u64,
         critical: bool,
@@ -72,7 +75,7 @@ impl MobileSelfProfile {
         }
     }
 
-    pub fn availability_label(&self) -> &'static str {
+    pub const fn availability_label(&self) -> &'static str {
         match self.availability {
             MobileAvailabilityClass::Opportunistic => {
                 "self-hosted: available when device is online"
@@ -110,6 +113,9 @@ pub struct MobileSelfContentPolicy {
 }
 
 impl MobileSelfContentPolicy {
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn validate_against_profile(&self, profile: &MobileSelfProfile) -> Result<(), String> {
         profile.validate()?;
         if self.owner != profile.owner {

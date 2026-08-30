@@ -1,8 +1,14 @@
 // The unsafe lock: src/ is a clean base with zero unsafe today, and the moment
 // an `unsafe` block enters, the build FAILS. This is a regression gate.
 #![forbid(unsafe_code)]
+// `serde_json::json!` walks an object's keys by recursion, and the RPC answers are
+// deliberately flat (a nested reply changes what an indexer has to parse). The
+// largest of those maps is `qr_feed_json`, whose fifty-odd keys outgrow the
+// default depth of 128; the depth is raised instead of splitting the reply, so
+// no client has to learn a second shape.
+#![recursion_limit = "256"]
 /// Quantum-safe account abstraction. Signature verification is bound to ML-DSA-87
-/// oldugu icin `wallet-ml-dsa` ozelligini gerektirir.
+/// it therefore requires the `wallet-ml-dsa` feature.
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod account_abstraction;
 pub mod ai;

@@ -24,7 +24,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main]
   schedule:
     - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:
@@ -190,7 +190,7 @@ jobs:
       # something it exits non-zero and, under `set -e`, the job fails there. False
       # positives go into a justified `[package.metadata.cargo-machete] ignored`
       # entry; ignoring is not free, the justification stays in the commit.
-      # Dizin listesi elle tutulmuyor. Elle tutulan liste, yeni bir crate
+      # The directory list is not maintained by hand. A hand-maintained list
       # A hand-kept list silently goes stale when a crate is added: xtask/gates had
       # not been added to the OSV scan, and there a gate caught it while here none did.
       # Now every Cargo.toml is discovered, so a new crate joins on its own.
@@ -352,7 +352,7 @@ jobs:
     # without excluding any harness.
     #
     # `--harness-timeout` was tried and reverted: `-Z unstable-options`
-    # istiyor. Bir kapiyi kararsiz bir bayraga baglamak, Kani'nin bir sonraki
+    # wants. Tying a gate to an unstable flag means the next Kani release
     # would mean the gate breaking silently in the next version.
     timeout-minutes: 25
     permissions:
@@ -400,7 +400,7 @@ jobs:
       # Because the names are unique it selects the same nine, and more importantly
       # the NUMBER of matches is verified by the gate: expecting nine and running
       # eight is caught by the `kani` gate. The filter loosened, the gate did not.
-      - name: Kani proofs (hizli set)
+      - name: Kani proofs (fast set)
         working-directory: kani
         run: |
           set -euo pipefail
