@@ -42,13 +42,13 @@ use tiny_keccak::{Hasher, Keccak};
 
 /// Compiles, executes, proves and verifies the source. `Ok(())` = the proof is valid.
 ///
-/// Public input'lar `bud-cli`'nin `run` yolundaki ile AYNI sekilde kurulur:
+/// Public inputs are built the SAME way as on `bud-cli`'s `run` path:
 /// `initial_state_root` is not the root of the state tree but the value the AIR
 /// katladigi bellek+register goruntusudur; elle sabit vermek
 /// `PublicInputsMismatch` uretir.
 fn compile_run_prove(kaynak: &str) -> Result<(), String> {
     let bytecode =
-        compile(kaynak, IsaProfile::Experimental).map_err(|e| format!("derleme hatasi: {e:?}"))?;
+        compile(kaynak, IsaProfile::Experimental).map_err(|e| format!("compile error: {e:?}"))?;
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
@@ -94,7 +94,7 @@ fn compile_run_prove(kaynak: &str) -> Result<(), String> {
 
 /// Control: a branchless program can be proven. This test must be GREEN;
 /// if it turns red the problem is not branching but the whole pipeline
-/// ve asagidaki testin teshisi yaniltici olur.
+/// and the diagnosis of the test below would be misleading.
 #[test]
 fn a_branchless_program_is_proven() {
     let source = r#"

@@ -59,7 +59,7 @@ jobs:
       - name: cargo machete (budzero)
         run: cd budzero && cargo machete --with-metadata; true
 
-  # BLOKLAR. Onceki hali hem `continue-on-error: true` hem `|| true`
+  # BLOCKS. The previous form carried both `continue-on-error: true` and `|| true`
   # tasiyordu, ve arac hic kosmuyordu:
   #
   #   error: unexpected argument '--test-timeout' found

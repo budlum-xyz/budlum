@@ -332,7 +332,25 @@ impl BridgeState {
         Ok((transfer, event))
     }
 
-    pub fn mint(&mut self, message: &CrossDomainMessage) -> Result<(), BridgeError> {
+    /// Mint a locked transfer on the target domain after relay verification.
+    ///
+    /// `current_height` is the Budlum chain height at which this mint is
+    /// applied. It is threaded to the replay store so that
+    /// [`ReplayNonceStore::mark_processed_at`] records *when* the message was
+    /// processed; the height-aware pruning in that store then only removes
+    /// entries older than the finality window, so replay protection is never
+    /// lost on a message that is still within finality.
+    ///
+    /// Passing the height is what lets the store prune at all. The previous
+    /// call used a height-less `mark_processed`, which never prunes and
+    /// records no height, so a long-running node leaked the processed-message
+    /// set unboundedly (an OOM liveness failure) and had a count-based fallback
+    /// whose own documentation warns it opens a replay window.
+    pub fn mint(
+        &mut self,
+        message: &CrossDomainMessage,
+        current_height: u64,
+    ) -> Result<(), BridgeError> {
         if !message.verify_id() {
             return Err(BridgeError("Invalid cross-domain message id".into()));
         }
@@ -366,7 +384,7 @@ impl BridgeState {
             ));
         }
         self.replay
-            .mark_processed(message.message_id)
+            .mark_processed_at(message.message_id, current_height)
             .map_err(BridgeError)?;
 
         let transfer = self
@@ -388,6 +406,22 @@ impl BridgeState {
 
     pub fn get_transfer(&self, message_id: &MessageId) -> Option<&BridgeTransfer> {
         self.transfers.get(message_id)
+    }
+
+    /// Sum of amounts on transfers still in [`BridgeStatus::Locked`].
+    ///
+    /// Minted, burned and unlocked transfers are inventory that has already
+    /// moved; only the locked set is capital currently trapped in the bridge.
+    /// Saturates at `u128::MAX` rather than overflowing a scrape.
+    #[must_use]
+    pub fn locked_amount_total(&self) -> u128 {
+        let mut total = 0u128;
+        for transfer in self.transfers.values() {
+            if matches!(transfer.status, BridgeStatus::Locked { .. }) {
+                total = total.saturating_add(transfer.amount);
+            }
+        }
+        total
     }
 
     pub fn burn(&mut self, message_id: MessageId, domain: DomainId) -> Result<(), BridgeError> {
@@ -640,8 +674,8 @@ mod tests {
             .unwrap();
         let message = event.message.unwrap();
 
-        bridge.mint(&message).unwrap();
-        assert!(bridge.mint(&message).is_err());
+        bridge.mint(&message, 0).unwrap();
+        assert!(bridge.mint(&message, 0).is_err());
     }
 
     #[test]
@@ -663,7 +697,7 @@ mod tests {
         assert!(bridge.unlock(transfer.message_id, 1).is_err());
 
         let message = event.message.unwrap();
-        bridge.mint(&message).unwrap();
+        bridge.mint(&message, 0).unwrap();
         assert!(bridge.unlock(transfer.message_id, 1).is_err());
         bridge.burn(transfer.message_id, 2).unwrap();
         // Regression: unlock must originate from the burn domain (target=2),

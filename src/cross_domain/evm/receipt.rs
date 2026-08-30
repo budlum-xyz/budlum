@@ -13,7 +13,7 @@
 
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 
-/// Decode edilen bir Ethereum log girdisi.
+/// A decoded Ethereum log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthLog {
     /// Emitter contract address (20 bytes).

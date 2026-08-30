@@ -155,7 +155,7 @@ fn live_path_prevote_with_wrong_height_rejected() {
             || err_lower.contains("mismatch")
             || err_lower.contains("height")
     );
-    // Aggregator'a sadece ilk oy girdi.
+    // Only the first vote reached the aggregator.
     assert_eq!(agg.prevotes.len(), 1);
 }
 

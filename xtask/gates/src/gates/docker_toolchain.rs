@@ -211,12 +211,22 @@ pub fn self_test() -> Result<String, String> {
     let good_copy = "COPY Cargo.toml rust-toolchain.toml ./";
     let good_check = "RUN rustc --version";
 
+    // Drift: the builder image must disagree with the pin in
+    // `rust-toolchain.toml`, which `build_fixture` always writes as 1.97.1.
+    //
+    // This canary was silently disarmed once. When the toolchain moved to
+    // 1.97.1 the image in this fixture was bumped along with every other
+    // occurrence, so the fixture came to agree with the pin - there was no
+    // drift left to detect, the gate correctly passed, and the canary reported
+    // its own fixture as a gate failure. The image here must therefore NOT
+    // track the real toolchain: it is deliberately a different version, and
+    // bumping it is what breaks the canary.
     let drift = tmp.join("drift");
-    build_fixture(&drift, "rust:1.97.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000", good_copy, good_check, "1.97.1")?;
+    build_fixture(&drift, "rust:1.88.0-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000", good_copy, good_check, "1.97.1")?;
     if run(&drift).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: 1.97.1 build vs 1.97.1 pin kabul edildi",
+            "canary: a 1.88.0 build image was accepted against a 1.97.1 pin",
         ));
     }
 
@@ -230,7 +240,7 @@ pub fn self_test() -> Result<String, String> {
     )?;
     if run(&nodigest).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: digest'siz FROM kabul edildi"));
+        return Err(String::from("canary: a FROM without a digest was accepted"));
     }
 
     let wf = tmp.join("wf");
@@ -253,7 +263,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&nocopy).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: rust-toolchain.toml kopyalanmayan Dockerfile kabul edildi",
+            "canary: a Dockerfile that does not copy rust-toolchain.toml was accepted",
         ));
     }
 

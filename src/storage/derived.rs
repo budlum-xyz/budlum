@@ -499,7 +499,7 @@ impl DerivedSpec {
     /// Split out rather than inlined because it is the whole of the byte-range
     /// case and reads as one rule instead of three branches inside a function
     /// whose other half is about rectangles.
-    fn check_prefix_span(span: PrefixSpan) -> Result<(), DerivedError> {
+    const fn check_prefix_span(span: PrefixSpan) -> Result<(), DerivedError> {
         if span.kept_bytes > span.master_bytes {
             return Err(DerivedError::PrefixPastEnd {
                 kept_bytes: span.kept_bytes,
@@ -536,7 +536,10 @@ impl DerivedSpec {
     /// # Errors
     ///
     /// [`DerivedError::DerivationChain`] when `master_is_derived` is true.
-    pub fn check_master_is_stored(&self, master_is_derived: bool) -> Result<(), DerivedError> {
+    pub const fn check_master_is_stored(
+        &self,
+        master_is_derived: bool,
+    ) -> Result<(), DerivedError> {
         if master_is_derived {
             return Err(DerivedError::DerivationChain {
                 master_id: self.master_id,

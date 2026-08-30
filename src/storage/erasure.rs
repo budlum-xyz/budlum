@@ -66,6 +66,13 @@ const GF_POLY: u16 = 0x11D;
 /// `k + m` distinct elements from GF(2^8), which has 256 of them.
 pub const MAX_TOTAL_SHARDS: usize = 255;
 
+/// Parity work (bytes, `shard length * m`) from which `encode_parity` hands
+/// the rows to a rayon pool instead of the calling thread. Below the window
+/// the pool round trip costs more than the row loop it replaces. The number
+/// is a host throughput observation logged by `benches/micro/erasure_rows.rs`
+/// in CI; it is not a protocol constant and moving it changes no bytes.
+const PARITY_ROW_WINDOW: usize = 256 * 1024;
+
 struct GfTables {
     exp: [u8; 512],
     log: [u8; 256],
@@ -126,7 +133,7 @@ struct GfMatrix {
 
 impl GfMatrix {
     fn zero(rows: usize, cols: usize) -> Self {
-        GfMatrix {
+        Self {
             rows,
             cols,
             data: vec![0u8; rows * cols],
@@ -154,13 +161,13 @@ impl GfMatrix {
     /// Gauss-Jordan inverse over GF(2^8). Returns `None` if singular, which
     /// for a Cauchy submatrix should be unreachable, the caller treats it as
     /// a hard error rather than a recoverable case.
-    fn invert(&self) -> Option<GfMatrix> {
+    fn invert(&self) -> Option<Self> {
         if self.rows != self.cols {
             return None;
         }
         let n = self.rows;
         let mut work = self.clone();
-        let mut inv = GfMatrix::identity(n);
+        let mut inv = Self::identity(n);
 
         for col in 0..n {
             // Find a pivot.
@@ -255,17 +262,17 @@ pub enum ErasureError {
 impl std::fmt::Display for ErasureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ErasureError::InvalidScheme(m) => write!(f, "invalid erasure scheme: {m}"),
-            ErasureError::ShardMismatch(m) => write!(f, "shard mismatch: {m}"),
-            ErasureError::NotEnoughShards { have, need } => write!(
+            Self::InvalidScheme(m) => write!(f, "invalid erasure scheme: {m}"),
+            Self::ShardMismatch(m) => write!(f, "shard mismatch: {m}"),
+            Self::NotEnoughShards { have, need } => write!(
                 f,
                 "cannot reconstruct: {have} shards survived, {need} are required"
             ),
-            ErasureError::IntegrityFailure { index } => write!(
+            Self::IntegrityFailure { index } => write!(
                 f,
                 "reconstructed shard {index} does not match its manifest ContentId"
             ),
-            ErasureError::SingularMatrix => {
+            Self::SingularMatrix => {
                 write!(f, "decode matrix was singular; the generator is broken")
             }
         }
@@ -287,6 +294,10 @@ pub struct ReedSolomon {
 
 impl ReedSolomon {
     /// `data_shards` is `k`, `parity_shards` is `n - k`.
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self, ErasureError> {
         if data_shards == 0 {
             return Err(ErasureError::InvalidScheme(
@@ -301,7 +312,7 @@ impl ReedSolomon {
                 "{total} total shards exceeds the {MAX_TOTAL_SHARDS} that GF(2^8) admits"
             )));
         }
-        Ok(ReedSolomon {
+        Ok(Self {
             k: data_shards,
             m: parity_shards,
             generator: generator_matrix(data_shards, parity_shards),
@@ -309,6 +320,10 @@ impl ReedSolomon {
     }
 
     /// Build a coder for a manifest's declared scheme.
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn for_scheme(scheme: &ErasureScheme) -> Result<Self, ErasureError> {
         scheme.validate().map_err(ErasureError::InvalidScheme)?;
         Self::new(scheme.k as usize, scheme.parity_count() as usize)
@@ -330,6 +345,10 @@ impl ReedSolomon {
     }
 
     /// Compute the parity shards for `data`.
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// Every data shard must be the same length, Reed-Solomon works
     /// symbol-wise across the shards, so column `c` of the code word is built
@@ -361,20 +380,73 @@ impl ReedSolomon {
             )));
         }
 
-        let mut parity = vec![vec![0u8; len]; self.m];
-        for (i, out) in parity.iter_mut().enumerate() {
-            let row = self.k + i;
-            for (j, src) in data.iter().enumerate() {
-                let coeff = self.generator.get(row, j);
-                if coeff == 0 {
-                    continue;
-                }
-                for (o, s) in out.iter_mut().zip(src.iter()) {
-                    *o ^= gf_mul(coeff, *s);
-                }
+        let work = len.saturating_mul(self.m);
+        let parity = if work >= PARITY_ROW_WINDOW && self.m > 1 {
+            use rayon::prelude::*;
+            (0..self.m)
+                .into_par_iter()
+                .map(|i| self.parity_row(i, data))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            (0..self.m)
+                .map(|i| self.parity_row(i, data))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(parity)
+    }
+
+    /// One parity shard, computed from `data` under generator row
+    /// `k + parity_index`.
+    ///
+    /// Rows are independent: row `i` reads only `data` and its own generator
+    /// row, so any number of rows can run in any order and return the same
+    /// bytes. That property is what lets [`ReedSolomon::encode_parity`] hand
+    /// the row loop to a rayon pool without letting the schedule leak into the
+    /// commitments that fold over the parity.
+    /// # Errors
+    ///
+    /// The same refusals as [`ReedSolomon::encode_parity`]: a wrong shard
+    /// count, an empty shard, ragged shards. A `parity_index` at or above
+    /// `m` is refused too, because it has no generator row to read.
+    fn parity_row(&self, parity_index: usize, data: &[Vec<u8>]) -> Result<Vec<u8>, ErasureError> {
+        if data.len() != self.k {
+            return Err(ErasureError::ShardMismatch(format!(
+                "expected {} data shards, got {}",
+                self.k,
+                data.len()
+            )));
+        }
+        if parity_index >= self.m {
+            return Err(ErasureError::ShardMismatch(format!(
+                "parity index {parity_index} is outside 0..{}",
+                self.m
+            )));
+        }
+        let len = data[0].len();
+        if len == 0 {
+            return Err(ErasureError::ShardMismatch(
+                "data shards must be non-empty".into(),
+            ));
+        }
+        if let Some(bad) = data.iter().position(|s| s.len() != len) {
+            return Err(ErasureError::ShardMismatch(format!(
+                "shard {bad} is {} bytes but shard 0 is {len}; \
+                 Reed-Solomon needs equal-length shards",
+                data[bad].len()
+            )));
+        }
+        let mut out = vec![0u8; len];
+        let row = self.k + parity_index;
+        for (j, src) in data.iter().enumerate() {
+            let coeff = self.generator.get(row, j);
+            if coeff == 0 {
+                continue;
+            }
+            for (o, s) in out.iter_mut().zip(src.iter()) {
+                *o ^= gf_mul(coeff, *s);
             }
         }
-        Ok(parity)
+        Ok(out)
     }
 
     /// The generator coefficient a coding audit multiplies by.
@@ -438,6 +510,10 @@ impl ReedSolomon {
     }
 
     /// Rebuild all `n` shards from any `k` survivors.
+    /// # Errors
+    ///
+    /// Propagates `ErasureError` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// `present` is indexed by shard index over the whole code word (data
     /// shards first, then parity, matching the generator's row order).
@@ -554,6 +630,9 @@ impl EncodedObject {
     }
 
     /// Build the on-chain manifest for this encoding.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// The shard sizes recorded are the padded stripe sizes, which is what an
     /// operator actually stores and what a challenge will hash. `total_size`
@@ -578,6 +657,10 @@ impl EncodedObject {
 
 /// Split `data` into `k` equal stripes, pad the tail, and append `n - k`
 /// parity shards.
+/// # Errors
+///
+/// Propagates `ErasureError` from the step that failed; its variants name the refused
+/// conditions.
 pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject, ErasureError> {
     scheme
         .validate()
@@ -613,7 +696,59 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
     })
 }
 
+/// Re-encode `data` under the scheme the claimed manifest declares and refuse
+/// if the result is a different object.
+///
+/// The usual path is client-built: the client encodes, builds a manifest, and
+/// registers it. The node then trusts the structural checks in
+/// `validate_untrusted` but never re-runs the coder, so a client that lies
+/// about parity (or pads a different payload into the same listed sizes) can
+/// still pass registration. This function is the optional, costly half of
+/// that path: given the bytes the client claims to have encoded, the node
+/// produces the only honest manifest for that `(data, scheme)` pair and
+/// compares ids.
+///
+/// # Errors
+///
+/// Scheme/empty-object failures from [`encode_object`], or a mismatch when the
+/// claimed id / shard list is not the one re-encoding produces.
+pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<(), ErasureError> {
+    // Structural lies are cheaper to catch first; the coder is the expensive
+    // half and should not run on a manifest that already fails the free checks.
+    claimed
+        .validate_untrusted()
+        .map_err(ErasureError::InvalidScheme)?;
+    let encoded = encode_object(data, claimed.erasure)?;
+    let honest = encoded.to_manifest().map_err(ErasureError::InvalidScheme)?;
+    if honest.manifest_id != claimed.manifest_id {
+        return Err(ErasureError::ShardMismatch(format!(
+            "re-encode produced manifest {} but the claim was {}",
+            honest.manifest_id, claimed.manifest_id
+        )));
+    }
+    if honest.shards.len() != claimed.shards.len() {
+        return Err(ErasureError::ShardMismatch(format!(
+            "re-encode produced {} shards, claim has {}",
+            honest.shards.len(),
+            claimed.shards.len()
+        )));
+    }
+    for (h, c) in honest.shards.iter().zip(claimed.shards.iter()) {
+        if h.shard_id != c.shard_id || h.kind != c.kind || h.size != c.size || h.index != c.index {
+            return Err(ErasureError::ShardMismatch(format!(
+                "shard {} disagrees after re-encode (honest id {}, claimed id {})",
+                h.index, h.shard_id, c.shard_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Rebuild the original bytes from whatever shards survived.
+/// # Errors
+///
+/// Propagates `ErasureError` from the step that failed; its variants name the refused
+/// conditions.
 ///
 /// `present` is the full code word with `None` for lost shards. Recovered
 /// shards are checked against the manifest's `ContentId`s before the object
@@ -1202,5 +1337,62 @@ mod tests {
                 .unwrap_or_else(|e| panic!("losing {lost:?} broke recovery: {e}"));
             assert_eq!(out, data, "wrong bytes after losing {lost:?}");
         }
+    }
+
+    #[test]
+    fn verify_object_encoding_accepts_an_honest_client_manifest() {
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let manifest = enc.to_manifest().unwrap();
+        verify_object_encoding(&data, &manifest).expect("honest encoding must verify");
+    }
+
+    #[test]
+    fn verify_object_encoding_refuses_a_swapped_payload() {
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let manifest = encode_object(&data, scheme).unwrap().to_manifest().unwrap();
+        let other: Vec<u8> = (1u8..=201).cycle().take(900).collect();
+        assert!(
+            verify_object_encoding(&other, &manifest).is_err(),
+            "a different payload under the same scheme must not verify"
+        );
+    }
+
+    #[test]
+    fn encode_parity_matches_one_row_calls() {
+        let rs = ReedSolomon::new(4, 3).unwrap();
+        let data: Vec<Vec<u8>> = (0..4u8)
+            .map(|i| (0u8..=255).cycle().skip(i as usize).take(600).collect())
+            .collect();
+        let rows: Vec<Vec<u8>> = (0..3).map(|i| rs.parity_row(i, &data).unwrap()).collect();
+        assert_eq!(rs.encode_parity(&data).unwrap(), rows);
+        assert_eq!(
+            rs.encode_parity(&data).unwrap(),
+            rows,
+            "a second run must return the same bytes"
+        );
+    }
+
+    #[test]
+    fn parity_row_refuses_a_ragged_shard_set() {
+        let rs = ReedSolomon::new(4, 2).unwrap();
+        let mut data: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 64]).collect();
+        data[3].pop();
+        assert!(
+            matches!(rs.parity_row(0, &data), Err(ErasureError::ShardMismatch(_))),
+            "a short last shard must be refused, not read past its end"
+        );
+    }
+
+    #[test]
+    fn parity_row_refuses_an_index_outside_the_scheme() {
+        let rs = ReedSolomon::new(4, 2).unwrap();
+        let data: Vec<Vec<u8>> = (0..4).map(|_| vec![7u8; 32]).collect();
+        assert!(matches!(
+            rs.parity_row(2, &data),
+            Err(ErasureError::ShardMismatch(_))
+        ));
     }
 }

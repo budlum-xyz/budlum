@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(dd.insert(b"ayni blok"), DedupOutcome::Stored);
         assert_eq!(dd.insert(b"ayni blok"), DedupOutcome::Deduplicated);
         assert_eq!(dd.insert(b"farkli"), DedupOutcome::Stored);
-        assert_eq!(dd.saved_bytes(), 9); // "ayni blok" uzunlugu
+        assert_eq!(dd.saved_bytes(), 9); // the length of "ayni blok"
         assert_eq!(dd.unique_chunks(), 2);
     }
 

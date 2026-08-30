@@ -77,7 +77,7 @@ pub fn self_test() -> Result<String, String> {
     let json = r#"{"data":[{"totals":{"lines":{"count":14493,"covered":9301,"percent":64.15},"functions":{"count":0,"percent":54.89}}}]}"#;
     let pct = percent_from_json(json).ok_or("canary: the percent could not be read")?;
     if (pct - 64.15).abs() > 1e-9 {
-        return Err(format!("canary: 64.15 yerine '{pct}' okundu"));
+        return Err(format!("canary: read '{pct}' instead of 64.15"));
     }
     // The committed baseline is a plain float without `%`; the parser must
     // read it (the shell gate's `float()` did, and CI writes it that way).
@@ -93,7 +93,9 @@ pub fn self_test() -> Result<String, String> {
         baseline(&dir).map_err(|e| format!("canary: the baseline could not be read: {e}"))?;
     if (base - 64.30).abs() > 1e-9 {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(format!("canary: baseline 64.30 yerine '{base}' okundu"));
+        return Err(format!(
+            "canary: read '{base}' instead of the 64.30 baseline"
+        ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(

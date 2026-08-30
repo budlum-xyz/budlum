@@ -7,7 +7,7 @@
 # History verification (evidence that NO baseline is needed):
 #   Tool: gitleaks v8.30.1, a full history scan, 2026-07-16
 #   - The candidate commit trees found with `git log --all -S'ghp_'` were reviewed
-#     `git grep -E 'ghp_[0-9a-zA-Z]{20,}'` ile kontrol edildi: hepsi
+#     checked with `git grep -E 'ghp_[0-9a-zA-Z]{20,}'`: all of them
 #     one by one: REDACTED markers of the form `ghp_6aXY...`; no real token.
 #   - A full scan with the gitleaks v8.30.1 default rules: 0 findings.
 #   - That the gate is not vacuous is proven on every CI run: the workflow first

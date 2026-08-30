@@ -11,7 +11,7 @@
 #
 # The digest was verified from the registry: the config blob of this image carries
 # RUST_VERSION=1.97.1. A tag name is not evidence -- the previous shape was
-# `rust:1.97.1-bookworm@sha256:77fac8b9...` idi ve o digest'in icindeki
+# was `rust:1.97.1-bookworm@sha256:77fac8b9...` and the toolchain inside
 # and the RUST_VERSION inside that digest really was 1.97.1, even though the comment
 # said "verified for 1.94.0". Turning only the tag into 1.97.1 would let the digest
 # override it; the two must change together. `check-docker-toolchain-matches-pin.sh`
@@ -69,7 +69,7 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
     echo "toolchain OK: rustc $actual == rust-toolchain.toml $pinned"
 
 # Build release binary
-# PROTOC env'ini build'e acikca gecir: prost-build protoc'u PATH'ten
+# Pass the PROTOC env explicitly to the build: prost-build resolves protoc
 # could not find it, docker-smoke reported 'Could not find protoc'.
 RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
     cp target/release/budlum-core /usr/local/bin/budlum-core

@@ -5,7 +5,7 @@
 # is budzero/deny.toml; the two graphs are checked in separate matrix steps.
 #
 # Schema: cargo-deny 0.20+ (the old keys were removed).
-# Modern semantikte `allow` listesinde OLMAYAN her lisans otomatik FAIL'dir
+# In the modern semantics every licence NOT on the `allow` list is an automatic FAIL
 # (this preserves the old `unlicensed = "deny"` plus copyleft ban behaviour;
 # the GPL/AGPL family is refused because it is not in allow).
 #

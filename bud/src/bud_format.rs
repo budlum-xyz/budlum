@@ -772,11 +772,11 @@ impl MultiRatioConsensus {
     }
 
     pub fn select_best(candidates: Vec<RatioCandidate>, required: f64) -> Option<RatioCandidate> {
-        // K-BUD-GENERATIVE-REMOVED: generative flag varsa RED, sadece deterministic
+        // K-BUD-GENERATIVE-REMOVED: a generative flag is REJECTED; deterministic only
         let filtered: Vec<_> = candidates
             .into_iter()
             .filter(|c| {
-                // generative yok, sadece deterministic
+                // no generative path; deterministic only
                 (c.flags.is_byte_identical() || c.flags.is_resolution_preserved()) && c.ratio >= 1.0
             })
             .collect();

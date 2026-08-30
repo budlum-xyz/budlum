@@ -1,10 +1,13 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// the build FAILs (a regression gate). The same policy as the main crate.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
+// enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 pub mod adapter;
 pub mod bud_stark;
+pub mod canonical_boot;
+pub mod canonical_set;
 pub mod plonky3_air;
 pub mod plonky3_prover;
+pub mod relayer;
 
 #[cfg(test)]
 // Test-only module: it holds three `#[test]` functions and a helper they

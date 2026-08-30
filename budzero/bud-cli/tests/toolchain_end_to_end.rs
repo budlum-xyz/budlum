@@ -316,7 +316,7 @@ fn a_storage_writing_program_proves_and_verifies() {
 
 /// The type of a storage field must really exist.
 ///
-/// `Type::from_str` primitif olmayan her adi `Type::Struct(ad)` yapar, bu
+/// `Type::from_str` turns every non-primitive name into `Type::Struct(name)`, so
 /// yuzden `count: Uint644` gibi bir yazim hatasi hayali bir struct tipine
 /// turned into one and was accepted silently. The same hole had been closed for
 /// struct field types; storage fields had been left out of that pass.
@@ -338,7 +338,7 @@ fn a_storage_field_with_an_unknown_type_is_refused() {
         "the error has to name the field and the type: {text}"
     );
 
-    // Yesil taraf: gercek tip gecmeli.
+    // The green side: a real type must pass.
     let ok = "contract T {\n\
                   storage {\n\
                       count: u64,\n\

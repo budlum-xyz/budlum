@@ -31,7 +31,7 @@ pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 /// # What happens when the ceiling is reached
 ///
 /// New registrations are refused. That forces a governance decision - raising the
-/// yukseltmek ya da kullanilmayan domainleri emekliye ayirmak - ve o karar
+/// or retiring unused domains - and that decision
 /// becomes visible. From a silently growing cost to a discussed decision.
 ///
 /// Retired domains count too: as long as the leaf stands in the tree, the root
@@ -434,7 +434,7 @@ mod tests {
         );
 
         // The refusal must really have kept it out of the registry - reporting a message and adding anyway
-        // tavani sussuz birakirdi.
+        // would leave the ceiling silent.
         assert_eq!(
             registry.domains().len(),
             MAX_REGISTERED_DOMAINS,
@@ -492,7 +492,7 @@ mod tests {
         );
 
         // Revoking something not in the list is an error: a failed revocation
-        // basarili gibi okunursa program hala kabul edilirken kaldirildigi
+        // reads as success, the program is still accepted while appearing removed
         // sanilir.
         assert!(registry.revoke_zk_program(5, &program).is_err());
 

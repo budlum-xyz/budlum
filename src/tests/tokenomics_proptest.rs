@@ -51,8 +51,8 @@ mod tests {
             // balances the test added. The value used to be computed and never
             // asserted, which made this test vacuous - it always passed. (On a
             // real network minting happens only in the genesis block.)
-            // `state` bos bir AccountState olarak basliyor (genesis burada
-            // Uygulanmiyor), dolayisiyla circulating_supply tam olarak test'in
+            // `state` starts as an empty AccountState (genesis is not applied
+            // here), so circulating_supply is exactly what the test
             // Ekledigi bakiyelerin toplamidir.
             let supply = state.circulating_supply();
             assert_eq!(
@@ -175,8 +175,8 @@ mod tests {
 
         /// INVARIANT 5: validator reward consistency.
         ///
-        /// calculate_epoch_reward(0) is trivial, and a positive stake gives a
-        /// positive reward.
+        /// calculate_epoch_reward(0) is nothing at all, and a positive stake
+        /// gives a positive reward.
         #[test]
         fn epoch_reward_consistency(
             stake in 0..100_000_000_000u64,
@@ -185,7 +185,7 @@ mod tests {
             let reward = params.calculate_epoch_reward(stake);
 
             if stake == 0 {
-                assert!(reward <= 1, "Zero stake should produce trivial reward");
+                assert_eq!(reward, 0, "Zero stake must produce no reward at all");
             } else {
                 assert!(reward > 0, "Positive stake should produce positive reward");
             }

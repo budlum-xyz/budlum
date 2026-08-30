@@ -90,7 +90,7 @@ jobs:
 # cannot execute: paths containing FFI and system calls.
     #
     # BLOCKS. It has a canary.
-    name: AddressSanitizer + debug std (careful yerine)
+    name: AddressSanitizer + debug std (in place of careful)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

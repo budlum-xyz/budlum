@@ -145,7 +145,7 @@ jobs:
           : > /tmp/geiger2.txt
           for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-node bud-cli verifier-registry; do
             set +e
-            # cargo-geiger MUTLAK yol istiyor: goreli verilirse
+            # cargo-geiger wants an ABSOLUTE path: given a relative one
             # "is not an absolute path. Please provide an absolute path."
             # deyip 101 ile cikiyor.
             cargo geiger --all-targets --manifest-path "$PWD/$crate/Cargo.toml" > "/tmp/geiger-$crate.txt" 2>&1

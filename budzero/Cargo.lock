@@ -374,6 +374,7 @@ dependencies = [
  "p3-util",
  "postcard",
  "serde",
+ "serde_json",
  "tiny-keccak",
  "tracing",
 ]

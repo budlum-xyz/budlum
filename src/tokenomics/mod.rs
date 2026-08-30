@@ -230,6 +230,13 @@ impl TokenomicsParams {
     /// The per-year burn amount (of the original reserve), in base units.
     pub fn calculate_epoch_reward(&self, validator_stake: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
+        // Nothing staked, nothing earned. This has to come before the `.max(1)`
+        // Floor below: that floor is there to keep a *real* stake from being
+        // Rounded to zero by the integer division, and applying it to an
+        // Account that holds nothing turns a rounding guard into a mint.
+        if validator_stake == 0 {
+            return 0;
+        }
         // Per-epoch reward formula.
         //
         // The parametric test `calculate_epoch_reward_parametric_behavior`
@@ -494,6 +501,25 @@ mod tests {
                 stake
             );
         }
+    }
+
+    /// The `.max(1)` floor exists so that a small but real stake is not
+    /// rounded away to nothing by the integer division. It is not a licence to
+    /// pay a stake that does not exist: an account holding nothing is not a
+    /// validator with a rounding problem, and every epoch that pays it mints.
+    #[test]
+    fn a_zero_stake_earns_nothing() {
+        let params = TokenomicsParams::default();
+        assert_eq!(
+            params.calculate_epoch_reward(0),
+            0,
+            "the floor is for rounding real stakes, not for minting to an empty account"
+        );
+        // The floor itself has to survive for the smallest stake there is.
+        assert!(
+            params.calculate_epoch_reward(1) > 0,
+            "a real stake must still not be rounded away to nothing"
+        );
     }
 
     #[test]

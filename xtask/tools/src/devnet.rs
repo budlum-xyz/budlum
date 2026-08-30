@@ -49,7 +49,7 @@ pub fn prepare(root: &Path) -> Result<String, String> {
         for entry in std::fs::read_dir(&data)
             .map_err(|e| format!("{} could not be read: {e}", data.display()))?
         {
-            let entry = entry.map_err(|e| format!("dizin girdisi okunamadi: {e}"))?;
+            let entry = entry.map_err(|e| format!("could not read the directory entry: {e}"))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if !EXPECTED.contains(&name.as_str()) {
                 foreign.push(name);

@@ -1015,7 +1015,7 @@ mod settlement_prod_tests {
         assert_ne!(baseline.replay_nonce_root, after_lock.replay_nonce_root);
         assert_ne!(baseline.calculate_hash(), after_lock.calculate_hash());
 
-        bridge.mint(&message).unwrap();
+        bridge.mint(&message, 0).unwrap();
         changed.state.bridge_state = bridge;
         let after_mint = changed.build_global_header(None);
         assert_ne!(after_lock.bridge_state_root, after_mint.bridge_state_root);
@@ -1440,7 +1440,7 @@ mod settlement_prod_tests {
             kind: MessageKind::BridgeLock,
             expiry_height: 100,
         });
-        let err = bc.state.bridge_state.mint(&fake_msg).unwrap_err();
+        let err = bc.state.bridge_state.mint(&fake_msg, 0).unwrap_err();
         assert!(err.to_string().contains("Unknown"));
         assert_eq!(bc.state.bridge_state.root(), before_bridge_root);
         assert_eq!(bc.state.bridge_state.replay_root(), before_replay_root);
@@ -1458,7 +1458,7 @@ mod settlement_prod_tests {
             .lock(1, 2, 1, 0, asset, owner, recipient, 50, 100)
             .unwrap();
         let msg = event.message.unwrap();
-        bc.state.bridge_state.mint(&msg).unwrap();
+        bc.state.bridge_state.mint(&msg, 0).unwrap();
         let err = bc
             .state
             .bridge_state
@@ -1479,11 +1479,11 @@ mod settlement_prod_tests {
             .lock(1, 2, 1, 0, asset, owner, recipient, 50, 100)
             .unwrap();
         let msg = event.message.unwrap();
-        bc.state.bridge_state.mint(&msg).unwrap();
+        bc.state.bridge_state.mint(&msg, 0).unwrap();
 
         let before_bridge_root = bc.state.bridge_state.root();
         let before_replay_root = bc.state.bridge_state.replay_root();
-        let err = bc.state.bridge_state.mint(&msg).unwrap_err();
+        let err = bc.state.bridge_state.mint(&msg, 0).unwrap_err();
         assert!(
             err.to_string().contains("not locked")
                 || err.to_string().contains("already processed")
@@ -1505,7 +1505,7 @@ mod settlement_prod_tests {
             .lock(1, 2, 1, 0, asset, owner, recipient, 50, 100)
             .unwrap();
         let msg = event.message.unwrap();
-        bc.state.bridge_state.mint(&msg).unwrap();
+        bc.state.bridge_state.mint(&msg, 0).unwrap();
         let err = bc
             .state
             .bridge_state

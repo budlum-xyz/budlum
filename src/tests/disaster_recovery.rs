@@ -381,7 +381,7 @@ async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     assert_eq!(
         bc.state.liveness.missed_count(&silent),
         missed_before,
-        "halt sirasinda epoch-close hook'u kosmaz, sayac sabit kalmali"
+        "the epoch-close hook must not run during a halt; the counter must hold"
     );
 
     // 3) Recovery: the producer returns and the chain keeps growing from the

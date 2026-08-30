@@ -20,7 +20,7 @@ members = [
 #
 # The release profile is not `panic = "abort"` here, but lubot is part of the
 # same binary
-# icinde kosuyor; bir panik yine sureci dusurur. Testler muaf
+# runs inside it; a panic still brings the process down. Tests are exempt
 # (`clippy.toml`: allow-unwrap-in-tests).
 [workspace.lints.clippy]
 unwrap_used = "deny"

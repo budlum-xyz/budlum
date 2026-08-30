@@ -1,23 +1,27 @@
-//! StorageProvider trait and deterministic mock implementation.
+//! `StorageProvider` trait and deterministic mock implementation.
 //!
 //! This is the off-chain/on-chain boundary described in
 //! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
 //! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
 //! Accounting in `domain::storage_deal`.
 //!
-//! WIRING: unwired - measured: nothing in the tree constructs a
-//! `StorageProvider`. That is what a boundary looks like from the inside. The
-//! trait describes what an off-chain implementation must do, and the
-//! implementation lives outside this repository by design; the only thing
-//! here is `InMemoryStorageProvider`, which exists so the trait has a
-//! deterministic reference behaviour to test against.
+//! WIRING: `storage::emit::qr_feed_preview` constructs an
+//! `InMemoryStorageProvider` and runs the put a publish would run, so the
+//! receipt it reports and the `refuse_durable_derivative` refusal it reports
+//! are measurements of this code, not a description of intent. That is the
+//! whole extent of it. No node startup selects a provider, the trait still
+//! describes what an off-chain implementation must do, and
+//! `InMemoryStorageProvider` exists so the trait has a deterministic reference
+//! behaviour to measure against.
 //!
-//! Wiring it would mean the node choosing a provider at startup, which is a
-//! deployment decision rather than a consensus one, and taking it would put
-//! an off-chain dependency on a path that currently has none.
+//! Selecting a provider at startup is a deployment decision rather than a
+//! consensus one, and taking it would put an off-chain dependency on a path
+//! that currently has none. The emit path is deliberately on the near side of
+//! that line: it borrows a provider for one call and drops it.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::storage_deal::{ChallengeOutcome, RetrievalChallenge};
+use crate::storage::three_gate::refuse_durable_derivative;
 use crate::storage::{ContentId, ContentManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -53,36 +57,67 @@ pub enum StorageProviderError {
     EmptyPayload,
     MissingContent(ContentId),
     MissingChallenge(ChallengeId),
-    InvalidRange { start: u64, end: u64, len: u64 },
+    InvalidRange {
+        start: u64,
+        end: u64,
+        len: u64,
+    },
     ProofChallengeMismatch,
     ProofRangeMismatch,
+    /// A1..A5 transport derivative (QR-video container, carousel drop, optical
+    /// frame, raw frame concat). These are renderings of bytes that already
+    /// carry a commitment: serving one out of a body slot would hand a reader
+    /// pixels-of-pixels under a `ContentId` that matches nothing. The durable
+    /// form is the packed payload, so the provider refuses and the caller
+    /// stores that instead.
+    DurableDerivative(crate::storage::three_gate::ThreeBlobKind),
 }
 
 pub trait StorageProvider {
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
     fn put(
         &mut self,
         manifest: &ContentManifest,
         bytes: &[u8],
     ) -> Result<PutReceipt, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
     fn get(
         &self,
         content_id: &ContentId,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
     fn prove(
         &self,
         deal_id: DealId,
         challenge: &RetrievalChallenge,
     ) -> Result<StorageProof, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
     fn challenge(
         &mut self,
         deal_id: DealId,
         challenge: RetrievalChallenge,
     ) -> Result<ChallengeId, StorageProviderError>;
 
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
     fn settle(
         &mut self,
         challenge_id: ChallengeId,
@@ -118,7 +153,7 @@ impl InMemoryStorageProvider {
     }
 
     /// The identity this provider's challenge answers are bound to.
-    pub fn operator(&self) -> &[u8; 32] {
+    pub const fn operator(&self) -> &[u8; 32] {
         &self.operator
     }
 
@@ -135,6 +170,9 @@ impl StorageProvider for InMemoryStorageProvider {
     ) -> Result<PutReceipt, StorageProviderError> {
         if bytes.is_empty() {
             return Err(StorageProviderError::EmptyPayload);
+        }
+        if let Err(kind) = refuse_durable_derivative(bytes) {
+            return Err(StorageProviderError::DurableDerivative(kind));
         }
         let content_id = ContentId::of(bytes);
         self.chunks.insert(content_id, bytes.to_vec());
@@ -300,6 +338,43 @@ mod tests {
 
     fn deal_id(byte: u8) -> DealId {
         [byte; 32]
+    }
+
+    /// Every transport shape the pipe can emit is refused from a body slot,
+    /// and the packed container that they are all derived from is accepted.
+    #[test]
+    fn a_provider_put_refuses_a_transport_derivative() {
+        use crate::storage::qr_codec::{CodecKind, FrameMux, RawFrameConcat};
+        use crate::storage::three_gate::ThreeBlobKind;
+        use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
+
+        let (manifest, body) = manifest_and_bytes();
+        let enc = encode_qr_video(&body, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        let concat = RawFrameConcat
+            .mux(CodecKind::RawFrames, &enc.pipe.frames)
+            .unwrap();
+
+        let refused = [
+            (enc.video_blob.clone(), ThreeBlobKind::QrVideo),
+            (enc.pipe.frames[0].clone(), ThreeBlobKind::OpticalFrame),
+            (concat, ThreeBlobKind::RawConcat),
+        ];
+        let mut provider = InMemoryStorageProvider::new();
+        for (blob, kind) in &refused {
+            let err = provider.put(&manifest, blob).unwrap_err();
+            assert_eq!(err, StorageProviderError::DurableDerivative(*kind));
+        }
+        // Nothing was stored by a refused put: the only body is the packed form.
+        provider.put(&manifest, &enc.pipe.packed).unwrap();
+        let id = ContentId::of(&enc.pipe.packed);
+        assert_eq!(
+            provider.get(&id, 0..enc.pipe.packed.len() as u64).unwrap(),
+            enc.pipe.packed
+        );
+        for (blob, _) in &refused {
+            let missing = provider.get(&ContentId::of(blob), 0..1).unwrap_err();
+            assert!(matches!(missing, StorageProviderError::MissingContent(_)));
+        }
     }
 
     fn challenge(shard_id: ContentId) -> RetrievalChallenge {

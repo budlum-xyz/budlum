@@ -1,4 +1,4 @@
-//! Depo araclarinin giris noktasi.
+//! The entry point for the repository tools.
 //!
 //! Kullanim:
 //!

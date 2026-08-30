@@ -1,5 +1,5 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe`
+// block enters, the build FAILS (regression gate). Same policy as the main crate.
 #![forbid(unsafe_code)]
 //! # lubot-core - the core types
 //!
@@ -11,4 +11,5 @@
 pub mod dataset;
 pub mod manifest;
 pub mod model;
+pub mod system_prompt;
 pub mod tier;

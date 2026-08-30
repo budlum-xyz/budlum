@@ -40,6 +40,15 @@ fn generator_variants(code: &str) -> Vec<String> {
     out
 }
 
+/// The test whose table this gate reads.
+///
+/// Named once because the gate looks for it twice - to decide the test exists,
+/// and to find where its table starts. Two string literals would let those two
+/// searches drift apart, and the second one used to `unwrap` on the assumption
+/// the first had already succeeded. Sharing the constant is what actually makes
+/// that assumption true.
+const FROZEN_TEST_FN: &str = "fn generated_bytes_match_their_frozen_vectors";
+
 /// # Errors
 ///
 /// Returns a finding when a generator is under-pinned or the digests are not
@@ -52,16 +61,16 @@ pub fn run(root: &Path) -> Result<String, String> {
             "could not read any variant from enum GeneratorId",
         ));
     }
-    if !code.contains("fn generated_bytes_match_their_frozen_vectors") {
+    // One search, not two. This used to ask `contains` whether the test was
+    // there and then `find` where it was, unwrapping the second on the strength
+    // of the first; asking once removes both the duplication and the panic.
+    let Some(start) = code.find(FROZEN_TEST_FN) else {
         return Err(String::from(
             "no frozen-vector test: the bytes are pinned to nothing, so a change that \
              alters every generated object would pass CI silently",
         ));
-    }
+    };
     // The test body from the fn to the first closing brace at depth 1.
-    let start = code
-        .find("fn generated_bytes_match_their_frozen_vectors")
-        .unwrap();
     let rest = &code[start..];
     let table_end = rest.find("\n    }").unwrap_or(rest.len());
     let table = &rest[..table_end];

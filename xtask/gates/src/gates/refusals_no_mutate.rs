@@ -213,6 +213,12 @@ fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
 /// # Errors
 ///
 /// Returns a finding per offender, or a vacuity failure.
+/// The keyword every scanned definition starts with.
+///
+/// Named so the scan offset and the name offset cannot disagree: the loop
+/// slices at this string, so the name is exactly this far in.
+const FN_KEYWORD: &str = "fn ";
+
 pub fn run(root: &Path) -> Result<String, String> {
     let files = collect_files(root)?;
 
@@ -224,7 +230,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         let src = strip_test_mods(&raw);
         let mut rest = src.as_str();
         let mut offset = 0usize;
-        while let Some(rel_pos) = rest.find("fn ") {
+        while let Some(rel_pos) = rest.find(FN_KEYWORD) {
             let abs = offset + rel_pos;
             // Parse the fn signature until `{`.
             let after = &rest[rel_pos..];
@@ -237,8 +243,12 @@ pub fn run(root: &Path) -> Result<String, String> {
                 offset = abs + open_rel + 1;
                 continue;
             }
-            // Name.
-            let name_start = sig.find("fn ").unwrap() + 3;
+            // Name. `after` was sliced at the `fn ` this iteration found, so
+            // the keyword is at offset 0 and the name begins right after it.
+            // The previous version searched for `fn ` a second time and
+            // unwrapped the result, which asked the same question twice and
+            // panicked on the answer it had already been given.
+            let name_start = FN_KEYWORD.len();
             let name: String = sig[name_start..]
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -353,7 +363,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/lib.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: remove sonrasi Err gecti"));
+        return Err(String::from("canary: Err after remove passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);

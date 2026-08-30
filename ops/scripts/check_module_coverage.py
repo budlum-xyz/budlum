@@ -142,7 +142,7 @@ def self_test() -> int:
             [sys.executable, os.path.abspath(__file__), jf, "--baselines", miss],
             env=env).returncode
         if code != 0:
-            print("BOZUK: baselines yokken SKIP yerine FAIL!"); return 1
+            print("BROKEN: FAIL instead of SKIP when baselines are absent!"); return 1
     print("canary OK: the measurement is right; below the baseline FAILs, above PASSes, no baselines means SKIP.")
     return 0
 

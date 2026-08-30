@@ -393,7 +393,7 @@ mod tests {
         let d = scratch();
         let empty = d.join("empty");
         let filled = d.join("filled");
-        fs::write(&empty, "# sadece yorum\n").expect("fixture");
+        fs::write(&empty, "# comment only\n").expect("fixture");
         fs::write(&filled, "method_missing: X | justification | approval\n").expect("fixture");
         let breaking = "--- failure struct_missing: pub struct removed\n";
         assert!(classify_report(breaking, &empty).is_err());

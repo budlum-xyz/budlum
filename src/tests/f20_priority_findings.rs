@@ -292,7 +292,7 @@ fn a_model_hash_that_contradicts_its_dims_is_refused() {
     );
 }
 
-/// Kontrol: tutarli cift kabul edilir.
+/// Control: a consistent pair is accepted.
 ///
 /// It shows that the gate refuses only the wrong case and does not also refuse
 /// the right one -

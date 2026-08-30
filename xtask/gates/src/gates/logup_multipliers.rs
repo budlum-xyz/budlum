@@ -268,7 +268,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: register indeksi ile carpan flag gecti",
+            "canary: a multiplier flag using a register index passed",
         ));
     }
     let _ = std::fs::remove_dir_all(&dir);

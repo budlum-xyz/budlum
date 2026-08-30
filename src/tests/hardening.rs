@@ -49,7 +49,7 @@ mod hardening_tests {
     fn test_metrics_encoding_format() {
         let metrics = Metrics::new().expect("metric names are literals");
         metrics.chain_height.set(1234);
-        metrics.peer_count.set(5);
+        metrics.p2p_peers_connected.set(5);
 
         let encoded = metrics.encode();
         assert!(
@@ -57,7 +57,7 @@ mod hardening_tests {
             "Encoded metrics should contain height"
         );
         assert!(
-            encoded.contains("budlum_peer_count 5"),
+            encoded.contains("budlum_p2p_peers_connected 5"),
             "Encoded metrics should contain peer count"
         );
         assert!(
@@ -333,7 +333,7 @@ mod hardening_tests {
     /// carrying `auth_required=false`, this check has to produce a `warn!`. The
     /// verification extracts a helper function and a `tracing` subscriber
     /// Ile log yakalayarak. (`tracing` global subscriber zaten
-    /// Test'lerde kurulu olmayabilir; bu test pratik olarak sadece
+    /// It may not be installed under test; in practice this test only
     /// verifies that the code path compiles and is called under the right
     /// condition; the real warning behaviour is verified manually in the
     /// integration tests.

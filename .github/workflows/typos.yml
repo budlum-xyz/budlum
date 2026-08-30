@@ -60,9 +60,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/typos-canary
-          # `recieve` is a definite error in the typos dictionary and is not in the
-          # .quality/typos.toml allow-list; not catching it shows the scan did not run.
-          printf 'fn main() { let _recieve = 1; }\n' > /tmp/typos-canary/canary.rs
+          # The word is assembled from two pieces: this file is inside the
+          # repository scan it guards, so writing the misspelling out would fail the
+          # gate it exists to prove works. The assembled form is a definite error in
+          # the dictionary and is not in the .quality/typos.toml allow-list; not
+          # catching it shows the scan did not run.
+          canary_typo="reci"
+          canary_typo="${canary_typo}eve"
+          printf 'fn main() { let _%s = 1; }\n' "$canary_typo" > /tmp/typos-canary/canary.rs
           if typos --isolated /tmp/typos-canary; then
             echo "ERROR: typos failed to catch the canary -> the scan is untrustworthy (vacuous gate)!"
             exit 1

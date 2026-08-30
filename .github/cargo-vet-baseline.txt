@@ -1,4 +1,4 @@
-437
+434
 # ---------------------------------------------------------------------------
 # cargo-vet ratchet baseline: the number of unvetted dependencies.
 # The FIRST bare-number line of this file is the baseline

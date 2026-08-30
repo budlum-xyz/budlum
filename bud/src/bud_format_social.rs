@@ -121,7 +121,7 @@ impl SocialBridgeRecord {
         self.content_id == content_id(&self.content)
     }
 
-    /// Kaynak sapmasi: platformdaki mevcut icerik farkliysa RED (kaynak degisti).
+    /// Source drift: if the content on the platform differs, REJECT (the source changed).
     pub fn verify_source(&self, platform_content: &[u8]) -> bool {
         platform_content.is_empty() || self.content_id == content_id(platform_content)
     }

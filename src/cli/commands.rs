@@ -264,6 +264,11 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_token_pin_env: Option<String>,
 
+    /// Label that picks the consensus key when the slot holds more than one Ed25519 pair.
+    /// Without it the slot must hold exactly one Ed25519 pair.
+    #[arg(long)]
+    pub pkcs11_key_label: Option<String>,
+
     #[arg(long, default_value = "./data/hsm/socket.sock")]
     pub hsm_socket_path: String,
 
@@ -406,6 +411,7 @@ impl Default for NodeConfig {
             pkcs11_module_path: None,
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
+            pkcs11_key_label: None,
             hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             pkcs11_bls_mechanism: None,
             pkcs11_pq_mechanism: None,

@@ -37,6 +37,12 @@ jobs:
           shared-key: budlum-core
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Format (kani proof harnesses)
+        # kani/ is not a member of the root workspace, so the step above never
+        # walks it: two drift hunks sat in kani/src/lib.rs while the root fmt
+        # step stayed green. Measured 2026-08-28 and pinned here so the gap
+        # cannot reopen.
+        run: cargo fmt --manifest-path kani/Cargo.toml --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy pedantic/nursery ratchet (izleme modu)
@@ -137,6 +143,14 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable --self-test
       - name: Generatable content is verifiable
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable
+      - name: QR is derivative only canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only --self-test
+      - name: QR is derivative only
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only
+      - name: Three is recipe only canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- three-is-recipe-only --self-test
+      - name: Three is recipe only
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- three-is-recipe-only
       # For a described object the recipe is the ONLY copy. An edit that changes the
       # generator does not produce a wrong image, it produces an object that can no longer be produced at all:
       # the id stops verifying and there are no bytes on disk to fall back to. Applied to a value
@@ -189,7 +203,7 @@ jobs:
       # default (bud2) and bud3 compile different module sets, while no-default
       # what falls outside both. Skipping a configuration is exactly the
       # would hide the "a 3.0 module leaked into the 2.0 build" bug found this
-      # birakirdi.
+      # would leave behind.
       # `cargo fmt --all` scans the root workspace; because `bud/` is not a member of it
       # there was no formatting check in this tree. Measured: 119
       # 103 of the files had drifted from rustfmt output. Formatting does not change
@@ -924,6 +938,17 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- timing-safe --self-test
       - name: Dudect-style statistical timing test
         run: cargo bench --bench timing_safe
+      # Ratio packing throughput with a determinism refusal: the step fails if the
+      # rayon path produces different bytes than the serial path, so the numbers
+      # printed here are measurements of a path that is provably equivalent.
+      - name: Ratio rayon vs serial throughput
+        run: cargo bench --bench ratio_rayon
+      # Erasure parity rows: serial loop against the pool dispatch above the
+      # window, plus the encode->verify reference roundtrip. The step dies
+      # (exit 2, no numbers) if the pool result differs by any byte, so the
+      # printed MB/s always describe an equal-output path.
+      - name: Erasure parity rows rayon vs serial throughput
+        run: cargo bench --bench erasure_rows
 
   docker-security:
     # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
@@ -1136,6 +1161,13 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code
+      # A registered Prometheus metric that nothing writes is a dashboard lie:
+      # scrapes report a permanent zero next to real counters. Ratched off
+      # .github/unwritten-metrics-baseline.txt; the baseline only shrinks.
+      - name: metrics are written gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- metrics-are-written --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- metrics-are-written
       - name: typographic dash gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
@@ -1487,6 +1519,29 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration
+      # Relay: ships the regeneration consensus (tokens + proof-side canonical
+      # set + signed relay-status.json) to external consumers. Runs after
+      # regeneration because it consumes its output line; the proof-side
+      # live report is picked up from budzero's target/relay when the
+      # bud-proof suite published one in this run.
+      - name: relay (signed canonical-production status report) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- relay --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- relay
+      # Tree-pin: the whole budzero source tree must match its integrity
+      # pins (any added/deleted/modified .rs file is a red relay). Pins are
+      # committed with the changes they describe; re-pin with `--pin`.
+      - name: tree-pin (budzero source-tree integrity) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin
+      # CI workflow guards: the protected gates must be invoked with their
+      # self-test canaries in the workflows (deleting a gate from CI or
+      # dropping its canary is a red relay, not a silent pass).
+      - name: ci-workflow-guards (security gates are live in CI) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;
@@ -1530,7 +1585,7 @@ jobs:
         run: |
           set -euo pipefail
           # Main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;
-          # Baseline bu push'la kurulur → durust SKIP marker.
+          # The baseline is established by this push -> an honest SKIP marker.
           # On non-main branches there is no 'branch=main' ref -> Repo Lint goes red.
           # The correct form is 'origin/main' (GitHub docs: .git#branch=<remote>/<branch>).
           if git cat-file -e origin/main:buf.yaml 2>/dev/null; then

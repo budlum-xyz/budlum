@@ -20,7 +20,7 @@
 //! into the state root, `snapshot.rs` writes it into the snapshot. The
 //! `NoteRegistry` here is the zkVM side twin of the same set and no production
 //! path constructs it: only `bud-cli` takes `bud-state` as a dependency and
-//! oradan da sadece `State`, `StateBackend`, `Account` okunuyor.
+//! and only `State`, `StateBackend` and `Account` are read from there.
 //!
 //! The missing link is not a call but an opcode. The document describes this
 //! type as "for the nullifier-check opcode 0x21", but `NullifierCheck` in

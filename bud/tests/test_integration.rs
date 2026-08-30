@@ -234,10 +234,7 @@ fn her_format_entegrasyonu() {
         ),
         (StructuralKind::Csv, b"a,b\n1,2\n3,4\n5,6\n7,8\n".to_vec()),
         (StructuralKind::Log, gen_log(50)),
-        (
-            StructuralKind::Text,
-            b"satir 1\nsatir 2\nsatir 3\n".to_vec(),
-        ),
+        (StructuralKind::Text, b"line 1\nline 2\nline 3\n".to_vec()),
         // Binary: high-bit bytes (no commas or newlines, so the detector says Binary)
         (
             StructuralKind::Binary,

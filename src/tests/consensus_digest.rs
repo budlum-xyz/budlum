@@ -9,7 +9,7 @@
 //! `calculate_state_root` and the transaction order of the block are recorded,
 //! and the final account state (balance and nonce) is dumped over a fixed address
 //! list. Every observation is reduced with SHA-256 to a single
-//! 64-hex digest'e indirgenir ve `CONSENSUS_DIGEST=<hex>` olarak stdout'a
+//! is reduced to a 64-hex digest and written to stdout as
 //! line, written out under `--nocapture`. `determinism.yml` collects that line as
 //! an artifact on three operating systems and requires byte equality in the
 //! `consensus-digest-compare` job - any difference is a cross-platform consensus

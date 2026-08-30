@@ -6,7 +6,7 @@
 
 ## Contents
 
-> 80 sections, one file. The decision not to split it stands; this list is for navigation only.
+> 82 sections, one file. The decision not to split it stands; this list is for navigation only.
 
 - [1. Overall system architecture](#1-overall-system-architecture)
 - [2. Consensus-domain isolation](#2-consensus-domain-isolation)
@@ -88,6 +88,12 @@
 - [78. Where the computed thing arrives](#78-where-the-computed-thing-arrives)
 - [79. Recipe-addressed identity: binding the frame to its position](#79-recipe-addressed-identity-binding-the-frame-to-its-position)
 - [80. Which arithmetic the division sign describes](#80-which-arithmetic-the-division-sign-describes)
+- [81. The product of two defensible limits](#81-the-product-of-two-defensible-limits)
+- [82. A disconnect is not an amnesty](#82-a-disconnect-is-not-an-amnesty)
+- [83. Who chooses the size of the allocation](#83-who-chooses-the-size-of-the-allocation)
+- [84. Where a guarantee lives](#84-where-a-guarantee-lives)
+- [85. A gate that panics is a gate that stopped checking](#85-a-gate-that-panics-is-a-gate-that-stopped-checking)
+- [86. When ambiguity stops being a reason to skip](#86-when-ambiguity-stops-being-a-reason-to-skip)
 
 ## 1. Overall system architecture
 
@@ -3492,3 +3498,432 @@ not. The VM and the AIR did not change - what had to change was which intent cou
 
 All three were measured: removing the gate turns the refusal test red, extending the gate to every type turns the `field`
 control group red. Without the control group an over-broad ban would have passed unnoticed.
+
+## 81. The product of two defensible limits
+
+The mempool had two limits and both were reasonable. `max_size` capped the number of pending transactions; `MAX_TX_SIZE`
+capped a single transaction. Neither capped the thing the machine actually has to hold. Twenty thousand slots times one
+hundred kibibytes is 1.95 GiB of resident memory reachable from the network, on a node whose whole budget is smaller than
+that. No individual admission was wrong. The product was never bounded, so it was never checked.
+
+```mermaid
+flowchart TD
+  Count["max_size: 20 000 entries - defensible"] --> Product
+  Size["MAX_TX_SIZE: 100 KiB per transaction - defensible"] --> Product
+  Product["Product: 1.95 GiB resident - never checked"] --> Budget["Node budget is smaller than the product"]
+  Budget --> Third["Third limit: max_pool_bytes"]
+  Third --> Default["Default 256 MiB, mainnet 512 MiB"]
+  Third --> Charged["charged_bytes: what the entry costs the node, not what the wire carried"]
+```
+
+The fix is a third limit that measures the quantity being defended: `max_pool_bytes`, defaulting to 256 MiB and raised to
+512 MiB for mainnet. Admission charges `charged_bytes()` - the cost of holding the entry, not the size of the wire
+encoding - against `resident_bytes`, and a pool that cannot make room refuses with `PoolBytesFull`.
+
+The ordering inside the admission path carries the security property, and it is not the obvious one:
+
+```mermaid
+sequenceDiagram
+  participant Tx as Incoming transaction
+  participant Pool as Mempool
+  participant Victim as Resident entry
+  Tx->>Pool: submit
+  Pool->>Pool: 1. count check
+  Pool->>Pool: 2. byte check - BEFORE any eviction
+  Note over Pool: a transaction that will be refused evicts nothing
+  Pool->>Victim: 3. replacement removal, only for an accepted entry
+```
+
+If eviction ran before the byte check, a transaction too large to be admitted would still have displaced a resident entry
+on its way to being refused. That is a free deletion primitive: an attacker who cannot get anything into the pool can
+still empty it. Checking bytes before evicting means the only transaction that can remove another is one that is itself
+being kept. The pool exposes `budlum_mempool_bytes` so the operator sees the quantity the limit defends, not a proxy
+for it.
+
+## 82. A disconnect is not an amnesty
+
+Peer scoring keeps a record per peer id. Peer ids are free to make, so the table that holds them is an attacker-writable
+allocation: a node that opens and drops connections under fresh identities grows the score table without limit. The table
+needs a ceiling - `MAX_SCORED_PEERS` at 4 096 - but the ceiling immediately raises a second question, which is who gets
+dropped when it is reached.
+
+The wrong answer is to drop the score when the peer disconnects. It looks like housekeeping and it is a laundering
+service: any peer that has earned a bad score reconnects clean, and the scoring system stops describing anything.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Scored: first message
+  Scored --> Scored: record_valid / record_invalid
+  Scored --> Queued: note_peer_disconnected - score KEPT, peer queued for eviction
+  Queued --> Scored: note_peer_connected - removed from the queue, record intact
+  Queued --> [*]: evicted first when the ceiling is reached
+  Scored --> [*]: evicted only after the queue is empty
+```
+
+A disconnect therefore changes eligibility for eviction, never the score itself. `enforce_score_ceiling` drains the
+disconnected queue first and only reaches connected peers when nothing else is left, so a peer that is currently talking
+to us keeps its history while churned identities pay for the churn. `budlum_gossip_scored_peers` reports the table's
+occupancy.
+
+Each of those three invariants is held by a test that a mutation kills: disabling the ceiling turns the churn test red,
+deleting the score on disconnect turns the laundering test red, and removing the disconnected-first branch turns the
+eviction-priority test red. The third one did not hold at first. The eviction test scored its resident peer like the
+churn, and with equal scores the fallback path happened to spare it by the id tie-break, so deleting the queue left the
+suite green. Scoring the resident deliberately *above* the churn makes it the fallback's first victim - and only then
+does the test measure the queue instead of a coincidence.
+
+## 83. Who chooses the size of the allocation
+
+A node reads five files it did not receive over the network: a state snapshot, the vote history, the persisted ban list,
+the relayer cursor, and `budlum.toml`. Each was read with `fs::read_to_string`, and each read looked safe for the same
+reason: the node wrote the file itself, so the size is the node's own.
+
+That reasoning is about provenance, and provenance is not what the allocator uses. `read_to_string` allocates whatever
+is in the file *now*. A snapshot directory is a directory; anything that can place a file in it has chosen the size of
+an allocation inside the process. On a 1 984 MB host a four-gigabyte candidate is not a parse error - it is an abort,
+and it happens *before* the parser that every one of these call sites already guards with.
+
+```mermaid
+flowchart TD
+  P["operator-supplied path"] --> M{"metadata length > limit?"}
+  M -->|"yes"| R1["TooLarge - nothing read"]
+  M -->|"no, or length unavailable"| T["read, bounded to limit + 1 bytes"]
+  T --> C{"bytes read > limit?"}
+  C -->|"yes"| R2["TooLarge - allocation stopped at limit + 1"]
+  C -->|"no"| U{"valid UTF-8?"}
+  U -->|"no"| R3["NotUtf8"]
+  U -->|"yes"| Ok["contents"]
+```
+
+Two checks, because neither is sufficient. The metadata length is a hint that can be raced and, on `/proc`, is simply
+false - those files report zero and then produce content. So metadata is a fast rejection and `Read::take` is the
+enforcement. The bound is `limit + 1` rather than `limit`: a read that stops exactly at the ceiling cannot distinguish a
+file that fits from one that was truncated to fit, and a silently truncated snapshot is worse than a refused one,
+because the parser then reports a syntax error and sends the operator to look at the wrong thing.
+
+The ceilings are per kind rather than global - 512 MiB for a snapshot, 16 MiB for the ban list, 1 MiB for the small
+control files - and they are ordered by what they carry, which a test asserts. None of them is tight. Tightness is not
+the property being bought: the property is that a number exists and that exceeding it produces a named refusal instead
+of an abort.
+
+The refusal also has to keep a distinction the callers already made. An absent vote history, ban list or cursor is the
+normal state of a first boot and is silent; a file that exists and cannot be used is an operator problem and is logged.
+So the error answers `is_not_found()`, and an oversized file answers **false** to it - it is present and wrong, which is
+the case this exists to make visible. The compiler found the three call sites that depended on this by refusing to
+compile `e.kind()`; a bare `io::Error` would have let all three keep compiling while quietly reclassifying an oversized
+file as a clean first boot.
+
+This is the same shape as the mempool ceiling (§81) and the score table (§82): a quantity that is small in every real
+run is still unbounded until something states the bound.
+
+## 84. Where a guarantee lives
+
+The wallet builds a change output only when the input note is larger than the payment. That output needs two secrets the
+caller supplies, and both are `Option`. The code read them with `expect("validated")`, and the word was accurate: the
+same function calls `validate_conservation()` on its first line, and that check refuses a change transfer whose secrets
+are missing. The panic could not fire.
+
+It could not fire *because of a check somewhere else*. That is a different property from cannot fire, and the difference
+is invisible at the point where the value is read.
+
+```mermaid
+flowchart TD
+  R["change transfer request"] --> V{"validate_conservation"}
+  V -->|"refuses"| E1["InvalidPrivateTransfer - no output built"]
+  V -->|"passes"| B["build change output"]
+  B --> S{"both change secrets present?"}
+  S -->|"no"| E2["InvalidPrivateTransfer - second line of defence"]
+  S -->|"yes"| O["change output"]
+  E1 -.->|"guard removed or bypassed"| S
+```
+
+The dotted edge is the whole argument. Delete the validation call, or add a second caller that reaches the builder
+without it, and the `expect` version aborts the process - inside a wallet, while holding the user's note witnesses and
+spend secrets in memory. The `let ... else` version answers with the refusal the caller already knows how to handle.
+
+This was measured rather than assumed. A test that passes a change request with one secret missing is green against
+*both* versions, because the early validation refuses first and the reader never runs. Removing that one line from the
+builder separates them: the refusal stays green, the `expect` fails with a panic. A test whose value only appears under
+mutation is still worth keeping, provided the mutation result is written down next to it - otherwise a later reader sees
+a test that would pass with the guard deleted and concludes it tests nothing.
+
+The other three sites in the same crate are the opposite case, and they are worth separating from the first. They read
+the first eight bytes of a 32-byte hash with `out[..8].try_into().expect("SHA3-256 output is always 32 bytes")`. The
+claim is true and always will be. But the compiler cannot see that a slice of a known-size array has a known size, so a
+panic branch survives into the binary and the `.expect()` string becomes an assertion the next reader has to re-verify
+by hand. Destructuring the array instead - `let [b0, ..., b7, ..] = out;` - moves the same claim into the build. There
+is no branch left, so there is nothing to re-verify.
+
+Both changes point the same way. A guarantee should live in the code that depends on it: as a refusal when the condition
+is a runtime fact, and as a pattern the build checks when it is not.
+
+## 85. A gate that panics is a gate that stopped checking
+
+The workspace crates deny `unwrap_used` and `expect_used`. `xtask/gates` was
+left out, on the reasoning that gate code is not production code: it does not
+ship in the node binary, and if it breaks, a developer sees the break
+immediately.
+
+The reasoning is wrong in two ways, and only the second is obvious.
+
+The first: a panic in a gate is a worse *report* than a failure. CI prints a
+backtrace, and whoever reads it has to work out whether the tree is broken or
+the gate is. A finding says what is wrong in a sentence written by someone who
+knew what the check was for; a backtrace says a slice index was out of range in
+a function whose name means nothing to the reader.
+
+The second is the one that matters for coverage. A gate runs as a process. When
+it panics, the process is gone, and **every check it had not reached yet is
+silently not performed**. A malformed input in one file does not merely fail
+that file's check - it removes the rest of the run. The gate reports one loud
+problem and hides an unknown number of quiet ones, which is the opposite of what
+a gate is for.
+
+```mermaid
+flowchart TD
+    A[Gate starts] --> B{Input malformed}
+    B -->|Returns Err| C[One finding printed]
+    C --> D[Remaining checks still run]
+    B -->|Panics| E[Backtrace printed]
+    E --> F[Process gone]
+    F --> G[Remaining checks never run]
+    G --> H[Absence of findings is not evidence]
+```
+
+### What is exempt, and why it is structural
+
+Two categories are not defects, and both are recognised by shape rather than by
+an allowlist. An allowlist would need maintaining, and a stale allowlist grants
+permissions nobody remembers granting.
+
+**Canary bodies.** A self-test asserts that a gate behaves; panicking is the
+assertion mechanism, and it happens under `--self-test`, where a backtrace is
+the expected way to report a broken canary. Recognised by the function name.
+
+**`write!` and `writeln!` into a `String`.** `std::fmt::Write` for `String`
+cannot fail; the `Result` exists only because the trait is shared with
+`io::Write`, where it can. Rewriting these buys nothing and costs readability.
+
+### Counting the debt correctly
+
+The first measurement of this debt reported 295 findings. The number was wrong
+three times over, and each correction is a lesson about measuring before fixing.
+
+Excluding `#[cfg(test)]` by brace depth rather than by a line-oriented guess
+took it to 181. Then `.expect(` turned out to match `self.expect(Token::Comma)`
+- a parser method returning `Result`, not a panic - which alone accounted for 81
+phantom findings in one file. Requiring a string-literal argument took the count
+to 94. Splitting canaries and infallible `String` writes out left **27 real
+panic points**, all in gate code.
+
+Fixing 295 things would have been a month of work against a number that was
+mostly an artefact of the grep that produced it.
+
+### The ratchet, and why duplicates need an ordinal
+
+`.github/gate-panics-baseline.txt` records the 27, and `gates-do-not-panic`
+fails in both directions: a new panic point is a finding, and a baseline entry
+that is no longer a panic point is also a finding, so the file cannot rot into a
+permanent excuse for a tree that no longer exists.
+
+The baseline key is `path + ordinal + source text`, not `path + line`. Line
+numbers would make every inserted comment above a panic point look like one
+entry disappearing and another appearing, for a change that moved nothing.
+
+The ordinal exists because the first version keyed on `path + text` alone, and
+that collapsed the four identical `runtime.quote([0u8; 32]).unwrap()` lines in
+one file into a single entry. Removing three of the four would then have left
+the fourth matching the same key, and the ratchet would have reported no change
+for work that removed three quarters of the debt. Four identical lines are four
+debts. The ordinal only shifts when a duplicate is genuinely added or removed,
+which is exactly when the debt changed.
+
+Four points were removed rather than recorded, because each was a question asked
+twice. `mermaid.rs` matched `Some(_o)` and then unwrapped the same `Option`;
+`wire_fields_are_signed.rs` checked `is_none()` and then unwrapped;
+`refusals_no_mutate.rs` searched for `fn ` a second time in a slice that began
+with it; and `zero_storage_frozen.rs` asked `contains` whether a test existed
+and then `find` where it was, unwrapping the second on the strength of the
+first. In every case the panic was defending an invariant the same function had
+just established, and restructuring so the answer is only obtained once removed
+both the duplication and the panic.
+
+## 86. When ambiguity stops being a reason to skip
+
+`no-idle-code` asks, for every public item, whether any other production file
+names it. When two files define the same name the question has no honest answer:
+a mention of `is_valid` elsewhere in the tree does not say which `is_valid` it
+reached, and calling either one idle would be a guess. So ambiguous names were
+skipped, and the count of skips was printed alongside the result.
+
+Printing the number is what eventually exposed the problem. The gate was
+reporting **1267 skipped items against 4614 public items** - over a quarter of
+the public surface checked by nothing at all, sitting in plain sight at the end
+of a green line.
+
+### The case that needs no guess
+
+The skip is right whenever there is something to be ambiguous about. There is
+one case where there is not: when *no* file outside the defining set mentions
+the name at all.
+
+If the tree contains zero mentions, then no definition under that name was
+reached - whichever one a mention would have meant. The ambiguity is about
+*attribution*, and attribution only matters once there is something to
+attribute. At zero, every candidate is unreached, and the gate can say so
+without guessing.
+
+```mermaid
+flowchart TD
+    A[Public name] --> B{Defined in more than one file}
+    B -->|No| C[Reached, or idle]
+    B -->|Yes| D{Mentioned outside the defining files}
+    D -->|Yes, at least once| E[Skip: which one was meant is a guess]
+    D -->|No mentions at all| F[Every definition is unreached]
+    F --> G[Same finding as idle, same baseline]
+```
+
+This moved **191 items** out of the blind spot and onto the ratchet, leaving
+1076 genuinely undecidable. They are folded into the existing baseline rather
+than reported separately: a reader does not care why the scan was unsure of a
+name, only that nothing calls it.
+
+### What the widened scan found
+
+Most of the 191 are ordinary debt. Some are worth naming, because a duplicated
+name is itself a signal:
+
+- `MAX_BLOCK_SIZE` is defined twice, at 1_000_000 and 1_048_576. This one is
+  deliberate and already defended by a test: the consensus bound is measured
+  over JSON and the transport bound over protobuf, and the transport bound must
+  stay the looser of the two or gossip admits blocks every validator then
+  refuses. Both constants document the other.
+- `MAX_DECOMPRESSED_BYTES` is defined twice, at 100 MB and 4 GiB, in two
+  different layers of the same format.
+- `PROTOCOL_VERSION` exists as both a `u32` and a `&str`.
+
+None of these were introduced by the change; the gate simply had no way to
+mention them before. A name that means two things is not automatically wrong -
+the block-size pair is the example of doing it correctly, with each constant
+naming the other and a test pinning the relationship - but it is always worth a
+reader's attention, and a gate that skips the whole category gives it none.
+
+### The canary pair
+
+Two canaries, because a one-sided check here would be worse than none. Two
+definitions with no outside mention must FAIL, and the same pair with one
+outside mention must PASS. Without the second canary, a gate that simply stopped
+skipping ambiguous names would look correct while making exactly the guess the
+skip existed to avoid.
+
+## 87. A metric that is never written is a dashboard lie
+
+Prometheus scrapes are trusted in a way log lines are not. An operator looking
+at a permanent zero next to a real counter does not read "this path was never
+wired"; they read "the network is quiet". The tree has paid for that confusion
+once already: `budlum_peer_count` sat beside `budlum_p2p_peers_connected`, only
+the second was ever set, and scrapes reported a healthy mesh next to a gauge
+that never left zero.
+
+### What the gate asks
+
+`metrics-are-written` walks every `pub field: IntCounter | IntGauge | Histogram`
+in `src/core/metrics.rs` and asks whether any production `.rs` file writes it.
+A write is a call of the form `.<field>.<method>(...)` after three scrubbing
+steps:
+
+1. `#[cfg(test)]` items are stripped, bodyful and bodyless. A bodyless
+   attribute (`#[cfg(test)] use foo;`) has no `{`; matching braces from the next
+   opening brace in the file would swallow the rest of the crate, so the scan
+   asks whether the decorated item has a body before walking.
+2. Comments and string literals are replaced with spaces, so a name that
+   appears only in prose cannot count as a write. A temporary mutation that
+   comments out `.p2p_gossip_duplicates.inc()` must turn the gate red; without
+   this step it stayed green.
+3. Whitespace is collapsed entirely so a call that spans lines still matches.
+
+The methods counted are the prometheus mutators this tree actually uses:
+`set`, `inc`, `dec`, `add`, `sub`, `observe`, `inc_by`, `add_by`,
+`start_timer`, and `observe_closure_duration`. Histograms written only through
+`start_timer()` are honest writes - the timer observes on drop - and a canary
+pins that.
+
+### Why a ratchet and not a ban
+
+Some metrics name surfaces that are not yet on a production path. Those can be
+recorded in `.github/unwritten-metrics-baseline.txt` so the gate fails on
+**new** unwritten metrics without forcing a half-honest bind. The baseline only
+shrinks: a line for a metric that is now written is itself a failure, so the
+file cannot rot into a permanent excuse.
+
+The adoption path preferred binding over baselining. Thirteen metrics were
+unwritten when the gate first measured the tree. One was deleted
+(`peer_count`, a duplicate of `p2p_peers_connected`). The rest were bound to
+real events or live state:
+
+| Metric | Bind |
+|---|---|
+| `mempool_sender_count` | `emit_chain_metrics` from `Mempool::sender_count` |
+| `p2p_gossip_duplicates` | per-duplicate branch in the gossip handler |
+| `p2p_sync_requests` | inbound `/sync` accept and outbound `send_request` |
+| `peer_connection_quality` | mean gossip score on connect/disconnect |
+| `storage_db_size_bytes` | `Storage::size_on_disk` on chain metric emit |
+| `bridge_amount_locked` | sum of `BridgeStatus::Locked` amounts |
+| `bridge_transfers_total` | successful bridge mint |
+| `bns_names_registered` | committed `BnsRegister` transactions |
+| `ai_requests_total` | committed `AiInferenceRequest` transactions |
+| `ai_outcomes_finalized` | registry outcome-length delta across apply |
+| `slashing_events_total` | QC fault slash, actionable registry slash, storage bond burn |
+| `settlement_equivocations_detected` | drained finality equivocation reports |
+
+Cumulative getters are not bind points. Setting a counter from
+`GossipDedup::total_duplicates()` would require a gauge and would hide the rate
+under a level; the event branch is the honest increment.
+
+### The canary set
+
+Written tree PASSes. Unwritten field FAILs. Baseline exempts. Stale baseline
+FAILs. Multi-line write counts. `start_timer` counts. `#[cfg(test)]` write does
+not. Bodyless `#[cfg(test)]` does not swallow the file. Identity boundary holds
+(`m11` is not satisfied by `m11_extra`). Comment-only write FAILs. Near-empty
+metrics struct FAILs the vacuity floor.
+
+```mermaid
+flowchart TD
+    A[Field in metrics.rs] --> B{Written in production after scrub}
+    B -->|Yes| C{On baseline}
+    C -->|Yes| D[FAIL: stale baseline entry]
+    C -->|No| E[OK]
+    B -->|No| F{On baseline}
+    F -->|Yes| G[OK: recorded debt]
+    F -->|No| H[FAIL: new unwritten metric]
+```
+
+## 88. B.U.D. edition Three holds no body
+
+B.U.D. is not one regime. **Classic** (editions one and two) is the deal-and-body
+world: operators may hold real bytes under `Stored` or a `Hybrid` prefix. Users
+who need custody of irreproducible media stay there.
+
+**Three** is recipe-only. The durable object on the network is a generative
+recipe. QR-video and other presentations are derivatives and are not stored. A
+validator unplugging cannot lose "the file" because there is no file body to
+lose - only a recipe that can be re-run. Bodies are not banned from the project;
+they are banned from *this* edition.
+
+```mermaid
+flowchart TD
+    M[ContentManifest] --> E{edition}
+    E -->|Classic| S[Stored / Hybrid / Derived allowed]
+    E -->|Three| G[Generated only]
+    G --> R[Recipe on chain]
+    R --> D[Derivatives on demand: QR-video, frames]
+    D --> X[Not a deal object]
+```
+
+`BudStorageEdition` defaults to `Classic` and adds no commitment bytes in that
+case, so every pre-edition id stays bit-identical. `Three` binds
+`BUD_EDITION_3` into the manifest id and `check_source` refuses `Stored`,
+`Hybrid` and `Derived` at registration and at `validate_untrusted`. The
+generated-content gate pins the enum, `admits_body`, `check_source` and the
+commitment tag so the pair cannot silently disappear.

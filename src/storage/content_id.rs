@@ -2,7 +2,7 @@
 //!
 //! Vision §8.2 originally proposed a *double-hash* `ContentId` carrying both
 //! An IPFS multihash and a Poseidon4 hash. The Poseidon primitive is not
-//! Wired into `budlum-core` (it lives in BudZKVM), so we use the
+//! Wired into `budlum-core` (it lives in `BudZKVM`), so we use the
 //! Existing domain-separated SHA-256 (`hash_fields_bytes`) with the
 //! `BDLM_CONTENT_V1` domain tag. This is exactly the same trade-off the Tur
 //! 14 plan §3.1 makes:
@@ -42,7 +42,7 @@ pub struct ContentId(pub Hash32);
 impl ContentId {
     /// Compute the `ContentId` of a chunk.
     pub fn of(chunk: &[u8]) -> Self {
-        ContentId(hash_fields_bytes(&[b"BDLM_CONTENT_V1", chunk]))
+        Self(hash_fields_bytes(&[b"BDLM_CONTENT_V1", chunk]))
     }
 
     /// Compute the `ContentId` of a chunk plus an explicit sub-chunk byte
@@ -62,13 +62,13 @@ impl ContentId {
             // Caller can't infer anything from a "panic vs Ok" distinction)
             // But the hash is over a tagged-out-of-range field so it can
             // Never collide with a real subrange.
-            return ContentId(hash_fields_bytes(&[
+            return Self(hash_fields_bytes(&[
                 b"BDLM_CONTENT_SUBRANGE_OOR_V1",
                 &start.to_le_bytes(),
                 &end.to_le_bytes(),
             ]));
         }
-        ContentId(hash_fields_bytes(&[
+        Self(hash_fields_bytes(&[
             b"BDLM_CONTENT_SUBRANGE_V1",
             &start.to_le_bytes(),
             &end.to_le_bytes(),
@@ -80,7 +80,7 @@ impl ContentId {
     ///
     /// [`Self::of_subrange`] hashes the bytes and nothing else, so every
     /// operator holding a replica of the same shard answers a challenge with
-    /// the same value. That makes two attacks free, both named in the SoK on
+    /// the same value. That makes two attacks free, both named in the `SoK` on
     /// decentralized storage networks:
     ///
     /// * **outsourcing** - several operators keep one physical copy between
@@ -93,7 +93,7 @@ impl ContentId {
     /// challenge can only be answered by whoever holds *that deal's* copy.
     /// Sharing bytes no longer shares answers.
     ///
-    /// This is a *binding*, not a proof of distinct storage. Filecoin's PoRep
+    /// This is a *binding*, not a proof of distinct storage. Filecoin's `PoRep`
     /// goes further and makes each replica physically different and
     /// incompressible by encoding it under a per-replica key, so the bytes
     /// themselves cannot be shared. That is a format change to what an
@@ -110,7 +110,7 @@ impl ContentId {
         manifest_id: &Hash32,
     ) -> Self {
         let base = Self::of_subrange(chunk, start, end);
-        ContentId(hash_fields_bytes(&[
+        Self(hash_fields_bytes(&[
             b"BDLM_CONTENT_SUBRANGE_DEAL_V1",
             base.as_bytes(),
             operator,
@@ -119,7 +119,7 @@ impl ContentId {
         ]))
     }
 
-    pub fn as_bytes(&self) -> &Hash32 {
+    pub const fn as_bytes(&self) -> &Hash32 {
         &self.0
     }
 }

@@ -1,4 +1,4 @@
-//! Agresif oranlama - her format icin boru hatti, en buyuk oran secimi
+//! Aggressive ratioing - a pipeline per format, picking the largest ratio
 //! No number without a measurement - the ratio table comes from
 //! corpus/format.json plus our own measurement
 

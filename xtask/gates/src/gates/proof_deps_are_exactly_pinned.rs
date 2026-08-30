@@ -74,8 +74,8 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     for manifest in MANIFESTS {
         let path = root.join(manifest);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("{manifest} okunamadi: {e}"))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("could not read {manifest}: {e}"))?;
         for line in text.lines() {
             let Some((name, version)) = dependency(line) else {
                 continue;

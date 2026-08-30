@@ -5,7 +5,7 @@
 //! Simple byte slicing) is **off-chain** - the chain only sees the
 //! Per-shard `ContentId`s and a deterministic `manifest_id` derived from
 //! Them. This matches the existing project rule "the chain carries the
-//! Proof/address of data, not the data itself" (BudZKVM STARK proof
+//! Proof/address of data, not the data itself" (`BudZKVM` STARK proof
 //! Analogy, plan §3.1).
 //!
 //! Per the data-sovereignty rule (plan §0.5): the manifest is
@@ -50,7 +50,7 @@ impl ShardRef {
     /// Computed deterministically; `index` is assigned by the caller
     /// (e.g. the off-chain chunker).
     pub fn from_bytes(index: u32, chunk: &[u8]) -> Self {
-        ShardRef {
+        Self {
             kind: ShardKind::Data,
             index,
             shard_id: ContentId::of(chunk),
@@ -217,14 +217,14 @@ pub struct ErasureScheme {
 
 impl ErasureScheme {
     /// Plain replication: every shard is data, nothing reconstructs anything.
-    pub fn replication(shard_count: u32) -> Self {
+    pub const fn replication(shard_count: u32) -> Self {
         Self {
             k: shard_count,
             n: shard_count,
         }
     }
 
-    pub fn parity_count(&self) -> u32 {
+    pub const fn parity_count(&self) -> u32 {
         self.n.saturating_sub(self.k)
     }
 
@@ -285,13 +285,16 @@ impl ErasureScheme {
 
     /// Bytes stored per byte of content, as a ratio scaled by 1000 to stay in
     /// integer arithmetic. Replication of 3 is 3000; a (4,6) code is 1500.
-    pub fn overhead_per_mille(&self) -> u32 {
+    pub const fn overhead_per_mille(&self) -> u32 {
         if self.k == 0 {
             return u32::MAX;
         }
         (self.n.saturating_mul(1000)) / self.k
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn validate(&self) -> Result<(), String> {
         if self.k == 0 {
             return Err("erasure scheme k must be at least 1".into());
@@ -393,6 +396,13 @@ pub struct ContentManifest {
     /// silently replace the other.
     #[serde(default)]
     pub source: crate::storage::generated::ContentSource,
+    /// Which B.U.D. edition this manifest claims.
+    ///
+    /// Default `Classic` (editions one and two): durable bodies are allowed. `Three` is
+    /// recipe-only and refuses every body regime at registration. The
+    /// commitment adds no bytes for `Classic`, so pre-edition ids are stable.
+    #[serde(default)]
+    pub edition: crate::storage::generated::BudStorageEdition,
     /// Length of the *object*, as opposed to `total_size`, which is the sum
     /// of the stored shard sizes.
     ///
@@ -443,6 +453,9 @@ impl ContentManifest {
     /// Build a manifest from a pre-computed set of shards. Validates that
     /// The shard list is non-empty, indices are unique, sizes are non-zero,
     /// And the total size matches the sum of shard sizes.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// `owner` defaults to the zero address, for F01 backward compatibility; a
     /// caller can set the real owner with `with_owner`.
@@ -460,7 +473,7 @@ impl ContentManifest {
                 return Err(format!("Duplicate shard index {}", s.index));
             }
             total = total
-                .checked_add(s.size as u64)
+                .checked_add(u64::from(s.size))
                 .ok_or_else(|| "ContentManifest total size overflow".to_string())?;
         }
         let shard_count = shards.len() as u32;
@@ -473,7 +486,7 @@ impl ContentManifest {
         let encryption = ContentEncryption::Plaintext;
         let manifest_id =
             manifest_id_from_parts_stored(&shards, &erasure, &encryption, total, total);
-        Ok(ContentManifest {
+        Ok(Self {
             manifest_id,
             owner,
             dictionary_id: None,
@@ -481,6 +494,7 @@ impl ContentManifest {
             shard_count,
             erasure,
             source: crate::storage::generated::ContentSource::Stored,
+            edition: crate::storage::generated::BudStorageEdition::Classic,
             content_size: total,
             encryption,
             shards,
@@ -505,11 +519,56 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
-            &source,
-            self.dictionary_id.as_ref(),
+            ManifestProvenance {
+                source: &source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition: self.edition,
+            },
         );
         self.source = source;
         self
+    }
+
+    /// Test-only until a mint path exists: nothing on the live upload path writes an
+    /// edition, and a public setter no product calls is how a client is told an
+    /// `editionId` is pinned when it is not.
+    #[cfg(test)]
+    /// Declare the B.U.D. edition. Recomputes the id when the edition binds
+    /// bytes (`Three`); `Classic` is a no-op on the preimage.
+    ///
+    /// Does not check source compatibility - that is
+    /// [`crate::storage::generated::BudStorageEdition::check_source`] at registration time.
+    #[must_use]
+    pub fn with_edition(mut self, edition: crate::storage::generated::BudStorageEdition) -> Self {
+        self.manifest_id = manifest_id_from_parts(
+            &self.shards,
+            &self.erasure,
+            &self.encryption,
+            self.content_size(),
+            self.total_size,
+            ManifestProvenance {
+                source: &self.source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition,
+            },
+        );
+        self.edition = edition;
+        self
+    }
+
+    fn recompute_id(&mut self) {
+        self.manifest_id = manifest_id_from_parts(
+            &self.shards,
+            &self.erasure,
+            &self.encryption,
+            self.content_size(),
+            self.total_size,
+            ManifestProvenance {
+                source: &self.source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition: self.edition,
+            },
+        );
     }
 
     /// The object's byte length.
@@ -518,7 +577,7 @@ impl ContentManifest {
     /// `content_size` existed. Those were replication-only, where the two are
     /// the same number, so the fallback is their actual meaning rather than a
     /// guess.
-    pub fn content_size(&self) -> u64 {
+    pub const fn content_size(&self) -> u64 {
         if self.content_size == 0 {
             self.total_size
         } else {
@@ -528,6 +587,9 @@ impl ContentManifest {
 
     /// Record the object's byte length, for manifests whose stored bytes
     /// exceed their content (erasure coding, or a padded tail stripe).
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// Refuses a length larger than the stored bytes: an object cannot be
     /// bigger than the shards holding it, and a reconstructor trusting such a
@@ -543,17 +605,14 @@ impl ContentManifest {
             ));
         }
         self.content_size = content_size;
-        self.manifest_id = manifest_id_from_parts_stored(
-            &self.shards,
-            &self.erasure,
-            &self.encryption,
-            self.content_size(),
-            self.total_size,
-        );
+        self.recompute_id();
         Ok(self)
     }
 
     /// Recompute the canonical id and check it against the one carried.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// `manifest_id` is the key every registry, deal and challenge indexes
     /// by, and it arrives over RPC inside a caller-supplied struct. Nothing
@@ -569,8 +628,11 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
-            &self.source,
-            self.dictionary_id.as_ref(),
+            ManifestProvenance {
+                source: &self.source,
+                dictionary_id: self.dictionary_id.as_ref(),
+                edition: self.edition,
+            },
         );
         if expected != self.manifest_id {
             return Err(format!(
@@ -584,6 +646,9 @@ impl ContentManifest {
 
     /// Full structural check: the id matches, the shard list is coherent, and
     /// the declared erasure scheme is one the shard list can deliver.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// This is what an untrusted manifest has to pass before the chain stores
     /// it. The individual checks already existed on the construction paths;
@@ -610,7 +675,7 @@ impl ContentManifest {
                 return Err(format!("Duplicate shard index {}", s.index));
             }
             total = total
-                .checked_add(s.size as u64)
+                .checked_add(u64::from(s.size))
                 .ok_or_else(|| "ContentManifest total size overflow".to_string())?;
         }
         if total != self.total_size {
@@ -664,10 +729,16 @@ impl ContentManifest {
                 self.content_size()
             ));
         }
+        self.edition
+            .check_source(&self.source)
+            .map_err(|reason| format!("edition/source pair refused: {reason}"))?;
         self.verify_id()
     }
 
     /// Attach an erasure scheme, validating it against the shard list.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
     /// The counts have to line up: `n` is every shard, `k` is the data shards,
     /// and the difference is the parity shards actually present. A manifest
@@ -705,18 +776,12 @@ impl ContentManifest {
             ));
         }
         self.erasure = erasure;
-        self.manifest_id = manifest_id_from_parts_stored(
-            &self.shards,
-            &self.erasure,
-            &self.encryption,
-            self.content_size(),
-            self.total_size,
-        );
+        self.recompute_id();
         Ok(self)
     }
 
     /// Whether an object is still reconstructible with `live` shards left.
-    pub fn is_recoverable(&self, live: u32) -> bool {
+    pub const fn is_recoverable(&self, live: u32) -> bool {
         live >= self.erasure.k
     }
 
@@ -730,7 +795,7 @@ impl ContentManifest {
     /// Returns false once the object is already unrecoverable: there is
     /// nothing to reconstruct from, and a repair deal opened then would just
     /// burn an operator bond.
-    pub fn needs_repair(&self, live: u32, margin: u32) -> bool {
+    pub const fn needs_repair(&self, live: u32, margin: u32) -> bool {
         if live < self.erasure.k {
             return false;
         }
@@ -760,13 +825,7 @@ impl ContentManifest {
     #[must_use]
     pub fn with_encryption(mut self, encryption: ContentEncryption) -> Self {
         self.encryption = encryption;
-        self.manifest_id = manifest_id_from_parts_stored(
-            &self.shards,
-            &self.erasure,
-            &self.encryption,
-            self.content_size(),
-            self.total_size,
-        );
+        self.recompute_id();
         self
     }
 
@@ -783,7 +842,7 @@ impl ContentManifest {
     /// F01: set the real owner, after `from_shards`. If `manifest_id` were bound
     /// to the owner it would have to be recomputed; for now `manifest_id` is
     /// shards-only, which is F01 task 2.
-    pub fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
+    pub const fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self
     }
@@ -791,6 +850,9 @@ impl ContentManifest {
     /// Convenience: build a manifest by slicing `data` into equal-sized
     /// Chunks. The default chunk size is `DEFAULT_CHUNK_SIZE_BYTES`.
     /// The last shard may be smaller.
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn from_bytes_sliced(data: &[u8], chunk_size: u32) -> Result<Self, String> {
         if chunk_size == 0 {
             return Err("ContentManifest chunk_size must be > 0".into());
@@ -863,15 +925,32 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// manifest reading `Plaintext` at the same id, and a reader concludes the
 /// bytes it pulled were never protected.
 #[must_use]
-pub fn manifest_id_from_parts(
+/// Registration provenance grouped so the id preimage stays a single call:
+/// source, dictionary binding and edition are one concept - where the bytes
+/// came from and under which claim they are registered.
+#[derive(Debug, Clone, Copy)]
+struct ManifestProvenance<'a> {
+    /// Where the bytes came from (the upload path).
+    pub source: &'a crate::storage::generated::ContentSource,
+    /// Optional dictionary binding (dedup) the manifest commits to.
+    pub dictionary_id: Option<&'a ContentId>,
+    /// The B.U.D. edition; `Three` binds bytes, `Classic` does not.
+    pub edition: crate::storage::generated::BudStorageEdition,
+}
+
+fn manifest_id_from_parts(
     shards: &[ShardRef],
     erasure: &ErasureScheme,
     encryption: &ContentEncryption,
     content_size: u64,
     total_size: u64,
-    source: &crate::storage::generated::ContentSource,
-    dictionary_id: Option<&ContentId>,
+    provenance: ManifestProvenance<'_>,
 ) -> ContentId {
+    let ManifestProvenance {
+        source,
+        dictionary_id,
+        edition,
+    } = provenance;
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
     buf.extend_from_slice(&(shards.len() as u32).to_le_bytes());
@@ -898,6 +977,8 @@ pub fn manifest_id_from_parts(
     // ids of manifests written before this field have to stay exactly the same.
     // A claim is committed only when something is claimed.
     buf.extend_from_slice(&crate::storage::generated::source_commitment_bytes(source));
+    // Classic edition adds nothing (pre-edition id stability). Three binds.
+    buf.extend_from_slice(&edition.commitment_bytes());
     // The dictionary commitment follows the same rule as the source commitment.
     // With no dictionary, no byte is written, so the preimage of manifests
     // recorded before this field does not change and their ids are preserved.
@@ -926,8 +1007,11 @@ pub fn manifest_id_from_parts_stored(
         encryption,
         content_size,
         total_size,
-        &crate::storage::generated::ContentSource::Stored,
-        None,
+        ManifestProvenance {
+            source: &crate::storage::generated::ContentSource::Stored,
+            dictionary_id: None,
+            edition: crate::storage::generated::BudStorageEdition::Classic,
+        },
     )
 }
 

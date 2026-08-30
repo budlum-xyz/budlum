@@ -87,7 +87,7 @@ impl GateSuite {
             Ok((_, (w, h))) => {
                 // A thumbnail may carry a different resolution and that is fine, because it is a derivative. What matters here is the fidelity core: for originals the format must match.
                 let expected_ok = match fmt {
-                    RenderFormat::Thumbnail { .. } => true, // turev, KF2 icin orijinal kabul
+                    RenderFormat::Thumbnail { .. } => true, // derived; accepted as original for KF2
                     _ => w == core.width && h == core.height,
                 };
                 GateResult {
@@ -123,7 +123,7 @@ impl GateSuite {
     }
 
     pub fn kl(usage_percent: f64) -> GateResult {
-        // Yasayan esik: kullanim arttikca gereken ucret duser, n degisir
+        // A living threshold: as usage grows the required fee drops and n moves
         // u=90 -> n=3, u=50 -> n=10, u=10 -> n=66 - model
         let ok = (0.0..=100.0).contains(&usage_percent);
         GateResult {

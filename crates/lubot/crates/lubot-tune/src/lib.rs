@@ -1,5 +1,5 @@
-// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe`
+// block enters, the build FAILS (regression gate). Same policy as the main crate.
 #![forbid(unsafe_code)]
 //! # lubot-tune - ince ayar orkestrasyonu iskeleti
 //!
@@ -9,6 +9,7 @@
 //! stage is only documented, and the run guides live outside this repository
 //! (on the `lubot-kosu-2026-08-13` branch).
 
+pub mod eval;
 pub mod lock;
 pub mod plan;
 pub mod schema;

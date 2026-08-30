@@ -40,6 +40,7 @@ pub mod fork_choice_locks;
 pub mod manifest_commitment_locks;
 #[cfg(test)]
 pub mod multi_consensus_locks;
+pub mod operator_kill_chaos;
 #[cfg(test)]
 pub mod poisoned_lock_locks;
 #[cfg(test)]
@@ -103,7 +104,7 @@ pub mod zkvm;
 #[cfg(test)]
 pub mod adversarial_p2p;
 // The F1 seal (2026-07-17): NftBurn -> storage manifest hard
-// Prune zincir-seviyesi regresyon kilidi (produce_block yolu).
+// Prune chain-level regression lock (the produce_block path).
 #[cfg(test)]
 pub mod bns_expanded;
 // Universal Relayer E2E integration tests.
@@ -147,7 +148,7 @@ pub mod poa_onboarding_matrix;
 // rollback); they are inverted when the product fix is ordered.
 #[cfg(test)]
 pub mod snapshot_chaos;
-// P5 regresyon kilidi (2026-07-19): ZK finality fail-open +
+// P5 regression lock (2026-07-19): ZK finality fail-open +
 // The relayer escrow silent-failure security seals, which break CI.
 // Reachability premises behind the accepted dependency advisories. These fail
 // when a routine dependency change makes a carried CVE live again.

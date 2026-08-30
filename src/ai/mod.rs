@@ -35,9 +35,9 @@ mod tests {
     use super::*;
     use crate::core::address::Address;
 
-    /// Test yardimcisi: verifier stake'i MIN_VERIFIER_STAKE altindaysa
+    /// Test helper: when the verifier stake is below MIN_VERIFIER_STAKE
     /// stakes, then calls submit_result (the Strix #359 auth check
-    /// sonrasi: yetkisiz verifier sonuc sayamaz).
+    /// afterwards: an unauthorised verifier cannot count a result).
     fn submit_result_staked(
         registry: &mut AiRegistry,
         result: AiInferenceResult,

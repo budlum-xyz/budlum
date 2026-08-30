@@ -10,7 +10,7 @@ not ask which consensus produced a fact, only whether the finality proof for tha
 so value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-2430%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-2621%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -30,6 +30,7 @@ so value moves between domains without trusting an intermediary.
 
 - [Why Budlum](#why-budlum)
 - [How settlement works](#how-settlement-works)
+- [Operator scenarios](#operator-scenarios-measured)
 - [Repository layout](#repository-layout)
 - [Getting started](#getting-started)
 - [Running a node](#running-a-node)
@@ -120,6 +121,38 @@ Both are code maps first and design documents second. Where a diagram and the co
 the code is the fact and the diagram is the bug.
 
 ---
+
+## Operator scenarios (measured)
+
+Three production paths run end to end in CI. Every number below is read from a
+CI log; none of it is a local measurement.
+
+1. **Canonical proof relay.** `bud-cli relay` first re-derives both canonical
+   check programs (private-transfer, syscall-context) from the pinned operand
+   values, slot by slot, and compares the recomputed Keccak-256 against the
+   pin table: a drifted builder refuses the run before a proof is touched.
+   The signed `relay_report.json` is then verified from disk: the pretty JSON
+   is regenerated from the parsed report and compared byte-for-byte, the proof
+   fingerprint is re-derived from the loaded envelope, and `--payload-out`
+   writes the exact bytes the signature covers, so a monitor can re-hash them
+   without re-implementing the layout. `--verified-at <unix>` pins the clock
+   and makes a re-run reproduce the signature.
+2. **Lubot grading loop.** `lubot-ops tune data.jsonl` validates the dataset
+   label (model target, sample count), attaches the curriculum's eval-set
+   digest to the plan and checks the binding; `lubot-ops eval data.jsonl
+   responses.jsonl [MIN_SCORE]` refuses a curriculum whose golden rules pass on
+   an empty answer, grades the produced answers against the golden rules, and
+   exits non-zero when the report does not clear the gate. On the device side,
+   `lubot-serve` refuses a consensus bridge whose residency plan streams more
+   from disk than the operator's `disk_budget_bytes` allows, before the
+   streaming policy decides anything.
+3. **Storage throughput.** `cargo bench --bench ratio_rayon` measures the QR
+   payload packer on a 96 x 65536 B corpus (6291456 B in, 7 repetitions,
+   fastest reported): serial 39.7 MB/s (158352 us), rayon pool 97.5 MB/s
+   (64539 us), speedup 2.45x. The packed outputs of the two paths are
+   byte-compared; a mismatch exits non-zero. Measured in CI at `usl@967acce4c`
+   (job `Timing-Safe Regression`, step `Ratio rayon vs serial throughput`,
+   2026-08-30T06:18:49Z).
 
 ## Repository layout
 

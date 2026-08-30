@@ -71,12 +71,12 @@ mod tests {
     }
 
     #[test]
-    fn zaman_darsa_hizli_seviye() {
+    fn tight_time_picks_a_fast_level() {
         assert!(matches!(decide(1.5, 3.0, 50, 1.05), ZstdDecision::Level(3)));
     }
 
     #[test]
-    fn buyuk_kazanc_yavs_seviye() {
+    fn a_large_gain_picks_a_slow_level() {
         assert!(matches!(
             decide(1.5, 2.2, 10_000, 1.05),
             ZstdDecision::Level(19)

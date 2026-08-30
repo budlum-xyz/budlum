@@ -12,7 +12,7 @@ use sled::Db;
 use std::str::from_utf8;
 use tracing::info;
 
-/// On-disk ConsensusDomain shape used appended
+/// On-disk `ConsensusDomain` shape used appended
 /// `pow_parameters`. Bincode is positional, so serde defaults alone cannot
 /// Recover an older record that ends before the new field.
 #[derive(serde::Deserialize)]
@@ -83,7 +83,7 @@ impl From<LegacyConsensusDomainV1> for ConsensusDomain {
             pow_parameters: None,
             // The migrated legacy record had no such field, so which programs
             // this domain permits is unknown. An unknown
-            // Izin = izin yok: liste bos birakilir ve alan, operatoru acikca
+            // Allow = no allowance: the list is left empty and the field explicitly
             // Bir program listesi verene kadar zk ile ilerletilemez.
             zk_program_allowlist: Vec::new(),
         }
@@ -119,10 +119,10 @@ pub struct Storage {
 
 /// Sled's file-lock release is not synchronous with `Db::drop`: the flusher
 /// Thread can still hold the lock briefly after the last handle is gone, and
-/// `sled::open` reports that contention as an io::Error with `kind: Other`
-/// (sled wraps the WouldBlock detail into its message text). Reopening the
+/// `sled::open` reports that contention as an `io::Error` with `kind: Other`
+/// (sled wraps the `WouldBlock` detail into its message text). Reopening the
 /// Same path immediately after a drop therefore races with the release and
-/// Flakes under CI load (observed in the tur13_5 restore test, 2026-07-18).
+/// Flakes under CI load (observed in the `tur13_5` restore test, 2026-07-18).
 /// A small bounded retry absorbs the race; non-contention errors and
 /// Persistent contention keep the exact same failure surface as before.
 fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Db> {
@@ -148,14 +148,35 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
 }
 
 impl Storage {
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn new(path: &str) -> std::io::Result<Self> {
         let db = sled_open_with_retry(path)?;
-        let storage = Storage { db };
+        let storage = Self { db };
         storage.apply_migrations()?;
         storage.recover_interrupted_commit()?;
         Ok(storage)
     }
 
+    /// Approximate on-disk size of the sled database, for the
+    /// `storage_db_size_bytes` gauge.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    ///
+    /// Sled's own `size_on_disk` walks the file set; it can fail under lock
+    /// contention. Callers treat `Err` as "leave the last scrape".
+    pub fn size_on_disk(&self) -> std::io::Result<u64> {
+        self.db.size_on_disk().map_err(std::io::Error::from)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn apply_migrations(&self) -> std::io::Result<()> {
         const CURRENT_SCHEMA_VERSION: u64 = 1;
         let current = self.schema_version()?;
@@ -170,6 +191,10 @@ impl Storage {
     }
 
     /// Read the on-disk schema version.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// A stored value that does not parse used to become `0` through
     /// `unwrap_or(0)`, and `0` is exactly the value that means "fresh
@@ -200,6 +225,10 @@ impl Storage {
     }
 
     /// Create an atomic, self-contained database backup.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     ///
     /// The temporary file is written beside the destination and renamed only
     /// After all bytes are durable, so a crash never presents a partial file as
@@ -246,6 +275,10 @@ impl Storage {
     }
 
     /// Validate backup framing and key uniqueness without modifying a database.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn verify_snapshot<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<usize> {
         let bytes = std::fs::read(path)?;
         let backup = decode_database_backup(&bytes)?;
@@ -277,6 +310,10 @@ impl Storage {
 
     /// Restore an offline backup into a new, empty sled directory and run the
     /// Normal migration/integrity checks before reporting success.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn restore_snapshot<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
         snapshot_path: P,
         target_db_path: Q,
@@ -328,7 +365,7 @@ impl Storage {
             // Reopen races with it and flakes (tur13_5, 2026-07-18). The
             // Semantics are unchanged - the checks run on the freshly
             // Restored data exactly as `Storage::new` would run them.
-            let restored = Storage { db };
+            let restored = Self { db };
             restored.apply_migrations()?;
             restored.recover_interrupted_commit()?;
             let errors = restored.check_integrity().map_err(std::io::Error::other)?;
@@ -341,6 +378,10 @@ impl Storage {
         }
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn insert_block(&self, block: &Block) -> std::io::Result<()> {
         let key = block.hash.clone();
         let val = encode(block)?;
@@ -353,6 +394,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn commit_block(&self, block: &Block, state_root: &str) -> std::io::Result<()> {
         let mut batch = sled::Batch::default();
 
@@ -379,6 +424,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn recover_interrupted_commit(&self) -> std::io::Result<()> {
         if let Some(height_bytes) = self.db.get(b"IN_PROGRESS_HEIGHT")? {
             let height_str = from_utf8(&height_bytes)
@@ -448,6 +497,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
         // Write IN_PROGRESS_HEIGHT marker and flush it
         self.db.insert(
@@ -537,6 +590,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_block(&self, hash: &str) -> std::io::Result<Option<Block>> {
         if let Some(val) = self.db.get(hash)? {
             let block: Block = decode(&val)?;
@@ -545,6 +602,10 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_block_by_height(&self, height: u64) -> std::io::Result<Option<Block>> {
         let height_key = format!("HEIGHT:{height}");
         if let Some(hash_bytes) = self.db.get(height_key.as_bytes())? {
@@ -556,6 +617,10 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_canonical_height(&self) -> std::io::Result<u64> {
         if let Some(val) = self.db.get("CANONICAL_HEIGHT")? {
             let s = from_utf8(&val)
@@ -566,6 +631,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_block(&self, height: u64) -> std::io::Result<()> {
         let key = format!("HEIGHT:{height}");
         if let Some(hash_val) = self.db.get(key.as_bytes())? {
@@ -580,6 +649,10 @@ impl Storage {
         }
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_qc_blob(
         &self,
         height: u64,
@@ -591,6 +664,10 @@ impl Storage {
         self.db.flush()?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_qc_blob(
         &self,
         height: u64,
@@ -603,6 +680,10 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_qc_blob(&self, height: u64) -> std::io::Result<()> {
         let key = format!("QC_BLOB:{height}");
         self.db.remove(key.as_bytes())?;
@@ -690,6 +771,10 @@ impl Storage {
         self.db.flush()?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_finality_cert(
         &self,
         height: u64,
@@ -702,18 +787,30 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_finality_cert(&self, height: u64) -> std::io::Result<()> {
         let key = format!("FINALITY_CERT:{height}");
         self.db.remove(key.as_bytes())?;
         self.db.flush()?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_canonical_height(&self, height: u64) -> std::io::Result<()> {
         self.db
             .insert("CANONICAL_HEIGHT", height.to_string().as_bytes())?;
         self.db.flush()?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_state_root(&self, height: u64, state_root: &str) -> std::io::Result<()> {
         let key = format!("STATE_ROOT:{height}");
         self.db.insert(key.as_bytes(), state_root.as_bytes())?;
@@ -721,6 +818,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
         let key = format!("DOMAIN:{}", domain.id);
         let val = encode(domain)?;
@@ -729,6 +830,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
         let mut domains: Vec<ConsensusDomain> = Vec::new();
         for item in self.db.scan_prefix(b"DOMAIN:") {
@@ -746,6 +851,10 @@ impl Storage {
         Ok(domains)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
         let key = format!(
             "DOMAIN_COMMITMENT:{}:{}:{}",
@@ -757,6 +866,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_domain_commitment_batch(
         &self,
         commitment: &DomainCommitment,
@@ -781,6 +894,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
         let mut commitments: Vec<DomainCommitment> = Vec::new();
         for item in self.db.scan_prefix(b"DOMAIN_COMMITMENT:") {
@@ -797,6 +914,10 @@ impl Storage {
         Ok(commitments)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()> {
         let key = format!("GLOBAL_HEADER:{}", header.global_height);
         let hash_key = format!("GLOBAL_HEADER_HASH:{}", header.calculate_hash());
@@ -817,6 +938,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
         let key = format!("GLOBAL_HEADER:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -826,6 +951,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_global_headers(&self) -> std::io::Result<Vec<GlobalBlockHeader>> {
         let mut headers: Vec<GlobalBlockHeader> = Vec::new();
         for item in self.db.scan_prefix(b"GLOBAL_HEADER:") {
@@ -836,6 +965,10 @@ impl Storage {
         Ok(headers)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
         let val = encode(bridge_state)?;
         self.db.insert(b"BRIDGE_STATE", val)?;
@@ -843,6 +976,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
         if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
             let decoded = decode(&val)?;
@@ -852,6 +989,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_universal_relayer(
         &self,
         relayer: &crate::cross_domain::relayer::UniversalRelayer,
@@ -862,6 +1003,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_universal_relayer(
         &self,
     ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
@@ -873,6 +1018,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_storage_registry(
         &self,
         registry: &crate::domain::storage_deal::StorageRegistry,
@@ -883,6 +1032,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_storage_registry(
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
@@ -894,6 +1047,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_proof_claim_registry(
         &self,
         registry: &crate::prover::ProofClaimRegistry,
@@ -904,6 +1061,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_proof_claim_registry(
         &self,
     ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
@@ -915,6 +1076,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
@@ -925,6 +1090,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_storage_economics_state(
         &self,
     ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
@@ -936,6 +1105,10 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
         let key = format!("XDOMAIN_MSG:{}", hex::encode(message.message_id));
         let val = encode(message)?;
@@ -944,6 +1117,10 @@ impl Storage {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
         let mut messages: Vec<CrossDomainMessage> = Vec::new();
         for item in self.db.scan_prefix(b"XDOMAIN_MSG:") {
@@ -953,6 +1130,10 @@ impl Storage {
         Ok(messages)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_state_root(&self, height: u64) -> std::io::Result<Option<String>> {
         let key = format!("STATE_ROOT:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -964,11 +1145,19 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_last_hash(&self, hash: &str) -> std::io::Result<()> {
         self.db.insert("LAST", hash.as_bytes())?;
         self.db.flush()?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_last_hash(&self) -> std::io::Result<Option<String>> {
         if let Some(val) = self.db.get("LAST")? {
             let hash = from_utf8(&val)
@@ -979,6 +1168,10 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_chain(&self) -> std::io::Result<Vec<Block>> {
         let mut chain = Vec::new();
         if let Some(mut current_hash) = self.get_last_hash()? {
@@ -993,15 +1186,23 @@ impl Storage {
         chain.reverse();
         Ok(chain)
     }
-    pub fn db(&self) -> &Db {
+    pub const fn db(&self) -> &Db {
         &self.db
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_tx_index(&self, tx_hash: &str, block_height: u64) -> std::io::Result<()> {
         let key = format!("TX_IDX:{tx_hash}");
         self.db
             .insert(key.as_bytes(), block_height.to_string().as_bytes())?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_tx_block_height(&self, tx_hash: &str) -> std::io::Result<Option<u64>> {
         let key = format!("TX_IDX:{tx_hash}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1012,17 +1213,29 @@ impl Storage {
             Ok(None)
         }
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn delete_tx_index(&self, tx_hash: &str) -> std::io::Result<()> {
         let key = format!("TX_IDX:{tx_hash}");
         self.db.remove(key.as_bytes())?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_account(&self, pubkey: &Address, account: &Account) -> std::io::Result<()> {
         let key = format!("ACCT:{pubkey}");
         let val = encode(account)?;
         self.db.insert(key.as_bytes(), val)?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_all_accounts(
         &self,
     ) -> std::io::Result<std::collections::HashMap<Address, Account>> {
@@ -1039,17 +1252,29 @@ impl Storage {
         }
         Ok(accounts)
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_mempool_tx(&self, tx: &Transaction) -> std::io::Result<()> {
         let key = format!("MEMPOOL:{}", tx.hash);
         let val = encode(tx)?;
         self.db.insert(key.as_bytes(), val)?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn remove_mempool_tx(&self, tx_hash: &str) -> std::io::Result<()> {
         let key = format!("MEMPOOL:{tx_hash}");
         self.db.remove(key.as_bytes())?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_mempool_txs(&self) -> std::io::Result<Vec<Transaction>> {
         let mut txs = Vec::new();
         let mut removed_corrupt = false;
@@ -1073,6 +1298,10 @@ impl Storage {
         }
         Ok(txs)
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_checkpoint(
         &self,
         checkpoint: &crate::consensus::pos::Checkpoint,
@@ -1089,6 +1318,10 @@ impl Storage {
         self.db.flush()?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_checkpoints(&self) -> std::io::Result<Vec<crate::consensus::pos::Checkpoint>> {
         let mut cps = Vec::new();
         for item in self.db.scan_prefix(b"CP:") {
@@ -1099,6 +1332,10 @@ impl Storage {
         cps.sort_by_key(|c| c.block_index);
         Ok(cps)
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_seen_block(
         &self,
         header: &crate::core::block::BlockHeader,
@@ -1113,6 +1350,10 @@ impl Storage {
         self.db.insert(key.as_bytes(), val)?;
         Ok(())
     }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap> {
         let mut seen = std::collections::HashMap::new();
         for item in self.db.scan_prefix(b"SEEN:") {
@@ -1134,10 +1375,17 @@ impl Storage {
         Ok(seen)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn flush_batch(&self) -> std::io::Result<usize> {
         Ok(self.db.flush()?)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn check_integrity(&self) -> Result<Vec<String>, String> {
         let mut errors = Vec::new();
         let height = self.get_canonical_height().map_err(|e| e.to_string())?;
@@ -1178,6 +1426,9 @@ impl Storage {
         Ok(errors)
     }
 
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
     pub fn repair_index(&self) -> Result<(), String> {
         tracing::info!("Starting database index repair...");
         let last_hash = match self.get_last_hash() {
@@ -1231,7 +1482,11 @@ impl Storage {
         format!("CONTENT:{}", hex::encode(cid.0))
     }
 
-    /// Store raw content bytes by their canonical ContentId.
+    /// Store raw content bytes by their canonical `ContentId`.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn put_content(
         &self,
         cid: &crate::storage::content_id::ContentId,
@@ -1249,7 +1504,11 @@ impl Storage {
         Ok(())
     }
 
-    /// Retrieve raw content bytes by ContentId.
+    /// Retrieve raw content bytes by `ContentId`.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_content(
         &self,
         cid: &crate::storage::content_id::ContentId,
@@ -1268,51 +1527,51 @@ impl Storage {
 
 impl BlockchainStorage for Storage {
     fn insert_block(&self, block: &Block) -> std::io::Result<()> {
-        Storage::insert_block(self, block)
+        Self::insert_block(self, block)
     }
 
     fn commit_block(&self, block: &Block, state_root: &str) -> std::io::Result<()> {
-        Storage::commit_block(self, block, state_root)
+        Self::commit_block(self, block, state_root)
     }
 
     fn get_block(&self, hash: &str) -> std::io::Result<Option<Block>> {
-        Storage::get_block(self, hash)
+        Self::get_block(self, hash)
     }
 
     fn get_block_by_height(&self, height: u64) -> std::io::Result<Option<Block>> {
-        Storage::get_block_by_height(self, height)
+        Self::get_block_by_height(self, height)
     }
 
     fn get_canonical_height(&self) -> std::io::Result<u64> {
-        Storage::get_canonical_height(self)
+        Self::get_canonical_height(self)
     }
 
     fn save_canonical_height(&self, height: u64) -> std::io::Result<()> {
-        Storage::save_canonical_height(self, height)
+        Self::save_canonical_height(self, height)
     }
 
     fn save_state_root(&self, height: u64, state_root: &str) -> std::io::Result<()> {
-        Storage::save_state_root(self, height, state_root)
+        Self::save_state_root(self, height, state_root)
     }
 
     fn get_state_root(&self, height: u64) -> std::io::Result<Option<String>> {
-        Storage::get_state_root(self, height)
+        Self::get_state_root(self, height)
     }
 
     fn save_last_hash(&self, hash: &str) -> std::io::Result<()> {
-        Storage::save_last_hash(self, hash)
+        Self::save_last_hash(self, hash)
     }
 
     fn get_last_hash(&self) -> std::io::Result<Option<String>> {
-        Storage::get_last_hash(self)
+        Self::get_last_hash(self)
     }
 
     fn load_chain(&self) -> std::io::Result<Vec<Block>> {
-        Storage::load_chain(self)
+        Self::load_chain(self)
     }
 
     fn delete_block(&self, height: u64) -> std::io::Result<()> {
-        Storage::delete_block(self, height)
+        Self::delete_block(self, height)
     }
 
     fn save_qc_blob(
@@ -1320,15 +1579,15 @@ impl BlockchainStorage for Storage {
         height: u64,
         blob: &crate::consensus::qc::QcBlob,
     ) -> std::io::Result<()> {
-        Storage::save_qc_blob(self, height, blob)
+        Self::save_qc_blob(self, height, blob)
     }
 
     fn get_qc_blob(&self, height: u64) -> std::io::Result<Option<crate::consensus::qc::QcBlob>> {
-        Storage::get_qc_blob(self, height)
+        Self::get_qc_blob(self, height)
     }
 
     fn delete_qc_blob(&self, height: u64) -> std::io::Result<()> {
-        Storage::delete_qc_blob(self, height)
+        Self::delete_qc_blob(self, height)
     }
 
     fn save_finality_cert(
@@ -1336,30 +1595,30 @@ impl BlockchainStorage for Storage {
         height: u64,
         cert: &crate::chain::finality::FinalityCert,
     ) -> std::io::Result<()> {
-        Storage::save_finality_cert(self, height, cert)
+        Self::save_finality_cert(self, height, cert)
     }
 
     fn get_finality_cert(
         &self,
         height: u64,
     ) -> std::io::Result<Option<crate::chain::finality::FinalityCert>> {
-        Storage::get_finality_cert(self, height)
+        Self::get_finality_cert(self, height)
     }
 
     fn delete_finality_cert(&self, height: u64) -> std::io::Result<()> {
-        Storage::delete_finality_cert(self, height)
+        Self::delete_finality_cert(self, height)
     }
 
     fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
-        Storage::save_consensus_domain(self, domain)
+        Self::save_consensus_domain(self, domain)
     }
 
     fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
-        Storage::load_consensus_domains(self)
+        Self::load_consensus_domains(self)
     }
 
     fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
-        Storage::save_domain_commitment(self, commitment)
+        Self::save_domain_commitment(self, commitment)
     }
 
     fn save_domain_commitment_batch(
@@ -1367,121 +1626,121 @@ impl BlockchainStorage for Storage {
         commitment: &DomainCommitment,
         domains: &[ConsensusDomain],
     ) -> std::io::Result<()> {
-        Storage::save_domain_commitment_batch(self, commitment, domains)
+        Self::save_domain_commitment_batch(self, commitment, domains)
     }
 
     fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
-        Storage::load_domain_commitments(self)
+        Self::load_domain_commitments(self)
     }
 
     fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()> {
-        Storage::save_global_header(self, header)
+        Self::save_global_header(self, header)
     }
 
     fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
-        Storage::get_global_header(self, height)
+        Self::get_global_header(self, height)
     }
 
     fn load_global_headers(&self) -> std::io::Result<Vec<GlobalBlockHeader>> {
-        Storage::load_global_headers(self)
+        Self::load_global_headers(self)
     }
 
     fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
-        Storage::save_bridge_state(self, bridge_state)
+        Self::save_bridge_state(self, bridge_state)
     }
 
     fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
-        Storage::load_bridge_state(self)
+        Self::load_bridge_state(self)
     }
 
     fn save_universal_relayer(
         &self,
         relayer: &crate::cross_domain::relayer::UniversalRelayer,
     ) -> std::io::Result<()> {
-        Storage::save_universal_relayer(self, relayer)
+        Self::save_universal_relayer(self, relayer)
     }
 
     fn load_universal_relayer(
         &self,
     ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
-        Storage::load_universal_relayer(self)
+        Self::load_universal_relayer(self)
     }
 
     fn save_proof_claim_registry(
         &self,
         registry: &crate::prover::ProofClaimRegistry,
     ) -> std::io::Result<()> {
-        Storage::save_proof_claim_registry(self, registry)
+        Self::save_proof_claim_registry(self, registry)
     }
 
     fn load_proof_claim_registry(
         &self,
     ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
-        Storage::load_proof_claim_registry(self)
+        Self::load_proof_claim_registry(self)
     }
 
     fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
     ) -> std::io::Result<()> {
-        Storage::save_storage_economics_state(self, snapshot)
+        Self::save_storage_economics_state(self, snapshot)
     }
 
     fn load_storage_economics_state(
         &self,
     ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
-        Storage::load_storage_economics_state(self)
+        Self::load_storage_economics_state(self)
     }
 
     fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
-        Storage::save_cross_domain_message(self, message)
+        Self::save_cross_domain_message(self, message)
     }
 
     fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
-        Storage::load_cross_domain_messages(self)
+        Self::load_cross_domain_messages(self)
     }
 
     fn save_tx_index(&self, tx_hash: &str, block_height: u64) -> std::io::Result<()> {
-        Storage::save_tx_index(self, tx_hash, block_height)
+        Self::save_tx_index(self, tx_hash, block_height)
     }
 
     fn get_tx_block_height(&self, tx_hash: &str) -> std::io::Result<Option<u64>> {
-        Storage::get_tx_block_height(self, tx_hash)
+        Self::get_tx_block_height(self, tx_hash)
     }
 
     fn delete_tx_index(&self, tx_hash: &str) -> std::io::Result<()> {
-        Storage::delete_tx_index(self, tx_hash)
+        Self::delete_tx_index(self, tx_hash)
     }
 
     fn save_account(&self, pubkey: &Address, account: &Account) -> std::io::Result<()> {
-        Storage::save_account(self, pubkey, account)
+        Self::save_account(self, pubkey, account)
     }
 
     fn load_all_accounts(&self) -> std::io::Result<std::collections::HashMap<Address, Account>> {
-        Storage::load_all_accounts(self)
+        Self::load_all_accounts(self)
     }
 
     fn save_mempool_tx(&self, tx: &Transaction) -> std::io::Result<()> {
-        Storage::save_mempool_tx(self, tx)
+        Self::save_mempool_tx(self, tx)
     }
 
     fn remove_mempool_tx(&self, tx_hash: &str) -> std::io::Result<()> {
-        Storage::remove_mempool_tx(self, tx_hash)
+        Self::remove_mempool_tx(self, tx_hash)
     }
 
     fn load_mempool_txs(&self) -> std::io::Result<Vec<Transaction>> {
-        Storage::load_mempool_txs(self)
+        Self::load_mempool_txs(self)
     }
 
     fn save_checkpoint(
         &self,
         checkpoint: &crate::consensus::pos::Checkpoint,
     ) -> std::io::Result<()> {
-        Storage::save_checkpoint(self, checkpoint)
+        Self::save_checkpoint(self, checkpoint)
     }
 
     fn load_checkpoints(&self) -> std::io::Result<Vec<crate::consensus::pos::Checkpoint>> {
-        Storage::load_checkpoints(self)
+        Self::load_checkpoints(self)
     }
 
     fn save_seen_block(
@@ -1489,19 +1748,19 @@ impl BlockchainStorage for Storage {
         header: &crate::core::block::BlockHeader,
         sig: &[u8],
     ) -> std::io::Result<()> {
-        Storage::save_seen_block(self, header, sig)
+        Self::save_seen_block(self, header, sig)
     }
 
     fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap> {
-        Storage::load_all_seen_blocks(self)
+        Self::load_all_seen_blocks(self)
     }
 
     fn flush_batch(&self) -> std::io::Result<usize> {
-        Storage::flush_batch(self)
+        Self::flush_batch(self)
     }
 
     fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
-        Storage::commit_durable_batch(self, batch)
+        Self::commit_durable_batch(self, batch)
     }
 }
 

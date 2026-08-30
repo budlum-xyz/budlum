@@ -912,7 +912,7 @@ pub fn self_test() -> Result<String, String> {
         "failed-verify branch success accepted",
     );
 
-    // TEE: nested conditional, closure decoy, success-sonrasi guard.
+    // TEE: nested conditional, closure decoy, post-success guard.
     expect_problem(
         &mut problems,
         TEE_NESTED_CONDITIONAL,

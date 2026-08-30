@@ -38,9 +38,19 @@ jobs:
           cargo bench --bench micro -- --output-format bencher 2>&1 | tee /tmp/bench-micro.txt
           cargo bench --bench single_node -- --output-format bencher 2>&1 | tee /tmp/bench-single.txt
           echo "Benchmark runs completed."
+      # BudZero canonical-program benches: prove/verify times for the three
+      # programs the regeneration gate reproduces (storage challenge, private
+      # transfer, matmul guest). One sample each keeps the job well inside the
+      # timeout; the JSON lines are recorded as artifacts.
+      - name: Run the BudZero canonical benches
+        run: |
+          (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
+          (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
+          echo "BudZero bench runs completed."
       - name: Store the results as an artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-results
           path: /tmp/bench-*.txt
+          # BudZero canonical JSON lines included via the same glob (bench-budzero-*.txt).
           retention-days: 30

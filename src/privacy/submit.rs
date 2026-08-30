@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 /// Max inputs/outputs per private transfer (DoS bound).
 pub const MAX_PRIVATE_IO: usize = 16;
 
-/// Eski Ed25519 yetkilendirme imzasinin uzunlugu.
+/// The length of the legacy Ed25519 authorisation signature.
 pub const ED25519_AUTH_SIG_LEN: usize = 64;
 
-/// ML-DSA-87 yetkilendirme imzasinin uzunlugu.
+/// The length of the ML-DSA-87 authorisation signature.
 pub const ML_DSA_87_AUTH_SIG_LEN: usize = crate::crypto::primitives::ML_DSA_87_SIGNATURE_LEN;
 
 /// Chain-submitted private transfer (from wallet intent).
@@ -108,7 +108,7 @@ mod tests {
         }
     }
 
-    /// Eski Ed25519 yetkilendirmesi kabul edilmeye devam etmeli.
+    /// The legacy Ed25519 authorisation must keep being accepted.
     #[test]
     fn an_ed25519_authorization_keeps_its_shape() {
         assert!(submit_with_sig(ED25519_AUTH_SIG_LEN)

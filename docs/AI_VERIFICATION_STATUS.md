@@ -17,7 +17,7 @@ feature, while the code deliberately refuses to perform it.
 | Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `lubot::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
 | Model modality declaration checked against the read it is asked to serve | working | `AiModelSpec::modalities`, `ModalitySet` |
 | SocialFi bridge: finalized Lubot output minted as requester-owned NFT | working (best-effort) | `src/execution/executor.rs` → `lubot::social::lubot_output_to_nft` |
-| `VerifyInference` opcode (0x1F) inside the zkVM | **always returns 0** | `budzero/bud-vm/src/lib.rs` |
+| `VerifyInference` opcode (0x1F) inside the zkVM | **fail-closed Poseidon binding**: `rd = 1` iff `output_c == poseidon4_hash(model_c, input_c)` for a proof window that fits memory, else 0; mainnet decoding is gated off | `budzero/bud-vm/src/lib.rs` |
 
 ## Perception declaration (V3)
 
@@ -217,60 +217,102 @@ commitment column in the AIR, or having the verifier rebuild the image and
 re-derive the trace itself. Until then the digest narrows the gap from "any
 weights" to "the registered weights, on the prover's word".
 
-## Why the transaction path fails closed
+## Why the transaction path refuses a proof it cannot check
 
-`src/execution/executor.rs` rejects any model that sets
-`require_execution_proof` with `ai_exec_verifier_unavailable`. This is
-intentional: full STARK verification needs the registered guest program words
-plus the canonical `ExecutionPublicInputs`, and the transaction carries
-neither. Accepting a proof envelope as evidence without checking it would be
-worse than refusing, so the path refuses.
+`src/execution/executor.rs` calls `verify_execution_proof_full` for every model
+that sets `require_execution_proof`, and refuses when the bundle says the proof
+does not hold. The refusal is per missing input rather than blanket: a proof
+without `public_inputs` is rejected with `ai_exec_no_public_inputs`, a model
+without a registered `execution_program_hash` with `ai_exec_no_program_hash`, a
+proof that names another chain with `ai_exec_chain_id`, and a program that
+cannot be rebuilt from the registration with `ai_exec_program_rebuild`. The
+older blanket refusal `ai_exec_verifier_unavailable` is gone: the two inputs it
+complained about (the guest program words, rebuilt from the registered model,
+and the canonical `ExecutionPublicInputs`, carried by the proof) both exist.
 
-Structural checks still run for models that do not require an execution proof.
-They bind commitments and the model id; they do **not** prove that the claimed
-computation happened.
+- `AiModelSpec::execution_dims` lets the node rebuild the exact guest program
+  words a proof was produced against (`guest_program_for_model`).
+- `AiExecutionProof::public_inputs` carries the public inputs the envelope was
+  produced against, and the envelope commits to them
+  (`public_inputs_hash`), so a prover cannot ship a bundle it did not prove
+  against.
+
+For a proof-required model the executor now fails closed on named conditions
+rather than on the whole feature: missing public inputs
+(`ai_exec_no_public_inputs`), missing registered program hash
+(`ai_exec_no_program_hash`), a public-inputs program hash that disagrees with
+the registration (`ai_exec_program_hash`), a non-zero exit code
+(`ai_exec_exit_code`), a `chain_id` that does not match the transaction
+(`ai_exec_chain_id`), and finally the STARK itself against the rebuilt program
+(`ai_exec_stark`). Structural checks (commitments, model id, weights digest)
+still run for every model; they bind the claim but do **not** prove that the
+claimed computation happened - the STARK is what does that, and only for
+proof-required models.
 
 ## Code that is present but unreachable
 
 These functions compile and are unit-tested, but nothing in a production path
 calls them. They are the scaffolding for the feature, not the feature:
 
-- `src/ai/execution/verify.rs::verify_execution_proof_stark`, only reached
-  through `verify_execution_proof_full`
-- `src/ai/execution/verify.rs::verify_execution_proof_full`, no callers
 - `src/lubot/verify.rs::verify_inference_stark`: only its own tests
 - `src/lubot/verify.rs::generate_and_verify_proof`: only its own tests
 
+`src/ai/execution/stark.rs::verify_execution_proof_stark` and
+`src/ai/execution/verify.rs::verify_execution_proof_full` are absent from the
+list because the transaction path reaches the STARK through the bundle. The two
+are deliberately one call rather than two: a caller that asks only for the
+structural checks accepts a proof it never checked cryptographically, and a
+caller that asks only for the STARK accepts a proof whose commitments belong to
+a different request.
+
 `src/tests/ai_verification_status_locks.rs` pins this: if any of them gains a
-production caller, or if the executor stops failing closed, those tests break
-and this document has to be updated with the change.
+production caller, or if the executor stops calling
+`verify_execution_proof_stark` on the transaction path, those tests break and
+this document has to be updated with the change.
 
 ## The zkVM opcode
 
-`VerifyInference` (0x1F) is constrained in the AIR, but the constraint says the
-result is always zero (fail-closed), the AIR binds the selector to the opcode
-and forces `rd_val_new = 0`. There is no STARK-verification circuit behind it
-yet. The opcode is additionally gated by `MainnetActivation`, which is off by
-default.
+`VerifyInference` (0x1F) is no longer a hard-coded zero. The VM reads a
+32-byte proof window (model, input and output commitments) and sets `rd = 1`
+exactly when `output_c == poseidon4_hash(model_c, input_c)`; a window that
+does not fit in memory, and any binding mismatch, answer 0. The AIR carries
+the matching witnesses: `COL_IS_VERIFY_INFERENCE` is bound to opcode 0x1F and
+`inference_is_expand` rows feed the commitment chain into the trace.
 
-## What closing the gap requires
+What is still open is the circuit half: nothing re-derives `output_c` from
+model weights yet, so no proof demonstrates the forward pass of an inference.
+Until that exists, mainnet keeps the opcode undecodable
+(`MainnetActivation::default()` sets `verify_inference_enabled = false`), and
+no production settlement can depend on an inference verification.
 
-1. Store the guest program words (or a commitment plus a retrievable blob) in
-   `AiModelSpec` at registration time.
+## What closing the gap requires (status)
+
+The original five-step plan, with what has since landed:
+
+1. ~~Store the guest program words in `AiModelSpec` at registration~~ -
+   **done**: `execution_dims` + `execution_program_hash` +
+   `execution_weights_digest`; the node rebuilds the words with
+   `guest_program_for_model`.
 2. Derive the fold constants from the Fiat-Shamir transcript instead of fixing
    them. The initial-memory commitment is in the AIR now
    (`COL_MEM_INIT_ACC` against `initial_state_root`), but with constant
    `BETA`/`GAMMA` it is solvable rather than collision-resistant.
-3. Re-derive `ExecutionPublicInputs` on the transaction path from the request,
-   the result and the registered program.
-4. Call `verify_execution_proof_full` with that bundle and treat
-   `stark_ok == Some(true)` as the acceptance condition.
-5. Replace the fail-closed branch, and update this document together with the
-   locking tests.
+3. Done. The transaction path derives `ExecutionPublicInputs` from the proof's
+   own claim (`AiExecutionProof::public_inputs`), binds it to the registration
+   (program hash, `chain_id`, `exit_code`) and rebuilds the guest program from
+   the registered model.
+4. Done. The executor calls `verify_execution_proof_full` and accepts only with
+   `stark_ok == Some(true)` plus a structurally valid report; `stark_error`
+   carries the verifier's own reason into the rejection.
+5. Done. The blanket refusal is replaced by the per-input refusals above, and
+   `src/tests/ai_verification_status_locks.rs` pins the chain end to end.
 
-Until all five are done, the honest claim is "AI layer with data-sovereign
-access control, a guest that really computes the forward pass, and structural
-proof checks", not "verifiable inference".
+The honest claim is now "AI layer with data-sovereign access control, a guest
+that really computes the forward pass, and a transaction path that STARK-
+verifies proof-required executions against the registered program". The gap argued above stays open: the Fiat-Shamir fold (step 2). Behind the
+`VerifyInference` opcode the commitment binding is real in VM and AIR, while
+the circuit that re-derives the output from the weights (step 3b) is not
+written, and mainnet keeps the opcode undecodable until it is.
 
 ## RPC / economics audit (2026-08-14, skill §10.5 pass)
 

@@ -298,7 +298,7 @@ mod tests {
         assert!(matches!(
             registry
                 .register(account)
-                .expect_err("adres anahtarla eslesmeli"),
+                .expect_err("the address must match the key"),
             QuantumAccountRegistryError::AddressDoesNotMatchKey { .. }
         ));
     }

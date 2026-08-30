@@ -271,7 +271,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
 
     if !drift_fails {
-        return Err(String::from("canary: bir test geride rozet kabul edildi"));
+        return Err(String::from("canary: a badge one test behind was accepted"));
     }
     if !red_fails {
         return Err(String::from(

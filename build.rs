@@ -8,7 +8,7 @@ fn main() {
 
     // protoc'u bul: PROTOC env > bilinen konumlar > PATH. Docker imajinda
     // prost-build PATH'ten bulamayip "Could not find protoc" veriyordu
-    // (docker-smoke); Config::protoc_executable ile acikca verilir.
+    // (docker-smoke); it is passed explicitly via Config::protoc_executable.
     let protoc = std::env::var("PROTOC")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -27,7 +27,7 @@ fn main() {
 
     // Buf STANDARD PACKAGE_DIRECTORY_MATCH uyumu, dosya
     // Proto/budlum/network/ altina tasindi (package adi degismedi → wire
-    // Etkisiz; input include-root'a goreli verilir, prost konvansiyonu).
+    // No effect; the input is given relative to the include root, a prost convention).
     prost_build::Config::new()
         .protoc_executable(protoc)
         .compile_protos(&["budlum/network/protocol.proto"], &["proto/"])

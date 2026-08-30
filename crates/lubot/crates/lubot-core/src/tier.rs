@@ -10,7 +10,7 @@
 //! Third-party weight repository names are kept as they are because attribution
 //! requires it (see `NOTICE.md`); only our own layer carries our own name.
 
-/// Lubot kademesi.
+/// The Lubot tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelTier {
     /// Flash-based: everyday use, low latency.
