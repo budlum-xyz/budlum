@@ -5,7 +5,7 @@
 //! `Vm::gas_cost` prices every opcode. The failure mode this gate exists for
 //! is an opcode that is cheap in gas but whose proof *expands* into many trace
 //! rows - a cheap call becomes a cheap way to force expensive prover work
-//! (a griefing / DoS vector). The canonical case found this gate: `Div` is a
+//! (a griefing / `DoS` vector). The canonical case found this gate: `Div` is a
 //! binary long division (the AIR expands one row per bit, up to 64 rows) yet
 //! had fallen onto the cheap arithmetic default `_ => 1`, so a caller paid 1
 //! gas per 64-row proof expansion.
@@ -61,7 +61,11 @@ fn opcode_names(lhs: &str) -> Vec<String> {
 }
 
 fn first_integer(s: &str) -> u64 {
-    let digits: String = s.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
+    let digits: String = s
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().unwrap_or(0)
 }
 
@@ -71,8 +75,7 @@ fn parse_gas_map(body: &str) -> (HashMap<String, u64>, u64) {
     let mut default = 0u64;
     let mut rest = body;
     let mut pending: Vec<String> = Vec::new();
-    loop {
-        let Some(eq) = rest.find("=>") else { break };
+    while let Some(eq) = rest.find("=>") {
         let lhs = &rest[..eq];
         pending.extend(opcode_names(lhs));
         let after = &rest[eq + 2..];
@@ -117,14 +120,26 @@ fn verify(map: &HashMap<String, u64>, default: u64, source_label: &str) -> Resul
 
     // 3) Memory / storage ordering (state-root persistence above plain memory).
     let g = |n: &str| map.get(n).copied().unwrap_or(default);
-    if !(g("SWrite") > g("SRead")) {
-        findings.push(format!("storage write ({}) must cost more than storage read ({})", g("SWrite"), g("SRead")));
+    if g("SWrite") <= g("SRead") {
+        findings.push(format!(
+            "storage write ({}) must cost more than storage read ({})",
+            g("SWrite"),
+            g("SRead")
+        ));
     }
-    if !(g("SRead") > g("Load")) {
-        findings.push(format!("storage read ({}) must cost more than a plain memory load ({})", g("SRead"), g("Load")));
+    if g("SRead") <= g("Load") {
+        findings.push(format!(
+            "storage read ({}) must cost more than a plain memory load ({})",
+            g("SRead"),
+            g("Load")
+        ));
     }
-    if !(g("SWrite") > g("Store")) {
-        findings.push(format!("storage write ({}) must cost more than a plain memory store ({})", g("SWrite"), g("Store")));
+    if g("SWrite") <= g("Store") {
+        findings.push(format!(
+            "storage write ({}) must cost more than a plain memory store ({})",
+            g("SWrite"),
+            g("Store")
+        ));
     }
 
     // 4) Vacuity: a price table with almost nothing in it proves nothing.
@@ -152,9 +167,13 @@ fn verify(map: &HashMap<String, u64>, default: u64, source_label: &str) -> Resul
 ///
 /// A calibration violation, or a vacuous (too thin) price table.
 pub fn run(root: &std::path::Path) -> Result<String, String> {
-    let path = root.join("budzero").join("bud-vm").join("src").join("lib.rs");
-    let src = fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let path = root
+        .join("budzero")
+        .join("bud-vm")
+        .join("src")
+        .join("lib.rs");
+    let src =
+        fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
     let start = src
         .find("pub fn gas_cost")
@@ -223,8 +242,7 @@ pub fn self_test() -> Result<String, String> {
         Err(msg) if msg.contains("`Div` is priced at 1") => {}
         other => {
             return Err(format!(
-                "canary: a cheap-priced Div was not refused as expected: {:?}",
-                other
+                "canary: a cheap-priced Div was not refused as expected: {other:?}"
             ));
         }
     }

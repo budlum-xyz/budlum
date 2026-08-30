@@ -60,6 +60,19 @@ pub fn chunk_document(
     while start < total {
         let end = (start + max_lines).min(total);
         let chunk_content = lines[start..end].join("\n");
+        // The prompt tells the model that a credential found inside a document it
+        // was given is to be treated as unreadable. The place that sentence becomes
+        // true is here, before the text becomes an index entry: a chunk is hashed
+        // and stored, so an unmasked credential would be committed to the index and
+        // quoted back as evidence. Ordinary documents are untouched - the mask
+        // rewrites a chunk only when it actually found something to mask, so chunk
+        // ids and content hashes do not move.
+        let mask = crate::redact::redact_text(&chunk_content);
+        let chunk_content = if mask.report().total() > 0 {
+            mask.into_text()
+        } else {
+            chunk_content
+        };
         let hash = crate::content_hash(chunk_content.as_bytes())?;
         chunks.push(Chunk {
             id: format!("{document_id}:{}-{}", start + 1, end),
@@ -155,5 +168,26 @@ mod tests {
         let a = chunk_document("p", "d", "x", &doc(), Some(100), Some(10)).unwrap();
         let b = chunk_document("p", "d", "x", &doc(), Some(100), Some(10)).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_credential_in_a_document_is_masked_before_it_becomes_a_chunk() {
+        let secret = format!("ghp_{}{}", "0123456789abcdefghij", "0123456789");
+        let doc = format!("title: notes\ntoken: {secret}\nbody: nothing else\n");
+        let chunks = chunk_document("p", "d", "notes.md", &doc, None, None).unwrap();
+        let joined: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(!joined.contains(&secret), "the credential survived into the index");
+        assert!(joined.contains("<SECRET:MASKED>"), "nothing was masked: {joined}");
+        // Shape is preserved: the line count and the ids do not move.
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[0].end_line, 3);
+    }
+
+    #[test]
+    fn an_ordinary_document_is_not_rewritten() {
+        let doc = "alpha: 1\nbeta: 2\n";
+        let chunks = chunk_document("p", "d", "x.md", doc, None, None).unwrap();
+        assert_eq!(chunks[0].content, "alpha: 1\nbeta: 2");
     }
 }

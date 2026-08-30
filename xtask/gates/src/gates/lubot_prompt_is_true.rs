@@ -8,6 +8,15 @@
 //! and the generation boundary is enforced by `PerceptionKind` having no
 //! output variant.
 //!
+//! The Secrets paragraph names four recipients: an output, a cache, a log and a
+//! document the model was given. `BACKED_PROMISES` binds the sentence to the
+//! mask's definition; [`MASK_SITES`] binds it to the places that actually call
+//! the mask on a write path - `cache.rs`, `memory.rs` and `chunk.rs`. Three of
+//! the four recipients are therefore covered. The fourth has nothing to cover
+//! it: no `lubot-core` module produces an answer, so [`check_answer_surface`]
+//! refuses the day one appears without a mask, which is the only honest way to
+//! hold a promise whose half does not exist yet.
+//!
 //! Two crates that do not depend on each other cannot keep those in step by
 //! themselves. The workspace tests inside `lubot-core` check that the prompt
 //! is internally consistent - the numbers it states are the numbers its own
@@ -371,6 +380,113 @@ pub fn check_backed_promises(
     Ok(BACKED_PROMISES.len())
 }
 
+/// Where each recipient named by the prompt is masked on its way out.
+///
+/// `defines` proves a symbol exists; that is not enough here. A mask defined in
+/// `redact.rs` and called from nowhere would satisfy a definition check while
+/// every log line still went to disk in the clear, which is the failure this
+/// whole gate exists to catch. So each entry names the file that writes and the
+/// call it has to contain.
+///
+/// Each entry is (prompt phrase, writing file, call).
+const MASK_SITES: &[(&str, &str, &str)] = &[
+    (
+        "Masking happens before storage, not after",
+        "crates/lubot/crates/lubot-knowledge/src/cache.rs",
+        "redact_model_strings(",
+    ),
+    (
+        "Masking happens before storage, not after",
+        "crates/lubot/crates/lubot-knowledge/src/memory.rs",
+        "redact_model_strings(",
+    ),
+    (
+        "treat the credential as unreadable",
+        "crates/lubot/crates/lubot-knowledge/src/chunk.rs",
+        "redact_text(",
+    ),
+];
+
+/// Check that every writing file named by [`MASK_SITES`] really calls the mask.
+///
+/// # Errors
+///
+/// Returns the first recipient the prompt promises and the write path does not
+/// mask.
+pub fn check_mask_sites(
+    prompt: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<usize, String> {
+    let mut seen = 0usize;
+    for (phrase, path, call) in MASK_SITES {
+        if !prompt.contains(phrase) {
+            return Err(format!(
+                "the prompt no longer says `{phrase}` while {path} still carries `{call}`.\n  \
+                 A masked write path with no sentence describing it is a rule a reader cannot\n  \
+                 find; either the sentence went out by accident or the behaviour did."
+            ));
+        }
+        let source = read(path)?;
+        if !source.contains(call) {
+            let head = format!("the prompt promises `{phrase}` but `{call}` is gone from {path}");
+            let body = "this is the direction that does not announce itself: the prompt still \
+                        reads correctly to anyone auditing it, and the file now writes what it \
+                        was handed. A cache without a mask is a slow secret; a log or an index \
+                        without one is a published secret.";
+            return Err(format!("{head}.\n  {body}"));
+        }
+        seen += 1;
+    }
+    Ok(seen)
+}
+
+/// The names that would make a module answer rather than prepare.
+const ANSWER_NAMES: &[&str] = &["answer", "respond", "reply", "complete", "generate"];
+
+/// Refuse an answer-producing surface in `lubot-core` that does not mask.
+///
+/// The prompt promises no key reaches an output. Today no `lubot-core` module
+/// produces one: the serving bridge stops at startup, residency and chain
+/// questions. There is nothing to bind the sentence to and no leak either, so
+/// this is a pin rather than a wiring, and a pin is what keeps an absence from
+/// rotting. The first module that gains an answering surface has to mask in the
+/// same change, or the prompt is lying from the day that function lands.
+///
+/// # Errors
+///
+/// Returns the first answering function whose file never mentions a mask.
+pub fn check_answer_surface(files: &[(String, String)]) -> Result<usize, String> {
+    let mut answering = 0usize;
+    for (name, source) in files {
+        for l in source.lines() {
+            let t = l.trim_start();
+            let Some(rest) = t
+                .strip_prefix("pub fn ")
+                .or_else(|| t.strip_prefix("pub async fn "))
+            else {
+                continue;
+            };
+            let Some(word) = rest.split('(').next() else {
+                continue;
+            };
+            let word = word.trim();
+            if !ANSWER_NAMES.iter().any(|a| word.eq_ignore_ascii_case(a)) {
+                continue;
+            }
+            answering += 1;
+            if source.contains("redact_") {
+                continue;
+            }
+            let head = format!("{name} defines `pub fn {word}`");
+            let body = "an answer leaves the runtime and the file never mentions a mask. The \
+                        prompt says no API key, token, password or private key may pass through \
+                        into an output, and `redact_model_strings` exists for exactly this line.";
+            return Err(format!("{head}: {body}"));
+        }
+    }
+    Ok(answering)
+}
+
 /// Pull the prompt text itself out of the module's source.
 ///
 /// The first version of this gate scanned the whole file and reported the
@@ -474,11 +590,44 @@ pub fn run(root: &Path) -> Result<String, String> {
         std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))
     };
     let backed = check_backed_promises(prompt_text, &read)?;
+    let masked = check_mask_sites(prompt_text, &read)?;
+    let core = root.join("crates/lubot/crates/lubot-core/src");
+    let mut core_files: Vec<(String, String)> = Vec::new();
+    for e in std::fs::read_dir(&core).map_err(|e| format!("{}: {e}", core.display()))? {
+        let Ok(e) = e else { continue };
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(&path).map_err(|x| format!("{}: {x}", path.display()))?;
+        core_files.push((
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            text,
+        ));
+    }
+    if core_files.len() < 3 {
+        let head = format!(
+            "only {} modules found under {}",
+            core_files.len(),
+            core.display()
+        );
+        let body = "lubot-core has more than three modules, so a scan that saw this many read \
+                    part of a crate and reports nothing about the rest.";
+        return Err(format!("{head}: {body}"));
+    }
+    core_files.sort();
+    let answering = check_answer_surface(&core_files)?;
+
     Ok(format!(
         "the Lubot system prompt agrees with the tree: {} claims checked \
          ({} ceilings against {PERCEPTION_PATH}, {} effort figures against \
          {EFFORT_PATH}, {} required statements, {backed} promises traced to an \
-         implementing symbol)",
+         implementing symbol, {masked} masked write paths, \
+         {answering} answering surface(s) in lubot-core each masked)",
         checked + backed,
         LIMITS.len(),
         EFFORT_FIGURES.len(),
@@ -489,6 +638,81 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// # Errors
 ///
 /// Returns the first canary that did not behave.
+/// The two canaries that keep the Secrets sentence honest.
+///
+/// # Errors
+///
+/// Returns the fixture that the gate accepted wrongly.
+pub fn canary_masks_and_answers() -> Result<(), String> {
+    // 15. A masked write path is accepted and an unmasked one is refused, for
+    // each of the three sites. `defines` already proves the mask exists; what a
+    // log needs is a caller.
+    let site_prompt = "Masking happens before storage, not after.\n\
+                       If a document you were given contains a credential, treat the credential \
+                       as unreadable.\n";
+    let masked_read = |rel: &str| -> Result<String, String> {
+        Ok(format!(
+            "fn write(v: &Value) {{ {}v) }}",
+            match rel {
+                r if r.ends_with("chunk.rs") => "redact_text(",
+                _ => "redact_model_strings(",
+            }
+        ))
+    };
+    if let Err(e) = check_mask_sites(site_prompt, &masked_read) {
+        return Err(format!("canary 15: masked write paths were refused: {e}"));
+    }
+    let plain_read = |_: &str| -> Result<String, String> {
+        Ok(String::from("fn write(v: &Value) { disk.write(v) }"))
+    };
+    if check_mask_sites(site_prompt, &plain_read).is_ok() {
+        return Err(String::from(
+            "canary 15: a log, cache and index that write what they were handed were accepted \
+             while the prompt promises masking before storage.",
+        ));
+    }
+    if check_mask_sites("a prompt that promises nothing", &masked_read).is_ok() {
+        return Err(String::from(
+            "canary 15: the sentence went out of the prompt and the gate stayed quiet.",
+        ));
+    }
+
+    // 16. An answer-producing module without a mask is refused, one with a mask is
+    // accepted, and a module that answers nothing is left alone. The output half of
+    // the Secrets sentence has no implementation site yet; that is only honest
+    // while a first answering function cannot land unmasked.
+    let bare = vec![(
+        "answer.rs".to_string(),
+        "pub fn answer(req: &Request) -> String { req.text.clone() }\n".to_string(),
+    )];
+    if check_answer_surface(&bare).is_ok() {
+        return Err(String::from(
+            "canary 16: an unmasked answering function was accepted while the prompt promises \
+             that no key reaches an output.",
+        ));
+    }
+    let masked_answer = vec![(
+        "answer.rs".to_string(),
+        "pub fn answer(req: &Request) -> String { redact_model_strings(&req.text) }\n".to_string(),
+    )];
+    if check_answer_surface(&masked_answer).is_err() {
+        return Err(String::from(
+            "canary 16: an answering function that masks its own output was refused.",
+        ));
+    }
+    let quiet = vec![(
+        "model.rs".to_string(),
+        "pub fn register(&mut self) {}\n".to_string(),
+    )];
+    if check_answer_surface(&quiet).is_err() {
+        return Err(String::from(
+            "canary 16: a module that answers nothing was refused. The check has to stay quiet \
+             until an answer surface exists.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     let perception = "\
 pub const MAX_TEXT_INPUT_BYTES: u32 = 1024 * 1024;
@@ -732,6 +956,8 @@ There is no fourth channel.
              A gate that cannot read what it checks has to say so.",
         ));
     }
+
+    canary_masks_and_answers()?;
 
     Ok(())
 }
