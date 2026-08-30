@@ -1524,6 +1524,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_poseidon.clone() * ten.clone()
             // Expansion rows reuse opcode 0x1E but must not re-charge gas.
             + is_verify_merkle.clone() * (one.clone() - is_expand.clone()) * ten.clone()
+            // VerifyInference: same cost (10) as VerifyMerkle, charged on
+            // the original row only. (2026-08-28) This term was missing:
+            // the VM charged 10 but the AIR fell through to the unit-cost
+            // fallback, so every VerifyInference proof failed at OOD.
+            + is_verify_inference.clone()
+                * (one.clone() - cur[COL_INFERENCE_IS_EXPAND].into())
+                * ten.clone()
             // Privacy opcodes share Poseidon gas cost (10).
             + is_privacy_commit.clone() * ten.clone()
             + is_nullifier_check.clone() * ten.clone()
@@ -1543,6 +1550,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 - is_swrite.clone()
                 - is_poseidon.clone()
                 - is_verify_merkle.clone()
+                - is_verify_inference.clone()
                 - is_privacy_commit.clone()
                 - is_nullifier_check.clone()
                 - is_sum_conservation.clone()
@@ -1606,8 +1614,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // events, and nothing in the AIR says that number is at most the
         // number of CPU rows.
         //
-        // It happens to be, today. Measured: four opcodes set `memory_addr`
-        // on their step (`Load`, `Store`, `VerifyMerkle`, `SumConservation`)
+        // It happens to be, today. Measured: three opcodes set `memory_addr`
+        // on their step (`Load`, `Store`, `VerifyMerkle`; `SumConservation`
+        // reads no memory despite carrying a memory slot in older comments)
         // and six push an extra event from the stack or storage buffers
         // (`Push`, `Pop`, `Call`, `Ret`, `SRead`, `SWrite`); the two sets do
         // not intersect, so one step contributes at most one memory event and
@@ -1678,7 +1687,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder
                 .when(is_halt.clone())
                 .when(cpu_active.clone())
-                .assert_zero(cur[COL_STATE_WRITES_0 + j].into() - public_inputs[48 + j].into());
+                .assert_zero(cur[COL_FINAL_ROOT_0 + j].into() - public_inputs[18 + j].into());
         }
 
         // (2c) state-write accumulator carry + first-row zero (Strix HIGH)
@@ -2311,10 +2320,15 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let s_reg_nxt: AB::ExprEF = perm_nxt[0].into();
             let is_real_op_ext: AB::ExprEF = is_real_op.into();
             // Register LogUp must also
-            // Exclude VerifyMerkle expansion rows (same multiplicity mismatch
-            // As Program CTL). The trace_matrix correctly skips register events
-            // For expansion rows, so the CPU side must match.
-            let is_expand_ext_reg: AB::ExprEF = cur[COL_VM_MERKLE_IS_EXPAND].into().into();
+            // Exclude VerifyMerkle AND VerifyInference expansion rows (same
+            // multiplicity mismatch As Program CTL). The trace_matrix
+            // correctly skips register events For expansion rows, so the CPU
+            // side must match. (2026-08-28: COL_INFERENCE_IS_EXPAND was
+            // missing here - every clean VerifyInference proof failed with
+            // InvalidProof because 1+8 CPU rows claimed register events that
+            // were never supplied.)
+            let is_expand_ext_reg: AB::ExprEF =
+                (cur[COL_VM_MERKLE_IS_EXPAND].into() + cur[COL_INFERENCE_IS_EXPAND].into()).into();
             let is_reg_active: AB::ExprEF =
                 is_real_op_ext.clone() * (AB::ExprEF::ONE - is_expand_ext_reg);
             builder.when_transition().assert_zero_ext(
@@ -2531,7 +2545,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // Map to 1 preprocessed row → Program CTL LogUp multiplicity
             // Mismatch → InvalidProof. Register LogUp already correctly
             // Skips expansion rows; Program CTL must do the same.
-            let is_expand: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
+            // (2026-08-28) Same exclusion for VerifyInference expansion rows:
+            // 1 original + 8 expansion rows map to 1 preprocessed ROM row;
+            // without COL_INFERENCE_IS_EXPAND here the LogUp multiplicity
+            // never balances and every VerifyInference proof is InvalidProof.
+            let is_expand: AB::Expr =
+                cur[COL_VM_MERKLE_IS_EXPAND].into() + cur[COL_INFERENCE_IS_EXPAND].into();
             let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_expand);
             let prog_active_ext: AB::ExprEF = prog_active.into();
             // A row outside the program can lend nothing: the multiplicity can be
@@ -2744,19 +2763,20 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_gte)
             .assert_eq(rd_val_new.clone(), one.clone() - cmp_lt_raw.clone());
 
-        // --- (2026-07-23): VerifyInference AIR binding ---
+        // --- (2026-07-23; kademe 3a 2026-08-28): VerifyInference AIR binding ---
         //
-        // VerifyInference (0x1F) is currently disabled on mainnet:
-        // The VM always returns rd=0 (verification failed). These AIR
-        // Constraints ensure:
+        // VerifyInference (0x1F) commitment-chain binding (kademe 3a):
+        //   rd = 1 iff output_c == Poseidon(model_c, input_c), else 0
+        //   (fail-closed). The equality constraint lives with the Poseidon
+        //   gadget below (this opcode's main row feeds the shared gadget).
+        //   This block ensures:
         //   1. Selector is bound to opcode 0x1F (malicious prover cannot
-        //      Set is_verify_inference=1 on non-0x1F rows or =0 on 0x1F rows).
-        //   2. rd_val_new = 0 always (proof always fails - fail-closed).
-        //   3. Expansion rows (COL_INFERENCE_IS_EXPAND=1) carry consistent
-        //      Commitment chain: model/input/output commitments are constant
-        //      Across all 8 expansion rows of a single VerifyInference step.
-        //   4. Expansion rows have next_pc = pc (stay on same instruction)
-        //      Until the last expansion row which hands off to pc+1.
+        //      set is_verify_inference=1 on non-0x1F rows or =0 on 0x1F rows).
+        //   2. Expansion rows (COL_INFERENCE_IS_EXPAND=1) carry consistent
+        //      commitment chain: model/input/output commitments are constant
+        //      across all 8 expansion rows of a single VerifyInference step.
+        //   3. Expansion rows have next_pc = pc (stay on same instruction)
+        //      until the last expansion row which hands off to pc+1.
         {
             let opcode_vi: AB::Expr = AB::Expr::from(AB::F::from_u64(0x1F));
             let opcode_row: AB::Expr = cur[COL_OPCODE].into();
@@ -2764,10 +2784,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder.assert_zero(
                 is_verify_inference.clone() * (opcode_row.clone() - opcode_vi.clone()),
             );
-            // 2. Result always 0 (: disabled, fail-closed)
-            builder
-                .when(is_verify_inference.clone())
-                .assert_zero(rd_val_new.clone());
+
+            // Proof-type pinning (imm in {0,1}) lives in 2b below; expansion
+            // rows carry imm = round 0..7 and are excluded there via
+            // (1 - inf_is_expand).
 
             // 3. Expansion row witness columns
             let inf_is_expand: AB::Expr = cur[COL_INFERENCE_IS_EXPAND].into();
@@ -2794,6 +2814,18 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder.assert_zero(both_expand.clone() * (inf_model.clone() - nxt_inf_model.clone()));
             builder.assert_zero(both_expand.clone() * (inf_input.clone() - nxt_inf_input.clone()));
             builder.assert_zero(both_expand * (inf_output.clone() - nxt_inf_output.clone()));
+
+            // 2b. Proof-type pinning (2026-08-28): on non-expansion
+            // VerifyInference rows the immediate must be 0 (STARK) or 1
+            // (SNARK wrap) - any other value is an undefined proof type and
+            // is rejected. Expansion rows carry imm = round 0..7 and are
+            // excluded via (1 - inf_is_expand); the proof type is only
+            // meaningful on the original row.
+            let imm_col: AB::Expr = cur[COL_IMM].into();
+            let vi_main = is_verify_inference.clone() * (one.clone() - inf_is_expand.clone());
+            builder
+                .when(vi_main)
+                .assert_zero(imm_col.clone() * (imm_col.clone() - one.clone()));
         }
 
         // --- Poseidon hash gadget (4 rounds, alpha=7) ---
@@ -2809,8 +2841,16 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let p_commit: AB::Expr = is_privacy_commit.clone();
             let p_null: AB::Expr = is_nullifier_check.clone();
             let p_sw: AB::Expr = is_swrite.clone();
+            // VerifyInference main row (kademe 3a): non-expansion rows feed
+            // the gadget with state = [model_c, input_c, 0..0].
+            let p_vi: AB::Expr =
+                is_verify_inference.clone() * (AB::Expr::ONE - cur[COL_INFERENCE_IS_EXPAND].into());
             // Any row that needs the Poseidon gadget.
-            let p: AB::Expr = p_poseidon.clone() + p_commit.clone() + p_null.clone() + p_sw.clone();
+            let p: AB::Expr = p_poseidon.clone()
+                + p_commit.clone()
+                + p_null.clone()
+                + p_sw.clone()
+                + p_vi.clone();
 
             // Opcode ↔ selector binding (malicious prover cannot flip selector).
             let opcode_at: AB::Expr = cur[COL_OPCODE].into();
@@ -2849,11 +2889,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let expected_s0 = p_poseidon.clone() * rs1_val.clone()
                 + p_commit.clone() * rs1_val.clone()
                 + p_null.clone() * rs2_val.clone()
-                + p_sw.clone() * imm.clone();
+                + p_sw.clone() * imm.clone()
+                + p_vi.clone() * cur[COL_INFERENCE_MODEL_COMMIT].into();
             let expected_s1 = p_poseidon.clone() * rs2_val.clone()
                 + p_commit.clone() * rs2_val.clone()
                 + p_null.clone() * domain_nullifier
-                + p_sw.clone() * rs1_val.clone();
+                + p_sw.clone() * rs1_val.clone()
+                + p_vi.clone() * cur[COL_INFERENCE_INPUT_COMMIT].into();
             let expected_s2 = p_commit.clone() * imm.clone() + p_sw.clone() * acc_lane(0);
             let expected_s3 = p_sw.clone() * acc_lane(1);
             let expected_s4 = p_sw.clone() * acc_lane(2);
@@ -2960,6 +3002,35 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder
                 .when(p_poseidon.clone() + p_commit.clone())
                 .assert_eq(rd_val_new.clone(), poseidon_out.clone());
+
+            // VerifyInference (kademe 3a): rd = 1 iff the commitment chain is
+            // valid, output_c == Poseidon(model_c, input_c); fail-closed,
+            // any other chain answers 0. Same per-row equality witness as
+            // NullifierCheck (COL_EQ_DIFF_INV); the selectors are mutually
+            // exclusive so reusing the witness column is sound.
+            {
+                let inf_out: AB::Expr = cur[COL_INFERENCE_OUTPUT_COMMIT].into();
+                let diff = poseidon_out.clone() - inf_out;
+                let diff_inv: AB::Expr = cur[COL_EQ_DIFF_INV].into();
+                let is_nonzero = diff.clone() * diff_inv.clone();
+                // Kademe 3a: equality witness constraints gated on the raw
+                // selector (derece 1) - the prover writes the EQ_DIFF_INV
+                // witness on every VerifyInference row, expansion rows
+                // included (there poseidon_out collapses to zero, so the
+                // witness is inverse(0 - output_c)). The rd equality uses
+                // p_vi so only the main row carries the actual rd semantics.
+                builder
+                    .when(is_verify_inference.clone())
+                    .assert_bool(is_nonzero.clone());
+                builder
+                    .when(is_verify_inference.clone())
+                    .assert_zero(diff.clone() * (AB::Expr::ONE - is_nonzero.clone()));
+                // Rd = 1 iff equal iff is_nonzero == 0
+                builder
+                    .when(p_vi.clone())
+                    .assert_eq(rd_val_new.clone(), AB::Expr::ONE - is_nonzero.clone());
+                builder.when(p_vi.clone()).assert_bool(rd_val_new.clone());
+            }
 
             // NullifierCheck: rd is boolean equality of (poseidon_out == rs1/claimed).
             // Reuse COL_EQ_DIFF_INV as inverse witness for (out - claimed).

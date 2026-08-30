@@ -230,9 +230,24 @@ older blanket refusal `ai_exec_verifier_unavailable` is gone: the two inputs it
 complained about (the guest program words, rebuilt from the registered model,
 and the canonical `ExecutionPublicInputs`, carried by the proof) both exist.
 
-Structural checks still run for models that do not require an execution proof.
-They bind commitments and the model id; they do **not** prove that the claimed
-computation happened.
+- `AiModelSpec::execution_dims` lets the node rebuild the exact guest program
+  words a proof was produced against (`guest_program_for_model`).
+- `AiExecutionProof::public_inputs` carries the public inputs the envelope was
+  produced against, and the envelope commits to them
+  (`public_inputs_hash`), so a prover cannot ship a bundle it did not prove
+  against.
+
+For a proof-required model the executor now fails closed on named conditions
+rather than on the whole feature: missing public inputs
+(`ai_exec_no_public_inputs`), missing registered program hash
+(`ai_exec_no_program_hash`), a public-inputs program hash that disagrees with
+the registration (`ai_exec_program_hash`), a non-zero exit code
+(`ai_exec_exit_code`), a `chain_id` that does not match the transaction
+(`ai_exec_chain_id`), and finally the STARK itself against the rebuilt program
+(`ai_exec_stark`). Structural checks (commitments, model id, weights digest)
+still run for every model; they bind the claim but do **not** prove that the
+claimed computation happened - the STARK is what does that, and only for
+proof-required models.
 
 ## Code that is present but unreachable
 
@@ -251,8 +266,9 @@ caller that asks only for the STARK accepts a proof whose commitments belong to
 a different request.
 
 `src/tests/ai_verification_status_locks.rs` pins this: if any of them gains a
-production caller, or if the executor stops failing closed, those tests break
-and this document has to be updated with the change.
+production caller, or if the executor stops calling
+`verify_execution_proof_stark` on the transaction path, those tests break and
+this document has to be updated with the change.
 
 ## The zkVM opcode
 
@@ -262,10 +278,14 @@ and forces `rd_val_new = 0`. There is no STARK-verification circuit behind it
 yet. The opcode is additionally gated by `MainnetActivation`, which is off by
 default.
 
-## What closing the gap requires
+## What closing the gap requires (status)
 
-1. Store the guest program words (or a commitment plus a retrievable blob) in
-   `AiModelSpec` at registration time.
+The original five-step plan, with what has since landed:
+
+1. ~~Store the guest program words in `AiModelSpec` at registration~~ -
+   **done**: `execution_dims` + `execution_program_hash` +
+   `execution_weights_digest`; the node rebuilds the words with
+   `guest_program_for_model`.
 2. Derive the fold constants from the Fiat-Shamir transcript instead of fixing
    them. The initial-memory commitment is in the AIR now
    (`COL_MEM_INIT_ACC` against `initial_state_root`), but with constant
@@ -280,9 +300,11 @@ default.
 5. Done. The blanket refusal is replaced by the per-input refusals above, and
    `src/tests/ai_verification_status_locks.rs` pins the chain end to end.
 
-Until all five are done, the honest claim is "AI layer with data-sovereign
-access control, a guest that really computes the forward pass, and structural
-proof checks", not "verifiable inference".
+The honest claim is now "AI layer with data-sovereign access control, a guest
+that really computes the forward pass, and a transaction path that STARK-
+verifies proof-required executions against the registered program". The two
+remaining gaps are the Fiat-Shamir fold (step 2, argued above) and the
+`VerifyInference` opcode, which still has no verification circuit behind it.
 
 ## RPC / economics audit (2026-08-14, skill §10.5 pass)
 

@@ -1,5 +1,6 @@
 use crate::adapter::{
     ExecutionPublicInputs, ProofEnvelope, ProverAdapter, ProverError, VerifyError,
+    PROOF_FORMAT_VERSION,
 };
 use crate::bud_stark::{
     prove_with_preprocessed, setup_preprocessed,
@@ -103,9 +104,13 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
         if step.instruction.opcode == bud_isa::Opcode::Halt {
             continue;
         }
-        // Merkle expansion rows are synthetic - no register
-        // Bus traffic (they reuse Opcode::VerifyMerkle with zeroed operands).
-        if step.merkle_is_expand {
+        // Merkle and VerifyInference expansion rows are synthetic - no
+        // register bus traffic (they reuse the original opcode with
+        // zeroed operands). (2026-08-28) COL_INFERENCE_IS_EXPAND was
+        // missing here: 8 expansion rows per VerifyInference step produced
+        // 24 phantom register events, unbalancing the Register LogUp and
+        // rejecting every clean VerifyInference proof.
+        if step.merkle_is_expand || step.inference_is_expand {
             continue;
         }
         let clk = i as u64;
@@ -678,6 +683,23 @@ pub fn trace_matrix(
                 // State = [secret=rs2, DOMAIN_NULLIFIER, 0..]
                 Some([step.src2_val, bud_vm::DOMAIN_NULLIFIER, 0, 0, 0, 0, 0, 0])
             }
+            bud_isa::Opcode::VerifyInference if !step.inference_is_expand => {
+                // Kademe 3a: state = [model_c, input_c, 0..0]; the AIR binds
+                // the resulting poseidon_out to rd via the equality
+                // constraint (rd = 1 iff output_c == Poseidon(model_c,
+                // input_c)). Expansion rows take the default None branch
+                // (no gadget on expansion rows).
+                Some([
+                    step.inference_model_commitment.unwrap_or(0),
+                    step.inference_input_commitment.unwrap_or(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ])
+            }
             bud_isa::Opcode::SWrite => {
                 // Strix HIGH CWE-345: SWrite feeds the state-write chain.
                 // slot = imm (matching the AIR's storage_addr = STORAGE_BASE +
@@ -710,13 +732,17 @@ pub fn trace_matrix(
             _ => None,
         };
 
+        // Kademe 3a: poseidon_out must be visible outside the gadget block:
+        // the VerifyInference equality witness below runs on EVERY
+        // VerifyInference row (including expansion rows, where the gadget
+        // block itself is skipped and poseidon_out stays zero).
+        let mut poseidon_out = 0u64;
         if let Some(init_state) = poseidon_init {
             const P: u64 = 18446744069414584321;
             // Same constants the AIR reads; see plonky3_air.rs.
             use bud_vm::{POSEIDON_MDS as mds, POSEIDON_RC_FULL as rc};
 
             let mut s: [u64; 8] = init_state;
-            let mut poseidon_out = 0u64;
 
             for r in 0..POSEIDON_ROUNDS {
                 for i in 0..8 {
@@ -810,6 +836,36 @@ pub fn trace_matrix(
                 };
                 values[row_start + COL_EQ_DIFF_INV] = Goldilocks::new(inv);
             }
+        }
+
+        // VerifyInference (kademe 3a): equality witness for
+        // (Poseidon(model, input) - claimed_output). Same field-subtraction
+        // discipline as NullifierCheck: the AIR computes the difference
+        // in Goldilocks, so the inverse witness must be the inverse of
+        // the *field* difference.
+        //
+        // Expansion rows get the witness too: the AIR evaluates
+        // diff = poseidon_out - output on every is_verify_inference row,
+        // and on expansion rows poseidon_out collapses to ZERO (the x2/x4
+        // witness columns are not written there, so the sbox expression
+        // x4*x2*s vanishes and the whole gadget output is 0). The inverse
+        // must therefore be inverse(0 - output_c) on expansion rows, or
+        // the equality constraints fail on rows that carry a non-zero
+        // output commitment (e.g. a valid chain, where output_c is a real
+        // Poseidon hash).
+        if opcode == bud_isa::Opcode::VerifyInference {
+            let claimed = step.inference_output_commitment.unwrap_or(0);
+            let diff = if step.inference_is_expand {
+                bud_vm::field_sub_goldilocks(0, claimed)
+            } else {
+                bud_vm::field_sub_goldilocks(poseidon_out, claimed)
+            };
+            let inv = if diff != 0 {
+                bud_vm::field_inverse_goldilocks(diff)
+            } else {
+                0
+            };
+            values[row_start + COL_EQ_DIFF_INV] = Goldilocks::new(inv);
         }
 
         // (security audit) trace-length counter and
@@ -1484,7 +1540,11 @@ fn aux_trace_generator(
             // Expansion rows reuse opcode 0x1E at the same PC
             // But are NOT program fetches - counting them unbalances LogUp
             // (trace_len >> program.len for VerifyMerkle paths).
-            let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND];
+            // (2026-08-28) Same for VerifyInference expansion rows: without
+            // COL_INFERENCE_IS_EXPAND here, 8 phantom demands per step were
+            // added to the program LogUp partial sum while the AIR excluded
+            // them, and every clean VerifyInference proof failed at OOD.
+            let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND];
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
@@ -1624,7 +1684,7 @@ impl ProverAdapter for Plonky3Adapter {
             .map_err(|e| ProverError::SerializationError(e.to_string()))?;
 
         Ok(ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -1644,7 +1704,7 @@ impl ProverAdapter for Plonky3Adapter {
             proof_len = envelope.proof_bytes.len(),
             "Verifying proof"
         );
-        if envelope.proof_format_version != 1 {
+        if envelope.proof_format_version != PROOF_FORMAT_VERSION {
             return Err(VerifyError::InvalidEnvelope(
                 "Unsupported proof format version".to_string(),
             ));
@@ -1714,6 +1774,30 @@ impl ProverAdapter for Plonky3Adapter {
     }
 }
 
+impl Plonky3Adapter {
+    /// Verify a proof exactly as [`ProverAdapter::verify`] does, and
+    /// additionally require the proven program to be part of the canonical
+    /// set ([`crate::canonical_set`]).
+    ///
+    /// This is the ZKVM-side alarm of the regeneration gate: a proof for a
+    /// program outside the canonical set is refused with
+    /// `VerifyError::NonCanonicalProgram`, which is a different, explicit
+    /// failure than a bogus proof.
+    pub fn verify_canonical_program(
+        envelope: &ProofEnvelope,
+        expected_inputs: &ExecutionPublicInputs,
+        program: &[u64],
+    ) -> Result<(), VerifyError> {
+        <Self as ProverAdapter>::verify(envelope, expected_inputs, program)?;
+        if !crate::canonical_set::is_canonical_program_hash(&expected_inputs.program_hash) {
+            return Err(VerifyError::NonCanonicalProgram(
+                expected_inputs.program_hash,
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1740,6 +1824,16 @@ mod tests {
     }
 
     fn prove_and_verify(program: Vec<u64>, setup: impl FnOnce(&mut Vm)) -> ProofEnvelope {
+        prove_and_verify_full(program, setup).0
+    }
+
+    /// Prove a program, verify it, and return the envelope together with the
+    /// public inputs - for tests that must tamper with the envelope after a
+    /// successful round-trip.
+    fn prove_and_verify_full(
+        program: Vec<u64>,
+        setup: impl FnOnce(&mut Vm),
+    ) -> (ProofEnvelope, ExecutionPublicInputs) {
         let mut vm = Vm::new(64);
         setup(&mut vm);
         let receipt = vm.run_receipt(&program);
@@ -1789,7 +1883,42 @@ mod tests {
             eprintln!("Verification error: {:?}", e);
         }
         assert!(verify_res.is_ok());
-        envelope
+        (envelope, pi)
+    }
+
+    /// The proof format version is a hard gate: bytes from an older format
+    /// are not migrated and bytes claiming a future format are not
+    /// understood. Both must be rejected before anything else is inspected.
+    #[test]
+    fn verifier_rejects_old_and_future_proof_format_versions() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (mut envelope, pi) = prove_and_verify_full(program.clone(), |_| {});
+
+        // v0 (pre-versioning) and v2 (unknown future) are both unsupported.
+        for bad_version in [0u32, PROOF_FORMAT_VERSION - 1, PROOF_FORMAT_VERSION + 1] {
+            if bad_version == PROOF_FORMAT_VERSION {
+                continue;
+            }
+            let mut tampered = envelope.clone();
+            tampered.proof_format_version = bad_version;
+            match Plonky3Adapter::verify(&tampered, &pi, &program) {
+                Err(VerifyError::InvalidEnvelope(_)) => {}
+                other => panic!(
+                    "version {bad_version} must be rejected as InvalidEnvelope, got {other:?}"
+                ),
+            }
+        }
+
+        // Sanity: the untouched envelope still verifies after the tampered
+        // attempts (the check reads the field, it does not consume it).
+        envelope.proof_format_version = PROOF_FORMAT_VERSION;
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "the untouched envelope must still verify"
+        );
     }
 
     /// Run the program, tamper the trace, and assert that proving FAILS.
@@ -2555,7 +2684,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -2969,7 +3098,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3228,7 +3357,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3343,7 +3472,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3485,7 +3614,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3622,7 +3751,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -3774,7 +3903,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -4469,7 +4598,7 @@ mod tests {
     #[test]
     fn rejects_invalid_proof_bytes() {
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5057,7 +5186,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5172,7 +5301,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5277,7 +5406,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5474,7 +5603,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5634,7 +5763,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -5847,7 +5976,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6104,7 +6233,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6230,7 +6359,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6476,7 +6605,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6605,7 +6734,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6743,7 +6872,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -6904,7 +7033,7 @@ mod tests {
             Ok(p3_proof) => {
                 let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
                 let envelope = ProofEnvelope {
-                    proof_format_version: 1,
+                    proof_format_version: PROOF_FORMAT_VERSION,
                     backend: "Plonky3-Keccak-Goldilocks".to_string(),
                     p3_version: "0.5.2".to_string(),
                     fri_params_id: "test_fri_params".to_string(),
@@ -7187,7 +7316,7 @@ mod tests {
             Ok(p3_proof) => {
                 let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
                 let envelope = ProofEnvelope {
-                    proof_format_version: 1,
+                    proof_format_version: PROOF_FORMAT_VERSION,
                     backend: "Plonky3-Keccak-Goldilocks".to_string(),
                     p3_version: "0.5.2".to_string(),
                     fri_params_id: "test_fri_params".to_string(),
@@ -7283,7 +7412,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -7773,7 +7902,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -7883,7 +8012,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -7992,7 +8121,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -8252,7 +8381,7 @@ mod tests {
 
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -8365,8 +8494,9 @@ mod tests {
     /// Selector is zeroed out while COL_OPCODE remains 0x1F.
     #[test]
     fn rejects_verify_inference_row_with_zero_selector() {
-        // Program: load some values, run VerifyInference (always returns 0
-        // On mainnet), then Halt.
+        // Program: load some values, run VerifyInference, then Halt. The
+        // proof window at address 42 is all zeros, so the kademe 3a chain
+        // (output_c == Poseidon(model_c, input_c)) does not hold: rd = 0.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 42),
             inst(Opcode::Load, 3, 0, 0, 99),
@@ -8377,7 +8507,7 @@ mod tests {
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
-        // VerifyInference should always return 0 (disabled)
+        // A zeroed window is a broken chain: VerifyInference answers 0.
         // Find the VerifyInference step and check rd_val = 0
         let vi_step = vm
             .trace
@@ -8459,7 +8589,7 @@ mod tests {
         );
         let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
         let envelope = ProofEnvelope {
-            proof_format_version: 1,
+            proof_format_version: PROOF_FORMAT_VERSION,
             backend: "Plonky3-Keccak-Goldilocks".to_string(),
             p3_version: "0.5.2".to_string(),
             fri_params_id: "test_fri_params".to_string(),
@@ -8472,6 +8602,262 @@ mod tests {
         assert!(
             res.is_err(),
             "Expected verification to FAIL when is_verify_inference is zeroed on a 0x1F row, but it succeeded!"
+        );
+    }
+
+    /// Kademe 1 control (2026-08-28): with a 16-byte VM memory the
+    /// expansion guard (proof_addr+32 <= len) is false, so the trace holds
+    /// only the original VerifyInference row. The clean proof must verify
+    /// without any expansion rows.
+    #[test]
+    fn verify_inference_clean_proof_without_expansion_verifies() {
+        let program = vec![
+            inst(Opcode::VerifyInference, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(16); // too small for any expansion
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert!(
+            vm.trace.iter().all(|s| !s.inference_is_expand),
+            "no expansion rows expected with 16-byte memory"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_ok(),
+            "no-expansion VerifyInference proof must verify, got {:?}",
+            res
+        );
+    }
+
+    /// Kademe 1 (2026-08-28): a clean VerifyInference proof with imm=0
+    /// (STARK proof type) must verify.
+    /// This was red before the LogUp fix: the Register and Program
+    /// arguments did not exclude COL_INFERENCE_IS_EXPAND rows, so every
+    /// VerifyInference proof (regardless of imm) returned InvalidProof.
+    #[test]
+    fn verify_inference_clean_proof_verifies() {
+        let program = vec![
+            inst(Opcode::VerifyInference, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_ok(),
+            "clean VerifyInference (imm=0, STARK) proof must verify, got {:?}",
+            res
+        );
+    }
+
+    /// Kademe 3a (2026-08-28): a program whose VerifyInference window holds
+    /// a valid commitment chain (output_c == Poseidon(model_c, input_c))
+    /// gets rd = 1, and the STARK proof of that trace must verify - the AIR
+    /// equality constraint must agree with the VM's answer.
+    #[test]
+    fn verify_inference_valid_chain_proof_verifies() {
+        let model_c = 0xABCD_EF01_2345_6789u64;
+        let input_c = 0x1122_3344_5566_7788u64;
+        let output_c = bud_vm::poseidon4_hash(model_c, input_c);
+        let program = vec![
+            inst(Opcode::VerifyInference, 2, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
+        vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
+        vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
+        vm.registers[1] = 64; // proof address
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[2], 1, "valid chain must answer 1");
+
+        // The initial state root commits the memory and register images; the
+        // proof window is at r1=64, so the register image is not all zeros.
+        let initial_root = crate::adapter::initial_state_root_of(
+            crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+            crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: initial_root,
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_ok(),
+            "valid-chain VerifyInference proof must verify, got {:?}",
+            res
+        );
+    }
+
+    /// Kademe 1b: imm=1 (SNARK wrap) is a defined proof type and must also
+    /// verify while the circuit is fail-closed (VM still returns rd=0).
+    #[test]
+    fn verify_inference_snark_wrap_proof_verifies() {
+        let program = vec![
+            inst(Opcode::VerifyInference, 1, 2, 3, 1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_ok(),
+            "VerifyInference imm=1 (SNARK wrap) must verify, got {:?}",
+            res
+        );
+    }
+
+    /// Kademe 2 (2026-08-28): the AIR refuses an undefined proof type -
+    /// imm=2 is neither STARK (0) nor SNARK wrap (1). Pinned by the
+    /// `imm * (imm - 1)` constraint on non-expansion VerifyInference rows.
+    #[test]
+    fn rejects_verify_inference_with_undefined_proof_type() {
+        let program = vec![
+            inst(Opcode::VerifyInference, 1, 2, 3, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "undefined proof type imm=2 must be rejected by the AIR, but it verified!"
         );
     }
 }

@@ -33,13 +33,8 @@ pub enum ServeEngine {
 }
 
 impl ServeEngine {
-<<<<<<< HEAD
-    /// Whether this engine is guaranteed to produce bit-identical output for the same
-    /// is it serviceable?
-=======
     /// Whether this engine is guaranteed to produce bit-identical output for
     /// the same input.
->>>>>>> origin/lubot
     ///
     /// **Why it matters:** `AiRegistry::try_finalize_with_proofs` groups results by
     /// `output_commitment: [u8; 32]`. If two operators differ by a single

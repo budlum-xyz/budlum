@@ -54,6 +54,7 @@ mod gates {
     pub mod budscan_parity;
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
+    pub mod ci_workflow_guards;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
     pub mod clippy_extra;
@@ -119,6 +120,7 @@ mod gates {
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
     pub mod regeneration;
+    pub mod relay;
     pub mod rejection_tests;
     pub mod repair_fires;
     pub mod required_tests;
@@ -141,6 +143,7 @@ mod gates {
     pub mod three_is_recipe_only;
     pub mod threshold_rates;
     pub mod timing_safe;
+    pub mod tree_pin;
     pub mod transcript_mirrors;
     pub mod tree_is_english;
     pub mod udeps;
@@ -628,6 +631,30 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::regeneration::self_test,
+    },
+    Gate {
+        name: "relay",
+        replaces: None,
+        run: gates::relay::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::relay::self_test,
+    },
+    Gate {
+        name: "ci-workflow-guards",
+        replaces: None,
+        run: gates::ci_workflow_guards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "tree-pin",
+        replaces: None,
+        run: gates::tree_pin::run,
+        run_log: None,
+        run_args: Some(gates::tree_pin::run_with_args),
+        self_test: gates::tree_pin::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",
