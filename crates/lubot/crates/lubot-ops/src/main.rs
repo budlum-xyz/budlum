@@ -8,6 +8,7 @@ use cli::{parse, Command, HELP};
 use lubot_core::model::{FineTuneSource, ModelId, ModelLicense, ModelSpec};
 use lubot_core::tier::ModelTier;
 use lubot_serve::config::ServeConfig;
+use lubot_tune::eval::{EvalDataSet, EvalGate};
 use lubot_tune::plan::TunePlan;
 
 fn main() {
@@ -64,6 +65,87 @@ fn main() {
                 "lubot-ops status: a skeleton - the chain connection is fail-closed (NotConnected)"
             );
         }
+        Command::Eval { dataset, responses } => {
+            let Some(d) = dataset else {
+                eprintln!("eval: no dataset file given");
+                std::process::exit(2);
+            };
+            let text = match std::fs::read_to_string(&d) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("the dataset could not be read ({d}): {e}");
+                    std::process::exit(2);
+                }
+            };
+            let mut records = Vec::new();
+            for line in text.lines() {
+                match lubot_data::jsonl::decode(line) {
+                    Ok(r) => records.push(r),
+                    Err(e) => {
+                        eprintln!("the dataset line is not a valid record: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let set = EvalDataSet::from_golden(d.clone(), &records);
+            println!("eval set: {}", set.name);
+            println!("records: {}", set.len());
+            println!("content digest (B.U.D. hash): {}", digest_hex(&set.digest()));
+
+            match responses {
+                None => println!("no responses given: the set identity is reported, but it\ncannot be graded without produced answers."),
+                Some(rp) => {
+                    let rtext = match std::fs::read_to_string(&rp) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("the responses could not be read ({rp}): {e}");
+                            std::process::exit(2);
+                        }
+                    };
+                    let mut answers = std::collections::HashMap::new();
+                    for line in rtext.lines() {
+                        match lubot_data::jsonl::decode(line) {
+                            Ok(r) => {
+                                answers.insert(r.user, r.assistant);
+                            }
+                            Err(e) => {
+                                eprintln!("the responses line is not a valid record: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    let report = set.run(|p| answers.get(p).cloned().unwrap_or_default());
+                    let passed = report.passed();
+                    let total = report.total();
+                    println!("\nscored: {passed}/{total}");
+                    let gate = EvalGate::perfect();
+                    println!("gate: {}", gate.verdict(&report));
+                    for c in &report.cases {
+                        if !c.passed {
+                            println!("  FAIL {:?}: {}", c.name, c.reason.as_deref().unwrap_or(""));
+                        }
+                    }
+                }
+            }
+        }
+        Command::Prompt => match lubot_serve::config::checked_system_prompt() {
+            // The prompt is served unaltered: the bridge serves exactly this
+            // text, so printing it here is printing what the model sees.
+            Ok(text) => {
+                println!(
+                    "lubot system prompt (verified): {}\n{}\n---",
+                    text.len(),
+                    text
+                )
+            }
+            // A start-up refusal would catch the same thing later; surfacing it
+            // here lets the operator fix the prompt (or understand a bad state)
+            // before they attempt to bring a bridge up.
+            Err(e) => {
+                eprintln!("THE PROMPT CHECK REFUSED: {e}");
+                std::process::exit(1);
+            }
+        },
         Command::Validate { path } => match path {
             None => println!("validate: <no jsonl file given>"),
             Some(p) => match std::fs::read_to_string(&p) {
@@ -92,4 +174,9 @@ fn main() {
         },
         Command::Help => print!("{HELP}"),
     }
+}
+
+/// A 64-char lowercase hex rendering of a 32-byte content hash.
+fn digest_hex(hash: &[u8; 32]) -> String {
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -1533,6 +1533,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_push.clone() * two.clone()
             + is_pop.clone() * two.clone()
             + is_syscall.clone() * five.clone()
+            // Div is the binary long division (64 rows); priced with the heavy
+            // ops, so the AIR's gas arithmetic matches Vm::gas_cost.
+            + is_div.clone() * ten.clone()
             + (one.clone()
                 - is_load.clone()
                 - is_store.clone()
@@ -1548,6 +1551,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 - is_push.clone()
                 - is_pop.clone()
                 - is_syscall.clone()
+                - is_div.clone()
                 - is_halt.clone())
                 * one.clone();
 

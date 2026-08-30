@@ -1522,4 +1522,141 @@ mod tests {
             }
         }
     }
+
+    /// Fuzz-style crash gate: the BudL parser + semantic analyzer + codegen
+    /// (3379 lines) must never panic on arbitrary or mutated input - only
+    /// return an error. A panic is a bug (a crash), not a language error.
+    ///
+    /// This is the deterministic, in-tree counterpart to the libFuzzer targets
+    /// (which need a nightly toolchain); it is reproducible from a fixed seed
+    /// and runs in a plain `cargo test`.
+    #[test]
+    fn compiler_never_panics_on_adversarial_or_mutated_input() {
+        let mut rng = Rng(0x9E3779B97F4A7C15);
+        let total = 1200;
+        let mut panics = 0u32;
+
+        // 1) Pure random garbage (lexer/parser), 2) structured nesting
+        // (parser/sema), 3) mutation of a known-good program (sema/codegen
+        // deep paths).
+        for i in 0..total {
+            let source = match i % 3 {
+                0 => random_garbage(&mut rng, 260),
+                1 => random_nested_contract(&mut rng),
+                _ => mutate_template(&mut rng),
+            };
+
+            let result = std::panic::catch_unwind(|| {
+                let _ = crate::compile(&source, IsaProfile::Production);
+            });
+            if result.is_err() {
+                panics += 1;
+                if panics <= 3 {
+                    eprintln!("PANIC on iteration {i}:\n{source}");
+                }
+            }
+        }
+        assert_eq!(panics, 0, "the BudL compiler must never panic on input");
+    }
+
+    // --- deterministic fuzz helpers (no external deps) ---
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn pick(&mut self, cs: &[char]) -> char {
+            cs[self.below(cs.len() as u64) as usize]
+        }
+        fn push(&mut self) -> String {
+            self.next().to_string()
+        }
+    }
+
+    const ALPHABET: &[char] = &[
+        'a', 'b', 'c', '0', '1', '2', '3', '4', '5', ' ', '\n', '\t', '{', '}', '(', ')', ':', ';',
+        '+', '-', '*', '/', '=', '>', '<', '.', ',', '"', '\'', '|', '@', '$', '%', '&', '!', '?',
+        '_', '[', ']', '#', '~', '^', '\\',
+    ];
+
+    fn random_garbage(rng: &mut Rng, max_len: usize) -> String {
+        let n = 1 + rng.below(max_len.max(1) as u64) as usize;
+        (0..n).map(|_| rng.pick(ALPHABET)).collect()
+    }
+
+    fn random_nested_contract(rng: &mut Rng) -> String {
+        let tokens = [
+            "contract",
+            "pub",
+            "fn",
+            "main",
+            "let",
+            "field",
+            "u64",
+            "Address",
+            "Hash32",
+            "if",
+            "else",
+            "while",
+            "for",
+            "match",
+            "return",
+            "struct",
+            "true",
+            "false",
+            "Immutable",
+            "operator",
+            "=>",
+            "::",
+            ",",
+        ];
+        let mut s = String::new();
+        let depth = 1 + rng.below(6) as usize;
+        s.push_str("contract ");
+        s.push_str(&rng.push());
+        s.push_str(" { ");
+        for _ in 0..depth {
+            s.push_str("pub fn ");
+            s.push_str(&rng.push());
+            s.push_str("(a: field, b: u64) -> field { ");
+            for _ in 0..(1 + rng.below(4)) {
+                s.push_str("let x = a ");
+                s.push_str(tokens[rng.below(tokens.len() as u64) as usize]);
+                s.push_str(" b; ");
+            }
+            s.push_str("return a; } ");
+        }
+        s.push('}');
+        s
+    }
+
+    fn mutate_template(rng: &mut Rng) -> String {
+        let base = "contract T { pub fn f(a: field, b: field) -> field { let c = a + b; return c; } pub fn main() { } }";
+        let mut bytes = base.as_bytes().to_vec();
+        for _ in 0..(1 + rng.below(8)) {
+            if bytes.is_empty() {
+                break;
+            }
+            let idx = rng.below(bytes.len() as u64) as usize;
+            match rng.below(3) {
+                0 => bytes[idx] = rng.pick(ALPHABET) as u8,
+                1 => {
+                    if !bytes.is_empty() {
+                        bytes.remove(idx);
+                    }
+                }
+                _ => bytes.insert(idx, rng.pick(ALPHABET) as u8),
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
 }

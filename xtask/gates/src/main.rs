@@ -75,6 +75,7 @@ mod gates {
     pub mod forgery_tests;
     pub mod fork_choice_gate;
     pub mod fuzz_targets_wired;
+    pub mod gas_calibration;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
     pub mod gating_flags;
@@ -89,6 +90,7 @@ mod gates {
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
+    pub mod lubot_prompt_is_true;
     pub mod lubot_reads;
     pub mod lubot_zk_inference;
     pub mod master_derivation;
@@ -104,6 +106,7 @@ mod gates {
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_unicode_dashes;
+    pub mod no_upstream_brands;
     pub mod node_classification_gate;
     pub mod paid_content;
     pub mod parallel_execution;
@@ -467,6 +470,23 @@ const GATES: &[Gate] = &[
         run: gates::gates_do_not_panic::run,
         run_args: None,
         self_test: gates::gates_do_not_panic::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "lubot-prompt-is-true",
+        replaces: None,
+        run: gates::lubot_prompt_is_true::run,
+        run_args: None,
+        self_test: gates::lubot_prompt_is_true::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-upstream-brands",
+        replaces: None,
+        run: gates::no_upstream_brands::run,
+        run_args: None,
+        self_test: gates::no_upstream_brands::self_test,
+
         run_log: None,
     },
     Gate {
@@ -952,6 +972,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::fuzz_targets_wired::self_test,
+    },
+    Gate {
+        name: "gas-calibration",
+        replaces: None,
+        run: gates::gas_calibration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::gas_calibration::self_test,
     },
     Gate {
         name: "gates-are-wired",

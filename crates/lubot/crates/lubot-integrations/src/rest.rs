@@ -52,6 +52,15 @@ pub struct RetryPolicy {
     pub retry_on_status: Vec<u16>,
 }
 
+/// The absolute ceiling on the wait between attempts, in seconds.
+///
+/// Exponential backoff is a safety valve, not a license to hang: a retry that
+/// waits hours is indistinguishable from a dead process to a user, and a
+/// misconfigured `base_delay_secs` (or a code path that passes a large
+/// `attempt`) would otherwise produce it. Capping the wait keeps the retry
+/// bounded and observable.
+pub const MAX_BACKOFF_SECS: u64 = 300;
+
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
@@ -63,11 +72,12 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Computes the wait for a given zero-based attempt, growing
-    /// hesaplar: `base * 2^attempt`.
+    /// Computes the wait for a given zero-based attempt, growing exponentially
+    /// but **capped** at [`MAX_BACKOFF_SECS`]: `min(base * 2^attempt, MAX)`.
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
-        self.base_delay_secs.saturating_mul(1u64 << attempt.min(10))
+        let shifted = self.base_delay_secs.saturating_mul(1u64 << attempt.min(10));
+        shifted.min(MAX_BACKOFF_SECS)
     }
 
     /// Does this status call for a retry?
@@ -87,6 +97,25 @@ mod tests {
         assert_eq!(policy.delay_for_attempt(0), 1);
         assert_eq!(policy.delay_for_attempt(1), 2);
         assert_eq!(policy.delay_for_attempt(2), 4);
+    }
+
+    /// A retry must never wait longer than the ceiling, no matter how large
+    /// the attempt or how large a base is configured.
+    #[test]
+    fn retry_delay_is_capped() {
+        let policy = RetryPolicy::default();
+        // The exponential does not grow unbounded.
+        assert_eq!(policy.delay_for_attempt(9), MAX_BACKOFF_SECS);
+        assert_eq!(policy.delay_for_attempt(u32::MAX), MAX_BACKOFF_SECS);
+
+        // Even an enormous base is clamped.
+        let huge = RetryPolicy {
+            base_delay_secs: 1_000_000,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(huge.delay_for_attempt(10), MAX_BACKOFF_SECS);
+        // The first attempt on a sane base is still the base.
+        assert_eq!(policy.delay_for_attempt(0), 1);
     }
 
     #[test]

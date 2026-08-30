@@ -1703,7 +1703,7 @@ impl Blockchain {
 
         self.state
             .bridge_state
-            .mint(&message)
+            .mint(&message, self.chain.len() as u64)
             .map_err(|e| e.to_string())?;
 
         // Q9: Deduct relayer fee from arriving asset if inbound to Budlum
@@ -2534,7 +2534,7 @@ impl Blockchain {
             MessageKind::BridgeLock => {
                 self.state
                     .bridge_state
-                    .mint(&message)
+                    .mint(&message, current_height)
                     .map_err(|e| e.to_string())?;
                 // Deduct relayer fee (Decision 9: 1%)
                 let transfer = self

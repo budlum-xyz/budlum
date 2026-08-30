@@ -2790,6 +2790,29 @@ mod tests {
         });
     }
 
+    /// Div-by-zero is defined as result 0 by the VM and pinned by the AIR
+    /// (`when(is_div * div_zero).assert_zero(rd_val_new)`). A prover claiming a
+    /// non-zero quotient for a zero divisor is the forgery that pin exists to
+    /// refuse - the canary that it is actually live.
+    #[test]
+    fn rejects_a_forged_div_by_zero_result() {
+        let program = vec![
+            inst(Opcode::Div, 4, 2, 3, 0), // r4 = r2 / r3, with r3 = 0
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 5; // dividend
+                vm.registers[3] = 0; // zero divisor -> div by zero -> 0
+            },
+            |trace| {
+                // The honest VM result is 0. Claim 7 instead.
+                trace[0].dst_val = 7;
+            },
+        );
+    }
+
     #[test]
     fn proves_load_immediate_trace() {
         let program = vec![

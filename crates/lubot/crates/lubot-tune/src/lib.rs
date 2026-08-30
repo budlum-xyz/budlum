@@ -9,6 +9,7 @@
 //! stage is only documented, and the run guides live outside this repository
 //! (on the `lubot-kosu-2026-08-13` branch).
 
+pub mod eval;
 pub mod lock;
 pub mod plan;
 pub mod schema;
