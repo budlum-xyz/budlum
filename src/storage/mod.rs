@@ -94,8 +94,9 @@ pub use manifest::{
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
-    decide_custody, CustodyDecision, CustodyMode, MobileAvailabilityClass,
-    MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
+    decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger, CustodyMode,
+    MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
+    UploadCustodyRefusal,
 };
 pub use msr::{
     lrc_repair_traffic_scaled, msr_repair_traffic_scaled, msr_speedup_over_lrc_scaled, MsrError,
