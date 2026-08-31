@@ -270,7 +270,18 @@ fn try_zlib9(data: &[u8]) -> Option<Vec<u8>> {
 fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, ()> {
     let mut decoder = ZlibDecoder::new(data);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out).map_err(|_| ())?;
+    // Cap the expansion before reading. A hostile body may declare a small
+    // `orig_len` in the header yet carry a zlib stream that inflates far past
+    // [`MAX_PAYLOAD_CONTENT`]; without the cap, `read_to_end` allocates the
+    // whole bomb before the length check below can refuse it.
+    decoder
+        .by_ref()
+        .take(MAX_PAYLOAD_CONTENT as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| ())?;
+    if out.len() > MAX_PAYLOAD_CONTENT {
+        return Err(());
+    }
     Ok(out)
 }
 
@@ -303,6 +314,41 @@ mod tests {
             hex(&payload_commitment(&packed)),
             "7e380b6b1a1e981793bc14e8970fefe3a25cff3895bac65b5e5cc2c9f855ac0d"
         );
+    }
+
+    /// A packed body may declare a small `orig_len` yet carry a zlib stream
+    /// that inflates far past [`MAX_PAYLOAD_CONTENT`]. Unpack must refuse
+    /// without first ballooning memory: the inflate read is capped, so a bomb
+    /// is an `Inflate` error, not a multi-gigabyte allocation.
+    #[test]
+    fn unpack_refuses_a_zlib_body_that_expands_past_the_cap() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+        // A highly compressible body that would inflate well past the cap.
+        let big = vec![b'A'; MAX_PAYLOAD_CONTENT + 1_048_576];
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(&big).unwrap();
+        let zlib_body = enc.finish().unwrap();
+        assert!(
+            zlib_body.len() < big.len(),
+            "a repeated body must shrink, otherwise it is not a bomb payload"
+        );
+
+        // Hand-build the wire header declaring orig_len = 1 (a lie) and the bomb.
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&THREE_PAYLOAD_MAGIC);
+        packed.push(THREE_PAYLOAD_VERSION);
+        packed.push(FLAG_ZLIB);
+        packed.push(PayloadKind::ContentBytes.tag());
+        packed.extend_from_slice(&1u64.to_le_bytes());
+        packed.extend_from_slice(&[0u8; 32]); // sha never reached
+        packed.extend_from_slice(&zlib_body);
+
+        match unpack_payload(&packed) {
+            Err(PayloadError::Inflate) => {}
+            other => panic!("the bomb must be refused as Inflate, got {other:?}"),
+        }
     }
 
     #[test]
