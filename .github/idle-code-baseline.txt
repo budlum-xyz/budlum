@@ -2049,3 +2049,112 @@ src/tokenomics/reward_pool.rs	fn	per_epoch_budget
 src/tokenomics/reward_pool.rs	fn	reward_for_epoch
 src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 src/tokenomics/reward_pool.rs	struct	RewardPoolSchedule
+#
+# 2026-08-31 (user-approved hybrid): the lubot-serve economics modules
+# (fee_scenario, cost_forecast, validator_cost, staging, metric) are the
+# published fee schedule and cost model as code - the single source every
+# doc number quotes. Their consumer (the settlement/serving runtime) does
+# not exist in any crate yet; these lines are the debt record for that
+# wiring, and they come out when the settlement layer starts calling them.
+
+#
+# 2026-08-31 (user-approved hybrid): the lubot-serve economics modules
+# (fee_scenario, cost_forecast, validator_cost, staging, metric) are the
+# published fee schedule and cost model as code - the single source every
+# doc number quotes. Their consumer (the settlement/serving runtime) does
+# not exist in any crate yet; these lines are the debt record for that
+# wiring, and they come out when the settlement layer starts calling them.
+
+#
+# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# DENETIM-PLANI-3.0.md): the lubot-serve economics modules (fee_scenario,
+# cost_forecast, validator_cost, staging, metric) are the published fee
+# schedule and cost model as code, the single source every doc number
+# quotes. Their consumer (the settlement/serving runtime) does not exist
+# in any crate yet; these lines are the debt record for that wiring and
+# come out when the settlement layer starts calling them.
+
+#
+# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# DENETIM-PLANI-3.0.md): the lubot-serve economics modules (fee_scenario,
+# cost_forecast, validator_cost, staging, metric, residency) are the
+# published fee schedule and cost model as code, the single source every
+# doc number quotes. Their consumer (the settlement/serving runtime) does
+# not exist in any crate yet; these lines are the debt record for that
+# wiring and come out when the settlement layer starts calling them.
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	const	GIB_PER_COLD_TOKEN
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	const	MTP_SPEEDUP
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	const	OWNED_DISK_GIB
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	compare
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second_with_speculation
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	footprint_reduction_ratio
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	forecast
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	gib_per_cold_token
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	market_rates
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	owned_device_budget
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	rental_hour_savings_ratio
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	rented_datacenter_budget
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	savings_ratio
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	scaled_bytes
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	struct	CostComparison
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	struct	CostForecast
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_2_MONTHLY_USD_PER_TB
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_CUSTODY_YEARS
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_EXPIRY_AUCTION_DAYS
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_MAX_CUSTODY_YEARS
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_RECIPE_PUBLIC_BYTES
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_RECIPE_SEALED_BYTES
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_UPLOAD_BASE_USD
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BYTES_PER_TB
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	enum	BudVersion
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	enum	CustodyPhase
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	enum	TxClass
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	auction_start_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	base_usd
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	bud_extension_fee_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	bud_upload_extra_fee_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	bud_upload_fee_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	custody_phase
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	enters_open_auction
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	monthly_storage_fee_usd
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	rate_bps
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	recipes_for_content
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	three_network_bytes_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	three_network_custody_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	three_network_monthly_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	transaction_fee_usd
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	struct	InsufficientBalance
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	struct	PromptWallet
+crates/lubot/crates/lubot-serve/src/metric.rs	fn	time_to_first_token_ms
+crates/lubot/crates/lubot-serve/src/residency.rs	fn	plan_with_heat
+crates/lubot/crates/lubot-serve/src/residency.rs	fn	rebalance
+crates/lubot/crates/lubot-serve/src/residency.rs	fn	total_fast_bytes
+crates/lubot/crates/lubot-serve/src/residency.rs	struct	RoutingHeat
+crates/lubot/crates/lubot-serve/src/staging.rs	enum	StripeError
+crates/lubot/crates/lubot-serve/src/staging.rs	fn	is_usable
+crates/lubot/crates/lubot-serve/src/staging.rs	fn	stripe_plan
+crates/lubot/crates/lubot-serve/src/staging.rs	fn	weight_kib_s
+crates/lubot/crates/lubot-serve/src/staging.rs	struct	DeviceProbe
+crates/lubot/crates/lubot-serve/src/staging.rs	struct	StorageDevice
+crates/lubot/crates/lubot-serve/src/staging.rs	struct	StripeChunk
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	const	STORAGE_HDD_WATTS_PER_TB
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	capital_dollars
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	core_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	market_pricelist
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	measure_serving
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	measure_serving_at
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	minimum
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	minimum_quantized
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	monthly_energy_dollars
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	one_year_storage_cost_usd_per_tb
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	serving_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	serving_layer_for
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	serving_layer_int4
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	storage_capital_per_tb_usd
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	storage_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	total_capital_dollars
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	zkvm_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	LayerFootprint
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	ServingMeasure
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	ValidatorBudget
