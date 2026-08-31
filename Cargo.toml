@@ -113,7 +113,7 @@ pqcrypto-traits = { version = "0.3.5", optional = true }
 # feature) or as the always-on user/wallet signature crate. The same crate is
 # used by both, so the feature gates `dep:ml-dsa` and we mark it optional and
 # pull it in from `default` to keep it always present.
-ml-dsa = { version = "0.1.1", optional = true, features = ["alloc"] }
+ml-dsa = { version = "0.1.1", optional = true, features = ["alloc", "rand_core"] }
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 rand_core = { version = "0.6", features = ["getrandom"] }
