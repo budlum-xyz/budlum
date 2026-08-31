@@ -47,7 +47,10 @@ impl std::fmt::Display for RevealRpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Forbidden => write!(f, "three reveal rpc: forbidden without a live grant"),
-            Self::NeedFullRecipe => write!(f, "three reveal rpc: sealed recipe needs a full public opening"),
+            Self::NeedFullRecipe => write!(
+                f,
+                "three reveal rpc: sealed recipe needs a full public opening"
+            ),
             Self::Meter(e) => write!(f, "three reveal rpc: meter: {e}"),
             Self::Reemit(e) => write!(f, "three reveal rpc: reemit: {e}"),
         }
@@ -135,8 +138,7 @@ pub fn open_reveal_session(
     registry: &ViewGrantRegistry,
     req: &RevealRequest,
 ) -> Result<RevealHandle, RevealRpcError> {
-    let grant_allows =
-        registry.may_view(&req.content_id, &req.viewer, &req.key_id, &req.owner);
+    let grant_allows = registry.may_view(&req.content_id, &req.viewer, &req.key_id, &req.owner);
     let session = RevealSession::open(
         &req.recipe,
         req.full_public.as_ref(),
@@ -198,7 +200,14 @@ mod rpc_tests {
         let sealed = ThreeRecipe::Sealed(full.clone().seal());
 
         // No grant yet -> refused.
-        let r = req(sealed.clone(), Some(full.clone()), packed.clone(), viewer, owner, key_id);
+        let r = req(
+            sealed.clone(),
+            Some(full.clone()),
+            packed.clone(),
+            viewer,
+            owner,
+            key_id,
+        );
         assert_eq!(
             open_reveal_session(&reg, &r).unwrap_err(),
             RevealRpcError::Forbidden

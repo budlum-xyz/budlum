@@ -805,7 +805,14 @@ mod tests {
         let owner = addr(1);
         let grantee = addr(5);
         let id = reg
-            .issue(cid(4), owner, Some(grantee), [9u8; 32], ViewPolicy::NamedGrantee, 1)
+            .issue(
+                cid(4),
+                owner,
+                Some(grantee),
+                [9u8; 32],
+                ViewPolicy::NamedGrantee,
+                1,
+            )
             .unwrap();
         let mut hook = crate::storage::three_hooks::RecordingThreeHook::default();
 
@@ -813,7 +820,10 @@ mod tests {
 
         assert_eq!(hook.events.len(), 1);
         let ev = &hook.events[0];
-        assert_eq!(ev.kind, crate::storage::three_hooks::ThreeHookKind::GrantRevoked);
+        assert_eq!(
+            ev.kind,
+            crate::storage::three_hooks::ThreeHookKind::GrantRevoked
+        );
         assert_eq!(ev.content_id, cid(4));
         assert_eq!(ev.actor, owner);
         assert_eq!(ev.epoch, 9);
@@ -825,7 +835,14 @@ mod tests {
         let mut reg = ViewGrantRegistry::new();
         let owner = addr(1);
         let id = reg
-            .issue(cid(4), owner, Some(addr(5)), [9u8; 32], ViewPolicy::NamedGrantee, 1)
+            .issue(
+                cid(4),
+                owner,
+                Some(addr(5)),
+                [9u8; 32],
+                ViewPolicy::NamedGrantee,
+                1,
+            )
             .unwrap();
         let mut hook = crate::storage::three_hooks::RecordingThreeHook::default();
 

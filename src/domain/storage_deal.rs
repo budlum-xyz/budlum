@@ -1903,7 +1903,10 @@ impl StorageRegistry {
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         if caller != owner {
-            return Err(crate::storage::ViewGrantError::NotOwner { issuer: caller, owner });
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner,
+            });
         }
         let digest = crate::storage::social_delete_digest(&content_id, &caller, at_epoch);
         auth.verify(&digest, &owner)

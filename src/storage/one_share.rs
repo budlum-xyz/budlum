@@ -15,8 +15,8 @@
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
 use crate::storage::mobile_self::{decide_custody, CustodyLedger, CustodyMode, MobileSelfProfile};
-use crate::storage::server_admission::{ServerAdmission, ServerAdmissionRefusal};
 use crate::storage::one_view::{EndpointRef, SingleScreenView};
+use crate::storage::server_admission::{ServerAdmission, ServerAdmissionRefusal};
 use std::collections::BTreeMap;
 
 /// A 1.0 share: content held on an endpoint, marked as shared.
@@ -213,7 +213,10 @@ mod one_share_tests {
             .create(&profile(1000), ContentId([2; 32]), 5000, addr(0xA2))
             .unwrap_err();
         assert_eq!(refused, ShareRefusal::WouldBeNetworkHeld);
-        assert!(reg.shares.is_empty(), "a refused share must not be recorded");
+        assert!(
+            reg.shares.is_empty(),
+            "a refused share must not be recorded"
+        );
     }
 
     #[test]
@@ -226,7 +229,11 @@ mod one_share_tests {
         let screen = reg.screen(&p);
         assert!(screen.honest_custody(&p));
         assert_eq!(screen.user_held_bytes(), 700);
-        assert_eq!(screen.network_held_bytes(), 0, "1.0 never holds network bytes");
+        assert_eq!(
+            screen.network_held_bytes(),
+            0,
+            "1.0 never holds network bytes"
+        );
     }
 
     #[test]

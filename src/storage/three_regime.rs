@@ -190,12 +190,18 @@ mod regime_tests {
 
     #[test]
     fn a_public_recipe_is_the_three_regime() {
-        assert_eq!(regime_of(&public_recipe(), b"anything"), ContentRegime::Three);
+        assert_eq!(
+            regime_of(&public_recipe(), b"anything"),
+            ContentRegime::Three
+        );
     }
 
     #[test]
     fn a_sealed_recipe_is_the_three_regime() {
-        assert_eq!(regime_of(&sealed_recipe(), b"anything"), ContentRegime::Three);
+        assert_eq!(
+            regime_of(&sealed_recipe(), b"anything"),
+            ContentRegime::Three
+        );
     }
 
     #[test]
@@ -234,10 +240,7 @@ mod regime_tests {
     #[test]
     fn held_bytes_for_a_derivative_is_a_refusal() {
         assert_eq!(held_bytes_for(&stored(), 500, b"BDLD"), None);
-        assert_eq!(
-            rent_basis_for(&stored(), 500, b"BDLD"),
-            RentBasis::Refused
-        );
+        assert_eq!(rent_basis_for(&stored(), 500, b"BDLD"), RentBasis::Refused);
     }
 
     #[test]

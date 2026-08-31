@@ -457,7 +457,10 @@ mod custody_tests {
         let p = av(MobileAvailabilityClass::AlwaysOnReplica);
         // Critical but the owner did not opt in to network custody -> refused.
         let err = decide_upload_custody(&p, 200, true, false).unwrap_err();
-        assert_eq!(err, UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody);
+        assert_eq!(
+            err,
+            UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody
+        );
         // Critical and the owner opted in -> network holds it, no user bytes.
         let d = decide_upload_custody(&p, 200, true, true).unwrap();
         assert_eq!(d.mode, CustodyMode::NetworkHeld);
@@ -616,7 +619,9 @@ mod ledger_behavior_tests {
         assert_eq!(d.mode, CustodyMode::UserHeld);
         assert_eq!(ledger.total_user_held_bytes(), 800);
         assert_eq!(ledger.network_default_attempts(), 0);
-        assert!(admit_device_as_server(&ledger).unwrap().is_device_the_server());
+        assert!(admit_device_as_server(&ledger)
+            .unwrap()
+            .is_device_the_server());
     }
 
     #[test]

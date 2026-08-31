@@ -452,7 +452,6 @@ bud/src/bud_format_qrvideo.rs	const	QRV_MAGIC
 bud/src/bud_format_qrvideo.rs	const	QRV_VERSION
 bud/src/bud_format_qrvideo.rs	fn	add_drop
 bud/src/bud_format_qrvideo.rs	fn	add_frame
-bud/src/bud_format_qrvideo.rs	fn	assemble
 bud/src/bud_format_qrvideo.rs	fn	composition
 bud/src/bud_format_qrvideo.rs	fn	derivative_growth
 bud/src/bud_format_qrvideo.rs	fn	derive_stream
@@ -2158,3 +2157,51 @@ crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	zkvm_layer
 crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	LayerFootprint
 crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	ServingMeasure
 crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	ValidatorBudget
+#
+# 2026-08-31 (user-approved hybrid, second slice): seams waiting on a real
+# production path, recorded as debt with the path named. Each line comes
+# OUT when its consumer lands:
+#   one_share/one_view  -> the 1.0 device-screen RPC surface (needs a share
+#                          registry in chain state; consensus-surface work).
+#   three_rpc           -> the reveal RPC endpoint (serving surface).
+#   three_regime        -> the rent/settlement path (none exists yet).
+#   mobile_self upload  -> the custody-aware upload flow.
+#   three_nft registry  -> the mint/pin chain transactions (in flight with
+#                          the teammate working the same PR).
+#   ScreenItem/contract_digest/honest_custody/network_held_bytes ride the
+#   screen surface above.
+src/storage/mobile_self.rs	enum	UploadCustodyRefusal
+src/storage/mobile_self.rs	fn	decide_upload_custody
+src/storage/mobile_self.rs	fn	put_user_content
+src/storage/mobile_self.rs	fn	record_network_default_attempt
+src/storage/mobile_self.rs	fn	record_network_held
+src/storage/mobile_self.rs	fn	user_held_items
+src/storage/one_share.rs	enum	ShareRefusal
+src/storage/one_share.rs	fn	admit_as_server
+src/storage/one_share.rs	fn	all_user_held
+src/storage/one_share.rs	fn	endpoint_refs
+src/storage/one_share.rs	fn	screen
+src/storage/one_share.rs	fn	storage_fee_owed_usd
+src/storage/one_share.rs	struct	OneShareRegistry
+src/storage/one_share.rs	struct	Share
+src/storage/one_view.rs	fn	contract_digest
+src/storage/one_view.rs	fn	honest_custody
+src/storage/one_view.rs	fn	network_held_bytes
+src/storage/one_view.rs	struct	ScreenItem
+src/storage/three_nft.rs	enum	ThreeNftRegistryError
+src/storage/three_nft.rs	fn	drop_validator
+src/storage/three_nft.rs	fn	reemit_video_from_pin
+src/storage/three_nft.rs	fn	with_body
+src/storage/three_nft.rs	struct	PinRow
+src/storage/three_nft.rs	struct	ThreeNftRegistry
+src/storage/three_regime.rs	enum	AccountingRefusal
+src/storage/three_regime.rs	enum	ContentRegime
+src/storage/three_regime.rs	enum	RentBasis
+src/storage/three_regime.rs	fn	held_bytes_for
+src/storage/three_regime.rs	fn	refuse_rent_without_held_bytes
+src/storage/three_regime.rs	fn	regime_of
+src/storage/three_regime.rs	fn	rent_basis_for
+src/storage/three_rpc.rs	enum	RevealRpcError
+src/storage/three_rpc.rs	fn	open_reveal_session
+src/storage/three_rpc.rs	struct	RevealHandle
+src/storage/three_rpc.rs	struct	RevealRequest

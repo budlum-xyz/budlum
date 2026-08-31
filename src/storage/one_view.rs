@@ -78,9 +78,9 @@ impl SingleScreenView {
     /// a screen with a forged attribution fails this check.
     #[must_use]
     pub fn honest_custody(&self, profile: &MobileSelfProfile) -> bool {
-        self.items.iter().all(|item| {
-            item.custody == decide_custody(profile, item.size, item.critical)
-        })
+        self.items
+            .iter()
+            .all(|item| item.custody == decide_custody(profile, item.size, item.critical))
     }
 
     /// Bytes the user's device is responsible for on this screen. The 1.0
@@ -182,7 +182,12 @@ mod one_view_tests {
         let p = profile(1000);
         let view = SingleScreenView::assemble(
             &p,
-            &[r(1, 400, false), r(2, 600, false), r(3, 5000, false), r(4, 100, true)],
+            &[
+                r(1, 400, false),
+                r(2, 600, false),
+                r(3, 5000, false),
+                r(4, 100, true),
+            ],
         );
         assert_eq!(view.user_held_bytes(), 1000);
         assert_eq!(view.network_held_bytes(), 5100);
