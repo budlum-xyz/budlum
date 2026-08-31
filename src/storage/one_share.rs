@@ -36,6 +36,14 @@ pub enum ShareRefusal {
     /// hold it). 1.0 refuses rather than let the network become the
     /// custodian: there is no 1.0 economy that pays for network custody.
     WouldBeNetworkHeld,
+    /// The profile behind the share is not valid (zero owner, zero device
+    /// commitment, or zero declared capacity). A marker cannot be attributed
+    /// to a holder that has no identity.
+    ProfileInvalid,
+    /// The endpoint the bytes are claimed to sit on is the zero address: a
+    /// marker pointing nowhere. 1.0 says where the holder keeps the bytes, so
+    /// a share without a real endpoint is refused, not recorded.
+    EndpointMissing,
 }
 
 /// The 1.0 share registry: share NFTs and the one-screen assembly.
@@ -53,12 +61,16 @@ impl OneShareRegistry {
 
     /// Create a share. Refuses any share whose custody decision would be
     /// network-held: in 1.0 the network is never the custodian, and refusing
-    /// is the only honest answer to a put the device cannot hold.
+    /// is the only honest answer to a put the device cannot hold. The marker
+    /// itself must also be attributable: an invalid profile or a zero
+    /// endpoint is refused before anything is recorded.
     ///
     /// # Errors
     ///
-    /// [`ShareRefusal::WouldBeNetworkHeld`] when the device cannot hold the
-    /// bytes under the profile.
+    /// [`ShareRefusal::ProfileInvalid`] when the profile fails its own
+    /// validation; [`ShareRefusal::EndpointMissing`] when the endpoint is the
+    /// zero address; [`ShareRefusal::WouldBeNetworkHeld`] when the device
+    /// cannot hold the bytes under the profile.
     pub fn create(
         &mut self,
         profile: &MobileSelfProfile,
@@ -66,6 +78,15 @@ impl OneShareRegistry {
         size: u64,
         endpoint: Address,
     ) -> Result<u64, ShareRefusal> {
+        // A marker names a holder and a place. If either is missing the share
+        // is refused before the custody decision, so no invalid marker can
+        // reach the registry (and the single screen) at all.
+        if profile.validate().is_err() {
+            return Err(ShareRefusal::ProfileInvalid);
+        }
+        if endpoint == Address::zero() {
+            return Err(ShareRefusal::EndpointMissing);
+        }
         // 1.0 shares are never critical: critical means paid replicas and
         // network custody, which is a 2.0 notion. Passing `false` here is the
         // whole of the 1.0 custody policy.
@@ -198,11 +219,41 @@ mod one_share_tests {
     }
 
     #[test]
+    fn a_share_needs_a_valid_profile_and_a_real_endpoint() {
+        let mut reg = OneShareRegistry::new();
+        // An unvalidated profile (zero owner) cannot attribute a marker.
+        let bad_profile = MobileSelfProfile {
+            owner: Address::zero(),
+            device_commitment: [9u8; 32],
+            availability: MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1000,
+            metered_network_ok: false,
+            battery_saver_aware: true,
+            last_seen_block: 100,
+        };
+        assert_eq!(
+            reg.create(&bad_profile, ContentId([7; 32]), 100, addr(1))
+                .unwrap_err(),
+            ShareRefusal::ProfileInvalid
+        );
+        // The zero endpoint points nowhere: refused, and nothing is recorded.
+        assert_eq!(
+            reg.create(&profile(1000), ContentId([7; 32]), 100, Address::zero())
+                .unwrap_err(),
+            ShareRefusal::EndpointMissing
+        );
+        assert!(reg.shares.is_empty(), "refused shares must not be recorded");
+    }
+
+    #[test]
     fn one_zero_charges_no_storage_fee() {
         let p = profile(1000);
         let mut reg = OneShareRegistry::new();
-        for n in 0..5 {
-            reg.create(&p, ContentId([n; 32]), 100, addr(n)).unwrap();
+        for n in 0..5u8 {
+            // n + 1 keeps every endpoint non-zero: the zero address is a
+            // refused endpoint, not a holder.
+            reg.create(&p, ContentId([n; 32]), 100, addr(n + 1))
+                .unwrap();
         }
         assert_eq!(reg.storage_fee_owed_usd(), 0.0);
     }
