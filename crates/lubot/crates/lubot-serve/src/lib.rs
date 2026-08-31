@@ -13,4 +13,5 @@ pub mod bridge;
 pub mod chain;
 pub mod config;
 pub mod health;
+pub mod metric;
 pub mod residency;
