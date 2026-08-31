@@ -19,12 +19,26 @@
 //! already made. Both funnel into the same meter-and-budget construction, so
 //! a sealed recipe with no live grant is refused either way.
 
+use crate::core::hash::hash_fields_bytes;
 use crate::storage::three_rpc::{
     open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
     RevealRpcError,
 };
 use crate::storage::view_grant::ViewGrantRegistry;
 use std::collections::BTreeMap;
+
+/// Per-gateway secret mixed into every issued session id. The id is the only
+/// credential the frame endpoint sees, so it must not be guessable: a
+/// sequential counter would let any RPC caller enumerate live sessions of
+/// other clients (read their frames, or close them out from under them).
+#[derive(Clone)]
+struct IdNonce([u8; 32]);
+
+impl std::fmt::Debug for IdNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IdNonce(<redacted>)")
+    }
+}
 
 /// Hard cap on open reveal sessions. A flood of opens is refused here rather
 /// than growing the table without bound.
@@ -103,17 +117,43 @@ struct GatewaySession {
 }
 
 /// The session table a gateway/RPC handler owns.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RevealGateway {
     sessions: BTreeMap<u64, GatewaySession>,
+    /// Internal uniqueness counter; never issued raw (see [`IdNonce`]).
     next_id: u64,
+    id_nonce: IdNonce,
+}
+
+impl Default for RevealGateway {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RevealGateway {
-    /// New, empty table.
+    /// New, empty table with a fresh secret id nonce.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        use rand::Rng;
+        let mut nonce = [0u8; 32];
+        rand::rng().fill_bytes(&mut nonce);
+        Self {
+            sessions: BTreeMap::new(),
+            next_id: 0,
+            id_nonce: IdNonce(nonce),
+        }
+    }
+
+    /// Derive the public id for an internal counter value: a keyed hash, so
+    /// ids look random to anyone without the nonce yet never repeat for one
+    /// gateway instance.
+    fn derive_id(&self, counter: u64, now: u64) -> u64 {
+        let digest =
+            hash_fields_bytes(&[&self.id_nonce.0, &counter.to_be_bytes(), &now.to_be_bytes()]);
+        let mut head = [0u8; 8];
+        head.copy_from_slice(digest.get(..8).unwrap_or(&[0u8; 8]));
+        u64::from_be_bytes(head)
     }
 
     /// Number of open sessions (used by tests and telemetry).
@@ -168,7 +208,21 @@ impl RevealGateway {
                 max: MAX_REVEAL_SESSIONS,
             });
         }
-        let id = self.next_id;
+        // Bounded collision retry: two derived ids colliding is a ~2^-64
+        // event; eight misses in a row is not a live table, it is a broken
+        // rng, and a broken rng must not mint guessable ids either.
+        let mut id = self.derive_id(self.next_id, now);
+        let mut tries = 0u8;
+        while self.sessions.contains_key(&id) {
+            if tries == 8 {
+                return Err(RevealGatewayError::SessionLimit {
+                    max: MAX_REVEAL_SESSIONS,
+                });
+            }
+            tries += 1;
+            self.next_id = self.next_id.saturating_add(1);
+            id = self.derive_id(self.next_id, now);
+        }
         self.next_id = self.next_id.saturating_add(1);
         self.sessions.insert(
             id,
@@ -320,6 +374,38 @@ mod gateway_tests {
         let (frames, fold) = gw.emit_frames(id, 0, 2, 100).unwrap();
         assert_eq!(frames.len(), 2);
         assert_ne!(fold, [0u8; 32]);
+    }
+
+    /// Issued ids are keyed hashes, not a counter: a sequential id would be
+    /// a guessable bearer credential for the frame endpoint and the close
+    /// endpoint.
+    #[test]
+    fn issued_ids_are_keyed_not_counters() {
+        let (full, packed) = sample();
+        let make = |packed: Vec<u8>| {
+            req(
+                ThreeRecipe::Public(full.clone()),
+                None,
+                packed,
+                addr(1),
+                addr(2),
+                [7u8; 32],
+                None,
+            )
+        };
+        let mut gw = RevealGateway::new();
+        let a = gw
+            .open_prechecked(make(packed.clone()), false, 100)
+            .unwrap();
+        let b = gw
+            .open_prechecked(make(packed.clone()), false, 100)
+            .unwrap();
+        assert_ne!(a, 0);
+        assert_ne!(b, a.wrapping_add(1));
+        assert_ne!(a, b.wrapping_add(1));
+        let mut other = RevealGateway::new();
+        let c = other.open_prechecked(make(packed), false, 100).unwrap();
+        assert_ne!(a, c, "a fresh nonce must not reissue the same id");
     }
 
     /// A sealed recipe under a false decision is refused, and under a true
