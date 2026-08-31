@@ -7,11 +7,14 @@
 //! * **B.U.D. storage, by version** - 1.0 charges only the share NFT's
 //!   transaction fee (content stays on the user's device, so there is no
 //!   storage cost to charge); 2.0 bills `$0.016/TB` monthly for the held
-//!   body; 3.0's recipe fits inside the `$0.01` upload base, so nothing
-//!   monthly, and only if the ten-year cost exceeds that cent is the excess
-//!   charged. Uploaded content stays alive ten years; on expiry the owner may
-//!   delete it, and if they do not, it moves to an open auction and
-//!   transfers after one month.
+//!   body; 3.0 charges the `$0.01` upload base plus the ten-year recipe
+//!   custody cost on top of it (user decision 2026-08-31: the base is a
+//!   transaction fee, custody is priced separately and added). The uploader
+//!   chooses the custody duration: ten years is the floor, a hundred is the
+//!   ceiling, and every year above ten adds one tenth of the ten-year cost.
+//!   Nothing is billed monthly. Uploaded content stays alive for the chosen
+//!   duration; on expiry the owner may delete it, and if they do not, it
+//!   moves to an open auction and transfers after one month.
 //! * **Lubot serving** - token-metered like an API: every prompt debits its
 //!   tokens at the serving rate from the wallet as it runs, using the rates
 //!   [`crate::cost_forecast`] measures. No terabyte is priced here; serving
@@ -55,9 +58,9 @@ pub fn transaction_fee_usd(class: TxClass, amount_usd: f64) -> f64 {
     class.base_usd() + amount_usd * f64::from(class.rate_bps()) / BPS
 }
 
-/// The upload transaction's base fee, already paid by the uploader. In 3.0 it
-/// covers ten-year custody of the recipe, because a recipe is a fixed-size
-/// commitment, not the terabytes of content it describes.
+/// The upload transaction's base fee, paid by the uploader on every upload.
+/// It is a transaction fee only: the ten-year recipe custody cost is charged
+/// on top of it (see [`bud_upload_extra_fee_usd_per_tb`]), never inside it.
 pub const BUD_UPLOAD_BASE_USD: f64 = 0.01;
 
 /// A 3.0 recipe is fixed-size, no matter how large the content was: the
@@ -65,14 +68,21 @@ pub const BUD_UPLOAD_BASE_USD: f64 = 0.01;
 pub const BUD_RECIPE_SEALED_BYTES: u64 = 40;
 pub const BUD_RECIPE_PUBLIC_BYTES: u64 = 74;
 
-/// 3.0 keeps uploaded content alive this many years.
+/// 3.0 keeps uploaded content alive at least this many years: the floor of
+/// the duration the uploader picks.
 ///
-/// User decision 2026-08-31 (final): ten years. The economics measured it:
-/// a recipe's network cost is one-time capital, so the $0.01 upload base
-/// covers ten-year recipe custody of a terabyte for any item >= 512 KiB
-/// (worst measured case: $0.0092 per TB); smaller items are covered by the
-/// excess rule, never by extending the promise.
+/// User decision 2026-08-31 (updated): ten years is the base promise, and
+/// its measured cost is charged on top of the `$0.01` upload base (worst
+/// measured case $0.0092 per TB at 512 KiB items). The uploader may choose a
+/// longer custody, up to [`BUD_MAX_CUSTODY_YEARS`], priced pro rata.
 pub const BUD_CUSTODY_YEARS: u32 = 10;
+
+/// The ceiling of the custody duration an uploader may choose, in years.
+///
+/// User decision 2026-08-31: nobody can buy more than a hundred years of
+/// custody in one upload; a request outside `10..=100` is refused, never
+/// silently clamped.
+pub const BUD_MAX_CUSTODY_YEARS: u32 = 100;
 
 /// Expired but undeleted content transfers by open auction lasting one month.
 pub const BUD_EXPIRY_AUCTION_DAYS: u32 = 30;
@@ -88,7 +98,8 @@ pub enum BudVersion {
     V1_0,
     /// 2.0: a held body, billed monthly per terabyte.
     V2_0,
-    /// 3.0: a recipe, carried inside the upload base fee.
+    /// 3.0: a recipe. The upload base plus the ten-year custody cost are
+    /// charged once at upload; nothing is billed monthly.
     V3_0,
 }
 
@@ -96,8 +107,8 @@ impl BudVersion {
     /// Monthly storage fee for `tb` terabytes, in dollars.
     ///
     /// 1.0 holds nothing (the bytes are the user's own), 2.0 bills the
-    /// measured per-terabyte rate, and 3.0's fixed-size recipe already fits
-    /// inside the `$0.01` upload base so it bills nothing monthly.
+    /// measured per-terabyte rate, and 3.0 bills nothing monthly: its
+    /// custody was paid once, at upload, on top of the base fee.
     #[must_use]
     pub fn monthly_storage_fee_usd(self, tb: f64) -> f64 {
         match self {
@@ -108,13 +119,40 @@ impl BudVersion {
     }
 }
 
-/// Extra fee per terabyte on upload: the ten-year custody cost above the base
-/// fee already paid. Zero while the cost fits inside $0.01, which is always
-/// the case for a recipe; it fires only when the ten-year cost of the terabyte
-/// really exceeds a cent.
+/// Extra fee per terabyte on upload: the full ten-year custody cost, added
+/// on top of the `$0.01` base (user decision 2026-08-31: the base is a
+/// transaction fee and no longer absorbs custody; the old "excess above the
+/// cent" rule is gone with the decision it belonged to).
 #[must_use]
 pub fn bud_upload_extra_fee_usd_per_tb(ten_year_storage_cost_usd: f64) -> f64 {
-    (ten_year_storage_cost_usd - BUD_UPLOAD_BASE_USD).max(0.0)
+    ten_year_storage_cost_usd.max(0.0)
+}
+
+/// Total upload fee per terabyte: the base plus the ten-year custody cost.
+#[must_use]
+pub fn bud_upload_fee_usd_per_tb(ten_year_storage_cost_usd: f64) -> f64 {
+    BUD_UPLOAD_BASE_USD + bud_upload_extra_fee_usd_per_tb(ten_year_storage_cost_usd)
+}
+
+/// Price of extending custody from the ten-year floor to `custody_years`,
+/// per terabyte, given the measured ten-year custody cost.
+///
+/// Pro rata: each year above ten adds one tenth of the ten-year cost, so a
+/// hundred years costs nine times the ten-year figure on top of it. A
+/// duration outside `10..=100` is a refusal ([`None`]), never a clamp: the
+/// schedule does not sell what the user did not ask for.
+///
+/// # Errors
+///
+/// `None` when `custody_years` is below [`BUD_CUSTODY_YEARS`] or above
+/// [`BUD_MAX_CUSTODY_YEARS`].
+#[must_use]
+pub fn bud_extension_fee_usd_per_tb(ten_year_storage_cost_usd: f64, custody_years: u32) -> Option<f64> {
+    if !(BUD_CUSTODY_YEARS..=BUD_MAX_CUSTODY_YEARS).contains(&custody_years) {
+        return None;
+    }
+    let extra_years = f64::from(custody_years - BUD_CUSTODY_YEARS);
+    Some(ten_year_storage_cost_usd.max(0.0) * extra_years / f64::from(BUD_CUSTODY_YEARS))
 }
 
 /// One terabyte of content, in bytes (decimal TB, the unit the fee schedule
@@ -296,15 +334,35 @@ mod fee_scenario_tests {
     }
 
     #[test]
-    fn bud_upload_extra_fee_is_the_excess_over_the_base_cent() {
-        assert!(approx(bud_upload_extra_fee_usd_per_tb(0.005), 0.0));
-        assert!(approx(bud_upload_extra_fee_usd_per_tb(0.01), 0.0));
-        assert!(approx(bud_upload_extra_fee_usd_per_tb(0.02), 0.01));
-        assert!(approx(bud_upload_extra_fee_usd_per_tb(112.52), 112.51));
+    fn the_extra_fee_is_the_full_ten_year_cost_on_top_of_the_base() {
+        // 2026-08-31 (updated): custody is added to the base, never absorbed
+        // by it. The extra is the whole ten-year cost.
+        assert!(approx(bud_upload_extra_fee_usd_per_tb(0.005), 0.005));
+        assert!(approx(bud_upload_extra_fee_usd_per_tb(0.01), 0.01));
+        assert!(approx(bud_upload_extra_fee_usd_per_tb(112.52), 112.52));
+        // The total the uploader pays per terabyte is base plus that cost.
+        assert!(approx(bud_upload_fee_usd_per_tb(0.0092), 0.01 + 0.0092));
+        assert!(approx(bud_upload_fee_usd_per_tb(0.0), BUD_UPLOAD_BASE_USD));
     }
 
     #[test]
-    fn the_base_cent_covers_a_recipe_but_not_a_full_body() {
+    fn custody_extension_is_pro_rata_and_capped_at_a_hundred_years() {
+        let ten_year = 0.0092f64;
+        // The floor itself adds nothing.
+        assert!(approx(bud_extension_fee_usd_per_tb(ten_year, 10).unwrap(), 0.0));
+        // Each year above ten is one tenth of the ten-year cost.
+        assert!(approx(bud_extension_fee_usd_per_tb(ten_year, 20).unwrap(), ten_year));
+        assert!(approx(bud_extension_fee_usd_per_tb(ten_year, 55).unwrap(), ten_year * 4.5));
+        // The ceiling is a hundred years: nine times the ten-year cost extra.
+        assert!(approx(bud_extension_fee_usd_per_tb(ten_year, 100).unwrap(), ten_year * 9.0));
+        // Outside the schedule: refused, not clamped.
+        assert!(bud_extension_fee_usd_per_tb(ten_year, 9).is_none());
+        assert!(bud_extension_fee_usd_per_tb(ten_year, 101).is_none());
+        assert!(bud_extension_fee_usd_per_tb(ten_year, 0).is_none());
+    }
+
+    #[test]
+    fn a_recipe_costs_less_than_a_cent_and_a_body_costs_more() {
         use crate::validator_cost::{
             market_pricelist, nvme_custody_usd, ten_year_storage_cost_usd_per_tb,
         };
@@ -313,15 +371,16 @@ mod fee_scenario_tests {
         let body = ten_year_storage_cost_usd_per_tb(market_pricelist());
         assert!(
             recipe < BUD_UPLOAD_BASE_USD,
-            "a recipe ({BUD_RECIPE_PUBLIC_BYTES} B) fits inside the base cent: {recipe}"
+            "a recipe ({BUD_RECIPE_PUBLIC_BYTES} B) costs less than the base cent: {recipe}"
         );
         assert!(
             body > BUD_UPLOAD_BASE_USD,
-            "a full terabyte over ten years does not fit inside a cent: {body}"
+            "a full terabyte body over ten years costs more than a cent: {body}"
         );
-        // So a recipe upload charges nothing extra, a held body charges the excess.
-        assert!(approx(bud_upload_extra_fee_usd_per_tb(recipe), 0.0));
-        assert!(bud_upload_extra_fee_usd_per_tb(body) > 0.0);
+        // Both are charged on top of the base now; the recipe simply stays
+        // under a cent while the body dwarfs it.
+        assert!(approx(bud_upload_extra_fee_usd_per_tb(recipe), recipe));
+        assert!(approx(bud_upload_extra_fee_usd_per_tb(body), body));
     }
 
     #[test]
@@ -337,13 +396,14 @@ mod fee_scenario_tests {
 
     #[test]
     fn bud_custody_is_ten_years_and_the_auction_one_month() {
-        // User decision 2026-08-31 (final): custody is ten years and the
-        // $0.01 base covers a terabyte of ten-year recipe custody; the
-        // expiry auction runs one month.
+        // User decision 2026-08-31 (updated): the ten-year floor, a hundred
+        // year ceiling, and the expiry auction runs one month. Custody cost
+        // is charged on top of the base, not covered by it.
         assert_eq!(BUD_CUSTODY_YEARS, 10);
+        assert_eq!(BUD_MAX_CUSTODY_YEARS, 100);
         assert_eq!(BUD_EXPIRY_AUCTION_DAYS, 30);
-        // The covering claim, measured: for items >= 512 KiB the recipe
-        // capital of a whole terabyte stays under the base cent.
+        // Measured scale of what gets added: for items >= 512 KiB the recipe
+        // capital of a whole terabyte stays under a cent even at the floor.
         use crate::validator_cost::market_pricelist;
         let p = market_pricelist();
         assert!(three_network_custody_usd_per_tb(512 * 1024, p) < BUD_UPLOAD_BASE_USD);
@@ -466,8 +526,9 @@ mod fee_scenario_tests {
         assert!(approx(chain, 0.21 + 0.41 + 0.81));
 
         // Upload 1 TB whose ten-year custody cost is $4.50: $4.49 over the
-        // $0.01 base.
-        assert!(approx(bud_upload_extra_fee_usd_per_tb(4.5), 4.49));
+        // the $0.01 base: custody is added on top, in full.
+        assert!(approx(bud_upload_extra_fee_usd_per_tb(4.5), 4.5));
+        assert!(approx(bud_upload_fee_usd_per_tb(4.5), 4.51));
 
         // A 2 000-token prompt at the measured $38.2/M serving rate.
         let mut wallet = PromptWallet::new(10.0);
