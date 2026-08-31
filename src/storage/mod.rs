@@ -32,6 +32,7 @@ pub mod manifest;
 pub mod merkle_trie;
 pub mod mobile_self;
 pub mod msr;
+pub mod one_view;
 pub mod payload_crypt;
 pub mod provider;
 pub mod pruning;
@@ -96,10 +97,11 @@ pub use manifest::{
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
-    decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger, CustodyMode,
-    MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
-    UploadCustodyRefusal,
+    admit_device_as_server, decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger,
+    CustodyMode, MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile,
+    ReplicaRecommendation, ServerAdmission, ServerAdmissionRefusal, UploadCustodyRefusal,
 };
+pub use one_view::{EndpointRef, ScreenItem, SingleScreenView};
 pub use msr::{
     lrc_repair_traffic_scaled, msr_repair_traffic_scaled, msr_speedup_over_lrc_scaled, MsrError,
     TRAFFIC_SCALE,
