@@ -45,14 +45,14 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
     let at = bundle
         .find("pub fn verify_execution_proof_full")
         .expect("verify_execution_proof_full must exist");
-    let govde = &bundle[at..];
+    let body = &bundle[at..];
     assert!(
-        govde.contains("verify_execution_proof_stark(proof, program, pi)"),
+        body.contains("verify_execution_proof_stark(proof, program, pi)"),
         "the bundle must reach the STARK verifier, otherwise the executor's single \
          call checks nothing cryptographic"
     );
     assert!(
-        govde.contains("rep.stark_error = Some(e)"),
+        body.contains("rep.stark_error = Some(e)"),
         "the bundle must carry the verifier's own reason out, so the rejection the \
          executor raises names the failing half instead of a bare false"
     );
