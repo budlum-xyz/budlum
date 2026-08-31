@@ -47,6 +47,13 @@ pub enum QrVideoError {
     CommitmentMismatch,
     /// Decode of a QR PNG failed.
     Decode(String),
+    /// An optical frame larger than one pinned QR symbol can carry.
+    FrameTooLarge {
+        /// The frame length seen.
+        len: usize,
+        /// The symbol capacity.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for QrVideoError {
@@ -58,6 +65,9 @@ impl std::fmt::Display for QrVideoError {
             Self::Png(s) => write!(f, "qr video png: {s}"),
             Self::CommitmentMismatch => write!(f, "qr video commitment mismatch"),
             Self::Decode(s) => write!(f, "qr video decode: {s}"),
+            Self::FrameTooLarge { len, max } => {
+                write!(f, "qr video frame too large: {len} > {max}")
+            }
         }
     }
 }
@@ -97,6 +107,19 @@ impl QrVideo {
         }
         if optical_frames.len() as u32 > MAX_VIDEO_FRAMES {
             return Err(QrVideoError::TooMany(optical_frames.len() as u32));
+        }
+        // Refuse an unrenderable frame before drawing any of them: the
+        // carousel wire allows drops larger than one pinned QR symbol (other
+        // transports carry them fine), but this container cannot.
+        if let Some(len) = optical_frames
+            .iter()
+            .map(Vec::len)
+            .find(|l| *l > crate::storage::qr_matrix::MAX_QR_PAYLOAD)
+        {
+            return Err(QrVideoError::FrameTooLarge {
+                len,
+                max: crate::storage::qr_matrix::MAX_QR_PAYLOAD,
+            });
         }
         let recipe_commitment = crate::storage::qr_recipe::three_recipe_digest(recipe);
         let mut png_frames = Vec::with_capacity(optical_frames.len());
@@ -369,6 +392,32 @@ mod tests {
         assert_eq!(
             hex(&h.finalize()),
             "bab09b692296eb54e81010842ab0d000e91553f86e0a4a4e7242bbecfc2fbe3e"
+        );
+    }
+
+    /// A frame no pinned QR symbol can carry must be refused before any
+    /// frame is drawn, with the size named in the refusal. The carousel
+    /// wire itself stays transport-agnostic; this container is the QR one.
+    #[test]
+    fn oversized_frame_is_refused_before_render() {
+        let pc = [0u8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 1,
+                block_len: 8,
+                total_len: 8,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let fat = vec![1u8; crate::storage::qr_matrix::MAX_QR_PAYLOAD + 1];
+        assert_eq!(
+            QrVideo::from_optical_frames(&recipe, &pc, &[b"once".to_vec(), fat], 10).unwrap_err(),
+            QrVideoError::FrameTooLarge {
+                len: crate::storage::qr_matrix::MAX_QR_PAYLOAD + 1,
+                max: crate::storage::qr_matrix::MAX_QR_PAYLOAD,
+            }
         );
     }
 

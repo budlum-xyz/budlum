@@ -113,7 +113,10 @@ impl std::fmt::Display for CarouselError {
             Self::TooLarge { len, max } => {
                 write!(f, "carousel payload {len} exceeds max {max}")
             }
-            Self::BadBlockLen => write!(f, "carousel block_len must be non-zero"),
+            Self::BadBlockLen => write!(
+                f,
+                "carousel block_len out of range: zero, or header plus body over one QR frame"
+            ),
             Self::BadK(k) => write!(f, "carousel k={k} out of range 1..={MAX_K}"),
             Self::Truncated => write!(f, "carousel drop truncated"),
             Self::BadMagic => write!(f, "carousel drop bad magic"),
