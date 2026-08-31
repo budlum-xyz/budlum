@@ -116,6 +116,15 @@ impl DeviceBudget {
             Tier::Disk => u64::MAX,
         }
     }
+
+    /// The fast-memory hierarchy this device can spend in total (accelerator +
+    /// host). This is the measure of "runs on hardware you already own": a
+    /// model is runnable on a device only if the whole fast hierarchy plus the
+    /// stated disk can hold the routed-weighted part.
+    #[must_use]
+    pub const fn total_fast_bytes(&self) -> u64 {
+        self.accelerator_bytes.saturating_add(self.system_bytes)
+    }
 }
 
 /// How often a shard is needed.

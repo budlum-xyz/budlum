@@ -128,6 +128,111 @@ impl MobileSelfContentPolicy {
     }
 }
 
+/// B.U.D. 1.0 semantics: in the 1.0 product, a user's device enters the network
+/// *as a server-like node* and the device itself (not the network) carries the
+/// storage responsibility. This measures exactly that, without adding any
+/// network dependency: it is deterministic and unit-testable, and it is the
+/// piece that says "the storage load lives on the user's node, not on us".
+///
+/// `CustodyMode` answers the question that decides who pays and who holds:
+/// * [`CustodyMode::NetworkHeld`] - the network stores it (never true in 1.0).
+/// * [`CustodyMode::UserHeld`] - the user's node stores it (the 1.0 default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustodyMode {
+    NetworkHeld,
+    UserHeld,
+}
+
+/// The storage-custody decision for a single content item under a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustodyDecision {
+    pub mode: CustodyMode,
+    /// The bytes the user's node is responsible for (its own bytes only).
+    pub user_held_bytes: u64,
+}
+
+/// Decide which mode a put uses. This is so the network never silently becomes
+/// the custodian of 1.0 content: critical content always returns
+/// `NetworkHeld` only through a paid replica decision, while non-critical
+/// self-host-capable content stays `UserHeld` so the device is the server.
+pub const fn decide_custody(
+    profile: &MobileSelfProfile,
+    content_size: u64,
+    critical: bool,
+) -> CustodyDecision {
+    let mode = if critical {
+        // A paid replica is required and the network holds it.
+        CustodyMode::NetworkHeld
+    } else if content_size <= profile.max_storage_bytes {
+        // The device can hold it; it stays the server. User-held.
+        CustodyMode::UserHeld
+    } else {
+        // Too big for this device -> the network (or another node) holds it.
+        CustodyMode::NetworkHeld
+    };
+    let user_held_bytes = match mode {
+        CustodyMode::UserHeld => content_size,
+        CustodyMode::NetworkHeld => 0,
+    };
+    CustodyDecision {
+        mode,
+        user_held_bytes,
+    }
+}
+
+/// In B.U.D. 1.0 the network is never the default custodian. Every put is
+/// either held by the user's node (the robust, cheapest path) or goes to the
+/// network only because the content is critical or exceeds the device.
+#[cfg(test)]
+mod custody_tests {
+    use super::*;
+
+    fn av(availability: MobileAvailabilityClass) -> MobileSelfProfile {
+        MobileSelfProfile {
+            owner: Address::from([7u8; 32]),
+            device_commitment: [9u8; 32],
+            availability,
+            max_storage_bytes: 1000,
+            metered_network_ok: false,
+            battery_saver_aware: true,
+            last_seen_block: 100,
+        }
+    }
+
+    #[test]
+    fn user_content_within_device_capacity_is_user_held() {
+        let p = av(MobileAvailabilityClass::AlwaysOnReplica);
+        let d = decide_custody(&p, 500, false);
+        assert_eq!(d.mode, CustodyMode::UserHeld);
+        assert_eq!(d.user_held_bytes, 500);
+    }
+
+    #[test]
+    fn device_becomes_a_server_not_a_passive_client() {
+        // A scheduled phone that fits the content still hosts it (server-like),
+        // so the responsibility sits with the user, never with us.
+        let p = av(MobileAvailabilityClass::Scheduled);
+        let d = decide_custody(&p, 300, false);
+        assert_eq!(d.mode, CustodyMode::UserHeld);
+    }
+
+    #[test]
+    fn critical_content_goes_network_held_and_no_user_bytes() {
+        let p = av(MobileAvailabilityClass::AlwaysOnReplica);
+        let d = decide_custody(&p, 200, true);
+        assert_eq!(d.mode, CustodyMode::NetworkHeld);
+        assert_eq!(d.user_held_bytes, 0);
+    }
+
+    #[test]
+    fn content_larger_than_the_device_becomes_network_held() {
+        let p = av(MobileAvailabilityClass::AlwaysOnReplica);
+        let d = decide_custody(&p, 20_000, false);
+        assert_eq!(d.mode, CustodyMode::NetworkHeld);
+        assert_eq!(d.user_held_bytes, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
