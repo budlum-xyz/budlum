@@ -31,6 +31,7 @@ use crate::domain::storage_params::StorageDomainParams;
 use crate::domain::Hash32;
 use crate::storage::content_id::ContentId;
 use crate::storage::manifest::ContentManifest;
+use bincode::Options;
 use bud_proof::ProverAdapter;
 use serde::{Deserialize, Serialize};
 
@@ -139,6 +140,40 @@ pub enum OperatorClass {
 /// take down the whole validator set at once rather than a single node.
 /// Hashing a fixed marker keeps the root deterministic across nodes.
 const SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/storage-registry";
+
+/// Hard byte budget for one deserialized proof envelope.
+///
+/// A challenge answer is operator-supplied, so a proof blob must be bounded
+/// before it is parsed: the envelope's nested `proof_bytes` is copied out of
+/// the blob, so an oversized blob doubles whatever the operator sent and lets
+/// one answer hold a whole block's worth of bytes hostage in memory. 1 MiB
+/// matches the block ceiling and covers the 256 KiB execution-proof ceiling
+/// plus the envelope's version-string metadata with room to spare.
+pub const MAX_PROOF_ENVELOPE_BYTES: u64 = 1024 * 1024;
+
+/// Deserialize a [`bud_proof::ProofEnvelope`] under [`MAX_PROOF_ENVELOPE_BYTES`].
+fn deserialize_proof_envelope(
+    proof_bytes: &[u8],
+) -> Result<bud_proof::ProofEnvelope, StorageError> {
+    if proof_bytes.len() as u64 > MAX_PROOF_ENVELOPE_BYTES {
+        return Err(StorageError::InvalidMerkleProof(format!(
+            "proof envelope exceeds the {MAX_PROOF_ENVELOPE_BYTES} byte ceiling"
+        )));
+    }
+    // Fixint, not the `bincode::options()` varint default: envelopes are
+    // written by `bincode::serialize`, which is fixint, and a varint reader
+    // would reject every honest envelope before it ever saw the limit.
+    // `with_limit` also bounds the deserializer's own decoded-byte accounting,
+    // so a length-prefixed field cannot ask for more than the budget even on
+    // the io::Read path.
+    bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_PROOF_ENVELOPE_BYTES)
+        .deserialize::<bud_proof::ProofEnvelope>(proof_bytes)
+        .map_err(|e| {
+            StorageError::InvalidMerkleProof(format!("failed to deserialize ProofEnvelope: {e}"))
+        })
+}
 
 impl OperatorClass {
     /// Whether this class may hold `replica_index = 0`.
@@ -2467,12 +2502,7 @@ impl StorageRegistry {
             return Ok(());
         }
 
-        let envelope =
-            bincode::deserialize::<bud_proof::ProofEnvelope>(proof_bytes).map_err(|e| {
-                StorageError::InvalidMerkleProof(format!(
-                    "failed to deserialize ProofEnvelope: {e}"
-                ))
-            })?;
+        let envelope = deserialize_proof_envelope(proof_bytes)?;
 
         let (program, expected_inputs) =
             Self::storage_challenge_expected_program_and_inputs(context, storage_root, range_hash);
@@ -3078,26 +3108,21 @@ impl StorageRegistry {
                 "proof too short (< 64 bytes)".into(),
             ));
         }
-        // Try deserializing as ProofEnvelope via bincode.
+        // Try deserializing as ProofEnvelope via bincode, under the envelope
+        // byte budget so a hostile length prefix is refused before allocation.
         // The ProofEnvelope has: proof_format_version(u32), backend(String),
         // P3_version(String), fri_params_id(String), public_inputs_hash([u8;32]),
         // proof_bytes(Vec<u8>), degree_bits(u32).
-        match bincode::deserialize::<bud_proof::ProofEnvelope>(proof_bytes) {
-            Ok(envelope) => {
-                // Minimal sanity: proof_bytes inside envelope must not be empty.
-                if envelope.proof_bytes.is_empty() {
-                    return Err(StorageError::InvalidMerkleProof(
-                        "ProofEnvelope.proof_bytes is empty".into(),
-                    ));
-                }
-                // Log the proof acceptance (storage_root validated off-chain).
-                let _ = storage_root;
-                Ok(())
-            }
-            Err(e) => Err(StorageError::InvalidMerkleProof(format!(
-                "failed to deserialize ProofEnvelope: {e}"
-            ))),
+        let envelope = deserialize_proof_envelope(proof_bytes)?;
+        // Minimal sanity: proof_bytes inside envelope must not be empty.
+        if envelope.proof_bytes.is_empty() {
+            return Err(StorageError::InvalidMerkleProof(
+                "ProofEnvelope.proof_bytes is empty".into(),
+            ));
         }
+        // Log the proof acceptance (storage_root validated off-chain).
+        let _ = storage_root;
+        Ok(())
     }
 
     // ---- Queries (all read-only, no state change) --------------------
@@ -5507,6 +5532,25 @@ mod tests {
                 Some([0x42u8; 32]),
             )
             .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
+    }
+
+    #[test]
+    fn oversized_proof_envelope_is_refused_before_parsing() {
+        // A challenge answer must not carry a block-sized proof blob: the
+        // envelope ceiling refuses it before bincode parses it, so the nested
+        // `proof_bytes` is never copied into memory.
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; MAX_PROOF_ENVELOPE_BYTES as usize + 1],
+            degree_bits: 8,
+        };
+        let blob = bincode::serialize(&envelope).expect("test envelope serialize");
+        let err = StorageRegistry::validate_merkle_proof_format(&blob, &[0u8; 32]).unwrap_err();
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
     }
 
