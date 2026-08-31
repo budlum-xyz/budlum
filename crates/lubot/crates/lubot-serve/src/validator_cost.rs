@@ -166,8 +166,8 @@ pub const fn serving_layer_for(
 }
 
 /// int4 serving: the frontier model shrinks fourfold, so 64 GiB host RAM and
-/// one 2 TB NVMe drive serve it (colibri measures a 48 GB Mac Mini at 0.30
-/// tok/s and a 64 GB box higher — same class).
+/// one 2 TB NVMe drive serve it (measured on a 48 GB consumer mini at 0.30
+/// tok/s; a 64 GB box serves higher, same class).
 #[must_use]
 pub const fn serving_layer_int4() -> LayerFootprint {
     serving_layer_for(64, 1862, 8, 100)

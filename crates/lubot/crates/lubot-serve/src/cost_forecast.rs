@@ -107,7 +107,7 @@ pub const fn owned_device_budget() -> DeviceBudget {
 
 /// A CPU-only owned box: 128 GiB host RAM, no accelerator, routed experts
 /// staged from two 2 TB NVMe drives (≈ 3.7 TiB usable). This is the profile
-/// colibri-style serving actually measures on.
+/// consumer-box serving actually measures on.
 pub const PC128_DISK_GIB: u64 = 2 * 1862;
 
 #[must_use]
