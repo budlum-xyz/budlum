@@ -47,7 +47,7 @@ impl SingleScreenView {
     /// Assemble the screen from endpoint refs under a device profile.
     ///
     /// Custody is decided here, not supplied by the caller, so an item cannot
-    /// be mis-attributed by whoever builds the list: the profile is the only
+    /// be attributed to the wrong side by whoever builds the list: the profile is the only
     /// input to the decision.
     #[must_use]
     pub fn assemble(profile: &MobileSelfProfile, refs: &[EndpointRef]) -> Self {
