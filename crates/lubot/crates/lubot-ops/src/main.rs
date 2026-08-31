@@ -1,3 +1,8 @@
+// Unsafe lock: the whole lubot workspace is at 0 unsafe. This binary joins
+// the other crates in refusing unsafe from the first line, so a raw-pointer
+// regression cannot enter through the operator tooling. Same policy as the
+// serving bridge and the main crate.
+#![forbid(unsafe_code)]
 //! The lubot-ops entry point. A skeleton: it parses commands and prints
 //! drafts.
 
