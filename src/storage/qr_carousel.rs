@@ -19,7 +19,7 @@
 //!
 //! - It does not draw QR modules (A3) or mux video (A4).
 //! - It does not write a `ContentQrRecipe` (A5).
-//! - Decimen / AGPL source is not present; only the measured carousel rule.
+//! - No external transport library is linked; only our own measured carousel rule.
 //! - Live infinite carousel is modeled by letting the caller keep requesting
 //!   `drop_at(seq)` for increasing `seq`; a fixed-length file uses
 //!   [`planned_drop_count`].

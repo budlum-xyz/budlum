@@ -14,7 +14,7 @@
 //!
 //! - It does not encode QR video yet (A2-A4).
 //! - It does not write a full content QR recipe (A5).
-//! - Decimen source is not copied (AGPL); only the measured rule we already
+//! - No external transport library is linked; only the measured rule we already
 //!   pinned: try zlib only when it shrinks; never claim QR as storage.
 //!
 //! # Wire layout
