@@ -18,6 +18,7 @@ pub mod bridge;
 pub mod chain;
 pub mod config;
 pub mod cost_forecast;
+pub mod fee_scenario;
 pub mod health;
 pub mod metric;
 pub mod residency;
