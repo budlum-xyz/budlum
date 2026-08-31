@@ -15,3 +15,4 @@ pub mod config;
 pub mod health;
 pub mod metric;
 pub mod residency;
+pub mod staging;
