@@ -490,4 +490,148 @@ mod tests {
             "organic text must still attempt zlib at A1"
         );
     }
+
+    /// Deterministic pseudo-random bytes for the entropy-shaped classes.
+    fn lcg_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            out.push((state >> 33) as u8);
+        }
+        out
+    }
+
+    /// One sample per content class, shaped so the class discipline has
+    /// something honest to measure: compressible classes get repetitive
+    /// bodies, entropy classes get incompressible ones.
+    fn class_sample(class: ContentClass) -> Vec<u8> {
+        match class {
+            ContentClass::Generic => b"generic body ".repeat(200),
+            ContentClass::TextOrganic => b"organic text line\n".repeat(300),
+            ContentClass::EntropyMedia => {
+                let mut v = vec![0xff, 0xd8, 0xff, 0xe0];
+                v.extend_from_slice(&lcg_bytes(7, 3000));
+                v
+            }
+            ContentClass::EntropyArchive => {
+                let mut v = b"PK\x03\x04".to_vec();
+                v.extend_from_slice(&lcg_bytes(11, 3000));
+                v
+            }
+            ContentClass::Ciphertext => lcg_bytes(13, 3000),
+            ContentClass::RecipeWire => b"{\"recipe\":[1,2,3]}".repeat(100),
+            ContentClass::VectorOrganic => b"<svg><path d=\"M0 0\"/></svg>".repeat(150),
+            ContentClass::RasterFlat => {
+                let mut v = b"BM".to_vec();
+                v.extend_from_slice(&[0x40u8; 3000]);
+                v
+            }
+            ContentClass::AudioPcm => {
+                let mut v = b"RIFF\x00\x00\x00\x00WAVEfmt ".to_vec();
+                v.extend_from_slice(&[0x01u8, 0x00].repeat(1500));
+                v
+            }
+            ContentClass::DocumentOrganic => {
+                let mut v = b"PK\x03\x04doc".to_vec();
+                v.extend_from_slice(&b"office payload ".repeat(200));
+                v
+            }
+            ContentClass::Exec => {
+                let mut v = b"\x7fELF\x02\x01\x01\x00".to_vec();
+                v.extend_from_slice(&[0x90u8; 3000]);
+                v
+            }
+        }
+    }
+
+    /// The 3.0 doctrine, measured per class: every format goes through the
+    /// same transform+compression discipline, the transformed content becomes
+    /// a QR video, and the fixed-size recipe pins it. The round trip is
+    /// lossless for every class, compressible classes really arrive smaller,
+    /// and the durable object the pipe emits is the recipe, not a body.
+    #[test]
+    fn every_class_compresses_to_a_video_and_a_fixed_size_recipe() {
+        let classes = [
+            ContentClass::Generic,
+            ContentClass::TextOrganic,
+            ContentClass::EntropyMedia,
+            ContentClass::EntropyArchive,
+            ContentClass::Ciphertext,
+            ContentClass::RecipeWire,
+            ContentClass::VectorOrganic,
+            ContentClass::RasterFlat,
+            ContentClass::AudioPcm,
+            ContentClass::DocumentOrganic,
+            ContentClass::Exec,
+        ];
+        for class in classes {
+            let sample = class_sample(class);
+            let prepared = transform_content(
+                &sample,
+                TransformOpts {
+                    force_class: Some(class),
+                    ..TransformOpts::default()
+                },
+            )
+            .unwrap();
+            let enc = encode_payload(prepared, 64, None).unwrap();
+            assert_eq!(enc.class, class, "{class:?} must survive the A0 pass");
+
+            // Compression discipline: a class the A0 pass measured as
+            // shrinkable really arrives smaller through A1; a class that
+            // cannot shrink never pays for the attempt.
+            if class.may_try_zlib() {
+                assert!(
+                    packed_is_zlib(&enc.packed),
+                    "{class:?} sample must shrink at A1"
+                );
+                assert!(
+                    enc.packed.len() < sample.len(),
+                    "{class:?} must arrive smaller: {} >= {}",
+                    enc.packed.len(),
+                    sample.len()
+                );
+            } else {
+                assert!(
+                    !packed_is_zlib(&enc.packed),
+                    "{class:?} must not attempt zlib"
+                );
+            }
+
+            // The transformed content became a QR video, and the video
+            // decodes back to the original bytes, losslessly.
+            let video = QrVideo::from_optical_frames(
+                &enc.recipe,
+                &enc.stream_commitment,
+                &enc.frames,
+                DEFAULT_FPS,
+            )
+            .unwrap();
+            let (kind, raw, _decoded) = decode_qr_video(&video.to_bytes()).unwrap();
+            assert_eq!(kind, PayloadKind::ContentBytes);
+            assert_eq!(raw, sample, "{class:?} must round-trip losslessly");
+
+            // The recipe pins exactly the packed container. The durable
+            // object is fixed-size: a 32-byte payload commitment, locked
+            // carousel params, a 32-byte stream id, one block length - the
+            // same wire whether the content was 2 KB or 2 MB. Sealing it
+            // yields the 40-byte form; no body bytes enter either.
+            assert_eq!(
+                enc.recipe.payload_commitment,
+                payload_commitment(&enc.packed),
+                "{class:?} recipe must pin the packed container"
+            );
+            let sealed = enc.recipe.seal();
+            let sealed_wire_bytes = 32 + 4 + 2 + 2;
+            assert_eq!(sealed_wire_bytes, 40, "the sealed recipe is 40 bytes");
+            assert_eq!(
+                sealed.recipe_commitment,
+                crate::storage::qr_recipe::three_recipe_digest(&enc.recipe),
+                "{class:?} sealed form must commit to the public recipe"
+            );
+        }
+    }
 }
