@@ -65,8 +65,9 @@ pub const BUD_UPLOAD_BASE_USD: f64 = 0.01;
 pub const BUD_RECIPE_SEALED_BYTES: u64 = 40;
 pub const BUD_RECIPE_PUBLIC_BYTES: u64 = 74;
 
-/// 3.0 keeps uploaded content alive this many years.
-pub const BUD_CUSTODY_YEARS: u32 = 10;
+/// 3.0 keeps uploaded content alive this many years (user decision
+/// 2026-08-31: one year, down from ten).
+pub const BUD_CUSTODY_YEARS: u32 = 1;
 
 /// Expired but undeleted content transfers by open auction lasting one month.
 pub const BUD_EXPIRY_AUCTION_DAYS: u32 = 30;
@@ -134,37 +135,39 @@ pub const fn three_network_bytes_per_tb(item_bytes: u64) -> u64 {
     recipes_for_content(BYTES_PER_TB, item_bytes).saturating_mul(BUD_RECIPE_PUBLIC_BYTES)
 }
 
-/// Ten-year network cost of holding one terabyte of 3.0 content, in dollars.
+/// Network cost of holding one terabyte of 3.0 content for the custody
+/// period, in dollars.
 ///
 /// Priced as the NVMe capital upper bound of the recipe bytes (the same
 /// measure [`crate::validator_cost::nvme_custody_usd`] uses for a single
-/// recipe). Drive-level idle energy is a validator capital line
+/// recipe): the capital is one-time and covers the whole custody period,
+/// whatever its length. Drive-level idle energy is a validator capital line
 /// ([`crate::validator_cost::storage_layer`]), not a per-recipe one, so it is
 /// deliberately not attributed here; at these byte counts it would not move
 /// the third decimal of a cent.
 #[must_use]
-pub fn three_network_ten_year_usd_per_tb(
+pub fn three_network_custody_usd_per_tb(
     item_bytes: u64,
     p: crate::validator_cost::HardwarePricelist,
 ) -> f64 {
     crate::validator_cost::nvme_custody_usd(three_network_bytes_per_tb(item_bytes), p)
 }
 
-/// Monthly network cost of one terabyte of 3.0 content: the ten-year figure
-/// amortized over the custody period. This is the number to put next to
-/// 2.0's `BUD_2_MONTHLY_USD_PER_TB`.
+/// Monthly network cost of one terabyte of 3.0 content: the custody-period
+/// capital amortized over the custody months. This is the number to put next
+/// to 2.0's `BUD_2_MONTHLY_USD_PER_TB`.
 #[must_use]
 pub fn three_network_monthly_usd_per_tb(
     item_bytes: u64,
     p: crate::validator_cost::HardwarePricelist,
 ) -> f64 {
-    three_network_ten_year_usd_per_tb(item_bytes, p) / f64::from(BUD_CUSTODY_YEARS * 12)
+    three_network_custody_usd_per_tb(item_bytes, p) / f64::from(BUD_CUSTODY_YEARS * 12)
 }
 
 /// Where a piece of uploaded content sits in its custody lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustodyPhase {
-    /// Within its ten years, owner holding.
+    /// Within its custody period, owner holding.
     Live,
     /// The owner deleted it.
     Deleted,
@@ -175,7 +178,7 @@ pub enum CustodyPhase {
 }
 
 /// The custody phase from three facts: has the owner deleted it, has the
-/// ten years elapsed, and has the one-month auction elapsed.
+/// custody period elapsed, and has the one-month auction elapsed.
 #[must_use]
 pub fn custody_phase(owner_deleted: bool, expired: bool, auction_over: bool) -> CustodyPhase {
     match (owner_deleted, expired, auction_over) {
@@ -184,6 +187,26 @@ pub fn custody_phase(owner_deleted: bool, expired: bool, auction_over: bool) -> 
         (false, true, false) => CustodyPhase::Auctioning,
         (false, true, true) => CustodyPhase::Transferred,
     }
+}
+
+/// Whether an expired item enters the open auction at all.
+///
+/// User decision 2026-08-31: the auction is for **non-confidential** content
+/// only. Confidential (sealed) content is never offered to bidders: an
+/// expired sealed item leaves the auction path entirely, so no sealed recipe
+/// or its bytes can change hands through it.
+#[must_use]
+pub const fn enters_open_auction(confidential: bool, owner_deleted: bool, expired: bool) -> bool {
+    !confidential && !owner_deleted && expired
+}
+
+/// Start price of the open auction, per terabyte: the ten-year body custody
+/// cost (user decision 2026-08-31: the auction starts at the ten-year cost
+/// price and proceeds from there). The buyer takes over the body's real
+/// long-horizon cost, not a nominal cent.
+#[must_use]
+pub fn auction_start_usd_per_tb(p: crate::validator_cost::HardwarePricelist) -> f64 {
+    crate::validator_cost::ten_year_storage_cost_usd_per_tb(p)
 }
 
 /// A Lubot wallet, debited token by token as prompts run.
@@ -275,19 +298,17 @@ mod fee_scenario_tests {
 
     #[test]
     fn the_base_cent_covers_a_recipe_but_not_a_full_body() {
-        use crate::validator_cost::{
-            market_pricelist, nvme_custody_usd, ten_year_storage_cost_usd_per_tb,
-        };
+        use crate::validator_cost::{market_pricelist, nvme_custody_usd};
         // The 3.0 held unit is the fixed-size recipe, not the terabytes.
         let recipe = nvme_custody_usd(BUD_RECIPE_PUBLIC_BYTES, market_pricelist());
-        let body = ten_year_storage_cost_usd_per_tb(market_pricelist());
+        let body = crate::validator_cost::one_year_storage_cost_usd_per_tb(market_pricelist());
         assert!(
             recipe < BUD_UPLOAD_BASE_USD,
             "a recipe ({BUD_RECIPE_PUBLIC_BYTES} B) fits inside the base cent: {recipe}"
         );
         assert!(
             body > BUD_UPLOAD_BASE_USD,
-            "a full terabyte over ten years does not fit inside a cent: {body}"
+            "a full terabyte over the one-year custody does not fit inside a cent: {body}"
         );
         // So a recipe upload charges nothing extra, a held body charges the excess.
         assert!(approx(bud_upload_extra_fee_usd_per_tb(recipe), 0.0));
@@ -306,9 +327,33 @@ mod fee_scenario_tests {
     }
 
     #[test]
-    fn bud_custody_is_ten_years_and_the_auction_one_month() {
-        assert_eq!(BUD_CUSTODY_YEARS, 10);
+    fn bud_custody_is_one_year_and_the_auction_one_month() {
+        // User decision 2026-08-31: custody is one year; the expiry auction
+        // still runs one month.
+        assert_eq!(BUD_CUSTODY_YEARS, 1);
         assert_eq!(BUD_EXPIRY_AUCTION_DAYS, 30);
+    }
+
+    /// The auction rule, measured (user decision 2026-08-31): it starts at
+    /// the ten-year body cost, and confidential content never enters it.
+    #[test]
+    fn the_auction_starts_at_the_ten_year_cost_and_skips_confidential() {
+        use crate::validator_cost::{market_pricelist, ten_year_storage_cost_usd_per_tb};
+        let p = market_pricelist();
+        let start = auction_start_usd_per_tb(p);
+        assert!(
+            (start - ten_year_storage_cost_usd_per_tb(p)).abs() < 1e-12,
+            "the start price is the ten-year body cost"
+        );
+        assert!(start > 100.0, "start price: {start}");
+
+        // Non-confidential, expired, undeleted -> auction.
+        assert!(enters_open_auction(false, false, true));
+        // Confidential never enters, whatever the flags.
+        assert!(!enters_open_auction(true, false, true));
+        // Owner-deleted or still live -> no auction.
+        assert!(!enters_open_auction(false, true, true));
+        assert!(!enters_open_auction(false, false, false));
     }
 
     #[test]
@@ -341,42 +386,47 @@ mod fee_scenario_tests {
         assert_eq!(recipes_for_content(BYTES_PER_TB, 0), 0);
 
         // Ten-year and monthly network cost per TB of 3.0 content.
-        let ten_year_4mib = three_network_ten_year_usd_per_tb(4 * MIB, p);
+        let custody_4mib = three_network_custody_usd_per_tb(4 * MIB, p);
         let monthly_4mib = three_network_monthly_usd_per_tb(4 * MIB, p);
         assert!(
-            approx(monthly_4mib * 120.0, ten_year_4mib),
-            "monthly must amortize to the ten-year figure"
+            approx(monthly_4mib * 12.0, custody_4mib),
+            "monthly must amortize over the one-year custody period"
         );
-        // Measured magnitudes: ~$0.00115 per ten years, ~$9.6e-6 per month.
+        // Measured magnitudes: ~$0.00115 one-time capital per TB, ~$9.6e-5
+        // per month at the one-year amortization.
         assert!(
-            (0.0005..0.005).contains(&ten_year_4mib),
-            "ten-year recipe custody per TB: {ten_year_4mib}"
+            (0.0005..0.005).contains(&custody_4mib),
+            "recipe custody capital per TB: {custody_4mib}"
         );
         assert!(monthly_4mib < 0.000_1, "monthly: {monthly_4mib}");
 
         // Smaller items, same terabyte: more recipes, still under a cent at
         // 1 MiB, and a thousandth of a cent at 1 GiB.
-        assert!(three_network_ten_year_usd_per_tb(MIB, p) < BUD_UPLOAD_BASE_USD);
-        assert!(three_network_ten_year_usd_per_tb(GIB, p) < 0.000_1);
+        assert!(three_network_custody_usd_per_tb(MIB, p) < BUD_UPLOAD_BASE_USD);
+        assert!(three_network_custody_usd_per_tb(GIB, p) < 0.000_1);
 
         // The honest break-even: below roughly 470 KiB per item the recipe
         // bytes alone exceed the $0.01 base over ten years, and the upload
         // excess rule (bud_upload_extra_fee_usd_per_tb) is what covers it.
-        assert!(three_network_ten_year_usd_per_tb(512 * 1024, p) < BUD_UPLOAD_BASE_USD);
-        assert!(three_network_ten_year_usd_per_tb(256 * 1024, p) > BUD_UPLOAD_BASE_USD);
+        assert!(three_network_custody_usd_per_tb(512 * 1024, p) < BUD_UPLOAD_BASE_USD);
+        assert!(three_network_custody_usd_per_tb(256 * 1024, p) > BUD_UPLOAD_BASE_USD);
 
-        // Against the 2.0 held-body schedule: three orders of magnitude.
+        // Against the 2.0 held-body schedule: two orders of magnitude even at
+        // the one-year amortization (three at the old ten-year spread).
         let ratio = BUD_2_MONTHLY_USD_PER_TB / monthly_4mib;
         assert!(
-            ratio > 1000.0,
-            "3.0 must undercut 2.0 per TB per month by 1000x, got {ratio}x"
+            ratio > 100.0,
+            "3.0 must undercut 2.0 per TB per month by 100x, got {ratio}x"
         );
 
         // The body itself is the user's device under the 1.0 contract; the
         // device-side ten-year cost of the same terabyte, for contrast, is
         // the HDD line (capital + continuous energy), not a network bill.
-        let device_tb = crate::validator_cost::ten_year_storage_cost_usd_per_tb(p);
-        assert!(device_tb > 100.0, "device-side TB custody: {device_tb}");
+        let device_tb = crate::validator_cost::one_year_storage_cost_usd_per_tb(p);
+        assert!(
+            (29.0..30.0).contains(&device_tb),
+            "device-side one-year TB custody: {device_tb}"
+        );
     }
 
     #[test]
@@ -403,7 +453,8 @@ mod fee_scenario_tests {
             + transaction_fee_usd(TxClass::Bridge, 100.0);
         assert!(approx(chain, 0.21 + 0.41 + 0.81));
 
-        // Upload 1 TB whose ten-year cost is $4.50: $4.49 over the $0.01 base.
+        // Upload 1 TB whose one-year custody cost is $4.50: $4.49 over the
+        // $0.01 base.
         assert!(approx(bud_upload_extra_fee_usd_per_tb(4.5), 4.49));
 
         // A 2 000-token prompt at the measured $38.2/M serving rate.

@@ -114,6 +114,17 @@ pub const fn ten_year_storage_cost_usd_per_tb(p: HardwarePricelist) -> f64 {
     capital + energy
 }
 
+/// One-year custody cost of one full terabyte: capital plus one year of
+/// continuous energy. This is the custody-period figure the 3.0 upload rule
+/// prices against (user decision 2026-08-31: custody is one year); the
+/// ten-year figure survives as the auction's start-price anchor.
+#[must_use]
+pub const fn one_year_storage_cost_usd_per_tb(p: HardwarePricelist) -> f64 {
+    let capital = storage_capital_per_tb_usd(p);
+    let energy = STORAGE_HDD_WATTS_PER_TB * 24.0 * 365.25 / 1000.0 * p.dollar_per_kwh;
+    capital + energy
+}
+
 /// Custody cost of `bytes` held on NVMe, as an upper bound: the one-time
 /// capital of those bytes, not amortized over time.
 #[must_use]
