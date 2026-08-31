@@ -1,9 +1,9 @@
-//! Minimum-cost validator: one node that runs all four B.U.D. layers — the
-//! chain core, the BudZKVM prover, shard storage, and frontier serving —
+//! Minimum-cost validator: one node that runs all four B.U.D. layers - the
+//! chain core, the BudZKVM prover, shard storage, and frontier serving -
 //! priced as one capital figure plus one monthly energy figure.
 //!
 //! Every layer is a footprint struct, the pricelist is 2026 market data, and
-//! every total is recomputed from the two in the tests — no total is written
+//! every total is recomputed from the two in the tests - no total is written
 //! down. The serving layer reuses [`crate::cost_forecast`] so its numbers stay
 //! the measured residency numbers, not a second, separate set.
 
@@ -145,7 +145,7 @@ pub const fn storage_layer(disk_gib: u64) -> LayerFootprint {
     }
 }
 
-/// Serving layer: the pc128 box from [`crate::cost_forecast`] — 128 GiB host
+/// Serving layer: the pc128 box from [`crate::cost_forecast`] - 128 GiB host
 /// RAM and two 2 TB NVMe drives that stage the routed experts.
 #[must_use]
 pub const fn serving_layer() -> LayerFootprint {

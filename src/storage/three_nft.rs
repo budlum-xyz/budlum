@@ -166,7 +166,7 @@ pub struct PinRow {
 /// The NFT attachment registry: what has been pinned, and whether a pinned
 /// object can still be re-emitted.
 ///
-/// The design point (Görev 2): **what survives in the network is the recipe,
+/// The design point (Task 2): **what survives in the network is the recipe,
 /// not any one validator.** A validator joining or leaving the storage set
 /// changes who holds a *copy*, never whether the pin exists or its bytes come
 /// back. `drop_validator` therefore only removes a body-ownership reference and

@@ -2,9 +2,9 @@
 //!
 //! Fees are quoted in USD, the unit an operator shows a user. Three axes:
 //!
-//! * **Chain transactions** — a base plus an ad-valorem cut, by class:
+//! * **Chain transactions** - a base plus an ad-valorem cut, by class:
 //!   transfer `$0.01 + 0.2%`, swap `$0.01 + 0.4%`, bridge `$0.01 + 0.8%`.
-//! * **B.U.D. storage, by version** — 1.0 charges only the share NFT's
+//! * **B.U.D. storage, by version** - 1.0 charges only the share NFT's
 //!   transaction fee (content stays on the user's device, so there is no
 //!   storage cost to charge); 2.0 bills `$0.016/TB` monthly for the held
 //!   body; 3.0's recipe fits inside the `$0.01` upload base, so nothing
@@ -12,7 +12,7 @@
 //!   charged. Uploaded content stays alive ten years; on expiry the owner may
 //!   delete it, and if they do not, it moves to an open auction and
 //!   transfers after one month.
-//! * **Lubot serving** — token-metered like an API: every prompt debits its
+//! * **Lubot serving** - token-metered like an API: every prompt debits its
 //!   tokens at the serving rate from the wallet as it runs, using the rates
 //!   [`crate::cost_forecast`] measures. No terabyte is priced here; serving
 //!   costs scale with tokens, not with stored bytes.

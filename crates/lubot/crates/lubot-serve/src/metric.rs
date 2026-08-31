@@ -1,4 +1,4 @@
-//! Runtime hardware-economics measurements — the operator-facing dashboard
+//! Runtime hardware-economics measurements - the operator-facing dashboard
 //! side of multitiering-based residency.
 //!
 //! [`residency`](crate::residency) answers *where weights live*; this module
@@ -15,10 +15,10 @@
 //!
 //! # What is measured
 //!
-//! * **Tier bytes** — [`TierBytes`], the live footprint per storage tier.
-//! * **Throughput & latency** — [`IntervalSample::tokens_per_second`] and
+//! * **Tier bytes** - [`TierBytes`], the live footprint per storage tier.
+//! * **Throughput & latency** - [`IntervalSample::tokens_per_second`] and
 //!   [`IntervalSample::time_to_first_token_ms`].
-//! * **Cost** — [`HardwareCostModel::cost_per_million_tokens_dollars`], which is
+//! * **Cost** - [`HardwareCostModel::cost_per_million_tokens_dollars`], which is
 //!   the number that falls when residency moves routed weights onto owned disk:
 //!   only the fast-memory bytes are rented, the rest are already yours.
 

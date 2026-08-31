@@ -164,7 +164,7 @@ pub fn disk_band_tokens_per_second(disk_gib_per_second: f64) -> f64 {
     disk_band_tokens_per_second_at(disk_gib_per_second, 4, 1.0)
 }
 
-/// Measured multi-token-prediction speedup: an int8 head predicts 2.2–2.8
+/// Measured multi-token-prediction speedup: an int8 head predicts 2.2-2.8
 /// tokens per forward once the cache is warm (lower bound used). Speculation
 /// multiplies throughput, so it divides the per-token disk cost.
 pub const MTP_SPEEDUP: f64 = 2.2;
@@ -285,7 +285,7 @@ impl CostComparison {
 
     /// Throughput-independent saving: the fraction of the *hourly memory bill*
     /// the owned device avoids, at whatever throughput either side reaches.
-    /// This is the number the "acayip düşük maliyet" claim is allowed to rest
+    /// This is the number the "absurdly low cost" claim is allowed to rest
     /// on; the per-token figure is throughput's to change.
     #[must_use]
     pub fn rental_hour_savings_ratio(&self, rates: HardwareCostModel) -> Option<f64> {

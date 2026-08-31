@@ -34,6 +34,7 @@ pub mod mobile_self;
 pub mod msr;
 pub mod one_share;
 pub mod one_view;
+pub mod server_admission;
 pub mod payload_crypt;
 pub mod provider;
 pub mod pruning;
@@ -99,10 +100,11 @@ pub use manifest::{
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
-    admit_device_as_server, decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger,
-    CustodyMode, MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile,
-    ReplicaRecommendation, ServerAdmission, ServerAdmissionRefusal, UploadCustodyRefusal,
+    decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger, CustodyMode,
+    MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
+    UploadCustodyRefusal,
 };
+pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 pub use one_share::{OneShareRegistry, Share, ShareRefusal};
 pub use one_view::{EndpointRef, ScreenItem, SingleScreenView};
 pub use msr::{
