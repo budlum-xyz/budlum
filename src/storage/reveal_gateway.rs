@@ -203,6 +203,14 @@ impl RevealGateway {
     /// [`RevealGatewayError::Expired`] past the TTL;
     /// [`RevealGatewayError::Reveal`] when the frame ask exceeds the budget
     /// or the emitter fails.
+    ///
+    /// PARTIAL: allowed - the only removal happens on the expired path: an
+    /// entry whose TTL has run out is already dead, so dropping it there is
+    /// the reclamation itself and the refusal (`Expired`) reports the same
+    /// fact to the caller. Nothing a live caller owns is ever taken away
+    /// before a refusal: the budget check and the session lookup both
+    /// refuse before any mutation, and a failing emitter leaves the still
+    /// valid session in place for a retry.
     pub fn emit_frames(
         &mut self,
         id: u64,

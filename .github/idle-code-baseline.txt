@@ -2201,7 +2201,3 @@ src/storage/three_regime.rs	fn	held_bytes_for
 src/storage/three_regime.rs	fn	refuse_rent_without_held_bytes
 src/storage/three_regime.rs	fn	regime_of
 src/storage/three_regime.rs	fn	rent_basis_for
-src/storage/three_rpc.rs	enum	RevealRpcError
-src/storage/three_rpc.rs	fn	open_reveal_session
-src/storage/three_rpc.rs	struct	RevealHandle
-src/storage/three_rpc.rs	struct	RevealRequest

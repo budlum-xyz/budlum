@@ -159,6 +159,10 @@ pub use transformed::{
     transform_content, CodecFlags, ContentClass, TransformError, TransformOpts, TransformedPayload,
 };
 
+pub use reveal_gateway::{
+    RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES, MAX_FRAMES_PER_CALL,
+    MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
+};
 pub use three_nft::{
     meta_tracks_public_recipe, MetadataVisibility, PinRow, PreviewMode, ThreeNftMeta,
     ThreeNftRegistry, ThreeNftRegistryError,
@@ -175,10 +179,6 @@ pub use three_reveal::{RevealError, RevealSession};
 pub use three_rpc::{
     open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
     RevealRpcError,
-};
-pub use reveal_gateway::{
-    RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES, MAX_FRAMES_PER_CALL,
-    MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
 };
 
 pub use three_gate::{

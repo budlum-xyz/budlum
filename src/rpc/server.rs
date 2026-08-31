@@ -1029,6 +1029,33 @@ fn parse_grant_auth(
     })
 }
 
+/// Map a reveal-gateway refusal to a JSON-RPC error. Each refusal kind gets
+/// its own code so a client can tell "you asked too much" (invalid params)
+/// from "the table is full" (resource) from "your session is gone" (lookup)
+/// without parsing prose.
+fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjectOwned {
+    use crate::storage::RevealGatewayError;
+    match e {
+        RevealGatewayError::AskTooLarge { count, max } => ErrorObjectOwned::owned(
+            -32602,
+            format!("reveal: asked {count} frames, ceiling is {max}"),
+            None::<()>,
+        ),
+        RevealGatewayError::UnknownSession(id) => {
+            ErrorObjectOwned::owned(-32001, format!("reveal: unknown session {id}"), None::<()>)
+        }
+        RevealGatewayError::Expired { id } => {
+            ErrorObjectOwned::owned(-32002, format!("reveal: session {id} expired"), None::<()>)
+        }
+        RevealGatewayError::SessionLimit { max } => ErrorObjectOwned::owned(
+            -32003,
+            format!("reveal: session table full ({max})"),
+            None::<()>,
+        ),
+        RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
+    }
+}
+
 fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
     Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
 }
@@ -2399,15 +2426,33 @@ impl BudlumApiServer for RpcServer {
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        // Reclaim TTL-dead rows before admission so a burst of opens cannot
+        // be wedged by corpses, then refuse fast at the cap with its own
+        // code instead of paying for an open that admission would refuse.
+        gw.sweep(now);
+        if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                format!(
+                    "reveal: session table full ({})",
+                    crate::storage::MAX_REVEAL_SESSIONS
+                ),
+                None::<()>,
+            ));
+        }
         let session_id = gw
             .open_prechecked(req, grant_allows, now)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))?;
+            .map_err(reveal_gateway_rpc_error)?;
         let commit = gw
             .stream_commitment(session_id)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))?;
+            .map_err(reveal_gateway_rpc_error)?;
         Ok(serde_json::json!({
             "sessionId": session_id,
             "streamCommitment": format!("0x{}", hex::encode(commit)),
+            "expiresAt": now.saturating_add(crate::storage::REVEAL_SESSION_TTL_SECS),
+            "frameBudget": meter_budget
+                .unwrap_or(crate::storage::DEFAULT_REVEAL_BUDGET_FRAMES),
+            "activeSessions": gw.session_count(),
         }))
     }
 
@@ -2417,6 +2462,18 @@ impl BudlumApiServer for RpcServer {
         seq_start: u32,
         count: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The gateway enforces the ceiling too; answering before touching
+        // the table keeps a malformed ask off the shared lock entirely.
+        if count > crate::storage::MAX_FRAMES_PER_CALL {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "reveal: asked {count} frames, ceiling is {}",
+                    crate::storage::MAX_FRAMES_PER_CALL
+                ),
+                None::<()>,
+            ));
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2426,7 +2483,7 @@ impl BudlumApiServer for RpcServer {
         })?;
         let (frames, fold) = gw
             .emit_frames(session_id, seq_start, count, now)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))?;
+            .map_err(reveal_gateway_rpc_error)?;
         let frames_hex: Vec<String> = frames.iter().map(|f| hex::encode(f)).collect();
         Ok(serde_json::json!({
             "frames": frames_hex,
