@@ -10,9 +10,10 @@
 //! low-fidelity preview mode. Validators churning does not drop the pin.
 
 use crate::core::hash::hash_fields_bytes;
-use crate::storage::payload_crypt::PayloadKey;
+use crate::storage::qr_carousel::{oneshot_drop_count, ONESHOT_REPAIR_PERMILLAGE};
 use crate::storage::qr_recipe::{three_recipe_digest, ThreeRecipe, ThreeRecipePublic};
-use crate::storage::three_pipe::encode_qr_video;
+use crate::storage::qr_reemit::{ReemitError, RecipeEmitter};
+use crate::storage::qr_video::{QrVideo, QrVideoError, DEFAULT_FPS};
 use std::collections::BTreeMap;
 
 /// How a marketplace may show a preview without the full stream.
@@ -107,8 +108,10 @@ pub fn meta_tracks_public_recipe(meta: &ThreeNftMeta, recipe: &ThreeRecipePublic
 pub enum ThreeNftRegistryError {
     /// The pin id was never issued (or was dropped).
     UnknownPin(u64),
-    /// The stored object could not be re-encoded.
-    Reemit(crate::storage::three_pipe::PipeError),
+    /// The recipe could not be re-emitted against the packed body.
+    Reemit(ReemitError),
+    /// The re-emitted frames could not be wrapped into a video.
+    Video(QrVideoError),
 }
 
 impl std::fmt::Display for ThreeNftRegistryError {
@@ -116,33 +119,41 @@ impl std::fmt::Display for ThreeNftRegistryError {
         match self {
             Self::UnknownPin(id) => write!(f, "three nft registry: unknown pin {id}"),
             Self::Reemit(e) => write!(f, "three nft registry: reemit: {e}"),
+            Self::Video(e) => write!(f, "three nft registry: video: {e}"),
         }
     }
 }
 
 impl std::error::Error for ThreeNftRegistryError {}
 
-impl From<crate::storage::three_pipe::PipeError> for ThreeNftRegistryError {
-    fn from(e: crate::storage::three_pipe::PipeError) -> Self {
+impl From<ReemitError> for ThreeNftRegistryError {
+    fn from(e: ReemitError) -> Self {
         Self::Reemit(e)
     }
 }
 
-/// One pinned Three object. The row carries the recipe and the *content* the
-/// recipe pins, so a future reader can reproduce the BDLV stream from the pin
-/// even after every storage validator that held a copy has churned out.
+impl From<QrVideoError> for ThreeNftRegistryError {
+    fn from(e: QrVideoError) -> Self {
+        Self::Video(e)
+    }
+}
+
+/// One pinned Three object. The row carries the public pipe parameters and the
+/// packed A1 container they pin, so a future reader can rebuild the BDLV
+/// stream from the pin even after every storage validator that held a copy has
+/// churned out. The durable object is the recipe; the packed container is what
+/// re-emission reads back, never the seed and never a payload key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinRow {
     /// Marketplace metadata.
     pub meta: ThreeNftMeta,
-    /// Public or sealed recipe the object was minted from.
-    pub recipe: ThreeRecipe,
-    /// Block length used at encode (needed to re-run `encode_qr_video`).
-    pub block_len: u16,
-    /// Sealing key, if the object was sealed (never a raw seed on chain).
-    pub seal_key: Option<PayloadKey>,
-    /// The packed body the recipe pins.
-    pub content: Vec<u8>,
+    /// Public pipe parameters the object was minted from. These are not the
+    /// secret: for a sealed object the seed and the payload key never live
+    /// here, and re-emission runs over the packed container the pin holds.
+    pub recipe: ThreeRecipePublic,
+    /// The A1 packed container the recipe pins. For a sealed object this is
+    /// the encrypted payload; for a public one the plaintext body.
+    pub packed: Vec<u8>,
 }
 
 /// The NFT attachment registry: what has been pinned, and whether a pinned
@@ -206,18 +217,34 @@ impl ThreeNftRegistry {
         self.rows.get(&id).map(|r| &r.meta)
     }
 
-    /// Re-emit the BDLV video blob for a pin, byte-for-byte, from the content
-    /// the pin holds. Deterministic: the same pin always yields the same blob,
+    /// Re-emit the BDLV video blob for a pin, byte-for-byte, from the recipe
+    /// and the packed container the pin holds.
+    ///
+    /// The re-emission is not a re-encode: it opens the recipe against the
+    /// packed body through [`RecipeEmitter`], rebuilds the carousel drops
+    /// bit-equal to the original encode, and wraps them the same way the
+    /// product encoder does. The result is therefore the product video itself,
     /// so a reader that recorded the stream id can verify it matches.
     ///
     /// # Errors
     ///
     /// [`ThreeNftRegistryError::UnknownPin`] for an unknown id;
-    /// [`ThreeNftRegistryError::Reemit`] when encoding fails.
+    /// [`ThreeNftRegistryError::Reemit`] when the packed body does not match
+    /// the recipe or the stream id; [`ThreeNftRegistryError::Video`] when the
+    /// frames cannot be wrapped.
     pub fn reemit_video_from_pin(&self, id: u64) -> Result<Vec<u8>, ThreeNftRegistryError> {
         let row = self.rows.get(&id).ok_or(ThreeNftRegistryError::UnknownPin(id))?;
-        let encoded = encode_qr_video(&row.content, row.block_len, row.seal_key.as_ref())?;
-        Ok(encoded.video_blob)
+        let emitter = RecipeEmitter::open(row.recipe.clone(), &row.packed)?;
+        let count = oneshot_drop_count(row.recipe.carousel.k, ONESHOT_REPAIR_PERMILLAGE);
+        let (frames, fold) = emitter.emit_frames(0, count)?;
+        emitter.verify_stream_id(&fold)?;
+        let video = QrVideo::from_optical_frames(
+            &row.recipe,
+            &emitter.stream_commitment(),
+            &frames,
+            DEFAULT_FPS,
+        )?;
+        Ok(video.to_bytes())
     }
 }
 
@@ -250,59 +277,108 @@ mod tests {
 #[cfg(test)]
 mod nft_registry_tests {
     use super::*;
-    use crate::storage::qr_carousel::CarouselEncoder;
-    use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
+    use crate::storage::payload_crypt::PayloadKey;
+    use crate::storage::qr_payload::{unpack_payload, PayloadKind};
+    use crate::storage::three_pipe::encode_qr_video;
 
-    fn sample() -> (ThreeRecipePublic, Vec<u8>) {
-        let packed = pack_payload(PayloadKind::ContentBytes, b"churn-proof-body").unwrap();
-        let commit = payload_commitment(&packed);
-        let enc = CarouselEncoder::new(&packed, 32).unwrap();
-        let stream = enc.params().stream_commitment(&commit);
-        (ThreeRecipePublic::new(commit, enc.params(), stream), packed)
+    /// The real product encoder, so re-emission can be compared against the
+    /// actual BDLV blob rather than against another copy of itself.
+    fn product(content: &[u8]) -> crate::storage::three_pipe::EncodedQrVideo {
+        encode_qr_video(content, 32, None).unwrap()
     }
 
-    fn pin_public() -> (ThreeNftRegistry, u64, Vec<u8>) {
-        let (full, packed) = sample();
-        let recipe = ThreeRecipe::Public(full.clone());
-        let meta = ThreeNftMeta::from_recipe(&recipe, PreviewMode::PublicStill);
-        let row = PinRow {
-            meta,
-            recipe,
-            block_len: 32,
-            seal_key: None,
-            content: packed.clone(),
-        };
-        let mut reg = ThreeNftRegistry::new();
-        let id = reg.pin(row);
-        (reg, id, packed)
-    }
-
-    /// A validator churning out never loses the pin: the video re-emits
-    /// byte-for-byte, both before and after the churn.
+    /// A validator churning out never loses the pin, and the video that comes
+    /// back is the product video itself, byte for byte - before and after the
+    /// churn.
     #[test]
-    fn validator_churn_preserves_recipe_reemission() {
-        let (mut reg, id, _) = pin_public();
+    fn churn_reemit_reproduces_the_product_video_bit_equal() {
+        let enc = product(b"churn-proof-body");
+        let meta = ThreeNftMeta::from_recipe(
+            &ThreeRecipe::Public(enc.pipe.recipe.clone()),
+            PreviewMode::PublicStill,
+        );
+        let mut reg = ThreeNftRegistry::new();
+        let id = reg.pin(PinRow {
+            meta,
+            recipe: enc.pipe.recipe.clone(),
+            packed: enc.pipe.packed.clone(),
+        });
+
         let before = reg.reemit_video_from_pin(id).unwrap();
-        // Validators churn out; the pin stays and the bytes are identical.
+        assert_eq!(
+            before, enc.video_blob,
+            "reemit must reproduce the product video bit for bit"
+        );
+
         reg.drop_validator(id).unwrap();
         let after = reg.reemit_video_from_pin(id).unwrap();
-        assert_eq!(before, after);
+        assert_eq!(after, enc.video_blob);
+        assert_eq!(after, before);
     }
 
     /// The re-emitted stream is deterministic: the same pin always rebuilds the
     /// same blob, so a receiver can verify the stream id it was promised.
     #[test]
     fn churn_reemitted_video_is_deterministic() {
-        let (reg, id, _) = pin_public();
+        let enc = product(b"deterministic-body");
+        let meta = ThreeNftMeta::from_recipe(
+            &ThreeRecipe::Public(enc.pipe.recipe.clone()),
+            PreviewMode::None,
+        );
+        let mut reg = ThreeNftRegistry::new();
+        let id = reg.pin(PinRow {
+            meta,
+            recipe: enc.pipe.recipe.clone(),
+            packed: enc.pipe.packed.clone(),
+        });
         let a = reg.reemit_video_from_pin(id).unwrap();
         let b = reg.reemit_video_from_pin(id).unwrap();
         assert_eq!(a, b);
     }
 
+    /// The pin keeps the object re-emittable when the recipe is sealed, and it
+    /// never holds the seed, the payload key, or the plaintext: the packed
+    /// container the pin stores is the encrypted payload.
+    #[test]
+    fn sealed_pin_reemits_the_sealed_stream_without_holding_the_key() {
+        let key = PayloadKey([42u8; 32]);
+        let enc = encode_qr_video(b"sealed-object-content", 32, Some(&key)).unwrap();
+
+        // The container the pin would hold is ciphertext, not the plaintext.
+        let (kind, _) = unpack_payload(&enc.pipe.packed).unwrap();
+        assert_eq!(kind, PayloadKind::EncryptedContent);
+
+        let meta = ThreeNftMeta::from_recipe(
+            &ThreeRecipe::Sealed(enc.pipe.recipe.seal()),
+            PreviewMode::Gated,
+        );
+        let mut reg = ThreeNftRegistry::new();
+        let id = reg.pin(PinRow {
+            meta,
+            recipe: enc.pipe.recipe.clone(),
+            packed: enc.pipe.packed.clone(),
+        });
+        let a = reg.reemit_video_from_pin(id).unwrap();
+        let b = reg.reemit_video_from_pin(id).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, enc.video_blob);
+    }
+
     /// An unknown pin refuses rather than silently producing nothing.
     #[test]
     fn unknown_pin_is_refused() {
-        let (reg, _, _) = pin_public();
+        let enc = product(b"any-body");
+        let meta = ThreeNftMeta::from_recipe(
+            &ThreeRecipe::Public(enc.pipe.recipe.clone()),
+            PreviewMode::None,
+        );
+        let mut reg = ThreeNftRegistry::new();
+        let id = reg.pin(PinRow {
+            meta,
+            recipe: enc.pipe.recipe.clone(),
+            packed: enc.pipe.packed.clone(),
+        });
+        assert_ne!(id, 99);
         assert_eq!(
             reg.reemit_video_from_pin(99),
             Err(ThreeNftRegistryError::UnknownPin(99))
@@ -310,23 +386,28 @@ mod nft_registry_tests {
         assert!(reg.meta(99).is_none());
     }
 
-    /// The pin keeps the object re-emittable even if the recipe was sealed.
-    /// The sealed form re-emits the same deterministic blob.
+    /// A packed body that does not hash to the recipe's payload commitment is
+    /// refused at re-emit time, so a pin cannot be swapped out for another
+    /// object without breaking the commitment the chain named.
     #[test]
-    fn sealed_pin_reemits_deterministically() {
-        let (full, packed) = sample();
-        let recipe = ThreeRecipe::Sealed(full.seal());
-        let meta = ThreeNftMeta::from_recipe(&recipe, PreviewMode::Gated);
+    fn a_packed_body_that_does_not_match_the_recipe_is_refused() {
+        let right = product(b"right-body");
+        let wrong = product(b"wrong-body-wrong-body");
+        let meta = ThreeNftMeta::from_recipe(
+            &ThreeRecipe::Public(right.pipe.recipe.clone()),
+            PreviewMode::None,
+        );
         let mut reg = ThreeNftRegistry::new();
         let id = reg.pin(PinRow {
             meta,
-            recipe,
-            block_len: 32,
-            seal_key: None,
-            content: packed,
+            recipe: right.pipe.recipe.clone(),
+            packed: wrong.pipe.packed.clone(),
         });
-        let a = reg.reemit_video_from_pin(id).unwrap();
-        let b = reg.reemit_video_from_pin(id).unwrap();
-        assert_eq!(a, b);
+        assert_eq!(
+            reg.reemit_video_from_pin(id),
+            Err(ThreeNftRegistryError::Reemit(
+                ReemitError::PayloadCommitmentMismatch
+            ))
+        );
     }
 }
