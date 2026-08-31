@@ -637,7 +637,7 @@ mod tests {
         assert!(ResidencyPlan::plan_bounded_by_disk(&shards, budget, profile(), 0).is_err());
 
         // A model with nothing on disk passes with semantics intact.
-        let dense_only = vec![shards[0].clone()];
+        let dense_only = vec![shards.first().cloned().expect("model has a dense shard")];
         let asked = profile();
         let plan = ResidencyPlan::plan_bounded_by_disk(&dense_only, budget, asked, 0).unwrap();
         assert_eq!(plan.semantics, asked);
@@ -697,7 +697,7 @@ mod tests {
             system_bytes: 1200,
         };
         // The dense shard needs no disk, so it is admitted with disk=0.
-        let dense_only = vec![model()[0].clone()];
+        let dense_only = vec![model().first().cloned().expect("model has a dense shard")];
         assert!(ResidencyPlan::plan_bounded_by_disk(&dense_only, budget, profile(), 0).is_ok());
 
         // The full model needs 2000 bytes of disk; a disk with 0 free cannot

@@ -195,6 +195,11 @@ pub enum UploadCustodyRefusal {
     /// The content is critical, so it may only be offered to the network when
     /// the owner accepts network custody for it rather than defaulting.
     CriticalNeedsExplicitNetworkCustody,
+    /// Accepting this item would push the device's own ledger past the
+    /// capacity the profile declared. A device that quietly over-commits its
+    /// storage is a server that will miss the reads it promised, so the put
+    /// is refused rather than recorded.
+    OverDeviceCapacity { held: u64, capacity: u64 },
 }
 
 /// The B.U.D. 1.0 upload contract. Wraps [`decide_custody`] with the one rule
@@ -322,6 +327,9 @@ impl CustodyLedger {
     /// [`UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody`] as
     /// described on [`decide_upload_custody`]; a refused attempt is recorded
     /// so the ledger reports the leak rather than silently accepting it.
+    /// [`UploadCustodyRefusal::OverDeviceCapacity`] when the put would push
+    /// the ledger past the profile's declared capacity; that refusal is not a
+    /// default-custody attempt, so it is not counted as one.
     pub fn put_user_content(
         &mut self,
         content_id: ContentId,
@@ -334,6 +342,28 @@ impl CustodyLedger {
             Ok(d) => {
                 match d.mode {
                     CustodyMode::UserHeld => {
+                        // The device ledger may never claim more than the
+                        // profile declared. Each item passes the per-item check
+                        // above; this is the cumulative one, so a sequence of
+                        // small puts cannot silently exceed the budget either.
+                        // A re-put of content already served replaces its old
+                        // footprint rather than stacking on top of it.
+                        let held_now = self.total_user_held_bytes();
+                        let replaced = self
+                            .user_held
+                            .iter()
+                            .find(|(id, _)| *id == content_id)
+                            .map(|(_, b)| *b)
+                            .unwrap_or(0);
+                        let held_next = held_now
+                            .saturating_add(d.user_held_bytes)
+                            .saturating_sub(replaced);
+                        if held_next > profile.max_storage_bytes {
+                            return Err(UploadCustodyRefusal::OverDeviceCapacity {
+                                held: held_now,
+                                capacity: profile.max_storage_bytes,
+                            });
+                        }
                         self.record_user_held(content_id, d.user_held_bytes);
                     }
                     CustodyMode::NetworkHeld => {
@@ -683,5 +713,66 @@ mod admission_tests {
         assert_eq!(ledger.total_user_held_bytes(), 800);
         assert_eq!(ledger.network_default_attempts(), 0);
         assert!(admit_device_as_server(&ledger).unwrap().is_device_the_server());
+    }
+
+    #[test]
+    fn a_device_cannot_silently_exceed_its_declared_capacity() {
+        let mut ledger = CustodyLedger::default();
+        ledger
+            .put_user_content(ContentId::of(b"a"), &profile(), 600, false, false)
+            .unwrap();
+        let err = ledger
+            .put_user_content(ContentId::of(b"b"), &profile(), 600, false, false)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            UploadCustodyRefusal::OverDeviceCapacity {
+                held: 600,
+                capacity: 1000
+            }
+        );
+        // The refused put is not recorded, and it is not a default-custody
+        // attempt.
+        assert_eq!(ledger.total_user_held_bytes(), 600);
+        assert_eq!(ledger.network_default_attempts(), 0);
+    }
+
+    #[test]
+    fn a_put_that_lands_exactly_on_the_capacity_is_accepted() {
+        let mut ledger = CustodyLedger::default();
+        ledger
+            .put_user_content(ContentId::of(b"full"), &profile(), 1000, false, false)
+            .unwrap();
+        assert_eq!(ledger.total_user_held_bytes(), 1000);
+    }
+
+    #[test]
+    fn network_held_items_do_not_count_against_device_capacity() {
+        let mut ledger = CustodyLedger::default();
+        // Oversize: the network holds it; the device's own ledger stays empty.
+        ledger
+            .put_user_content(ContentId::of(b"movie"), &profile(), 20_000, false, false)
+            .unwrap();
+        assert_eq!(ledger.total_user_held_bytes(), 0);
+        assert_eq!(ledger.network_held_items(), 1);
+        // Room for the device's own content is untouched.
+        ledger
+            .put_user_content(ContentId::of(b"clip"), &profile(), 800, false, false)
+            .unwrap();
+        assert_eq!(ledger.total_user_held_bytes(), 800);
+    }
+
+    #[test]
+    fn replacing_an_item_with_a_smaller_copy_shrinks_the_ledger() {
+        let mut ledger = CustodyLedger::default();
+        ledger
+            .put_user_content(ContentId::of(b"photo"), &profile(), 800, false, false)
+            .unwrap();
+        // The same content re-put with a smaller footprint replaces the entry.
+        ledger
+            .put_user_content(ContentId::of(b"photo"), &profile(), 400, false, false)
+            .unwrap();
+        assert_eq!(ledger.total_user_held_bytes(), 400);
+        assert_eq!(ledger.user_held_items(), 1);
     }
 }

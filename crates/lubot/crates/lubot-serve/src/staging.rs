@@ -181,8 +181,8 @@ mod staging_tests {
         let plan = stripe_plan(1000, &[dev(1, 100), dev(2, 100)]).unwrap();
         assert_eq!(total(&plan), 1000);
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].len, 500);
-        assert_eq!(plan[1].len, 500);
+        assert_eq!(plan.first().expect("first chunk").len, 500);
+        assert_eq!(plan.get(1).expect("second chunk").len, 500);
     }
 
     #[test]
@@ -221,8 +221,8 @@ mod staging_tests {
     #[test]
     fn the_first_chunk_lands_on_the_first_device() {
         let plan = stripe_plan(5000, &[dev(9, 100), dev(8, 100)]).unwrap();
-        assert_eq!(plan[0].offset, 0);
-        assert_eq!(plan[0].device, [9u8; 32]);
+        assert_eq!(plan.first().expect("first chunk").offset, 0);
+        assert_eq!(plan.first().expect("first chunk").device, [9u8; 32]);
     }
 
     #[test]
