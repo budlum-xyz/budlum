@@ -143,6 +143,12 @@ impl From<QrVideoError> for ThreeNftRegistryError {
 /// stream from the pin even after every storage validator that held a copy has
 /// churned out. The durable object is the recipe; the packed container is what
 /// re-emission reads back, never the seed and never a payload key.
+///
+/// Responsibility: a pin row lives on the **holder side** (the owner's device
+/// or node, B.U.D. 1.0 custody). The network object of a Three edition is the
+/// fixed-size recipe (and the NFT meta built from it); the packed bytes in
+/// this row are the holder's own copy, not network custody, and the edition
+/// gate refuses any attempt to place them as a durable body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinRow {
     /// Marketplace metadata.
