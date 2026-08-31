@@ -21,7 +21,7 @@
 //!
 //! - Key distribution / view-grants (separate; `view_grant` already exists).
 //! - Consensus verification of plaintext (chain never sees content).
-//! - Decimen source.
+//! - The provenance is our own measurement; no prior transport code is linked here.
 
 use crate::core::hash::hash_fields_bytes;
 use chacha20poly1305::aead::{Aead, KeyInit};

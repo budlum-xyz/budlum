@@ -1,5 +1,5 @@
 //! Runtime hardware-economics measurements — the operator-facing dashboard
-//! side of Colibri-style multitiering.
+//! side of multitiering-based residency.
 //!
 //! [`residency`](crate::residency) answers *where weights live*; this module
 //! answers *what running them costs on this machine*. The two are the two halves
