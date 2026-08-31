@@ -23,7 +23,7 @@ sha2 = "0.11"
 # zlib for Three payload pack (K-QR-SIKISTIR: only when it shrinks).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # G1 payload AEAD (T11): content bytes encrypted before A1 pack.
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 # ISO QR encode for Three optical frames (K-QR: EC=L, mask pin). MIT/Apache.
 qrcode = { version = "0.14", default-features = false, features = [] }
 # Decode QR modules from our deterministic PNGs (MIT/Apache).
