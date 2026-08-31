@@ -155,6 +155,33 @@ pub struct WeightShard {
     pub demand: Demand,
 }
 
+/// Routing heat: how many times the router selected each routed shard since
+/// the last placement decision.
+///
+/// The measured input to the rebalance step, the same way the probe in
+/// [`crate::staging`] measures bandwidth before any split is decided. A heat
+/// value that was guessed is not a heat value; callers record real router
+/// selections, and a shard never selected simply has no entry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RoutingHeat {
+    /// Selection count per shard, keyed by content id.
+    pub counts: std::collections::BTreeMap<[u8; 32], u64>,
+}
+
+impl RoutingHeat {
+    /// Record one router selection of a shard.
+    pub fn record(&mut self, content_id: [u8; 32]) {
+        let current = self.counts.get(&content_id).copied().unwrap_or(0);
+        self.counts.insert(content_id, current.saturating_add(1));
+    }
+
+    /// The measured selection count for a shard (zero when never selected).
+    #[must_use]
+    pub fn count(&self, content_id: &[u8; 32]) -> u64 {
+        self.counts.get(content_id).copied().unwrap_or(0)
+    }
+}
+
 /// The parts of a model's behaviour that placement may not alter.
 ///
 /// Carried through the planner untouched. It exists so that "placement does not
@@ -202,6 +229,11 @@ pub struct Placement {
     pub content_id: [u8; 32],
     pub tier: Tier,
     pub bytes: u64,
+    /// The demand that drove this placement. Carried so a plan is
+    /// self-describing: a placement alone cannot say whether a fast-memory
+    /// shard is the dense part or a routed expert, and the rebalance step
+    /// needs to tell them apart without re-reading the model.
+    pub demand: Demand,
 }
 
 /// The result of planning a model onto a device.
@@ -235,6 +267,76 @@ impl ResidencyPlan {
         shards: &[WeightShard],
         budget: DeviceBudget,
         semantics: SemanticProfile,
+    ) -> Result<Self, PlanError> {
+        Self::place_internal(shards, budget, semantics, |a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| a.content_id.cmp(&b.content_id))
+        })
+    }
+
+    /// Place `shards` onto `budget`, ordering the routed part by routing heat
+    /// instead of by size.
+    ///
+    /// The dense-part rule is identical to [`ResidencyPlan::plan`]. The routed
+    /// part then fills the remaining fast memory hottest first: a shard the
+    /// router selects constantly earns residency, one it never selects is read
+    /// from disk. Ties break by content id so two operators with the same
+    /// device and the same measured heat produce the same plan.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::NothingToPlace`] for an empty model,
+    /// [`PlanError::DensePartDoesNotFit`] when the dense part cannot fit.
+    pub fn plan_with_heat(
+        shards: &[WeightShard],
+        budget: DeviceBudget,
+        semantics: SemanticProfile,
+        heat: &RoutingHeat,
+    ) -> Result<Self, PlanError> {
+        Self::place_internal(shards, budget, semantics, |a, b| {
+            heat.count(&b.content_id)
+                .cmp(&heat.count(&a.content_id))
+                .then_with(|| a.content_id.cmp(&b.content_id))
+        })
+    }
+
+    /// Re-place this plan's routed shards according to measured routing heat.
+    ///
+    /// Rebuilds the shards from the placements (a placement now carries its
+    /// demand, so the plan is self-describing), orders the routed ones
+    /// hottest-first, and re-runs placement under the same budget. Every-token
+    /// shards never move - their placement is the dense invariant, not a
+    /// performance knob - and the semantic profile is carried through
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError`] from the re-run. For a plan produced under the same
+    /// budget this cannot fail, but the signature stays honest instead of
+    /// panicking.
+    pub fn rebalance(
+        &self,
+        heat: &RoutingHeat,
+        budget: DeviceBudget,
+    ) -> Result<Self, PlanError> {
+        let shards: Vec<WeightShard> = self
+            .placements
+            .iter()
+            .map(|p| WeightShard {
+                content_id: p.content_id,
+                bytes: p.bytes,
+                demand: p.demand,
+            })
+            .collect();
+        Self::plan_with_heat(&shards, budget, self.semantics, heat)
+    }
+
+    fn place_internal(
+        shards: &[WeightShard],
+        budget: DeviceBudget,
+        semantics: SemanticProfile,
+        order_routed: impl FnMut(&&WeightShard, &&WeightShard) -> std::cmp::Ordering,
     ) -> Result<Self, PlanError> {
         if shards.is_empty() {
             return Err(PlanError::NothingToPlace);
@@ -280,19 +382,17 @@ impl ResidencyPlan {
                 content_id: shard.content_id,
                 tier,
                 bytes: shard.bytes,
+                demand: Demand::EveryToken,
             });
         }
 
-        // Rule 2: routed experts, largest first, deterministic on ties.
+        // Rule 2: routed experts, ordered by the caller (largest first, or
+        // hottest first), deterministic on ties.
         let mut routed: Vec<&WeightShard> = shards
             .iter()
             .filter(|s| s.demand == Demand::WhenRouted)
             .collect();
-        routed.sort_by(|a, b| {
-            b.bytes
-                .cmp(&a.bytes)
-                .then_with(|| a.content_id.cmp(&b.content_id))
-        });
+        routed.sort_by(order_routed);
         for shard in routed {
             let tier = if shard.bytes <= free_accelerator {
                 free_accelerator -= shard.bytes;
@@ -307,6 +407,7 @@ impl ResidencyPlan {
                 content_id: shard.content_id,
                 tier,
                 bytes: shard.bytes,
+                demand: Demand::WhenRouted,
             });
         }
 
@@ -752,5 +853,163 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, PlanError::DensePartDoesNotFit { .. }));
+    }
+}
+
+/// Heat-aware placement: the rebalance step the "runs on hardware you own"
+/// promise leans on. Placement stays a speed decision, never a semantic one.
+#[cfg(test)]
+mod heat_tests {
+    use super::*;
+
+    fn id(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
+    fn profile() -> SemanticProfile {
+        SemanticProfile {
+            weight_bits: 8,
+            context_tokens: 4096,
+            experts_per_token: 2,
+        }
+    }
+
+    fn model() -> Vec<WeightShard> {
+        let mut shards = vec![WeightShard {
+            content_id: id(0),
+            bytes: 1000,
+            demand: Demand::EveryToken,
+        }];
+        for n in 1..=4 {
+            shards.push(WeightShard {
+                content_id: id(n),
+                bytes: 500,
+                demand: Demand::WhenRouted,
+            });
+        }
+        shards
+    }
+
+    fn tier_of(plan: &ResidencyPlan, n: u8) -> Tier {
+        plan.placements
+            .iter()
+            .find(|p| p.content_id == id(n))
+            .map(|p| p.tier)
+            .expect("shard present")
+    }
+
+    #[test]
+    fn heat_promotes_a_hot_expert_into_fast_memory() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1700, // dense 1000 + room for exactly one 500-byte expert
+        };
+        // Size-first: the first expert (id 1, tie break) takes the fast slot.
+        let cold = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        assert_eq!(tier_of(&cold, 1), Tier::System);
+
+        // Heat-first: id 4 is the hot one, so it takes the fast slot instead.
+        let mut heat = RoutingHeat::default();
+        for _ in 0..100 {
+            heat.record(id(4));
+        }
+        let hot = ResidencyPlan::plan_with_heat(&shards, budget, profile(), &heat).unwrap();
+        assert_eq!(tier_of(&hot, 4), Tier::System);
+        assert_eq!(tier_of(&hot, 1), Tier::Disk);
+    }
+
+    #[test]
+    fn rebalance_moves_a_hot_expert_off_disk() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1700,
+        };
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        assert_eq!(tier_of(&plan, 4), Tier::Disk);
+
+        let mut heat = RoutingHeat::default();
+        heat.record(id(4));
+        let rebalanced = plan.rebalance(&heat, budget).unwrap();
+
+        assert_eq!(tier_of(&rebalanced, 4), Tier::System);
+        assert_eq!(tier_of(&rebalanced, 1), Tier::Disk);
+    }
+
+    #[test]
+    fn rebalance_preserves_semantics_and_dense_placement() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1700,
+        };
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        let mut heat = RoutingHeat::default();
+        heat.record(id(3));
+
+        let rebalanced = plan.rebalance(&heat, budget).unwrap();
+        assert_eq!(rebalanced.semantics, plan.semantics);
+        // The dense part never moves.
+        assert_eq!(tier_of(&rebalanced, 0), tier_of(&plan, 0));
+        assert_ne!(tier_of(&rebalanced, 0), Tier::Disk);
+    }
+
+    #[test]
+    fn a_cold_expert_is_demoted_to_disk_when_a_hot_one_arrives() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1700,
+        };
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        assert_eq!(tier_of(&plan, 1), Tier::System);
+
+        let mut heat = RoutingHeat::default();
+        heat.record(id(2));
+        heat.record(id(2));
+        let rebalanced = plan.rebalance(&heat, budget).unwrap();
+
+        assert_eq!(tier_of(&rebalanced, 2), Tier::System);
+        assert_eq!(tier_of(&rebalanced, 1), Tier::Disk);
+    }
+
+    #[test]
+    fn rebalance_is_deterministic() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1700,
+        };
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        let mut heat = RoutingHeat::default();
+        heat.record(id(3));
+        heat.record(id(4));
+
+        let a = plan.rebalance(&heat, budget).unwrap();
+        let b = plan.rebalance(&heat, budget).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_heat_keeps_the_size_first_plan() {
+        let shards = model();
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1700,
+        };
+        let heat = RoutingHeat::default();
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        let rebalanced = plan.rebalance(&heat, budget).unwrap();
+        assert_eq!(rebalanced, plan);
+    }
+
+    #[test]
+    fn routing_heat_counts_selections() {
+        let mut heat = RoutingHeat::default();
+        assert_eq!(heat.count(&id(4)), 0);
+        heat.record(id(4));
+        heat.record(id(4));
+        assert_eq!(heat.count(&id(4)), 2);
     }
 }
