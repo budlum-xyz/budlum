@@ -49,6 +49,7 @@ pub mod qr_recipe;
 pub mod qr_reemit;
 pub mod qr_video;
 pub mod render;
+pub mod social_delete;
 pub mod three_gate;
 pub mod three_hooks;
 pub mod three_meter;
@@ -182,6 +183,7 @@ pub use qr_video::{
     demux_optical_frames, png_to_optical_frame, QrVideo, QrVideoError, DEFAULT_FPS,
     MAX_VIDEO_FRAMES, VIDEO_MAGIC, VIDEO_VERSION,
 };
+pub use social_delete::{process_social_delete, DeleteOutcome};
 pub use three_visibility::{
     delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
 };
