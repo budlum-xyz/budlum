@@ -1,4 +1,4 @@
-![Budlum](assets/budlum-banner.png)
+![Budlum](assets/budlum (16).png)
 
 Budlum, izin gerektirmeyen bir Evrensel Uzlaşma Katmanıdır. Diğer zincirlerle yarışmaz, onları *uzlaştırır*.
 PoW, PoS, PoA, BFT ve ZK alanlarının her biri kendi konsensüsünü korur; Budlum bu alanların
