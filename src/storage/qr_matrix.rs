@@ -6,7 +6,7 @@
 //! `block_len` 200 lab default stays on the carousel side; here we encode one
 //! A3 optical frame wire into one QR symbol.
 //!
-//! Decimen/AGPL source is not copied - only the measured rules.
+//! No external QR library is linked into this module; only the measured rules are used.
 
 use qrcode::types::EcLevel;
 
