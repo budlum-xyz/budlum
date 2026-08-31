@@ -53,6 +53,7 @@ pub mod three_meter;
 pub mod three_nft;
 pub mod three_pipe;
 pub mod three_recipe;
+pub mod three_regime;
 pub mod three_reveal;
 pub mod three_rpc;
 pub mod three_visibility;
@@ -157,6 +158,10 @@ pub use three_nft::{
 pub use three_recipe::{
     recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, VideoRecipeSealed,
     RECIPE_VIDEO_MAGIC,
+};
+pub use three_regime::{
+    admits_body as three_regime_admits_body, held_bytes_for, refuse_rent_without_held_bytes,
+    regime_of, rent_basis_for, AccountingRefusal, ContentRegime, RentBasis,
 };
 pub use three_reveal::{RevealError, RevealSession};
 pub use three_rpc::{open_reveal_session, RevealHandle, RevealRequest, RevealRpcError};
