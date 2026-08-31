@@ -14,7 +14,8 @@
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
-use crate::storage::mobile_self::{decide_custody, CustodyMode, MobileSelfProfile};
+use crate::storage::mobile_self::{decide_custody, CustodyLedger, CustodyMode, MobileSelfProfile};
+use crate::storage::server_admission::{ServerAdmission, ServerAdmissionRefusal};
 use crate::storage::one_view::{EndpointRef, SingleScreenView};
 use std::collections::BTreeMap;
 
@@ -131,7 +132,27 @@ impl OneShareRegistry {
     /// refused every network-held put.
     #[must_use]
     pub fn screen(&self, profile: &MobileSelfProfile) -> SingleScreenView {
-        SingleScreenView::assemble(profile, &self.endpoint_refs())
+        let mut view = SingleScreenView::assemble(profile, &self.endpoint_refs());
+        view.device_is_server = self
+            .admit_as_server()
+            .map(|a| a.is_device_the_server())
+            .unwrap_or(false);
+        view
+    }
+
+    /// The device behind this registry, measured as a server: a custody
+    /// ledger built from the registry's own shares (every share is
+    /// user-held, because [`Self::create`] refused every network-held put)
+    /// is handed to the admission rule. The screen shows the result; the
+    /// rule itself lives in
+    /// [`admit_device_as_server`](crate::storage::server_admission::admit_device_as_server).
+    #[must_use]
+    pub fn admit_as_server(&self) -> Result<ServerAdmission, ServerAdmissionRefusal> {
+        let mut ledger = CustodyLedger::default();
+        for s in self.shares.values() {
+            ledger.record_user_held(s.content_id, s.size);
+        }
+        crate::storage::server_admission::admit_device_as_server(&ledger)
     }
 
     /// True when every share's custody decision is user-held. In 1.0 this is

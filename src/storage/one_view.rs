@@ -41,6 +41,13 @@ pub struct ScreenItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleScreenView {
     pub items: Vec<ScreenItem>,
+    /// Measured evidence, not a claim: whether the device this screen belongs
+    /// to is admitted as a server of its own content
+    /// ([`crate::storage::server_admission::admit_device_as_server`]). A bare
+    /// [`assemble`](Self::assemble) cannot know this and leaves it false;
+    /// [`OneShareRegistry::screen`](crate::storage::one_share::OneShareRegistry::screen)
+    /// sets it from the registry's own custody evidence.
+    pub device_is_server: bool,
 }
 
 impl SingleScreenView {
@@ -60,7 +67,10 @@ impl SingleScreenView {
                 custody: decide_custody(profile, r.size, r.critical),
             })
             .collect();
-        Self { items }
+        Self {
+            items,
+            device_is_server: false,
+        }
     }
 
     /// Re-derive custody for every item and compare. True only when every item

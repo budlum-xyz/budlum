@@ -1,8 +1,3 @@
-//! WIRING: unwired - no production server-admission path exists yet;
-//! `admit_device_as_server` is the evidence rule (the device must serve bytes
-//! of its own) that the node runtime's admission flow must call when it
-//! grows one.
-//!
 //! Server admission for the 1.0 mobile-self profile: the network-side
 //! measurement that a device really is the server of its own content.
 
