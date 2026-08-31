@@ -63,7 +63,7 @@ impl TierBytes {
     }
 
     /// The fraction of the model that lives in rented fast memory, in the
-    /// range `0.0..=1.0`. This is the direct measure of how much Colibri-style
+    /// range `0.0..=1.0`. This is the direct measure of how much multitiering
     /// multitiering bought: a plan that keeps the dense part in fast memory and
     /// pushes routed experts to owned disk reports a small number, and a plan
     /// that rents everything reports 1.0.
@@ -142,7 +142,7 @@ impl HardwareCostModel {
     ///
     /// Only the rented fast memory is priced. Weights that the residency plan
     /// placed on disk are the operator's own, so they contribute no hourly
-    /// cost (this is the amount Colibri-style multitiering saves: a model that
+    /// cost (this is the amount multitiering multitiering saves: a model that
     /// fits entirely in rented accelerator memory costs more per token than the
     /// same model with routed experts staged from owned disk).
     ///
