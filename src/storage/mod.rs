@@ -49,6 +49,7 @@ pub mod qr_recipe;
 pub mod qr_reemit;
 pub mod qr_video;
 pub mod render;
+pub mod reveal_gateway;
 pub mod server_admission;
 pub mod social_delete;
 pub mod three_gate;
@@ -171,7 +172,14 @@ pub use three_regime::{
     regime_of, rent_basis_for, AccountingRefusal, ContentRegime, RentBasis,
 };
 pub use three_reveal::{RevealError, RevealSession};
-pub use three_rpc::{open_reveal_session, RevealHandle, RevealRequest, RevealRpcError};
+pub use three_rpc::{
+    open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
+    RevealRpcError,
+};
+pub use reveal_gateway::{
+    RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES, MAX_FRAMES_PER_CALL,
+    MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
+};
 
 pub use three_gate::{
     classify_three_blob, is_transport_derivative, refuse_durable_derivative, ThreeBlobKind,

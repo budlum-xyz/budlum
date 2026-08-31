@@ -422,6 +422,40 @@ pub trait BudlumApi {
         owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Open a metered reveal session for a Three object. The node re-derives
+    /// the view grant from chain state (the same path as
+    /// `bud_storageMayView`), so a sealed recipe without a live grant is
+    /// refused here, not at the viewer. The returned session id is served by
+    /// `bud_storageRevealFrames`; sessions are capped at
+    /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
+    #[method(name = "bud_storageOpenReveal")]
+    async fn storage_open_reveal(
+        &self,
+        content_id: String,
+        recipe: serde_json::Value,
+        full_public: Option<serde_json::Value>,
+        packed: String,
+        viewer: String,
+        owner: String,
+        key_id: String,
+        meter_budget: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Serve `count` frames from `seq_start` of an open reveal session, under
+    /// that session's meter budget and the per-call ceiling
+    /// (`MAX_FRAMES_PER_CALL`).
+    #[method(name = "bud_storageRevealFrames")]
+    async fn storage_reveal_frames(
+        &self,
+        session_id: u64,
+        seq_start: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Close a reveal session early. Returns whether it existed.
+    #[method(name = "bud_storageCloseReveal")]
+    async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned>;
+
     /// Classic/2.0 confidential body commit. Three/recipe-only is refused.
     #[method(name = "bud_storageRegisterConfidentialCommit")]
     async fn storage_register_confidential_commit(
