@@ -22,3 +22,4 @@ pub mod health;
 pub mod metric;
 pub mod residency;
 pub mod staging;
+pub mod validator_cost;

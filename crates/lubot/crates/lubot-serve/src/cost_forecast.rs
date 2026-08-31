@@ -105,6 +105,55 @@ pub const fn owned_device_budget() -> DeviceBudget {
     }
 }
 
+/// A CPU-only owned box: 128 GiB host RAM, no accelerator, routed experts
+/// staged from two 2 TB NVMe drives (≈ 3.7 TiB usable). This is the profile
+/// colibri-style serving actually measures on.
+pub const PC128_DISK_GIB: u64 = 2 * 1862;
+
+#[must_use]
+pub const fn owned_pc128_budget() -> DeviceBudget {
+    DeviceBudget {
+        accelerator_bytes: 0,
+        system_bytes: 128 * GIB,
+    }
+}
+
+/// Market-calibrated rental rates (2026): H100-class accelerator ≈ $0.04/GB-hr
+/// and host RAM ≈ $0.002/GB-hr. [`HardwareCostModel::cost_per_million_tokens_dollars`]
+/// prices only rented fast memory, so the absolute dollars are realistic and
+/// the ratio stays identical to the conservative `rates()`.
+#[must_use]
+pub const fn market_rates() -> HardwareCostModel {
+    HardwareCostModel {
+        dollar_per_accelerator_gb_hour: 0.04,
+        dollar_per_system_gb_hour: 0.002,
+    }
+}
+
+/// Cold-token disk cost of a frontier MoE, in GiB read per token. This is the
+/// figure streaming-from-disk serving is bound by (75 layers × 8 experts on a
+/// 744B int4 model, measured); throughput is disk bandwidth divided by this.
+pub const GIB_PER_COLD_TOKEN: f64 = 11.0;
+
+/// Tokens per second a disk-bound device serves: disk bandwidth divided by the
+/// cold-token read cost. Zero (not infinite) when the disk reports nothing.
+#[must_use]
+pub fn disk_band_tokens_per_second(disk_gib_per_second: f64) -> f64 {
+    if disk_gib_per_second <= 0.0 {
+        0.0
+    } else {
+        disk_gib_per_second / GIB_PER_COLD_TOKEN
+    }
+}
+
+/// Hourly rent of a tier footprint, in dollars: rate × bytes, no throughput.
+/// The quantity multitiering shrinks, expressed in market dollars.
+#[must_use]
+pub fn hourly_rent(tb: TierBytes, rates: HardwareCostModel) -> f64 {
+    (tb.accelerator as f64 / 1e9) * rates.dollar_per_accelerator_gb_hour
+        + (tb.system as f64 / 1e9) * rates.dollar_per_system_gb_hour
+}
+
 /// One side of the comparison, measured.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CostForecast {
@@ -199,6 +248,20 @@ impl CostComparison {
             return None;
         }
         Some(1.0 - cheap / costly)
+    }
+
+    /// Throughput-independent saving: the fraction of the *hourly memory bill*
+    /// the owned device avoids, at whatever throughput either side reaches.
+    /// This is the number the "acayip düşük maliyet" claim is allowed to rest
+    /// on; the per-token figure is throughput's to change.
+    #[must_use]
+    pub fn rental_hour_savings_ratio(&self, rates: HardwareCostModel) -> Option<f64> {
+        let rent_all = hourly_rent(self.rent_all.tier_bytes, rates);
+        let owned = hourly_rent(self.multitier.tier_bytes, rates);
+        if rent_all <= 0.0 {
+            return None;
+        }
+        Some(1.0 - owned / rent_all)
     }
 }
 
@@ -346,5 +409,76 @@ mod cost_forecast_tests {
         let dense4 = model4.first().expect("dense shard first").bytes;
         assert_eq!(dense4, dense16 / 4, "int4 is a quarter of bf16");
         assert_eq!(model4.len(), model16.len());
+    }
+
+    #[test]
+    fn market_rates_make_the_absolute_dollars_realistic() {
+        let model = frontier_model(16);
+        let cmp =
+            CostComparison::compare(&model, 16, PC128_DISK_GIB, sample_hundred_tps(), market_rates())
+                .unwrap();
+        // Rent-all: ~652 GiB accelerator at $0.04/GB-hr ≈ $28/hr, not thousands.
+        let rent_all = hourly_rent(cmp.rent_all.tier_bytes, market_rates());
+        assert!(
+            (20.0..40.0).contains(&rent_all),
+            "rent-all hourly at market rate should be tens of dollars, got {rent_all}"
+        );
+        // Owned pc128: rented fast memory is host RAM only, ≈ $0.27/hr.
+        let owned = hourly_rent(cmp.multitier.tier_bytes, market_rates());
+        assert!(owned < 1.0, "owned hourly rent {owned} should be sub-dollar");
+        assert!(owned > 0.0);
+    }
+
+    #[test]
+    fn owned_pc128_stages_experts_and_keeps_dense_in_ram() {
+        let model = frontier_model(16);
+        let plan = ResidencyPlan::plan_bounded_by_disk(
+            &model,
+            owned_pc128_budget(),
+            frontier_profile(16),
+            PC128_DISK_GIB * GIB,
+        )
+        .unwrap();
+        assert!(plan.streams_from_disk());
+        let tb = TierBytes::from_plan(&plan);
+        assert_eq!(tb.accelerator, 0, "a CPU-only box has no accelerator tier");
+        assert!(tb.system <= 128 * GIB, "system tier over the 128 GiB budget");
+        assert!(tb.disk <= PC128_DISK_GIB * GIB, "disk over the owned budget");
+        let dense = plan
+            .placements
+            .iter()
+            .find(|p| p.demand == Demand::EveryToken)
+            .expect("dense shard present");
+        assert_ne!(
+            dense.tier,
+            crate::residency::Tier::Disk,
+            "every-token weights never stream"
+        );
+    }
+
+    #[test]
+    fn disk_band_throughput_is_bandwidth_over_cold_token_cost() {
+        // 2× NVMe ≈ 10 GB/s → ~0.9 tok/s; 4× NVMe ≈ 20 GB/s → ~1.8 tok/s.
+        let two_drives = disk_band_tokens_per_second(10.0);
+        let four_drives = disk_band_tokens_per_second(20.0);
+        assert!((two_drives - 10.0 / GIB_PER_COLD_TOKEN).abs() < 1e-12);
+        assert!((four_drives - 2.0 * two_drives).abs() < 1e-12);
+        assert_eq!(disk_band_tokens_per_second(0.0), 0.0);
+    }
+
+    #[test]
+    fn rental_hour_savings_ratio_is_rate_independent() {
+        let model = frontier_model(16);
+        for rates in [market_rates(), rates()] {
+            let cmp =
+                CostComparison::compare(&model, 16, PC128_DISK_GIB, sample_hundred_tps(), rates)
+                    .unwrap();
+            let saving = cmp.rental_hour_savings_ratio(rates).unwrap();
+            let rent_all = hourly_rent(cmp.rent_all.tier_bytes, rates);
+            let owned = hourly_rent(cmp.multitier.tier_bytes, rates);
+            let expected = 1.0 - owned / rent_all;
+            assert!((saving - expected).abs() < 1e-12, "saving must be recomputed");
+            assert!(saving > 0.9, "multitiering must cut >90% of the memory bill");
+        }
     }
 }
