@@ -97,6 +97,30 @@ pub const fn zkvm_layer() -> LayerFootprint {
     }
 }
 
+/// Continuous HDD draw per terabyte held (bulk drives, ~7 W).
+pub const STORAGE_HDD_WATTS_PER_TB: f64 = 7.0;
+
+/// One-time capital of a terabyte of shard disk.
+#[must_use]
+pub const fn storage_capital_per_tb_usd(p: HardwarePricelist) -> f64 {
+    1024.0 * p.dollar_per_gib_hdd
+}
+
+/// Ten-year custody cost of one full terabyte: capital plus continuous energy.
+#[must_use]
+pub const fn ten_year_storage_cost_usd_per_tb(p: HardwarePricelist) -> f64 {
+    let capital = storage_capital_per_tb_usd(p);
+    let energy = STORAGE_HDD_WATTS_PER_TB * 24.0 * 365.25 * 10.0 / 1000.0 * p.dollar_per_kwh;
+    capital + energy
+}
+
+/// Custody cost of `bytes` held on NVMe, as an upper bound: the one-time
+/// capital of those bytes, not amortized over time.
+#[must_use]
+pub const fn nvme_custody_usd(bytes: u64, p: HardwarePricelist) -> f64 {
+    (bytes as f64 / (1u64 << 30) as f64) * p.dollar_per_gib_nvme
+}
+
 /// Storage layer: `disk_gib` of committed shards on bulk HDD plus a small RAM
 /// index. Shards are written once and read for challenges and repair.
 #[must_use]
@@ -373,6 +397,21 @@ mod validator_cost_tests {
             int4.tier_bytes.total(),
             bf16.tier_bytes.total() / 4,
             "int4 is a quarter of bf16 bytes"
+        );
+    }
+
+    #[test]
+    fn a_full_terabyte_ten_year_cost_exceeds_a_cent_but_a_recipe_does_not() {
+        let p = market_pricelist();
+        let body = ten_year_storage_cost_usd_per_tb(p);
+        assert!(
+            body > 0.01,
+            "a full terabyte over ten years costs more than a cent: {body}"
+        );
+        let recipe = nvme_custody_usd(74, p);
+        assert!(
+            recipe < 0.01,
+            "a 74-byte recipe costs far less than a cent: {recipe}"
         );
     }
 
