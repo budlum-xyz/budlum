@@ -240,6 +240,19 @@ pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u
     ])
 }
 
+/// Digest a social/DM delete authorisation is signed over. Separate domain
+/// from issue and revoke: a delete is not a revoke of one grant, it is the
+/// owner retiring every grant of one content and its key id with them.
+#[must_use]
+pub fn social_delete_digest(content_id: &ContentId, caller: &Address, at_epoch: u64) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_SOCIAL_DELETE_V1",
+        content_id.as_bytes(),
+        caller.as_bytes(),
+        &at_epoch.to_le_bytes(),
+    ])
+}
+
 /// Digest a confidential body commit is signed over.
 ///
 /// The object, the owner deriving from the signing key, the cipher, the

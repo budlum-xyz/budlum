@@ -394,6 +394,16 @@ pub trait BudlumApi {
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Social/DM delete: owner-authorised; revokes every live view grant the
+    /// owner issued for the content and rotates its payload key id.
+    #[method(name = "bud_storageSocialDelete")]
+    async fn storage_social_delete(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Every view-grant row of a confidential object, with the count the node
     /// treats as live. `liveOnly` asks for the live rows alone.
     #[method(name = "bud_storageListViewGrants")]

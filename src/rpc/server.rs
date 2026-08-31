@@ -2273,6 +2273,28 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn storage_social_delete(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let auth = parse_grant_auth(authorization.as_ref())?;
+        let content_id = parse_content_id(&content_id)?;
+        // Same boundary rule as revoke: when this node cannot check the
+        // signature at all, that is an operator fault, not a client key fault.
+        let _actor = auth.derived_owner().map_err(grant_auth_error)?;
+        let outcome = self
+            .chain
+            .social_delete(content_id, auth, at_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "grantsRevoked": outcome.grants_revoked,
+            "keyRotated": outcome.key_rotated,
+        }))
+    }
+
     async fn storage_list_view_grants(
         &self,
         content_id: String,

@@ -149,7 +149,7 @@ const SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/storage-registry";
 /// one answer hold a whole block's worth of bytes hostage in memory. 1 MiB
 /// matches the block ceiling and covers the 256 KiB execution-proof ceiling
 /// plus the envelope's version-string metadata with room to spare.
-pub const MAX_PROOF_ENVELOPE_BYTES: u64 = 1024 * 1024;
+const MAX_PROOF_ENVELOPE_BYTES: u64 = 1024 * 1024;
 
 /// Deserialize a [`bud_proof::ProofEnvelope`] under [`MAX_PROOF_ENVELOPE_BYTES`].
 fn deserialize_proof_envelope(
@@ -1874,6 +1874,48 @@ impl StorageRegistry {
             .or_default()
             .push(deal_id);
         Ok(deal_id)
+    }
+
+    /// Social/DM delete for one content (plan G5, CK.5): owner-authorised,
+    /// it revokes every live grant the owner issued for the content and
+    /// rotates the payload key id (delete implies rotate). Grants issued by
+    /// someone else are not the owner's word and are left alone.
+    ///
+    /// The hook seam runs on [`NopThreeHook`](crate::storage::three_hooks::NopThreeHook)
+    /// here because this binary is headless: a gateway installs its own sink
+    /// at its boundary. The revocations themselves are the durable state a
+    /// block commits; serving checks them regardless of who heard the event.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for unknown content, a caller who
+    /// is not the owner, or an unreadable authorisation.
+    pub fn social_delete(
+        &mut self,
+        content_id: ContentId,
+        auth: &crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
+        let owner = self
+            .owner_of(&content_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        let caller = auth
+            .derived_owner()
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        if caller != owner {
+            return Err(crate::storage::ViewGrantError::NotOwner { issuer: caller, owner });
+        }
+        let digest = crate::storage::social_delete_digest(&content_id, &caller, at_epoch);
+        auth.verify(&digest, &owner)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        let mut hook = crate::storage::three_hooks::NopThreeHook;
+        Ok(crate::storage::process_social_delete(
+            &mut self.view_grants,
+            content_id,
+            owner,
+            at_epoch,
+            &mut hook,
+        ))
     }
 
     /// Open a retrieval challenge. Anyone can call this (no role
