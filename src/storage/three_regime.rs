@@ -1,3 +1,9 @@
+//! WIRING: unwired - no production rent-claim path exists yet. The deal-open
+//! path in `domain::storage_deal` refuses edition-Three inline and never sees
+//! a raw blob, so this module is the accounting a rent/settlement path must
+//! call (including the transport-derivative case deals never see) when that
+//! path lands.
+//!
 //! G6b - honest storage accounting across the three regimes.
 //!
 //! Three different things can sit in front of the storage layer, and each has
