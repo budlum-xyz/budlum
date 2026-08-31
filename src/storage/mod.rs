@@ -32,6 +32,7 @@ pub mod manifest;
 pub mod merkle_trie;
 pub mod mobile_self;
 pub mod msr;
+pub mod one_share;
 pub mod one_view;
 pub mod payload_crypt;
 pub mod provider;
@@ -101,6 +102,7 @@ pub use mobile_self::{
     CustodyMode, MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile,
     ReplicaRecommendation, ServerAdmission, ServerAdmissionRefusal, UploadCustodyRefusal,
 };
+pub use one_share::{OneShareRegistry, Share, ShareRefusal};
 pub use one_view::{EndpointRef, ScreenItem, SingleScreenView};
 pub use msr::{
     lrc_repair_traffic_scaled, msr_repair_traffic_scaled, msr_speedup_over_lrc_scaled, MsrError,
