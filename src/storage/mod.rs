@@ -54,6 +54,7 @@ pub mod three_nft;
 pub mod three_pipe;
 pub mod three_recipe;
 pub mod three_reveal;
+pub mod three_rpc;
 pub mod three_visibility;
 pub mod traits;
 pub mod transformed;
@@ -155,6 +156,7 @@ pub use three_recipe::{
     RECIPE_VIDEO_MAGIC,
 };
 pub use three_reveal::{RevealError, RevealSession};
+pub use three_rpc::{open_reveal_session, RevealHandle, RevealRequest, RevealRpcError};
 
 pub use three_gate::{
     classify_three_blob, is_transport_derivative, refuse_durable_derivative, ThreeBlobKind,

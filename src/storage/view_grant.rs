@@ -419,6 +419,50 @@ impl ViewGrantRegistry {
         Ok(())
     }
 
+    /// Revoke a grant and deliver the resulting social event to a hook.
+    ///
+    /// This is the product-facing wrapper: a DM-delete or social-revoke path
+    /// calls this so the local side learns not just that the row is gone but
+    /// *which* content and *when*, so it can drop session keys and stop serving
+    /// new reveal sessions. The revoke behaviour is exactly
+    /// [`Self::revoke`], unchanged and re-used; only the event emission is new.
+    ///
+    /// The event is delivered only after the revoke succeeds, so a refused
+    /// revoke (unknown id, wrong issuer, already revoked) produces no event and
+    /// the caller sees the same errors it always did.
+    ///
+    /// # Errors
+    ///
+    /// [`ViewGrantError`] exactly as [`Self::revoke`]: `UnknownGrant`,
+    /// `NotIssuer`, or `AlreadyRevoked`.
+    pub fn revoke_with_hook(
+        &mut self,
+        grant_id: u64,
+        caller: Address,
+        at_epoch: u64,
+        hook: &mut dyn crate::storage::three_hooks::ThreeEventHook,
+    ) -> Result<(), ViewGrantError> {
+        // Read the content id from the live row before revoking, so the event
+        // names the content even though the row is revoked right after.
+        let content_id = self
+            .grants
+            .get(&grant_id)
+            .ok_or(ViewGrantError::UnknownGrant(grant_id))?
+            .content_id;
+        self.revoke(grant_id, caller, at_epoch)?;
+        crate::storage::three_hooks::emit_hook(
+            hook,
+            crate::storage::three_hooks::ThreeHookEvent {
+                kind: crate::storage::three_hooks::ThreeHookKind::GrantRevoked,
+                content_id,
+                actor: caller,
+                epoch: at_epoch,
+                grant_id: Some(grant_id),
+            },
+        );
+        Ok(())
+    }
+
     #[must_use]
     pub fn get(&self, grant_id: u64) -> Option<&ViewGrant> {
         self.grants.get(&grant_id)
@@ -740,6 +784,41 @@ mod tests {
         let after = reg.get(id).unwrap().commitment();
         assert_ne!(before, after);
         assert_ne!(root_before, reg.root());
+    }
+
+    #[test]
+    fn revoke_with_hook_emits_social_event() {
+        let mut reg = ViewGrantRegistry::new();
+        let owner = addr(1);
+        let grantee = addr(5);
+        let id = reg
+            .issue(cid(4), owner, Some(grantee), [9u8; 32], ViewPolicy::NamedGrantee, 1)
+            .unwrap();
+        let mut hook = crate::storage::three_hooks::RecordingThreeHook::default();
+
+        reg.revoke_with_hook(id, owner, 9, &mut hook).unwrap();
+
+        assert_eq!(hook.events.len(), 1);
+        let ev = &hook.events[0];
+        assert_eq!(ev.kind, crate::storage::three_hooks::ThreeHookKind::GrantRevoked);
+        assert_eq!(ev.content_id, cid(4));
+        assert_eq!(ev.actor, owner);
+        assert_eq!(ev.epoch, 9);
+        assert_eq!(ev.grant_id, Some(id));
+    }
+
+    #[test]
+    fn revoke_with_hook_no_event_when_revoke_refused() {
+        let mut reg = ViewGrantRegistry::new();
+        let owner = addr(1);
+        let id = reg
+            .issue(cid(4), owner, Some(addr(5)), [9u8; 32], ViewPolicy::NamedGrantee, 1)
+            .unwrap();
+        let mut hook = crate::storage::three_hooks::RecordingThreeHook::default();
+
+        // A wrong revoker refusals and emits nothing.
+        assert!(reg.revoke_with_hook(id, addr(9), 3, &mut hook).is_err());
+        assert!(hook.events.is_empty());
     }
 
     #[test]
