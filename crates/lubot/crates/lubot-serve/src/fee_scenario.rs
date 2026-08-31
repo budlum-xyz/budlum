@@ -128,8 +128,10 @@ pub const fn recipes_for_content(content_bytes: u64, item_bytes: u64) -> u64 {
     content_bytes / item_bytes
 }
 
-/// Network bytes held for one terabyte of 3.0 content: recipes only, no body
-/// (the bytes live on the user's device under the 1.0 custody contract).
+/// Network bytes held for one terabyte of 3.0 content: recipes only, no body.
+/// In 3.0 nobody holds the body - not the network, not the user: the content
+/// is generated from its recipe on demand, so a terabyte of 3.0 content costs
+/// storage nowhere and the recipe records are the entire network footprint.
 #[must_use]
 pub const fn three_network_bytes_per_tb(item_bytes: u64) -> u64 {
     recipes_for_content(BYTES_PER_TB, item_bytes).saturating_mul(BUD_RECIPE_PUBLIC_BYTES)
