@@ -413,7 +413,11 @@ pub enum ServerAdmissionRefusal {
     /// The ledger shows an attempt to default holdable content to the network.
     /// A node that sheds its own responsibility is not admitted as a server.
     TriedToDefaultCustody,
-    /// The device serves nothing: it is a client, not a server.
+    /// The device holds none of its own bytes: it is a client, not a server.
+    /// Network-held items do not count toward this - they are not the
+    /// device's load, so a device whose every upload went to the network
+    /// (all oversize) is refused here rather than admitted as a server that
+    /// would launder network custody as B.U.D. 1.0.
     ServesNothing,
 }
 
@@ -436,7 +440,11 @@ pub fn admit_device_as_server(
     if ledger.network_default_attempts() > 0 {
         return Err(ServerAdmissionRefusal::TriedToDefaultCustody);
     }
-    if ledger.user_held_items() == 0 && ledger.network_held_items() == 0 {
+    // The device must serve at least one byte of its own. Network-held items
+    // are not the device's load, so "has network items" is not evidence of
+    // serving: without this, an all-oversize uploader (every byte network
+    // held) would be admitted as a "server" while holding nothing.
+    if ledger.total_user_held_bytes() == 0 {
         return Err(ServerAdmissionRefusal::ServesNothing);
     }
     Ok(ServerAdmission {
@@ -678,6 +686,23 @@ mod admission_tests {
     #[test]
     fn a_device_that_serves_nothing_is_refused() {
         let ledger = CustodyLedger::default();
+        assert_eq!(
+            admit_device_as_server(&ledger).unwrap_err(),
+            ServerAdmissionRefusal::ServesNothing
+        );
+    }
+
+    #[test]
+    fn a_device_that_only_pushed_oversize_content_is_refused() {
+        // Everything it uploaded went to the network (oversize), so the device
+        // serves nothing of its own. The admission contract is "the device
+        // serves its own bytes"; a node that holds nothing is a client, and
+        // admitting it as a server would launder network custody as 1.0.
+        let mut ledger = CustodyLedger::default();
+        ledger
+            .put_user_content(ContentId::of(b"movie"), &profile(), 20_000, false, false)
+            .unwrap();
+        assert_eq!(ledger.total_user_held_bytes(), 0);
         assert_eq!(
             admit_device_as_server(&ledger).unwrap_err(),
             ServerAdmissionRefusal::ServesNothing
