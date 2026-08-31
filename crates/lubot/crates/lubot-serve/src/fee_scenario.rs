@@ -4,12 +4,14 @@
 //!
 //! * **Chain transactions** — a base plus an ad-valorem cut, by class:
 //!   transfer `$0.01 + 0.2%`, swap `$0.01 + 0.4%`, bridge `$0.01 + 0.8%`.
-//! * **B.U.D. storage** — the upload transaction's $0.01 base fee covers
-//!   ten-year custody of the recipe (a fixed-size commitment, ~74 bytes).
-//!   If the ten-year cost of a terabyte exceeds that cent, the excess is
-//!   charged with the transaction fee. Uploaded content stays alive ten
-//!   years; on expiry the owner may delete it, and if they do not, it moves
-//!   to an open auction and transfers after one month.
+//! * **B.U.D. storage, by version** — 1.0 charges only the share NFT's
+//!   transaction fee (content stays on the user's device, so there is no
+//!   storage cost to charge); 2.0 bills `$0.016/TB` monthly for the held
+//!   body; 3.0's recipe fits inside the `$0.01` upload base, so nothing
+//!   monthly, and only if the ten-year cost exceeds that cent is the excess
+//!   charged. Uploaded content stays alive ten years; on expiry the owner may
+//!   delete it, and if they do not, it moves to an open auction and
+//!   transfers after one month.
 //! * **Lubot serving** — token-metered like an API: every prompt debits its
 //!   tokens at the serving rate from the wallet as it runs, using the rates
 //!   [`crate::cost_forecast`] measures. No terabyte is priced here; serving
@@ -68,6 +70,37 @@ pub const BUD_CUSTODY_YEARS: u32 = 10;
 
 /// Expired but undeleted content transfers by open auction lasting one month.
 pub const BUD_EXPIRY_AUCTION_DAYS: u32 = 30;
+
+/// 2.0 monthly price per terabyte held, measured.
+pub const BUD_2_MONTHLY_USD_PER_TB: f64 = 0.016;
+
+/// Which B.U.D. version a piece of content is stored under, which sets its fee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudVersion {
+    /// 1.0: a share. The NFT is the charge (a plain transaction fee); the
+    /// content bytes stay on the user's device, so nothing is billed monthly.
+    V1_0,
+    /// 2.0: a held body, billed monthly per terabyte.
+    V2_0,
+    /// 3.0: a recipe, carried inside the upload base fee.
+    V3_0,
+}
+
+impl BudVersion {
+    /// Monthly storage fee for `tb` terabytes, in dollars.
+    ///
+    /// 1.0 holds nothing (the bytes are the user's own), 2.0 bills the
+    /// measured per-terabyte rate, and 3.0's fixed-size recipe already fits
+    /// inside the `$0.01` upload base so it bills nothing monthly.
+    #[must_use]
+    pub fn monthly_storage_fee_usd(self, tb: f64) -> f64 {
+        match self {
+            BudVersion::V1_0 => 0.0,
+            BudVersion::V2_0 => tb * BUD_2_MONTHLY_USD_PER_TB,
+            BudVersion::V3_0 => 0.0,
+        }
+    }
+}
 
 /// Extra fee per terabyte on upload: the ten-year custody cost above the base
 /// fee already paid. Zero while the cost fits inside $0.01, which is always
@@ -209,6 +242,17 @@ mod fee_scenario_tests {
         // So a recipe upload charges nothing extra, a held body charges the excess.
         assert!(approx(bud_upload_extra_fee_usd_per_tb(recipe), 0.0));
         assert!(bud_upload_extra_fee_usd_per_tb(body) > 0.0);
+    }
+
+    #[test]
+    fn version_monthly_fees_follow_the_published_schedule() {
+        // 1.0: the NFT's transaction fee only; no storage charge at any size.
+        assert!(approx(BudVersion::V1_0.monthly_storage_fee_usd(100.0), 0.0));
+        // 2.0: measured $0.016 per TB per month.
+        assert!(approx(BudVersion::V2_0.monthly_storage_fee_usd(1.0), 0.016));
+        assert!(approx(BudVersion::V2_0.monthly_storage_fee_usd(10.0), 0.16));
+        // 3.0: recipe rides the upload base; nothing monthly.
+        assert!(approx(BudVersion::V3_0.monthly_storage_fee_usd(100.0), 0.0));
     }
 
     #[test]
