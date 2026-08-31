@@ -8,8 +8,8 @@
 //! the measured residency numbers, not a second, separate set.
 
 use crate::cost_forecast::{
-    disk_band_tokens_per_second, frontier_model, frontier_profile, hourly_rent, owned_pc128_budget,
-    PC128_DISK_GIB,
+    disk_band_tokens_per_second_at, frontier_model, frontier_profile, hourly_rent,
+    owned_pc128_budget, PC128_DISK_GIB,
 };
 use crate::metric::{HardwareCostModel, TierBytes};
 use crate::residency::{PlanError, ResidencyPlan};
@@ -123,6 +123,32 @@ pub const fn serving_layer() -> LayerFootprint {
     }
 }
 
+/// A serving layer of the operator's choosing, so a cheaper box for a smaller
+/// (quantized) model is one call, not a new constant.
+#[must_use]
+pub const fn serving_layer_for(
+    ram_gib: u64,
+    nvme_gib: u64,
+    cores: u64,
+    watts: u64,
+) -> LayerFootprint {
+    LayerFootprint {
+        ram_gib,
+        nvme_gib,
+        hdd_gib: 0,
+        cores,
+        watts,
+    }
+}
+
+/// int4 serving: the frontier model shrinks fourfold, so 64 GiB host RAM and
+/// one 2 TB NVMe drive serve it (colibri measures a 48 GB Mac Mini at 0.30
+/// tok/s and a 64 GB box higher — same class).
+#[must_use]
+pub const fn serving_layer_int4() -> LayerFootprint {
+    serving_layer_for(64, 1862, 8, 100)
+}
+
 /// The four layers of one validator, summed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ValidatorBudget {
@@ -161,6 +187,18 @@ impl ValidatorBudget {
             serving: serving_layer(),
         }
     }
+
+    /// The same validator serving the model at int4: the serving layer drops
+    /// to a 64 GiB box, everything else is unchanged.
+    #[must_use]
+    pub const fn minimum_quantized(storage_disk_gib: u64) -> Self {
+        Self {
+            core: core_layer(),
+            zkvm: zkvm_layer(),
+            storage: storage_layer(storage_disk_gib),
+            serving: serving_layer_int4(),
+        }
+    }
 }
 
 /// The serving layer measured through [`crate::cost_forecast`]: the frontier
@@ -184,15 +222,32 @@ pub fn measure_serving(
     disk_gib_per_second: f64,
     rates: HardwareCostModel,
 ) -> Result<ServingMeasure, PlanError> {
-    let model = frontier_model(16);
+    measure_serving_at(16, disk_gib_per_second, 1.0, rates)
+}
+
+/// Measure the serving layer at a chosen weight precision and speculation
+/// speedup, so quantization and MTP show up as one number each instead of
+/// being retold in prose.
+///
+/// # Errors
+///
+/// [`PlanError`] when the model cannot be placed on the pc128 box.
+pub fn measure_serving_at(
+    weight_bits: u8,
+    disk_gib_per_second: f64,
+    speculation: f64,
+    rates: HardwareCostModel,
+) -> Result<ServingMeasure, PlanError> {
+    let model = frontier_model(weight_bits);
     let plan = ResidencyPlan::plan_bounded_by_disk(
         &model,
         owned_pc128_budget(),
-        frontier_profile(16),
+        frontier_profile(weight_bits),
         PC128_DISK_GIB * GIB,
     )?;
     let tier_bytes = TierBytes::from_plan(&plan);
-    let tokens_per_second_cold = disk_band_tokens_per_second(disk_gib_per_second);
+    let tokens_per_second_cold =
+        disk_band_tokens_per_second_at(disk_gib_per_second, weight_bits, speculation);
     Ok(ServingMeasure {
         tier_bytes,
         tokens_per_second_cold,
@@ -207,7 +262,7 @@ pub fn measure_serving(
 #[cfg(test)]
 mod validator_cost_tests {
     use super::*;
-    use crate::cost_forecast::market_rates;
+    use crate::cost_forecast::{gib_per_cold_token, market_rates, MTP_SPEEDUP};
 
     #[test]
     fn the_zkvm_owns_no_dedicated_hardware() {
@@ -278,7 +333,10 @@ mod validator_cost_tests {
     fn measure_serving_reports_disk_bound_throughput_and_market_rent() {
         let m = measure_serving(10.0, market_rates()).unwrap();
         assert_eq!(m.tier_bytes.accelerator, 0, "pc128 has no accelerator");
-        assert!((m.tokens_per_second_cold - 10.0 / 11.0).abs() < 1e-12);
+        assert!(
+            (m.tokens_per_second_cold - 10.0 / gib_per_cold_token(16)).abs() < 1e-12,
+            "bf16 reads four times the int4 bytes per token"
+        );
         assert!(
             (0.0..1.0).contains(&m.hourly_rent_dollars),
             "pc128 rents only host RAM, sub-dollar per hour, got {}",
@@ -286,5 +344,52 @@ mod validator_cost_tests {
         );
         let cost = m.cost_per_million_tokens_dollars.unwrap();
         assert!(cost > 0.0 && cost < 500.0, "market-rate token cost {cost}");
+    }
+
+    #[test]
+    fn int4_serving_costs_less_than_bf16() {
+        let p = market_pricelist();
+        let bf16 = serving_layer().capital_dollars(p);
+        let int4 = serving_layer_int4().capital_dollars(p);
+        assert!(
+            int4 < bf16,
+            "int4 serving {int4} must undercut bf16 serving {bf16}"
+        );
+    }
+
+    #[test]
+    fn quantized_validator_undercuts_the_bf16_total() {
+        let p = market_pricelist();
+        let bf16 = ValidatorBudget::minimum(1024).total_capital_dollars(p);
+        let int4 = ValidatorBudget::minimum_quantized(1024).total_capital_dollars(p);
+        assert!(int4 < bf16, "int4 validator {int4} must be cheaper than {bf16}");
+    }
+
+    #[test]
+    fn int4_shrinks_the_served_footprint_fourfold() {
+        let bf16 = measure_serving_at(16, 10.0, 1.0, market_rates()).unwrap();
+        let int4 = measure_serving_at(4, 10.0, 1.0, market_rates()).unwrap();
+        assert_eq!(
+            int4.tier_bytes.total(),
+            bf16.tier_bytes.total() / 4,
+            "int4 is a quarter of bf16 bytes"
+        );
+    }
+
+    #[test]
+    fn speculation_multiplies_throughput_and_divides_token_cost() {
+        let greedy = measure_serving_at(16, 10.0, 1.0, market_rates()).unwrap();
+        let speculative = measure_serving_at(16, 10.0, MTP_SPEEDUP, market_rates()).unwrap();
+        assert!(
+            (speculative.tokens_per_second_cold - greedy.tokens_per_second_cold * MTP_SPEEDUP)
+                .abs()
+                < 1e-12
+        );
+        let greedy_cost = greedy.cost_per_million_tokens_dollars.unwrap();
+        let speculative_cost = speculative.cost_per_million_tokens_dollars.unwrap();
+        assert!(
+            (speculative_cost - greedy_cost / MTP_SPEEDUP).abs() < 1e-6,
+            "speculation divides the per-token cost by its speedup"
+        );
     }
 }

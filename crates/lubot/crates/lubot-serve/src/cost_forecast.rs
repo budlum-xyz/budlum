@@ -130,20 +130,53 @@ pub const fn market_rates() -> HardwareCostModel {
     }
 }
 
-/// Cold-token disk cost of a frontier MoE, in GiB read per token. This is the
-/// figure streaming-from-disk serving is bound by (75 layers × 8 experts on a
-/// 744B int4 model, measured); throughput is disk bandwidth divided by this.
+/// Cold-token disk cost of a frontier MoE at int4, in GiB read per token
+/// (75 layers × 8 experts on a 744B int4 model, measured). Other precisions
+/// scale linearly in the weight size: bf16 reads four times the int4 bytes.
 pub const GIB_PER_COLD_TOKEN: f64 = 11.0;
 
-/// Tokens per second a disk-bound device serves: disk bandwidth divided by the
-/// cold-token read cost. Zero (not infinite) when the disk reports nothing.
+/// Cold-token disk cost at a weight precision: the int4 reference scaled by
+/// the weight bits.
 #[must_use]
-pub fn disk_band_tokens_per_second(disk_gib_per_second: f64) -> f64 {
+pub fn gib_per_cold_token(weight_bits: u8) -> f64 {
+    GIB_PER_COLD_TOKEN * f64::from(weight_bits) / 4.0
+}
+
+/// Tokens per second a disk-bound device serves at a weight precision and
+/// speculation speedup: disk bandwidth over the cold-token read cost, times
+/// the speedup. Zero (not infinite) when the disk reports nothing.
+#[must_use]
+pub fn disk_band_tokens_per_second_at(
+    disk_gib_per_second: f64,
+    weight_bits: u8,
+    speculation: f64,
+) -> f64 {
     if disk_gib_per_second <= 0.0 {
         0.0
     } else {
-        disk_gib_per_second / GIB_PER_COLD_TOKEN
+        disk_gib_per_second / gib_per_cold_token(weight_bits) * speculation
     }
+}
+
+/// Tokens per second at int4, greedy decoding.
+#[must_use]
+pub fn disk_band_tokens_per_second(disk_gib_per_second: f64) -> f64 {
+    disk_band_tokens_per_second_at(disk_gib_per_second, 4, 1.0)
+}
+
+/// Measured multi-token-prediction speedup: an int8 head predicts 2.2–2.8
+/// tokens per forward once the cache is warm (lower bound used). Speculation
+/// multiplies throughput, so it divides the per-token disk cost.
+pub const MTP_SPEEDUP: f64 = 2.2;
+
+/// Disk-bound throughput with speculation: the int4 greedy figure times the
+/// speculation speedup. `speculation` is 1.0 for greedy single-token decoding.
+#[must_use]
+pub fn disk_band_tokens_per_second_with_speculation(
+    disk_gib_per_second: f64,
+    speculation: f64,
+) -> f64 {
+    disk_band_tokens_per_second_at(disk_gib_per_second, 4, speculation)
 }
 
 /// Hourly rent of a tier footprint, in dollars: rate × bytes, no throughput.
