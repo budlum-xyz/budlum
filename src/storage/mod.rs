@@ -150,7 +150,10 @@ pub use transformed::{
     transform_content, CodecFlags, ContentClass, TransformError, TransformOpts, TransformedPayload,
 };
 
-pub use three_nft::{meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta};
+pub use three_nft::{
+    meta_tracks_public_recipe, MetadataVisibility, PinRow, PreviewMode, ThreeNftMeta,
+    ThreeNftRegistry, ThreeNftRegistryError,
+};
 pub use three_recipe::{
     recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, VideoRecipeSealed,
     RECIPE_VIDEO_MAGIC,
