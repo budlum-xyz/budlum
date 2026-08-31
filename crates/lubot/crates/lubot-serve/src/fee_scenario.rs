@@ -111,6 +111,56 @@ pub fn bud_upload_extra_fee_usd_per_tb(ten_year_storage_cost_usd: f64) -> f64 {
     (ten_year_storage_cost_usd - BUD_UPLOAD_BASE_USD).max(0.0)
 }
 
+/// One terabyte of content, in bytes (decimal TB, the unit the fee schedule
+/// quotes in).
+pub const BYTES_PER_TB: u64 = 1_000_000_000_000;
+
+/// How many fixed-size recipes cover `content_bytes` of 3.0 content when the
+/// average item is `item_bytes`. The network object of 3.0 is the recipe, so
+/// this count - not the terabytes - is what the network holds. Zero item size
+/// addresses nothing and returns zero rather than dividing by it.
+#[must_use]
+pub const fn recipes_for_content(content_bytes: u64, item_bytes: u64) -> u64 {
+    if item_bytes == 0 {
+        return 0;
+    }
+    content_bytes / item_bytes
+}
+
+/// Network bytes held for one terabyte of 3.0 content: recipes only, no body
+/// (the bytes live on the user's device under the 1.0 custody contract).
+#[must_use]
+pub const fn three_network_bytes_per_tb(item_bytes: u64) -> u64 {
+    recipes_for_content(BYTES_PER_TB, item_bytes).saturating_mul(BUD_RECIPE_PUBLIC_BYTES)
+}
+
+/// Ten-year network cost of holding one terabyte of 3.0 content, in dollars.
+///
+/// Priced as the NVMe capital upper bound of the recipe bytes (the same
+/// measure [`crate::validator_cost::nvme_custody_usd`] uses for a single
+/// recipe). Drive-level idle energy is a validator capital line
+/// ([`crate::validator_cost::storage_layer`]), not a per-recipe one, so it is
+/// deliberately not attributed here; at these byte counts it would not move
+/// the third decimal of a cent.
+#[must_use]
+pub fn three_network_ten_year_usd_per_tb(
+    item_bytes: u64,
+    p: crate::validator_cost::HardwarePricelist,
+) -> f64 {
+    crate::validator_cost::nvme_custody_usd(three_network_bytes_per_tb(item_bytes), p)
+}
+
+/// Monthly network cost of one terabyte of 3.0 content: the ten-year figure
+/// amortized over the custody period. This is the number to put next to
+/// 2.0's `BUD_2_MONTHLY_USD_PER_TB`.
+#[must_use]
+pub fn three_network_monthly_usd_per_tb(
+    item_bytes: u64,
+    p: crate::validator_cost::HardwarePricelist,
+) -> f64 {
+    three_network_ten_year_usd_per_tb(item_bytes, p) / f64::from(BUD_CUSTODY_YEARS * 12)
+}
+
 /// Where a piece of uploaded content sits in its custody lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustodyPhase {
@@ -268,6 +318,65 @@ mod fee_scenario_tests {
         assert_eq!(custody_phase(true, true, true), CustodyPhase::Deleted);
         assert_eq!(custody_phase(false, true, false), CustodyPhase::Auctioning);
         assert_eq!(custody_phase(false, true, true), CustodyPhase::Transferred);
+    }
+
+    /// The 3.0 network cost of a terabyte, measured: the network holds
+    /// recipes only, so the TB/month and TB/10-year figures are the capital
+    /// of those recipe bytes - orders of magnitude under 2.0's held-body
+    /// schedule, and under the $0.01 upload base for any realistic item size.
+    #[test]
+    fn three_network_cost_per_tb_is_measured_against_the_body_schedule() {
+        use crate::validator_cost::market_pricelist;
+        let p = market_pricelist();
+        const MIB: u64 = 1 << 20;
+        const GIB: u64 = 1 << 30;
+
+        // Item-count math: the network holds one 74-byte recipe per item.
+        assert_eq!(recipes_for_content(BYTES_PER_TB, 4 * MIB), 238_418);
+        assert_eq!(
+            three_network_bytes_per_tb(4 * MIB),
+            238_418 * BUD_RECIPE_PUBLIC_BYTES
+        );
+        // A zero item size addresses nothing instead of dividing by zero.
+        assert_eq!(recipes_for_content(BYTES_PER_TB, 0), 0);
+
+        // Ten-year and monthly network cost per TB of 3.0 content.
+        let ten_year_4mib = three_network_ten_year_usd_per_tb(4 * MIB, p);
+        let monthly_4mib = three_network_monthly_usd_per_tb(4 * MIB, p);
+        assert!(
+            approx(monthly_4mib * 120.0, ten_year_4mib),
+            "monthly must amortize to the ten-year figure"
+        );
+        // Measured magnitudes: ~$0.00115 per ten years, ~$9.6e-6 per month.
+        assert!(
+            (0.0005..0.005).contains(&ten_year_4mib),
+            "ten-year recipe custody per TB: {ten_year_4mib}"
+        );
+        assert!(monthly_4mib < 0.000_1, "monthly: {monthly_4mib}");
+
+        // Smaller items, same terabyte: more recipes, still under a cent at
+        // 1 MiB, and a thousandth of a cent at 1 GiB.
+        assert!(three_network_ten_year_usd_per_tb(MIB, p) < BUD_UPLOAD_BASE_USD);
+        assert!(three_network_ten_year_usd_per_tb(GIB, p) < 0.000_1);
+
+        // The honest break-even: below roughly 470 KiB per item the recipe
+        // bytes alone exceed the $0.01 base over ten years, and the upload
+        // excess rule (bud_upload_extra_fee_usd_per_tb) is what covers it.
+        assert!(three_network_ten_year_usd_per_tb(512 * 1024, p) < BUD_UPLOAD_BASE_USD);
+        assert!(three_network_ten_year_usd_per_tb(256 * 1024, p) > BUD_UPLOAD_BASE_USD);
+
+        // Against the 2.0 held-body schedule: three orders of magnitude.
+        let ratio = BUD_2_MONTHLY_USD_PER_TB / monthly_4mib;
+        assert!(
+            ratio > 1000.0,
+            "3.0 must undercut 2.0 per TB per month by 1000x, got {ratio}x"
+        );
+
+        // The body itself is the user's device under the 1.0 contract; the
+        // device-side ten-year cost of the same terabyte, for contrast, is
+        // the HDD line (capital + continuous energy), not a network bill.
+        let device_tb = crate::validator_cost::ten_year_storage_cost_usd_per_tb(p);
+        assert!(device_tb > 100.0, "device-side TB custody: {device_tb}");
     }
 
     #[test]
