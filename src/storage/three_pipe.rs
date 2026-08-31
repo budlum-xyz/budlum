@@ -10,7 +10,9 @@ use crate::storage::qr_carousel::{
 };
 use crate::storage::qr_codec::{CodecError, CodecKind, FrameMux};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
-use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
+use crate::storage::qr_payload::{
+    pack_payload_opts, payload_commitment, PayloadError, PayloadKind,
+};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
 use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
 use crate::storage::qr_video::{demux_optical_frames, QrVideo, QrVideoError, DEFAULT_FPS};
@@ -171,7 +173,15 @@ fn encode_payload(
     } else {
         (PayloadKind::ContentBytes, prepared.bytes)
     };
-    let packed = pack_payload(kind, &body)?;
+    // The A0 class drives the A1 compression attempt. Ciphertext never shrinks,
+    // and an entropy-coded class already refused zlib at classification, so the
+    // container skips the attempt instead of re-running it over bytes that
+    // cannot compress. The unpacked bytes are identical either way.
+    let allow_zlib = match kind {
+        PayloadKind::EncryptedContent => false,
+        _ => class.may_try_zlib(),
+    };
+    let packed = pack_payload_opts(kind, &body, allow_zlib)?;
     let commit = payload_commitment(&packed);
     let enc = CarouselEncoder::new(&packed, block_len)?;
     let stream_commitment = enc.params().stream_commitment(&commit);
@@ -297,7 +307,7 @@ mod tests {
     use crate::storage::payload_crypt::{open_payload, PayloadKey, SEALED_NONCE_LEN};
     use crate::storage::qr_carousel::{oneshot_drop_count, planned_drop_count};
     use crate::storage::qr_codec::{FrameMux, RawFrameConcat};
-    use crate::storage::qr_payload::unpack_payload;
+    use crate::storage::qr_payload::{packed_is_zlib, unpack_payload};
 
     /// Incompressible bytes, so `k` is large enough that `k + repair` and the
     /// `2k` carousel floor are different numbers. A repeated-text payload
@@ -448,5 +458,36 @@ mod tests {
         let (kind, body) = decode_frames(&enc.stream_commitment, &enc.frames).unwrap();
         assert_eq!(kind, PayloadKind::EncryptedContent);
         assert_eq!(open_payload(&key, &body).unwrap(), content);
+    }
+
+    /// The A0 class drives the A1 compression attempt: entropy-coded content
+    /// reaches the container with zlib skipped, and sealed content never
+    /// attempts zlib over ciphertext.
+    #[test]
+    fn entropy_and_sealed_classes_skip_the_a1_zlib_attempt() {
+        // JPEG-magic bytes classify as EntropyMedia: the A0 pass refused zlib,
+        // so A1 must not re-attempt it.
+        let mut jpegish = vec![0xff, 0xd8, 0xff, 0xe0];
+        jpegish.extend_from_slice(&[0xabu8; 2048]);
+        let enc = encode_plain(&jpegish, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        assert!(
+            !packed_is_zlib(&enc.packed),
+            "entropy class must skip the A1 zlib attempt"
+        );
+
+        // Sealed content is ciphertext: it must never attempt zlib either.
+        let key = PayloadKey::derive(b"class-policy-key");
+        let sealed = encode_plain(b"secret body ".repeat(50).as_slice(), 64, Some(&key)).unwrap();
+        assert!(
+            !packed_is_zlib(&sealed.packed),
+            "ciphertext must skip the A1 zlib attempt"
+        );
+
+        // Organic text still compresses: the policy only skips what cannot shrink.
+        let organic = encode_plain(b"organic body ".repeat(300).as_slice(), 64, None).unwrap();
+        assert!(
+            packed_is_zlib(&organic.packed),
+            "organic text must still attempt zlib at A1"
+        );
     }
 }

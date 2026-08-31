@@ -144,6 +144,22 @@ impl std::error::Error for PayloadError {}
 /// [`PayloadError::Empty`] on zero-length content;
 /// [`PayloadError::TooLarge`] when `content` exceeds [`MAX_PAYLOAD_CONTENT`].
 pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, PayloadError> {
+    pack_payload_opts(kind, content, true)
+}
+
+/// Pack with an explicit zlib policy.
+///
+/// [`pack_payload`] always attempts shrink-only zlib. This variant lets the A0
+/// content class decide: an entropy-coded, ciphertext, or executable class
+/// already refused zlib at classification, so re-attempting it here only burns
+/// CPU on bytes that cannot shrink. Passing `false` stores the body raw. The
+/// packed bytes a reader unpacks are identical either way; only the attempt is
+/// skipped.
+pub fn pack_payload_opts(
+    kind: PayloadKind,
+    content: &[u8],
+    allow_zlib: bool,
+) -> Result<Vec<u8>, PayloadError> {
     if content.is_empty() {
         return Err(PayloadError::Empty);
     }
@@ -154,9 +170,13 @@ pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, Payloa
         });
     }
     let content_sha = calculate_hash_bytes(content);
-    let (body, flags) = match try_zlib9(content) {
-        Some(z) if z.len() < content.len() => (z, FLAG_ZLIB),
-        _ => (content.to_vec(), 0u8),
+    let (body, flags) = if allow_zlib {
+        match try_zlib9(content) {
+            Some(z) if z.len() < content.len() => (z, FLAG_ZLIB),
+            _ => (content.to_vec(), 0u8),
+        }
+    } else {
+        (content.to_vec(), 0u8)
     };
 
     let mut out = Vec::with_capacity(THREE_PAYLOAD_HEADER_LEN + body.len());
@@ -322,6 +342,24 @@ mod tests {
             pack_payload(PayloadKind::ContentBytes, b"").unwrap_err(),
             PayloadError::Empty
         );
+    }
+
+    /// The zlib policy knob is real: with the attempt allowed, repetitive text
+    /// carries the zlib flag; with it refused, the same text is stored raw and
+    /// still unpacks to the same bytes.
+    #[test]
+    fn pack_opts_without_zlib_skips_the_attempt_and_still_round_trips() {
+        let content = b"policy knob text ".repeat(300);
+        let with_zlib = pack_payload(PayloadKind::ContentBytes, &content).unwrap();
+        let without = pack_payload_opts(PayloadKind::ContentBytes, &content, false).unwrap();
+
+        assert!(packed_is_zlib(&with_zlib));
+        assert!(!packed_is_zlib(&without));
+
+        let (_, raw_with) = unpack_payload(&with_zlib).unwrap();
+        let (_, raw_without) = unpack_payload(&without).unwrap();
+        assert_eq!(raw_with, content.as_slice());
+        assert_eq!(raw_without, content.as_slice());
     }
 
     #[test]
