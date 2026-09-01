@@ -37,7 +37,7 @@ impl std::fmt::Display for RoleId {
             roles::PROVER => write!(f, "prover"),
             roles::STORAGE_OPERATOR => write!(f, "storage_operator"),
             roles::AI_VERIFIER => write!(f, "ai_verifier"),
-            roles::LUBOT_OPERATOR => write!(f, "lubot_operator"),
+            roles::AGENT_OPERATOR => write!(f, "agent_operator"),
             roles::CONTENT_VALIDATOR => write!(f, "content_validator"),
             RoleId(id) => write!(f, "role#{id}"),
         }
@@ -75,8 +75,8 @@ pub mod roles {
     /// Uses the same registry primitive as all other roles.
     pub const ATTESTER: RoleId = RoleId(7);
 
-    /// A Lubot decentralized AI operator (compute-bond, independent of PoS).
-    pub const LUBOT_OPERATOR: RoleId = RoleId(8);
+    /// A Agent decentralized AI operator (compute-bond, independent of PoS).
+    pub const AGENT_OPERATOR: RoleId = RoleId(8);
 
     /// SocialFi content validator - validates D-Web content authenticity.
     /// Unification: new role for SocialFi.
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(format!("{}", roles::PROVER), "prover");
         assert_eq!(format!("{}", roles::STORAGE_OPERATOR), "storage_operator");
         assert_eq!(format!("{}", roles::AI_VERIFIER), "ai_verifier");
-        assert_eq!(format!("{}", roles::LUBOT_OPERATOR), "lubot_operator");
+        assert_eq!(format!("{}", roles::AGENT_OPERATOR), "agent_operator");
         assert_eq!(format!("{}", roles::CONTENT_VALIDATOR), "content_validator");
     }
 
@@ -118,8 +118,8 @@ mod tests {
     }
 
     #[test]
-    fn lubot_operator_role_id_value_is_8() {
-        assert_eq!(roles::LUBOT_OPERATOR.value(), 8);
+    fn agent_operator_role_id_value_is_8() {
+        assert_eq!(roles::AGENT_OPERATOR.value(), 8);
     }
 
     #[test]
@@ -131,6 +131,6 @@ mod tests {
     fn role_id_ordering() {
         assert!(RoleId::new(1) < RoleId::new(2));
         assert!(roles::VALIDATOR < roles::RELAYER);
-        assert!(roles::ATTESTER < roles::LUBOT_OPERATOR);
+        assert!(roles::ATTESTER < roles::AGENT_OPERATOR);
     }
 }

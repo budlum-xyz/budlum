@@ -672,7 +672,7 @@ fn is_scannable(path: &Path) -> bool {
 /// locations by hand. If the same hash is produced in a fourth place tomorrow, a
 /// hand-kept list would stay silent - and that silence is exactly what the gate
 /// exists to protect against. The measurement confirmed it: the tree had more
-/// (`src/execution/zkvm.rs`, `src/lubot/verify.rs`, `src/domain/storage_deal.rs`).
+/// (`src/execution/zkvm.rs`, `src/agent/verify.rs`, `src/domain/storage_deal.rs`).
 ///
 /// The gate now says "find whatever is there and inspect it" rather than "inspect what I know about".
 fn discover_producers(root: &Path) -> Vec<Producer> {
@@ -983,7 +983,7 @@ pub fn self_test() -> Result<String, String> {
         "src/prover",
         "src/ai/execution",
         "src/execution",
-        "src/lubot",
+        "src/agent",
         "src/domain",
         "budzero/bud-proof/src",
     ] {
@@ -1048,7 +1048,7 @@ fn write_good(tmp: &Path) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     fs::write(
-        tmp.join("src/lubot/verify.rs"),
+        tmp.join("src/agent/verify.rs"),
         "let mut hasher = Keccak256::new();\nhasher.update(&program_bytes);\n",
     )
     .map_err(|e| e.to_string())?;
@@ -1247,7 +1247,7 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
         "src/prover/mod.rs",
         "src/ai/execution/guest.rs",
         "src/execution/zkvm.rs",
-        "src/lubot/verify.rs",
+        "src/agent/verify.rs",
     ] {
         fs::remove_file(tmp.join(f)).map_err(|e| e.to_string())?;
     }

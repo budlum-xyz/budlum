@@ -42,9 +42,9 @@ enum ProtoTransactionType {
     PRIVATE_TRANSFER_SUBMIT = 36;
     PRIVACY_NOTE_INSERT = 37;
     AI_ATTACH_EXECUTION_PROOF = 38;
-    LUBOT_OPERATOR_BOND = 39;
-    LUBOT_OPERATOR_UNBOND = 40;
-    LUBOT_OPERATOR_WITHDRAW = 41;
+    AGENT_OPERATOR_BOND = 39;
+    AGENT_OPERATOR_UNBOND = 40;
+    AGENT_OPERATOR_WITHDRAW = 41;
     REGISTER_CONSENSUS_KEYS = 42;
     // The developer's own claim that an app record is theirs. Distinct from
     // HUB_VERIFY_APP below: this proves ownership, not audit.

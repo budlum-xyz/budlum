@@ -447,8 +447,8 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// Lubot operator (RoleId 8) - must be preserved
-    pub fn register_lubot_operator(
+    /// Agent operator (RoleId 8) - must be preserved
+    pub fn register_agent_operator(
         &mut self,
         account: Address,
         stake: u64,
@@ -456,7 +456,7 @@ impl PermissionlessRegistry {
     ) -> Result<(), RegistryError> {
         self.register(
             account,
-            crate::registry::role::roles::LUBOT_OPERATOR,
+            crate::registry::role::roles::AGENT_OPERATOR,
             stake,
             current_epoch,
         )
@@ -593,7 +593,7 @@ impl PermissionlessRegistry {
     /// This takes a bare `SlashingCondition` and trusts it. That is correct
     /// for the two callers it has, both of which sit behind consensus:
     /// `Account::apply_slashing` mirrors a slash the consensus layer already
-    /// decided, and the executor path slashes a Lubot bond on an equivocation
+    /// decided, and the executor path slashes a Agent bond on an equivocation
     /// the same block proved.
     ///
     /// It is the wrong entry point for anything carrying a
@@ -620,7 +620,7 @@ impl PermissionlessRegistry {
     }
 
     /// Slash only the specified application role without mutating independent
-    /// Consensus/storage/relayer bonds. Lubot equivocation uses this path because
+    /// Consensus/storage/relayer bonds. Agent equivocation uses this path because
     /// The approved penalty is the RoleId(8) bond, not an implicit validator
     /// Slash unsupported by consensus evidence.
     pub fn slash_role_only(
@@ -826,8 +826,8 @@ impl PermissionlessRegistry {
         self.is_active(account, crate::registry::role::roles::MASTER_VERIFIER)
     }
 
-    pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        self.get(account, crate::registry::role::roles::LUBOT_OPERATOR)
+    pub fn is_active_agent_operator(&self, account: &Address) -> bool {
+        self.get(account, crate::registry::role::roles::AGENT_OPERATOR)
             .is_some_and(Registration::is_slashable)
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
         );
     }
 
-    /// `slash_role_only` is the path the executor uses for Lubot equivocation;
+    /// `slash_role_only` is the path the executor uses for Agent equivocation;
     /// it must refuse a replay for the same reason.
     #[test]
     fn slashing_a_role_only_twice_is_refused() {
@@ -1234,25 +1234,25 @@ mod tests {
     }
 
     #[test]
-    fn d4_attester_lubot_content_validator_roles() {
+    fn d4_attester_agent_content_validator_roles() {
         let mut reg = PermissionlessRegistry::new();
         reg.register_attester(addr(20), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        reg.register_lubot_operator(addr(21), MIN_REGISTRATION_STAKE, 0)
+        reg.register_agent_operator(addr(21), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         reg.register_content_validator(addr(22), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
 
         assert!(reg.is_active_attester(&addr(20)));
-        assert!(reg.is_active_lubot_operator(&addr(21)));
+        assert!(reg.is_active_agent_operator(&addr(21)));
         assert!(reg.is_active_content_validator(&addr(22)));
 
         // Same account can hold all three new roles
         reg.register_attester(addr(30), 5_000, 0).unwrap();
-        reg.register_lubot_operator(addr(30), 3_000, 0).unwrap();
+        reg.register_agent_operator(addr(30), 3_000, 0).unwrap();
         reg.register_content_validator(addr(30), 2_000, 0).unwrap();
         assert!(reg.is_active_attester(&addr(30)));
-        assert!(reg.is_active_lubot_operator(&addr(30)));
+        assert!(reg.is_active_agent_operator(&addr(30)));
         assert!(reg.is_active_content_validator(&addr(30)));
     }
 

@@ -21,7 +21,7 @@
 # The four, and why each one is still here rather than wired:
 #
 #   src/ai/execution/verify.rs   verify_execution_proof_structural
-#   src/lubot/verify.rs          verify_inference_stark
+#   src/agent/verify.rs          verify_inference_stark
 #       All three verify a STARK over an execution trace, and all three are
 #       blocked on the same gate: `MainnetActivation` ships with
 #       `verify_merkle_enabled: false` and `verify_inference_enabled: false`,
@@ -66,8 +66,8 @@
 # that contradicts the caller graph is worse than no note: it tells the next
 # reader not to look.
 #
-#   src/lubot/mod.rs             validate_inference_grant
-#       Wired into `build_lubot_request`, which now takes the grant as a
+#   src/agent/mod.rs             validate_inference_grant
+#       Wired into `build_agent_request`, which now takes the grant as a
 #       required argument. Two doc comments already claimed the check was
 #       performed; nothing performed it.
 #

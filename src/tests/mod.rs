@@ -64,7 +64,7 @@ pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
 #[cfg(test)]
-pub mod lubot_runtime;
+pub mod agent_runtime;
 pub mod migration_v2;
 #[cfg(test)]
 pub mod permissionless;

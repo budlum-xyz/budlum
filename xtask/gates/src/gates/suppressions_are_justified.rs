@@ -381,13 +381,13 @@ const BUDGETS: &[Budget] = &[
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
     },
     Budget {
-        file: "src/lubot/executor.rs",
+        file: "src/agent/executor.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
     },
     Budget {
-        file: "src/lubot/mod.rs",
+        file: "src/agent/mod.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
@@ -477,10 +477,10 @@ const BUDGETS: &[Budget] = &[
         reason: "test code indexing two slices in step, where the index is the point",
     },
     Budget {
-        file: "src/lubot/inference.rs",
+        file: "src/agent/inference.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
-        reason: "build_lubot_request is a closed-circuit inference entry point whose eight parameters are all required request fields (requester, model, input, fee, timing x2, grant, perception) and none of which groups into a meaningful struct without hiding which fields a caller must supply",
+        reason: "build_agent_request is a closed-circuit inference entry point whose eight parameters are all required request fields (requester, model, input, fee, timing x2, grant, perception) and none of which groups into a meaningful struct without hiding which fields a caller must supply",
     },
     Budget {
         file: "src/light_client/mod.rs",

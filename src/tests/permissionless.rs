@@ -409,12 +409,12 @@ fn unstake_release_epoch_follows_the_governance_parameter() {
 }
 
 /// The RoleId(8) bond must unbond on the same governance window as every other
-/// Role. `begin_lubot_operator_unbonding` called `begin_unbonding_with_delay`
+/// Role. `begin_agent_operator_unbonding` called `begin_unbonding_with_delay`
 /// With the hard-coded constant, so a governance vote moved every role's window
 /// Except this one. Canary: restore the `_with_delay(.., UNBONDING_EPOCHS)`
 /// Call and this fails with `7` instead of the configured window.
 #[test]
-fn lubot_operator_unbonding_follows_the_governance_parameter() {
+fn agent_operator_unbonding_follows_the_governance_parameter() {
     use crate::registry::RegistryParams;
 
     let operator = addr(0x52);
@@ -429,14 +429,14 @@ fn lubot_operator_unbonding_follows_the_governance_parameter() {
     params.validate().expect("33 epochs is inside the bounds");
     state.registry.set_params(params);
 
-    let bond = state.required_lubot_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
+    let bond = state.required_agent_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
     state
-        .bond_lubot_operator(&operator, bond, crate::core::transaction::DEFAULT_CHAIN_ID)
+        .bond_agent_operator(&operator, bond, crate::core::transaction::DEFAULT_CHAIN_ID)
         .expect("bond at the required floor");
 
     state.epoch_index = 11;
     let release = state
-        .begin_lubot_operator_unbonding(&operator)
+        .begin_agent_operator_unbonding(&operator)
         .expect("an operator with no open obligations may unbond");
     assert_eq!(
         release,
@@ -700,19 +700,19 @@ fn validator_stake_is_not_withdrawable_through_the_role_bond_path() {
 /// The RoleId(8) bond has its own pair, which also checks open inference
 /// Obligations and charges the fee. Routing it here would skip both.
 #[test]
-fn the_lubot_bond_is_not_withdrawable_through_the_role_bond_path() {
+fn the_agent_bond_is_not_withdrawable_through_the_role_bond_path() {
     let operator = addr(0x67);
     let mut state = funded_state(operator, 1_000_000);
-    let bond = state.required_lubot_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
+    let bond = state.required_agent_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
     state
-        .bond_lubot_operator(&operator, bond, crate::core::transaction::DEFAULT_CHAIN_ID)
+        .bond_agent_operator(&operator, bond, crate::core::transaction::DEFAULT_CHAIN_ID)
         .unwrap();
 
     state
-        .begin_role_bond_unbonding(&operator, roles::LUBOT_OPERATOR)
+        .begin_role_bond_unbonding(&operator, roles::AGENT_OPERATOR)
         .expect_err("the RoleId(8) bond has its own unbonding entry point");
     state
-        .withdraw_role_bond(&operator, roles::LUBOT_OPERATOR)
+        .withdraw_role_bond(&operator, roles::AGENT_OPERATOR)
         .expect_err("the RoleId(8) bond has its own withdrawal entry point");
 }
 

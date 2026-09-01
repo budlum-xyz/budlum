@@ -1,6 +1,6 @@
 # AI Inference Verification: What Is and Is Not Verified
 
-Status document for the Lubot AI layer. It exists because the README and
+Status document for the Agent AI layer. It exists because the README and
 several module headers described on-chain inference verification as a working
 feature, while the code deliberately refuses to perform it.
 
@@ -8,22 +8,22 @@ feature, while the code deliberately refuses to perform it.
 
 | Capability | State | Where |
 |---|---|---|
-| Model registry, operator compute-bond, Pollen-gated data access | working | `src/lubot/`, `src/ai/registry.rs` |
+| Model registry, operator compute-bond, Pollen-gated data access | working | `src/agent/`, `src/ai/registry.rs` |
 | Structural checks on an execution proof (commitments, model binding, program-hash match) | working | `verify_execution_proof_structural_with_model` |
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
 | Initial guest memory (weights, biases, input) bound by the AIR | working | `COL_MEM_INIT_ACC`, `initial_state_root` |
 | Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
 | STARK verification of an inference proof on the transaction path | working | `src/execution/executor.rs` |
-| Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `lubot::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
+| Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `agent::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
 | Model modality declaration checked against the read it is asked to serve | working | `AiModelSpec::modalities`, `ModalitySet` |
-| SocialFi bridge: finalized Lubot output minted as requester-owned NFT | working (best-effort) | `src/execution/executor.rs` → `lubot::social::lubot_output_to_nft` |
+| SocialFi bridge: finalized Agent output minted as requester-owned NFT | working (best-effort) | `src/execution/executor.rs` → `agent::social::agent_output_to_nft` |
 | `VerifyInference` opcode (0x1F) inside the zkVM | **fail-closed Poseidon binding**: `rd = 1` iff `output_c == poseidon4_hash(model_c, input_c)` for a proof window that fits memory, else 0; mainnet decoding is gated off | `budzero/bud-vm/src/lib.rs` |
 
 ## Perception declaration (V3)
 
 An inference request now carries what it intends to read: the Pollen asset,
 the B.U.D. content id, the modality (text/image/audio/video) and the declared
-size in that modality's unit (`src/lubot/perception.rs`). The declaration is
+size in that modality's unit (`src/agent/perception.rs`). The declaration is
 inside the request id (`BDLM_AI_REQUEST_ID_V3`), so an operator cannot answer
 a different read than the one paid for. The executor admits a request only if
 all of the following hold (`admit_inference_request`):
@@ -39,7 +39,7 @@ all of the following hold (`admit_inference_request`):
 ## SocialFi bridge
 
 When an inference outcome finalizes, the executor mints the output bytes as a
-`lubot-ai` NFT owned by the requester (best-effort: a mint refusal - e.g. a
+`agent-ai` NFT owned by the requester (best-effort: a mint refusal - e.g. a
 duplicate content id - is logged, never a block rejection, because the outcome
 has already settled and the bridge is a product surface, not a consensus
 condition).
@@ -254,8 +254,8 @@ proof-required models.
 These functions compile and are unit-tested, but nothing in a production path
 calls them. They are the scaffolding for the feature, not the feature:
 
-- `src/lubot/verify.rs::verify_inference_stark`: only its own tests
-- `src/lubot/verify.rs::generate_and_verify_proof`: only its own tests
+- `src/agent/verify.rs::verify_inference_stark`: only its own tests
+- `src/agent/verify.rs::generate_and_verify_proof`: only its own tests
 
 `src/ai/execution/stark.rs::verify_execution_proof_stark` and
 `src/ai/execution/verify.rs::verify_execution_proof_full` are absent from the
@@ -316,7 +316,7 @@ written, and mainnet keeps the opcode undecodable until it is.
 
 ## RPC / economics audit (2026-08-14, skill §10.5 pass)
 
-Every Lubot surface was checked against live code with call-site evidence:
+Every Agent surface was checked against live code with call-site evidence:
 
 | Surface | Result | Evidence |
 |---|---|---|

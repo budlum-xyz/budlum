@@ -3307,59 +3307,59 @@ impl Blockchain {
                     reasons.push("invalid_consensus_keys".to_string());
                 }
             }
-            crate::core::transaction::TransactionType::LubotOperatorBond => {
-                if tx.amount < self.state.required_lubot_bond(tx.chain_id) {
-                    reasons.push("lubot_operator_bond_below_network_floor".to_string());
+            crate::core::transaction::TransactionType::AgentOperatorBond => {
+                if tx.amount < self.state.required_agent_bond(tx.chain_id) {
+                    reasons.push("agent_operator_bond_below_network_floor".to_string());
                 }
                 if tx.to != Address::zero() || !tx.data.is_empty() {
-                    reasons.push("invalid_lubot_operator_bond_shape".to_string());
+                    reasons.push("invalid_agent_operator_bond_shape".to_string());
                 }
                 if self
                     .state
                     .registry
-                    .get(&tx.from, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .get(&tx.from, crate::registry::role::roles::AGENT_OPERATOR)
                     .is_some()
                 {
-                    reasons.push("lubot_operator_already_registered".to_string());
+                    reasons.push("agent_operator_already_registered".to_string());
                 }
             }
-            crate::core::transaction::TransactionType::LubotOperatorUnbond => {
+            crate::core::transaction::TransactionType::AgentOperatorUnbond => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
-                    reasons.push("invalid_lubot_operator_unbond_shape".to_string());
+                    reasons.push("invalid_agent_operator_unbond_shape".to_string());
                 }
                 if !self
                     .state
                     .registry
-                    .is_active(&tx.from, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .is_active(&tx.from, crate::registry::role::roles::AGENT_OPERATOR)
                 {
-                    reasons.push("lubot_operator_not_active".to_string());
+                    reasons.push("agent_operator_not_active".to_string());
                 }
                 if self
                     .state
                     .ai_registry
                     .operator_has_open_obligations(&tx.from, self.state.current_block_height)
                 {
-                    reasons.push("lubot_operator_has_open_obligations".to_string());
+                    reasons.push("agent_operator_has_open_obligations".to_string());
                 }
             }
-            crate::core::transaction::TransactionType::LubotOperatorWithdraw => {
+            crate::core::transaction::TransactionType::AgentOperatorWithdraw => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
-                    reasons.push("invalid_lubot_operator_withdraw_shape".to_string());
+                    reasons.push("invalid_agent_operator_withdraw_shape".to_string());
                 }
                 match self
                     .state
                     .registry
-                    .get(&tx.from, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .get(&tx.from, crate::registry::role::roles::AGENT_OPERATOR)
                 {
                     Some(registration) => match registration.status {
                         crate::registry::MemberStatus::Unbonding { release_epoch }
                             if self.state.epoch_index >= release_epoch => {}
                         crate::registry::MemberStatus::Unbonding { .. } => {
-                            reasons.push("lubot_bond_still_unbonding".to_string());
+                            reasons.push("agent_bond_still_unbonding".to_string());
                         }
-                        _ => reasons.push("lubot_operator_not_unbonding".to_string()),
+                        _ => reasons.push("agent_operator_not_unbonding".to_string()),
                     },
-                    None => reasons.push("lubot_operator_not_registered".to_string()),
+                    None => reasons.push("agent_operator_not_registered".to_string()),
                 }
             }
             crate::core::transaction::TransactionType::Unstake => {
@@ -3392,9 +3392,9 @@ impl Blockchain {
                 if !self
                     .state
                     .registry
-                    .is_active(&tx.from, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .is_active(&tx.from, crate::registry::role::roles::AGENT_OPERATOR)
                 {
-                    reasons.push("lubot_operator_unauthorized".to_string());
+                    reasons.push("agent_operator_unauthorized".to_string());
                 }
             }
             crate::core::transaction::TransactionType::PrivateTransferSubmit(_)
@@ -3414,16 +3414,16 @@ impl Blockchain {
                 if !self
                     .state
                     .registry
-                    .is_active(&verifier, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .is_active(&verifier, crate::registry::role::roles::AGENT_OPERATOR)
                 {
-                    reasons.push("lubot_slash_operator_inactive".to_string());
+                    reasons.push("agent_slash_operator_inactive".to_string());
                 }
                 if !self.state.ai_registry.is_disputable(
                     &request_id,
                     &verifier,
                     self.state.current_block_height,
                 ) {
-                    reasons.push("lubot_equivocation_evidence_missing".to_string());
+                    reasons.push("agent_equivocation_evidence_missing".to_string());
                 }
             }
             _ => {}

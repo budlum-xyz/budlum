@@ -9,7 +9,7 @@
 //! 3. Permissionless relayer → `RELAYER` (RoleId 3)
 //! 4. Supply-chain attester → `ATTESTER` (RoleId 7)
 //!
-//! And that `LUBOT_OPERATOR` (RoleId 8) is preserved (never removed).
+//! And that `AGENT_OPERATOR` (RoleId 8) is preserved (never removed).
 //!
 //! There is exactly ONE registry type and ONE stake/slashing model - no
 //! Per-domain allow-lists, no separate registries. The consumer gates
@@ -30,7 +30,7 @@ fn addr(b: u8) -> Address {
 }
 
 /// One registry instance simultaneously serves all four v1 domains plus the
-/// Preserved `LUBOT_OPERATOR` role. This is the core "merge" assertion.
+/// Preserved `AGENT_OPERATOR` role. This is the core "merge" assertion.
 #[test]
 fn d4_single_registry_serves_all_four_domains() {
     let mut reg = PermissionlessRegistry::new();
@@ -45,15 +45,15 @@ fn d4_single_registry_serves_all_four_domains() {
     reg.register_attester(addr(4), MIN_REGISTRATION_STAKE, 0)
         .expect("attester (supply-chain) registration");
 
-    // LUBOT_OPERATOR must remain preserved (acceptance criterion).
-    reg.register_lubot_operator(addr(5), MIN_REGISTRATION_STAKE, 0)
-        .expect("lubot operator registration");
+    // AGENT_OPERATOR must remain preserved (acceptance criterion).
+    reg.register_agent_operator(addr(5), MIN_REGISTRATION_STAKE, 0)
+        .expect("agent operator registration");
 
     assert!(reg.is_active_master_verifier(&addr(1)));
     assert!(reg.is_active_content_validator(&addr(2)));
     assert!(reg.is_active_relayer(&addr(3)));
     assert!(reg.is_active_attester(&addr(4)));
-    assert!(reg.is_active_lubot_operator(&addr(5)));
+    assert!(reg.is_active_agent_operator(&addr(5)));
 
     // Exactly one registry holds every entry (no per-domain split).
     assert_eq!(reg.len(), 5);
@@ -166,18 +166,18 @@ fn d4_cross_role_slash_jails_all_four_domains() {
     assert!(matches!(validator.status, MemberStatus::Slashed));
 }
 
-/// LUBOT_OPERATOR (RoleId 8) is preserved across merge, its RoleId is
+/// AGENT_OPERATOR (RoleId 8) is preserved across merge, its RoleId is
 /// Pinned and its registration path is intact.
 #[test]
-fn d4_lubot_operator_preserved() {
+fn d4_agent_operator_preserved() {
     let mut reg = PermissionlessRegistry::new();
-    reg.register_lubot_operator(addr(8), MIN_REGISTRATION_STAKE, 0)
+    reg.register_agent_operator(addr(8), MIN_REGISTRATION_STAKE, 0)
         .unwrap();
 
-    assert!(reg.is_active_lubot_operator(&addr(8)));
-    assert_eq!(roles::LUBOT_OPERATOR.value(), 8);
+    assert!(reg.is_active_agent_operator(&addr(8)));
+    assert_eq!(roles::AGENT_OPERATOR.value(), 8);
 
-    // Slashing the validator role of the same account also jails its lubot
+    // Slashing the validator role of the same account also jails its agent
     // Operator role - the merged model never leaves a role behind.
     let a = addr(8);
     reg.register_validator(a, 10_000, 0).unwrap();
@@ -188,7 +188,7 @@ fn d4_lubot_operator_preserved() {
         FIXED_POINT_SCALE / 2,
     )
     .unwrap();
-    assert!(!reg.is_active_lubot_operator(&a));
+    assert!(!reg.is_active_agent_operator(&a));
 }
 
 /// Slashing a malicious relayer (the `relayer_invalid_proof` / `MaliciousBehaviour`

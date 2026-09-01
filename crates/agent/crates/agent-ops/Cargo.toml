@@ -1,0 +1,22 @@
+[package]
+name = "agent-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Agent operator CLI skeleton (register/bond/serve/tune/status)"
+
+[[bin]]
+name = "agent-ops"
+path = "src/main.rs"
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+agent-data = { path = "../agent-data" }
+agent-integrations = { path = "../agent-integrations" }
+agent-serve = { path = "../agent-serve" }
+agent-tune = { path = "../agent-tune" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

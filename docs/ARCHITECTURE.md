@@ -610,7 +610,7 @@ stateDiagram-v2
   note right of Active
     RoleId: VALIDATOR VERIFIER RELAYER
     PROVER STORAGE_OPERATOR AI_VERIFIER
-    ATTESTER LUBOT_OPERATOR CONTENT_VALIDATOR
+    ATTESTER AGENT_OPERATOR CONTENT_VALIDATOR
     Cross-role: slash one -> jail ALL
   end note
 
@@ -1190,12 +1190,12 @@ flowchart TD
     Finality --> FinalityReward[Finality signing reward]
   end
 
-  subgraph sg2["Role 2: Lubot CPU/System Provider"]
-    Active --> LubotBond[LUBOT_OPERATOR role bond]
-    LubotBond --> LubotCompute[CPU/GPU compute for AI inference]
-    LubotCompute --> LubotServe[Serve Lubot inference requests]
-    LubotServe --> LubotReward[Inference service reward]
-    LubotServe --> LubotSlash[Compute fault -> slash]
+  subgraph sg2["Role 2: Agent CPU/System Provider"]
+    Active --> AgentBond[AGENT_OPERATOR role bond]
+    AgentBond --> AgentCompute[CPU/GPU compute for AI inference]
+    AgentCompute --> AgentServe[Serve Agent inference requests]
+    AgentServe --> AgentReward[Inference service reward]
+    AgentServe --> AgentSlash[Compute fault -> slash]
   end
 
   subgraph sg3["Role 3: B.U.D. Storage Verification"]
@@ -1209,7 +1209,7 @@ flowchart TD
 
   subgraph sg4[Cross-Role Slashing]
     Slash[Slashing evidence] --> Jailed[Jailed until epoch N]
-    LubotSlash --> Jailed
+    AgentSlash --> Jailed
     StorageSlash --> Jailed
     Jailed --> Release[Jail release]
     Release --> Active
@@ -1978,7 +1978,7 @@ hand:
 | New site found | What it does |
 |---|---|
 | `src/execution/zkvm.rs` | `hash_u64_words`, the zkVM's own program hash |
-| `src/lubot/verify.rs` | `build_public_inputs` on the Lubot STARK path |
+| `src/agent/verify.rs` | `build_public_inputs` on the Agent STARK path |
 | `src/domain/storage_deal.rs` | storage challenge program hash |
 
 All three are production code, all three were where the gate could not see.

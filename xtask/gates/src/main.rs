@@ -91,9 +91,9 @@ mod gates {
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
-    pub mod lubot_prompt_is_true;
-    pub mod lubot_reads;
-    pub mod lubot_zk_inference;
+    pub mod agent_prompt_is_true;
+    pub mod agent_reads;
+    pub mod agent_zk_inference;
     pub mod master_derivation;
     pub mod mempool_mev_free;
     pub mod mermaid;
@@ -228,12 +228,12 @@ const GATES: &[Gate] = &[
         self_test: gates::mempool_mev_free::self_test,
     },
     Gate {
-        name: "lubot-zk-inference",
+        name: "agent-zk-inference",
         replaces: None,
-        run: gates::lubot_zk_inference::run,
+        run: gates::agent_zk_inference::run,
         run_log: None,
         run_args: None,
-        self_test: gates::lubot_zk_inference::self_test,
+        self_test: gates::agent_zk_inference::self_test,
     },
     Gate {
         name: "bridge-dual-tree",
@@ -476,11 +476,11 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "lubot-prompt-is-true",
+        name: "agent-prompt-is-true",
         replaces: None,
-        run: gates::lubot_prompt_is_true::run,
+        run: gates::agent_prompt_is_true::run,
         run_args: None,
-        self_test: gates::lubot_prompt_is_true::self_test,
+        self_test: gates::agent_prompt_is_true::self_test,
         run_log: None,
     },
     Gate {
@@ -921,12 +921,12 @@ const GATES: &[Gate] = &[
         self_test: gates::master_derivation::self_test,
     },
     Gate {
-        name: "lubot-reads-but-does-not-generate",
-        replaces: Some("check-lubot-reads-but-does-not-generate.sh"),
-        run: gates::lubot_reads::run,
+        name: "agent-reads-but-does-not-generate",
+        replaces: Some("check-agent-reads-but-does-not-generate.sh"),
+        run: gates::agent_reads::run,
         run_log: None,
         run_args: None,
-        self_test: gates::lubot_reads::self_test,
+        self_test: gates::agent_reads::self_test,
     },
     Gate {
         name: "pinned-downloads-are-really-pinned",

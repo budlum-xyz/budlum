@@ -27,7 +27,7 @@ pub mod error;
 pub mod execution;
 pub mod gateway;
 pub mod light_client;
-pub mod lubot;
+pub mod agent;
 pub mod mempool;
 pub mod network;
 pub mod pollen;

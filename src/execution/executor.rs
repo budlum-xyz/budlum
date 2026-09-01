@@ -246,35 +246,35 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
-            TransactionType::LubotOperatorBond => {
-                let required = state.required_lubot_bond(tx.chain_id);
+            TransactionType::AgentOperatorBond => {
+                let required = state.required_agent_bond(tx.chain_id);
                 if tx.amount < required {
                     return Err(BudlumError::validation(
-                        "lubot_operator_bond_below_floor",
+                        "agent_operator_bond_below_floor",
                         format!(
-                            "Lubot operator bond {} is below network validator floor {}",
+                            "Agent operator bond {} is below network validator floor {}",
                             tx.amount, required
                         ),
                     ));
                 }
                 if tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err(BudlumError::validation(
-                        "lubot_operator_bond_shape",
-                        "Lubot operator bond requires zero recipient and empty data",
+                        "agent_operator_bond_shape",
+                        "Agent operator bond requires zero recipient and empty data",
                     ));
                 }
                 if state.spendable_balance(&tx.from) < total_cost {
                     return Err(BudlumError::validation(
-                        "lubot_operator_bond_vesting_locked",
-                        "Lubot operator bond exceeds spendable balance",
+                        "agent_operator_bond_vesting_locked",
+                        "Agent operator bond exceeds spendable balance",
                     ));
                 }
                 state
-                    .bond_lubot_operator(&tx.from, tx.amount, tx.chain_id)
+                    .bond_agent_operator(&tx.from, tx.amount, tx.chain_id)
                     .map_err(|e| {
-                        BudlumError::validation("lubot_operator_bond_failed", e.to_string())
+                        BudlumError::validation("agent_operator_bond_failed", e.to_string())
                     })?;
-                // Security audit: Lubot operators may submit AI inference results
+                // Security audit: Agent operators may submit AI inference results
                 // (RoleId=8, verified below); the AI verifier
                 // stake is established together with the bond, so the verifier
                 // authority check in the registry layer does not refuse these
@@ -285,51 +285,51 @@ impl Executor {
                     .lock_verifier_stake(&tx.from, crate::ai::registry::MIN_VERIFIER_STAKE);
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "Lubot bond fee underflow")
+                    BudlumError::validation("balance_underflow", "Agent bond fee underflow")
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
-            TransactionType::LubotOperatorUnbond => {
+            TransactionType::AgentOperatorUnbond => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err(BudlumError::validation(
-                        "lubot_operator_unbond_shape",
-                        "Lubot unbond requires zero amount/recipient and empty data",
+                        "agent_operator_unbond_shape",
+                        "Agent unbond requires zero amount/recipient and empty data",
                     ));
                 }
                 let release_epoch =
                     state
-                        .begin_lubot_operator_unbonding(&tx.from)
+                        .begin_agent_operator_unbonding(&tx.from)
                         .map_err(|error| {
-                            BudlumError::validation("lubot_operator_unbond_failed", error)
+                            BudlumError::validation("agent_operator_unbond_failed", error)
                         })?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "Lubot unbond fee underflow")
+                    BudlumError::validation("balance_underflow", "Agent unbond fee underflow")
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
                 tracing::info!(
                     operator = %tx.from,
                     release_epoch,
-                    "Lubot operator entered unbonding"
+                    "Agent operator entered unbonding"
                 );
             }
-            TransactionType::LubotOperatorWithdraw => {
+            TransactionType::AgentOperatorWithdraw => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err(BudlumError::validation(
-                        "lubot_operator_withdraw_shape",
-                        "Lubot withdrawal requires zero amount/recipient and empty data",
+                        "agent_operator_withdraw_shape",
+                        "Agent withdrawal requires zero amount/recipient and empty data",
                     ));
                 }
                 let withdrawn =
                     state
-                        .withdraw_lubot_operator(&tx.from, tx.fee)
+                        .withdraw_agent_operator(&tx.from, tx.fee)
                         .map_err(|error| {
-                            BudlumError::validation("lubot_operator_withdraw_failed", error)
+                            BudlumError::validation("agent_operator_withdraw_failed", error)
                         })?;
                 tracing::info!(
                     operator = %tx.from,
                     amount = withdrawn,
-                    "Lubot operator bond withdrawn"
+                    "Agent operator bond withdrawn"
                 );
             }
             TransactionType::Unstake => {
@@ -498,7 +498,7 @@ impl Executor {
                         callback: Some(tx.from),
                         submitted_at_block: state.current_block_height,
                         deadline_block,
-                        effort: crate::lubot::effort::EffortTier::default(),
+                        effort: crate::agent::effort::EffortTier::default(),
                         perception: None,
                     };
                     req.request_id = req.calculate_id();
@@ -506,7 +506,7 @@ impl Executor {
                     // same gate. Old contract calls carrying no declaration are
                     // refused fail-closed - a request that does not say what it reads
                     // is the way to feed an image to a text model.
-                    crate::lubot::admit_inference_request(&state.ai_registry, &req)
+                    crate::agent::admit_inference_request(&state.ai_registry, &req)
                         .map_err(|e| BudlumError::validation("ai_perception_rejected", e))?;
                     let current_block = state.current_block_height;
                     let pollen_grant = state
@@ -519,7 +519,7 @@ impl Executor {
                     // Saturating_sub silently keeps it at 0 - fee leak).
                     // `spendable_balance`, not `get_balance`: the vesting lock
                     // is a spend gate, and an escrow is a spend. Transfer and
-                    // LubotOperatorBond already ask the gated question; the
+                    // AgentOperatorBond already ask the gated question; the
                     // three paths that asked the raw one let the team account
                     // move locked $BUD by choosing a different transaction
                     // type. The instance was reported on one path, so the
@@ -1263,7 +1263,7 @@ impl Executor {
                     // Security audit (MEDIUM): the direct AI inference path was bypassing
                     // the vesting spendable gate. Escrow is a spend;
                     // a vesting-locked balance cannot enter escrow (the same gate as
-                    // LubotOperatorBond).
+                    // AgentOperatorBond).
                     let sender_balance = state.spendable_balance(&tx.from);
                     if sender_balance
                         < req.max_fee.checked_add(tx.fee).ok_or_else(|| {
@@ -1279,8 +1279,8 @@ impl Executor {
                 // Executor-layer deadline enforcement (defense-in-depth):
                 let current_block = state.current_block_height;
                 // The closed-loop read declaration (V3): requests without a declaration are
-                // refused fail-closed (see lubot::admit_inference_request).
-                crate::lubot::admit_inference_request(&state.ai_registry, &req)
+                // refused fail-closed (see agent::admit_inference_request).
+                crate::agent::admit_inference_request(&state.ai_registry, &req)
                     .map_err(|e| BudlumError::validation("ai_perception_rejected", e))?;
                 let pollen_grant = state
                     .marketplace
@@ -1329,17 +1329,17 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::AiInferenceResult(res) => {
-                // Lubot production authorization is permissionless but bonded:
+                // Agent production authorization is permissionless but bonded:
                 // Only an active RoleId(8) operator may submit inference results.
                 // A PoS validator, legacy AI_VERIFIER role, or governance
-                // Whitelist entry is not an implicit Lubot operator bond.
+                // Whitelist entry is not an implicit Agent operator bond.
                 if !state
                     .registry
-                    .is_active(&tx.from, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .is_active(&tx.from, crate::registry::role::roles::AGENT_OPERATOR)
                 {
                     return Err(BudlumError::validation(
-                        "lubot_operator_unauthorized",
-                        "Inference result signer must be an active bonded LUBOT_OPERATOR (RoleId=8)",
+                        "agent_operator_unauthorized",
+                        "Inference result signer must be an active bonded AGENT_OPERATOR (RoleId=8)",
                     ));
                 }
                 let mut res = res.clone();
@@ -1361,7 +1361,7 @@ impl Executor {
                         tracing::warn!(
                             operator = %tx.from,
                             request_id = %res.request_id.to_hex(),
-                            "Lubot equivocation evidence committed"
+                            "Agent equivocation evidence committed"
                         );
                         None
                     }
@@ -1400,8 +1400,8 @@ impl Executor {
                                 })?;
                             }
                         }
-                        // The SocialFi bridge (best effort): a finalized Lubot
-                        // output is minted to the requester as a "lubot-ai" NFT.
+                        // The SocialFi bridge (best effort): a finalized Agent
+                        // output is minted to the requester as a "agent-ai" NFT.
                         // A failure is NOT a block refusal - the inference result
                         // is already final; the bridge is a product surface, not a consensus
                         // condition. A duplicate ContentId (the same output in two
@@ -1410,13 +1410,13 @@ impl Executor {
                         // roll back a finalized inference result.
                         let output_bytes = res.output_ref.as_slice().to_vec();
                         let content_id = crate::storage::content_id::ContentId::of(&output_bytes);
-                        if let Err(e) = crate::lubot::social::lubot_output_to_nft(
+                        if let Err(e) = crate::agent::social::agent_output_to_nft(
                             &mut state.nft_registry,
                             requester,
                             &output_bytes,
                             state.epoch_index,
                         ) {
-                            tracing::warn!(%e, "lubot output NFT mint skipped (best-effort)");
+                            tracing::warn!(%e, "agent output NFT mint skipped (best-effort)");
                         }
                         // The Pollen bridge (the reverse direction, the same best-effort block):
                         // the output is also recorded as a DataAsset -
@@ -1435,7 +1435,7 @@ impl Executor {
                         if let Err(e) = state.marketplace.register_data_asset(asset) {
                             tracing::warn!(
                                 %e,
-                                "lubot output DataAsset registration skipped (best-effort)"
+                                "agent output DataAsset registration skipped (best-effort)"
                             );
                         }
                     }
@@ -1624,11 +1624,11 @@ impl Executor {
                 // Silently erase an independent PoS validator stake.
                 if !state
                     .registry
-                    .is_active(verifier, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .is_active(verifier, crate::registry::role::roles::AGENT_OPERATOR)
                 {
                     return Err(BudlumError::validation(
-                        "lubot_slash_operator_inactive",
-                        "Equivocation target is not an active bonded LUBOT_OPERATOR",
+                        "agent_slash_operator_inactive",
+                        "Equivocation target is not an active bonded AGENT_OPERATOR",
                     ));
                 }
                 let current_block = state.current_block_height;
@@ -1640,17 +1640,17 @@ impl Executor {
                     .registry
                     .slash_role_only(
                         *verifier,
-                        crate::registry::role::roles::LUBOT_OPERATOR,
+                        crate::registry::role::roles::AGENT_OPERATOR,
                         crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
                         crate::core::chain_config::FIXED_POINT_SCALE,
                     )
                     .map_err(|e| {
-                        BudlumError::validation("lubot_role_slash_failed", e.to_string())
+                        BudlumError::validation("agent_role_slash_failed", e.to_string())
                     })?;
                 tracing::warn!(
                     operator = %verifier,
                     penalty = slash.penalty,
-                    "Burned full Lubot RoleId(8) bond for proven equivocation"
+                    "Burned full Agent RoleId(8) bond for proven equivocation"
                 );
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -1879,11 +1879,11 @@ impl Executor {
             TransactionType::AiAttachExecutionProof { request_id, proof } => {
                 if !state
                     .registry
-                    .is_active(&tx.from, crate::registry::role::roles::LUBOT_OPERATOR)
+                    .is_active(&tx.from, crate::registry::role::roles::AGENT_OPERATOR)
                 {
                     return Err(BudlumError::validation(
-                        "lubot_operator_unauthorized",
-                        "Execution proof signer must be an active bonded LUBOT_OPERATOR (RoleId=8)",
+                        "agent_operator_unauthorized",
+                        "Execution proof signer must be an active bonded AGENT_OPERATOR (RoleId=8)",
                     ));
                 }
                 // Model-aware structural verify + program_hash bind.
