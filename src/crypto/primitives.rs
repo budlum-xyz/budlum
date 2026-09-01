@@ -373,7 +373,8 @@ impl PqKeyPair {
         // accept hedged and deterministic signatures alike, so the wire and
         // every read path stay unchanged.
         let sig = sk
-            .sign_randomized(message, b"", &mut rand_core::OsRng)
+            .expanded_key()
+            .sign_randomized(message, b"", &mut rand::rng())
             .map_err(|_| CryptoError::Signing("OS rng failed for hedged signing".to_string()))?;
         let binding = sig.encode();
         let enc: &[u8] = binding.as_ref();
@@ -857,7 +858,6 @@ impl WalletKeyPair {
     }
 
     pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {
-        use ml_dsa::signature::Signer as _;
         // Hedged per FIPS 204 3.6.1 (see the validator path above). The only
         // error branch is a dead OS rng - the same failure class generate()
         // already treats as fatal; as a last resort the deterministic
@@ -865,8 +865,12 @@ impl WalletKeyPair {
         // the caller mid-transaction.
         let sig = self
             .signing_key
-            .sign_randomized(message, b"", &mut rand_core::OsRng)
-            .unwrap_or_else(|_| self.signing_key.sign(message));
+            .expanded_key()
+            .sign_randomized(message, b"", &mut rand::rng())
+            .unwrap_or_else(|_| {
+                use ml_dsa::signature::Signer as _;
+                self.signing_key.sign(message)
+            });
         let enc = sig.encode();
         let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
         out.copy_from_slice(enc.as_ref());
