@@ -1,0 +1,14 @@
+[package]
+name = "ai-inference-integrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The external data adapter skeleton: the WebSocket and REST connection pattern, batch message parsing and the shutdown signal"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

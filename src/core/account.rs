@@ -92,7 +92,7 @@ pub struct Validator {
     /// A single validator can simultaneously serve as:
     /// - VALIDATOR (RoleId 1): consensus block production + finality
     /// - STORAGE_OPERATOR (RoleId 5): B.U.D. storage verification
-    /// - LUBOT_OPERATOR (RoleId 8): Lubot AI compute provider
+    /// - AI_INFERENCE_OPERATOR (RoleId 8): the AI inference layer AI compute provider
     ///
     /// Cross-role slashing: slashing any role jails ALL roles.
     #[serde(default)]
@@ -121,7 +121,7 @@ impl Validator {
         }
     }
 
-    /// Add a role to this validator (e.g. STORAGE_OPERATOR, LUBOT_OPERATOR).
+    /// Add a role to this validator (e.g. STORAGE_OPERATOR, AI_INFERENCE_OPERATOR).
     /// Returns true if the role was newly added, false if already present.
     pub fn add_role(&mut self, role: RoleId) -> bool {
         self.roles.insert(role)
@@ -148,9 +148,9 @@ impl Validator {
         self.has_role(&roles::STORAGE_OPERATOR)
     }
 
-    /// Check if this validator is a Lubot compute provider.
-    pub fn is_lubot_operator(&self) -> bool {
-        self.has_role(&roles::LUBOT_OPERATOR)
+    /// Check if this validator is a the AI inference layer compute provider.
+    pub fn is_ai_inference_operator(&self) -> bool {
+        self.has_role(&roles::AI_INFERENCE_OPERATOR)
     }
 
     /// Cross-role slashing: when any role is slashed, ALL roles are jailed.
@@ -726,7 +726,7 @@ impl AccountState {
     /// # Errors
     ///
     /// Returns a message when the role carries no independently debited bond
-    /// (`VALIDATOR` and `LUBOT_OPERATOR` each unwind through their own path),
+    /// (`VALIDATOR` and `AI_INFERENCE_OPERATOR` each unwind through their own path),
     /// Or when the registry refuses because the account is not registered for
     /// The role or the bond is not `Active`.
     pub fn begin_role_bond_unbonding(
@@ -742,7 +742,7 @@ impl AccountState {
 
     /// Withdraw a matured role bond back into the account balance.
     ///
-    /// Mirrors `withdraw_lubot_operator`: the registry's maturity check runs
+    /// Mirrors `withdraw_ai_inference_operator`: the registry's maturity check runs
     /// First and the balance is credited only after it succeeds, so a premature
     /// Or duplicate withdrawal cannot mint. `PermissionlessRegistry::withdraw`
     /// Rejects anything that is not `Unbonding` past its `release_epoch` and
@@ -784,8 +784,8 @@ impl AccountState {
     /// VALIDATOR is excluded: its bond lives in `self.validators` and unwinds
     /// Through `Unstake` -> `unbonding_queue` -> `process_unbonding`, and
     /// Crediting it here as well would pay the same stake out twice.
-    /// `LUBOT_OPERATOR` is excluded because it has its own pair
-    /// (`begin_lubot_operator_unbonding` / `withdraw_lubot_operator`) that also
+    /// `AI_INFERENCE_OPERATOR` is excluded because it has its own pair
+    /// (`begin_ai_inference_operator_unbonding` / `withdraw_ai_inference_operator`) that also
     /// Checks open inference obligations and charges the transaction fee.
     fn ensure_withdrawable_role(role: crate::registry::role::RoleId) -> Result<(), String> {
         use crate::registry::role::roles;
@@ -795,8 +795,8 @@ impl AccountState {
                 "validator stake unwinds through Unstake and the unbonding queue, not this path"
                     .to_string(),
             ),
-            roles::LUBOT_OPERATOR => Err(
-                "the RoleId(8) bond unwinds through begin_lubot_operator_unbonding/withdraw_lubot_operator"
+            roles::AI_INFERENCE_OPERATOR => Err(
+                "the RoleId(8) bond unwinds through begin_ai_inference_operator_unbonding/withdraw_ai_inference_operator"
                     .to_string(),
             ),
             other => Err(format!("role {other} has no independently debited bond")),
@@ -806,25 +806,25 @@ impl AccountState {
     /// Minimum RoleId(8) bond for a chain. Known networks use the same floor
     /// As validator onboarding; a higher governance registry floor still wins.
     /// Custom chains fall back to the registry floor.
-    pub fn required_lubot_bond(&self, chain_id: u64) -> u64 {
+    pub fn required_ai_inference_bond(&self, chain_id: u64) -> u64 {
         let registry_floor = self.registry.params().min_stake;
         crate::core::chain_config::Network::from_chain_id(chain_id)
             .map(|network| network.min_stake().max(registry_floor))
             .unwrap_or(registry_floor)
     }
 
-    /// Bond a signed sender into the permissionless Lubot operator role.
+    /// Bond a signed sender into the permissionless the AI inference layer operator role.
     ///
     /// Registration is applied before the balance debit so a duplicate or
     /// Below-floor bond cannot consume funds. The caller remains responsible
     /// For charging the transaction fee after this succeeds.
-    pub fn bond_lubot_operator(
+    pub fn bond_ai_inference_operator(
         &mut self,
         address: &Address,
         amount: u64,
         chain_id: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
-        let required = self.required_lubot_bond(chain_id);
+        let required = self.required_ai_inference_bond(chain_id);
         let available = self.spendable_balance(address);
         if amount < required || available < amount {
             return Err(crate::registry::RegistryError::InsufficientStake {
@@ -833,19 +833,24 @@ impl AccountState {
             });
         }
         self.registry
-            .register_lubot_operator(*address, amount, self.epoch_index)?;
+            .register_ai_inference_operator(*address, amount, self.epoch_index)?;
         let account = self.get_or_create(address);
         account.balance -= amount;
         self.dirty_accounts.insert(*address);
         Ok(amount)
     }
 
-    pub fn begin_lubot_operator_unbonding(&mut self, address: &Address) -> Result<u64, String> {
+    pub fn begin_ai_inference_operator_unbonding(
+        &mut self,
+        address: &Address,
+    ) -> Result<u64, String> {
         if self
             .ai_registry
             .operator_has_open_obligations(address, self.current_block_height)
         {
-            return Err("Lubot operator has open inference or dispute obligations".into());
+            return Err(
+                "the AI inference layer operator has open inference or dispute obligations".into(),
+            );
         }
         // Same governance parameter as validator unbonding. Passing the
         // Compile-time `UNBONDING_EPOCHS` pinned the RoleId(8) bond to 7 epochs
@@ -854,27 +859,33 @@ impl AccountState {
         // Unbonding on two different schedules from one parameter is a bug, not
         // A policy: call the parameter-reading entry point.
         self.registry
-            .begin_unbonding(*address, roles::LUBOT_OPERATOR, self.epoch_index)
+            .begin_unbonding(*address, roles::AI_INFERENCE_OPERATOR, self.epoch_index)
             .map_err(|error| error.to_string())
     }
 
     /// Withdraw the complete matured RoleId(8) bond and charge the transaction
     /// Fee atomically. The principal is credited only after registry withdrawal
     /// Validation succeeds.
-    pub fn withdraw_lubot_operator(&mut self, address: &Address, fee: u64) -> Result<u64, String> {
+    pub fn withdraw_ai_inference_operator(
+        &mut self,
+        address: &Address,
+        fee: u64,
+    ) -> Result<u64, String> {
         let stake = self
             .registry
-            .get(address, roles::LUBOT_OPERATOR)
+            .get(address, roles::AI_INFERENCE_OPERATOR)
             .map(|registration| registration.stake)
-            .ok_or_else(|| "Lubot operator is not registered".to_string())?;
+            .ok_or_else(|| "the AI inference layer operator is not registered".to_string())?;
         let final_balance = self
             .get_balance(address)
             .checked_add(stake)
             .and_then(|balance| balance.checked_sub(fee))
-            .ok_or_else(|| "Lubot withdrawal balance overflow/fee underflow".to_string())?;
+            .ok_or_else(|| {
+                "the AI inference layer withdrawal balance overflow/fee underflow".to_string()
+            })?;
         let withdrawn = self
             .registry
-            .withdraw(*address, roles::LUBOT_OPERATOR, self.epoch_index)
+            .withdraw(*address, roles::AI_INFERENCE_OPERATOR, self.epoch_index)
             .map_err(|error| error.to_string())?;
         let account = self.get_or_create(address);
         account.balance = final_balance;
@@ -1186,54 +1197,70 @@ impl AccountState {
                 }
                 registration.validate(tx.from, tx.chain_id)?;
             }
-            TransactionType::LubotOperatorBond => {
-                let required = self.required_lubot_bond(tx.chain_id);
+            TransactionType::AiInferenceOperatorBond => {
+                let required = self.required_ai_inference_bond(tx.chain_id);
                 if tx.amount < required {
                     return Err(format!(
-                        "Lubot operator bond below network validator floor: {} < {}",
+                        "the AI inference layer operator bond below network validator floor: {} < {}",
                         tx.amount, required
                     ));
                 }
                 if tx.to != Address::zero() || !tx.data.is_empty() {
-                    return Err("Lubot operator bond requires zero recipient and empty data".into());
+                    return Err("the AI inference layer operator bond requires zero recipient and empty data".into());
                 }
-                if self.registry.get(&tx.from, roles::LUBOT_OPERATOR).is_some() {
-                    return Err("Lubot operator is already registered".into());
+                if self
+                    .registry
+                    .get(&tx.from, roles::AI_INFERENCE_OPERATOR)
+                    .is_some()
+                {
+                    return Err("the AI inference layer operator is already registered".into());
                 }
             }
-            TransactionType::LubotOperatorUnbond => {
+            TransactionType::AiInferenceOperatorUnbond => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
-                    return Err("Lubot unbond requires zero amount/recipient and empty data".into());
+                    return Err("the AI inference layer unbond requires zero amount/recipient and empty data".into());
                 }
-                if !self.registry.is_active(&tx.from, roles::LUBOT_OPERATOR) {
-                    return Err("Lubot operator is not active".into());
+                if !self
+                    .registry
+                    .is_active(&tx.from, roles::AI_INFERENCE_OPERATOR)
+                {
+                    return Err("the AI inference layer operator is not active".into());
                 }
                 if self
                     .ai_registry
                     .operator_has_open_obligations(&tx.from, self.current_block_height)
                 {
-                    return Err("Lubot operator has open inference or dispute obligations".into());
+                    return Err(
+                        "the AI inference layer operator has open inference or dispute obligations"
+                            .into(),
+                    );
                 }
             }
-            TransactionType::LubotOperatorWithdraw => {
+            TransactionType::AiInferenceOperatorWithdraw => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err(
-                        "Lubot withdrawal requires zero amount/recipient and empty data".into(),
+                        "the AI inference layer withdrawal requires zero amount/recipient and empty data".into(),
                     );
                 }
                 let registration = self
                     .registry
-                    .get(&tx.from, roles::LUBOT_OPERATOR)
-                    .ok_or_else(|| "Lubot operator is not registered".to_string())?;
+                    .get(&tx.from, roles::AI_INFERENCE_OPERATOR)
+                    .ok_or_else(|| {
+                        "the AI inference layer operator is not registered".to_string()
+                    })?;
                 match registration.status {
                     crate::registry::MemberStatus::Unbonding { release_epoch }
                         if self.epoch_index >= release_epoch => {}
                     crate::registry::MemberStatus::Unbonding { release_epoch } => {
                         return Err(format!(
-                            "Lubot bond remains locked until epoch {release_epoch}"
+                            "the AI inference layer bond remains locked until epoch {release_epoch}"
                         ));
                     }
-                    _ => return Err("Lubot operator is not in unbonding state".into()),
+                    _ => {
+                        return Err(
+                            "the AI inference layer operator is not in unbonding state".into()
+                        )
+                    }
                 }
             }
             TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_) => {
@@ -1284,9 +1311,12 @@ impl AccountState {
             }
             TransactionType::AiInferenceResult(_)
             | TransactionType::AiAttachExecutionProof { .. } => {
-                if !self.registry.is_active(&tx.from, roles::LUBOT_OPERATOR) {
+                if !self
+                    .registry
+                    .is_active(&tx.from, roles::AI_INFERENCE_OPERATOR)
+                {
                     return Err(
-                        "Inference result/proof signer is not an active bonded LUBOT_OPERATOR"
+                        "Inference result/proof signer is not an active bonded AI_INFERENCE_OPERATOR"
                             .into(),
                     );
                 }
@@ -1295,15 +1325,20 @@ impl AccountState {
                 request_id,
                 verifier,
             } => {
-                if !self.registry.is_active(&verifier, roles::LUBOT_OPERATOR) {
-                    return Err("Equivocation target is not an active LUBOT_OPERATOR".into());
+                if !self
+                    .registry
+                    .is_active(&verifier, roles::AI_INFERENCE_OPERATOR)
+                {
+                    return Err("Equivocation target is not an active AI_INFERENCE_OPERATOR".into());
                 }
                 if !self.ai_registry.is_disputable(
                     &request_id,
                     &verifier,
                     self.current_block_height,
                 ) {
-                    return Err("No live Lubot equivocation evidence for target".into());
+                    return Err(
+                        "No live the AI inference layer equivocation evidence for target".into(),
+                    );
                 }
             }
             _ => {}
@@ -1908,7 +1943,7 @@ impl AccountState {
     ///
     /// The cap denominator includes liquid accounts, canonical validator stake,
     /// Validator unbonding entries, and independently debited role bonds such as
-    /// LUBOT_OPERATOR. Excluding role bonds would make a bond look like a supply
+    /// AI_INFERENCE_OPERATOR. Excluding role bonds would make a bond look like a supply
     /// Burn and reopen false minting headroom.
     pub fn total_bud_committed(&self) -> u128 {
         self.circulating_supply()
@@ -2693,13 +2728,17 @@ mod tests {
     }
 
     #[test]
-    fn total_bud_committed_counts_lubot_role_bond_without_double_counting_validator() {
+    fn total_bud_committed_counts_ai_inference_role_bond_without_double_counting_validator() {
         let operator = test_addr_from_byte(14u8);
         let mut state = AccountState::new();
         state.add_balance(&operator, 2_000);
         state
-            .bond_lubot_operator(&operator, 1_000, crate::core::transaction::DEFAULT_CHAIN_ID)
-            .expect("Lubot role bond");
+            .bond_ai_inference_operator(
+                &operator,
+                1_000,
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+            )
+            .expect("the AI inference layer role bond");
 
         assert_eq!(state.circulating_supply(), 1_000);
         assert_eq!(state.total_registry_role_bonded_supply(), 1_000);

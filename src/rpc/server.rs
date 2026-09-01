@@ -441,10 +441,13 @@ impl RpcServer {
         format!("0x{:x}", n)
     }
 
-    fn lubot_readiness_json(chain_id: u64, active_bonded_operators: usize) -> serde_json::Value {
+    fn ai_inference_readiness_json(
+        chain_id: u64,
+        active_bonded_operators: usize,
+    ) -> serde_json::Value {
         const REQUIRED_OPERATORS: usize = 3;
         serde_json::json!({
-            "module": "lubot",
+            "module": "ai_inference",
             "status": "not_ready",
             "chain_id": chain_id,
             "active_bonded_operators": active_bonded_operators,
@@ -1772,16 +1775,16 @@ impl BudlumApiServer for RpcServer {
         tx: Transaction,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Permissionless registration reuses signed consensus transactions:
-        // Stake onboards validators; LubotOperatorBond onboards RoleId(8)
+        // Stake onboards validators; AiInferenceOperatorBond onboards RoleId(8)
         // Compute operators. No RPC-side state mutation or approval gate.
         if !matches!(
             tx.tx_type,
             crate::core::transaction::TransactionType::Stake
-                | crate::core::transaction::TransactionType::LubotOperatorBond
+                | crate::core::transaction::TransactionType::AiInferenceOperatorBond
         ) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "registry_register requires a Stake or LubotOperatorBond transaction",
+                "registry_register requires a Stake or AiInferenceOperatorBond transaction",
                 None::<()>,
             ));
         }
@@ -4209,8 +4212,8 @@ impl BudlumApiServer for RpcServer {
             execution_dims: None,
             execution_weights_digest: None,
             modalities: modality_bits.map_or_else(
-                crate::lubot::perception::ModalitySet::text_only,
-                crate::lubot::perception::ModalitySet::from_bits,
+                crate::ai_inference::perception::ModalitySet::text_only,
+                crate::ai_inference::perception::ModalitySet::from_bits,
             ),
         };
 
@@ -4362,7 +4365,7 @@ impl BudlumApiServer for RpcServer {
                 }
                 let mut cid = [0u8; 32];
                 cid.copy_from_slice(&cid_bytes);
-                let kind = crate::lubot::perception::PerceptionKind::from_tag(
+                let kind = crate::ai_inference::perception::PerceptionKind::from_tag(
                     u8::try_from(k).map_err(|_| {
                         ErrorObjectOwned::owned(
                             -32602,
@@ -4378,7 +4381,7 @@ impl BudlumApiServer for RpcServer {
                         None::<()>,
                     )
                 })?;
-                Some(crate::lubot::perception::PerceptionRequest {
+                Some(crate::ai_inference::perception::PerceptionRequest {
                     asset_id: crate::pollen::AssetId(aid),
                     content_id: crate::storage::content_id::ContentId(cid),
                     kind,
@@ -4406,7 +4409,7 @@ impl BudlumApiServer for RpcServer {
             callback: cb,
             submitted_at_block: current_height,
             deadline_block,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception,
         };
         req.request_id = req.calculate_id();
@@ -5236,13 +5239,16 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    async fn lubot_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+    async fn ai_inference_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let active_operators = self
             .chain
-            .get_registry_active_members(crate::registry::role::roles::LUBOT_OPERATOR)
+            .get_registry_active_members(crate::registry::role::roles::AI_INFERENCE_OPERATOR)
             .await;
         let chain_id = self.chain.get_chain_id().await;
-        Ok(Self::lubot_readiness_json(chain_id, active_operators.len()))
+        Ok(Self::ai_inference_readiness_json(
+            chain_id,
+            active_operators.len(),
+        ))
     }
 }
 
@@ -5487,8 +5493,8 @@ mod tests {
     }
 
     #[test]
-    fn lubot_stats_fail_closed_until_runtime_wiring_is_complete() {
-        let stats = RpcServer::lubot_readiness_json(1, 3);
+    fn ai_inference_stats_fail_closed_until_runtime_wiring_is_complete() {
+        let stats = RpcServer::ai_inference_readiness_json(1, 3);
         assert_eq!(stats["status"], "not_ready");
         assert_eq!(stats["active_bonded_operators"], 3);
         assert!(stats["operator_quorum_available"]

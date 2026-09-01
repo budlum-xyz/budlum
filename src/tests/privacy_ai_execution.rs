@@ -203,7 +203,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
             execution_class: 1,
             execution_dims: None,
             execution_weights_digest: Some([11u8; 32]),
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         })
         .expect_err(
             "F-04: proof-required models cannot register while STARK verification is not live",

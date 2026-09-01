@@ -206,7 +206,7 @@ pub trait BudlumApi {
     // Validation is economic (stake) / cryptographic (evidence).
 
     /// Register by submitting a signed `Stake` (validator) or
-    /// `LubotOperatorBond` (RoleId 8) transaction. Bonding == registration;
+    /// `AiInferenceOperatorBond` (RoleId 8) transaction. Bonding == registration;
     /// There is no separate approval step. Returns the tx hash.
     #[method(name = "bud_registryRegister")]
     async fn registry_register(
@@ -1057,8 +1057,8 @@ pub trait BudlumApi {
     #[method(name = "bud_getSlashingHistory")]
     async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Lubot readiness: chain-derived bonded operator count plus explicit
+    /// AI inference layer readiness: chain-derived bonded operator count plus explicit
     /// Fail-closed flags for scheduler, worker, proof, and settlement wiring.
-    #[method(name = "bud_lubotStats")]
-    async fn lubot_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    #[method(name = "bud_ai_inferenceStats")]
+    async fn ai_inference_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

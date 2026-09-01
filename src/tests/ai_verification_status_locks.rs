@@ -82,7 +82,7 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
 /// Neither `verify_execution_proof_stark` nor `verify_execution_proof_full` is
 /// in this list: the transaction path reaches the STARK through the bundle,
 /// which is what `execution_path_verifies_the_stark_for_proof_required_models`
-/// pins end to end. The two below belong to Lubot paths that are not wired.
+/// pins end to end. The two below belong to the AI inference layer paths that are not wired.
 #[test]
 fn stark_verification_helpers_have_no_production_callers() {
     let scaffolding = ["verify_inference_stark", "generate_and_verify_proof"];
@@ -93,7 +93,7 @@ fn stark_verification_helpers_have_no_production_callers() {
         "src/ai/execution/verify.rs",
         "src/ai/execution/mod.rs",
         "src/ai/mod.rs",
-        "src/lubot/verify.rs",
+        "src/ai_inference/verify.rs",
         "src/tests/ai_verification_status_locks.rs",
     ];
 

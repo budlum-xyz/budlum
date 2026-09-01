@@ -1,0 +1,13 @@
+[package]
+name = "ai-inference-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The serving bridge: vLLM/SGLang configuration, the attribution policy check, and health counters"
+
+[dependencies]
+ai-inference-core = { path = "../ai-inference-core" }
+
+[lints]
+workspace = true

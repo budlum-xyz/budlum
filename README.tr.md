@@ -100,7 +100,7 @@ flowchart TB
   GBH --> BR["Alanlar arası köprü<br/>lock · mint · burn · unlock"]
   GBH --> ST["B.U.D. depolama<br/>içerik adresleme · anlaşmalar · meydan okumalar"]
   GBH --> ZK["BudZero zkVM<br/>STARK yürütme kanıtları"]
-  GBH --> AI["Lubot yapay zeka katmanı<br/>model kaydı · hesaplama teminatı"]
+  GBH --> AI["the AI inference layer yapay zeka katmanı<br/>model kaydı · hesaplama teminatı"]
 ```
 
 Bir alan kesinlik kanıtı sunar. Eşleşen adaptör bu kanıtı o alanın kendi kurallarına göre
@@ -139,13 +139,13 @@ okunmuştur; hiçbiri yerel ölçüm değildir.
    `--payload-out` imzanın kapsadığı baytların tamını yazar; izleyici düzeni
    yeniden yazmadan onları yeniden hash'leyebilir. `--verified-at <unix>` saati
    sabitler ve yeniden koşum imzayı bayt-bayt üretir.
-2. **Lubot derecelendirme döngüsü.** `lubot-ops tune data.jsonl` veri seti
+2. **the AI inference layer derecelendirme döngüsü.** `ai-inference-ops tune data.jsonl` veri seti
    etiketini (hedef model, örnek sayısı) doğrular, müfredatın derecelendirme
-   seti özetini plana iliştirip bağı kontrol eder; `lubot-ops eval data.jsonl
+   seti özetini plana iliştirip bağı kontrol eder; `ai-inference-ops eval data.jsonl
    responses.jsonl [MIN_SCORE]` altın kuralları boş yanıtta geçen bir
    müfredatı reddeder, üretilen yanıtları altın kurallarla derecelendirir ve
    rapor eşiği geçmezse sıfır olmayan çıkışla döner. Cihaz tarafında
-   `lubot-serve`, yerleşim planı operatörün `disk_budget_bytes` payından
+   `ai-inference-serve`, yerleşim planı operatörün `disk_budget_bytes` payından
    fazlasını diskten akıtan köprüyü, akış politikası bir şeye karar
    vermeden önce reddeder.
 3. **Depolama verimi.** `cargo bench --bench ratio_rayon`, QR yük paketleyicisini
@@ -184,7 +184,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 | --- | --- | --- |
 | **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK yerlisi sanal makine: belirlenimli ISA, gaz ölçümlü VM, derleyici ve bir Plonky3 STARK kanıtlayıcı/doğrulayıcı |
 | **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` 1.0/2.0/3.0 uygulamasıdır (tarif / QR / makbuz / uzlaşma modülleri, [bud README](bud/README.md)); `src/storage/` uzlaşma katmanının depolama motorudur (içerik adresleme, anlaşmalar, meydan okuma/yanıt kanıtları) |
-| **Lubot** | [`src/lubot/`](src/lubot) | Kapalı devre yapay zeka katmanı: model kayıt defteri, operatör hesaplama teminatı, çaba kademeleri, Pollen ile kapılanan veri erişimi, algı beyanları (V3), SocialFi çıktı köprüsü. Zincir dışı çalışma alanı: [`crates/lubot/`](crates/lubot) |
+| **the AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Kapalı devre yapay zeka katmanı: model kayıt defteri, operatör hesaplama teminatı, çaba kademeleri, Pollen ile kapılanan veri erişimi, algı beyanları (V3), SocialFi çıktı köprüsü. Zincir dışı çalışma alanı: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Rıza ile kapılanan veri pazarı, izinler, şifreleme ve yapay zeka katmanının geçmek zorunda olduğu kapı |
 | **BNS** | [`src/bns/`](src/bns) | `.bud` adlandırması: kayıt, alt alanlar, içerik ve depolama kayıtları |
 | **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 türetimi ve işlem imzalama. Bir cüzdandır, aktarıcı değildir |
@@ -193,7 +193,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 
 | Yol | İçerik |
 | --- | --- |
-| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budscan, lubot, note-packing |
+| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budscan, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 uygulaması (kendi çalışma alanı) |
 | [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
 | [`config/`](config) | Devnet / testnet / mainnet profilleri ve genesis şablonları |
@@ -440,7 +440,7 @@ depoda hiçbir yerde "denetlenmiş" iddiası yapılmaz.
 adaptörleri · sahtecilik kapılarıyla alanlar arası köprü yaşam döngüsü · kesinti ve
 çözülme ile izinsiz teminat kayıt defteri · STARK kanıtlamalı ağaç içi BudZKVM · anlaşma ve
 meydan okuma ekonomisiyle B.U.D. depolama · BNS `.bud` adları · Pollen veri pazarı ·
-SocialFi ilkelleri · Lubot yapay zeka çıkarım katmanı · EVM zincir adaptörü
+SocialFi ilkelleri · the AI inference layer yapay zeka çıkarım katmanı · EVM zincir adaptörü
 (RLP + MPT + makbuz doğrulama) · `$BUD` tokenomisi · doğrulayıcı yönetişimi · parça oturumu
 bağlamalı anlık görüntü V2.
 

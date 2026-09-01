@@ -38,7 +38,7 @@ const FORBIDDEN: &[(&str, &str)] = &[
         "colibri",
         "an on-device MoE engine. What we took was the idea of a placement \
          hierarchy across VRAM, RAM and disk; that idea now lives in \
-         `lubot-serve/src/residency.rs` under our own terms.",
+         `ai-inference-serve/src/residency.rs` under our own terms.",
     ),
     (
         "jcode",
@@ -49,8 +49,8 @@ const FORBIDDEN: &[(&str, &str)] = &[
     (
         "system_prompts_leaks",
         "a corpus of published system prompts, read while writing \
-         `lubot-core/src/system_prompt.rs`. Our prompt states our own system's \
-         behaviour and is checked against the tree by `lubot-prompt-is-true`.",
+         `ai-inference-core/src/system_prompt.rs`. Our prompt states our own system's \
+         behaviour and is checked against the tree by `ai-inference-prompt-is-true`.",
     ),
 ];
 

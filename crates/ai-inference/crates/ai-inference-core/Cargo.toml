@@ -1,0 +1,12 @@
+[package]
+name = "ai-inference-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "the AI inference layer core types: the model identity, the dataset types and the LoRA manifest"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -42,6 +42,9 @@ use std::path::{Path, PathBuf};
 mod gates {
     pub mod accumulators_pinned;
     pub mod actionlint;
+    pub mod ai_inference_prompt_is_true;
+    pub mod ai_inference_reads;
+    pub mod ai_inference_zk;
     pub mod air_selectors;
     pub mod ast_security_gates;
     pub mod badges_current;
@@ -91,9 +94,6 @@ mod gates {
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
-    pub mod lubot_prompt_is_true;
-    pub mod lubot_reads;
-    pub mod lubot_zk_inference;
     pub mod master_derivation;
     pub mod mempool_mev_free;
     pub mod mermaid;
@@ -228,12 +228,12 @@ const GATES: &[Gate] = &[
         self_test: gates::mempool_mev_free::self_test,
     },
     Gate {
-        name: "lubot-zk-inference",
+        name: "ai-inference-zk",
         replaces: None,
-        run: gates::lubot_zk_inference::run,
+        run: gates::ai_inference_zk::run,
         run_log: None,
         run_args: None,
-        self_test: gates::lubot_zk_inference::self_test,
+        self_test: gates::ai_inference_zk::self_test,
     },
     Gate {
         name: "bridge-dual-tree",
@@ -476,11 +476,11 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "lubot-prompt-is-true",
+        name: "ai-inference-prompt-is-true",
         replaces: None,
-        run: gates::lubot_prompt_is_true::run,
+        run: gates::ai_inference_prompt_is_true::run,
         run_args: None,
-        self_test: gates::lubot_prompt_is_true::self_test,
+        self_test: gates::ai_inference_prompt_is_true::self_test,
         run_log: None,
     },
     Gate {
@@ -921,12 +921,12 @@ const GATES: &[Gate] = &[
         self_test: gates::master_derivation::self_test,
     },
     Gate {
-        name: "lubot-reads-but-does-not-generate",
-        replaces: Some("check-lubot-reads-but-does-not-generate.sh"),
-        run: gates::lubot_reads::run,
+        name: "ai-inference-reads-but-does-not-generate",
+        replaces: Some("check-ai-inference-reads-but-does-not-generate.sh"),
+        run: gates::ai_inference_reads::run,
         run_log: None,
         run_args: None,
-        self_test: gates::lubot_reads::self_test,
+        self_test: gates::ai_inference_reads::self_test,
     },
     Gate {
         name: "pinned-downloads-are-really-pinned",

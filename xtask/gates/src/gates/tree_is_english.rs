@@ -849,7 +849,7 @@ fn scan_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         "// Programlar sonradan, acikca eklenir.\n",
         "/// `None` = servis edilebilir.\n",
         "// Ekleme sirasinda tutulan girdiler.\n",
-        "/// Lubot kademesi.\n",
+        "/// the AI inference layer kademesi.\n",
         "// Kalanlar arasinda >= n olan en kucuk kod noktasi.\n",
         "// veri tasidiginda. Onceki test bunu kaciriyordu.\n",
         "/// Push oncesi kontrolleri kosur.\n",

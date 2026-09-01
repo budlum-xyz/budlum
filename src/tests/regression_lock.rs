@@ -294,7 +294,7 @@ mod relayer_escrow_silent_failure_regression {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
         (registry, model_id, owner)
@@ -318,7 +318,7 @@ mod relayer_escrow_silent_failure_regression {
             callback: None,
             submitted_at_block: current_block,
             deadline_block,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();

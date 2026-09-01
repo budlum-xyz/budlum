@@ -178,20 +178,20 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss --self-test
       - name: Repair fires on loss
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss
-      - name: Lubot detection canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate --self-test
-      - name: Lubot reads, does not produce
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate
-      # crates/lubot is a separate workspace: not a member of the root Cargo.toml, so
+      - name: the AI inference layer detection canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate --self-test
+      - name: the AI inference layer reads, does not produce
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate
+      # crates/ai-inference is a separate workspace: not a member of the root Cargo.toml, so
       # `cargo clippy --all-targets` never reached it. Only the gate above,
       # which reads the source text, existed. Result: the tree stopped compiling
       # and nobody saw it (`&'static [u16]` could not be derived with serde,
       # `ConnState: Default` was missing, one test was passing `&[]`). The build
       # and the tests were wired in here so it cannot break silently again.
-      - name: Lubot builds and its tests pass
+      - name: the AI inference layer builds and its tests pass
         run: |
-          cargo clippy --manifest-path crates/lubot/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path crates/lubot/Cargo.toml
+          cargo clippy --manifest-path crates/ai-inference/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/ai-inference/Cargo.toml
       # The B.U.D. core (bud/) was in the same silent hole: bud-core with 103 modules
       # -- ALL of B.U.D. 1.0/2.0/3.0 -- was built by no CI job,
       # because it is not a member of the root workspace and no step pointed

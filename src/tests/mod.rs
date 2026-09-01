@@ -52,6 +52,8 @@ pub mod wall_clock_locks;
 // On `AccountState`, so these test files now exercise the real code paths
 // Again. They were the regression tests for patch series.
 #[cfg(test)]
+pub mod ai_inference_runtime;
+#[cfg(test)]
 pub mod disaster_recovery;
 #[cfg(test)]
 pub mod finality_adversarial;
@@ -63,8 +65,6 @@ pub mod hardening;
 pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
-#[cfg(test)]
-pub mod lubot_runtime;
 pub mod migration_v2;
 #[cfg(test)]
 pub mod permissionless;
