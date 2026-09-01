@@ -1,0 +1,70 @@
+{
+ "kaynak": "BUD-2.0-SKILL-CORPUS-2026-08-16",
+ "aileler": [
+  {
+   "ad": "Duz XOR 7+1",
+   "e": 1.1428571428571428,
+   "f": 1,
+   "onarim": 7,
+   "gecer": true,
+   "kp1": true,
+   "kp2": true,
+   "aile": "xor"
+  },
+  {
+   "ad": "Duz XOR 3+1",
+   "e": 1.3333333333333333,
+   "f": 1,
+   "onarim": 3,
+   "gecer": true,
+   "kp1": true,
+   "kp2": true,
+   "aile": "xor"
+  },
+  {
+   "ad": "EVENODD p=7",
+   "e": 1.2857142857142858,
+   "f": 2,
+   "onarim": 7,
+   "gecer": true,
+   "kp1": true,
+   "kp2": true,
+   "aile": "xor"
+  },
+  {
+   "ad": "EVENODD p=5",
+   "e": 1.4,
+   "f": 2,
+   "onarim": 5,
+   "gecer": true,
+   "kp1": true,
+   "kp2": true,
+   "aile": "xor"
+  },
+  {
+   "ad": "STAR p=5",
+   "e": 1.6,
+   "f": 3,
+   "onarim": 5,
+   "gecer": true,
+   "kp1": true,
+   "kp2": true,
+   "aile": "xor"
+  },
+  {
+   "ad": "RS(28,4)",
+   "e": 1.1428571428571428,
+   "f": 4,
+   "onarim": 28,
+   "gecer": false,
+   "kp1": false,
+   "kp2": false,
+   "aile": "gf"
+  }
+ ],
+ "bedel": {
+  "tur_farki": 0
+ },
+ "tavan_usd_tb_ay": 0.016,
+ "not": "v7 olcumlerine bagli iskelet parametreleri; BUD 2.0 tavan 0.016, duz 7+1 e=1.143."
+}
