@@ -360,7 +360,7 @@ impl VerifierRegistry {
         self.register(account, crate::role::roles::VALIDATOR, stake, current_epoch)
     }
 
-    pub fn register_lubot_operator(
+    pub fn register_ai_operator(
         &mut self,
         account: Address,
         stake: u64,
@@ -368,7 +368,7 @@ impl VerifierRegistry {
     ) -> Result<(), RegistryError> {
         self.register(
             account,
-            crate::role::roles::LUBOT_OPERATOR,
+            crate::role::roles::AI_OPERATOR,
             stake,
             current_epoch,
         )
@@ -637,8 +637,8 @@ impl VerifierRegistry {
         self.is_active(account, crate::role::roles::MASTER_VERIFIER)
     }
 
-    pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        self.get(account, crate::role::roles::LUBOT_OPERATOR)
+    pub fn is_active_ai_operator(&self, account: &Address) -> bool {
+        self.get(account, crate::role::roles::AI_OPERATOR)
             .is_some_and(Registration::is_active)
     }
 
@@ -1114,13 +1114,13 @@ mod tests {
     }
 
     #[test]
-    fn d4_lubot_and_content_validator_roles() {
+    fn d4_ai_and_content_validator_roles() {
         let mut reg = VerifierRegistry::new();
-        reg.register_lubot_operator(addr(20), MIN_REGISTRATION_STAKE, 0)
+        reg.register_ai_operator(addr(20), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         reg.register_content_validator(addr(21), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        assert!(reg.is_active_lubot_operator(&addr(20)));
+        assert!(reg.is_active_ai_operator(&addr(20)));
         assert!(reg.is_active_content_validator(&addr(21)));
     }
 }

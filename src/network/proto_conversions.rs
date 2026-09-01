@@ -52,14 +52,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
-            TransactionType::LubotOperatorBond => {
-                (pb::ProtoTransactionType::LubotOperatorBond as i32, None)
+            TransactionType::AiOperatorBond => {
+                (pb::ProtoTransactionType::AiOperatorBond as i32, None)
             }
-            TransactionType::LubotOperatorUnbond => {
-                (pb::ProtoTransactionType::LubotOperatorUnbond as i32, None)
+            TransactionType::AiOperatorUnbond => {
+                (pb::ProtoTransactionType::AiOperatorUnbond as i32, None)
             }
-            TransactionType::LubotOperatorWithdraw => {
-                (pb::ProtoTransactionType::LubotOperatorWithdraw as i32, None)
+            TransactionType::AiOperatorWithdraw => {
+                (pb::ProtoTransactionType::AiOperatorWithdraw as i32, None)
             }
             TransactionType::Unstake => (pb::ProtoTransactionType::Unstake as i32, None),
             TransactionType::Vote => (pb::ProtoTransactionType::Vote as i32, None),
@@ -824,10 +824,10 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     },
                 )
             }
-            pb::ProtoTransactionType::LubotOperatorBond => TransactionType::LubotOperatorBond,
-            pb::ProtoTransactionType::LubotOperatorUnbond => TransactionType::LubotOperatorUnbond,
-            pb::ProtoTransactionType::LubotOperatorWithdraw => {
-                TransactionType::LubotOperatorWithdraw
+            pb::ProtoTransactionType::AiOperatorBond => TransactionType::AiOperatorBond,
+            pb::ProtoTransactionType::AiOperatorUnbond => TransactionType::AiOperatorUnbond,
+            pb::ProtoTransactionType::AiOperatorWithdraw => {
+                TransactionType::AiOperatorWithdraw
             }
             pb::ProtoTransactionType::Unstake => TransactionType::Unstake,
             pb::ProtoTransactionType::Vote => TransactionType::Vote,
@@ -992,9 +992,9 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     // Wire 0 = legacy peer: those models read text, the
                     // same reading `#[serde(default)]` gives a stored spec.
                     modalities: if payload.modality_bits == 0 {
-                        crate::lubot::perception::ModalitySet::text_only()
+                        crate::ai_inference::perception::ModalitySet::text_only()
                     } else {
-                        crate::lubot::perception::ModalitySet::from_bits(payload.modality_bits)
+                        crate::ai_inference::perception::ModalitySet::from_bits(payload.modality_bits)
                     },
                 })
             }
@@ -1041,11 +1041,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     // peer cannot smuggle a 20x request past the check by
                     // putting it on the wire.
                     effort: if payload.effort_tenths == 0 {
-                        crate::lubot::effort::EffortTier::default()
+                        crate::ai_inference::effort::EffortTier::default()
                     } else {
                         let tenths = u16::try_from(payload.effort_tenths)
                             .map_err(|_| "effort tier does not fit in u16".to_string())?;
-                        crate::lubot::effort::EffortTier::from_tenths(tenths)?
+                        crate::ai_inference::effort::EffortTier::from_tenths(tenths)?
                     },
                     perception: match payload.perception {
                         Some(p) => {
@@ -1058,7 +1058,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                             aid.copy_from_slice(&p.asset_id);
                             let mut cid = [0u8; 32];
                             cid.copy_from_slice(&p.content_id);
-                            let kind = crate::lubot::perception::PerceptionKind::from_tag(
+                            let kind = crate::ai_inference::perception::PerceptionKind::from_tag(
                                 u8::try_from(p.kind_tag).map_err(|_| {
                                     "perception kind tag does not fit in u8".to_string()
                                 })?,
@@ -1066,7 +1066,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                             .ok_or_else(|| {
                                 format!("unknown perception kind tag: {}", p.kind_tag)
                             })?;
-                            Some(crate::lubot::perception::PerceptionRequest {
+                            Some(crate::ai_inference::perception::PerceptionRequest {
                                 asset_id: crate::pollen::AssetId(aid),
                                 content_id: crate::storage::content_id::ContentId(cid),
                                 kind,
@@ -2045,9 +2045,9 @@ mod tests {
                     pq_public_key: vec![4; 64],
                 },
             ),
-            TransactionType::LubotOperatorBond,
-            TransactionType::LubotOperatorUnbond,
-            TransactionType::LubotOperatorWithdraw,
+            TransactionType::AiOperatorBond,
+            TransactionType::AiOperatorUnbond,
+            TransactionType::AiOperatorWithdraw,
             TransactionType::Unstake,
             TransactionType::Vote,
             TransactionType::ContractCall,
@@ -2113,7 +2113,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             }),
             TransactionType::AiInferenceRequest(crate::ai::types::AiInferenceRequest {
                 request_id: crate::ai::types::AiRequestId([3u8; 32]),
@@ -2125,7 +2125,7 @@ mod tests {
                 callback: Some(to),
                 submitted_at_block: 10,
                 deadline_block: 110,
-                effort: crate::lubot::effort::EffortTier::default(),
+                effort: crate::ai_inference::effort::EffortTier::default(),
                 perception: None,
             }),
             TransactionType::AiInferenceResult(crate::ai::types::AiInferenceResult {

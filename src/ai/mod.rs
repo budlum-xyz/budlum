@@ -77,7 +77,7 @@ mod tests {
             execution_class: 0,
             execution_dims: None,
             execution_weights_digest: None,
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         };
 
         assert!(registry.register_model(spec.clone()).is_ok());
@@ -109,7 +109,7 @@ mod tests {
             execution_class: 0,
             execution_dims: None,
             execution_weights_digest: None,
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         };
         registry.register_model(spec).unwrap();
 
@@ -126,7 +126,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -196,7 +196,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -210,7 +210,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -306,7 +306,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -361,7 +361,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -375,7 +375,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -435,7 +435,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -449,7 +449,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -510,7 +510,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -524,7 +524,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -598,7 +598,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -612,7 +612,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -686,7 +686,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -700,7 +700,7 @@ mod tests {
             callback: None,
             submitted_at_block: 50,
             deadline_block: 150,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -738,7 +738,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -755,7 +755,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -817,7 +817,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -831,7 +831,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -873,7 +873,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -894,7 +894,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -966,7 +966,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -980,7 +980,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1026,7 +1026,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1040,7 +1040,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1098,7 +1098,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1112,7 +1112,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1152,7 +1152,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1169,7 +1169,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1209,7 +1209,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1243,7 +1243,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1263,7 +1263,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1298,7 +1298,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1319,7 +1319,7 @@ mod tests {
             callback: Some(callback_addr),
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1387,7 +1387,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1408,7 +1408,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1474,7 +1474,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1524,7 +1524,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1561,7 +1561,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1603,7 +1603,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1618,7 +1618,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1659,7 +1659,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1673,7 +1673,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1710,7 +1710,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1734,7 +1734,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1813,7 +1813,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1835,7 +1835,7 @@ mod tests {
             execution_class: 0,
             execution_dims: None,
             execution_weights_digest: None,
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already registered"));
@@ -1867,7 +1867,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1902,7 +1902,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
 
@@ -1941,7 +1941,7 @@ mod tests {
                 execution_class: 0,
                 execution_dims: None,
                 execution_weights_digest: None,
-                modalities: crate::lubot::perception::ModalitySet::text_only(),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             })
             .unwrap();
         (registry, model_id, owner)
@@ -1966,7 +1966,7 @@ mod tests {
             callback: None,
             submitted_at_block: current_block,
             deadline_block,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1993,7 +1993,7 @@ mod tests {
             callback,
             submitted_at_block: current_block,
             deadline_block,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -2057,7 +2057,7 @@ mod tests {
             callback: None,
             submitted_at_block: 111,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -2085,7 +2085,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -2156,7 +2156,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 200, // Must be >= result_deadline so check #1 doesn't fire,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -2189,7 +2189,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 55,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -2552,7 +2552,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -2762,7 +2762,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
-            effort: crate::lubot::effort::EffortTier::default(),
+            effort: crate::ai_inference::effort::EffortTier::default(),
             perception: None,
         };
         req.request_id = req.calculate_id();

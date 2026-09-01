@@ -35,7 +35,7 @@ fn model_spec(owner: Address) -> AiModelSpec {
         execution_class: 0,
         execution_dims: None,
         execution_weights_digest: None,
-        modalities: crate::lubot::perception::ModalitySet::text_only(),
+        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
     }
 }
 
@@ -50,16 +50,16 @@ fn request(
     // checks that the assets match; for opaque inputs a neutral text
     // declaration is carried instead.
     let perception = match crate::pollen::data_rights::AiDataInputRef::decode(&input_ref) {
-        Ok(Some(r)) => Some(crate::lubot::perception::PerceptionRequest {
+        Ok(Some(r)) => Some(crate::ai_inference::perception::PerceptionRequest {
             asset_id: r.asset_id,
             content_id: crate::storage::content_id::ContentId([0; 32]),
-            kind: crate::lubot::perception::PerceptionKind::Text,
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }),
-        _ => Some(crate::lubot::perception::PerceptionRequest {
+        _ => Some(crate::ai_inference::perception::PerceptionRequest {
             asset_id: crate::pollen::AssetId([0xEE; 32]),
             content_id: crate::storage::content_id::ContentId([0; 32]),
-            kind: crate::lubot::perception::PerceptionKind::Text,
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }),
     };
@@ -73,7 +73,7 @@ fn request(
         callback: None,
         submitted_at_block: 0,
         deadline_block: 10,
-        effort: crate::lubot::effort::EffortTier::default(),
+        effort: crate::ai_inference::effort::EffortTier::default(),
         perception,
     };
     req.request_id = req.calculate_id();

@@ -1,0 +1,54 @@
+# Aday veri setleri (bkz. docs/ACIK_KAYNAK_VERI_ARASTIRMASI_2026-08-13.md §3).
+# The principle: every set is first registered with B.U.D. as a StorageDeal,
+# gets the TrainingCorpus label and has its hash verified; there is NO direct
+# external read (closed circuit).
+
+[policy]
+# KARAR (2026-08-13): Varyant B - hibrit.
+# Open sets are first recorded to B.U.D. as a StorageDeal; TrainingCorpus
+# gets the label and has its hash verified; the network is the only channel
+# AI inference layer reads from.
+entry_channel = "B.U.D. StorageDeal + AiDatasetMetadata::training"
+variant = "B-hibrit"
+
+[candidates."turkish-nlp-suite/InstrucTurca"]
+license = "Apache-2.0"
+license_verified = true
+scale = "2.58M samples; 4.17 GB"
+status = "aday-birincil"
+
+[candidates."hasankursun/turkish-corpus-100b"]
+license = "Apache-2.0"
+license_verified = true
+scale = "~105B tokens; sft split 7.62M lines"
+status = "aday-sft-split"
+
+[candidates."ogulcanaydogan/Turkish-LLM-v10-Training"]
+license = "open (the card is to be verified)"
+license_verified = false
+scale = "144K kuratorlu TR cifti"
+status = "aday-sartli"
+
+[candidates."merve/turkish_instructions"]
+license = "the card is empty - to be verified"
+license_verified = false
+scale = "51.6K lines"
+status = "aday-sartli"
+
+[candidates."BAAI/Infinity-Instruct"]
+license = "CC-BY-SA-4.0"
+license_verified = true
+scale = "3.4M-7.4M talimat"
+status = "sartli-sharealike"
+
+[candidates."magpie-datasets"]
+license = "CC BY-NC + Llama"
+license_verified = true
+scale = "-"
+status = "not-suitable-nc"
+
+[candidates."brewinteractive/alpaca-tr"]
+license = "to be verified"
+license_verified = false
+scale = "52K"
+status = "aday-sartli"

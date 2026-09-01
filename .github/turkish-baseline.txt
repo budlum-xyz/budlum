@@ -18,6 +18,6 @@
 # Recorded: 2026-08-25. 3 files, 7 lines. The vocabulary the gate scans with
 # was widened from 60 words to 156 on this date; the 132 lines it had been
 # walking past were translated in the same change.
-crates/lubot/crates/lubot-data/src/jsonl.rs	2
-crates/lubot/crates/lubot-knowledge/src/embed.rs	1
-crates/lubot/crates/lubot-tune/src/schema.rs	4
+crates/ai-inference/crates/ai-data/src/jsonl.rs	2
+crates/ai-inference/crates/ai-knowledge/src/embed.rs	1
+crates/ai-inference/crates/ai-tune/src/schema.rs	4

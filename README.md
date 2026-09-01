@@ -99,7 +99,7 @@ flowchart TB
   GBH --> BR["Cross-domain bridge<br/>lock · mint · burn · unlock"]
   GBH --> ST["B.U.D. storage<br/>content addressing · deals · challenges"]
   GBH --> ZK["BudZero zkVM<br/>STARK execution proofs"]
-  GBH --> AI["Lubot AI layer<br/>model registry · compute bond"]
+  GBH --> AI["AI inference layer<br/>model registry · compute bond"]
 ```
 
 A domain submits a finality proof. The matching adapter verifies it against that domain's own
@@ -137,13 +137,13 @@ CI log; none of it is a local measurement.
    writes the exact bytes the signature covers, so a monitor can re-hash them
    without re-implementing the layout. `--verified-at <unix>` pins the clock
    and makes a re-run reproduce the signature.
-2. **Lubot grading loop.** `lubot-ops tune data.jsonl` validates the dataset
+2. **AI inference layer grading loop.** `ai-ops tune data.jsonl` validates the dataset
    label (model target, sample count), attaches the curriculum's eval-set
-   digest to the plan and checks the binding; `lubot-ops eval data.jsonl
+   digest to the plan and checks the binding; `ai-ops eval data.jsonl
    responses.jsonl [MIN_SCORE]` refuses a curriculum whose golden rules pass on
    an empty answer, grades the produced answers against the golden rules, and
    exits non-zero when the report does not clear the gate. On the device side,
-   `lubot-serve` refuses a consensus bridge whose residency plan streams more
+   `ai-serve` refuses a consensus bridge whose residency plan streams more
    from disk than the operator's `disk_budget_bytes` allows, before the
    streaming policy decides anything.
 3. **Storage throughput.** `cargo bench --bench ratio_rayon` measures the QR
@@ -182,7 +182,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | --- | --- | --- |
 | **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK-native VM: deterministic ISA, gas-metered VM, compiler, and a Plonky3 STARK prover/verifier |
 | **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` is the 1.0/2.0/3.0 implementation (tarif / QR / receipt / settlement modules, [bud README](bud/README.md)); `src/storage/` is the settlement layer's storage engine (content addressing, deals, challenge/response proofs) |
-| **Lubot** | [`src/lubot/`](src/lubot) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/lubot/`](crates/lubot) |
+| **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
 | **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, subdomains, content and storage records |
 | **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 derivation and transaction signing. A wallet, not a relayer |
@@ -191,7 +191,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 
 | Path | Contents |
 | --- | --- |
-| [`crates/`](crates) | Standalone workspaces: wallet-core, budscan, lubot, note-packing |
+| [`crates/`](crates) | Standalone workspaces: wallet-core, budscan, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
 | [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
@@ -424,7 +424,7 @@ claim is made anywhere in this repository.
 finality · domain registry and finality adapters · cross-domain bridge lifecycle with forgery
 gates · permissionless stake registry with slashing and unbonding · in-tree BudZKVM with
 STARK proving · B.U.D. storage with deal and challenge economy · BNS `.bud` names · Pollen
-data marketplace · SocialFi primitives · Lubot AI inference layer · EVM chain adapter
+data marketplace · SocialFi primitives · AI inference layer AI inference layer · EVM chain adapter
 (RLP + MPT + receipt verification) · `$BUD` tokenomics · validator governance · snapshot V2
 with chunk-session binding.
 

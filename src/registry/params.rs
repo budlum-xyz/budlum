@@ -82,7 +82,7 @@ pub struct RegistryParams {
     /// Fails verification. Set to 0 to disable. Same permissionless-but-costly
     /// Pattern as `slashing_report_fee`.
     pub proof_submission_fee: u64,
-    /// Fee required to register an AI model (Lubot), as an anti-sybil/DoS
+    /// Fee required to register an AI model (AI inference layer), as an anti-sybil/DoS
     /// measure on the model registry. Governance-tunable per network; set to
     /// 0 to disable. Charged as an exact cost on top of the base transaction
     /// fee (H1 exact-cost pattern): paying less is rejected, paying more is

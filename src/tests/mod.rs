@@ -64,7 +64,7 @@ pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
 #[cfg(test)]
-pub mod lubot_runtime;
+pub mod ai_inference_runtime;
 pub mod migration_v2;
 #[cfg(test)]
 pub mod permissionless;

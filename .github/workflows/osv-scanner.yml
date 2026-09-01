@@ -108,7 +108,7 @@ jobs:
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock \
-            --lockfile=crates/lubot/Cargo.lock \
+            --lockfile=crates/ai-inference/Cargo.lock \
             --lockfile=crates/budscan/Cargo.lock \
             --lockfile=bud/Cargo.lock
 
