@@ -13,9 +13,11 @@ yanlis FAIL/yanlis OK verdi).
   python3 olc.py <dizin> --kur           # rustup + protoc kurulumu (agdan)
 """
 import collections
+import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -39,7 +41,9 @@ def taze():
     """Cargo parmagi izler: degmeyen kaynak yeniden derlenmez ve clippy onerileri
     ile uyari sayimi bos cikar (olculdu: --fix hicbir sey degistirmedi, sayim 0
     geldi). Her olcumden once kaynaklara dokunmak yeterli, deps yeniden derlenmiyor."""
-    subprocess.run("find src -name '*.rs' -exec touch {} +", shell=True, cwd=DIZIN)
+    subprocess.run(
+        ["find", "src", "-name", "*.rs", "-exec", "touch", "{}", "+"], cwd=DIZIN
+    )
 
 
 def run(cmd, cwd=DIZIN):
@@ -58,6 +62,10 @@ def run(cmd, cwd=DIZIN):
         p = subprocess.run(["bash", "-c", "set -o pipefail; " + cmd], cwd=cwd, env=ENV,
                            capture_output=True, text=True)
     else:
+        # Sabit komutlarin calistiricisi: `cmd` bu betigin kendi sabit
+        # dizgilerinden gelir, kullanicidan degil; kabuk yorumu yalnizca
+        # `&&`/`|` zincirleri icin gereklidir ve komutlar gomuludur.
+        # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
         p = subprocess.run(cmd, shell=True, cwd=cwd, env=ENV, capture_output=True, text=True)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
@@ -65,23 +73,32 @@ def run(cmd, cwd=DIZIN):
 def kur():
     print("# arac kurulumu")
     if not os.path.exists(TC + "/cargo/bin/cargo"):
-        subprocess.run("curl -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh && "
-                       "rm -rf %s/rustup/toolchains/* %s/rustup/settings.toml && "
-                       "RUSTUP_HOME=%s/rustup CARGO_HOME=%s/cargo sh /tmp/rustup-init.sh -y "
-                       "--default-toolchain 1.97.1 --profile minimal -c rustfmt -c clippy"
-                       % (TC, TC, TC, TC), shell=True)
+        subprocess.run(["curl", "-sSf", "https://sh.rustup.rs", "-o", "/tmp/rustup-init.sh"])
+        shutil.rmtree(TC + "/rustup/toolchains", ignore_errors=True)
+        try:
+            os.remove(TC + "/rustup/settings.toml")
+        except FileNotFoundError:
+            pass
+        subprocess.run(
+            ["sh", "/tmp/rustup-init.sh", "-y", "--default-toolchain", "1.97.1",
+             "--profile", "minimal", "-c", "rustfmt", "-c", "clippy"],
+            env={**os.environ, "RUSTUP_HOME": TC + "/rustup", "CARGO_HOME": TC + "/cargo"})
     if not os.path.exists("/home/user/work/protoc27/bin/protoc"):
-        subprocess.run("cd /tmp && curl -sSL -o pc.zip "
-                       "https://github.com/protocolbuffers/protobuf/releases/download/"
-                       "v27.2/protoc-27.2-linux-x86_64.zip && rm -rf /home/user/work/protoc27 && "
-                       "unzip -oq pc.zip -d /home/user/work/protoc27", shell=True)
+        subprocess.run(
+            ["curl", "-sSL", "-o", "pc.zip",
+             "https://github.com/protocolbuffers/protobuf/releases/download/"
+             "v27.2/protoc-27.2-linux-x86_64.zip"],
+            cwd="/tmp")
+        shutil.rmtree("/home/user/work/protoc27", ignore_errors=True)
+        subprocess.run(["unzip", "-oq", "pc.zip", "-d", "/home/user/work/protoc27"], cwd="/tmp")
     # Arac agaci snapshot disi bir klasorde tutulur (4 GB'lik agac geri yuklemeyi
     # patlatiyordu); ~/.cargo ve ~/.rustup oraya symlink'lenir, ~/.profile da
     # yollari yazar. Olculdu: boylece tek on yoklama ile cargo/actionlint/protac
     # bulunuyor.
     for hedef, kaynak in (("/home/user/.cargo", TC + "/cargo"), ("/home/user/.rustup", TC + "/rustup")):
         if not os.path.islink(hedef):
-            subprocess.run("rm -rf %s && ln -s %s %s" % (hedef, kaynak, hedef), shell=True)
+            subprocess.run(["rm", "-rf", hedef])
+            subprocess.run(["ln", "-s", kaynak, hedef])
     if not os.path.exists("/home/user/.profile") or "CARGO_HOME" not in open("/home/user/.profile").read():
         open("/home/user/.profile", "a").write(
             "\nexport CARGO_HOME=/home/user/.cargo RUSTUP_HOME=/home/user/.rustup\n"
@@ -90,7 +107,8 @@ def kur():
             "[ -f $CARGO_HOME/env ] && . $CARGO_HOME/env\n"
             "export CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0\n")
     for _d in ("/home/user/work/bin", "/home/user/work/protoc27/bin"):
-        subprocess.run("chmod +x %s/* 2>/dev/null || true" % _d, shell=True)
+        for f in glob.glob(_d + "/*"):
+            subprocess.run(["chmod", "+x", f])
     for c, v in (("cargo", "--version"), ("gitleaks", "--version"), ("actionlint", "--version")):
         k, o = run("which %s && %s %s | head -1" % (c, c, v))
         print("  %-10s %s" % (c, o.strip().splitlines()[-1] if o.strip() else "YOK"))

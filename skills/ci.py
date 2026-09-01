@@ -43,6 +43,8 @@ def gh(path, url=False):
     req = urllib.request.Request(base, headers={"Authorization": "Bearer " + tok(),
                                                 "Accept": "application/vnd.github+json",
                                                 "User-Agent": "ayaz-agent"})
+    # Sabit https api.github.com ucu, zaman asimi var; konak kullanicidan gelmez.
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     return urllib.request.urlopen(req, timeout=240).read()
 
 
@@ -56,6 +58,8 @@ def job_log(job):
         loc = e.headers.get("Location")
     if not loc:
         return ""
+    # Log yonlendirmesi api.github.com'un verdigi sabit blob adresi; zaman asimi var.
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     data = urllib.request.urlopen(urllib.request.Request(loc), timeout=300).read()
     if data[:2] == b"\x1f\x8b":
         data = gzip.decompress(data)

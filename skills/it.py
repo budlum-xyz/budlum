@@ -83,6 +83,8 @@ def api(path, data=None, method=None, raw=False):
         req.method = method
     elif data is not None:
         req.method = "POST"
+    # Sabit https api.github.com ucu, zaman asimi var; konak kullanicidan gelmez.
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     out = urllib.request.urlopen(req, timeout=240).read()
     return out.decode("utf8", "replace") if raw else (json.loads(out) if out else {})
 
@@ -90,6 +92,8 @@ def api(path, data=None, method=None, raw=False):
 def blob(path):
     with open(os.path.join(ROOT, path), "rb") as h:
         data = h.read()
+    # Git blob nesne kimligi; git nesne formati SHA-1 gerektirir, guvenlik ozeti degil.
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(), data
 
 
