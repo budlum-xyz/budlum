@@ -20,6 +20,7 @@
 
 use crate::adapter::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter, VerifyError};
 use crate::canonical_set;
+use crate::transfer_verdict::{verdict_of, TransferVerdict};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tiny_keccak::{Hasher, Keccak};
@@ -466,6 +467,20 @@ pub fn verify_and_report_with_reexecution_at(
         mark_transfer_violation(
             &mut report,
             String::from("canonical transfer program must reach Halt"),
+        );
+        return report;
+    }
+
+    // The logged decision vector must classify as a conserving transfer. This
+    // is the raw-event check that does not pass through the digest comparison:
+    // the canonical program logs [conservation, nullifier], and anything that
+    // is not a `ConservationHolds` verdict is a violation even if a proof
+    // bound a matching digest.
+    let verdict = verdict_of(&reexec.receipt.events);
+    if !matches!(verdict, TransferVerdict::ConservationHolds { .. }) {
+        mark_transfer_violation(
+            &mut report,
+            format!("logged events classify as {verdict:?}, not a conserving transfer"),
         );
         return report;
     }

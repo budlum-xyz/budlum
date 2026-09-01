@@ -174,6 +174,17 @@ enum Commands {
             help = "Also write the exact canonical payload the signature covers, so a monitor can re-hash it without re-implementing the layout"
         )]
         payload_out: Option<String>,
+        #[arg(
+            long,
+            help = "Re-run the canonical transfer program and check the proof-bound inputs against the re-execution before signing (K1)"
+        )]
+        reexecute: bool,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Read spent nullifiers (one decimal per line) and refuse a spent transfer nullifier via the spent-set relay path (S1)"
+        )]
+        spent_set: Option<String>,
     },
     #[command(about = "Run hardcoded smoke test of BudZKVM execution engine")]
     Test,
@@ -441,6 +452,111 @@ struct RelayRequest<'a> {
     strict: bool,
     verified_at: Option<u64>,
     payload_out: Option<&'a str>,
+    reexecute: bool,
+    spent_set: Option<&'a str>,
+}
+
+/// In-memory spent-set oracle for the relay's double-spend check (S1): the
+/// nullifiers spent by previous transfers. A CLI run seeds it from a file,
+/// one decimal nullifier per line.
+struct InMemorySpentSet {
+    spent: std::collections::BTreeSet<u64>,
+}
+
+impl InMemorySpentSet {
+    fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let text = fs::read_to_string(path)
+            .map_err(|e| format!("cannot read the spent-set file {path}: {e}"))?;
+        let mut spent = std::collections::BTreeSet::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let value: u64 = line
+                .parse()
+                .map_err(|e| format!("spent-set line {line:?} is not a u64: {e}"))?;
+            spent.insert(value);
+        }
+        Ok(Self { spent })
+    }
+}
+
+impl bud_proof::relayer::SpentSet for InMemorySpentSet {
+    fn is_spent(&self, nullifier: u64) -> Result<bool, String> {
+        Ok(self.spent.contains(&nullifier))
+    }
+}
+
+/// The node-side ledger a relay consults: the chained alarm log (K3) and the
+/// derived quarantine ledger (K4). A fresh instance per CLI run records the
+/// alarms the relay just produced and quarantines the offending program, so a
+/// later pass refuses it without a gossip round.
+struct NodeLedger {
+    alarms: bud_proof::alarm_log::AlarmLog,
+    quarantine: bud_proof::quarantine::QuarantineLedger,
+}
+
+/// Map a relay alarm code to the ledger alarm kind it corresponds to.
+fn alarm_kind_of(code: bud_proof::relayer::AlarmCode) -> bud_proof::alarm_log::AlarmKind {
+    use bud_proof::alarm_log::AlarmKind;
+    match code {
+        bud_proof::relayer::AlarmCode::NonCanonicalProgram => AlarmKind::NonCanonicalProgram,
+        bud_proof::relayer::AlarmCode::InvalidProof => AlarmKind::InvalidProof,
+        bud_proof::relayer::AlarmCode::PublicInputsMismatch => AlarmKind::PublicInputsMismatch,
+        bud_proof::relayer::AlarmCode::InvalidEnvelope => AlarmKind::InvalidEnvelope,
+        bud_proof::relayer::AlarmCode::DeserializationError => AlarmKind::DeserializationError,
+        bud_proof::relayer::AlarmCode::TransferViolation => AlarmKind::TransferViolation,
+    }
+}
+
+/// The alarm kinds that also quarantine the offending program (K4).
+fn quarantine_reason_of(
+    kind: bud_proof::alarm_log::AlarmKind,
+) -> Option<bud_proof::quarantine::QuarantineReason> {
+    use bud_proof::quarantine::QuarantineReason;
+    match kind {
+        bud_proof::alarm_log::AlarmKind::NonCanonicalProgram => {
+            Some(QuarantineReason::NonCanonicalProgram)
+        }
+        bud_proof::alarm_log::AlarmKind::TransferViolation => {
+            Some(QuarantineReason::TransferViolation)
+        }
+        _ => None,
+    }
+}
+
+/// Record the relay's alarm into the node ledger and quarantine the offending
+/// program, then assert the chained log still verifies.
+fn record_relay_outcome(
+    ledger: &mut NodeLedger,
+    report: &bud_proof::relayer::CanonicalRelayReport,
+    program_hash: [u8; 32],
+) {
+    if report.status != bud_proof::relayer::RelayStatus::Alarm {
+        return;
+    }
+    let Some(bud_proof::relayer::AlarmDetail { code, detail }) = &report.alarm else {
+        return;
+    };
+    let kind = alarm_kind_of(*code);
+    ledger.alarms.record(report.report_sig, kind, detail);
+    if let Some(reason) = quarantine_reason_of(kind) {
+        ledger.quarantine.ban(program_hash, reason);
+    }
+    debug_assert!(
+        ledger.alarms.verify_integrity(),
+        "the chained alarm log must verify after a record"
+    );
+}
+
+/// The system clock, or the caller-pinned timestamp. Naming the clock error
+/// type keeps the stamp-failure path explicit for the relay.
+fn clock_stamp(preferred: Option<u64>) -> Result<u64, bud_proof::relayer::ClockError> {
+    match preferred {
+        Some(t) => Ok(t),
+        None => bud_proof::relayer::now_unix(),
+    }
 }
 
 /// Verify with the canonical-program requirement and publish the signed
@@ -453,17 +569,61 @@ struct RelayRequest<'a> {
 /// a report can never describe a proof the verifier did not look at.
 fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn std::error::Error>> {
     use bud_proof::relayer::{
-        verify_and_report_at, AlarmCode, AlarmDetail, CanonicalRelayReport, ProofFingerprint,
-        RelayStatus, RELAY_SCHEMA_VERSION,
+        verify_and_report_at, verify_and_report_with_reexecution_at,
+        verify_and_report_with_spentset_at, AlarmCode, AlarmDetail, CanonicalRelayReport,
+        ProofFingerprint, RelayStatus, RELAY_SCHEMA_VERSION,
     };
     let (envelope, expected_inputs, program) =
         load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
-    let at = match req.verified_at {
-        Some(t) => t,
-        None => bud_proof::relayer::now_unix()
-            .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?,
+    let at = clock_stamp(req.verified_at)
+        .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?;
+
+    // The relay path: the spent-set check (S1) when a spent file is given, the
+    // re-execution check (K1) when asked, and the bare verify otherwise.
+    let report = match &req.spent_set {
+        Some(spent_set) => {
+            let oracle = InMemorySpentSet::from_file(spent_set)?;
+            verify_and_report_with_spentset_at(&envelope, &expected_inputs, &program, &oracle, at)
+        }
+        None if req.reexecute => {
+            verify_and_report_with_reexecution_at(&envelope, &expected_inputs, &program, at)
+        }
+        None => verify_and_report_at(&envelope, &expected_inputs, &program, at),
     };
-    let report = verify_and_report_at(&envelope, &expected_inputs, &program, at);
+
+    // Record the outcome into the node-side ledger (K3/K4) so the alarm chain
+    // and the derived ban are observable on every relay run.
+    let mut ledger = NodeLedger {
+        alarms: bud_proof::alarm_log::AlarmLog::new(),
+        quarantine: bud_proof::quarantine::QuarantineLedger::new(),
+    };
+    record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash);
+    if !ledger.alarms.is_empty() {
+        let entries: Vec<&bud_proof::alarm_log::AlarmEntry> = ledger.alarms.iter().collect();
+        info!(
+            entries = entries.len(),
+            anchor = hex::encode(ledger.alarms.window_anchor()),
+            "alarm log advanced"
+        );
+        for entry in entries {
+            info!(
+                seq = entry.seq,
+                kind = entry.kind.as_str(),
+                byte = entry.kind.as_byte(),
+                "alarm recorded"
+            );
+        }
+        let quarantined: Option<&bud_proof::quarantine::QuarantineEntry> =
+            ledger.quarantine.entry(&expected_inputs.program_hash);
+        if let Some(entry) = quarantined {
+            info!(
+                reason = entry.reason.as_str(),
+                byte = entry.reason.as_byte(),
+                "program quarantined"
+            );
+        }
+    }
+
     let path = std::path::Path::new(req.output);
     report.write_report(path)?;
 
@@ -780,6 +940,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             strict,
             verified_at,
             payload_out,
+            reexecute,
+            spent_set,
         } => {
             let req = RelayRequest {
                 proof_file,
@@ -789,6 +951,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strict: *strict,
                 verified_at: *verified_at,
                 payload_out: payload_out.as_deref(),
+                reexecute: *reexecute,
+                spent_set: spent_set.as_deref(),
             };
             let line = write_signed_relay_report(&req)?;
             println!("{line}");
@@ -981,6 +1145,8 @@ mod tests {
             strict: true,
             verified_at: Some(1_700_000_000),
             payload_out: None,
+            reexecute: false,
+            spent_set: None,
         };
         let r = write_signed_relay_report(&req);
         assert!(r.is_err(), "a missing proof file had to be refused");

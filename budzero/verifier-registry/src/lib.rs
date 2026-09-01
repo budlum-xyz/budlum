@@ -24,29 +24,16 @@
 //!    SHA-256 hash suitable for snapshot and consensus commitment.
 
 pub mod address;
-pub mod alarm_log;
 pub mod evidence;
 pub mod params;
-pub mod quarantine;
 pub mod registry;
 pub mod role;
-pub mod transfer_verdict;
 
 pub use address::Address;
-pub use alarm_log::{
-    genesis_link, AlarmEntry, AlarmKind, AlarmLog, ALARM_LOG_DOMAIN, MAX_ALARM_DETAIL_LEN,
-    MAX_ALARM_LOG_ENTRIES,
-};
 pub use evidence::{EvidenceError, ProofProvenance, SlashingProof, SlashingReport};
 pub use params::RegistryParams;
-pub use quarantine::{
-    QuarantineEntry, QuarantineLedger, QuarantineReason, MAX_QUARANTINE_ENTRIES, QUARANTINE_DOMAIN,
-};
 pub use registry::{
     MemberStatus, Registration, RegistryError, SlashOutcome, SlashingCondition, VerifierRegistry,
     MIN_REGISTRATION_STAKE, UNBONDING_EPOCHS,
 };
 pub use role::{roles, RoleId};
-pub use transfer_verdict::{
-    verdict_of, TransferFlags, TransferVerdict, CANONICAL_TRANSFER_EVENT_COUNT,
-};

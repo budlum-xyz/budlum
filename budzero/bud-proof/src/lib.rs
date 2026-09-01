@@ -2,13 +2,16 @@
 // enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 pub mod adapter;
+pub mod alarm_log;
 pub mod bud_stark;
 pub mod canonical_boot;
 pub mod canonical_recovery;
 pub mod canonical_set;
 pub mod plonky3_air;
 pub mod plonky3_prover;
+pub mod quarantine;
 pub mod relayer;
+pub mod transfer_verdict;
 
 #[cfg(test)]
 // Test-only module: it holds three `#[test]` functions and a helper they

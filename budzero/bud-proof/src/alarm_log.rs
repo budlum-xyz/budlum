@@ -20,13 +20,13 @@
 use sha2::{Digest, Sha256};
 
 /// Domain separator for alarm-chain links.
-pub const ALARM_LOG_DOMAIN: &[u8] = b"BDLM_BUDZERO_ALARMLOG_V1";
+const ALARM_LOG_DOMAIN: &[u8] = b"BDLM_BUDZERO_ALARMLOG_V1";
 
 /// Hard cap on retained entries; the oldest is dropped beyond it.
-pub const MAX_ALARM_LOG_ENTRIES: usize = 4096;
+const MAX_ALARM_LOG_ENTRIES: usize = 4096;
 
 /// Stored detail is truncated to this many characters.
-pub const MAX_ALARM_DETAIL_LEN: usize = 256;
+const MAX_ALARM_DETAIL_LEN: usize = 256;
 
 /// Why a proof alarmed. Mirrors the relay's alarm codes in a form the
 /// verifier-registry can store without depending on the proof crate.
@@ -68,7 +68,7 @@ impl AlarmKind {
 
 /// The chain's genesis link: the domain digest. No alarm ever has this link.
 #[must_use]
-pub fn genesis_link() -> [u8; 32] {
+fn genesis_link() -> [u8; 32] {
     let mut hasher = Sha256::default();
     hasher.update(ALARM_LOG_DOMAIN);
     hasher.finalize().into()
@@ -112,7 +112,7 @@ impl AlarmLog {
     /// The link for an alarm that follows `prev`. Pure: no log state, so a
     /// verifier recomputes it without trusting the log.
     #[must_use]
-    pub fn link_of(
+    fn link_of(
         prev: &[u8; 32],
         report_sig: &[u8; 32],
         kind: AlarmKind,

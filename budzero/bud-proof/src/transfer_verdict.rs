@@ -18,11 +18,11 @@
 
 /// The number of events the canonical transfer program logs. Any other event
 /// shape is not the canonical transfer program and must not be read as one.
-pub const CANONICAL_TRANSFER_EVENT_COUNT: usize = 2;
+const CANONICAL_TRANSFER_EVENT_COUNT: usize = 2;
 
 /// The two flags the canonical transfer program logs, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransferFlags {
+struct TransferFlags {
     /// Σinputs == Σoutputs. The law of the transfer; must be exactly 1.
     pub conservation: u64,
     /// Derived-nullifier == claimed-nullifier. Reported, not judged here.
@@ -34,7 +34,7 @@ impl TransferFlags {
     /// count is not [`CANONICAL_TRANSFER_EVENT_COUNT`], so a different
     /// program's log can never be misread as a transfer verdict.
     #[must_use]
-    pub fn extract(events: &[u64]) -> Option<Self> {
+    fn extract(events: &[u64]) -> Option<Self> {
         if events.len() != CANONICAL_TRANSFER_EVENT_COUNT {
             return None;
         }

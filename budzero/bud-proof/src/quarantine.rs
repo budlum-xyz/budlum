@@ -19,10 +19,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// Domain separator for derived ban rules.
-pub const QUARANTINE_DOMAIN: &[u8] = b"BDLM_BUDZERO_QUARANTINE_V1";
+const QUARANTINE_DOMAIN: &[u8] = b"BDLM_BUDZERO_QUARANTINE_V1";
 
 /// Hard cap on ledger entries; the oldest entry is dropped beyond it.
-pub const MAX_QUARANTINE_ENTRIES: usize = 4096;
+const MAX_QUARANTINE_ENTRIES: usize = 4096;
 
 /// Why a program was banned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl QuarantineLedger {
     /// hash. Pure - no ledger state, no sequence - so two nodes banning the
     /// same code derive the same rule id.
     #[must_use]
-    pub fn derive_rule_id(program_hash: &[u8; 32]) -> [u8; 32] {
+    fn derive_rule_id(program_hash: &[u8; 32]) -> [u8; 32] {
         let mut hasher = Sha256::default();
         hasher.update(QUARANTINE_DOMAIN);
         hasher.update(program_hash);

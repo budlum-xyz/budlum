@@ -85,10 +85,10 @@ pub struct SlashingReport {
 /// is bounded at 8 KiB so a post-quantum signature (ML-DSA-87 is under 5 KiB)
 /// still fits. The opaque `Other` proof is bounded so a domain cannot attach
 /// an unbounded blob to a slashing report.
-pub const MAX_BLOCK_HASH_LEN: usize = 128;
-pub const MAX_SIGNATURE_LEN: usize = 8192;
-pub const MAX_EVIDENCE_TAG_LEN: usize = 64;
-pub const MAX_EVIDENCE_DATA_LEN: usize = 4096;
+const MAX_BLOCK_HASH_LEN: usize = 128;
+const MAX_SIGNATURE_LEN: usize = 8192;
+const MAX_EVIDENCE_TAG_LEN: usize = 64;
+const MAX_EVIDENCE_DATA_LEN: usize = 4096;
 
 /// Reasons a report is structurally invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]

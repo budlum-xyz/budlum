@@ -18,11 +18,11 @@ pub const MAX_ENVELOPE_PROOF_BYTES: usize = 10 * 1024 * 1024;
 
 /// Envelope metadata strings are bounded so a crafted envelope cannot make a
 /// verifier allocate without limit at parse time.
-pub const MAX_ENVELOPE_STRING_LEN: usize = 256;
+const MAX_ENVELOPE_STRING_LEN: usize = 256;
 
 /// The serialized-envelope cap: any file or wire blob beyond this is refused
 /// before parsing, so parse-time allocation is bounded by construction.
-pub const MAX_ENVELOPE_SERIALIZED_LEN: usize =
+const MAX_ENVELOPE_SERIALIZED_LEN: usize =
     MAX_ENVELOPE_PROOF_BYTES + MAX_ENVELOPE_STRING_LEN * 4 + 4096;
 
 /// A program or trace longer than this cannot carry a verifiable canonical

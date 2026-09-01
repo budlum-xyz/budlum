@@ -817,7 +817,6 @@ budzero/bud-state/src/lib.rs	fn	get_empty_hash
 budzero/bud-state/src/lib.rs	fn	hash_account
 budzero/bud-state/src/lib.rs	fn	verify_account_proof
 budzero/bud-state/src/note.rs	fn	from_field_elements
-budzero/bud-state/src/note.rs	fn	is_spent
 budzero/bud-state/src/note.rs	fn	live_count
 budzero/bud-state/src/note.rs	fn	spend
 budzero/bud-state/src/note.rs	fn	spent_count
