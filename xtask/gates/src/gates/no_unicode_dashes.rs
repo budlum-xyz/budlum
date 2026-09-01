@@ -33,11 +33,7 @@ const DASHES: [(char, &str); 8] = [
 ];
 
 /// Directories that carry no prose worth scanning.
-///
-/// `skills` holds the operator's own working documents (Turkish by design,
-/// see `tree_is_english.rs`); their typographic dashes are the operator's
-/// prose, not product typography.
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".cargo", "skills"];
+const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".cargo"];
 
 /// Machine-written files that carry no prose.
 const SKIP_FILES: &[&str] = &["Cargo.lock", "flake.lock", "imports.lock", "LICENSE.md"];
