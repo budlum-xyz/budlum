@@ -1164,8 +1164,9 @@ fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorOb
         return Ok(None);
     };
     let hex = seed_hex.strip_prefix("0x").unwrap_or(seed_hex.as_str());
-    let bytes = hex::decode(hex)
-        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>))?;
+    let bytes = hex::decode(hex).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>)
+    })?;
     let len = bytes.len();
     let seed: [u8; 32] = bytes.try_into().map_err(|_| {
         ErrorObjectOwned::owned(

@@ -1509,8 +1509,7 @@ mod tests {
             seal_seed: Some([9u8; 32]),
             ..EmitPolicy::default()
         };
-        let (frames, _) =
-            qr_feed_frames_burst(&data, &sealed, 0, 2).expect("sealed burst");
+        let (frames, _) = qr_feed_frames_burst(&data, &sealed, 0, 2).expect("sealed burst");
         assert!(
             frames.iter().all(|f| find_subslice(f, marker).is_none()),
             "sealed frames must not carry the body in the clear"
@@ -1519,8 +1518,7 @@ mod tests {
         // The transparent transport of the same body does carry the marker:
         // this is what sealing removes.
         let plain = EmitPolicy::default();
-        let (frames, _) =
-            qr_feed_frames_burst(&data, &plain, 0, 2).expect("plain burst");
+        let (frames, _) = qr_feed_frames_burst(&data, &plain, 0, 2).expect("plain burst");
         assert!(
             frames.iter().any(|f| find_subslice(f, marker).is_some()),
             "the transparent transport is the plaintext baseline the seal is measured against"
