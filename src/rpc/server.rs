@@ -2484,7 +2484,7 @@ impl BudlumApiServer for RpcServer {
         let (frames, fold) = gw
             .emit_frames(session_id, seq_start, count, now)
             .map_err(reveal_gateway_rpc_error)?;
-        let frames_hex: Vec<String> = frames.iter().map(|f| hex::encode(f)).collect();
+        let frames_hex: Vec<String> = frames.iter().map(hex::encode).collect();
         Ok(serde_json::json!({
             "frames": frames_hex,
             "fold": format!("0x{}", hex::encode(fold)),

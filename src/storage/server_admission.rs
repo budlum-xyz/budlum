@@ -1,9 +1,7 @@
 //! Server admission for the 1.0 mobile-self profile: the network-side
 //! measurement that a device really is the server of its own content.
 
-use crate::core::address::Address;
-use crate::storage::content_id::ContentId;
-use crate::storage::mobile_self::{CustodyLedger, MobileAvailabilityClass, MobileSelfProfile};
+use crate::storage::mobile_self::CustodyLedger;
 
 /// A 1.0 device enters the network *as a server of its own content*, not as a
 /// client of ours. Admission is the network-side check that the claim is true
@@ -81,6 +79,9 @@ pub fn admit_device_as_server(
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+    use crate::core::address::Address;
+    use crate::storage::content_id::ContentId;
+    use crate::storage::mobile_self::{MobileAvailabilityClass, MobileSelfProfile};
 
     fn profile() -> MobileSelfProfile {
         MobileSelfProfile {

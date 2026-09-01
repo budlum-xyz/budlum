@@ -280,7 +280,10 @@ struct HedgedRndExhausted;
 
 #[cfg(feature = "production")]
 impl core::fmt::Display for HedgedRndExhausted {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    // Note: no `<'_>` here on purpose - the repo's binding-claims gate reads
+    // this file with a quote-parity scanner, and a lifetime apostrophe in code
+    // shifts that parity. Eliding the lifetime keeps the file gate-readable.
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         f.write_str("hedged signing randomness exhausted")
     }
 }

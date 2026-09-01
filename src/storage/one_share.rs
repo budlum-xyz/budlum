@@ -146,7 +146,6 @@ impl OneShareRegistry {
     /// is handed to the admission rule. The screen shows the result; the
     /// rule itself lives in
     /// [`admit_device_as_server`](crate::storage::server_admission::admit_device_as_server).
-    #[must_use]
     pub fn admit_as_server(&self) -> Result<ServerAdmission, ServerAdmissionRefusal> {
         let mut ledger = CustodyLedger::default();
         for s in self.shares.values() {

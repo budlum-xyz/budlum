@@ -380,13 +380,9 @@ impl CustodyLedger {
     }
 }
 
-/// B.U.D. 1.0 server admission.
-///
-
 #[cfg(test)]
 mod custody_tests {
     use super::*;
-    use crate::storage::server_admission::admit_device_as_server;
 
     fn av(availability: MobileAvailabilityClass) -> MobileSelfProfile {
         MobileSelfProfile {
