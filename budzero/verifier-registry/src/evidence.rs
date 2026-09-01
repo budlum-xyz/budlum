@@ -67,6 +67,26 @@ pub struct SlashingReport {
     pub reporter: Option<Address>,
 }
 
+/// Byte bounds on the free-form evidence fields.
+///
+/// The slashing history is capped by entry count
+/// (`registry::MAX_SLASHING_HISTORY`), but a single report can carry a
+/// multi-megabyte string or signature and make the *byte* footprint of the
+/// history - and of any node that gossips the report - unbounded anyway.
+/// These ceilings are enforced by [`SlashingReport::validate_shape`], which
+/// runs before the registry records or acts on a report, so an oversized
+/// report is refused where it would otherwise be retained or forwarded.
+///
+/// A block hash is a 32-byte value written as up to 64 hex characters; 128
+/// bytes leaves room for a `0x` prefix and generous formatting. A signature
+/// is bounded at 8 KiB so a post-quantum signature (ML-DSA-87 is under 5 KiB)
+/// still fits. The opaque `Other` proof is bounded so a domain cannot attach
+/// an unbounded blob to a slashing report.
+pub const MAX_BLOCK_HASH_LEN: usize = 128;
+pub const MAX_SIGNATURE_LEN: usize = 8192;
+pub const MAX_EVIDENCE_TAG_LEN: usize = 64;
+pub const MAX_EVIDENCE_DATA_LEN: usize = 4096;
+
 /// Reasons a report is structurally invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceError {
@@ -76,6 +96,10 @@ pub enum EvidenceError {
     ImpossibleLivenessWindow,
     EmptyProofTag,
     InsufficientInvalidVoteCount,
+    BlockHashTooLong,
+    SignatureTooLong,
+    TagTooLong,
+    DataTooLong,
     Unverified,
 }
 
@@ -95,6 +119,14 @@ impl std::fmt::Display for EvidenceError {
                 f,
                 "invalid-signature-spam proof does not cross its threshold"
             ),
+            EvidenceError::BlockHashTooLong => {
+                write!(f, "double-sign proof block hash exceeds the byte bound")
+            }
+            EvidenceError::SignatureTooLong => {
+                write!(f, "double-sign proof signature exceeds the byte bound")
+            }
+            EvidenceError::TagTooLong => write!(f, "opaque proof tag exceeds the byte bound"),
+            EvidenceError::DataTooLong => write!(f, "opaque proof data exceeds the byte bound"),
             EvidenceError::Unverified => write!(f, "cannot slash on an unverified evidence report"),
         }
     }
@@ -142,6 +174,14 @@ impl SlashingReport {
                 if signature_1.is_empty() || signature_2.is_empty() {
                     return Err(EvidenceError::MissingSignature);
                 }
+                if block_hash_1.len() > MAX_BLOCK_HASH_LEN
+                    || block_hash_2.len() > MAX_BLOCK_HASH_LEN
+                {
+                    return Err(EvidenceError::BlockHashTooLong);
+                }
+                if signature_1.len() > MAX_SIGNATURE_LEN || signature_2.len() > MAX_SIGNATURE_LEN {
+                    return Err(EvidenceError::SignatureTooLong);
+                }
             }
             SlashingProof::Liveness {
                 missed, expected, ..
@@ -150,9 +190,15 @@ impl SlashingReport {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
                 }
             }
-            SlashingProof::Other { tag, .. } => {
+            SlashingProof::Other { tag, data } => {
                 if tag.is_empty() {
                     return Err(EvidenceError::EmptyProofTag);
+                }
+                if tag.len() > MAX_EVIDENCE_TAG_LEN {
+                    return Err(EvidenceError::TagTooLong);
+                }
+                if data.len() > MAX_EVIDENCE_DATA_LEN {
+                    return Err(EvidenceError::DataTooLong);
                 }
             }
             SlashingProof::InvalidSignatureSpam {
@@ -293,6 +339,86 @@ mod tests {
         );
         assert!(r.validate_shape().is_ok());
         assert_eq!(r.is_actionable(), Err(EvidenceError::Unverified));
+    }
+
+    #[test]
+    fn oversized_block_hash_rejected() {
+        let r = SlashingReport::new(
+            addr(1),
+            roles::MASTER_VERIFIER,
+            SlashingProof::DoubleSign {
+                height: 10,
+                block_hash_1: "a".repeat(MAX_BLOCK_HASH_LEN + 1),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert_eq!(r.validate_shape(), Err(EvidenceError::BlockHashTooLong));
+    }
+
+    #[test]
+    fn oversized_signature_rejected() {
+        let r = SlashingReport::new(
+            addr(1),
+            roles::MASTER_VERIFIER,
+            SlashingProof::DoubleSign {
+                height: 10,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1u8; MAX_SIGNATURE_LEN + 1],
+                signature_2: vec![2],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert_eq!(r.validate_shape(), Err(EvidenceError::SignatureTooLong));
+    }
+
+    #[test]
+    fn oversized_opaque_tag_and_data_rejected() {
+        let tag = SlashingReport::new(
+            addr(1),
+            roles::RELAYER,
+            SlashingProof::Other {
+                tag: "x".repeat(MAX_EVIDENCE_TAG_LEN + 1),
+                data: vec![0],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert_eq!(tag.validate_shape(), Err(EvidenceError::TagTooLong));
+
+        let data = SlashingReport::new(
+            addr(1),
+            roles::RELAYER,
+            SlashingProof::Other {
+                tag: "relayer_invalid_proof".into(),
+                data: vec![0u8; MAX_EVIDENCE_DATA_LEN + 1],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert_eq!(data.validate_shape(), Err(EvidenceError::DataTooLong));
+    }
+
+    #[test]
+    fn evidence_at_the_byte_bound_is_accepted() {
+        // A report whose free-form fields sit exactly at the ceilings is
+        // valid: the bound refuses only what is beyond it.
+        let r = SlashingReport::new(
+            addr(1),
+            roles::RELAYER,
+            SlashingProof::Other {
+                tag: "t".repeat(MAX_EVIDENCE_TAG_LEN),
+                data: vec![0u8; MAX_EVIDENCE_DATA_LEN],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert!(r.validate_shape().is_ok());
     }
 
     #[test]

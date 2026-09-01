@@ -407,8 +407,8 @@ fn load_verifier_inputs(
 ) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), Box<dyn std::error::Error>> {
     let env_data =
         fs::read_to_string(proof_file).map_err(|e| format!("Failed to read proof file: {e}"))?;
-    let envelope: ProofEnvelope = serde_json::from_str(&env_data)
-        .map_err(|e| format!("Failed to parse proof envelope: {e}"))?;
+    let envelope: ProofEnvelope = ProofEnvelope::from_json_bounded(&env_data)
+        .map_err(|e| format!("Failed to parse proof envelope: {e:?}"))?;
 
     let pi_data = fs::read_to_string(public_inputs_file)
         .map_err(|e| format!("Failed to read public inputs file: {e}"))?;
@@ -458,7 +458,11 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
     };
     let (envelope, expected_inputs, program) =
         load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
-    let at = req.verified_at.unwrap_or_else(bud_proof::relayer::now_unix);
+    let at = match req.verified_at {
+        Some(t) => t,
+        None => bud_proof::relayer::now_unix()
+            .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?,
+    };
     let report = verify_and_report_at(&envelope, &expected_inputs, &program, at);
     let path = std::path::Path::new(req.output);
     report.write_report(path)?;
@@ -514,6 +518,7 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
                     AlarmCode::PublicInputsMismatch => "public inputs mismatch",
                     AlarmCode::InvalidEnvelope => "invalid envelope",
                     AlarmCode::DeserializationError => "deserialization error",
+                    AlarmCode::TransferViolation => "transfer violation",
                 }
             ),
             None => String::from("no alarm code recorded"),

@@ -7,7 +7,6 @@ use crate::bud_stark::{
     verify_with_preprocessed as stark_verify_with_preprocessed, StarkConfig,
 };
 use crate::plonky3_air::*;
-const MAX_PROOF_BYTES: usize = 10 * 1024 * 1024;
 use bud_vm::{Step, Vm};
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::ExtensionMmcs;
@@ -1704,6 +1703,19 @@ impl ProverAdapter for Plonky3Adapter {
             proof_len = envelope.proof_bytes.len(),
             "Verifying proof"
         );
+        // Shape bounds first: nothing below may allocate or compute off an
+        // unbounded field. A trace_len above the cap would overflow the
+        // `3 * trace_len + 1` degree derivation; a program above the cap
+        // cannot be a canonical program and is refused before it is hashed.
+        envelope.validate_shape()?;
+        expected_inputs.validate_shape()?;
+        if program.len() > crate::adapter::MAX_TRACE_LEN {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "program length {} exceeds the {} cap",
+                program.len(),
+                crate::adapter::MAX_TRACE_LEN
+            )));
+        }
         if envelope.proof_format_version != PROOF_FORMAT_VERSION {
             return Err(VerifyError::InvalidEnvelope(
                 "Unsupported proof format version".to_string(),
@@ -1758,8 +1770,10 @@ impl ProverAdapter for Plonky3Adapter {
 
         let public_values = to_public_values(expected_inputs);
 
-        let bounded_bytes =
-            &envelope.proof_bytes[..envelope.proof_bytes.len().min(MAX_PROOF_BYTES)];
+        let bounded_bytes = &envelope.proof_bytes[..envelope
+            .proof_bytes
+            .len()
+            .min(crate::adapter::MAX_ENVELOPE_PROOF_BYTES)];
         let p3_proof: crate::bud_stark::Proof<MyConfig> = postcard::from_bytes(bounded_bytes)
             .map_err(|e| VerifyError::DeserializationError(e.to_string()))?;
 
