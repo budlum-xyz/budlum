@@ -3,6 +3,9 @@
 //! The single, canonical shape in which a proven offence is reported.
 //! Carries an opaque, condition-specific proof payload plus a verified
 //! Provenance flag.
+//!
+//! WIRING: unwired - landed with the K-series evidence claims; the verifier
+//! report path that consumes this shape is the next commit in that series.
 
 use crate::address::Address;
 use crate::registry::SlashingCondition;

@@ -762,7 +762,7 @@ pub fn qr_feed_preview(
     // produced (client-side encryption). That is the one clear-body case that
     // is still nobody's plaintext, and the visibility enforcement below reads
     // this rather than asking a client to seal the same bytes twice.
-    let declared_ciphertext = manifest.map_or(false, |m| m.encryption.is_encrypted());
+    let declared_ciphertext = manifest.is_some_and(|m| m.encryption.is_encrypted());
     // The pipe writes the pacing it pins, not the pacing a caller asks for, so a
     // policy naming any other rate is refused here rather than reported wrongly
     // by the preview below.

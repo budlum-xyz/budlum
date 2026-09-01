@@ -839,6 +839,11 @@ mod tests {
         pi.event_digest[0] ^= 0x01;
         let report = verify_and_report_with_reexecution_at(&envelope, &pi, &program, 1_700_000_000);
         assert_eq!(report.status, RelayStatus::Alarm);
+        assert_ne!(
+            report.status,
+            RelayStatus::Ok,
+            "a tampered bound digest must never be relabeled as a clean relay"
+        );
         assert!(
             matches!(
                 report.alarm.as_ref().map(|a| a.code),
