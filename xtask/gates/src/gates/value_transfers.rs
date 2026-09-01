@@ -16,7 +16,9 @@
 //!    fields; `bridge_fee_ppm` is not merged into `bridge_relayer_fee_ppm`.
 //! 2. Every rate is validated below 100%.
 //! 3. The fee actually consults the amount.
-//! 4. The combination is `max`, not `+`.
+//! 4. The combination is the floor plus the cut (user decision 2026-09-01:
+//!    base + rate; the rate is protocol revenue bound at the instruction),
+//!    never `max`.
 //! 5. Rounding is up (`div_ceil`), and the arithmetic widens to `u128`.
 //! 6. The rates are governance-tunable in both places that decide it: the
 //!    whitelist in governance.rs and the match in account.rs.
@@ -247,18 +249,20 @@ fn check_fee_shape(params_code: &str, problems: &mut Vec<String>, checked: &mut 
     *checked += 1;
     if let Some(body) = req {
         *checked += 1;
-        if !body.contains(".max(") {
+        if !adds_floor(body) {
             problems.push(String::from(
-                "`required_transfer_fee` does not take the larger of the floor and \
-                 the cut. Adding them charges the floor twice on every large \
-                 transfer, which is not the model.",
+                "`required_transfer_fee` does not add the floor to the \
+                 proportional cut. The decided model (user decision 2026-09-01) \
+                 bills base + rate: the rate is protocol revenue bound at the \
+                 instruction level, so it rides on top of the floor.",
             ));
         }
         *checked += 1;
-        if adds_floor(body) {
+        if body.contains(".max(") {
             problems.push(String::from(
-                "`required_transfer_fee` adds the floor to the proportional cut. It \
-                 must take the larger of the two.",
+                "`required_transfer_fee` maxes the floor against the cut. The \
+                 decided model bills both: a max would let any large transfer \
+                 skip the floor entirely.",
             ));
         }
     } else {
@@ -425,11 +429,11 @@ const PROP_TRUNCATES: &str =
     }\n";
 const REQ_GOOD: &str =
     "    pub fn required_transfer_fee(&self, amount: u64, base_fee: u64) -> u64 {\n\
-        base_fee.max(self.proportional_fee(amount, self.transfer_fee_ppm))\n\
-    }\n";
-const REQ_ADDS: &str =
-    "    pub fn required_transfer_fee(&self, amount: u64, base_fee: u64) -> u64 {\n\
         base_fee.saturating_add(self.proportional_fee(amount, self.transfer_fee_ppm))\n\
+    }\n";
+const REQ_MAXES: &str =
+    "    pub fn required_transfer_fee(&self, amount: u64, base_fee: u64) -> u64 {\n\
+        base_fee.max(self.proportional_fee(amount, self.transfer_fee_ppm))\n\
     }\n";
 const TEST_NAMES: [&str; 7] = [
     "a_larger_transfer_requires_a_larger_fee",
@@ -467,7 +471,7 @@ fn check_fixture(mode: &str, expect_ok: bool, label: &str) -> Result<(), String>
         "truncates" => PROP_TRUNCATES,
         _ => PROP_GOOD,
     };
-    let req = if mode == "adds" { REQ_ADDS } else { REQ_GOOD };
+    let req = if mode == "maxes" { REQ_MAXES } else { REQ_GOOD };
 
     let mut tests = String::new();
     let test_count = if mode == "missing_test" {
@@ -564,8 +568,8 @@ pub fn self_test() -> Result<String, String> {
     // 3. The rate exists but nothing applies it.
     check_fixture("unapplied", false, "a rate no validation path reads")?;
 
-    // 4. Floor and cut added instead of max.
-    check_fixture("adds", false, "a floor added to the cut rather than maxed")?;
+    // 4. Floor and cut maxed instead of added.
+    check_fixture("maxes", false, "a floor maxed against the cut rather than added")?;
 
     // 5. Rounding reverts to truncation.
     check_fixture(
