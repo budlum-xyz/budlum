@@ -34,10 +34,14 @@ def api(repo, path):
         "https://api.github.com/repos/" + repo + path,
         headers={"Authorization": "Bearer " + tok(),
                  "Accept": "application/vnd.github+json", "User-Agent": "ayaz-agent"})
+    # Sabit https api.github.com ucu, zaman asimi var; konak kullanicidan gelmez.
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     return json.loads(urllib.request.urlopen(req, timeout=240).read())
 
 
 def blob_of(data):
+    # Git blob nesne kimligi; git nesne formati SHA-1 gerektirir, guvenlik ozeti degil.
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
@@ -82,6 +86,8 @@ def main():
     req = urllib.request.Request(
         "https://api.github.com/repos/%s/tarball/%s" % (repo, head),
         headers={"Authorization": "Bearer " + tok(), "User-Agent": "ayaz-agent"})
+    # Sabit https api.github.com ucu, zaman asimi var; konak kullanicidan gelmez.
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     raw = urllib.request.urlopen(req, timeout=600).read()
     with open("/tmp/senkron.tar.gz", "wb") as h:
         h.write(raw)
