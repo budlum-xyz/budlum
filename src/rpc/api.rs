@@ -353,18 +353,25 @@ pub trait BudlumApi {
     /// and the commitments a publish would pin. Bounded by
     /// `MAX_PREVIEW_CONTENT_BYTES`, so it is a question an operator can ask
     /// twice on the same body and get the same answer.
+    ///
+    /// A non-public feed (the default) must be sealed or declared ciphertext:
+    /// pass `seal_seed` as 32 bytes hex to seal the body before it is
+    /// carouselled, or a manifest whose `encryption` is `client-side`. A clear
+    /// body over a gated pin is refused.
     #[method(name = "bud_storageQrFeedPreview")]
     async fn storage_qr_feed_preview(
         &self,
         data_hex: String,
         block_len: u16,
         manifest: Option<crate::storage::ContentManifest>,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Re-emit `count` frames of that feed from `seq`, with the fold a client
     /// checks them against. The caller supplies the body, so this publishes no
     /// handle into stored content and grants nothing: whoever holds the bytes
-    /// can already produce the frames.
+    /// can already produce the frames. Pass `seal_seed` (32 bytes hex) to emit
+    /// the feed over the sealed body instead of the clear one.
     #[method(name = "bud_storageQrFeedFrames")]
     async fn storage_qr_feed_frames(
         &self,
@@ -372,6 +379,7 @@ pub trait BudlumApi {
         block_len: u16,
         first_frame: u32,
         count: u32,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Issue a view grant (key handle on-chain; key material off-chain).
@@ -394,6 +402,16 @@ pub trait BudlumApi {
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Social/DM delete: owner-authorised; revokes every live view grant the
+    /// owner issued for the content and rotates its payload key id.
+    #[method(name = "bud_storageSocialDelete")]
+    async fn storage_social_delete(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Every view-grant row of a confidential object, with the count the node
     /// treats as live. `liveOnly` asks for the live rows alone.
     #[method(name = "bud_storageListViewGrants")]
@@ -411,6 +429,40 @@ pub trait BudlumApi {
         key_id: String,
         owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Open a metered reveal session for a Three object. The node re-derives
+    /// the view grant from chain state (the same path as
+    /// `bud_storageMayView`), so a sealed recipe without a live grant is
+    /// refused here, not at the viewer. The returned session id is served by
+    /// `bud_storageRevealFrames`; sessions are capped at
+    /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
+    #[method(name = "bud_storageOpenReveal")]
+    async fn storage_open_reveal(
+        &self,
+        content_id: String,
+        recipe: serde_json::Value,
+        full_public: Option<serde_json::Value>,
+        packed: String,
+        viewer: String,
+        owner: String,
+        key_id: String,
+        meter_budget: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Serve `count` frames from `seq_start` of an open reveal session, under
+    /// that session's meter budget and the per-call ceiling
+    /// (`MAX_FRAMES_PER_CALL`).
+    #[method(name = "bud_storageRevealFrames")]
+    async fn storage_reveal_frames(
+        &self,
+        session_id: u64,
+        seq_start: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Close a reveal session early. Returns whether it existed.
+    #[method(name = "bud_storageCloseReveal")]
+    async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned>;
 
     /// Classic/2.0 confidential body commit. Three/recipe-only is refused.
     #[method(name = "bud_storageRegisterConfidentialCommit")]

@@ -116,9 +116,9 @@ fn seal_payload(
         });
     }
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).map_err(|_| SealError::Encrypt)?;
-    let nonce = XNonce::from_slice(nonce24);
+    let nonce = XNonce::try_from(nonce24.as_slice()).map_err(|_| SealError::Encrypt)?;
     let ct = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|_| SealError::Encrypt)?;
     let mut out = Vec::with_capacity(SEALED_HEADER_LEN + ct.len());
     out.extend_from_slice(&SEALED_MAGIC);
@@ -168,8 +168,8 @@ pub fn open_payload(key: &PayloadKey, sealed: &[u8]) -> Result<Vec<u8>, SealErro
     nonce_arr.copy_from_slice(nonce_bytes);
     let ct = sealed.get(SEALED_HEADER_LEN..).ok_or(SealError::BadBlob)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key.0).map_err(|_| SealError::Decrypt)?;
-    let nonce = XNonce::from_slice(&nonce_arr);
-    cipher.decrypt(nonce, ct).map_err(|_| SealError::Decrypt)
+    let nonce = XNonce::try_from(nonce_arr.as_slice()).map_err(|_| SealError::Decrypt)?;
+    cipher.decrypt(&nonce, ct).map_err(|_| SealError::Decrypt)
 }
 
 /// Deterministic nonce from stream context.

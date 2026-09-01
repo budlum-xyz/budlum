@@ -283,6 +283,10 @@ pub struct RpcServer {
     node: NodeClient,
     security: RpcSecurityConfig,
     mode: RpcMode,
+    /// Bounded, expiring reveal-session table (G4). Frames of a Three object
+    /// are served through sessions opened by `bud_storageOpenReveal`, never
+    /// as raw handle-passing.
+    reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
     /// Prometheus metrics handle for RPC latency and rate-limit counters.
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
@@ -296,6 +300,7 @@ impl RpcServer {
             node,
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
+            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
         }
     }
@@ -310,6 +315,7 @@ impl RpcServer {
             node,
             security,
             mode: RpcMode::Public,
+            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
         }
     }
@@ -325,6 +331,7 @@ impl RpcServer {
             node,
             security,
             mode,
+            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
         }
     }
@@ -1022,6 +1029,33 @@ fn parse_grant_auth(
     })
 }
 
+/// Map a reveal-gateway refusal to a JSON-RPC error. Each refusal kind gets
+/// its own code so a client can tell "you asked too much" (invalid params)
+/// from "the table is full" (resource) from "your session is gone" (lookup)
+/// without parsing prose.
+fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjectOwned {
+    use crate::storage::RevealGatewayError;
+    match e {
+        RevealGatewayError::AskTooLarge { count, max } => ErrorObjectOwned::owned(
+            -32602,
+            format!("reveal: asked {count} frames, ceiling is {max}"),
+            None::<()>,
+        ),
+        RevealGatewayError::UnknownSession(id) => {
+            ErrorObjectOwned::owned(-32001, format!("reveal: unknown session {id}"), None::<()>)
+        }
+        RevealGatewayError::Expired { id } => {
+            ErrorObjectOwned::owned(-32002, format!("reveal: session {id} expired"), None::<()>)
+        }
+        RevealGatewayError::SessionLimit { max } => ErrorObjectOwned::owned(
+            -32003,
+            format!("reveal: session table full ({max})"),
+            None::<()>,
+        ),
+        RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
+    }
+}
+
 fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
     Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
 }
@@ -1115,10 +1149,33 @@ fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
         | crate::storage::emit::EmitError::TooLarge { .. }
         | crate::storage::emit::EmitError::BurstTooWide { .. }
         | crate::storage::emit::EmitError::FrameOutOfRange { .. }
-        | crate::storage::emit::EmitError::Edition(_) => -32602,
+        | crate::storage::emit::EmitError::Edition(_)
+        | crate::storage::emit::EmitError::UnsealedGated => -32602,
         _ => -32000,
     };
     ErrorObjectOwned::owned(code, format!("qr feed: {e}"), None::<()>)
+}
+
+/// Parse the optional `seal_seed` argument (32 bytes, hex, optional `0x`).
+/// `None` leaves the feed unsealed; a present-but-malformed seed is a caller
+/// fault, not a silent fallback to clear frames.
+fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorObjectOwned> {
+    let Some(seed_hex) = seed_hex else {
+        return Ok(None);
+    };
+    let hex = seed_hex.strip_prefix("0x").unwrap_or(seed_hex.as_str());
+    let bytes = hex::decode(hex).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>)
+    })?;
+    let len = bytes.len();
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
+        ErrorObjectOwned::owned(
+            -32602,
+            format!("seal_seed must be 32 bytes, got {len}"),
+            None::<()>,
+        )
+    })?;
+    Ok(Some(seed))
 }
 
 fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
@@ -2123,6 +2180,7 @@ impl BudlumApiServer for RpcServer {
         data_hex: String,
         block_len: u16,
         manifest: Option<crate::storage::ContentManifest>,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
         let data = hex::decode(hex).map_err(|e| {
@@ -2141,6 +2199,7 @@ impl BudlumApiServer for RpcServer {
         }
         let policy = crate::storage::emit::EmitPolicy {
             block_len,
+            seal_seed: parse_seal_seed(seal_seed)?,
             ..crate::storage::emit::EmitPolicy::default()
         };
         let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
@@ -2154,6 +2213,7 @@ impl BudlumApiServer for RpcServer {
         block_len: u16,
         first_frame: u32,
         count: u32,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
         let data = hex::decode(hex).map_err(|e| {
@@ -2172,6 +2232,7 @@ impl BudlumApiServer for RpcServer {
         }
         let policy = crate::storage::emit::EmitPolicy {
             block_len,
+            seal_seed: parse_seal_seed(seal_seed)?,
             ..crate::storage::emit::EmitPolicy::default()
         };
         let (frames, fold) =
@@ -2273,6 +2334,28 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn storage_social_delete(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let auth = parse_grant_auth(authorization.as_ref())?;
+        let content_id = parse_content_id(&content_id)?;
+        // Same boundary rule as revoke: when this node cannot check the
+        // signature at all, that is an operator fault, not a client key fault.
+        let _actor = auth.derived_owner().map_err(grant_auth_error)?;
+        let outcome = self
+            .chain
+            .social_delete(content_id, auth, at_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "grantsRevoked": outcome.grants_revoked,
+            "keyRotated": outcome.key_rotated,
+        }))
+    }
+
     async fn storage_list_view_grants(
         &self,
         content_id: String,
@@ -2315,6 +2398,131 @@ impl BudlumApiServer for RpcServer {
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
         Ok(serde_json::json!({ "allowed": allowed }))
+    }
+
+    async fn storage_open_reveal(
+        &self,
+        content_id: String,
+        recipe: serde_json::Value,
+        full_public: Option<serde_json::Value>,
+        packed: String,
+        viewer: String,
+        owner: String,
+        key_id: String,
+        meter_budget: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let recipe: crate::storage::ThreeRecipe = serde_json::from_value(recipe)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("recipe: {e}"), None::<()>))?;
+        let full_public: Option<crate::storage::ThreeRecipePublic> = match full_public {
+            None => None,
+            Some(v) => Some(serde_json::from_value(v).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("fullPublic: {e}"), None::<()>)
+            })?),
+        };
+        let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
+        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>))?;
+        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
+        let key_id = parse_hex32_field(&key_id, "key_id")?;
+
+        // The grant decision is the chain's; the gateway re-enforces it on the
+        // sealed path, but the authority that owns the registry answers it.
+        let grant_allows = self
+            .chain
+            .may_view_content(content_id, viewer, key_id, owner)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+
+        let req = crate::storage::RevealRequest {
+            recipe,
+            full_public,
+            packed,
+            content_id,
+            viewer,
+            owner,
+            key_id,
+            meter_budget,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut gw = self.reveal_gateway.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+        })?;
+        // Reclaim TTL-dead rows before admission so a burst of opens cannot
+        // be wedged by corpses, then refuse fast at the cap with its own
+        // code instead of paying for an open that admission would refuse.
+        gw.sweep(now);
+        if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                format!(
+                    "reveal: session table full ({})",
+                    crate::storage::MAX_REVEAL_SESSIONS
+                ),
+                None::<()>,
+            ));
+        }
+        let session_id = gw
+            .open_prechecked(req, grant_allows, now)
+            .map_err(reveal_gateway_rpc_error)?;
+        let commit = gw
+            .stream_commitment(session_id)
+            .map_err(reveal_gateway_rpc_error)?;
+        Ok(serde_json::json!({
+            "sessionId": session_id,
+            "streamCommitment": format!("0x{}", hex::encode(commit)),
+            "expiresAt": now.saturating_add(crate::storage::REVEAL_SESSION_TTL_SECS),
+            "frameBudget": meter_budget
+                .unwrap_or(crate::storage::DEFAULT_REVEAL_BUDGET_FRAMES),
+            "activeSessions": gw.session_count(),
+        }))
+    }
+
+    async fn storage_reveal_frames(
+        &self,
+        session_id: u64,
+        seq_start: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The gateway enforces the ceiling too; answering before touching
+        // the table keeps a malformed ask off the shared lock entirely.
+        if count > crate::storage::MAX_FRAMES_PER_CALL {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "reveal: asked {count} frames, ceiling is {}",
+                    crate::storage::MAX_FRAMES_PER_CALL
+                ),
+                None::<()>,
+            ));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut gw = self.reveal_gateway.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+        })?;
+        let (frames, fold) = gw
+            .emit_frames(session_id, seq_start, count, now)
+            .map_err(reveal_gateway_rpc_error)?;
+        let frames_hex: Vec<String> = frames.iter().map(hex::encode).collect();
+        Ok(serde_json::json!({
+            "frames": frames_hex,
+            "fold": format!("0x{}", hex::encode(fold)),
+        }))
+    }
+
+    async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned> {
+        let mut gw = self.reveal_gateway.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+        })?;
+        Ok(gw.close(session_id))
     }
 
     async fn storage_register_confidential_commit(

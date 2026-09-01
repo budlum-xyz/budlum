@@ -427,11 +427,38 @@ jobs:
             tail -30 /tmp/loom-canary.log >&2
             exit 1
           fi
-      # Without `--cfg loom` the model module does not compile. The inventory test
-      # runs independently of that flag and verifies the model still describes the
-      # engine, so it is called here as well.
+      # The model compiles against loom in a harness crate whose only dependency
+      # is loom itself. The previous form set `--cfg loom` through RUSTFLAGS on
+      # the whole `cargo test --lib` build, which recompiles every transitive
+      # dependency with the loom cfg; the smol-ecosystem crates in the tree
+      # (event-listener, event-listener-strategy, concurrent-queue, parking)
+      # gate their sync shims behind `#[cfg(loom)]` with a target-scoped
+      # optional `loom` dependency that cargo does not resolve from RUSTFLAGS,
+      # so the build broke with "cannot find module or crate `loom`" inside a
+      # dependency. The harness keeps the cfg scoped to the model, and the
+      # model file is the same file the normal test tree compiles (the
+      # inventory test inside it stays in the ordinary profile too), so the
+      # loom run cannot drift from what CI otherwise verifies.
       - name: The loom model (every interleaving)
         run: |
           set -euo pipefail
-          RUSTFLAGS="--cfg loom" \
-            cargo test --lib --release consensus_lock_order_loom -- --nocapture
+          mkdir -p /tmp/loom-model/src
+          cat > /tmp/loom-model/Cargo.toml <<'EOF'
+          [package]
+          name = "loom-model"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          loom = "0.7"
+          EOF
+          cat > /tmp/loom-model/src/main.rs <<EOF
+          //! Harness that compiles the real model file from the checkout, so the
+          //! loom run cannot drift from the file the ordinary test tree builds.
+          #[path = "$GITHUB_WORKSPACE/src/tests/consensus_lock_order_loom.rs"]
+          mod consensus_lock_order_loom;
+
+          fn main() {}
+          EOF
+          cd /tmp/loom-model
+          RUSTFLAGS="--cfg loom" cargo test --release -- --nocapture

@@ -113,7 +113,10 @@ impl std::fmt::Display for CarouselError {
             Self::TooLarge { len, max } => {
                 write!(f, "carousel payload {len} exceeds max {max}")
             }
-            Self::BadBlockLen => write!(f, "carousel block_len must be non-zero"),
+            Self::BadBlockLen => write!(
+                f,
+                "carousel block_len out of range: zero, or header plus body over one QR frame"
+            ),
             Self::BadK(k) => write!(f, "carousel k={k} out of range 1..={MAX_K}"),
             Self::Truncated => write!(f, "carousel drop truncated"),
             Self::BadMagic => write!(f, "carousel drop bad magic"),
@@ -260,6 +263,19 @@ impl Drop {
         }
         if k == 0 || k > MAX_K {
             return Err(CarouselError::BadK(k));
+        }
+        // `total_len` is the one header field the decoder turns straight into
+        // an allocation (`finish` reserves it). Bound it before it can ask for
+        // gigabytes: an honest carousel never exceeds [`MAX_CAROUSEL_BYTES`],
+        // and an empty payload is refused by the encoder too.
+        if total_len == 0 {
+            return Err(CarouselError::Empty);
+        }
+        if total_len > MAX_CAROUSEL_BYTES as u32 {
+            return Err(CarouselError::TooLarge {
+                len: total_len as usize,
+                max: MAX_CAROUSEL_BYTES,
+            });
         }
         if body.len() != usize::from(block_len) {
             return Err(CarouselError::BodyLenMismatch {
@@ -599,6 +615,18 @@ impl CarouselDecoder {
         }
         let bl = usize::from(params.block_len);
         let total = params.total_len as usize;
+        // Defense in depth for params built directly (the fields are `pub`):
+        // refuse the same degenerate values `Drop::from_bytes` refuses, so no
+        // construction path can turn `total_len` into a giant reservation.
+        if total == 0 {
+            return Err(CarouselError::Empty);
+        }
+        if total > MAX_CAROUSEL_BYTES {
+            return Err(CarouselError::TooLarge {
+                len: total,
+                max: MAX_CAROUSEL_BYTES,
+            });
+        }
         let mut out = Vec::with_capacity(total);
         for block in &self.solved {
             let b = block
@@ -1169,6 +1197,53 @@ mod tests {
         assert_eq!(
             CarouselEncoder::new(b"", 200).unwrap_err(),
             CarouselError::Empty
+        );
+    }
+
+    /// A drop whose header names a 4 GiB payload must be refused at the wire,
+    /// not turned into a 4 GiB reservation in `finish`.
+    #[test]
+    fn hostile_total_len_is_refused_on_the_wire() {
+        let enc = CarouselEncoder::new(b"total-len-guard", 16).unwrap();
+        let mut bytes = enc.drop_at(0).to_bytes();
+        bytes[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            Drop::from_bytes(&bytes).unwrap_err(),
+            CarouselError::TooLarge {
+                len: u32::MAX as usize,
+                max: MAX_CAROUSEL_BYTES
+            }
+        );
+
+        let mut bytes = enc.drop_at(0).to_bytes();
+        bytes[14..18].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(Drop::from_bytes(&bytes).unwrap_err(), CarouselError::Empty);
+    }
+
+    /// Defense in depth: `CarouselParams` fields are public, so a caller could
+    /// build one without `Drop::from_bytes`; `finish` must still refuse before
+    /// it reserves `total_len`.
+    #[test]
+    fn hostile_total_len_is_refused_even_when_params_are_built_directly() {
+        let mut dec = CarouselDecoder::new();
+        let drop = Drop {
+            seq: 0,
+            params: CarouselParams {
+                k: 1,
+                block_len: 1,
+                total_len: u32::MAX,
+            },
+            degree: 1,
+            body: vec![0u8; 1],
+        };
+        dec.push(&drop).unwrap();
+        assert!(dec.is_complete());
+        assert_eq!(
+            dec.finish().unwrap_err(),
+            CarouselError::TooLarge {
+                len: u32::MAX as usize,
+                max: MAX_CAROUSEL_BYTES
+            }
         );
     }
 

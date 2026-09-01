@@ -20,6 +20,7 @@
 
 use crate::adapter::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter, VerifyError};
 use crate::canonical_set;
+use crate::transfer_verdict::{verdict_of, TransferVerdict};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tiny_keccak::{Hasher, Keccak};
@@ -51,6 +52,10 @@ pub enum AlarmCode {
     InvalidEnvelope,
     /// Proof bytes could not be deserialized.
     DeserializationError,
+    /// The proof is valid but the canonical transfer program's logged events
+    /// broke conservation (Σinputs != Σoutputs). A proof attests the trace;
+    /// this is the law check the proof alone does not answer (K1).
+    TransferViolation,
 }
 
 /// Proof fingerprint: the envelope fields an external party can compare
@@ -177,6 +182,7 @@ impl CanonicalRelayReport {
                     AlarmCode::PublicInputsMismatch => b"public_inputs_mismatch",
                     AlarmCode::InvalidEnvelope => b"invalid_envelope",
                     AlarmCode::DeserializationError => b"deserialization_error",
+                    AlarmCode::TransferViolation => b"transfer_violation",
                 });
                 p.push(0);
                 p.extend_from_slice(a.detail.as_bytes());
@@ -236,11 +242,25 @@ impl CanonicalRelayReport {
 }
 
 /// Current unix time in seconds.
-pub fn now_unix() -> u64 {
+/// The system clock cannot stamp a relay report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockError;
+
+impl std::fmt::Display for ClockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("system clock is before the Unix epoch")
+    }
+}
+
+/// The live clock, or a hard error when the system time is unusable (for
+/// example before the epoch). The previous `unwrap_or(0)` stamped a signed
+/// report with `verified_at = 0`, which a signature-only verifier could
+/// mistake for a fresh report; a clock failure now refuses to stamp one.
+pub fn now_unix() -> Result<u64, ClockError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_err(|_| ClockError)
 }
 
 fn alarm_from_verify_error(e: &VerifyError) -> AlarmDetail {
@@ -341,6 +361,223 @@ pub fn verify_and_report_at(
                 )
             });
     CanonicalRelayReport::from_outcome(envelope, pi, verified, at_unix)
+}
+
+/// Verify and re-run the canonical transfer program against the bound public
+/// inputs (K1 of the BudZero regeneration design).
+///
+/// Today the canonical transfer is a fixed specimen, and every field re-derived
+/// here (`event_digest`, `initial_state_root`, `trace_len`, `exit_code`,
+/// `gas_used`) is already bound by the AIR - so a disagreement after a
+/// successful STARK verify means the proof path and the re-execution path
+/// disagreed, which is exactly the independent second derivation K1 exists to
+/// provide. Re-execution needs no untrusted inputs because the program is
+/// fixed and deterministic, and the `event_digest` is a field sum, not a hash,
+/// so nothing is read off caller-supplied events. When transfers become
+/// parameterized (real amounts, recipients, secrets), this same re-derivation
+/// against the proof-bound inputs is what makes a wrong conservation flag
+/// impossible to hide; until then the AIR binding already rejects it.
+/// The spent-set the relay consults for the transfer's claimed nullifier (S1
+/// of the regeneration design: double-spend). The VM derives and compares the
+/// nullifier but never asks whether it was already spent; the relay-side
+/// check closes that gap without touching the ISA or the consensus surface.
+pub trait SpentSet {
+    /// Whether `nullifier` is already spent. An `Err` means the oracle could
+    /// not answer, and the relay must fail closed.
+    fn is_spent(&self, nullifier: u64) -> Result<bool, String>;
+}
+
+/// The re-execution of the canonical transfer program and the public-input
+/// values a correct proof must bind. Re-execution is the K1 motor: it needs
+/// no untrusted inputs because the program is fixed and deterministic.
+struct TransferReexecution {
+    receipt: bud_vm::ExecutionReceipt,
+    registers: [u64; 32],
+    trace_len: usize,
+    gas_used: u64,
+    event_digest: [u8; 32],
+    init_root: [u8; 32],
+}
+
+fn reexecute_transfer(program: &[u64]) -> TransferReexecution {
+    let mut vm = bud_vm::Vm::new(64);
+    let receipt = vm.run_receipt(program);
+    let event_digest = crate::event_digest_from_events(&receipt.events);
+    let init_root = crate::initial_state_root_of(
+        crate::memory_image_commitment_of_reads(&crate::initial_memory_reads(&vm.trace)),
+        crate::register_image_commitment_of_reads(&crate::initial_register_reads(&vm.trace)),
+    );
+    TransferReexecution {
+        receipt,
+        registers: vm.registers,
+        trace_len: vm.trace.len(),
+        gas_used: vm.gas_used,
+        event_digest,
+        init_root,
+    }
+}
+
+fn mark_transfer_violation(report: &mut CanonicalRelayReport, detail: String) {
+    report.status = RelayStatus::Alarm;
+    report.alarm = Some(AlarmDetail {
+        code: AlarmCode::TransferViolation,
+        detail,
+    });
+    report.report_sig = keccak256(&report.canonical_payload());
+}
+
+/// Verify and re-run the canonical transfer program against the bound public
+/// inputs (K1 of the BudZero regeneration design).
+///
+/// Today the canonical transfer is a fixed specimen, and every field re-derived
+/// here (`event_digest`, `initial_state_root`, `trace_len`, `exit_code`,
+/// `gas_used`) is already bound by the AIR - so a disagreement after a
+/// successful STARK verify means the proof path and the re-execution path
+/// disagreed, which is exactly the independent second derivation K1 exists to
+/// provide. Re-execution needs no untrusted inputs because the program is
+/// fixed and deterministic, and the `event_digest` is a field sum, not a hash,
+/// so nothing is read off caller-supplied events. When transfers become
+/// parameterized (real amounts, recipients, secrets), this same re-derivation
+/// against the proof-bound inputs is what makes a wrong conservation flag
+/// impossible to hide; until then the AIR binding already rejects it.
+pub fn verify_and_report_with_reexecution_at(
+    envelope: &ProofEnvelope,
+    pi: &ExecutionPublicInputs,
+    program: &[u64],
+    at_unix: u64,
+) -> CanonicalRelayReport {
+    let mut report = verify_and_report_at(envelope, pi, program, at_unix);
+
+    // A failed verification is already an alarm; the re-execution check must
+    // not overwrite that classification.
+    if report.status == RelayStatus::Alarm {
+        return report;
+    }
+
+    // The re-execution law check applies only to the canonical transfer
+    // program; reading a "verdict" off any other program would be a shape
+    // error, not a detection.
+    if !canonical_set::is_canonical_transfer_program(&pi.program_hash) {
+        return report;
+    }
+
+    let reexec = reexecute_transfer(program);
+
+    if !reexec.receipt.success {
+        mark_transfer_violation(
+            &mut report,
+            String::from("canonical transfer program must reach Halt"),
+        );
+        return report;
+    }
+
+    // The logged decision vector must classify as a conserving transfer. This
+    // is the raw-event check that does not pass through the digest comparison:
+    // the canonical program logs [conservation, nullifier], and anything that
+    // is not a `ConservationHolds` verdict is a violation even if a proof
+    // bound a matching digest.
+    let verdict = verdict_of(&reexec.receipt.events);
+    if !matches!(verdict, TransferVerdict::ConservationHolds { .. }) {
+        mark_transfer_violation(
+            &mut report,
+            format!("logged events classify as {verdict:?}, not a conserving transfer"),
+        );
+        return report;
+    }
+
+    // Every value the proof bound must match what the canonical program
+    // actually does. The conservation flag is the low limb of the digest:
+    // an honest run logs [1, 0] and anything else means the trace recorded
+    // Σin != Σout (or a fabricated nullifier) and was proven anyway.
+    let mut mismatch: Option<String> = None;
+    if reexec.event_digest != pi.event_digest {
+        mismatch = Some(format!(
+            "event digest {} != re-executed {} (conservation flag is not 1)",
+            hex32(&pi.event_digest),
+            hex32(&reexec.event_digest)
+        ));
+    } else if reexec.init_root != pi.initial_state_root {
+        mismatch = Some(String::from(
+            "initial state root differs from the re-executed transfer",
+        ));
+    } else if reexec.trace_len as u64 != pi.trace_len {
+        mismatch = Some(format!(
+            "trace length {} != canonical {}",
+            pi.trace_len, reexec.trace_len
+        ));
+    } else if reexec.receipt.exit_code != pi.exit_code {
+        mismatch = Some(format!(
+            "exit code {} != canonical {}",
+            pi.exit_code, reexec.receipt.exit_code
+        ));
+    } else if reexec.gas_used != pi.gas_used {
+        mismatch = Some(format!(
+            "gas used {} != canonical {}",
+            pi.gas_used, reexec.gas_used
+        ));
+    }
+
+    if let Some(detail) = mismatch {
+        mark_transfer_violation(&mut report, detail);
+    }
+    report
+}
+
+/// Verify, re-execute, and ask the spent-set about the transfer's claimed
+/// nullifier (S1 of the regeneration design: double-spend).
+///
+/// The claimed nullifier is read from the re-executed register the schema
+/// assigns to it (r8, see `private_transfer.rs`), so a parameterized transfer
+/// builder feeds per-transfer claims through the same seam with no relay
+/// change and no ISA change. A spent nullifier - or an oracle that cannot
+/// answer, which must fail closed - is a [`AlarmCode::TransferViolation`].
+pub fn verify_and_report_with_spentset_at(
+    envelope: &ProofEnvelope,
+    pi: &ExecutionPublicInputs,
+    program: &[u64],
+    spent_set: &dyn SpentSet,
+    at_unix: u64,
+) -> CanonicalRelayReport {
+    let mut report = verify_and_report_with_reexecution_at(envelope, pi, program, at_unix);
+
+    // A failed verification or a re-execution mismatch is already an alarm;
+    // the spent-set check must not overwrite that classification.
+    if report.status == RelayStatus::Alarm {
+        return report;
+    }
+    if !canonical_set::is_canonical_transfer_program(&pi.program_hash) {
+        return report;
+    }
+
+    // The re-execution is negligible (~tens of microseconds) next to the
+    // verification it follows; reading the nullifier off the re-executed
+    // registers is what keeps it untrusted-input-free.
+    let reexec = reexecute_transfer(program);
+    if !reexec.receipt.success {
+        mark_transfer_violation(
+            &mut report,
+            String::from("canonical transfer program must reach Halt"),
+        );
+        return report;
+    }
+
+    let claimed = reexec.registers[8];
+    match spent_set.is_spent(claimed) {
+        Ok(false) => {}
+        Ok(true) => {
+            mark_transfer_violation(
+                &mut report,
+                format!("nullifier 0x{claimed:016x} already spent (double-spend)"),
+            );
+        }
+        Err(e) => {
+            mark_transfer_violation(
+                &mut report,
+                format!("spent-set oracle could not answer for 0x{claimed:016x}: {e}"),
+            );
+        }
+    }
+    report
 }
 
 #[cfg(test)]
@@ -505,5 +742,131 @@ mod tests {
         let parsed: CanonicalRelayReport = serde_json::from_str(&json).expect("json parses");
         assert_eq!(parsed, report);
         assert!(parsed.verify_report_sig());
+    }
+
+    fn prove_transfer() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
+        let program = bud_vm::private_transfer::build_private_transfer_check_program()
+            .expect("canonical transfer build");
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "canonical transfer must reach Halt");
+        assert_eq!(
+            receipt.events,
+            vec![1, 0],
+            "canonical verdicts [conservation, nullifier]"
+        );
+        let mut pi = dummy_pi(&vm, &program);
+        pi.event_digest = crate::event_digest_from_events(&receipt.events);
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        (envelope, pi, program)
+    }
+
+    #[test]
+    fn canonical_transfer_passes_reexecution_check() {
+        let (envelope, pi, program) = prove_transfer();
+        let report = verify_and_report_with_reexecution_at(&envelope, &pi, &program, 1_700_000_000);
+        assert_eq!(report.status, RelayStatus::Ok);
+        assert!(report.is_canonical);
+        assert!(report.alarm.is_none(), "no alarm for the honest specimen");
+        assert!(report.verify_report_sig());
+    }
+
+    struct MockSpentSet {
+        spent: std::collections::HashSet<u64>,
+        fail: bool,
+    }
+
+    impl SpentSet for MockSpentSet {
+        fn is_spent(&self, nullifier: u64) -> Result<bool, String> {
+            if self.fail {
+                return Err(String::from("oracle unreachable"));
+            }
+            Ok(self.spent.contains(&nullifier))
+        }
+    }
+
+    #[test]
+    fn unspent_nullifier_passes_the_spentset_check() {
+        let (envelope, pi, program) = prove_transfer();
+        let oracle = MockSpentSet {
+            spent: std::collections::HashSet::new(),
+            fail: false,
+        };
+        let report =
+            verify_and_report_with_spentset_at(&envelope, &pi, &program, &oracle, 1_700_000_000);
+        assert_eq!(report.status, RelayStatus::Ok);
+        assert!(report.alarm.is_none());
+    }
+
+    #[test]
+    fn spent_nullifier_is_a_transfer_violation() {
+        use bud_vm::private_transfer::CANONICAL_CLAIMED_NULLIFIER;
+        let (envelope, pi, program) = prove_transfer();
+        let oracle = MockSpentSet {
+            spent: std::collections::HashSet::from([CANONICAL_CLAIMED_NULLIFIER as u64]),
+            fail: false,
+        };
+        let report =
+            verify_and_report_with_spentset_at(&envelope, &pi, &program, &oracle, 1_700_000_000);
+        assert_eq!(report.status, RelayStatus::Alarm);
+        let alarm = report.alarm.as_ref().expect("alarm present");
+        assert_eq!(alarm.code, AlarmCode::TransferViolation);
+        assert!(
+            alarm.detail.contains("double-spend"),
+            "detail must name the double-spend, got: {}",
+            alarm.detail
+        );
+        assert!(report.verify_report_sig());
+    }
+
+    #[test]
+    fn oracle_failure_fails_closed() {
+        let (envelope, pi, program) = prove_transfer();
+        let oracle = MockSpentSet {
+            spent: std::collections::HashSet::new(),
+            fail: true,
+        };
+        let report =
+            verify_and_report_with_spentset_at(&envelope, &pi, &program, &oracle, 1_700_000_000);
+        assert_eq!(report.status, RelayStatus::Alarm);
+        assert_eq!(
+            report.alarm.as_ref().map(|a| a.code),
+            Some(AlarmCode::TransferViolation),
+            "an oracle that cannot answer must fail closed"
+        );
+    }
+
+    #[test]
+    fn live_clock_never_stamps_zero_silently() {
+        match now_unix() {
+            Ok(t) => assert!(t > 0, "a usable clock must be after the epoch"),
+            Err(e) => panic!("clock failure must be loud, not a silent zero: {e}"),
+        }
+    }
+
+    #[test]
+    fn tampered_transfer_digest_is_rejected_by_stark_not_relabeled() {
+        let (envelope, mut pi, program) = prove_transfer();
+        // The event_digest is a field sum, not a hash: a caller-supplied
+        // [1, x-1] relabel would keep the same sum. The re-execution path must
+        // never read events off the caller, and tampering the bound digest
+        // must surface as the verification error it is, not as a verdict.
+        pi.event_digest[0] ^= 0x01;
+        let report = verify_and_report_with_reexecution_at(&envelope, &pi, &program, 1_700_000_000);
+        assert_eq!(report.status, RelayStatus::Alarm);
+        assert_ne!(
+            report.status,
+            RelayStatus::Ok,
+            "a tampered bound digest must never be relabeled as a clean relay"
+        );
+        assert!(
+            matches!(
+                report.alarm.as_ref().map(|a| a.code),
+                Some(AlarmCode::InvalidProof) | Some(AlarmCode::PublicInputsMismatch)
+            ),
+            "a tampered bound digest must stay a verification error, got: {:?}",
+            report.alarm
+        );
+        assert!(report.verify_report_sig());
     }
 }

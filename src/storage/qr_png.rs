@@ -41,6 +41,13 @@ impl From<QrMatrixError> for QrPngError {
     }
 }
 
+/// Upper bound on the PNG side (px) the raster encoder emits and the BDLV
+/// decoder accepts. A QR matrix is at most 177×177 modules; at [`MODULE_PX`]
+/// per module plus quiet zone the side stays far under the cap, but the cap is
+/// what stops a hostile IHDR from declaring a geometry our encoder never
+/// produces (see `qr_video::decode_png_grey`, which re-uses this ceiling).
+pub const MAX_PNG_SIDE_PX: u32 = 8192;
+
 /// Render matrix to a deterministic RGB8 PNG.
 /// # Errors
 ///
@@ -48,7 +55,7 @@ impl From<QrMatrixError> for QrPngError {
 pub fn matrix_to_png(matrix: &QrMatrix) -> Result<Vec<u8>, QrPngError> {
     let side_m = matrix.raster_modules();
     let side_px = side_m.saturating_mul(MODULE_PX);
-    if side_px == 0 || side_px > 8192 {
+    if side_px == 0 || side_px > MAX_PNG_SIDE_PX {
         return Err(QrPngError::Geometry);
     }
     let w = side_px as usize;

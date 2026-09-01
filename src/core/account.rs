@@ -1114,9 +1114,9 @@ impl AccountState {
         if tx.priority_fee != 0 {
             return Err("flat-fee mode requires priority_fee == 0".into());
         }
-        // The flat floor, and above it the proportional cut on a value
-        // transfer. `required_transfer_fee` takes the larger of the two, never
-        // the sum.
+        // The flat floor plus the proportional cut on a value transfer
+        // (user decision 2026-09-01): `required_transfer_fee` bills base +
+        // rate; the rate part is protocol revenue bound at the instruction.
         //
         // Until this existed the amount was invisible to pricing: `tx.amount`
         // appeared only in the overflow guard and the balance check, so moving

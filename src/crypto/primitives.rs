@@ -364,11 +364,18 @@ impl PqKeyPair {
     }
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        use ml_dsa::Signer;
         let seed = ml_dsa::Seed::try_from(self.secret_key.as_slice())
             .map_err(|_| CryptoError::Signing("Invalid ML-DSA seed".to_string()))?;
         let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&seed);
-        let sig = sk.sign(message);
+        // FIPS 204 3.6.1 hedged variant: a fresh `rnd` per signature keeps
+        // repeated signatures of one message from repeating intermediate
+        // values (fault-injection and side-channel defence). Verifiers
+        // accept hedged and deterministic signatures alike, so the wire and
+        // every read path stay unchanged.
+        let sig = sk
+            .expanded_key()
+            .sign_randomized(message, b"", &mut rand::rng())
+            .map_err(|_| CryptoError::Signing("OS rng failed for hedged signing".to_string()))?;
         let binding = sig.encode();
         let enc: &[u8] = binding.as_ref();
         Ok(enc.to_vec())
@@ -851,8 +858,19 @@ impl WalletKeyPair {
     }
 
     pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {
-        use ml_dsa::signature::Signer as _;
-        let sig = self.signing_key.sign(message);
+        // Hedged per FIPS 204 3.6.1 (see the validator path above). The only
+        // error branch is a dead OS rng - the same failure class generate()
+        // already treats as fatal; as a last resort the deterministic
+        // variant still produces a valid signature rather than stranding
+        // the caller mid-transaction.
+        let sig = self
+            .signing_key
+            .expanded_key()
+            .sign_randomized(message, b"", &mut rand::rng())
+            .unwrap_or_else(|_| {
+                use ml_dsa::signature::Signer as _;
+                self.signing_key.sign(message)
+            });
         let enc = sig.encode();
         let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
         out.copy_from_slice(enc.as_ref());

@@ -263,10 +263,105 @@ fn verifying_key_bytes(sk: &SigningKey<MlDsa87>) -> PublicKeyBytes {
     out
 }
 
+/// Randomness source for one hedged signature: serves exactly the
+/// CSPRNG-filled 32-byte block FIPS 204 `rnd` consumes, word by word.
+/// Implementing `TryRng` by hand keeps rand_core a traits-only dependency
+/// (no getrandom feature), so the wasm build is untouched.
+#[cfg(feature = "production")]
+struct HedgedRnd {
+    bytes: [u8; 32],
+    pos: usize,
+}
+
+/// The 32-byte block ran out before the signer was satisfied.
+#[derive(Debug, Clone, Copy)]
+#[cfg(feature = "production")]
+struct HedgedRndExhausted;
+
+#[cfg(feature = "production")]
+impl core::fmt::Display for HedgedRndExhausted {
+    // Note: no `<'_>` here on purpose - the repo's binding-claims gate reads
+    // this file with a quote-parity scanner, and a lifetime apostrophe in code
+    // shifts that parity. Eliding the lifetime keeps the file gate-readable.
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str("hedged signing randomness exhausted")
+    }
+}
+
+#[cfg(feature = "production")]
+impl std::error::Error for HedgedRndExhausted {}
+
+#[cfg(feature = "production")]
+impl HedgedRnd {
+    fn take(&mut self, dst: &mut [u8]) -> Result<(), HedgedRndExhausted> {
+        let end = self
+            .pos
+            .checked_add(dst.len())
+            .ok_or(HedgedRndExhausted)?;
+        let src = self.bytes.get(self.pos..end).ok_or(HedgedRndExhausted)?;
+        dst.copy_from_slice(src);
+        self.pos = end;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "production")]
+impl rand_core::TryCryptoRng for HedgedRnd {}
+
+#[cfg(feature = "production")]
+impl rand_core::TryRng for HedgedRnd {
+    type Error = HedgedRndExhausted;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut b = [0u8; 4];
+        self.take(&mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut b = [0u8; 8];
+        self.take(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        self.take(dst)
+    }
+}
+
 /// Sign a message with an ML-DSA-87 signing key and return the 4627-byte
 /// encoded signature.
+///
+/// Hedged per FIPS 204 3.6.1 when the `production` CSPRNG is available: a
+/// fresh `rnd` per signature keeps repeated signatures of one message from
+/// repeating intermediate values (fault-injection / side-channel defence).
+/// Verifiers accept hedged and deterministic signatures alike, so nothing
+/// on any read path changes. Without `production` (fixed-entropy builds and
+/// tests) the deterministic variant is kept, mirroring this crate's
+/// fail-closed entropy policy for key generation.
 fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
-    let sig: Signature<MlDsa87> = sk.sign(message);
+    #[cfg(feature = "production")]
+    let hedged: Option<Signature<MlDsa87>> = {
+        let mut rnd_bytes = [0u8; 32];
+        match getrandom::getrandom(&mut rnd_bytes) {
+            Ok(()) => sk
+                .expanded_key()
+                .sign_randomized(
+                    message,
+                    b"",
+                    &mut HedgedRnd {
+                        bytes: rnd_bytes,
+                        pos: 0,
+                    },
+                )
+                .ok(),
+            Err(_) => None,
+        }
+    };
+    #[cfg(not(feature = "production"))]
+    let hedged: Option<Signature<MlDsa87>> = None;
+
+    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| sk.sign(message));
     let enc: EncodedSignature<MlDsa87> = sig.encode();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
     out.copy_from_slice(enc.as_ref());

@@ -1,3 +1,9 @@
+//! WIRING: unwired - no production rent-claim path exists yet. The deal-open
+//! path in `domain::storage_deal` refuses edition-Three inline and never sees
+//! a raw blob, so this module is the accounting a rent/settlement path must
+//! call (including the transport-derivative case deals never see) when that
+//! path lands.
+//!
 //! G6b - honest storage accounting across the three regimes.
 //!
 //! Three different things can sit in front of the storage layer, and each has
@@ -5,7 +11,7 @@
 //!
 //! * **Classic** (edition Two / the pre-Three model): a durable body. The held
 //!   bytes are real and are what rent is charged on
-//!   ([`held_bytes`](crate::storage::generated::held_bytes) already answers
+//!   ([`held_bytes`] already answers
 //!   this for `Stored` / `Hybrid` / `Derived`).
 //! * **Three** (edition Three): a generative recipe. The durable object on the
 //!   network is a recipe everyone can re-run; nothing is held, so there is no
@@ -184,12 +190,18 @@ mod regime_tests {
 
     #[test]
     fn a_public_recipe_is_the_three_regime() {
-        assert_eq!(regime_of(&public_recipe(), b"anything"), ContentRegime::Three);
+        assert_eq!(
+            regime_of(&public_recipe(), b"anything"),
+            ContentRegime::Three
+        );
     }
 
     #[test]
     fn a_sealed_recipe_is_the_three_regime() {
-        assert_eq!(regime_of(&sealed_recipe(), b"anything"), ContentRegime::Three);
+        assert_eq!(
+            regime_of(&sealed_recipe(), b"anything"),
+            ContentRegime::Three
+        );
     }
 
     #[test]
@@ -228,10 +240,7 @@ mod regime_tests {
     #[test]
     fn held_bytes_for_a_derivative_is_a_refusal() {
         assert_eq!(held_bytes_for(&stored(), 500, b"BDLD"), None);
-        assert_eq!(
-            rent_basis_for(&stored(), 500, b"BDLD"),
-            RentBasis::Refused
-        );
+        assert_eq!(rent_basis_for(&stored(), 500, b"BDLD"), RentBasis::Refused);
     }
 
     #[test]

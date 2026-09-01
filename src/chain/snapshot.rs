@@ -110,6 +110,15 @@ impl StateSnapshot {
         serde_json::to_vec(self).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        // The disk-read path enforces MAX_SNAPSHOT_BYTES; a snapshot handed
+        // to this entry point directly (remote sync, tests, imports) must
+        // not skip that ceiling, or the parse allocates on trust.
+        if data.len() as u64 > crate::core::bounded_read::MAX_SNAPSHOT_BYTES {
+            return Err(format!(
+                "snapshot exceeds the {} byte ceiling",
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES
+            ));
+        }
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
     }
     pub fn size(&self) -> usize {
@@ -1042,6 +1051,15 @@ impl StateSnapshotV2 {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        // Same ceiling as the V1 entry point and the bounded disk reader:
+        // no snapshot is parsed before its size is checked, whoever hands
+        // it over.
+        if data.len() as u64 > crate::core::bounded_read::MAX_SNAPSHOT_BYTES {
+            return Err(format!(
+                "snapshot V2 exceeds the {} byte ceiling",
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES
+            ));
+        }
         let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;

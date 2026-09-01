@@ -47,7 +47,10 @@ impl std::fmt::Display for RevealRpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Forbidden => write!(f, "three reveal rpc: forbidden without a live grant"),
-            Self::NeedFullRecipe => write!(f, "three reveal rpc: sealed recipe needs a full public opening"),
+            Self::NeedFullRecipe => write!(
+                f,
+                "three reveal rpc: sealed recipe needs a full public opening"
+            ),
             Self::Meter(e) => write!(f, "three reveal rpc: meter: {e}"),
             Self::Reemit(e) => write!(f, "three reveal rpc: reemit: {e}"),
         }
@@ -135,8 +138,28 @@ pub fn open_reveal_session(
     registry: &ViewGrantRegistry,
     req: &RevealRequest,
 ) -> Result<RevealHandle, RevealRpcError> {
-    let grant_allows =
-        registry.may_view(&req.content_id, &req.viewer, &req.key_id, &req.owner);
+    let grant_allows = registry.may_view(&req.content_id, &req.viewer, &req.key_id, &req.owner);
+    open_reveal_session_prechecked(req, grant_allows)
+}
+
+/// Open a reveal session with a grant decision that was already made.
+///
+/// The registry path ([`open_reveal_session`]) derives the decision itself; a
+/// network handler that already asked the chain (its `may_view_content`
+/// surface) passes that decision here, so the grant is checked once by the
+/// authority that owns it and still enforced again by [`RevealSession::open`],
+/// which refuses a sealed recipe under a `false` decision.
+///
+/// # Errors
+///
+/// [`RevealRpcError::Forbidden`] for a sealed recipe under a `false` decision,
+/// or with a non-owner viewer and no grant;
+/// [`RevealRpcError::NeedFullRecipe`] for a sealed recipe missing its public
+/// opening.
+pub fn open_reveal_session_prechecked(
+    req: &RevealRequest,
+    grant_allows: bool,
+) -> Result<RevealHandle, RevealRpcError> {
     let session = RevealSession::open(
         &req.recipe,
         req.full_public.as_ref(),
@@ -198,7 +221,14 @@ mod rpc_tests {
         let sealed = ThreeRecipe::Sealed(full.clone().seal());
 
         // No grant yet -> refused.
-        let r = req(sealed.clone(), Some(full.clone()), packed.clone(), viewer, owner, key_id);
+        let r = req(
+            sealed.clone(),
+            Some(full.clone()),
+            packed.clone(),
+            viewer,
+            owner,
+            key_id,
+        );
         assert_eq!(
             open_reveal_session(&reg, &r).unwrap_err(),
             RevealRpcError::Forbidden

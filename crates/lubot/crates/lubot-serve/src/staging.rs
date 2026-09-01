@@ -82,8 +82,9 @@ pub struct StripeChunk {
 /// `devices` order matters: the first entry owns offset zero. A device that
 /// measured zero bandwidth receives nothing (but the plan is refused only when
 /// *every* device measured zero, because then there is nothing to weight by).
-/// The last device in the order absorbs the rounding remainder so the chunks
-/// always sum to `len` exactly.
+/// The last device *that measured bandwidth* absorbs the rounding remainder,
+/// so the chunks always sum to `len` exactly and a dead leg is never handed
+/// bytes just because it sits last in the order.
 ///
 /// # Errors
 ///
@@ -108,29 +109,52 @@ pub fn stripe_plan(len: u64, devices: &[StorageDevice]) -> Result<Vec<StripeChun
         return Err(StripeError::NoUsableDevice);
     }
 
+    // Floor shares first: floor(len * w / total), computed in u128 so the
+    // multiply cannot wrap; each result is at most `len` and fits in u64.
+    let mut shares = Vec::with_capacity(devices.len());
+    let mut allocated: u64 = 0;
+    for dev in devices {
+        let share = (u128::from(len) * u128::from(dev.bandwidth_kib_s))
+            / u128::from(total_weight);
+        let share = u64::try_from(share).map_err(|_| StripeError::WeightOverflow)?;
+        allocated = allocated
+            .checked_add(share)
+            .ok_or(StripeError::WeightOverflow)?;
+        shares.push(share);
+    }
+
+    // The floor shares can leave a rounding remainder (always < len). It goes
+    // to the last device that measured bandwidth: a zero-bandwidth leg keeps
+    // receiving nothing, so the "measured nothing, receives nothing"
+    // invariant holds even when a dead device sits last.
+    let remainder = len.saturating_sub(allocated);
+    if remainder > 0 {
+        let mut remainder_placed = false;
+        for (share, dev) in shares.iter_mut().zip(devices).rev() {
+            if dev.bandwidth_kib_s > 0 {
+                *share = share
+                    .checked_add(remainder)
+                    .ok_or(StripeError::WeightOverflow)?;
+                remainder_placed = true;
+                break;
+            }
+        }
+        // Unreachable when total_weight > 0, but fail closed rather than
+        // panic if the weights and the share list ever disagree.
+        if !remainder_placed {
+            return Err(StripeError::NoUsableDevice);
+        }
+    }
+
     let mut chunks = Vec::with_capacity(devices.len());
     let mut offset: u64 = 0;
-    let mut remaining: u64 = len;
-
-    for (i, dev) in devices.iter().enumerate() {
-        let share = if i + 1 == devices.len() {
-            // The last device absorbs the rounding remainder, guaranteeing the
-            // sum is exactly `len`.
-            remaining
-        } else {
-            // floor(len * w / total). Computed in u128 so the multiply cannot
-            // wrap; the result is at most `len` and always fits in u64.
-            let share = (u128::from(len) * u128::from(dev.bandwidth_kib_s))
-                / u128::from(total_weight);
-            u64::try_from(share).map_err(|_| StripeError::WeightOverflow)?
-        };
+    for (dev, share) in devices.iter().zip(shares) {
         chunks.push(StripeChunk {
             device: dev.id,
             offset,
             len: share,
         });
         offset = offset.saturating_add(share);
-        remaining = remaining.saturating_sub(share);
     }
 
     Ok(chunks)
@@ -244,6 +268,17 @@ mod staging_tests {
         let dead = plan.iter().find(|c| c.device == [1u8; 32]).unwrap();
         assert_eq!(dead.len, 0);
         assert_eq!(total(&plan), 1000);
+    }
+
+    #[test]
+    fn a_dead_last_device_absorbs_no_remainder() {
+        // The invariant is "a device that measured nothing receives nothing".
+        // The rounding remainder must land on the last device that measured
+        // bandwidth, never on a dead leg just because it is last in order.
+        let plan = stripe_plan(10, &[dev(1, 2), dev(2, 1), dev(3, 0)]).unwrap();
+        let dead = plan.iter().find(|c| c.device == [3u8; 32]).unwrap();
+        assert_eq!(dead.len, 0, "a dead leg must receive nothing");
+        assert_eq!(total(&plan), 10, "the plan must still sum exactly");
     }
 
     #[test]

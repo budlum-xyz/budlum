@@ -452,7 +452,6 @@ bud/src/bud_format_qrvideo.rs	const	QRV_MAGIC
 bud/src/bud_format_qrvideo.rs	const	QRV_VERSION
 bud/src/bud_format_qrvideo.rs	fn	add_drop
 bud/src/bud_format_qrvideo.rs	fn	add_frame
-bud/src/bud_format_qrvideo.rs	fn	assemble
 bud/src/bud_format_qrvideo.rs	fn	composition
 bud/src/bud_format_qrvideo.rs	fn	derivative_growth
 bud/src/bud_format_qrvideo.rs	fn	derive_stream
@@ -818,7 +817,6 @@ budzero/bud-state/src/lib.rs	fn	get_empty_hash
 budzero/bud-state/src/lib.rs	fn	hash_account
 budzero/bud-state/src/lib.rs	fn	verify_account_proof
 budzero/bud-state/src/note.rs	fn	from_field_elements
-budzero/bud-state/src/note.rs	fn	is_spent
 budzero/bud-state/src/note.rs	fn	live_count
 budzero/bud-state/src/note.rs	fn	spend
 budzero/bud-state/src/note.rs	fn	spent_count
@@ -2049,3 +2047,156 @@ src/tokenomics/reward_pool.rs	fn	per_epoch_budget
 src/tokenomics/reward_pool.rs	fn	reward_for_epoch
 src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 src/tokenomics/reward_pool.rs	struct	RewardPoolSchedule
+#
+# 2026-08-31 (user-approved hybrid): the lubot-serve economics modules
+# (fee_scenario, cost_forecast, validator_cost, staging, metric) are the
+# published fee schedule and cost model as code - the single source every
+# doc number quotes. Their consumer (the settlement/serving runtime) does
+# not exist in any crate yet; these lines are the debt record for that
+# wiring, and they come out when the settlement layer starts calling them.
+
+#
+# 2026-08-31 (user-approved hybrid): the lubot-serve economics modules
+# (fee_scenario, cost_forecast, validator_cost, staging, metric) are the
+# published fee schedule and cost model as code - the single source every
+# doc number quotes. Their consumer (the settlement/serving runtime) does
+# not exist in any crate yet; these lines are the debt record for that
+# wiring, and they come out when the settlement layer starts calling them.
+
+#
+# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# DENETIM-PLANI-3.0.md): the lubot-serve economics modules (fee_scenario,
+# cost_forecast, validator_cost, staging, metric) are the published fee
+# schedule and cost model as code, the single source every doc number
+# quotes. Their consumer (the settlement/serving runtime) does not exist
+# in any crate yet; these lines are the debt record for that wiring and
+# come out when the settlement layer starts calling them.
+
+#
+# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# DENETIM-PLANI-3.0.md): the lubot-serve economics modules (fee_scenario,
+# cost_forecast, validator_cost, staging, metric, residency) are the
+# published fee schedule and cost model as code, the single source every
+# doc number quotes. Their consumer (the settlement/serving runtime) does
+# not exist in any crate yet; these lines are the debt record for that
+# wiring and come out when the settlement layer starts calling them.
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	const	GIB_PER_COLD_TOKEN
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	const	MTP_SPEEDUP
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	const	OWNED_DISK_GIB
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	compare
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second_with_speculation
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	footprint_reduction_ratio
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	forecast
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	gib_per_cold_token
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	market_rates
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	owned_device_budget
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	rental_hour_savings_ratio
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	rented_datacenter_budget
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	savings_ratio
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	fn	scaled_bytes
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	struct	CostComparison
+crates/lubot/crates/lubot-serve/src/cost_forecast.rs	struct	CostForecast
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_2_MONTHLY_USD_PER_TB
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_CUSTODY_YEARS
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_EXPIRY_AUCTION_DAYS
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_MAX_CUSTODY_YEARS
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_RECIPE_PUBLIC_BYTES
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_RECIPE_SEALED_BYTES
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BUD_UPLOAD_BASE_USD
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	const	BYTES_PER_TB
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	enum	BudVersion
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	enum	CustodyPhase
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	enum	TxClass
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	auction_start_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	base_usd
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	bud_extension_fee_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	bud_upload_extra_fee_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	bud_upload_fee_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	custody_phase
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	enters_open_auction
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	monthly_storage_fee_usd
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	rate_bps
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	recipes_for_content
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	three_network_bytes_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	three_network_custody_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	three_network_monthly_usd_per_tb
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	fn	transaction_fee_usd
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	struct	InsufficientBalance
+crates/lubot/crates/lubot-serve/src/fee_scenario.rs	struct	PromptWallet
+crates/lubot/crates/lubot-serve/src/metric.rs	fn	time_to_first_token_ms
+crates/lubot/crates/lubot-serve/src/residency.rs	fn	plan_with_heat
+crates/lubot/crates/lubot-serve/src/residency.rs	fn	rebalance
+crates/lubot/crates/lubot-serve/src/residency.rs	fn	total_fast_bytes
+crates/lubot/crates/lubot-serve/src/residency.rs	struct	RoutingHeat
+crates/lubot/crates/lubot-serve/src/staging.rs	enum	StripeError
+crates/lubot/crates/lubot-serve/src/staging.rs	fn	is_usable
+crates/lubot/crates/lubot-serve/src/staging.rs	fn	stripe_plan
+crates/lubot/crates/lubot-serve/src/staging.rs	fn	weight_kib_s
+crates/lubot/crates/lubot-serve/src/staging.rs	struct	DeviceProbe
+crates/lubot/crates/lubot-serve/src/staging.rs	struct	StorageDevice
+crates/lubot/crates/lubot-serve/src/staging.rs	struct	StripeChunk
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	const	STORAGE_HDD_WATTS_PER_TB
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	capital_dollars
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	core_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	market_pricelist
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	measure_serving
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	measure_serving_at
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	minimum
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	minimum_quantized
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	monthly_energy_dollars
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	one_year_storage_cost_usd_per_tb
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	serving_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	serving_layer_for
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	serving_layer_int4
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	storage_capital_per_tb_usd
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	storage_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	total_capital_dollars
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	fn	zkvm_layer
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	LayerFootprint
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	ServingMeasure
+crates/lubot/crates/lubot-serve/src/validator_cost.rs	struct	ValidatorBudget
+#
+# 2026-08-31 (user-approved hybrid, second slice): seams waiting on a real
+# production path, recorded as debt with the path named. Each line comes
+# OUT when its consumer lands:
+#   one_share/one_view  -> the 1.0 device-screen RPC surface (needs a share
+#                          registry in chain state; consensus-surface work).
+#   three_rpc           -> the reveal RPC endpoint (serving surface).
+#   three_regime        -> the rent/settlement path (none exists yet).
+#   mobile_self upload  -> the custody-aware upload flow.
+#   three_nft registry  -> the mint/pin chain transactions (in flight with
+#                          the teammate working the same PR).
+#   ScreenItem/contract_digest/honest_custody/network_held_bytes ride the
+#   screen surface above.
+src/storage/mobile_self.rs	enum	UploadCustodyRefusal
+src/storage/mobile_self.rs	fn	decide_upload_custody
+src/storage/mobile_self.rs	fn	put_user_content
+src/storage/mobile_self.rs	fn	record_network_default_attempt
+src/storage/mobile_self.rs	fn	record_network_held
+src/storage/mobile_self.rs	fn	user_held_items
+src/storage/one_share.rs	enum	ShareRefusal
+src/storage/one_share.rs	fn	admit_as_server
+src/storage/one_share.rs	fn	all_user_held
+src/storage/one_share.rs	fn	endpoint_refs
+src/storage/one_share.rs	fn	screen
+src/storage/one_share.rs	fn	storage_fee_owed_usd
+src/storage/one_share.rs	struct	OneShareRegistry
+src/storage/one_share.rs	struct	Share
+src/storage/one_view.rs	fn	contract_digest
+src/storage/one_view.rs	fn	honest_custody
+src/storage/one_view.rs	fn	network_held_bytes
+src/storage/one_view.rs	struct	ScreenItem
+src/storage/three_nft.rs	enum	ThreeNftRegistryError
+src/storage/three_nft.rs	fn	drop_validator
+src/storage/three_nft.rs	fn	reemit_video_from_pin
+src/storage/three_nft.rs	fn	with_body
+src/storage/three_nft.rs	struct	PinRow
+src/storage/three_nft.rs	struct	ThreeNftRegistry
+src/storage/three_regime.rs	enum	AccountingRefusal
+src/storage/three_regime.rs	enum	ContentRegime
+src/storage/three_regime.rs	enum	RentBasis
+src/storage/three_regime.rs	fn	held_bytes_for
+src/storage/three_regime.rs	fn	refuse_rent_without_held_bytes
+src/storage/three_regime.rs	fn	regime_of
+src/storage/three_regime.rs	fn	rent_basis_for

@@ -50,6 +50,14 @@ pub fn is_canonical_program_hash(hash: &[u8; 32]) -> bool {
     CANONICAL_PROGRAM_HASHES.contains(&hex.as_str())
 }
 
+/// True if the program hash is the canonical private-transfer program - the
+/// one whose logged events carry the transfer verdict (conservation, then
+/// nullifier). The relay uses this to know when to read the decision vector.
+pub fn is_canonical_transfer_program(hash: &[u8; 32]) -> bool {
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    hex == CANONICAL_PROGRAM_HASHES[2]
+}
+
 /// Combined digest of the whole canonical set: Keccak-256 over the
 /// concatenated canonical hashes (raw bytes). The regeneration gate emits
 /// this as its `canonical-set` token, so a proof-side check and the gate
