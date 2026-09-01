@@ -103,15 +103,7 @@ const ALLOWED_FILES: &[&str] = &[
 /// so that a localisation gains files without the gate having to be edited,
 /// and it is deliberately narrow - only the Turkish locale of the browser,
 /// never a source tree.
-const ALLOWED_DIRS: &[&str] = &[
-    "browser/l10n/tr-TR/",
-    // The operator's skill documents and bootstrap programs. Their Turkish is
-    // the product the Turkish operator reads - the same category as the
-    // Turkish README - not untranslated source. The four Python programs carry
-    // their usage in Turkish so the next session can run them without a
-    // translation step.
-    "skills/",
-];
+const ALLOWED_DIRS: &[&str] = &["browser/l10n/tr-TR/"];
 
 /// The one Turkish word that may appear anywhere: the label on the link to the
 /// Turkish README. Scrubbed before both scans.
