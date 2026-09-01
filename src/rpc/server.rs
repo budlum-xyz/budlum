@@ -1149,10 +1149,32 @@ fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
         | crate::storage::emit::EmitError::TooLarge { .. }
         | crate::storage::emit::EmitError::BurstTooWide { .. }
         | crate::storage::emit::EmitError::FrameOutOfRange { .. }
-        | crate::storage::emit::EmitError::Edition(_) => -32602,
+        | crate::storage::emit::EmitError::Edition(_)
+        | crate::storage::emit::EmitError::UnsealedGated => -32602,
         _ => -32000,
     };
     ErrorObjectOwned::owned(code, format!("qr feed: {e}"), None::<()>)
+}
+
+/// Parse the optional `seal_seed` argument (32 bytes, hex, optional `0x`).
+/// `None` leaves the feed unsealed; a present-but-malformed seed is a caller
+/// fault, not a silent fallback to clear frames.
+fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorObjectOwned> {
+    let Some(seed_hex) = seed_hex else {
+        return Ok(None);
+    };
+    let hex = seed_hex.strip_prefix("0x").unwrap_or(seed_hex.as_str());
+    let bytes = hex::decode(hex)
+        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>))?;
+    let len = bytes.len();
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
+        ErrorObjectOwned::owned(
+            -32602,
+            format!("seal_seed must be 32 bytes, got {len}"),
+            None::<()>,
+        )
+    })?;
+    Ok(Some(seed))
 }
 
 fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
@@ -2157,6 +2179,7 @@ impl BudlumApiServer for RpcServer {
         data_hex: String,
         block_len: u16,
         manifest: Option<crate::storage::ContentManifest>,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
         let data = hex::decode(hex).map_err(|e| {
@@ -2175,6 +2198,7 @@ impl BudlumApiServer for RpcServer {
         }
         let policy = crate::storage::emit::EmitPolicy {
             block_len,
+            seal_seed: parse_seal_seed(seal_seed)?,
             ..crate::storage::emit::EmitPolicy::default()
         };
         let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
@@ -2188,6 +2212,7 @@ impl BudlumApiServer for RpcServer {
         block_len: u16,
         first_frame: u32,
         count: u32,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
         let data = hex::decode(hex).map_err(|e| {
@@ -2206,6 +2231,7 @@ impl BudlumApiServer for RpcServer {
         }
         let policy = crate::storage::emit::EmitPolicy {
             block_len,
+            seal_seed: parse_seal_seed(seal_seed)?,
             ..crate::storage::emit::EmitPolicy::default()
         };
         let (frames, fold) =

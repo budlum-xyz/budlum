@@ -417,6 +417,12 @@ pub enum EmitError {
     /// The NFT metadata does not track the recipe it was built from. The mint
     /// and the feed would name different objects.
     MetaDrift,
+    /// A feed whose on-chain form is sealed and whose metadata is gated was
+    /// about to be emitted over a clear body: the seal and the gate both
+    /// promise a key, and plaintext frames need none. Refused unless the body
+    /// was sealed (a seal seed) or the uploader already encrypted it (the
+    /// manifest's `encryption` field).
+    UnsealedGated,
     /// The manifest names a sealed recipe. Its public fields are metered, and
     /// then the emit stops: without the seed nobody can say which bytes this
     /// feed carries.
@@ -527,6 +533,10 @@ impl std::fmt::Display for EmitError {
             } => write!(f, "{stage} carries version {found}, this build emits {want}"),
             Self::FlagMismatch => write!(f, "a1 zlib flag disagrees with the container report"),
             Self::MetaDrift => write!(f, "nft metadata does not track its recipe"),
+            Self::UnsealedGated => write!(
+                f,
+                "non-public feed refused: the body is neither sealed nor declared ciphertext"
+            ),
             Self::DecodePathMismatch => {
                 write!(f, "two decode paths of one feed disagreed about the body")
             }
@@ -748,6 +758,11 @@ pub fn qr_feed_preview(
         meter.record_seal()?;
     }
     let key = policy.seal_seed.map(|seed| PayloadKey::derive(&seed));
+    // A manifest may declare the shards to be ciphertext the uploader already
+    // produced (client-side encryption). That is the one clear-body case that
+    // is still nobody's plaintext, and the visibility enforcement below reads
+    // this rather than asking a client to seal the same bytes twice.
+    let declared_ciphertext = manifest.map_or(false, |m| m.encryption.is_encrypted());
     // The pipe writes the pacing it pins, not the pacing a caller asks for, so a
     // policy naming any other rate is refused here rather than reported wrongly
     // by the preview below.
@@ -1096,12 +1111,6 @@ pub fn qr_feed_preview(
             actual: u32::from(sealed_capsule.k),
         });
     }
-    // Reported as the recipe's own answer about its visibility form: a sealed A3
-    // recipe can be pinned on chain while the frames it describes are nobody's to
-    // rebuild, and a client choosing a marketplace listing off that difference
-    // needs the flag to mean the form rather than a hope.
-    let publicly_reemitable = ThreeRecipe::Public(pipe.recipe.clone()).is_publicly_reemitable();
-
     // Which on-chain form a mint would name. This is not invented here: the
     // upload path has a product default (start sealed, open later through key
     // infrastructure), and a preview that reported a different form than the
@@ -1113,6 +1122,26 @@ pub fn qr_feed_preview(
     };
     let grant_policy = policy_for_upload(vis);
     let recipe_form = recipe_for_upload(&pipe.recipe, vis);
+
+    // Reported as the recipe's own answer about its visibility form: a sealed A3
+    // recipe can be pinned on chain while the frames it describes are nobody's to
+    // rebuild, and a client choosing a marketplace listing off that difference
+    // needs the flag to mean the form rather than a hope. It must name the form
+    // being pinned (`recipe_form`), not a public construction of it: reporting
+    // "publicly re-emittable" for a sealed pin would tell a marketplace anyone
+    // can rebuild a feed the chain holds behind a commitment.
+    let publicly_reemitable = recipe_form.is_publicly_reemitable();
+
+    // The seal and the gate are one promise in two places: the sealed recipe
+    // says nobody without the opening can rebuild the feed, and the gated
+    // metadata says a key is needed to view it. Both are false over a clear
+    // body, because the frames themselves carry the content. Enforced rather
+    // than reported: a non-public feed whose frames are not ciphertext is
+    // refused unless the uploader already encrypted the body (client-side
+    // ciphertext is clear transport over bytes that are nobody's plaintext).
+    if !publicly_reemitable && key.is_none() && !declared_ciphertext {
+        return Err(EmitError::UnsealedGated);
+    }
     // The metadata a mint would pin, built here and checked against this feed
     // rather than trusted: a token whose recipe commitment is not the feed's
     // recipe is a token for a different object, and nothing else in the pipeline
@@ -1362,7 +1391,14 @@ mod tests {
 
     #[test]
     fn preview_reports_a_feed_that_reassembles() {
-        let p = qr_feed_preview(&body(4096), &EmitPolicy::default(), None).expect("preview");
+        // A sealed policy: the production default upload is sealed, and an
+        // unsealed preview of real content is refused below rather than
+        // measured as if it could be published.
+        let policy = EmitPolicy {
+            seal_seed: Some([1u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let p = qr_feed_preview(&body(4096), &policy, None).expect("preview");
         assert_eq!(p.frames_rejected, 0);
         assert!(p.planned_drops <= p.ceiling_drops);
         assert_eq!(
@@ -1405,21 +1441,90 @@ mod tests {
         // The A4 agreement is not measured across a seal, and the preview says
         // so rather than reporting a check it never ran.
         assert!(!p.a4_agreement);
-        let acik =
-            qr_feed_preview(&body(2048), &EmitPolicy::default(), None).expect("plain preview");
-        assert!(acik.a4_agreement);
-        assert_eq!(acik.recipe_class, p.recipe_class);
-        assert_ne!(acik.nft_meta, [0u8; 32]);
+        // The sealed pin is not publicly re-emittable: the flag names the form
+        // on chain, not a public construction of it.
+        assert!(!p.publicly_reemitable);
         assert_ne!(p.nft_meta, [0u8; 32]);
-        // The pin follows the recipe, and the recipe pins the A1 kind: a sealed
-        // feed and a plain feed of one body are two objects to a marketplace.
-        // Measured, not assumed - the first version of this assert asked for the
-        // two to be equal and CI named the two digests (emit.rs:1270).
-        assert_ne!(acik.nft_meta, p.nft_meta);
-        // Neither preview was metered against a public form, so both carry the
-        // gated preview mode and the same visibility word.
-        assert_eq!(acik.visibility, p.visibility);
-        assert!(acik.rotate_key_on_delete);
+        assert!(p.rotate_key_on_delete);
+        // The same body without a seal is refused, not reported as a gated feed
+        // over clear frames: the seal and the gate promise a key the frames
+        // would not need.
+        assert!(matches!(
+            qr_feed_preview(&body(2048), &EmitPolicy::default(), None),
+            Err(EmitError::UnsealedGated)
+        ));
+    }
+
+    #[test]
+    fn a_clear_body_with_no_seal_and_no_ciphertext_is_refused() {
+        // The default policy is the production default: sealed recipe, gated
+        // metadata. Over clear frames that is a claim about the content that
+        // the frames would not honour, so the emit refuses.
+        assert!(matches!(
+            qr_feed_preview(&body(1024), &EmitPolicy::default(), None),
+            Err(EmitError::UnsealedGated)
+        ));
+    }
+
+    #[test]
+    fn client_side_ciphertext_passes_without_a_seed() {
+        // The one clear-transport case that is nobody's plaintext: the
+        // uploader already encrypted the shards and says so in the manifest.
+        let data = body(1024);
+        let manifest = crate::storage::ContentManifest::from_bytes_sliced(&data, 256)
+            .unwrap()
+            .with_encryption(crate::storage::ContentEncryption::ClientSide(
+                crate::storage::ContentCipher::XChaCha20Poly1305,
+            ));
+        let p = qr_feed_preview(&data, &EmitPolicy::default(), Some(&manifest))
+            .expect("client-side ciphertext preview");
+        // The recipe form stays sealed (the seed is not on chain), but the
+        // frames carry the uploader's ciphertext, not plaintext.
+        assert!(!p.publicly_reemitable);
+        assert!(p.a4_agreement);
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn sealing_hides_the_body_from_the_frames() {
+        // A body the A1 zlib pass cannot shrink: if the frames carried it in
+        // the clear, the marker would survive byte for byte.
+        // Incompressible body (a fixed xorshift stream): the A1 zlib pass keeps
+        // it verbatim, so a clear frame carries the marker byte for byte.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"BDLM_MARKER_");
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..2048 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            data.push((x & 0xFF) as u8);
+        }
+        let marker = b"BDLM_MARKER_";
+
+        let sealed = EmitPolicy {
+            seal_seed: Some([9u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let (frames, _) =
+            qr_feed_frames_burst(&data, &sealed, 0, 2).expect("sealed burst");
+        assert!(
+            frames.iter().all(|f| find_subslice(f, marker).is_none()),
+            "sealed frames must not carry the body in the clear"
+        );
+
+        // The transparent transport of the same body does carry the marker:
+        // this is what sealing removes.
+        let plain = EmitPolicy::default();
+        let (frames, _) =
+            qr_feed_frames_burst(&data, &plain, 0, 2).expect("plain burst");
+        assert!(
+            frames.iter().any(|f| find_subslice(f, marker).is_some()),
+            "the transparent transport is the plaintext baseline the seal is measured against"
+        );
     }
 
     #[test]

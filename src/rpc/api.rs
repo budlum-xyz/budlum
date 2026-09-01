@@ -353,18 +353,25 @@ pub trait BudlumApi {
     /// and the commitments a publish would pin. Bounded by
     /// `MAX_PREVIEW_CONTENT_BYTES`, so it is a question an operator can ask
     /// twice on the same body and get the same answer.
+    ///
+    /// A non-public feed (the default) must be sealed or declared ciphertext:
+    /// pass `seal_seed` as 32 bytes hex to seal the body before it is
+    /// carouselled, or a manifest whose `encryption` is `client-side`. A clear
+    /// body over a gated pin is refused.
     #[method(name = "bud_storageQrFeedPreview")]
     async fn storage_qr_feed_preview(
         &self,
         data_hex: String,
         block_len: u16,
         manifest: Option<crate::storage::ContentManifest>,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Re-emit `count` frames of that feed from `seq`, with the fold a client
     /// checks them against. The caller supplies the body, so this publishes no
     /// handle into stored content and grants nothing: whoever holds the bytes
-    /// can already produce the frames.
+    /// can already produce the frames. Pass `seal_seed` (32 bytes hex) to emit
+    /// the feed over the sealed body instead of the clear one.
     #[method(name = "bud_storageQrFeedFrames")]
     async fn storage_qr_feed_frames(
         &self,
@@ -372,6 +379,7 @@ pub trait BudlumApi {
         block_len: u16,
         first_frame: u32,
         count: u32,
+        seal_seed: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Issue a view grant (key handle on-chain; key material off-chain).
