@@ -11,7 +11,7 @@
 //!
 //! * **Classic** (edition Two / the pre-Three model): a durable body. The held
 //!   bytes are real and are what rent is charged on
-//!   ([`held_bytes`](crate::storage::generated::held_bytes) already answers
+//!   ([`held_bytes`] already answers
 //!   this for `Stored` / `Hybrid` / `Derived`).
 //! * **Three** (edition Three): a generative recipe. The durable object on the
 //!   network is a recipe everyone can re-run; nothing is held, so there is no

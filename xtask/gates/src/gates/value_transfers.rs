@@ -569,7 +569,11 @@ pub fn self_test() -> Result<String, String> {
     check_fixture("unapplied", false, "a rate no validation path reads")?;
 
     // 4. Floor and cut maxed instead of added.
-    check_fixture("maxes", false, "a floor maxed against the cut rather than added")?;
+    check_fixture(
+        "maxes",
+        false,
+        "a floor maxed against the cut rather than added",
+    )?;
 
     // 5. Rounding reverts to truncation.
     check_fixture(
