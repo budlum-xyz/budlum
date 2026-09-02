@@ -35,6 +35,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "ml-dsa",
+ "rand_core",
  "sha2",
  "sha3",
  "wasm-bindgen",

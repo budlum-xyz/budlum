@@ -12,6 +12,7 @@
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod account_abstraction;
 pub mod ai;
+pub mod ai_inference;
 pub mod bns;
 pub mod budlumxyz;
 pub mod chain;
@@ -27,7 +28,6 @@ pub mod error;
 pub mod execution;
 pub mod gateway;
 pub mod light_client;
-pub mod lubot;
 pub mod mempool;
 pub mod network;
 pub mod pollen;

@@ -43,12 +43,12 @@ use tiny_keccak::{Hasher, Keccak};
 /// Compiles, executes, proves and verifies the source. `Ok(())` = the proof is valid.
 ///
 /// Public inputs are built the SAME way as on `bud-cli`'s `run` path:
-/// `initial_state_root` is not the root of the state tree but the value the AIR
-/// katladigi bellek+register goruntusudur; elle sabit vermek
-/// `PublicInputsMismatch` uretir.
-fn compile_run_prove(kaynak: &str) -> Result<(), String> {
+/// `initial_state_root` is not the root of the state tree but the memory+register
+/// image the AIR folds; giving a hand-written constant produces
+/// `PublicInputsMismatch`.
+fn compile_run_prove(source: &str) -> Result<(), String> {
     let bytecode =
-        compile(kaynak, IsaProfile::Experimental).map_err(|e| format!("compile error: {e:?}"))?;
+        compile(source, IsaProfile::Experimental).map_err(|e| format!("compile error: {e:?}"))?;
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);

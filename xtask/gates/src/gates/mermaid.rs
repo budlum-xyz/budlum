@@ -362,7 +362,7 @@ fn check(block: &Block) -> Vec<Finding> {
 /// present are checked; how many exist is a property of the work in progress.
 const DOCUMENTS: &[(&str, usize)] = &[
     ("docs/ARCHITECTURE.md", 50),
-    ("crates/lubot/ARCHITECTURE.md", 0),
+    ("crates/ai-inference/ARCHITECTURE.md", 0),
 ];
 
 pub fn run(root: &Path) -> Result<String, String> {

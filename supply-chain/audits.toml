@@ -101,3 +101,39 @@ version = "0.3.10"
 criteria = "safe-to-deploy"
 who = "Lubo's Ruler <ayazkussann@gmail.com>"
 notes = "adler32 with SIMD; reviewed 0.3.10: no build script, unsafe is the intrinsics kernels selected at runtime; reached only through the pure-Rust flate2 backend"
+
+[[audits.chacha20poly1305]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.aead]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.cipher]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.inout]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.poly1305]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.universal-hash]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."

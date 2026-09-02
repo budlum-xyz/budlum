@@ -968,8 +968,8 @@ fn manifest_id_from_parts(
     buf.push(encryption.commitment_tag());
     // The object length is part of the identity: two manifests with the same
     // shard set but different content lengths (e.g. different padding in the
-    // final stripe) must not share an id (Strix MEDIUM, CWE-345; BUDLUM
-    // bulgu #107). `ContentManifest::content_size()` returns the committed
+    // final stripe) must not share an id (MEDIUM, CWE-345; BUDLUM
+    // finding #107). `ContentManifest::content_size()` returns the committed
     // length, falling back to the shard total for pre-V4 manifests.
     buf.extend_from_slice(&content_size.to_le_bytes());
     buf.extend_from_slice(&total_size.to_le_bytes());

@@ -27,15 +27,15 @@ pub struct NodeSpec {
 
 /// The files expected under the devnet data directory. A delete happens only
 /// if the target holds one of them or the directory is empty; that way a wrong
-/// bir `data/` dizini silinemez.
+/// `data/` directory cannot be deleted.
 const EXPECTED: &[&str] = &["node1.db", "node2.db", "validators.json"];
 
-/// `data/` dizinini temizle ve validator listesini yaz.
+/// Clean the `data/` directory and write the validator list.
 ///
 /// # Errors
 ///
-/// Hedef dizin bir devnet dizinine benzemiyorsa, ya da dosya islemleri
-/// basarisiz olursa.
+/// If the target does not look like a devnet directory, or a file operation
+/// fails.
 pub fn prepare(root: &Path) -> Result<String, String> {
     let data = root.join("data");
 

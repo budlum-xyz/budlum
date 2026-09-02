@@ -66,7 +66,7 @@ mod tests {
             .join(format!("snapshot_{height}.json"))
     }
 
-    // ── 1) Naive tamper (parseable ama hash-bozuk) → red + karantina ───────
+    // ── 1) Naive tamper (parseable but hash-broken) → refused + quarantined ──
     #[test]
     fn test_snapshot_v2_naive_tamper_rejected_and_quarantined() {
         let dir = tempdir().expect("tempdir");
@@ -107,7 +107,7 @@ mod tests {
 
     // -- 2) Forging an UNHASHED field (GAP): bns_registry is outside the hash --
     // calculate_hash covers only the core consensus fields; schema-3
-    // Ve Task-0.08+ ile eklenen alanlar (bns/nft/registry/bridge_state/…)
+    // and the fields added with Task-0.08+ (bns/nft/registry/bridge_state/…)
     // are out of scope. The consequence: forgery in those fields PASSES verify.
     #[test]
     fn test_snapshot_v2_unhashed_field_forgery_gap() {
@@ -273,7 +273,7 @@ mod tests {
                 .join("snaps")
                 .join("snapshot_20.json.corrupted")
                 .exists(),
-            "yarim dosya karantinada tasinmali"
+            "a half-written file must be moved to quarantine"
         );
     }
 
@@ -348,7 +348,7 @@ mod tests {
 
             let _ = bc.produce_block(zero); // tip 3 (chain_len=4 > hB=2)
 
-            // B'yi crash-in-write ile boz.
+            // Break B with a crash-in-write.
             let file_b = snap_file(&dir, snap_height_b);
             let raw = std::fs::read_to_string(&file_b).expect("read B");
             std::fs::write(&file_b, &raw[..raw.len() / 2]).expect("truncate B");
@@ -376,7 +376,7 @@ mod tests {
                     .join("snaps")
                     .join(format!("snapshot_{snap_height_a}.json"))
                     .exists(),
-                "A karantinasiz yerinde kalmali"
+                "A must stay in place, unquarantined"
             );
         }
 
@@ -388,7 +388,7 @@ mod tests {
             assert_eq!(
                 bc.state.get_balance(&alice),
                 700,
-                "ikinci boot da A'dan iyilesir"
+                "the second boot also recovers from A"
             );
         }
     }
@@ -432,13 +432,13 @@ mod tests {
             assert_eq!(
                 bc.state.get_balance(&alice),
                 0,
-                "manuel mutasyon replay-disidir (belgelenmis semantik)"
+                "a manual mutation is outside replay (documented semantics)"
             );
 
             let (b4, _) = bc.produce_block(zero).expect("production on resume");
             assert_eq!(b4.previous_hash, tip3_hash, "it builds on the tip");
             assert_eq!(b4.index, tip3_index + 1, "height continuity");
-            let (b5, _) = bc.produce_block(zero).expect("ikinci blok");
+            let (b5, _) = bc.produce_block(zero).expect("second block");
             assert_eq!(b5.index, tip3_index + 2);
         }
     }

@@ -43,7 +43,7 @@ pub fn namehash(name: &str) -> [u8; 32] {
     node
 }
 
-/// Tek bir etiketin keccak-256'si.
+/// The keccak-256 of a single label.
 #[must_use]
 pub fn labelhash(label: &str) -> [u8; 32] {
     Keccak256::digest(label.as_bytes()).into()

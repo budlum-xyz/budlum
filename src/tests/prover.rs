@@ -401,8 +401,8 @@ fn a_proof_bound_to_another_chain_is_refused() {
 /// The accepted claim is keyed by `(domain, height)`. The binding hash
 /// does not cover both, a single valid proof can be submitted to every
 /// pair not yet claimed: the attacker only rebuilds the transport message and
-/// never touches the proof. A proof says "a program ran this way"; it does not say "this is
-/// yukseklikteki gecistir" demez.
+/// never touches the proof. A proof says "a program ran this way"; it does not say
+/// "this is the transition at this height".
 #[test]
 fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
     let mut bc = fresh_chain();
@@ -448,7 +448,7 @@ fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
 /// run. The `program_hash` check does not help either: since the sender supplies both the program
 /// and the hash, that check always passes.
 ///
-/// Reddi saglayan tek sey alanin onceden ilan ettigi izin listesidir.
+/// The only thing that produces the refusal is the allowlist the domain declared beforehand.
 #[test]
 fn a_valid_proof_over_an_unauthorized_program_is_refused() {
     let mut bc = fresh_chain();
@@ -628,7 +628,7 @@ fn gas_used_above_the_declared_limit_is_refused() {
         .expect_err("exceeding the declared budget must be refused");
     assert!(
         err.contains("gas"),
-        "ret, asilan seyin butce oldugunu soylemeli: {err}"
+        "the refusal must say that the budget was exceeded: {err}"
     );
     // The refusal comes before the fee: a refused proof does not touch the balance.
     assert_eq!(bc.state.get_balance(&sender), before);

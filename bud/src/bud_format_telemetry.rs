@@ -9,7 +9,7 @@
 //! - The production side (runner/API) calls `tracker.record(cluster_id)` on
 //!   every read; a periodic `tracker.plan(hot, cold, ts)` produces the tier
 //!   plan.
-//! - Deterministik, panik'siz, no unsafe.
+//! - Deterministic, panic free, no unsafe.
 
 #![forbid(unsafe_code)]
 

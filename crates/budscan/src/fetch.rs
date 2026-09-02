@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn an_ipfs_dag_pb_cid_is_not_claimed_verified() {
         let s = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
-        let t = Table::with(s, b"her ne ise");
+        let t = Table::with(s, b"whatever");
         let got = fetch_and_verify(&t, &Target::Ipfs(s.to_string())).unwrap();
         assert_eq!(got.evidence.weakest(), Strength::RpcClaimOnly);
         assert!(got.is_displayable(), "yasaklamiyoruz, etiketliyoruz");

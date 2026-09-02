@@ -199,8 +199,8 @@ pub enum ProposalType {
     /// no path could set it, so it was permanently false. This is the path.
     /// The proposal binds the reviewed snapshot: the developer address, the
     /// manifest id and the website-url hash that voters evaluated. A passed
-    /// vote may not be retargeted to different content (Strix HIGH, CWE-345;
-    /// BUDLUM bulgu #173).
+    /// vote may not be retargeted to different content (HIGH, CWE-345;
+    /// BUDLUM finding #173).
     VerifyHubApp {
         app_id: u64,
         developer: crate::core::address::Address,
@@ -455,7 +455,7 @@ impl GovernanceState {
                 // registered while the vote is open, and refusing at proposal
                 // time would make the outcome depend on submission order.
                 // The reviewed snapshot is bound here so the badge cannot be
-                // retargeted later (Strix HIGH, CWE-345).
+                // retargeted later (HIGH, CWE-345).
                 let _ = (app_id, developer, manifest_id, website_url_hash);
             }
             ProposalType::SetEncryptionPolicy(policy) => policy.validate()?,

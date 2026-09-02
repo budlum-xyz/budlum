@@ -32,6 +32,8 @@ pub mod manifest;
 pub mod merkle_trie;
 pub mod mobile_self;
 pub mod msr;
+pub mod one_share;
+pub mod one_view;
 pub mod payload_crypt;
 pub mod provider;
 pub mod pruning;
@@ -47,13 +49,18 @@ pub mod qr_recipe;
 pub mod qr_reemit;
 pub mod qr_video;
 pub mod render;
+pub mod reveal_gateway;
+pub mod server_admission;
+pub mod social_delete;
 pub mod three_gate;
 pub mod three_hooks;
 pub mod three_meter;
 pub mod three_nft;
 pub mod three_pipe;
 pub mod three_recipe;
+pub mod three_regime;
 pub mod three_reveal;
+pub mod three_rpc;
 pub mod three_visibility;
 pub mod traits;
 pub mod transformed;
@@ -94,24 +101,29 @@ pub use manifest::{
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
+    decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger, CustodyMode,
     MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
+    UploadCustodyRefusal,
 };
 pub use msr::{
     lrc_repair_traffic_scaled, msr_repair_traffic_scaled, msr_speedup_over_lrc_scaled, MsrError,
     TRAFFIC_SCALE,
 };
+pub use one_share::{OneShareRegistry, Share, ShareRefusal};
+pub use one_view::{EndpointRef, ScreenItem, SingleScreenView};
 pub use provider::{
     provider_challenge_id, ChallengeId, DealId, InMemoryStorageProvider, ProviderChallengeResult,
     PutReceipt, StorageProof, StorageProvider, StorageProviderError,
 };
 pub use pruning::{NodeMode, PruningPolicy};
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
+pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 
 pub mod pact_binding;
 pub use view_grant::{
-    confidential_commit_digest, grant_issue_digest, grant_revoke_digest, ConfidentialBodyCommit,
-    ConfidentialProofKind, GrantAuthError, GrantAuthorization, ViewGrant, ViewGrantError,
-    ViewGrantRegistry, ViewPolicy,
+    confidential_commit_digest, grant_issue_digest, grant_revoke_digest, social_delete_digest,
+    ConfidentialBodyCommit, ConfidentialProofKind, GrantAuthError, GrantAuthorization, ViewGrant,
+    ViewGrantError, ViewGrantRegistry, ViewPolicy,
 };
 
 pub use payload_crypt::{
@@ -147,12 +159,27 @@ pub use transformed::{
     transform_content, CodecFlags, ContentClass, TransformError, TransformOpts, TransformedPayload,
 };
 
-pub use three_nft::{meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta};
+pub use reveal_gateway::{
+    RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES, MAX_FRAMES_PER_CALL,
+    MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
+};
+pub use three_nft::{
+    meta_tracks_public_recipe, MetadataVisibility, PinRow, PreviewMode, ThreeNftMeta,
+    ThreeNftRegistry, ThreeNftRegistryError,
+};
 pub use three_recipe::{
     recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, VideoRecipeSealed,
     RECIPE_VIDEO_MAGIC,
 };
+pub use three_regime::{
+    admits_body as three_regime_admits_body, held_bytes_for, refuse_rent_without_held_bytes,
+    regime_of, rent_basis_for, AccountingRefusal, ContentRegime, RentBasis,
+};
 pub use three_reveal::{RevealError, RevealSession};
+pub use three_rpc::{
+    open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
+    RevealRpcError,
+};
 
 pub use three_gate::{
     classify_three_blob, is_transport_derivative, refuse_durable_derivative, ThreeBlobKind,
@@ -166,6 +193,7 @@ pub use qr_video::{
     demux_optical_frames, png_to_optical_frame, QrVideo, QrVideoError, DEFAULT_FPS,
     MAX_VIDEO_FRAMES, VIDEO_MAGIC, VIDEO_VERSION,
 };
+pub use social_delete::{process_social_delete, DeleteOutcome};
 pub use three_visibility::{
     delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
 };

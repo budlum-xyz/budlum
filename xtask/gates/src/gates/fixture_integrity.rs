@@ -82,7 +82,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| format!("the temporary directory could not be created: {e}"))?;
     let fixture = dir.join(FIXTURE_PATH);
 
-    // (1) Eksik dosya → red.
+    // (1) A missing file is refused.
     if run(&dir).is_ok() {
         return Err("a missing fixture file was not refused (vacuous)".into());
     }

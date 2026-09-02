@@ -267,7 +267,7 @@ impl MerkleProof {
     ///
     /// The direction bits are **derived from the address and compared**.
     /// Without the comparison a valid proof could be labelled as a proof for a
-    /// different address, which is exactly what the Strix LOW (CWE-345) finding
+    /// different address, which is exactly what the LOW (CWE-345) finding
     /// closed in `merkle_trie.rs`. It has to stay closed here too: leaving the
     /// verifier side open makes the proof meaningless.
     #[must_use]
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn a_merkle_proof_verifies_only_against_its_own_root() {
-        // Tek yaprakli bir trie: kardeslerin hepsi bos.
+        // A single-leaf trie: every sibling is empty.
         let address = [0xAAu8; 32];
         let leaf = hash_leaf(&address, 100, 3);
         let mut current = leaf;

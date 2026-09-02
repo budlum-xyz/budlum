@@ -12,8 +12,8 @@
 //! upstream deserves to know it is looking at a fork.
 //!
 //! Local changes concentrate in `folder.rs` (constraint folding for the Budlum
-//! VM AIR) and in the proof/config types; see `PROVENANCE_NOTES.md` at the
-//! repository root for the measurement this claim rests on.
+//! VM AIR) and in the proof/config types; see `docs/PROVENANCE_NOTES.md` for
+//! the measurement this claim rests on.
 
 extern crate alloc;
 

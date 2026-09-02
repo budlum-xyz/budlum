@@ -167,7 +167,7 @@ pub struct SecretRedactor;
 
 impl SecretRedactor {
     pub fn redact(content: &str) -> (String, Vec<String>) {
-        // Strip AWS, a model vendor keys etc
+        // Strip cloud and model-provider API keys
         let mut redacted = content.to_string();
         let mut secrets = Vec::new();
         // Simple pattern: AKIA, sk- etc

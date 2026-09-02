@@ -262,8 +262,8 @@ mod tests {
     fn an_empty_backup_dir_is_an_error() {
         let tmp = std::env::temp_dir().join("budlum-drill-empty");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("dizin");
-        let err = newest_backup(&tmp).expect_err("bos dizin hata vermeli");
+        std::fs::create_dir_all(&tmp).expect("directory");
+        let err = newest_backup(&tmp).expect_err("an empty directory must be an error");
         assert!(err.contains("budbak"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -272,9 +272,9 @@ mod tests {
     fn a_name_with_spaces_is_found() {
         let tmp = std::env::temp_dir().join("budlum-drill-spaces");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("dizin");
+        std::fs::create_dir_all(&tmp).expect("directory");
         let p = tmp.join("budlum-2026 08 14 12:00.budbak");
-        std::fs::write(&p, b"x").expect("dosya");
+        std::fs::write(&p, b"x").expect("file");
         assert_eq!(newest_backup(&tmp).expect("bulunmali"), p);
         let _ = std::fs::remove_dir_all(&tmp);
     }

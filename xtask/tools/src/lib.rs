@@ -121,7 +121,7 @@ pub fn run_checked(program: &str, args: &[&str], cwd: &Path) -> Result<(), Strin
     }
 }
 
-/// Bir programin `PATH`'te olup olmadigini soyle.
+/// Say whether a program is on `PATH`.
 ///
 /// Shell'deki `command -v X >/dev/null 2>&1` karsiligi.
 #[must_use]
@@ -180,6 +180,6 @@ mod tests {
     #[test]
     fn has_program_finds_a_shell_builtin_binary() {
         assert!(has_program("sh"), "`sh` her POSIX sisteminde PATH'te");
-        assert!(!has_program("budlum-bu-program-yok"));
+        assert!(!has_program("budlum-no-such-program"));
     }
 }

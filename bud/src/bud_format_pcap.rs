@@ -131,7 +131,7 @@ pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let records = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
-    // The STRIX pattern: guard against OOM from a user-controlled record count
+    // guard against OOM from a user-controlled record count
     if records > PCAP_MAX_RECORDS {
         return None;
     }

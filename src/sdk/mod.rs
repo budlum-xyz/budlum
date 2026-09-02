@@ -142,7 +142,7 @@ impl BudlumToml {
     }
 }
 
-/// `budlum.toml` ile ilgili hatalar.
+/// Errors related to `budlum.toml`.
 #[derive(Debug)]
 pub enum BudlumTomlError {
     Io {

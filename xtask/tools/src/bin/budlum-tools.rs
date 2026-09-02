@@ -1,6 +1,6 @@
 //! The entry point for the repository tools.
 //!
-//! Kullanim:
+//! Usage:
 //!
 //! ```text
 //! cargo run --manifest-path xtask/tools/Cargo.toml -- <arac> [arg...]
@@ -92,7 +92,7 @@ fn main() {
         Some(&"backup-drill") => backup_drill::DrillConfig::from_env(&root)
             .and_then(|cfg| backup_drill::run(&cfg, &root)),
         Some(name) => {
-            eprintln!("FAIL: `{name}` diye bir arac yok.\n");
+            eprintln!("FAIL: there is no tool named `{name}`.\n");
             eprint!("{}", usage());
             std::process::exit(2);
         }

@@ -26,6 +26,10 @@ use std::time::Duration;
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8545";
 const RPC_TIMEOUT_SECS: u64 = 15;
 
+/// Ceiling for one RPC response body. CLI answers are kilobytes; a hostile
+/// or broken endpoint that streams forever must hit a wall, not the heap.
+const MAX_RPC_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Parser)]
 #[command(
     name = "bud",
@@ -172,9 +176,15 @@ fn http_post_json(host: &str, port: u16, body: &str) -> Result<String, String> {
         .map_err(|e| format!("request write error: {e}"))?;
 
     let mut raw = Vec::new();
-    stream
+    let mut limited = stream.take(MAX_RPC_RESPONSE_BYTES + 1);
+    limited
         .read_to_end(&mut raw)
         .map_err(|e| format!("response read error: {e}"))?;
+    if raw.len() as u64 > MAX_RPC_RESPONSE_BYTES {
+        return Err(format!(
+            "response over {MAX_RPC_RESPONSE_BYTES} bytes refused"
+        ));
+    }
     let text = String::from_utf8(raw).map_err(|e| format!("UTF-8 parse: {e}"))?;
 
     // HTTP header/body split: everything after the first "\r\n\r\n" is the body.
@@ -337,8 +347,8 @@ fn run_query_status(rpc_url: &str) -> Result<(), String> {
 }
 
 fn run_validator(config: Option<&str>) -> Result<(), String> {
-    // Tam node runner (chain + consensus loop + RPC sunucu) paketli bir binary
-    // It is not - `validator run` here validates configuration and gives guidance.
+    // This is not a packaged full-node runner (chain + consensus loop + RPC
+    // server) - `validator run` here validates configuration and gives guidance.
     // Real node startup with `RpcServer::run` + `NodeConfig` is future work.
     match config {
         Some(path) => {

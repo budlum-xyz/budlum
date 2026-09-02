@@ -196,10 +196,10 @@ impl BudBitswap {
         if response.not_found || response.data.is_empty() {
             return Ok(()); // Nothing to store.
         }
-        // Strix MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
-        // has to arrive. A payload that only hashes to its own cid lets a bad
-        // block; otherwise a malicious peer is allowed to send a different block
-        // verir (cache zehirleme + eviction). Istenen cid eslesmezse red.
+        // MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
+        // block. A payload that only hashes to its own cid would let a malicious
+        // peer hand over a different block (cache poisoning + eviction). If the
+        // requested cid does not match, refuse.
         if response.cid != requested_cid {
             tracing::warn!(
                 wanted = %requested_cid,

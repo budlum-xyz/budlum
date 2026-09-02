@@ -113,10 +113,10 @@ impl Type {
 pub struct SemanticAnalyzer {
     pub structs: HashMap<String, HashMap<String, Type>>,
     pub functions: HashMap<String, (Vec<Type>, Type)>,
-    /// Sozlesmenin `storage { ... }` blogunda bildirilen alanlarin tipleri.
+    /// The types of the fields declared in the contract's `storage { ... }` block.
     ///
-    /// Erisim `storage::ad` sozdizimiyle olur ve `Stmt::StorageWrite` /
-    /// is parsed as `Expr::StorageRead`, so the fields are
+    /// Access uses the `storage::name` syntax and is parsed as `Stmt::StorageWrite` /
+    /// `Expr::StorageRead`, so the fields are
     /// not placed into the variable environment. They are held here so the types
     /// are verified once: a typo in a field's type name must not silently turn
     /// into an imaginary struct type, as it can with struct field types.
@@ -166,12 +166,11 @@ impl SemanticAnalyzer {
         }
 
         // 1a-bis. Verify that the storage field types really exist.
-        // `Type::from_str` turns EVERY non-primitive name into `Type::Struct(name)`
-        // yapar, dolayisiyla `count: Uint644` gibi bir yazim hatasi hayali
-        // would turn into a struct type and be accepted silently - the same class as the
-        // hole closed for struct field types. It runs after the struct registration pass
-        // so that a field can refer to a struct declared later.
-        // bulunabilsin.
+        // `Type::from_str` turns EVERY non-primitive name into `Type::Struct(name)`,
+        // so a typo such as `count: Uint644` would turn into an imaginary struct
+        // type and be accepted silently - the same class as the hole closed for
+        // struct field types. It runs after the struct registration pass so that
+        // a field can refer to a struct declared later.
         for field in &contract.storage {
             if let Ok(ty) = Type::from_str(&field.ty) {
                 self.check_struct_type(

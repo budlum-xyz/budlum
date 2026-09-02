@@ -26,8 +26,8 @@ jobs:
     # CI result of the same commit could change (external-red risk + reproduction
     # weakness). Removing or updating the pin is only done with a justification in
     # the commit message (the same spirit as the MSRV pin discipline).
-    # Not: src/ ve budzero'da `#![forbid(unsafe_code)]` + 0 unsafe temiz
-    # there is a base; this gate is an early warning for UB surfacing through the
+    # Note: src/ and budzero carry `#![forbid(unsafe_code)]` and a clean 0-unsafe
+    # base; this gate is an early warning for UB surfacing through the
     # dependency chain and for MIR-level errors.
     name: Miri UB Inspection (crypto + budzero, nightly-2026-07-19) (item 4)
     runs-on: ubuntu-latest
@@ -124,8 +124,8 @@ jobs:
           edition = "2021"
           EOF
           cat > /tmp/asan-canary/src/main.rs <<'EOF'
-          // Serbest birakilmis bellege erisim. ASan bunu gormezse tarama
-          // guvenilmez.
+          // Access to freed memory. If ASan does not see this the scan is
+          // not trustworthy.
           fn main() {
               let p = {
                   let v = vec![1u8, 2, 3, 4];

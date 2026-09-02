@@ -13,6 +13,7 @@ bud-vm = { path = "../bud-vm", features = ["experimental"] }
 bud-isa = { path = "../bud-isa", features = ["experimental"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 
 p3-air = "=0.6.3"
 p3-matrix = "=0.6.3"

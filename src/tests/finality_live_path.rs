@@ -3,10 +3,9 @@
 //! The existing `finality_adversarial.rs` (12 tests) covers the fixes there:
 //! equivocation producing slashing evidence, and signature verification at
 //! ingest time. This file tests the **live-path windows** and the **honesty
-//! boundaries**
-//! Eder - son taramada eksik kalan senaryolar.
+//! boundaries** - the scenarios left out of the last sweep.
 //!
-//! ## Kapsam
+//! ## Scope
 //!
 //! - **2.1 The epoch change**: the validator set is renewed at every epoch, and
 //!   the votes of the old epoch must not leak into the new aggregator.
@@ -122,7 +121,7 @@ fn live_path_epoch_change_isolates_votes() {
     let pv2 = sign_prevote(&sks2[0], 2, 20, "H2", snap2.validators[0].address);
     agg2.add_prevote(pv2).expect("epoch 2 prevote");
     assert_eq!(agg2.prevotes.len(), 1);
-    // Epoch 1 aggregator hâlâ kendi penceresinde, etkilenmedi.
+    // The epoch 1 aggregator is still in its own window, unaffected.
     assert_eq!(agg1.prevotes.len(), 3, "epoch 1 penceresi kirletilmemeli");
 }
 
@@ -171,7 +170,7 @@ fn live_path_double_sign_window_is_tight() {
     let mut agg = FinalityAggregator::new(1, 10, "H".into());
     agg.set_validator_snapshot(snap.clone());
 
-    // 1. oy (canonical) - kabul.
+    // 1st vote (canonical) - accepted.
     let pv1 = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
     agg.add_prevote(pv1).expect("first prevote");
 
@@ -182,7 +181,7 @@ fn live_path_double_sign_window_is_tight() {
         .expect_err("a duplicate prevote has to be refused");
     assert!(err.contains("Duplicate"));
 
-    // 3. oy (AYNI voter, FARKLI hash) - hash mismatch + evidence.
+    // 3rd vote (SAME voter, DIFFERENT hash) - hash mismatch + evidence.
     let pv_conflict = sign_prevote(&sks[0], 1, 10, "H2", snap.validators[0].address);
     let _ = agg.add_prevote(pv_conflict); // refused, but it produces evidence
     assert_eq!(agg.prevotes.len(), 1, "only the first vote may count");
@@ -198,7 +197,7 @@ fn live_path_double_sign_window_is_tight() {
 /// Different validator sets (a different order, a different count) produce
 /// different snapshot hashes - treated as collision-free. The SAME set produces
 /// the same hash
-/// (deterministik kabul).
+/// (deterministic acceptance).
 #[test]
 fn live_path_snapshot_hash_distinguishes_sets() {
     let (snap_a, _) = make_snapshot(3, 1, 1000);

@@ -1,4 +1,4 @@
-//! Round 5 root fix: `syn`-based AST security gates.
+//! `syn`-based AST security gates.
 //!
 //! Substring+brace-walk gate'ler (`zero_address_sender_is_verified`,
 //! `tee_trust_boundary_is_structural`, `gov_slash_evidence_is_validator_only`)
@@ -23,7 +23,7 @@
 //!      `if digest == evidence_hash` block, or as the TAIL expression of the
 //!      `.any(|..| { ..; digest == hash })` closure.
 //!
-//! Hardening note (after round 5): the last-round findings
+//! Hardening note: the later review findings
 //! (nested conditional `return true`, nested-item `Ok(())`, nested conditional
 //! (`return Err`, closure decoy) were closed at AST level too; each visitor
 //! carries a nesting counter and counts only the checks that are DIRECT members of the
@@ -65,7 +65,7 @@ fn is_err_call(node: &ExprCall) -> bool {
 /// Walk the inside of the `if tx.verify() { .. }` block; success counts only as a direct
 /// (nesting == 0) `Ok(())` / `return Ok(())`. An `Ok(())` inside a closure, nested
 /// fn item, nested if, match arm or loop is a decoy (
-/// CWE-697, round 8/10 findings: nested helper and nested-item decoys).
+/// CWE-697: nested helper and nested-item decoys).
 #[derive(Default)]
 struct VerifySuccess {
     found: bool,
@@ -133,8 +133,8 @@ struct ZeroBlockCheck {
 
 /// Is the expression after the verify block fail-closed? Only `return Err`,
 /// an `Err(...)` tail or a bare `return;` counts; a helper call, a macro
-/// or a value expression could leak success outwards (CWE-697, round
-/// 6/7 findings: helper and tail success).
+/// or a value expression could leak success outwards (CWE-697:
+/// helper and tail success).
 fn stmt_fails_closed(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(Expr::Return(ret), _) => match &ret.expr {
@@ -244,7 +244,7 @@ impl<'ast> Visit<'ast> for ZeroAddressFinder {
 
 /// Walk the `then` block of the TEE guard; `return Err` counts only when direct
 /// (nesting == 0). A `return Err` inside a closure/nested if/nested item/match arm/loop
-/// is a decoy (CWE-697, round 5/6/7/10 findings).
+/// is a decoy (CWE-697).
 #[derive(Default)]
 struct GuardErrCheck {
     found: bool,
@@ -404,7 +404,7 @@ impl<'ast> Visit<'ast> for TeeVisitor {
 }
 
 /// Walk the inside of the `if digest == evidence_hash { .. }` block; `return true;`
-/// counts only when direct (nesting == 0) (CWE-697, round 10 finding:
+/// counts only when direct (nesting == 0) (CWE-697:
 /// nested conditional `return true` decoy).
 #[derive(Default)]
 struct TopLevelTrue {
@@ -457,7 +457,7 @@ impl<'ast> Visit<'ast> for TopLevelTrue {
 
 /// Is the tail expression of the `.any(|..| { .. })` closure the digest comparison?
 /// A trailing expression with `;` or a value such as `true` does not drive the
-/// comparison (CWE-697, round 8 finding: overriding the tail form).
+/// comparison (CWE-697: overriding the tail form).
 fn closure_tail_is_digest_cmp(body: &Expr) -> bool {
     let last: Option<&Expr> = match body {
         Expr::Block(b) => match b.block.stmts.last() {

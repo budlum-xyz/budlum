@@ -95,15 +95,15 @@ jobs:
       #
       # The vulnerable expression is assembled AT RUN TIME, not written plainly into
       # the file. The reason was measured: even with a quoted heredoc, GitHub expands
-      # `run` blogunu kabuga VERMEDEN once genisletir, ve `issues` tetikleyicisi
-      # run without an `issues` trigger. So the canary was writing `echo ""` into the
+      # the `run` block BEFORE handing it to the shell, and the `issues` trigger does
+      # not fire without an `issues` event. So the canary was writing `echo ""` into the
       # file: a workflow with no vulnerability in it at all. zizmor gave the right
       # answer, "No findings to report", and the canary read that as "the tool is not
       # working". The canary was destroying the very thing it wanted to measure.
       #
       #
-      # `printf '%s%s%s'` ile parcalar kabukta birlesince GitHub'in gorecegi bir
-      # so no expression remains for GitHub to see and a real vulnerability lands in the file.
+      # When the pieces are joined in the shell with `printf '%s%s%s'`, no
+      # expression remains for GitHub to see and a real vulnerability lands in the file.
       - name: zizmor canary (does the tool really find findings)
         run: |
           set -euo pipefail
@@ -122,7 +122,6 @@ jobs:
           EOF
           # The expression is built character by character. A brace does not survive
           # even in a `printf` format string, because shellcheck mistakes the `${`
-          # `${` dizisini genisletilmesi unutulmus bir degisken sanip SC2016
           # sequence inside single quotes for a variable forgotten to expand and emits
           # SC2016, and that warning is wrong here: not expanding this string in the
           # shell is exactly the intent. Rather than suppressing the warning, we leave nothing to suppress.
@@ -178,7 +177,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           languages: rust
           queries: security-extended
@@ -196,7 +195,7 @@ jobs:
       - name: Build (CodeQL extraction)
         run: cargo build --lib --locked
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
 
   msrv:
     name: MSRV check (1.94.0)
@@ -283,7 +282,7 @@ jobs:
           install -m755 /tmp/cargo-hack /usr/local/bin/cargo-hack
           cargo hack --version
       # Canary: a feature that deliberately does not compile ON ITS OWN is written
-      # `--each-feature`in onu bulmasi beklenir. Duz `cargo check` bu kusuru
+      # and `--each-feature` is expected to find it. A plain `cargo check`
       # cannot see it, because with features enabled together the missing piece comes
       # from another feature. Without the canary a green matrix would say not that
       # the matrix ran, but at most that it did not fail.
@@ -338,7 +337,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: ops/Dockerfile
 

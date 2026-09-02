@@ -70,7 +70,7 @@ pub fn encode_label(input: &str) -> Option<String> {
     let chars: Vec<char> = input.chars().collect();
     let mut output = String::with_capacity(chars.len() * 2);
 
-    // Temel (ASCII) kod noktalari once, sirasi bozulmadan.
+    // Basic (ASCII) code points first, in their original order.
     let basic_count = chars
         .iter()
         .filter(|c| c.is_ascii())

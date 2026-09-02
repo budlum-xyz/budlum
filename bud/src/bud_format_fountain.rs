@@ -175,7 +175,7 @@ mod tests {
         // k=8 blocks, collect 16 symbols -> everything comes back
         let blocks: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 64]).collect();
         let sym = lt_encode(&blocks, 32, 42).unwrap();
-        // ilk 24 sembolle kur (LT: k·ln(k/δ) ≈ 16-24 yeterli)
+        // rebuild from the first 24 symbols (LT: k·ln(k/δ) ≈ 16-24 is enough)
         let dec = lt_decode(&sym[..24], 8).unwrap();
         for (a, b) in blocks.iter().zip(dec.iter()) {
             assert_eq!(a, b, "LT block lossless");

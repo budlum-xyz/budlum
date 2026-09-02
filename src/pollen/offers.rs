@@ -589,7 +589,7 @@ impl MarketplaceRegistry {
             authorization.terms_hash,
         );
         // Authorization-backed grant: `create_sale_authorization` already
-        // verified the seller signature cryptographically (Strix #358), so a
+        // verified the seller signature cryptographically (finding #358), so a
         // grant issued from a *registered* authorization carries verified
         // owner consent. The owner_signature field is inherited from the
         // verified authorization rather than re-signed over the grant's own
@@ -703,7 +703,7 @@ impl MarketplaceRegistry {
         if !asset.is_active() {
             return Err("cannot sell content under a revoked asset".into());
         }
-        // Strix HIGH (CWE-639, 2026-08-17): manifests are shared,
+        // HIGH (CWE-639, 2026-08-17): manifests are shared,
         // content-addressed identities, so binding another uploader's unowned
         // `manifest_id` to your own asset seizes that content's future read
         // gate. A bind is valid only when the manifest is IDENTICAL to the
@@ -866,7 +866,7 @@ mod tests {
     /// A deterministic test key pair: the address is the public key, and the
     /// signature comes from this pair.
     ///
-    /// Strix HIGH #358: signatures are now verified cryptographically, so tests
+    /// Finding #358 (HIGH): signatures are now verified cryptographically, so tests
     /// have to produce real ed25519 signatures.
     fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
         crate::crypto::primitives::KeyPair::from_seed(&[byte; 32])
@@ -1134,7 +1134,7 @@ mod tests {
     /// The DAO ceiling is applied identically on EVERY path that writes to
     /// `access_grants`.
     ///
-    /// Strix finding (CWE-862): the ceiling was applied only inside
+    /// Finding CWE-862: the ceiling was applied only inside
     /// `create_access_grant`. The marketplace purchase path,
     /// `issue_grant_from_sale_authorization`, never looked at the policy, so an
     /// ordinary buyer carrying a seller-signed authorization could obtain a

@@ -110,6 +110,15 @@ impl StateSnapshot {
         serde_json::to_vec(self).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        // The disk-read path enforces MAX_SNAPSHOT_BYTES; a snapshot handed
+        // to this entry point directly (remote sync, tests, imports) must
+        // not skip that ceiling, or the parse allocates on trust.
+        if data.len() as u64 > crate::core::bounded_read::MAX_SNAPSHOT_BYTES {
+            return Err(format!(
+                "snapshot exceeds the {} byte ceiling",
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES
+            ));
+        }
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
     }
     pub fn size(&self) -> usize {
@@ -301,7 +310,7 @@ impl PruningManager {
                     let _ = fs::rename(&path, &quarantine_path);
                     quarantined_any = true;
                     tracing::error!(
-                        "Bozuk V1 snapshot karantinaya alindi, eski aday deneniyor: {} ({e})",
+                        "Corrupt V1 snapshot quarantined, trying the older candidate: {} ({e})",
                         path.display()
                     );
                     continue;
@@ -313,7 +322,7 @@ impl PruningManager {
                 let _ = fs::rename(&path, &quarantine_path);
                 quarantined_any = true;
                 tracing::error!(
-                    "Integrity-bozuk V1 snapshot karantinaya alindi, eski aday deneniyor: {}",
+                    "Integrity-broken V1 snapshot quarantined, trying the older candidate: {}",
                     path.display()
                 );
                 continue;
@@ -396,7 +405,7 @@ impl PruningManager {
                     let _ = fs::rename(&path, &quarantine_path);
                     quarantined_any = true;
                     tracing::error!(
-                        "Bozuk V2 snapshot karantinaya alindi, eski aday deneniyor: {} ({e})",
+                        "Corrupt V2 snapshot quarantined, trying the older candidate: {} ({e})",
                         path.display()
                     );
                     continue;
@@ -408,7 +417,7 @@ impl PruningManager {
                 let _ = fs::rename(&path, &quarantine_path);
                 quarantined_any = true;
                 tracing::error!(
-                    "Integrity-bozuk V2 snapshot karantinaya alindi, eski aday deneniyor: {}",
+                    "Integrity-broken V2 snapshot quarantined, trying the older candidate: {}",
                     path.display()
                 );
                 continue;
@@ -1042,12 +1051,21 @@ impl StateSnapshotV2 {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        // Same ceiling as the V1 entry point and the bounded disk reader:
+        // no snapshot is parsed before its size is checked, whoever hands
+        // it over.
+        if data.len() as u64 > crate::core::bounded_read::MAX_SNAPSHOT_BYTES {
+            return Err(format!(
+                "snapshot V2 exceeds the {} byte ceiling",
+                crate::core::bounded_read::MAX_SNAPSHOT_BYTES
+            ));
+        }
         let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
         // C6 legacy import (RFC_GAP1 section 7.3, AllowUnsigned transition window):
-        // Schema<4 snapshot'lar eski digest ile geldi; yeni kod schema-4 digest
-        // recomputes snapshot_hash + AllowUnsigned (devnet transition).
+        // Schema<4 snapshots arrived with the old digest; the new code recomputes
+        // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
@@ -1777,19 +1795,19 @@ mod tests {
             "signing a snapshot must not change the digest that was signed"
         );
     }
-    // --- Borc G: gercek eski-blob goc testleri (schema 2 -> 4 ve 3 -> 4) ---
+    // --- Debt G: real legacy-blob migration tests (schema 2 -> 4 and 3 -> 4) ---
     //
     // The migration tests so far took a schema-4 production and rewound the version
-    // number by hand: the blob CARRIED every new field, so
-    // `serde(default)` dolgusu hic sinanmiyordu. Gercek bir schema-2/3 disk
-    // in a real record those fields are not present as bytes; what migration promises is exactly
-    // o yokluga karsi davranistir. Iki test blobu bu yuzden `serde_json`
-    // surgery: the field key is entirely ABSENT from the source blob.
+    // number by hand: the blob CARRIED every new field, so the `serde(default)`
+    // fill was never exercised. In a real schema-2/3 disk record those fields
+    // are not present as bytes; what migration promises is exactly the
+    // behaviour against that absence. The two test blobs are therefore built by
+    // `serde_json` surgery: the field key is entirely ABSENT from the source blob.
     // The red evidence was taken in an isolated vault (the pd vault): an importer without the bump line
     // reported "migration done" while leaving the version at 2 and the test
     // failed; the variant with the bump passed the same test.
 
-    /// Test kurulumunda kullanilan ortak parametre paketi.
+    /// The shared parameter bundle used by the test setup.
     fn legacy_params(height: u64) -> StateSnapshotV2Params {
         StateSnapshotV2Params {
             height,
@@ -1848,8 +1866,8 @@ mod tests {
     /// Only the keys of the schema-4 wave.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
-    /// PoA admission records: added with `#[serde(default)]`, without a version bump
-    /// bir alan.
+    /// PoA admission records: a field added with `#[serde(default)]`, without a
+    /// version bump.
     ///
     /// **Why `CURRENT_..._SCHEMA_VERSION` was not bumped:** the version exists for cases where an old
     /// binary could read a new snapshot *wrongly*.
@@ -1899,11 +1917,11 @@ mod tests {
         for field in fields {
             let av = a
                 .get(*field)
-                .unwrap_or_else(|| panic!("kaynokta alan yok: {field}"));
+                .unwrap_or_else(|| panic!("field missing at the source: {field}"));
             let bv = b
                 .get(*field)
-                .unwrap_or_else(|| panic!("hedefte alan yok: {field}"));
-            assert_eq!(av, bv, "goc bu alani kaybetti: {field}");
+                .unwrap_or_else(|| panic!("field missing at the target: {field}"));
+            assert_eq!(av, bv, "migration lost this field: {field}");
         }
     }
 
@@ -2094,11 +2112,11 @@ mod tests {
         );
     }
 
-    /// schema-3 blobu: v3 alanlari veri TASIYOR, v4 alanlari yok.
+    /// A schema-3 blob: the v3 fields CARRY data, the v4 fields are absent.
     ///
-    /// The other half of the loss distinction: the same `serde(default)` field, when present
-    /// carries data, it must deliver that data verbatim. The previous test
-    /// hic-tasinmayan tarafi, bu test dolu-tasinan tarafi kilitler.
+    /// The other half of the loss distinction: when the same `serde(default)`
+    /// field is present and carries data, it must deliver that data verbatim.
+    /// The previous test locks the never-carried side, this one the carried side.
     #[test]
     fn a_legacy_schema3_blob_migrates_keeping_v3_data_and_defaulting_v4() {
         let mut account_state = schema2_filled_state();
@@ -2245,9 +2263,9 @@ mod tests {
     ///
     /// The window is `[2, 4]`; the closure must stay identical one below and one above
     /// the edge, otherwise when the window shifts a version that must be refused
-    /// loads silently. It also locks the refusal message: staying closed
-    /// sebebi `"staged migration hook rejected"` metnidir ve yukleyicideki
-    /// karantina karari bu sinifa guvenir.
+    /// loads silently. It also locks the refusal message: the reason for staying
+    /// closed is the text `"staged migration hook rejected"`, and the quarantine
+    /// decision in the loader relies on that class.
     #[test]
     fn the_migration_hook_rejects_versions_just_outside_the_supported_window() {
         let account_state = AccountState::new();

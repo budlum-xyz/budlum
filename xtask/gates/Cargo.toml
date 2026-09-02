@@ -7,9 +7,9 @@ license = "LicenseRef-PolyForm-Shield-1.0.0"
 description = "Repository gates, written in Rust rather than shell."
 publish = false
 
-# Round 5: the substring+brace-walk gates could not model nested closures,
-# helpers and conditionals; Strix found a new variant every round. This PR
-# adds `syn` (a real Rust parser) for AST-based gates that model the actual
+# The substring+brace-walk gates could not model nested closures,
+# helpers and conditionals; each review round found a new variant. `syn`
+# (a real Rust parser) is used for AST-based gates that model the actual
 # control flow. The trade-off against the old zero-dependency principle is
 # deliberate and documented: correctness of the gate matters more than the
 # width of its dependency set, and syn is the de-facto standard, pure-Rust,

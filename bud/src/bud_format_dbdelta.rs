@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn farkli_boyut_red() {
+    fn different_page_sizes_are_refused() {
         assert!(page_delta_encode(&[vec![0u8; 8], vec![0u8; 9]]).is_none());
         assert!(page_delta_encode(&[]).is_none());
     }

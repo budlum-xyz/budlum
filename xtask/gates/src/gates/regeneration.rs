@@ -570,7 +570,7 @@ fn keccak_f(a: &mut [u64; 25]) {
     }
 }
 
-/// Keccak-256 (orijinal padding 0x01), Ethereum'un kullandigi.
+/// Keccak-256 (the original 0x01 padding), as used by Ethereum.
 pub(crate) fn keccak256(input: &[u8]) -> [u8; 32] {
     const RATE: usize = 136;
     let mut state = [0u64; 25];
@@ -672,7 +672,7 @@ fn is_scannable(path: &Path) -> bool {
 /// locations by hand. If the same hash is produced in a fourth place tomorrow, a
 /// hand-kept list would stay silent - and that silence is exactly what the gate
 /// exists to protect against. The measurement confirmed it: the tree had more
-/// (`src/execution/zkvm.rs`, `src/lubot/verify.rs`, `src/domain/storage_deal.rs`).
+/// (`src/execution/zkvm.rs`, `src/ai_inference/verify.rs`, `src/domain/storage_deal.rs`).
 ///
 /// The gate now says "find whatever is there and inspect it" rather than "inspect what I know about".
 fn discover_producers(root: &Path) -> Vec<Producer> {
@@ -733,7 +733,7 @@ fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
                 || window.contains(&format!("for inst in {n}"))
                 || window.contains(&format!("for &inst in &{n}"))
         });
-        // Sekil B: once program_bytes toplanip tek seferde besleniyor.
+        // Shape B: program_bytes is collected first and fed in one go.
         let shape_b =
             window.contains("update(&program_bytes)") || window.contains("update(program_bytes)");
         if shape_a || shape_b {
@@ -983,7 +983,7 @@ pub fn self_test() -> Result<String, String> {
         "src/prover",
         "src/ai/execution",
         "src/execution",
-        "src/lubot",
+        "src/ai_inference",
         "src/domain",
         "budzero/bud-proof/src",
     ] {
@@ -1048,7 +1048,7 @@ fn write_good(tmp: &Path) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     fs::write(
-        tmp.join("src/lubot/verify.rs"),
+        tmp.join("src/ai_inference/verify.rs"),
         "let mut hasher = Keccak256::new();\nhasher.update(&program_bytes);\n",
     )
     .map_err(|e| e.to_string())?;
@@ -1247,7 +1247,7 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
         "src/prover/mod.rs",
         "src/ai/execution/guest.rs",
         "src/execution/zkvm.rs",
-        "src/lubot/verify.rs",
+        "src/ai_inference/verify.rs",
     ] {
         fs::remove_file(tmp.join(f)).map_err(|e| e.to_string())?;
     }

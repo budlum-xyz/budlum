@@ -687,12 +687,12 @@ impl Vm {
             Opcode::PrivacyCommit => {
                 let amount = src1_val;
                 let blinding = src2_val; // full u64 from register
-                                         // Strix HIGH (CWE-682, 2026-08-17): recipient, trace'teki
+                                         // HIGH (CWE-682, 2026-08-17): recipient, trace'teki
                                          // It must be EXACTLY the same value as COL_IMM. COL_IMM carries a negative
                                          // imm as the Goldilocks modular negative (P - |imm|); the i64->u64
                                          // two's complement (2^64-|imm|) was incompatible with the AIR.
                                          // The VM, prover and AIR now use the same value.
-                                         // Strix HIGH (CWE-682 + i32::MIN, 2026-08-17): `-imm` i32::MIN
+                                         // HIGH (CWE-682 + i32::MIN, 2026-08-17): `-imm` i32::MIN
                                          // panics for that case; unsigned_abs() is safe (|-2^31| = 2^31).
                 let recipient = if inst.imm < 0 {
                     GOLDILOCKS_P.wrapping_sub(inst.imm.unsigned_abs() as u64)
@@ -1069,7 +1069,7 @@ impl Vm {
             }
         }
 
-        // Strix HIGH CWE-345 (2026-08-17): state-write digest is a Poseidon
+        // HIGH CWE-345 (2026-08-17): state-write digest is a Poseidon
         // STATE CHAIN over the executed (slot, val) pairs in EXECUTION ORDER
         // (matching the trace, which feeds the gadget on each SWrite row in
         // program order). 32 bytes = first 4 lanes of the final accumulator.
@@ -1612,7 +1612,7 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
 
 /// Full 30-round Poseidon permutation returning the ENTIRE 8-lane state.
 ///
-/// Strix HIGH CWE-345 (2026-08-17): the state-write digest must be bound to
+/// HIGH CWE-345 (2026-08-17): the state-write digest must be bound to
 /// executed `SWrite` effects inside the STARK. `poseidon_full_hash_state`
 /// collapses the state to lane 0; this variant returns all 8 lanes so the
 /// AIR can constrain a state chain (slot, val, prev_acc..) -> next_acc in
@@ -2322,9 +2322,9 @@ mod tests {
     /// The whole table is bound to a single constant.
     ///
     /// The lock above pinned **two** of the 240 round constants. The remaining 238
-    /// could be changed silently: changing a constant changes what the permutation
-    /// degistirir, permutasyonu degistirmek taahhutlerin ne sakladigini ve neye
-    /// binds - and no test would see it.
+    /// could be changed silently: changing a constant changes the permutation,
+    /// and changing the permutation changes what the commitments hide and what
+    /// they bind - and no test would see it.
     ///
     /// A spot check is exactly the kind of check that misses this class: a lock that
     /// always passes (because it leaves everything outside the sample free) is worse
@@ -2336,8 +2336,8 @@ mod tests {
     /// Adding a hash library would mean a new dependency living in the same tree as the
     /// table it locks.
     ///
-    /// When the value changes the thing to do is not to update it but to ask **what
-    /// degistigini bulmaktir**.
+    /// When the value changes the thing to do is not to update it but to find
+    /// out **what changed**.
     #[test]
     fn the_whole_constant_table_is_locked() {
         const fn fnv1a64(vals: &[[u64; 8]]) -> u64 {

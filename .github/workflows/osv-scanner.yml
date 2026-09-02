@@ -108,7 +108,7 @@ jobs:
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock \
-            --lockfile=crates/lubot/Cargo.lock \
+            --lockfile=crates/ai-inference/Cargo.lock \
             --lockfile=crates/budscan/Cargo.lock \
             --lockfile=bud/Cargo.lock
 
@@ -130,4 +130,4 @@ jobs:
             echo "The lockfiles above are outside the OSV scan."
             exit 1
           fi
-          echo "Depodaki her Cargo.lock OSV taramasinda."
+          echo "Every Cargo.lock in the repository is in the OSV scan."

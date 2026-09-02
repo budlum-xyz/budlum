@@ -143,7 +143,7 @@ pub struct PrivateTransferAuth {
 }
 
 impl PrivateTransferAuth {
-    /// Nullifier harcanmislar kumesinde mi.
+    /// Is the nullifier in the spent set?
     ///
     /// # Errors
     ///

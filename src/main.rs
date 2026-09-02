@@ -862,7 +862,7 @@ async fn main() {
     // Sharding is a consensus parameter (Whitepaper v1.3): the shards
     // commitment is part of block validity. Sourcing it from per-node CLI
     // flags would let two validators apply different validity rules to the
-    // same block (Strix CWE-1287), so any non-default value fails closed
+    // same block (CWE-1287), so any non-default value fails closed
     // until the parameters are chain-committed in genesis.
     if config.sharding_enabled
         || config.sharding_num_shards != 1

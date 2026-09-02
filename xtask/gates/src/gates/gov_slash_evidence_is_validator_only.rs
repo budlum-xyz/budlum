@@ -1,11 +1,11 @@
-//! Governance slash evidence gate (Round 4 finding).
+//! Governance slash evidence gate.
 //!
-//! Bir HIGH bulgusu giderildi (Strix CWE-345):
+//! A HIGH finding was fixed (CWE-345):
 //! `SlashValidator` used to accept a slashing record from ANY role as
 //! evidence. The fix requires `record.report.role == VALIDATOR` and digests
 //! the full report.
 //!
-//! Strix CWE-697 follow-ups: substring checks anywhere in the file can be
+//! CWE-697 follow-ups: substring checks anywhere in the file can be
 //! satisfied by bait snippets (comments, strings, raw strings, earlier
 //! decoy arms) outside the live `SlashValidator` path. This gate strips
 //! comments and literals, anchors to the live `fn execute_proposal` ->
@@ -23,7 +23,7 @@ fn collect(root: &Path) -> Result<String, String> {
 }
 
 /// Strip Rust comments, ordinary strings and raw strings (preserving line
-/// structure) so dead text cannot satisfy the gate (Strix CWE-697).
+/// structure) so dead text cannot satisfy the gate (CWE-697).
 fn strip_rust_noise(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
@@ -39,7 +39,7 @@ fn strip_rust_noise(src: &str) -> String {
         if bytes[pos..].starts_with(b"/*") {
             // Rust block comments nest (`/* outer /* inner */ tail */`); a
             // flat scan stops at the first `*/` and leaves the tail looking
-            // like live code. Track depth instead (Strix CWE-697).
+            // like live code. Track depth instead (CWE-697).
             out.push(' ');
             out.push(' ');
             pos += 2;
@@ -211,7 +211,7 @@ fn judge(src: &str) -> Vec<String> {
     // The digest comparison must be used as a CONDITION (`if .. ==
     // evidence_hash { .. }`), not assigned to any binding (`let x = .. ==
     // evidence_hash`). A renamed no-op binding still bypasses a bare
-    // substring check (Strix CWE-697, round 5 finding: arbitrary `let`
+    // substring check (CWE-697: arbitrary `let`
     // binding).
     // The digest comparison must drive the success. Two legitimate forms:
     //   1. `if sha2::Sha256::digest(..) == evidence_hash { return true; }`
@@ -220,13 +220,13 @@ fn judge(src: &str) -> Vec<String> {
     //   2. `sha2::Sha256::digest(..) == evidence_hash` as a tail expression
     //      (the closure's result, as in `any(|r| { ..; digest == hash })`).
     // A comparison bound to an unused variable, or an `if` whose body does
-    // not contain the success, is cosmetic (Strix CWE-697, round 5 finding:
+    // not contain the success, is cosmetic (CWE-697:
     // inert `if` bodies).
     let digest_cmp = "sha2::Sha256::digest(&bytes).as_slice() == evidence_hash";
     let guard_str = format!("if {digest_cmp} {{");
     // The guarded `return true` must be inside the digest-guard block AND not
     // inside a closure (`|| { return true; }`) or nested helper; a closure
-    // decoy does not control the slash decision (Strix CWE-697, round 6).
+    // decoy does not control the slash decision (CWE-697).
     let guarded_form = block.find(&guard_str).is_some_and(|guard_start| {
         let guard_rest = &block[guard_start..];
         let open = guard_rest.find('{').unwrap_or(0);
@@ -256,7 +256,7 @@ fn judge(src: &str) -> Vec<String> {
                 || body.trim().ends_with("{ /*");
             // `return true` must be at the guard's top level (nested_depth
             // <= 1: the guard's own if). A return nested deeper (closure or
-            // move-closure body) is a decoy (Strix CWE-697, round 9).
+            // move-closure body) is a decoy (CWE-697).
             let mut nested_depth = 0i32;
             let mut top_level_return = false;
             let mut nested_return = false;
@@ -273,14 +273,13 @@ fn judge(src: &str) -> Vec<String> {
                     .saturating_sub(trimmed.matches('}').count().try_into().unwrap_or(i32::MAX));
             }
             // The guard body must itself end in `return true;` so a trailing
-            // fall-through cannot carry the success (Strix CWE-697, round
-            // 5/6/7 findings, kept from the round-8 refactor on main).
+            // fall-through cannot carry the success (CWE-697).
             let inside = &guard_rest[open + 1..end.saturating_sub(1)];
             let ends_with_return = inside.trim_end().ends_with("return true;");
             // An enclosing `.any(...)` whose result is then overridden
             // (`|| true`, `&& x`) must be rejected: the guard is accepted
-            // while the slash decision is forced by the override (Strix
-            // CWE-697, round 8 finding).
+            // while the slash decision is forced by the override
+            // (CWE-697).
             let no_any_override = block[..guard_start].rfind(".any(").is_none_or(|any_at| {
                 let any_rest = &block[any_at..];
                 let any_open = any_rest.find('{').unwrap_or(0);
@@ -325,8 +324,7 @@ fn judge(src: &str) -> Vec<String> {
     // separate `return true;`, and nothing that overrides the result right
     // after the comparison. `... == evidence_hash }) || true` must be
     // rejected: the `|| true` immediately overrides the closure result, so
-    // slashing succeeds without evidence control (Strix CWE-697, round 8
-    // finding).
+    // slashing succeeds without evidence control (CWE-697).
     let tail_form = block.contains(digest_cmp)
         && !block.lines().any(|l| {
             let t = l.trim();
@@ -426,25 +424,24 @@ fn execute_proposal(&mut self, proposal: &Proposal) {
     // A closure-decoy `return true;` inside the digest guard must not satisfy
     // the guarded form: the guard body must end with the return, so a nested
     // closure or inner block cannot carry it while the outer success falls
-    // through to an unconditional tail (Strix CWE-697, round 7 finding).
+    // through to an unconditional tail (CWE-697).
     check_canary(&mut problems, "closure-decoy bait",
         "fn execute_proposal(&mut self, proposal: &Proposal) { match &proposal.p_type { ProposalType::SlashValidator { address, evidence_hash } => { if sha2::Sha256::digest(&bytes).as_slice() == evidence_hash { let _d = || { return true; }; } true } } }\n");
 
     // A `|| true` right after the digest comparison overrides the closure
-    // result, so the tail form must be rejected (Strix CWE-697, round 8
-    // finding).
+    // result, so the tail form must be rejected (CWE-697).
     check_canary(&mut problems, "tail-or-true bait",
         "fn execute_proposal(&mut self, proposal: &Proposal) { match &proposal.p_type { ProposalType::SlashValidator { address, evidence_hash } => { records.iter().any(|record| { let bytes = bincode::serialize(&record.report).expect(\"x\"); sha2::Sha256::digest(&bytes).as_slice() == evidence_hash }) || true } } }\n");
 
     // A guarded `return true` inside `.any(|...| { ... })` whose result is
-    // then overridden with `|| true` must be rejected too (Strix CWE-697,
-    // round 8 finding: guarded_form acceptance with a forced decision).
+    // then overridden with `|| true` must be rejected too (CWE-697:
+    // guarded_form acceptance with a forced decision).
     check_canary(&mut problems, "guarded-or-true bait",
         "fn execute_proposal(&mut self, proposal: &Proposal) { match &proposal.p_type { ProposalType::SlashValidator { address, evidence_hash } => { records.iter().any(|record| { if sha2::Sha256::digest(&bytes).as_slice() == evidence_hash { return true; } false }) || true } } }\n");
 
     // The same with a `move` closure: `.any(move |record| ...) || true` must
-    // be rejected even though `.any(|` is absent (Strix CWE-697, round 8
-    // finding: exact `.any(|` match misses move closures).
+    // be rejected even though `.any(|` is absent (CWE-697: exact `.any(|`
+    // match misses move closures).
     check_canary(&mut problems, "guarded-move-or-true bait",
         "fn execute_proposal(&mut self, proposal: &Proposal) { match &proposal.p_type { ProposalType::SlashValidator { address, evidence_hash } => { records.iter().any(move |record| { if sha2::Sha256::digest(&bytes).as_slice() == evidence_hash { return true; } false }) || true } } }\n");
 

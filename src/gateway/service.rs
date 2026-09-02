@@ -377,7 +377,7 @@ mod tests {
     ///
     /// The recipe is on chain, but the only thing saying the generator read it correctly
     /// is that the identity holds. Without this check the gateway would serve
-    /// uretmedigi baytlari tarifin adiyla sunardi.
+    /// bytes the recipe did not produce under the recipe's name.
     #[test]
     fn bytes_that_do_not_match_the_id_are_refused() {
         let mut manifest = generated_manifest();

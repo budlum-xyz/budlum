@@ -1,10 +1,10 @@
-//! B.U.D. 2.0 Icat - K20: Tenant-ici Dedup + PoW Ownership (2026-08-16)
+//! B.U.D. 2.0 - K20: tenant-local dedup + PoW ownership
 //!
 //! S.30/S.72 (privacy-preserving dedup, PM-Dedup and ase-PoW), DECISION 71
-//! (convergent encryption
-//! saldirilari kapatilamaz -> tenant-ici dedup + encrypted dict + PoW ownership).
-//! Bu cekirdek: tenant-ici dedup indeksi (kriptografik chunk hash'leri) + proof-of-ownership
-//! challenge (SHA3 preimage work). Cross-tenant convergent dedup is NOT done,
+//! (convergent-encryption attacks cannot be closed -> tenant-local dedup +
+//! encrypted dict + PoW ownership).
+//! This core: a tenant-local dedup index (cryptographic chunk hashes) plus a
+//! proof-of-ownership challenge (SHA3 preimage work). Cross-tenant convergent dedup is NOT done,
 //! for privacy.
 
 #![forbid(unsafe_code)]
@@ -12,7 +12,7 @@
 use sha3::{Digest, Sha3_256};
 use std::collections::HashSet;
 
-/// Tenant-ici dedup indeksi. Ayni tenant'in ayni chunk'i teke iner.
+/// Tenant-local dedup index. The same chunk of the same tenant collapses to one.
 #[derive(Debug, Clone, Default)]
 pub struct TenantDedup {
     chunks: HashSet<[u8; 32]>,
@@ -50,7 +50,7 @@ impl TenantDedup {
     }
 }
 
-/// PoW ownership challenge: chunk'a sahip olan, challenge'i cozebilir.
+/// PoW ownership challenge: whoever holds the chunk can solve the challenge.
 /// The first `difficulty` bits of SHA3(chunk_id || nonce) have to be zero.
 #[derive(Debug, Clone)]
 pub struct PowChallenge {
@@ -113,10 +113,10 @@ mod tests {
     #[test]
     fn dedup_saves_duplicate_chunks() {
         let mut dd = TenantDedup::new();
-        assert_eq!(dd.insert(b"ayni blok"), DedupOutcome::Stored);
-        assert_eq!(dd.insert(b"ayni blok"), DedupOutcome::Deduplicated);
-        assert_eq!(dd.insert(b"farkli"), DedupOutcome::Stored);
-        assert_eq!(dd.saved_bytes(), 9); // the length of "ayni blok"
+        assert_eq!(dd.insert(b"same blok"), DedupOutcome::Stored);
+        assert_eq!(dd.insert(b"same blok"), DedupOutcome::Deduplicated);
+        assert_eq!(dd.insert(b"other"), DedupOutcome::Stored);
+        assert_eq!(dd.saved_bytes(), 9); // the length of "same blok"
         assert_eq!(dd.unique_chunks(), 2);
     }
 

@@ -82,7 +82,7 @@ pub struct RegistryParams {
     /// Fails verification. Set to 0 to disable. Same permissionless-but-costly
     /// Pattern as `slashing_report_fee`.
     pub proof_submission_fee: u64,
-    /// Fee required to register an AI model (Lubot), as an anti-sybil/DoS
+    /// Fee required to register an AI model (AI inference layer), as an anti-sybil/DoS
     /// measure on the model registry. Governance-tunable per network; set to
     /// 0 to disable. Charged as an exact cost on top of the base transaction
     /// fee (H1 exact-cost pattern): paying less is rejected, paying more is
@@ -144,8 +144,9 @@ pub struct RegistryParams {
     /// someone moving a quadrillion paid exactly the same, which is the transfer
     /// twin of the storage deal that charged the same for 1 KiB and 16 MiB.
     ///
-    /// `0` keeps the previous behaviour exactly, which is what every existing
-    /// network runs until governance says otherwise.
+    /// The struct default is `0` ("not configured"). The decided protocol
+    /// rate is 0.2% (user decision 2026-09-01); production networks set it
+    /// through governance, and `0` expresses "free" explicitly.
     pub transfer_fee_ppm: u64,
 
     /// Protocol cut of a swap, in parts-per-million.
@@ -215,12 +216,14 @@ impl RegistryParams {
 
     /// The fee a value transfer of `amount` must carry, given a flat floor.
     ///
-    /// The larger of the flat floor and the proportional cut. Never the sum:
-    /// charging both would mean the floor is paid twice on every large
-    /// transfer, which is not what the economic model describes.
+    /// The flat floor PLUS the proportional cut (user decision 2026-09-01:
+    /// the fee is base + rate; the ad-valorem part is Budlum protocol
+    /// revenue bound at the instruction level, never folded into the floor).
+    /// The earlier "larger of the two" reading let a large transfer skip the
+    /// floor entirely; the economic model bills both.
     #[must_use]
     pub fn required_transfer_fee(&self, amount: u64, base_fee: u64) -> u64 {
-        base_fee.max(self.proportional_fee(amount, self.transfer_fee_ppm))
+        base_fee.saturating_add(self.proportional_fee(amount, self.transfer_fee_ppm))
     }
 
     /// Protocol-level bounds for governance-tunable registry params.
@@ -556,7 +559,10 @@ mod tests {
             large > small,
             "a 1000x larger transfer must not cost the same: {small} vs {large}"
         );
-        assert_eq!(large, small * 1_000, "the cut must be linear in the amount");
+        // Base + cut: the cut alone is linear in the amount (1 + 200 vs
+        // 1 + 200_000), and the floor rides on top of both.
+        assert_eq!(small, 1 + 200);
+        assert_eq!(large - 1, (small - 1) * 1_000, "the cut must be linear");
     }
 
     /// The default has to reproduce the previous behaviour exactly. Every

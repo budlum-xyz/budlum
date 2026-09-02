@@ -6,7 +6,7 @@
 //! per-process random order: two honest nodes with identical state produce
 //! different digests. Iteration of `BTreeMap`/`BTreeSet`/`Vec` is fine.
 //!
-//! The Strix CWE-184 hardening is kept:
+//! The CWE-184 hardening is kept:
 //!   * field declarations and `type` aliases are resolved per module scope,
 //!     so an inner `mod` cannot be masked by a safe outer alias of the same
 //!     name (lexical shadowing);

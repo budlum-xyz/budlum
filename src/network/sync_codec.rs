@@ -21,11 +21,11 @@ impl request_response::Codec for SyncCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        // Strix HIGH (CWE-400, 2026-08-17): /sync istekleri handshake/ban/
-        // rate-limit kontrollerinden ONCE tamponlanir. 10 MiB tavan, uzak bir
-        // a peer connects and sends small control requests (GetHeaders,
-        // GetBlocksRange) to make large allocations.
-        // Kontrol istekleri kilobayt seviyesindedir; tavan 1 MiB'a indirildi.
+        // HIGH (CWE-400, 2026-08-17): /sync requests are buffered BEFORE the
+        // handshake/ban/rate-limit checks. A 10 MiB ceiling let a remote peer
+        // connect and send small control requests (GetHeaders, GetBlocksRange)
+        // to force large allocations.
+        // Control requests are kilobyte sized; the ceiling was lowered to 1 MiB.
         let mut buf = Vec::new();
         let mut limited = io.take(1024 * 1024);
         limited.read_to_end(&mut buf).await?;

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ai-core",
+    "crates/ai-data",
+    "crates/ai-integrations",
+    "crates/ai-knowledge",
+    "crates/ai-serve",
+    "crates/ai-tune",
+    "crates/ai-ops",
+]
+
+# The panic limit: `unwrap` and `expect` are forbidden on the production path.
+#
+# This workspace had been left outside the gate in the main repo. Measured: a
+# single violation (`encode` in `ai-data/src/jsonl.rs`), and the
+# documentation of that violation claimed "in production a wrapper returning
+# `Result` is used" - no such wrapper
+# existed. Without a gate, the false claim stayed in the tree.
+#
+# The release profile is not `panic = "abort"` here, but ai_inference is part of the
+# same binary
+# runs inside it; a panic still brings the process down. Tests are exempt
+# (`clippy.toml`: allow-unwrap-in-tests).
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[profile.release]
+lto = true

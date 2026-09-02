@@ -207,7 +207,7 @@ pub struct BudFile {
     pub chunks: Vec<BudChunk>,
     pub merkle_root: [u8; 32],
     pub pq_signature: Option<Vec<u8>>,
-    pub pq_public_key: Option<Vec<u8>>, // STRIX: the ML-DSA-87 verification key (required for PQ_SIGNED)
+    pub pq_public_key: Option<Vec<u8>>, // the ML-DSA-87 verification key (required for PQ_SIGNED)
     pub encryption_key_wrapped: Option<Vec<u8>>,
     pub pollen_consent_token: Option<String>,
     pub files: Vec<BudFileEntry>,
@@ -299,7 +299,7 @@ impl BudFile {
         original_len as f64 / payload as f64
     }
 
-    /// STRIX FIX (2026-08-16): a .bud carrying the PQ_SIGNED flag must not be
+    /// Fix (2026-08-16): a .bud carrying the PQ_SIGNED flag must not be
     /// accepted by looking at the signature SIZE alone; the signature must be
     /// verified CRYPTOGRAPHICALLY against the ML-DSA-87 (FIPS 204 NIST final)
     /// public key. The message is domain tagged: BDLM_PQ_SIGN_V1 || content_id.
@@ -789,7 +789,7 @@ impl MultiRatioConsensus {
             passing.sort_by(|a, b| b.ratio.total_cmp(&a.ratio)); // K38: total_cmp NaN'da panik yapmaz
             Some(passing[0].clone())
         } else {
-            // device_only ile tut
+            // keep with device_only
             let mut filtered2: Vec<_> =
                 Self::candidates_for_format(BudFormatClass::Image, b"dummy")
                     .into_iter()
@@ -829,7 +829,7 @@ impl BudGates {
         Ok(())
     }
     pub fn k_bud_generative_removed(f: &BudFile) -> Result<(), &'static str> {
-        // generative flag varsa RED
+        // a generative flag is REFUSED
         if f.header.pipe_id >= 10 && f.header.pipe_id <= 19 {
             // the old optical range, now forbidden
             return Err("K-BUD-GENERATIVE-REMOVED: generative pipe_id 10-19 is forbidden, generation was removed from the lists");
@@ -1006,7 +1006,7 @@ mod tests {
         for i in 0..bytes.len() {
             let _ = BudFile::from_bytes(&bytes[..i]); // there must be no panic
         }
-        let _ = BudFile::from_bytes(&bytes); // tam dosya OK
+        let _ = BudFile::from_bytes(&bytes); // the whole file is fine
                                              // ends truncated from the right (signature/key/token length reads)
         for cut in [bytes.len().saturating_sub(2), bytes.len().saturating_sub(3)] {
             let _ = BudFile::from_bytes(&bytes[..cut]);

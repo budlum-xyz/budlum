@@ -44,7 +44,7 @@ impl std::fmt::Display for RoleId {
             roles::STORAGE_OPERATOR => write!(f, "storage_operator"),
             roles::AI_VERIFIER => write!(f, "ai_verifier"),
             roles::ATTESTER => write!(f, "attester"),
-            roles::LUBOT_OPERATOR => write!(f, "lubot_operator"),
+            roles::AI_OPERATOR => write!(f, "ai_operator"),
             roles::CONTENT_VALIDATOR => write!(f, "content_validator"),
             RoleId(id) => write!(f, "role#{id}"),
         }
@@ -66,7 +66,7 @@ pub mod roles {
     /// Settlement / proof verifier (generic).
     pub const VERIFIER: RoleId = RoleId(2);
     /// DeEd master verifier - alias to VERIFIER (RoleId 2), same primitive,
-    /// Distinct semantic label matrix. Preserves LUBOT_OPERATOR=8.
+    /// Distinct semantic label matrix. Preserves AI_OPERATOR=8.
     pub const MASTER_VERIFIER: RoleId = RoleId(2);
     /// Cross-domain message relayer (permissionless).
     pub const RELAYER: RoleId = RoleId(3);
@@ -106,9 +106,9 @@ pub mod roles {
     /// Unified under PermissionlessRegistry.
     pub const ATTESTER: RoleId = RoleId(7);
 
-    /// A Lubot decentralized AI operator: a compute bond, independent of PoS.
+    /// An AI inference layer decentralized AI operator: a compute bond, independent of PoS.
     /// Must be preserved acceptance (RoleId 8).
-    pub const LUBOT_OPERATOR: RoleId = RoleId(8);
+    pub const AI_OPERATOR: RoleId = RoleId(8);
 
     /// SocialFi content validator - validates D-Web content authenticity
     /// For SocialFi NFT registry. New (RoleId 9).
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(format!("{}", roles::STORAGE_OPERATOR), "storage_operator");
         assert_eq!(format!("{}", roles::AI_VERIFIER), "ai_verifier");
         assert_eq!(format!("{}", roles::ATTESTER), "attester");
-        assert_eq!(format!("{}", roles::LUBOT_OPERATOR), "lubot_operator");
+        assert_eq!(format!("{}", roles::AI_OPERATOR), "ai_operator");
         assert_eq!(format!("{}", roles::CONTENT_VALIDATOR), "content_validator");
     }
 
@@ -155,8 +155,8 @@ mod tests {
     }
 
     #[test]
-    fn lubot_operator_role_id_value_is_8() {
-        assert_eq!(roles::LUBOT_OPERATOR.value(), 8);
+    fn ai_operator_role_id_value_is_8() {
+        assert_eq!(roles::AI_OPERATOR.value(), 8);
     }
 
     #[test]
@@ -174,6 +174,6 @@ mod tests {
     fn role_id_ordering() {
         assert!(RoleId::new(1) < RoleId::new(2));
         assert!(roles::VALIDATOR < roles::RELAYER);
-        assert!(roles::ATTESTER < roles::LUBOT_OPERATOR);
+        assert!(roles::ATTESTER < roles::AI_OPERATOR);
     }
 }

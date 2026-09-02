@@ -13,7 +13,7 @@
 //! it describes; CI runs the gate without `--pin`, so an unpinned edit is a
 //! red relay.
 //!
-//! Per `ask_user` 9, detection and reporting only - repair is manual.
+//! Detection and reporting only - repair is manual.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

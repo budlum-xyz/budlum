@@ -2,11 +2,11 @@
 //!
 //! In Fiat-Shamir the challenges are derived from everything absorbed so far.
 //! If the two sides do not absorb the same things **in the same order** they do not produce the
-//! same challenges; either no valid proof verifies (a noticeable failure) or
-//! -tehlikeli olani- bir taraf otekinin bagladigi bir seyi **atlar** ve o alan
-//! it stops being bound to the challenge. Over the skipped field an attacker
-//! serbesttir: CVE-2026-46654 ve gnark'in Last Challenge Attack'i bu sinifin
-//! iki ornegi.
+//! same challenges; either no valid proof verifies (a noticeable failure) or,
+//! the dangerous one, one side **skips** something the other binds, and that
+//! field stops being bound to the challenge. Over the skipped field an attacker
+//! is free: CVE-2026-46654 and gnark's Last Challenge Attack are two examples
+//! of this class.
 //!
 //! Today that mirroring is described in the comments of two files ("the verifier
 //! absorbs the same slice at the same point") and **nothing enforces it**.
@@ -44,9 +44,9 @@ const VERIFIER: &str = "budzero/bud-proof/src/bud_stark/verifier.rs";
 /// absorptions have to be identical.
 #[derive(Debug, PartialEq, Eq)]
 struct Absorb {
-    /// `observe` veya `observe_slice`.
+    /// `observe` or `observe_slice`.
     call: String,
-    /// Kaba bir sinif: skaler mi, taahhut mu, dilim mi.
+    /// A coarse class: scalar, commitment or slice.
     shape: &'static str,
 }
 
@@ -59,7 +59,7 @@ fn classify(arg: &str) -> &'static str {
     } else if a.contains("public_values") {
         "public-values"
     } else {
-        // Geri kalan her sey bir taahhut (Merkle koku): trace, preprocessed,
+        // Everything else is a commitment (a Merkle root): trace, preprocessed,
         // aux, quotient, random.
         "commitment"
     }

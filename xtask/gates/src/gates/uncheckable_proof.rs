@@ -7,7 +7,7 @@
 //! no-proof answer must still be `Err` (Mismatched), the flag must be a plain
 //! constant `false`, and the two named containment tests must exist.
 //!
-//! The Strix CWE-184 hardening is kept: the scan runs on a literal- and
+//! The CWE-184 hardening is kept: the scan runs on a literal- and
 //! comment-scrubbed view (literals first, then block comments with a depth
 //! counter, then line comments), so prose that merely names the guard cannot
 //! satisfy a check about the guard.

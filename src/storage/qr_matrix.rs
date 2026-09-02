@@ -6,7 +6,7 @@
 //! `block_len` 200 lab default stays on the carousel side; here we encode one
 //! A3 optical frame wire into one QR symbol.
 //!
-//! Decimen/AGPL source is not copied - only the measured rules.
+//! No external QR library is linked into this module; only the measured rules are used.
 
 use qrcode::types::EcLevel;
 
@@ -203,7 +203,7 @@ mod tests {
         let m = QrMatrix::encode(payload).unwrap();
         assert_eq!(m.version, 2);
         assert_eq!(m.width, 25);
-        // ayni yuk, ayni moduller: kodlayici bizim, secim sabit
+        // same payload, same modules: the encoder is ours, the choice is fixed
         let again = QrMatrix::encode(payload).unwrap();
         assert_eq!(m, again);
     }

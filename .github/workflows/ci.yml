@@ -178,20 +178,20 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss --self-test
       - name: Repair fires on loss
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss
-      - name: Lubot detection canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate --self-test
-      - name: Lubot reads, does not produce
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate
-      # crates/lubot is a separate workspace: not a member of the root Cargo.toml, so
+      - name: AI inference layer detection canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate --self-test
+      - name: AI inference layer reads, does not produce
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate
+      # crates/ai-inference is a separate workspace: not a member of the root Cargo.toml, so
       # `cargo clippy --all-targets` never reached it. Only the gate above,
       # which reads the source text, existed. Result: the tree stopped compiling
       # and nobody saw it (`&'static [u16]` could not be derived with serde,
       # `ConnState: Default` was missing, one test was passing `&[]`). The build
       # and the tests were wired in here so it cannot break silently again.
-      - name: Lubot builds and its tests pass
+      - name: AI inference layer builds and its tests pass
         run: |
-          cargo clippy --manifest-path crates/lubot/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path crates/lubot/Cargo.toml
+          cargo clippy --manifest-path crates/ai-inference/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/ai-inference/Cargo.toml
       # The B.U.D. core (bud/) was in the same silent hole: bud-core with 103 modules
       # -- ALL of B.U.D. 1.0/2.0/3.0 -- was built by no CI job,
       # because it is not a member of the root workspace and no step pointed
@@ -251,7 +251,7 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale
       - name: Derivation durability canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master --self-test
-      - name: Bir turev master'indan uzun yasayamaz
+      - name: A derivative cannot outlive its master
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master
       - name: Claim unit canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units --self-test
@@ -551,7 +551,7 @@ jobs:
     # and ContentId. Copies can diverge silently and their divergence is a silent
     # results (the explorer accepts a name the chain does not; or
     # the explorer says a byte verified while the chain computes a different identity).
-    # `budscan-name-rule-parity` o iki sessizligi gurultuye ceviriyor.
+    # `budscan-name-rule-parity` turns those two silences into noise.
     name: Budscan (explorer core + patch layer)
     runs-on: ubuntu-latest
     steps:
@@ -906,7 +906,7 @@ jobs:
             --report-format sarif --report-path gitleaks.sarif --exit-code 0
       - name: Upload gitleaks SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -951,9 +951,9 @@ jobs:
         run: cargo bench --bench erasure_rows
 
   docker-security:
-    # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
-    # The hadolint binary is version+sha256 pinned (the gitleaks pattern). DL3008 (apt version
-    # Pinleme) warning seviyesinde birakilir: bookworm apt churn'une karsi
+    # Dockerfile static lint (hadolint) + repo fs trivy scan.
+    # The hadolint binary is version+sha256 pinned (the gitleaks pattern). DL3008 (apt
+    # version pinning) is left at warning level against bookworm apt churn.
     # A deliberate calibration: with failure-threshold: error only error+ FAILs.
     name: Docker Security (trivy + hadolint)
     runs-on: ubuntu-latest
@@ -996,7 +996,7 @@ jobs:
           ignore-unfixed: true
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -1172,9 +1172,9 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
-      # A fuzz target only fuzzes if three files agree: the harness,
-      # fuzz/Cargo.toml'daki [[bin]], ve onu kosturan bir workflow. Uclusunden
-      # if one is missing the target appears in the list and does nothing.
+      # A fuzz target only fuzzes if three files agree: the harness, the
+      # [[bin]] in fuzz/Cargo.toml, and a workflow that runs it. If one of the
+      # three is missing the target appears in the list and does nothing.
       - name: fuzz target wiring + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- fuzz-targets-are-wired --self-test
@@ -1590,9 +1590,9 @@ jobs:
           # The correct form is 'origin/main' (GitHub docs: .git#branch=<remote>/<branch>).
           if git cat-file -e origin/main:buf.yaml 2>/dev/null; then
             buf breaking --against '.git#branch=origin/main'
-            echo "buf breaking: main'e karsi temiz."
+            echo "buf breaking: clean against main."
           else
-            echo "SKIP (durust marker): main'de buf.yaml henuz yok - baseline bu dalgayla kuruluyor."
+            echo "SKIP (honest marker): main has no buf.yaml yet - the baseline is established by this wave."
           fi
       - name: genesis schema gate + canary
         run: |

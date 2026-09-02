@@ -24,7 +24,7 @@ pub struct EthLog {
     pub data: Vec<u8>,
 }
 
-/// Decode edilen Ethereum receipt.
+/// A decoded Ethereum receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthReceipt {
     /// `true` means the transaction succeeded (status=1 post-Byzantium;
@@ -103,7 +103,7 @@ fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
     }
 }
 
-/// `logs` RLP listesini decode eder. Her log = `[address(20), topics([32]*), data]`.
+/// Decodes the `logs` RLP list. Each log = `[address(20), topics([32]*), data]`.
 fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
     let logs = match item {
         Item::List(l) => l,
@@ -146,8 +146,8 @@ fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
 
 impl EthReceipt {
     /// Returns the first log matching the given `(emitter_address, topic0)`.
-    /// Bridge: `topic0` = keccak256("Deposit(address,uint256,bytes32,uint256)") gibi
-    /// Event signature; `emitter_address` = bridge kontrat adresi.
+    /// Bridge: `topic0` is an event signature such as
+    /// keccak256("Deposit(address,uint256,bytes32,uint256)"); `emitter_address` is the bridge contract address.
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
         self.logs.iter().find(|log| {
             log.address == emitter && log.topics.first().map(|t| t == topic0).unwrap_or(false)

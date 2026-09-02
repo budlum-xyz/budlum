@@ -44,7 +44,7 @@ const FORBIDDEN_BRAND_SYLLABLES: &[&[&str]] = &[
     &["mull", "vad"],
 ];
 
-/// Aranacak marka parcalarini uretir.
+/// Produces the brand fragments to search for.
 fn forbidden_brand_tokens() -> Vec<String> {
     FORBIDDEN_BRAND_SYLLABLES
         .iter()
@@ -79,7 +79,7 @@ fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
     Ok(out)
 }
 
-/// Bir diff'in dokundugu dosyalar.
+/// The files a diff touches.
 fn touched_files(diff: &str) -> Vec<String> {
     diff.lines()
         .filter_map(|line| line.strip_prefix("+++ "))
@@ -165,7 +165,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     for (rel, _) in &listed {
         let path = browser.join(rel);
         let Ok(diff) = std::fs::read_to_string(&path) else {
-            continue; // yukarida zaten raporlandi
+            continue; // already reported above
         };
         let touched = touched_files(&diff);
         if touched.is_empty() {
@@ -184,7 +184,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    // Marka: yama adlari, yama govdeleri, ayarlar ve yerellestirme.
+    // Brand: patch names, patch bodies, settings and localisation.
     let mut scanned = 0usize;
     let brand_tokens = forbidden_brand_tokens();
     let scan = |rel: &str, text: &str, problems: &mut Vec<String>| {
@@ -204,7 +204,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     for (rel, _) in &listed {
         for token in &brand_tokens {
             if rel.to_ascii_lowercase().contains(token) {
-                problems.push(format!("{rel}: yama adi {token:?} tasiyor"));
+                problems.push(format!("{rel}: the patch name carries {token:?}"));
             }
         }
         if let Ok(text) = std::fs::read_to_string(browser.join(rel)) {

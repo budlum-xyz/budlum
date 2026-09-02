@@ -82,7 +82,7 @@ impl ChurnFixture {
             ChurnFixture {
                 kind: FixtureKind::DoubleChurn,
                 n: 9,
-                description: "N=9 EVENODD p=7 cift sutun kaybi kurtarmali",
+                description: "N=9 EVENODD p=7 must survive a double column loss",
             },
             ChurnFixture {
                 kind: FixtureKind::SmartProactive,
@@ -118,7 +118,7 @@ impl ChurnFixture {
     }
 
     pub fn run(&self) -> ChurnResult {
-        // Iskelet simulasyon - gercekte disk IO
+        // Skeleton simulation - real disk IO in production
         match self.kind {
             FixtureKind::SingleChurn => ChurnResult {
                 survived: true,
@@ -127,7 +127,7 @@ impl ChurnFixture {
             },
             FixtureKind::DoubleChurn => {
                 if self.n == 4 {
-                    // normal 3+1 cift fis kaybeder, kritik 2+2 kurtarir - burada normal varsay
+                    // normal 3+1 loses a double failure, critical 2+2 survives it - assume normal here
                     ChurnResult {
                         survived: false,
                         repair_disks: 0,

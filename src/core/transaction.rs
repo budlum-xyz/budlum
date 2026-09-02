@@ -28,8 +28,8 @@ pub const SIGNATURE_VERSION_V5: u32 = 5;
 /// The transaction form that carries multisig authorization.
 ///
 /// V5 carries a single signature and `from` is the hash of the key that produced it. That
-/// coklu imzali bir hesabin harcamasini ifade edemez: hesap soyutlama
-/// `MultisigPolicy` in that layer performed a real `t-of-n` check, but
+/// cannot express a spend by a multi-signature account: the account abstraction
+/// layer's `MultisigPolicy` performed a real `t-of-n` check, but
 /// no transaction could bring it an authorization, because the schema carried a single
 /// signature. The rule existed in code with no path to apply it.
 ///
@@ -293,7 +293,7 @@ pub enum TransactionType {
     AiModelRegister(crate::ai::types::AiModelSpec),
     /// (§1) Submit AI inference attestation request.
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
-    /// Submit a Lubot inference result by an active bonded RoleId(8) operator.
+    /// Submit an AI inference layer inference result by an active bonded RoleId(8) operator.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
     /// (§1 P5) Reclaim escrowed max_fee for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
@@ -339,13 +339,13 @@ pub enum TransactionType {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,
     },
-    /// Lubot production onboarding: bond `amount` from the signed sender into
-    /// The permissionless LUBOT_OPERATOR role (RoleId 8).
-    LubotOperatorBond,
+    /// AI inference layer production onboarding: bond `amount` from the signed sender into
+    /// The permissionless AI_OPERATOR role (RoleId 8).
+    AiOperatorBond,
     /// Begin RoleId(8) unbonding after all observable tasks/disputes close.
-    LubotOperatorUnbond,
+    AiOperatorUnbond,
     /// Withdraw the complete RoleId(8) principal after the unbonding epoch.
-    LubotOperatorWithdraw,
+    AiOperatorWithdraw,
     /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
@@ -374,7 +374,7 @@ pub struct Transaction {
     /// rejects a V5 transaction whose key does not hash to `from`.
     #[serde(default)]
     pub signer_public_key: Vec<u8>,
-    /// V6 coklu imzali yetkilendirme: sahip kumesi, esik ve imzalar.
+    /// V6 multi-signature authorization: the owner set, the threshold and the signatures.
     ///
     /// Must be `None` for V4/V5. A V5 transaction carrying this field is
     /// refused: an unchecked authorization sitting next to a transaction verified by a single
@@ -452,7 +452,7 @@ impl Transaction {
         )
     }
 
-    pub fn new_lubot_operator_bond(
+    pub fn new_ai_operator_bond(
         from: Address,
         amount: u64,
         fee: u64,
@@ -467,11 +467,11 @@ impl Transaction {
             nonce,
             vec![],
             chain_id,
-            TransactionType::LubotOperatorBond,
+            TransactionType::AiOperatorBond,
         )
     }
 
-    pub fn new_lubot_operator_unbond(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
+    pub fn new_ai_operator_unbond(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
             Address::zero(),
@@ -480,11 +480,11 @@ impl Transaction {
             nonce,
             vec![],
             chain_id,
-            TransactionType::LubotOperatorUnbond,
+            TransactionType::AiOperatorUnbond,
         )
     }
 
-    pub fn new_lubot_operator_withdraw(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
+    pub fn new_ai_operator_withdraw(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
             Address::zero(),
@@ -493,7 +493,7 @@ impl Transaction {
             nonce,
             vec![],
             chain_id,
-            TransactionType::LubotOperatorWithdraw,
+            TransactionType::AiOperatorWithdraw,
         )
     }
 
@@ -971,18 +971,18 @@ impl Transaction {
                     return false;
                 }
             }
-            TransactionType::LubotOperatorBond => {
+            TransactionType::AiOperatorBond => {
                 if self.amount == 0 || self.to != Address::zero() || !self.data.is_empty() {
                     debug!(
-                        "Lubot operator bond requires amount > 0, zero recipient, and empty data"
+                        "AI inference layer operator bond requires amount > 0, zero recipient, and empty data"
                     );
                     return false;
                 }
             }
-            TransactionType::LubotOperatorUnbond | TransactionType::LubotOperatorWithdraw => {
+            TransactionType::AiOperatorUnbond | TransactionType::AiOperatorWithdraw => {
                 if self.amount != 0 || self.to != Address::zero() || !self.data.is_empty() {
                     debug!(
-                        "Lubot unbond/withdraw requires zero amount, zero recipient, and empty data"
+                        "AI inference layer unbond/withdraw requires zero amount, zero recipient, and empty data"
                     );
                     return false;
                 }
@@ -1114,9 +1114,9 @@ impl Transaction {
             TransactionType::PrivateTransferSubmit(_) => schedule.contract_call_gas * 2,
             TransactionType::PrivacyNoteInsert(_) => schedule.transfer_gas,
             TransactionType::AiAttachExecutionProof { .. } => schedule.contract_call_gas * 2,
-            TransactionType::LubotOperatorBond
-            | TransactionType::LubotOperatorUnbond
-            | TransactionType::LubotOperatorWithdraw => schedule.stake_gas,
+            TransactionType::AiOperatorBond
+            | TransactionType::AiOperatorUnbond
+            | TransactionType::AiOperatorWithdraw => schedule.stake_gas,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1160,10 +1160,10 @@ mod tests {
         assert_eq!(tx.tx_type, TransactionType::Stake);
     }
     #[test]
-    fn lubot_operator_bond_signature_commits_amount_and_opcode() {
+    fn ai_operator_bond_signature_commits_amount_and_opcode() {
         let keypair = KeyPair::generate().unwrap();
         let operator = Address::from(keypair.public_key_bytes());
-        let mut tx = Transaction::new_lubot_operator_bond(operator, 1_000, 1, 0, DEFAULT_CHAIN_ID);
+        let mut tx = Transaction::new_ai_operator_bond(operator, 1_000, 1, 0, DEFAULT_CHAIN_ID);
         tx.sign(&keypair);
         assert!(tx.verify());
         assert!(tx.is_valid());
@@ -1286,9 +1286,9 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::PrivateTransferSubmit(_) => 36,
         TransactionType::PrivacyNoteInsert(_) => 37,
         TransactionType::AiAttachExecutionProof { .. } => 38,
-        TransactionType::LubotOperatorBond => 39,
-        TransactionType::LubotOperatorUnbond => 40,
-        TransactionType::LubotOperatorWithdraw => 41,
+        TransactionType::AiOperatorBond => 39,
+        TransactionType::AiOperatorUnbond => 40,
+        TransactionType::AiOperatorWithdraw => 41,
         TransactionType::RegisterConsensusKeys(_) => 42,
         TransactionType::BudlumxyzAttestApp { .. } => 43,
     }
@@ -1465,9 +1465,9 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         | TransactionType::NftMint
         | TransactionType::NftTransfer
         | TransactionType::NftBurn
-        | TransactionType::LubotOperatorBond
-        | TransactionType::LubotOperatorUnbond
-        | TransactionType::LubotOperatorWithdraw => {}
+        | TransactionType::AiOperatorBond
+        | TransactionType::AiOperatorUnbond
+        | TransactionType::AiOperatorWithdraw => {}
         TransactionType::RegisterConsensusKeys(registration) => {
             put_string(out, &registration.scheme_id);
             put_bytes(out, &registration.vrf_public_key);
@@ -1763,7 +1763,7 @@ mod v29_signing_tests {
             execution_class: 1,
             execution_weights_digest: Some([1u8; 32]),
             execution_dims: Some(vec![4, 1]),
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         };
         let mut tx = signed_variant(TransactionType::AiModelRegister(spec.clone()));
         let TransactionType::AiModelRegister(registered) = &mut tx.tx_type else {
@@ -1810,7 +1810,7 @@ mod v29_signing_tests {
             callback: None,
             submitted_at_block: 1,
             deadline_block: 100,
-            effort: crate::lubot::effort::EffortTier::DEEPEST,
+            effort: crate::ai_inference::effort::EffortTier::DEEPEST,
             perception: None,
         };
         req.request_id = req.calculate_id();
@@ -1820,7 +1820,7 @@ mod v29_signing_tests {
         let TransactionType::AiInferenceRequest(submitted) = &mut tx.tx_type else {
             unreachable!();
         };
-        submitted.effort = crate::lubot::effort::EffortTier::FASTEST;
+        submitted.effort = crate::ai_inference::effort::EffortTier::FASTEST;
         assert!(
             !tx.verify(),
             "an operator that can rewrite 10.0x to 0.5x in flight does the \
@@ -1920,7 +1920,7 @@ mod v29_signing_tests {
             execution_class: 0,
             execution_weights_digest: None,
             execution_dims: None,
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         };
         let mut absent = Vec::new();
         encode_model_spec(&base, &mut absent);
@@ -2028,7 +2028,7 @@ mod v29_signing_tests {
             // but the address is not derived from the set, so the binding breaks.
             tx.from = multisig_address(&other_owners, 2);
             tx.hash = tx.calculate_hash();
-            assert!(!tx.verify(), "adres kumeden turemeli");
+            assert!(!tx.verify(), "the address must derive from the set");
         }
 
         /// The threshold is part of the address: a lower-threshold version of the same set
@@ -2039,7 +2039,10 @@ mod v29_signing_tests {
             let strict = multisig_address(&owners, 3);
             let mut tx = tx_for(strict);
             tx.sign_v6(&owners, 1, &[&keys[0]]);
-            assert_ne!(tx.from, strict, "esik degisince adres de degisir");
+            assert_ne!(
+                tx.from, strict,
+                "when the threshold changes the address changes too"
+            );
         }
 
         /// The set is inside the signature scope: an intermediary cannot change it.

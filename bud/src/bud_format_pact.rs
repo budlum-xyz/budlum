@@ -13,7 +13,7 @@
 //! (for example a video codec) is used inside the .bud: commitment = H(producer output), and the bytes are
 //! reproducible. In the lossless class commitment = content_id(original) (K3).
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn from_blob_never_panics() {
-        // mini-fuzz: rastgele baytlarda from_blob panik'siz
+        // mini-fuzz: from_blob is panic free on random bytes
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {

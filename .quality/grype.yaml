@@ -1,10 +1,10 @@
 # .grype.yaml, configuration for the Grype (Anchore) vulnerability scanner
 #
 # WHY ALONGSIDE OSV-Scanner: Grype feeds from a different database set
-# (NVD + GHSA + distro feed'leri) ve her bulguya EPSS skoru ekliyor. EPSS,
+# (NVD + GHSA + distro feeds) and attaches an EPSS score to every finding. EPSS
 # is the measurable answer to "is this hole being exploited in the wild" and exists neither
 # in RustSec nor in OSV.dev. For an L1 it changes prioritisation:
-# CVSS 8.7 ama EPSS %0.5 olan bir bulgu ile CVSS 7.0 / EPSS %40 olan bir bulgu
+# a finding at CVSS 8.7 but EPSS 0.5% and one at CVSS 7.0 / EPSS 40%
 # do not carry the same urgency.
 #
 # Grype also produces SARIF; findings land in the Security tab. The Trivy fs scan

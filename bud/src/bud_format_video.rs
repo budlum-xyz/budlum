@@ -40,7 +40,7 @@ pub enum VideoCodec {
 #[derive(Debug, Clone, Copy)]
 pub struct VideoSuggestion {
     pub codec: VideoCodec,
-    pub gop_frames: u32,         // depolama: UZUN GOP (K85)
+    pub gop_frames: u32,         // storage: LONG GOP (K85)
     pub scenecut_threshold: u8,  // per content class: 60 for sport, 10 for slides
     pub lossless: bool,          // lossless mode suggestion, for archival
     pub expected_ratio_min: f64, // the K84 measured range, synthetic

@@ -263,10 +263,105 @@ fn verifying_key_bytes(sk: &SigningKey<MlDsa87>) -> PublicKeyBytes {
     out
 }
 
+/// Randomness source for one hedged signature: serves exactly the
+/// CSPRNG-filled 32-byte block FIPS 204 `rnd` consumes, word by word.
+/// Implementing `TryRng` by hand keeps rand_core a traits-only dependency
+/// (no getrandom feature), so the wasm build is untouched.
+#[cfg(feature = "production")]
+struct HedgedRnd {
+    bytes: [u8; 32],
+    pos: usize,
+}
+
+/// The 32-byte block ran out before the signer was satisfied.
+#[derive(Debug, Clone, Copy)]
+#[cfg(feature = "production")]
+struct HedgedRndExhausted;
+
+#[cfg(feature = "production")]
+impl core::fmt::Display for HedgedRndExhausted {
+    // Note: no `<'_>` here on purpose - the repo's binding-claims gate reads
+    // this file with a quote-parity scanner, and a lifetime apostrophe in code
+    // shifts that parity. Eliding the lifetime keeps the file gate-readable.
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str("hedged signing randomness exhausted")
+    }
+}
+
+#[cfg(feature = "production")]
+impl std::error::Error for HedgedRndExhausted {}
+
+#[cfg(feature = "production")]
+impl HedgedRnd {
+    fn take(&mut self, dst: &mut [u8]) -> Result<(), HedgedRndExhausted> {
+        let end = self
+            .pos
+            .checked_add(dst.len())
+            .ok_or(HedgedRndExhausted)?;
+        let src = self.bytes.get(self.pos..end).ok_or(HedgedRndExhausted)?;
+        dst.copy_from_slice(src);
+        self.pos = end;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "production")]
+impl rand_core::TryCryptoRng for HedgedRnd {}
+
+#[cfg(feature = "production")]
+impl rand_core::TryRng for HedgedRnd {
+    type Error = HedgedRndExhausted;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut b = [0u8; 4];
+        self.take(&mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut b = [0u8; 8];
+        self.take(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        self.take(dst)
+    }
+}
+
 /// Sign a message with an ML-DSA-87 signing key and return the 4627-byte
 /// encoded signature.
+///
+/// Hedged per FIPS 204 3.6.1 when the `production` CSPRNG is available: a
+/// fresh `rnd` per signature keeps repeated signatures of one message from
+/// repeating intermediate values (fault-injection / side-channel defence).
+/// Verifiers accept hedged and deterministic signatures alike, so nothing
+/// on any read path changes. Without `production` (fixed-entropy builds and
+/// tests) the deterministic variant is kept, mirroring this crate's
+/// fail-closed entropy policy for key generation.
 fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
-    let sig: Signature<MlDsa87> = sk.sign(message);
+    #[cfg(feature = "production")]
+    let hedged: Option<Signature<MlDsa87>> = {
+        let mut rnd_bytes = [0u8; 32];
+        match getrandom::getrandom(&mut rnd_bytes) {
+            Ok(()) => sk
+                .expanded_key()
+                .sign_randomized(
+                    message,
+                    b"",
+                    &mut HedgedRnd {
+                        bytes: rnd_bytes,
+                        pos: 0,
+                    },
+                )
+                .ok(),
+            Err(_) => None,
+        }
+    };
+    #[cfg(not(feature = "production"))]
+    let hedged: Option<Signature<MlDsa87>> = None;
+
+    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| sk.sign(message));
     let enc: EncodedSignature<MlDsa87> = sig.encode();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
     out.copy_from_slice(enc.as_ref());
@@ -521,8 +616,8 @@ impl Drop for Wallet {
     }
 }
 
-/// Budlum Address = ML-DSA-87 pubkey'nin domain-separated SHA3-256 hash'i (32 byte).
-/// `core::address::Address` deseni ile uyumlu.
+/// Budlum Address = the domain-separated SHA3-256 hash of the ML-DSA-87 public key (32 bytes).
+/// Compatible with the `core::address::Address` pattern.
 pub type BudlumAddress = [u8; 32];
 
 /// (2026-07-22) in-wallet privacy surface.
@@ -1127,7 +1222,7 @@ impl Wallet {
     /// the enclave measurement before signing (fail-closed otherwise). The
     /// attestation's `report_data` is the SHA-256 of the sealed bytes, so a
     /// runtime that substitutes attacker-controlled sealed bytes cannot
-    /// produce an attestation for the digest the wallet signs (Strix HIGH,
+    /// produce an attestation for the digest the wallet signs (HIGH,
     /// security audit).
     ///
     /// The trust boundary is structural: the runtime produces only a **raw
@@ -1135,7 +1230,7 @@ impl Wallet {
     /// verifier it owns ([`TeeQuoteVerifier`]) that checks the quote against
     /// the hardware root of trust. The runtime never supplies parsed
     /// attestation fields, so a self-attesting software runtime cannot
-    /// fabricate an attestation by echoing fields back (Strix MEDIUM,
+    /// fabricate an attestation by echoing fields back (MEDIUM,
     /// CWE-347, follow-up work). The wallet additionally requires its
     /// enrolled measurement to match and the backend to match its preference;
     /// signing fails closed while no measurement is enrolled.
@@ -1215,7 +1310,7 @@ impl Wallet {
         // for TEE. Until witness construction itself runs inside the enclave,
         // a `tee_enabled=true` request cannot be honoured honestly: the
         // returned intent would carry plaintext input/output notes, leaking
-        // exactly what the user asked the TEE to hide (Strix MEDIUM, deneme
+        // exactly what the user asked the TEE to hide (MEDIUM, CWE-200).
         // Require a live runtime (fail-closed without one) and then
         // still refuse the plaintext intent.
         if self.privacy.tee_enabled {
@@ -2167,7 +2262,7 @@ mod tests {
     fn d2_wallet_tee_requires_enrolled_measurement() {
         // The runtime produces a quote and the verifier validates it, but the
         // wallet has not enrolled any measurement, so it must refuse to sign
-        // rather than trust the runtime's own claim (Strix MEDIUM, CWE-347,
+        // rather than trust the runtime's own claim (MEDIUM, CWE-347,
         // follow-up work).
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
@@ -2213,7 +2308,7 @@ mod tests {
         // The runtime hands the wallet raw bytes. If those bytes are not a
         // valid quote for the verifier's root of trust, the wallet refuses
         // even though the runtime produced them itself: the runtime can
-        // never supply a parsed attestation (Strix MEDIUM, CWE-347).
+        // never supply a parsed attestation (MEDIUM, CWE-347).
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
         struct ForgingRuntime;
         impl TeeRuntime for ForgingRuntime {

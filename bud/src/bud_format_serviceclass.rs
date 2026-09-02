@@ -17,9 +17,9 @@ pub const SVC_MAGIC: [u8; 8] = *b"\xB5SVC1\0\0\0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServiceClass {
     Hot = 0,         // frequent access: HDD-CMR or QLC, many copies, high erasure
-    Warm = 1,        // arada → HDD-CMR, erasure standart
+    Warm = 1,        // occasional access: HDD-CMR, standard erasure
     Cold = 2,        // rare access: SMR or a tape hybrid, low erasure
-    Archive = 3,     // yasal/uzun → tape/M-Disc, write-once
+    Archive = 3,     // legal/long term: tape or M-Disc, write-once
     Regenerable = 4, // reproducible: a contract plus a commitment, holds no bytes (I2)
 }
 

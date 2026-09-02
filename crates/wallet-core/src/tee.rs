@@ -122,7 +122,7 @@ impl TeeQuoter for UnavailableTeeRuntime {
 
 /// Default quote verifier: no hardware root is linked, so no quote can ever
 /// verify. `sign_with_privacy` stays fail-closed even if a runtime somehow
-/// produced bytes claiming to be a quote (Strix MEDIUM, CWE-347).
+/// produced bytes claiming to be a quote (MEDIUM, CWE-347).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnavailableTeeQuoteVerifier;
 

@@ -1,4 +1,4 @@
-//! Provider soyutlamasi - B.U.D. 2.0 final kararlari
+//! The provider abstraction - B.U.D. 2.0 final decisions
 //! no_social: SocialOpen is cancelled; DeviceClosed + NetworkFull only
 //! When the device is offline: its own content stays indefinitely, while a
 //! replica of somebody else's gets a 10-minute grace period.
@@ -18,7 +18,7 @@ pub enum ProviderError {
     Offline,
     HashMismatch,
     ConsentDenied,
-    GraceExpired, // 10dk sonra
+    GraceExpired, // after 10 minutes
 }
 
 pub trait Provider {
@@ -70,9 +70,9 @@ impl MobileSelfProvider {
     }
     pub fn is_online(&self, now_secs: u64) -> bool {
         if self.is_owner {
-            true // kendi icerigi suresiz tolere
+            true // its own content is tolerated indefinitely
         } else {
-            now_secs.saturating_sub(self.last_seen_secs) < 600 // 10dk
+            now_secs.saturating_sub(self.last_seen_secs) < 600 // 10 minutes
         }
     }
     pub fn should_displace(&self, now_secs: u64) -> bool {

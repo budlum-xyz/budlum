@@ -615,7 +615,7 @@ mod tests {
         });
         let grids = prepared.detect_grids();
         assert_eq!(grids.len(), 1, "one grid must be detectable");
-        // decode_to, decode'un String'e zorlayan UTF-8 adimini atlar;
+        // decode_to skips decode's UTF-8 step that forces a String;
         // the frames carry a binary payload, so the raw bytes are compared.
         let mut out = Vec::new();
         grids[0].decode_to(&mut out).expect("grid must decode");

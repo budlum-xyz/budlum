@@ -52,8 +52,8 @@ mod tests {
             // asserted, which made this test vacuous - it always passed. (On a
             // real network minting happens only in the genesis block.)
             // `state` starts as an empty AccountState (genesis is not applied
-            // here), so circulating_supply is exactly what the test
-            // Ekledigi bakiyelerin toplamidir.
+            // here), so circulating_supply is exactly the sum of the balances
+            // the test added.
             let supply = state.circulating_supply();
             assert_eq!(
                 supply,

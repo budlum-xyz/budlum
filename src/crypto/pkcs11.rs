@@ -232,7 +232,7 @@ impl Pkcs11Signer {
     }
 
     pub fn store_bls_key(&self, _keypair: &BlsKeypair) -> Result<(), CryptoError> {
-        // Strix HIGH (CWE-922, 2026-08-17): storing a plaintext BLS key in a
+        // HIGH (CWE-922, 2026-08-17): storing a plaintext BLS key in a
         // DATA object is refused in EVERY mode. Hardware custody means
         // vendor-managed objects; a DATA object is readable from software
         // (fallback loaders rehydrate it through CKA_VALUE), so the
@@ -245,7 +245,7 @@ impl Pkcs11Signer {
     }
 
     pub fn store_pq_key(&self, _keypair: &PqKeyPair) -> Result<(), CryptoError> {
-        // Strix HIGH (CWE-922, 2026-08-17): the same reasoning - a PQ secret
+        // HIGH (CWE-922, 2026-08-17): the same reasoning - a PQ secret
         // cannot be stored as a DATA object; hardware custody is
         // vendor-managed.
         Err(CryptoError::Signing(

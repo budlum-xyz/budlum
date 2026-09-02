@@ -28,7 +28,7 @@ const SKIP_DIRS: &[&str] = &[".git", "target"];
 /// The gate must not fail on its own source: the canaries below embed real
 /// marker strings. Skipped by the exact repository-relative path, never by
 /// basename: a committed file elsewhere that merely shares the basename must
-/// still be scanned (Strix CWE-697).
+/// still be scanned (CWE-697).
 const SELF_PATH: &str = "xtask/gates/src/gates/no_conflict_markers.rs";
 
 /// `grep -rnE '^(<<<<<<< |>>>>>>> |={7}$)'` on a single line. The trailing
@@ -81,7 +81,7 @@ fn walk_into(dir: &Path, skip_dirs: &[&str], out: &mut Vec<PathBuf>) {
         // committed symlink to a directory (`loop -> .`, `docs -> /tree`) is
         // not followed: the shell gate's os.walk did not follow symlinked
         // directories either, and following them would walk outside the
-        // repository boundary and re-scan in a loop (Strix CWE-61).
+        // repository boundary and re-scan in a loop (CWE-61).
         let Ok(kind) = entry.file_type() else {
             continue;
         };
@@ -225,7 +225,7 @@ pub fn self_test() -> Result<String, String> {
     }
     canaries += 1;
 
-    // Canary 8 (Strix CWE-61): a committed symlink to a directory must not be
+    // Canary 8 (CWE-61): a committed symlink to a directory must not be
     // followed. `loop -> .` would make a `Path::is_dir()` walker re-scan the
     // same tree forever; the file_type walker never enters it, and a marker
     // inside the target that is reachable only through the symlink is not
@@ -246,7 +246,7 @@ pub fn self_test() -> Result<String, String> {
         canaries += 1;
     }
 
-    // Canary 9 (Strix CWE-697): the gate skips only its own source by the
+    // Canary 9 (CWE-697): the gate skips only its own source by the
     // full repository-relative path, never by basename. A committed file
     // elsewhere that happens to be named `no_conflict_markers.rs` must still
     // be scanned: drop one at the fixture root and it must be flagged.

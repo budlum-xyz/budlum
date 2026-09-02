@@ -164,7 +164,7 @@ pub enum ProofTaskStatus {
 }
 
 impl ProofTaskStatus {
-    /// Status bytes for the root commitment (Strix HIGH CWE-345, 2026-08-17).
+    /// Status bytes for the root commitment (HIGH CWE-345, 2026-08-17).
     ///
     /// `assign` changes ownership and timing inside the `status` field, so if
     /// the root skips the status, two different assignment states produce the
@@ -482,7 +482,7 @@ pub enum ReceiptStatus {
 }
 
 impl ReceiptStatus {
-    /// Root commitment bytes (Strix HIGH CWE-345, 2026-08-17): two different
+    /// Root commitment bytes (HIGH CWE-345, 2026-08-17): two different
     /// payment-eligibility states must not share one settlement root.
     pub fn root_bytes(&self) -> Vec<u8> {
         match self {
@@ -663,7 +663,7 @@ impl ProofMarketState {
             .ok_or("Task not found in active tasks")?;
 
         receipt.validate_for_task(&self.active_tasks[idx])?;
-        // Strix HIGH (CWE-345, 2026-08-17): a receipt carries only metadata and
+        // HIGH (CWE-345, 2026-08-17): a receipt carries only metadata and
         // a non-zero hash, so it must not reach `pending_receipts` without the
         // proof actually being verified. Verification runs through the hook the
         // caller supplies; the market accepts no unverified receipt, and pays

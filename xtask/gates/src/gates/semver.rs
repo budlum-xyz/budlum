@@ -188,8 +188,8 @@ pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
     }
     if !baseline.join("Cargo.toml").is_file() {
         // First release / empty baseline: there is no previous version to compare against,
-        // dolayisiyla public API kirilmasi diye bir olcu yoktur. Bu bir
-        // this is not an infrastructure error but the first-PR scenario; let it pass.
+        // so there is no such measure as a public API break. This is
+        // not an infrastructure error but the first-PR scenario; let it pass.
         return Ok(String::from(
             "SEMVER GATE: PASS - the baseline is empty (first release), no comparison.",
         ));
@@ -322,7 +322,7 @@ pub fn self_test() -> Result<String, String> {
 
     // Unrecognised output: neither a breakage report nor a known crash, so
     // fail-closed.
-    let unexpected = "beklenmedik bir sey\n";
+    let unexpected = "something unexpected\n";
     if classify_report(unexpected, &empty_exc).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
@@ -405,8 +405,8 @@ mod tests {
     fn unrecognised_output_is_fail_closed() {
         let d = scratch();
         let empty = d.join("empty");
-        fs::write(&empty, "# yorum\n").expect("fixture");
-        assert!(classify_report("beklenmedik bir sey\n", &empty).is_err());
+        fs::write(&empty, "# comment\n").expect("fixture");
+        assert!(classify_report("something unexpected\n", &empty).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 }

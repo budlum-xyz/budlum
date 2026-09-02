@@ -8,8 +8,8 @@
 //! `distribute_bud_boost_share` distributes it by the fee_per_byte_epoch weight
 //! of the active deals (the rounding dust goes to the operator of the first
 //! deal), and with no active deal it is an honest burn. These tests seal the
-//! weighted distribution, the dust determinism, the pending
-//! Drain'i ve burn fallback'ini kilitler.
+//! weighted distribution, the dust determinism, the pending drain and the
+//! burn fallback.
 //!
 //! NOTE: chain-level mempool transaction validation requires a signature
 //! (`Transaction::verify` - an unsigned transaction silently stays out of the

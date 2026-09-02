@@ -164,7 +164,7 @@ impl Mempool {
         // transaction (zero address, zero fields, no signature) and rejects
         // every other zero-address sender, so no special case is needed
         // here. A blanket zero-address exemption would let an attacker mint
-        // unsigned transactions from 0x00..00 (BUDLUM bulgu #19/#26).
+        // unsigned transactions from 0x00..00 (BUDLUM finding #19/#26).
         if !tx.verify() {
             return Err(MempoolError::InvalidTransaction(
                 "Invalid transaction signature".into(),
@@ -898,7 +898,7 @@ mod tests {
         tx2.sign(&keypair);
         assert_eq!(pool.add_transaction(tx2), Err(MempoolError::RbfFeeTooLow));
 
-        // Fee=2 (%10 ⇒ ceil(0.1)=1 ⇒ min 2) KABUL.
+        // Fee=2 (10% ⇒ ceil(0.1)=1 ⇒ min 2) ACCEPTED.
         let mut tx3 = Transaction::new(
             from,
             crate::core::address::Address::zero(),
@@ -912,7 +912,7 @@ mod tests {
         assert!(pool.add_transaction(tx3).is_ok());
         assert_eq!(pool.len(), 1);
 
-        // Fee=100 (%10 ⇒ bump=10 ⇒ min 110): 109 RED, 110 KABUL.
+        // Fee=100 (10% ⇒ bump=10 ⇒ min 110): 109 REFUSED, 110 ACCEPTED.
         let mut tx4 = Transaction::new(
             from,
             crate::core::address::Address::zero(),

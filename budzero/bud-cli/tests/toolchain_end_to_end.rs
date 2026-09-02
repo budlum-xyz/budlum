@@ -247,12 +247,12 @@ fn a_vm_smaller_than_the_heap_base_still_faults_on_structs() {
     );
 }
 
-/// Depolama alani bildirmek onu kullanilabilir yapmali.
+/// Declaring a storage field must make it usable.
 ///
-/// `storage { count: u64, }` was parsed and `codegen` emitted a slot for each field,
-/// slot ayirip `SWrite` uretebiliyordu, ama sema fonksiyon govdesine bos bir
-/// ortamla giriyordu: bildirilen alani okumak da yazmak da "Undefined
-/// but it was refused with "variable". The language's persistent state feature was
+/// `storage { count: u64, }` was parsed and `codegen` emitted a slot for each
+/// field and could produce `SWrite`, but sema entered the function body with an
+/// empty environment: reading or writing the declared field was refused with
+/// "Undefined variable". The language's persistent state feature was
 /// written end to end and no program could reach it.
 #[test]
 fn a_declared_storage_field_can_be_read_and_written() {
@@ -265,7 +265,7 @@ fn a_declared_storage_field_can_be_read_and_written() {
                       }\n\
                   }\n";
     let bytecode = bud_compiler::compile(source, IsaProfile::Production)
-        .expect("bildirilen bir storage alani derlenebilmeli");
+        .expect("a declared storage field must compile");
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
@@ -278,7 +278,7 @@ fn a_declared_storage_field_can_be_read_and_written() {
 
 /// A program that writes storage has to be provable.
 ///
-/// The AIR binds `state_writes_digest` to the real SWrite chain (Strix HIGH,
+/// The AIR binds `state_writes_digest` to the real SWrite chain (HIGH,
 /// CWE-345). When the caller put a hardcoded zero there, a proof was produced
 /// but failed in **its own verifier**. For programs that never touch storage
 /// the defect stayed invisible, because zero was the right answer.
@@ -317,8 +317,8 @@ fn a_storage_writing_program_proves_and_verifies() {
 /// The type of a storage field must really exist.
 ///
 /// `Type::from_str` turns every non-primitive name into `Type::Struct(name)`, so
-/// yuzden `count: Uint644` gibi bir yazim hatasi hayali bir struct tipine
-/// turned into one and was accepted silently. The same hole had been closed for
+/// a typo such as `count: Uint644` turned into an imaginary struct type
+/// and was accepted silently. The same hole had been closed for
 /// struct field types; storage fields had been left out of that pass.
 #[test]
 fn a_storage_field_with_an_unknown_type_is_refused() {

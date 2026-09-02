@@ -25,8 +25,8 @@ struct Outcome {
 
 /// Runs the pre-push checks.
 ///
-/// `cargo fmt --check` and `cargo clippy -D warnings`. Both run; the first
-/// dustu diye ikincisi atlanmaz.
+/// `cargo fmt --check` and `cargo clippy -D warnings`. Both run; the second is
+/// not skipped because the first failed.
 ///
 /// # Errors
 ///
@@ -172,7 +172,7 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
     Ok(format!("pre-push kancasi kuruldu: {}", hook.display()))
 }
 
-/// `cargo fmt` ve `cargo clippy` mevcut mu.
+/// Are `cargo fmt` and `cargo clippy` available?
 ///
 /// # Errors
 ///

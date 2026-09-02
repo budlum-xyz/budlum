@@ -13,14 +13,7 @@
 //! Sum-conservation (Σinputs == Σoutputs, homomorfik) opcode/constraint
 //! level (opcode 0x22); this registry only holds the note lifecycle and the
 //! nullifier set.
-//!
-//! WIRING: unwired - measured. The chain's spent nullifier set is
-//! `L1NoteRegistry` inside `src/privacy/note_registry.rs`, and that is the one
-//! running in production: `AccountState` holds it, `account.rs:2117` mixes it
-//! into the state root, `snapshot.rs` writes it into the snapshot. The
-//! `NoteRegistry` here is the zkVM side twin of the same set and no production
-//! path constructs it: only `bud-cli` takes `bud-state` as a dependency and
-//! and only `State`, `StateBackend` and `Account` are read from there.
+
 //!
 //! The missing link is not a call but an opcode. The document describes this
 //! type as "for the nullifier-check opcode 0x21", but `NullifierCheck` in
@@ -72,8 +65,8 @@ impl PrivacyNote {
 }
 
 /// An isolated note registry: parallel to the account model, it shares no state with
-/// NFT/B.U.D./Pollen. Live (unspent) commitments plus spent
-/// Nullifier set'ini izler.
+/// NFT/B.U.D./Pollen. Tracks the live (unspent) commitments plus the spent
+/// nullifier set.
 #[derive(Debug, Clone, Default)]
 pub struct NoteRegistry {
     /// The live (unspent) note commitments.

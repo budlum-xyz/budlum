@@ -192,7 +192,7 @@ pub struct ConsensusDomain {
     /// By the storage loader and remain bridge-gated.
     #[serde(default)]
     pub pow_parameters: Option<PoWDomainParameters>,
-    /// Bu alani ilerletmesine izin verilen zk programlarinin hash'leri.
+    /// The hashes of the zk programs allowed to advance this domain.
     ///
     /// # Why an allowlist is needed
     ///

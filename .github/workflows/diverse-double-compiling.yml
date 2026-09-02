@@ -16,8 +16,8 @@ name: Diverse Double Compiling
 #
 # DELIBERATE-TOOLCHAIN-DIVERGENCE
 #
-# Bu is `rust-toolchain.toml`'daki pin'den bilerek sapar ve `docker-toolchain`
-# gate sees this marker and does not inspect this file. Divergence is the point
+# This job deliberately diverges from the pin in `rust-toolchain.toml`; the
+# `docker-toolchain` gate sees this marker and does not inspect this file. Divergence is the point
 # of the job: building the same source with a second compiler. Matching the pin
 # would mean running the same compiler twice, and `determinism.yml` already does that.
 #

@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - Segment Ledger (segmentli zincir depolama deseni) (2026-08-16)
+//! B.U.D. 2.0 - Segment Ledger (the segmented chain storage pattern)
 //!
 //! K88-1: the segment storage pattern for the chain core - 64MB segments,
 //! `len(4) + data + crc32(4)` records, and a corrupt record REFUSED on a CRC

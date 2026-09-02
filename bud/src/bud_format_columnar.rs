@@ -139,9 +139,9 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     // columns, index on ties). Order does not affect losslessness (KF2).
     // The loop above verified that every record is an object carrying the same key
     // set. Those nine `unwrap`s said "we verified it, therefore it is safe";
-    // sound reasoning, but the distance between verification and use
-    // mesafeyi koruyan bir sey yok: araya bir `return` ya da bir kosul
-    // brings the panic back once something is inserted in between. We collect the objects once,
+    // sound reasoning, but nothing protects the distance between verification
+    // and use: a `return` or a condition inserted in between
+    // brings the panic back. We collect the objects once,
     // panic free, and use them below - same cost, no assumption left uncarried.
     let objs: Vec<&serde_json::Map<String, Value>> = arr
         .iter()

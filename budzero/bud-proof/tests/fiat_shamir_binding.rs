@@ -208,8 +208,8 @@ fn alpha_and_zeta_follow_their_commitments() {
         // alpha must come **after** the trace commitments.
         //
         // This test was named "alpha_and_zeta" and its body measured only zeta;
-        // olcuyordu - alpha hic aranmiyordu. Belgelenmis ama denetlenmemis
-        // an invariant nobody checks is an unchecked invariant; naming it in
+        // alpha was never looked for. Documented but unaudited: an invariant
+        // nobody checks is an unchecked invariant; naming it in
         // passing is worse still, because it gives a reader the impression of
         // coverage.
         //

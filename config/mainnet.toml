@@ -29,8 +29,9 @@ bootnodes = [
   "/ip4/203.0.113.11/tcp/4001/p2p/12D3KooWCeremonyBootstrap2BudlumMainnetNod0002",
   "/ip4/203.0.113.12/tcp/4001/p2p/12D3KooWCeremonyBootstrap3BudlumMainnetNod0003"
 ]
-# chain_config.rs MAINNET_DNS_SEEDS ile senkron: gercek TXT publish edilene
-# kadar "placeholder" marker'i bilincli (fail-closed guard aktif).
+# Kept in sync with MAINNET_DNS_SEEDS in chain_config.rs: the "placeholder"
+# marker is deliberate until the real TXT records are published (the
+# fail-closed guard is active).
 dns_seeds = [
   "_dnsaddr.placeholder-seed-1.mainnet.budlum.network",
   "_dnsaddr.placeholder-seed-2.mainnet.budlum.network"

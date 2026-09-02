@@ -98,7 +98,7 @@ pub enum RenderFormat {
     QrStream {
         /// Which transport frame this is.
         seq: u32,
-        /// Kare basina tasinan yuk (bayt).
+        /// Payload carried per frame, in bytes.
         payload_len: u16,
     },
 }
@@ -372,7 +372,7 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     // recipe whose own pixels are capped at MAX_GENERATED_BYTES. The output
     // must sit under the same cap, so the square side is bounded by
     // sqrt(MAX_GENERATED_BYTES / 3) ~= 1182. Refuse anything larger rather
-    // than let a hostile caller exhaust memory or CPU (Strix CWE-400).
+    // than let a hostile caller exhaust memory or CPU (CWE-400).
     let max_side = ((u64::from(MAX_GENERATED_BYTES) / 3) as f64).sqrt() as u64;
     if u64::from(size) > max_side {
         return Err(RenderError::MissingParam("png size"));
@@ -704,13 +704,13 @@ mod tests {
 
         // Deterministic: computing it twice gives the same value. Otherwise the id
         // would be a measurement artefact, not an address.
-        let id_a = super::qr_stream_content_id(&one, &payload, 64, 4).expect("ilk kimlik");
+        let id_a = super::qr_stream_content_id(&one, &payload, 64, 4).expect("first id");
         let id_again = super::qr_stream_content_id(&one, &payload, 64, 4).expect("recompute");
         assert_eq!(id_a, id_again, "the same recipe must give the same id");
 
         // Distinguishing: a changed recipe changes the id. Without this two different
         // streams would share the same address.
-        let id_b = super::qr_stream_content_id(&two, &payload, 64, 4).expect("ikinci kimlik");
+        let id_b = super::qr_stream_content_id(&two, &payload, 64, 4).expect("second id");
         assert_ne!(id_a, id_b, "a different recipe must give a different id");
 
         // Order sensitive: the frame count enters the scheme, so the stream length is
