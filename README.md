@@ -1,5 +1,7 @@
 ![Budlum](assets/budlum-banner.png)
 
+Budlum is the next layer of the internet, focused on data sovereignty and social flourishing.
+
 Budlum is a permissionless Universal Settlement Layer. It does not compete with other chains, it *settles* them.
 PoW, PoS, PoA, BFT and ZK domains each keep their own consensus; Budlum verifies their
 finality proofs and records cross-domain value transfer as a cryptographic fact on a single
