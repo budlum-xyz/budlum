@@ -981,10 +981,16 @@ mod tests {
 
     /// The retention window is long past what the replay store treats as
     /// final, so a settled row can never be dropped while its message could
-    /// still be reorganised.
+    /// still be reorganised. The bound is checked at compile time; the
+    /// test pins the concrete number so a change to either constant is a
+    /// visible diff here as well.
     #[test]
     fn settled_retention_exceeds_the_replay_finality_depth() {
-        assert!(SETTLED_RETENTION_BLOCKS >= 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH);
+        const {
+            assert!(
+                SETTLED_RETENTION_BLOCKS >= 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH
+            );
+        }
         assert_eq!(SETTLED_RETENTION_BLOCKS, 10_000);
     }
 
