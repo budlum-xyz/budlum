@@ -1049,7 +1049,11 @@ impl Executor {
                                 })?;
                                 state
                                     .bridge_state
-                                    .unlock(transfer_id, msg.source_domain)
+                                    .unlock(
+                                        transfer_id,
+                                        msg.source_domain,
+                                        state.current_block_height,
+                                    )
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_unlock_failed", e.0)
                                     })?;

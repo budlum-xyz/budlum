@@ -10,6 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 65536 entries × 32 bytes ≈ 2 MiB - sufficient for weeks of bridge traffic.
 pub const MAX_PROCESSED_MESSAGES: usize = 65_536;
 
+/// Minimum blocks before a processed message can be pruned.
+/// Must be >= the maximum reorg depth for the chain's consensus. The bridge
+/// derives its settled-row retention from this depth, so the two horizons
+/// cannot drift apart by an edit to one of them.
+pub const FINALITY_PRUNE_DEPTH: u64 = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReplayNonceStore {
     outbound_nonces: BTreeMap<(DomainId, DomainId, Address), u64>,
@@ -109,10 +115,6 @@ impl ReplayNonceStore {
     /// This prevents replay attacks within the finality window while
     /// Still bounding memory usage for long-running nodes.
     pub fn prune_processed_safe(&mut self, current_height: u64) {
-        /// Minimum blocks before a processed message can be pruned.
-        /// Must be >= the maximum reorg depth for the chain's consensus.
-        const FINALITY_PRUNE_DEPTH: u64 = 1000;
-
         // Hard cap: even with height awareness, bound the set size
         if self.processed_messages.len() <= MAX_PROCESSED_MESSAGES {
             return;

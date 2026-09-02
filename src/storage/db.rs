@@ -982,15 +982,25 @@ impl Storage {
     /// conditions.
     pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
         if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
-            // A row written before the replay store persisted its heights
-            // is one field shorter; the same fallback the domain loader uses.
-            let decoded = decode::<BridgeState>(&val).or_else(|_| {
-                bincode::deserialize::<crate::cross_domain::bridge::LegacyBridgeStateV1>(&val)
-                    .map(BridgeState::from)
-                    .map_err(|error| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-                    })
-            })?;
+            // Older rows are shorter: one written before the settled queue
+            // existed (V2), and one written before the replay store persisted
+            // its heights as well (V1). Bincode is positional, so each older
+            // shape is tried in turn; the same fallback the domain loader uses.
+            let decoded = decode::<BridgeState>(&val)
+                .or_else(|_| {
+                    bincode::deserialize::<crate::cross_domain::bridge::LegacyBridgeStateV2>(&val)
+                        .map(BridgeState::from)
+                        .map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                        })
+                })
+                .or_else(|_| {
+                    bincode::deserialize::<crate::cross_domain::bridge::LegacyBridgeStateV1>(&val)
+                        .map(BridgeState::from)
+                        .map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                        })
+                })?;
             Ok(Some(decoded))
         } else {
             Ok(None)

@@ -147,12 +147,25 @@ pub struct BridgeState {
     /// Fix O(N) sweep DoS by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
+    /// Settled queue: the height a transfer reached a terminal status
+    /// (`Unlocked`, or `Active` again after its lock expired) -> [message_id].
+    /// `sweep_expired_locks` drops those rows [`SETTLED_RETENTION_BLOCKS`]
+    /// later. Without it `transfers` only ever grew: every row stayed for
+    /// the life of the chain, and with it the per-block cost of `root()`,
+    /// which hashes every row into the state root.
+    ///
+    /// Last field on purpose: the on-disk row is bincode, which is
+    /// positional, so `LegacyBridgeStateV2` (everything but this field)
+    /// decodes an older row exactly. `serde(default)` covers the
+    /// self-describing JSON snapshot the same way.
+    #[serde(default)]
+    settled_queue: BTreeMap<u64, Vec<MessageId>>,
 }
 
 /// On-disk `BridgeState` written before the replay store persisted its
-/// heights (see `LegacyReplayNonceStoreV1`). Only the last field differs;
-/// the loader in `storage/db.rs` falls back to this shape when the current
-/// one does not decode.
+/// heights (see `LegacyReplayNonceStoreV1`) and before the settled queue
+/// existed. The loader in `storage/db.rs` falls back to this shape when the
+/// current one does not decode.
 #[derive(Deserialize)]
 pub struct LegacyBridgeStateV1 {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
@@ -167,10 +180,47 @@ impl From<LegacyBridgeStateV1> for BridgeState {
             asset_locations: legacy.asset_locations,
             transfers: legacy.transfers,
             expiry_queue: legacy.expiry_queue,
+            settled_queue: BTreeMap::new(),
             replay: legacy.replay.into(),
         }
     }
 }
+
+/// On-disk `BridgeState` written with persisted replay heights but before
+/// the settled queue existed. Bincode is positional, so the missing trailing
+/// field makes the current shape refuse the row; this shape accepts it and
+/// starts with an empty queue, which keeps every row, as that build did.
+#[derive(Deserialize)]
+pub struct LegacyBridgeStateV2 {
+    asset_locations: BTreeMap<AssetId, BridgeStatus>,
+    transfers: BTreeMap<MessageId, BridgeTransfer>,
+    expiry_queue: BTreeMap<u64, Vec<MessageId>>,
+    replay: ReplayNonceStore,
+}
+
+impl From<LegacyBridgeStateV2> for BridgeState {
+    fn from(legacy: LegacyBridgeStateV2) -> Self {
+        Self {
+            asset_locations: legacy.asset_locations,
+            transfers: legacy.transfers,
+            expiry_queue: legacy.expiry_queue,
+            settled_queue: BTreeMap::new(),
+            replay: legacy.replay,
+        }
+    }
+}
+
+/// Blocks a settled transfer row stays readable after it reached a terminal
+/// status, before `sweep_expired_locks` drops it.
+///
+/// Terminal means nothing can move it again: `unlock` is the last step of the
+/// lock/mint/burn/unlock chain, and an expired lock's asset is already back in
+/// `Active`. The row is kept for a while so a block explorer or a relayer's
+/// audit can still read the receipt of a recent settlement; ten times the
+/// replay store's finality depth is long past any reorg the consensus
+/// tolerates. Rows in `Locked`, `Minted` or `Burned` are never dropped: they
+/// are inventory, not history.
+const SETTLED_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
 
 /// Split an inbound bridge amount into the recipient's share and the relayer's.
 ///
@@ -265,8 +315,24 @@ impl BridgeState {
             asset_locations: BTreeMap::new(),
             transfers: BTreeMap::new(),
             expiry_queue: BTreeMap::new(),
+            settled_queue: BTreeMap::new(),
             replay: ReplayNonceStore::new(),
         }
+    }
+
+    /// How many transfer rows this state holds, terminal or not.
+    #[must_use]
+    pub fn transfer_count(&self) -> usize {
+        self.transfers.len()
+    }
+
+    /// Record that `message_id` reached a terminal status at `height`, so
+    /// the sweep can drop its row after [`SETTLED_RETENTION_BLOCKS`].
+    fn mark_settled(&mut self, message_id: MessageId, height: u64) {
+        self.settled_queue
+            .entry(height)
+            .or_default()
+            .push(message_id);
     }
 
     pub fn register_asset(
@@ -510,10 +576,16 @@ impl BridgeState {
         Ok(event)
     }
 
+    /// Return a burned transfer's asset to its source domain.
+    ///
+    /// `settled_height` is the block this unlock lands in; the row becomes
+    /// history at that height and is dropped by the sweep
+    /// [`SETTLED_RETENTION_BLOCKS`] later.
     pub fn unlock(
         &mut self,
         message_id: MessageId,
         source_domain: DomainId,
+        settled_height: u64,
     ) -> Result<(), BridgeError> {
         let transfer = self
             .transfers
@@ -546,12 +618,14 @@ impl BridgeState {
         transfer.status = BridgeStatus::Unlocked {
             domain: original_source,
         };
+        let asset_id = transfer.asset_id;
         self.asset_locations.insert(
-            transfer.asset_id,
+            asset_id,
             BridgeStatus::Active {
                 domain: original_source,
             },
         );
+        self.mark_settled(message_id, settled_height);
         Ok(())
     }
 
@@ -630,12 +704,45 @@ impl BridgeState {
                             self.asset_locations
                                 .insert(t.asset_id, BridgeStatus::Active { domain });
                             released.push((t.owner, t.amount));
+                            self.mark_settled(mid, current_height);
                         }
                     }
                 }
             }
         }
+        self.drop_settled_rows(current_height);
         released
+    }
+
+    /// Drop the rows of transfers that settled [`SETTLED_RETENTION_BLOCKS`]
+    /// or more blocks ago. Runs inside the block-apply sweep, so every node
+    /// drops the same rows at the same height and the bridge root stays
+    /// consensus-equal.
+    fn drop_settled_rows(&mut self, current_height: u64) {
+        let cutoff = current_height.saturating_sub(SETTLED_RETENTION_BLOCKS);
+        let due: Vec<u64> = self
+            .settled_queue
+            .range(..=cutoff)
+            .map(|(&h, _)| h)
+            .collect();
+        for h in due {
+            if let Some(mids) = self.settled_queue.remove(&h) {
+                for mid in mids {
+                    // Only a terminal row is dropped. A row re-listed here
+                    // that somehow moved again stays; the queue is a hint,
+                    // the status is the fact.
+                    let terminal = self.transfers.get(&mid).is_some_and(|t| {
+                        matches!(
+                            t.status,
+                            BridgeStatus::Unlocked { .. } | BridgeStatus::Active { .. }
+                        )
+                    });
+                    if terminal {
+                        self.transfers.remove(&mid);
+                    }
+                }
+            }
+        }
     }
 
     fn require_asset_status(
@@ -717,18 +824,218 @@ mod tests {
             .lock(1, 2, 11, 0, asset, owner, recipient, 100, 1000)
             .is_err());
         assert!(bridge.burn(transfer.message_id, 2).is_err());
-        assert!(bridge.unlock(transfer.message_id, 1).is_err());
+        assert!(bridge.unlock(transfer.message_id, 1, 0).is_err());
 
         let message = event.message.unwrap();
         bridge.mint(&message, 0).unwrap();
-        assert!(bridge.unlock(transfer.message_id, 1).is_err());
+        assert!(bridge.unlock(transfer.message_id, 1, 0).is_err());
         bridge.burn(transfer.message_id, 2).unwrap();
         // Regression: unlock must originate from the burn domain (target=2),
         // NOT the original lock source (1). Old code checked source_domain, so
         // Production (msg.source_domain = burn domain = 2) was always rejected.
-        assert!(bridge.unlock(transfer.message_id, 9).is_err());
-        assert!(bridge.unlock(transfer.message_id, 1).is_err()); // source domain ≠ burn domain
-        bridge.unlock(transfer.message_id, 2).unwrap(); // burn domain → succeeds
+        assert!(bridge.unlock(transfer.message_id, 9, 0).is_err());
+        assert!(bridge.unlock(transfer.message_id, 1, 0).is_err()); // source domain ≠ burn domain
+        bridge.unlock(transfer.message_id, 2, 0).unwrap(); // burn domain → succeeds
+    }
+
+    fn settled_round(bridge: &mut BridgeState, asset_seed: u8, unlock_height: u64) -> MessageId {
+        let asset = AssetId(hash_fields_bytes(&[&[asset_seed]]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, u64::MAX)
+            .unwrap();
+        let message = event.message.unwrap();
+        bridge.mint(&message, 0).unwrap();
+        bridge.burn(transfer.message_id, 2).unwrap();
+        bridge
+            .unlock(transfer.message_id, 2, unlock_height)
+            .unwrap();
+        transfer.message_id
+    }
+
+    /// A row that finished its lock/mint/burn/unlock chain is history, and
+    /// history leaves the table after the retention window.
+    ///
+    /// `transfers` had no removal path at all: every row ever created stayed
+    /// for the life of the chain, and `root()` hashed all of them on every
+    /// block. The row is kept for `SETTLED_RETENTION_BLOCKS` so a recent
+    /// settlement can still be read, then the block-apply sweep drops it.
+    #[test]
+    fn an_unlocked_transfer_leaves_the_table_after_the_retention_window() {
+        let mut bridge = BridgeState::new();
+        let id = settled_round(&mut bridge, 1, 500);
+        assert_eq!(bridge.transfer_count(), 1);
+
+        bridge.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS - 1);
+        assert!(
+            bridge.get_transfer(&id).is_some(),
+            "a settled row is readable for the whole retention window"
+        );
+        bridge.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS);
+        assert!(
+            bridge.get_transfer(&id).is_none(),
+            "a settled row is dropped once the window has passed"
+        );
+        assert_eq!(bridge.transfer_count(), 0);
+        assert!(
+            bridge.unlock(id, 2, 1).is_err(),
+            "a dropped row cannot be moved again"
+        );
+    }
+
+    /// An expired lock the sweep returned to `Active` is history too.
+    #[test]
+    fn an_expired_lock_leaves_the_table_after_the_retention_window() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"expiring"]));
+        let owner = Address::from([1u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, _) = bridge
+            .lock(1, 2, 10, 0, asset, owner, owner, 100, 300)
+            .unwrap();
+        let released = bridge.sweep_expired_locks(300);
+        assert_eq!(released, vec![(owner, 100)]);
+        assert!(bridge.get_transfer(&transfer.message_id).is_some());
+        bridge.sweep_expired_locks(300 + SETTLED_RETENTION_BLOCKS);
+        assert!(bridge.get_transfer(&transfer.message_id).is_none());
+    }
+
+    /// Inventory is never dropped: a transfer still locked, minted or burned
+    /// is money in flight, however old it is.
+    #[test]
+    fn transfers_still_in_flight_are_never_dropped() {
+        let far = u64::MAX / 2;
+        let owner = Address::from([1u8; 32]);
+        let mut bridge = BridgeState::new();
+
+        let locked = AssetId(hash_fields_bytes(&[b"locked"]));
+        bridge.register_asset(locked, 1).unwrap();
+        let (t_locked, _) = bridge
+            .lock(1, 2, 10, 0, locked, owner, owner, 1, u64::MAX)
+            .unwrap();
+
+        let minted = AssetId(hash_fields_bytes(&[b"minted"]));
+        bridge.register_asset(minted, 1).unwrap();
+        let (t_minted, e) = bridge
+            .lock(1, 2, 11, 0, minted, owner, owner, 1, u64::MAX)
+            .unwrap();
+        bridge.mint(&e.message.unwrap(), 0).unwrap();
+
+        let burned = AssetId(hash_fields_bytes(&[b"burned"]));
+        bridge.register_asset(burned, 1).unwrap();
+        let (t_burned, e) = bridge
+            .lock(1, 2, 12, 0, burned, owner, owner, 1, u64::MAX)
+            .unwrap();
+        bridge.mint(&e.message.unwrap(), 0).unwrap();
+        bridge.burn(t_burned.message_id, 2).unwrap();
+
+        bridge.sweep_expired_locks(far);
+        for (what, id) in [
+            ("locked", t_locked.message_id),
+            ("minted", t_minted.message_id),
+            ("burned", t_burned.message_id),
+        ] {
+            assert!(
+                bridge.get_transfer(&id).is_some(),
+                "a {what} transfer must survive the sweep"
+            );
+        }
+        assert_eq!(bridge.transfer_count(), 3);
+    }
+
+    /// Dropping a row moves the root, so the drop has to happen at the same
+    /// height on every node. It runs in the block-apply sweep, keyed on the
+    /// height the row settled at; two states that settle and sweep at the
+    /// same heights agree, and a state that has not swept yet does not.
+    #[test]
+    fn dropping_settled_rows_is_deterministic_and_visible_in_the_root() {
+        let mut a = BridgeState::new();
+        let mut b = BridgeState::new();
+        settled_round(&mut a, 3, 500);
+        settled_round(&mut b, 3, 500);
+        assert_eq!(a.root(), b.root());
+        let before = a.root();
+
+        a.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS);
+        assert_ne!(
+            a.root(),
+            before,
+            "dropping the row must move the bridge root"
+        );
+        assert_ne!(
+            a.root(),
+            b.root(),
+            "a node that has not swept yet disagrees"
+        );
+        b.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS);
+        assert_eq!(
+            a.root(),
+            b.root(),
+            "the same sweep at the same height agrees"
+        );
+        assert_eq!(a.transfer_count(), 0);
+    }
+
+    /// The retention window is long past what the replay store treats as
+    /// final, so a settled row can never be dropped while its message could
+    /// still be reorganised.
+    #[test]
+    fn settled_retention_exceeds_the_replay_finality_depth() {
+        assert!(SETTLED_RETENTION_BLOCKS >= 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH);
+        assert_eq!(SETTLED_RETENTION_BLOCKS, 10_000);
+    }
+
+    /// A state persisted before the settled queue existed still loads; its
+    /// rows are simply kept, which is what the older build did anyway.
+    ///
+    /// The bincode `BRIDGE_STATE` row is positional and one field short, so
+    /// it goes through `LegacyBridgeStateV2`; the current shape must refuse
+    /// the older row, or the fallback would be dead code. The JSON snapshot
+    /// is self-describing and the missing field defaults; it is exercised
+    /// on a state with no transfers because `serde_json` refuses a map
+    /// keyed by `[u8; 32]`, which is a separate finding about the V2
+    /// snapshot, not about this field.
+    #[test]
+    fn a_state_persisted_without_the_settled_queue_still_loads() {
+        let mut bridge = BridgeState::new();
+        let id = settled_round(&mut bridge, 4, 500);
+
+        let empty = BridgeState::new();
+        let mut value = serde_json::to_value(&empty).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("settled_queue")
+            .expect("the field must be present to be removed");
+        let loaded: BridgeState = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.root(), empty.root());
+        assert!(loaded.settled_queue.is_empty());
+
+        #[derive(Serialize)]
+        struct OlderRow<'a> {
+            asset_locations: &'a BTreeMap<AssetId, BridgeStatus>,
+            transfers: &'a BTreeMap<MessageId, BridgeTransfer>,
+            expiry_queue: &'a BTreeMap<u64, Vec<MessageId>>,
+            replay: &'a ReplayNonceStore,
+        }
+        let older = bincode::serialize(&OlderRow {
+            asset_locations: &bridge.asset_locations,
+            transfers: &bridge.transfers,
+            expiry_queue: &bridge.expiry_queue,
+            replay: &bridge.replay,
+        })
+        .unwrap();
+        assert!(
+            bincode::deserialize::<BridgeState>(&older).is_err(),
+            "the current shape must refuse the older row, or the fallback is dead code"
+        );
+        let legacy: LegacyBridgeStateV2 = bincode::deserialize(&older).unwrap();
+        let loaded = BridgeState::from(legacy);
+        assert!(loaded.get_transfer(&id).is_some());
+        assert_eq!(loaded.root(), bridge.root());
+        assert!(loaded.settled_queue.is_empty());
     }
 
     /// Regression: mutating transfer amount without going through state
