@@ -55,9 +55,13 @@ pub const MAX_CALLBACK_EVENTS_PER_ADDRESS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRegistry {
+    #[serde(with = "crate::core::map_keys")]
     pub models: BTreeMap<AiModelId, AiModelSpec>,
+    #[serde(with = "crate::core::map_keys")]
     pub requests: BTreeMap<AiRequestId, AiInferenceRequest>,
+    #[serde(with = "crate::core::map_keys")]
     pub results: BTreeMap<AiRequestId, Vec<AiInferenceResult>>,
+    #[serde(with = "crate::core::map_keys")]
     pub outcomes: BTreeMap<AiRequestId, AiInferenceOutcome>,
     /// Set of request IDs whose max_fee has been reclaimed
     /// After deadline expiry without finalization. Prevents double-reclaim.
@@ -66,6 +70,7 @@ pub struct AiRegistry {
     /// Maps (request_id, verifier_bytes) → block_number when detected.
     /// Dispute window enforcement - equivocation events
     /// Expire after `DISPUTE_WINDOW_BLOCKS` blocks, preventing stale slashing.
+    #[serde(with = "crate::core::map_keys")]
     pub equivocation_events: BTreeMap<(AiRequestId, [u8; 32]), u64>,
     /// Set of request IDs that have been cancelled
     /// By the requester before the deadline. Prevents double-cancel and
@@ -101,6 +106,7 @@ pub struct AiRegistry {
     /// Submits a ZKVM-verified inference result, the proof is stored here.
     /// This enables trustless verification - the paradigm shift from
     /// "verifier says so" to "mathematics prove it."
+    #[serde(with = "crate::core::map_keys")]
     pub execution_proofs: BTreeMap<(AiRequestId, [u8; 32]), AiExecutionProof>,
     /// Verifier Quality of Service registry.
     /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
@@ -109,8 +115,10 @@ pub struct AiRegistry {
     /// Agent-to-Agent payment registry.
     /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
     /// Between AI agents in the Agentic Economy.
+    #[serde(with = "crate::core::map_keys")]
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
     /// Finalized payment receipts (payment_id never reusable).
+    #[serde(with = "crate::core::map_keys")]
     pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
     /// Verifier whitelist - only whitelisted verifiers
     /// Can submit results. When empty, any staked verifier can submit

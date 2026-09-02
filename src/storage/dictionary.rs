@@ -200,6 +200,7 @@ pub struct DictionaryEntry {
 /// to save space, which is not the trade this project makes.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DictionaryRegistry {
+    #[serde(with = "crate::core::map_keys")]
     entries: BTreeMap<ContentId, DictionaryEntry>,
 }
 

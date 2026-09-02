@@ -1341,6 +1341,64 @@ mod tests {
         assert!(report.notes[0].contains("already at current schema"));
     }
 
+    /// The V2 snapshot is JSON. Every registry it carries keys at least one
+    /// map by a 32-byte id or a tuple, and `serde_json` refuses such keys
+    /// at the first non-empty entry, so on `main` this test failed with
+    /// "key must be a string" as soon as the bridge held one transfer. The
+    /// write path only logged that, which meant a chain with any bridge,
+    /// AI or storage activity never produced a V2 snapshot again. The map
+    /// key helper (`core::map_keys`) is what makes this pass; the bridge
+    /// root and the replay store must survive the round trip unchanged.
+    #[test]
+    fn snapshot_v2_round_trips_with_a_populated_bridge() {
+        use crate::cross_domain::AssetId;
+
+        let mut account_state = AccountState::new();
+        let asset = AssetId(crate::core::hash::hash_fields_bytes(&[b"asset"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        account_state.bridge_state.register_asset(asset, 1).unwrap();
+        let (transfer, _event) = account_state
+            .bridge_state
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 1000)
+            .unwrap();
+        let expected_root = account_state.bridge_state.root();
+
+        let snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 11,
+                block_hash: "hash11".into(),
+                genesis_hash: "genesis".into(),
+                chain_id: 1,
+                finalized_height: 10,
+                finalized_hash: "final10".into(),
+                finality_certificates: vec![],
+            },
+        );
+
+        let bytes = snapshot
+            .try_to_bytes()
+            .expect("a populated bridge must serialise to JSON");
+        let json = String::from_utf8(bytes.clone()).unwrap();
+        assert!(
+            json.contains(&hex::encode(transfer.message_id)),
+            "the transfer must be keyed by its hex message id in the JSON"
+        );
+
+        let restored = StateSnapshotV2::from_bytes(&bytes).unwrap();
+        assert!(restored.verify());
+        let mut bridge = restored.bridge_state.expect("bridge state must be present");
+        assert_eq!(bridge.root(), expected_root);
+        assert_eq!(
+            bridge.transfer(&transfer.message_id).map(|t| t.amount),
+            Some(100)
+        );
+        // The tuple-keyed outbound nonce map came back too: the lock above
+        // consumed nonce 0, so the next one on that route is 1.
+        assert_eq!(bridge.replay.next_nonce(1, 2, owner), 1);
+    }
+
     #[test]
     fn test_snapshot_v2_migration_roundtrip_with_tokenomics_burn() {
         let mut account_state = AccountState::new();

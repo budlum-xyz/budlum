@@ -469,6 +469,20 @@ jobs:
       - name: Inventory matches code
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- domain-tags
 
+  serialize-map-keys-gate:
+    # A Serialize struct must not key a map by bytes or a tuple: serde_json
+    # refuses such keys at the first entry, and the V2 snapshot is JSON.
+    name: Serialize Map Keys Are Strings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gate self-test (canary)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings --self-test
+      - name: Every map key is a string, a number, or carries a serde with
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings
+
   poa-compliance-gate:
     # : MASAK/AML hooks are isolated to PoA domains only.
     name: PoA Compliance Isolation

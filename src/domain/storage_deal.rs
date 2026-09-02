@@ -634,12 +634,14 @@ pub struct StorageRegistry {
     /// Index by `(manifest_id, shard_id)` for `bud_storageGetDealsByShard`
     /// And `bud_storageGetDealsByManifest`. `(deal_id)` is the value
     /// So the index is deterministic and small.
+    #[serde(with = "crate::core::map_keys")]
     deals_by_shard: BTreeMap<(ContentId, ContentId), Vec<u64>>,
     challenges: BTreeMap<u64, RetrievalChallenge>,
     results: BTreeMap<u64, ChallengeResult>,
     #[serde(default)]
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
     /// Shared dictionaries and how many manifests depend on them.
     ///
@@ -664,6 +666,7 @@ pub struct StorageRegistry {
     /// an operator inflate demand for its own content and keep replicas the
     /// network is paying for.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     access_events: BTreeMap<ContentId, Vec<crate::storage::living_threshold::AccessEvent>>,
     /// What each owner declared about content they intend to self-host.
     ///
@@ -676,6 +679,7 @@ pub struct StorageRegistry {
     /// than about the device: the same phone may self-host a holiday photo and
     /// be refused a legal document.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub self_host_policies: BTreeMap<ContentId, crate::storage::MobileSelfContentPolicy>,
     /// When each operator that missed a challenge may take storage work
     /// again, as a unix timestamp.
@@ -704,10 +708,12 @@ pub struct StorageRegistry {
     /// Classic/2.0 confidential body commits (ciphertext root + proof kind).
     /// Three/R1 has no body; this map is the private-body surface only.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub confidential_commits: BTreeMap<ContentId, crate::storage::ConfidentialBodyCommit>,
     /// The address each confidential commit was recorded for. Grants are signed
     /// authorisations, and a signature needs somebody whose word it is.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub confidential_owners: BTreeMap<ContentId, crate::core::address::Address>,
 }
 

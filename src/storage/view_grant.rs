@@ -385,6 +385,7 @@ pub struct ViewGrantRegistry {
     next_id: u64,
     grants: BTreeMap<u64, ViewGrant>,
     /// Live index: content → grant ids (includes revoked; filter at read).
+    #[serde(with = "crate::core::map_keys")]
     by_content: BTreeMap<ContentId, Vec<u64>>,
 }
 
