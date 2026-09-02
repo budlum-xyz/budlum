@@ -109,8 +109,8 @@ fuzz_target!(|data: &[u8]| {
                 // Unlock (must use burn domain after burn)
                 if let Some(mid) = last_message_id {
                     let burn_dom = src_dom.wrapping_add(1).max(2);
-                    let _ = bridge.unlock(mid, burn_dom);
-                    let _ = bridge.unlock(mid, src_dom); // wrong domain - Err ok
+                    let _ = bridge.unlock(mid, burn_dom, height);
+                    let _ = bridge.unlock(mid, src_dom, height); // wrong domain - Err ok
                 }
             }
             4 => {
