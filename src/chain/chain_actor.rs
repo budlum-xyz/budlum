@@ -2877,7 +2877,18 @@ impl ChainActor {
             .state
             .storage_registry
             .mark_overdue_reallocations_under_replicated(current_epoch);
-        if under_replicated > 0 || !repair_band.is_empty() {
+        // The delete half of the ticket lifecycle. A ticket whose replacement
+        // deal opened long enough ago is a record, not an obligation; the map
+        // had no delete path and grew by one row per slash or expiry forever.
+        let swept = self
+            .blockchain
+            .state
+            .storage_registry
+            .sweep_settled_reallocations(current_epoch);
+        if swept > 0 {
+            tracing::info!("B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {current_epoch}");
+        }
+        if under_replicated > 0 || swept > 0 || !repair_band.is_empty() {
             tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
             if let Err(error) = self.blockchain.persist_storage_registry() {
                 tracing::error!("Failed to persist storage reallocation status: {error}");
