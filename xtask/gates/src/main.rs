@@ -129,6 +129,7 @@ mod gates {
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
+    pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
     pub mod slash_expression;
     pub mod source_reading;
@@ -490,6 +491,14 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::no_upstream_brands::self_test,
 
+        run_log: None,
+    },
+    Gate {
+        name: "serialize-map-keys-are-strings",
+        replaces: None,
+        run: gates::serialize_map_keys_are_strings::run,
+        run_args: None,
+        self_test: gates::serialize_map_keys_are_strings::self_test,
         run_log: None,
     },
     Gate {

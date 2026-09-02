@@ -142,6 +142,7 @@ impl std::error::Error for BridgeError {}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
+    #[serde(with = "crate::core::map_keys")]
     transfers: BTreeMap<MessageId, BridgeTransfer>,
     /// Expiry queue: expiry_height -> [message_id]
     /// Fix O(N) sweep DoS by indexing by height.

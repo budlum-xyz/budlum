@@ -323,8 +323,11 @@ pub struct IntentSettlement {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RelayerPolicyRegistry {
+    #[serde(with = "crate::core::map_keys")]
     pub intents: BTreeMap<[u8; 32], UserIntent>,
+    #[serde(with = "crate::core::map_keys")]
     pub bids: BTreeMap<[u8; 32], Vec<SolverBid>>,
+    #[serde(with = "crate::core::map_keys")]
     pub settlements: BTreeMap<[u8; 32], IntentSettlement>,
 }
 

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrossDomainMessageRegistry {
+    #[serde(with = "crate::core::map_keys")]
     messages: BTreeMap<MessageId, CrossDomainMessage>,
 }
 

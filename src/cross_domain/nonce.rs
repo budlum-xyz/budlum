@@ -18,6 +18,7 @@ pub const FINALITY_PRUNE_DEPTH: u64 = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReplayNonceStore {
+    #[serde(with = "crate::core::map_keys")]
     outbound_nonces: BTreeMap<(DomainId, DomainId, Address), u64>,
     processed_messages: BTreeSet<MessageId>,
     /// Block height at which each message was processed.
@@ -31,6 +32,7 @@ pub struct ReplayNonceStore {
     /// nothing was ever old enough to prune and the bound this map exists
     /// for was gone after the first restart. Replay protection did not
     /// suffer (the ids were kept); the memory bound did.
+    #[serde(with = "crate::core::map_keys")]
     processed_at_height: BTreeMap<MessageId, u64>,
 }
 
