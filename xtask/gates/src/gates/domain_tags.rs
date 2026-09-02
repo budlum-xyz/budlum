@@ -22,9 +22,15 @@
 //!    literal `wallet-core` directory that does not exist (the crate lives
 //!    at `crates/wallet-core`). `scan_dir` returns early on a missing
 //!    directory, so the wallet-core surface was never looked at. The scan
-//!    is `src` + `budzero` + `crates` now. `bud/` stays out on purpose: it
-//!    is a separate workspace with its own `BDLM_BUD_*` constellation and
-//!    its own gates.
+//!    became `src` + `budzero` + `crates`.
+//! 3. **The `bud/` exemption.** `bud/` was then left out on the grounds
+//!    that it is a separate workspace with its own `BDLM_BUD_*` constellation
+//!    and its own gates. Measured (2026-09-02): `bud/` has no domain-tag
+//!    gate of its own, it carries 55 distinct tags, and one of them,
+//!    `BDLM_CONTENT_V1`, is also used by `src/storage/content_id.rs` and
+//!    `budzero/bud-node/src/store.rs`. A tag shared across trees is the
+//!    collision case the inventory exists to review, and it sat outside the
+//!    review surface. The scan is `src` + `budzero` + `crates` + `bud` now.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -37,7 +43,7 @@ const INVENTORY: &str = "src/crypto/domain_tags.rs";
 /// optionally excluding one file name (the inventory itself).
 fn tags_under(root: &Path, exclude: Option<&str>) -> BTreeSet<String> {
     let mut tags = BTreeSet::new();
-    for dir in ["src", "budzero", "crates"] {
+    for dir in ["src", "budzero", "crates", "bud"] {
         let base = root.join(dir);
         scan_dir(&base, exclude, &mut tags);
     }
@@ -72,27 +78,40 @@ fn scan_dir(dir: &Path, exclude: Option<&str>, out: &mut BTreeSet<String>) {
 }
 
 /// `"BDLM_[A-Z0-9_]+"` and `"BUDLUM_[A-Z0-9_]+"` literals, de-quoted.
+///
+/// The scanner used to pair every `"` with the next `"` and skip the span
+/// between them. A character literal `'"'` (a quote-tracking parser has one,
+/// `bud/src/bud_format_container.rs:71`) flipped that pairing for the rest
+/// of the file, so every tag after it sat inside a span the scanner treated
+/// as "between strings" and was never seen: two tags in that file, one of
+/// them `BDLM_CONTENT_V1`. The scanner now looks for the tag shape directly
+/// at each `"` instead of trusting quote parity: a tag is a `"`, the prefix,
+/// the body characters, and a closing `"`. It cannot lose sync because it
+/// never skips ahead further than one literal it has fully recognised.
 fn extract(text: &str, out: &mut BTreeSet<String>) {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'"' {
-            if let Some(end) = text[i + 1..].find('"') {
-                let lit = &text[i + 1..i + 1 + end];
-                let body = lit
-                    .strip_prefix("BUDLUM_")
-                    .or_else(|| lit.strip_prefix("BDLM_"));
-                if let Some(body) = body {
-                    if !body.is_empty()
-                        && body
-                            .chars()
-                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                    {
-                        out.insert(lit.to_string());
-                    }
+            let rest = &text[i + 1..];
+            let prefix_len = if rest.starts_with("BUDLUM_") {
+                Some("BUDLUM_".len())
+            } else if rest.starts_with("BDLM_") {
+                Some("BDLM_".len())
+            } else {
+                None
+            };
+            if let Some(prefix_len) = prefix_len {
+                let body_len = rest[prefix_len..]
+                    .bytes()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+                    .count();
+                let end = prefix_len + body_len;
+                if body_len > 0 && rest.as_bytes().get(end) == Some(&b'"') {
+                    out.insert(rest[..end].to_string());
+                    i += 1 + end + 1;
+                    continue;
                 }
-                i += 1 + end + 1;
-                continue;
             }
         }
         i += 1;
@@ -152,7 +171,7 @@ pub fn self_test() -> Result<String, String> {
     let tmp =
         std::env::temp_dir().join(format!("budlum-gates-dtags-{}-{nanos}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
-    for d in ["src/crypto", "budzero", "crates/wallet-core/src"] {
+    for d in ["src/crypto", "budzero", "crates/wallet-core/src", "bud/src"] {
         fs::create_dir_all(tmp.join(d)).map_err(|e| format!("cannot create fixture dir: {e}"))?;
     }
     fs::write(
@@ -211,7 +230,22 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    // A tag under `bud/` must be seen too: the B.U.D. workspace was
+    // exempted as "having its own gates", and it has none for this.
     fs::remove_file(tmp.join("crates/wallet-core/src/lib.rs")).map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("bud/src/lib.rs"),
+        "const D: &[u8] = b\"BDLM_BUD_UNLISTED_V1\";\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&tmp).is_ok() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "self-test: tag under bud/ was not seen (workspace blind spot)",
+        ));
+    }
+
+    fs::remove_file(tmp.join("bud/src/lib.rs")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("src/crypto/domain_tags.rs"),
         "pub const DOMAIN_TAGS: &[&str] = &[\"BDLM_LISTED_V1\", \"BDLM_GONE_V1\"];\n",
@@ -229,6 +263,28 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `'"'` character literal must not hide the tags after it.
+    #[test]
+    fn extract_survives_a_quote_character_literal() {
+        let mut s = BTreeSet::new();
+        extract(
+            "if c == '\"' { flip(); }\nlet tag = b\"BDLM_AFTER_V1\";\n",
+            &mut s,
+        );
+        assert!(
+            s.contains("BDLM_AFTER_V1"),
+            "a quote character literal desynchronised the scanner: {s:?}"
+        );
+    }
+
+    /// A tag-shaped word that is not a complete literal is not a tag.
+    #[test]
+    fn extract_requires_a_closing_quote() {
+        let mut s = BTreeSet::new();
+        extract("let x = \"BDLM_OPEN_V1 and more\";\n", &mut s);
+        assert!(s.is_empty(), "got {s:?}");
+    }
 
     #[test]
     fn extract_finds_tags() {
