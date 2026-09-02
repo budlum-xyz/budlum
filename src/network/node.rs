@@ -548,12 +548,17 @@ impl Node {
 
     /// Our side of the handshake: the same fields whether it opens the
     /// exchange (`Handshake`) or answers it (`HandshakeAck`).
-    async fn handshake_message(&self, ack: bool) -> NetworkMessage {
+    ///
+    /// Takes the chain handle rather than `&self`: `Node` is not `Sync`
+    /// (the swarm), so holding `&Node` across an await would make the
+    /// event loop's future `!Send`, and `tokio::spawn(node.run())` in the
+    /// distributed settlement test would not compile.
+    async fn handshake_message(chain: &ChainHandle, ack: bool) -> NetworkMessage {
         let version_major = crate::core::encoding::PROTOCOL_VERSION_MAJOR;
         let version_minor = crate::core::encoding::PROTOCOL_VERSION_MINOR;
-        let chain_id = self.chain.get_chain_id().await;
-        let best_height = self.chain.get_height().await + 1;
-        let validator_set_hash = self.chain.get_validator_set_hash().await;
+        let chain_id = chain.get_chain_id().await;
+        let best_height = chain.get_height().await + 1;
+        let validator_set_hash = chain.get_validator_set_hash().await;
         let supported_schemes = vec![
             "ED25519".to_string(),
             crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
@@ -1843,7 +1848,7 @@ impl Node {
                                    // became handshaked, and every later block from the
                                    // producer was dropped as "before completing
                                    // handshake". A follower could not follow at all.
-                                   let handshake = self.handshake_message(false).await;
+                                   let handshake = Self::handshake_message(&self.chain, false).await;
                                    let chain_len = self.chain.get_height().await + 1;
                                    info!("Connected to {peer_id}, Chain length: {chain_len}, sending Handshake over /sync");
                                    let sync = &mut self.swarm.behaviour_mut().sync;
@@ -2411,7 +2416,7 @@ impl Node {
                                                self.sync_if_behind(peer_id, peer_best_height).await;
                                                // Answer on the peer-bound channel: the ack is
                                                // for this peer, not for the mesh.
-                                               let response = self.handshake_message(true).await;
+                                               let response = Self::handshake_message(&self.chain, true).await;
                                                let sync = &mut self.swarm.behaviour_mut().sync;
                                                let _ = sync.send_request(&peer_id, response.to_bytes());
                                            }
@@ -2833,7 +2838,7 @@ impl Node {
                                                        };
                                                        self.sync_if_behind(peer, peer_best_height).await;
                                                        if !ack {
-                                                           let response = self.handshake_message(true).await;
+                                                           let response = Self::handshake_message(&self.chain, true).await;
                                                            let sync = &mut self.swarm.behaviour_mut().sync;
                                                            let _ = sync.send_request(&peer, response.to_bytes());
                                                        }
@@ -3089,6 +3094,20 @@ impl Node {
         }
     }
 }
+
+/// `Node::run()` must stay spawnable on a multi-threaded runtime.
+///
+/// `Node` is not `Sync` (the swarm), so any helper that holds `&self` across
+/// an `.await` makes the event loop's future `!Send`, and `tokio::spawn`
+/// in `src/tests/distributed_settlement.rs` stops compiling. That break
+/// is visible only when the test target is built, which the 2 GB sandbox
+/// cannot do; this check is compiled with the library, so `cargo check
+/// --lib` reports it. Helpers that need chain state across an await take
+/// the `ChainHandle` (which is `Send + Sync`) instead of `&self`.
+const _: fn(&mut Node) = |node| {
+    fn assert_send<T: Send>(_: T) {}
+    assert_send(node.run());
+};
 
 #[cfg(test)]
 mod vote_history_wiring_tests {
