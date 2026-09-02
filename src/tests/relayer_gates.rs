@@ -222,3 +222,96 @@ fn test_bns_register_fee_enforced_regression_m4() {
         "a name with an underpayment must not be registered"
     );
 }
+
+/// The bridge mint inside a `RelayerResult` asks the supply ceiling.
+///
+/// A `RelayerResult` carrying a `BridgeLock` message is the block-path
+/// counterpart of `Blockchain::mint_bridge_transfer_from_verified_event`: it
+/// mints the arriving asset on Budlum. The RPC path credits the recipient and
+/// the relayer through `try_mint_balance`, which refuses to cross
+/// `BUD_TOTAL_SUPPLY`. The executor path credited both through
+/// `try_add_balance`, which only guards `u64` overflow, so a chain already at
+/// the ceiling still minted: the cap held on one entry point and not on the
+/// other. With the state one unit under the cap, a 100-unit bridge mint must
+/// be refused, and neither the recipient nor the relayer may be credited.
+#[test]
+fn relayer_result_bridge_mint_is_bound_to_the_supply_ceiling() {
+    use crate::cross_domain::bridge::AssetId;
+
+    let owner = Address::from([0x0B; 32]);
+    let recipient = Address::from([0x0C; 32]);
+    let mut state = AccountState::new();
+    let asset = AssetId([0x7A; 32]);
+    state
+        .bridge_state
+        .register_asset(asset, 1)
+        .expect("asset registers");
+    let (_transfer, lock_event) = state
+        .bridge_state
+        .lock(1, 2, 20, 0, asset, owner, recipient, 100, 1_000)
+        .expect("lock succeeds");
+    let message = lock_event.message.expect("lock carries its message");
+
+    // Everything except one unit is already committed.
+    let headroom_before = state.supply_capacity_remaining();
+    state.add_balance(&owner, headroom_before - 1);
+    assert_eq!(state.supply_capacity_remaining(), 1);
+    // The relayer pays the tx fee out of that last unit.
+    let fee_payer_balance = state.get_balance(&relayer_addr());
+    state.add_balance(&relayer_addr(), 1);
+    assert_eq!(state.supply_capacity_remaining(), 0);
+
+    let mut res = make_result("0xLOCK_ON_ETHEREUM");
+    res.message = Some(message);
+    seal_single_leaf(&mut res);
+    let tx = relayer_tx(res, 1);
+    let root = match &tx.tx_type {
+        TransactionType::RelayerResult(result) => result.external_state_root,
+        _ => unreachable!(),
+    };
+    state
+        .external_roots
+        .insert(ExternalChain::Ethereum.domain_id(), root);
+
+    let err = Executor::apply_transaction(&mut state, &tx)
+        .expect_err("a bridge mint above the supply ceiling must be refused");
+    assert!(
+        err.contains("supply cap"),
+        "the refusal must come from the ceiling check, got: {err}"
+    );
+    assert_eq!(
+        state.get_balance(&recipient),
+        0,
+        "the recipient must not be credited past the ceiling"
+    );
+    assert_eq!(
+        state.get_balance(&relayer_addr()),
+        fee_payer_balance + 1,
+        "the relayer fee must not be credited past the ceiling"
+    );
+}
+
+/// The supply gate reads every file that mints, not only the two it started with.
+///
+/// `minting-paths-are-counted` proves the ceiling by listing every
+/// `try_add_balance` call in production code and requiring a written reason
+/// why each one moves money instead of creating it. It read
+/// `src/chain/blockchain.rs` and `src/core/account.rs`. The executor also
+/// credits a bridge mint, so a mint that bypassed the ceiling there was
+/// invisible to the gate. The gate's source list must name the executor.
+#[test]
+fn minting_gate_reads_the_executor() {
+    let gate = include_str!("../../xtask/gates/src/gates/minting_paths_are_counted.rs");
+    let sources_at = gate
+        .find("const SOURCES: &[&str] = &[")
+        .expect("the gate must keep its SOURCES list");
+    let sources_end = gate[sources_at..]
+        .find("];")
+        .map(|end| sources_at + end)
+        .expect("SOURCES list must close");
+    let sources = &gate[sources_at..sources_end];
+    assert!(
+        sources.contains("src/execution/executor.rs"),
+        "minting-paths-are-counted must read src/execution/executor.rs; it credits bridge mints"
+    );
+}

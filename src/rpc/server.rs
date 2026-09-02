@@ -1029,6 +1029,61 @@ fn parse_grant_auth(
     })
 }
 
+/// Check a viewer's signed claim to open a reveal session and return the
+/// address it speaks for.
+///
+/// The claim is `{ownerPublicKey, signature, issuedAt}` in the same shape as
+/// a grant authorisation (the viewer signs with its own wallet key). The
+/// address is derived from the key, the signature is checked over
+/// [`crate::storage::view_claim_digest`] of this exact request, and a claim
+/// older than [`crate::storage::VIEW_CLAIM_MAX_AGE_SECS`] is refused. A
+/// claim dated in the future is refused too, up to the same tolerance, so a
+/// caller cannot pre-sign claims that come alive later.
+fn verify_view_claim(
+    claim: &serde_json::Value,
+    content_id: &crate::storage::ContentId,
+    key_id: &[u8; 32],
+    owner: &Address,
+    packed: &[u8],
+    now: u64,
+) -> Result<Address, ErrorObjectOwned> {
+    let auth = parse_grant_auth(Some(claim)).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("viewerClaim: {}", e.message()), None::<()>)
+    })?;
+    let issued_at = claim
+        .get("issuedAt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "viewerClaim.issuedAt must be unix seconds",
+                None::<()>,
+            )
+        })?;
+    let max_age = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
+    if issued_at > now.saturating_add(max_age) || issued_at.saturating_add(max_age) < now {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!(
+                "viewerClaim.issuedAt {issued_at} is outside the {max_age} s window around {now}"
+            ),
+            None::<()>,
+        ));
+    }
+    let viewer = auth.derived_owner().map_err(grant_auth_error)?;
+    let payload_commitment = crate::storage::payload_commitment(packed);
+    let digest = crate::storage::view_claim_digest(
+        content_id,
+        &viewer,
+        key_id,
+        owner,
+        &payload_commitment,
+        issued_at,
+    );
+    auth.verify(&digest, &viewer).map_err(grant_auth_error)?;
+    Ok(viewer)
+}
+
 /// Map a reveal-gateway refusal to a JSON-RPC error. Each refusal kind gets
 /// its own code so a client can tell "you asked too much" (invalid params)
 /// from "the table is full" (resource) from "your session is gone" (lookup)
@@ -2406,7 +2461,7 @@ impl BudlumApiServer for RpcServer {
         recipe: serde_json::Value,
         full_public: Option<serde_json::Value>,
         packed: String,
-        viewer: String,
+        viewer_claim: serde_json::Value,
         owner: String,
         key_id: String,
         meter_budget: Option<u64>,
@@ -2422,11 +2477,19 @@ impl BudlumApiServer for RpcServer {
         };
         let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
-        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>))?;
         let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
         let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // The viewer is whoever signed the claim, never a field. Before this,
+        // `viewer` was a string the caller typed, so any caller could name a
+        // grantee and have this node build frames for content it holds no
+        // grant on. The derived address is what the grant lookup asks about.
+        let viewer = verify_view_claim(&viewer_claim, &content_id, &key_id, &owner, &packed, now)?;
 
         // The grant decision is the chain's; the gateway re-enforces it on the
         // sealed path, but the authority that owns the registry answers it.
@@ -2446,10 +2509,6 @@ impl BudlumApiServer for RpcServer {
             key_id,
             meter_budget,
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
@@ -5660,5 +5719,139 @@ mod render_format_tests {
     fn the_transport_frame_is_not_a_read_format() {
         assert!(parse_render_format("qrstream:0").is_err());
         assert!(parse_render_format("qr:0:256").is_err());
+    }
+}
+
+#[cfg(test)]
+mod view_claim_tests {
+    use super::verify_view_claim;
+    use crate::core::address::Address;
+    use crate::storage::ContentId;
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn parts() -> (ContentId, [u8; 32], Address, Vec<u8>) {
+        (
+            ContentId([7u8; 32]),
+            [3u8; 32],
+            Address::from([4u8; 32]),
+            b"packed-bytes".to_vec(),
+        )
+    }
+
+    /// A claim without a key or a signature is refused before any crypto.
+    #[test]
+    fn a_bare_viewer_address_is_not_a_claim() {
+        let (content, key, owner, packed) = parts();
+        let claim =
+            serde_json::json!("0x0202020202020202020202020202020202020202020202020202020202020202");
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+        assert!(err.message().contains("viewerClaim"), "{err:?}");
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    fn signed_claim(
+        kp: &crate::crypto::primitives::WalletKeyPair,
+        content: &ContentId,
+        key: &[u8; 32],
+        owner: &Address,
+        packed: &[u8],
+        issued_at: u64,
+    ) -> serde_json::Value {
+        let digest = crate::storage::view_claim_digest(
+            content,
+            &kp.address(),
+            key,
+            owner,
+            &crate::storage::payload_commitment(packed),
+            issued_at,
+        );
+        serde_json::json!({
+            "ownerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
+            "signature": format!("0x{}", hex::encode(kp.sign(&digest))),
+            "issuedAt": issued_at,
+        })
+    }
+
+    /// The viewer is the address the signing key derives to, and nothing else.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn the_viewer_is_whoever_signed() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
+        let viewer = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW)
+            .expect("a claim signed by the viewer's own key is accepted");
+        assert_eq!(viewer, kp.address());
+    }
+
+    /// A claim signed for one object, key, owner or payload opens no other.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_claim_is_bound_to_the_request_it_was_signed_for() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
+        let other_content = ContentId([8u8; 32]);
+        let other_key = [9u8; 32];
+        let other_owner = Address::from([5u8; 32]);
+        let other_packed = b"other-bytes".to_vec();
+        for (c, k, o, p) in [
+            (&other_content, &key, &owner, &packed),
+            (&content, &other_key, &owner, &packed),
+            (&content, &key, &other_owner, &packed),
+            (&content, &key, &owner, &other_packed),
+        ] {
+            let err = verify_view_claim(&claim, c, k, o, p, NOW).unwrap_err();
+            assert_eq!(err.code(), -32602, "{err:?}");
+        }
+    }
+
+    /// A stranger's key cannot speak for a grantee: the address is derived,
+    /// so the only way to be the grantee is to hold the grantee's key.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_stranger_cannot_name_the_grantee() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let grantee = WalletKeyPair::generate();
+        let stranger = WalletKeyPair::generate();
+        // The stranger signs the grantee's digest with its own key: the
+        // signature verifies under the stranger's key, but the key derives to
+        // the stranger, so the request is about the stranger, not the grantee.
+        let digest = crate::storage::view_claim_digest(
+            &content,
+            &grantee.address(),
+            &key,
+            &owner,
+            &crate::storage::payload_commitment(&packed),
+            NOW,
+        );
+        let claim = serde_json::json!({
+            "ownerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
+            "signature": format!("0x{}", hex::encode(stranger.sign(&digest))),
+            "issuedAt": NOW,
+        });
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+    }
+
+    /// A captured claim dies with the session window, in both directions.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_claim_outside_the_window_is_refused() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let max = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
+        let stale = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max - 1);
+        assert!(verify_view_claim(&stale, &content, &key, &owner, &packed, NOW).is_err());
+        let future = signed_claim(&kp, &content, &key, &owner, &packed, NOW + max + 1);
+        assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
+        let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
+        assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());
     }
 }

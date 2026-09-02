@@ -251,10 +251,12 @@ impl BridgeRelayerPipeline {
     // ─── Stage 5: Unlock (source domain) ─────
 
     /// After relay verification of a burn, unlock the asset on the source domain.
+    /// `current_height` is the block the unlock settles in.
     pub fn unlock(
         &mut self,
         message: &CrossDomainMessage,
         source_domain: DomainId,
+        current_height: u64,
     ) -> Result<(), PipelineError> {
         if !matches!(message.kind, MessageKind::BridgeBurn) {
             return Err(PipelineError::UnexpectedMessageKind {
@@ -269,7 +271,8 @@ impl BridgeRelayerPipeline {
         let transfer_id = message
             .correlation_id
             .ok_or(PipelineError::MissingCorrelationId)?;
-        self.bridge.unlock(transfer_id, source_domain)?;
+        self.bridge
+            .unlock(transfer_id, source_domain, current_height)?;
         Ok(())
     }
 
@@ -384,7 +387,7 @@ mod tests {
 
         // Unlock must pass the burn domain (unlock_msg.source_domain = 2),
         // Which the bridge now checks against transfer.target_domain.
-        p.unlock(&unlock_msg, 2).unwrap();
+        p.unlock(&unlock_msg, 2, 250).unwrap();
         let transfer = p.bridge_state().get_transfer(&lock_msg_id).unwrap();
         assert_eq!(
             transfer.status,

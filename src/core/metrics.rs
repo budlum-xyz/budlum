@@ -55,6 +55,10 @@ pub struct Metrics {
     pub rpc_rate_limited_total: IntCounter,
     pub bridge_transfers_total: IntCounter,
     pub bridge_amount_locked: IntGauge,
+    /// Rows in the bridge transfer table. Settled rows leave it after
+    /// `SETTLED_RETENTION_BLOCKS`; a gauge that only ever rises means the
+    /// sweep is not running.
+    pub bridge_transfer_rows: IntGauge,
     pub ai_requests_total: IntCounter,
     pub ai_outcomes_finalized: IntCounter,
     pub bns_names_registered: IntCounter,
@@ -171,6 +175,10 @@ impl Metrics {
             "budlum_bridge_amount_locked",
             "Assets currently locked in bridge",
         )?;
+        let bridge_transfer_rows = IntGauge::new(
+            "budlum_bridge_transfer_rows",
+            "Rows in the bridge transfer table (settled rows are swept after the retention window)",
+        )?;
         let ai_requests_total = IntCounter::new(
             "budlum_ai_requests_total",
             "Total AI inference requests submitted",
@@ -221,6 +229,7 @@ impl Metrics {
         registry.register(Box::new(rpc_requests_total.clone()))?;
         registry.register(Box::new(bridge_transfers_total.clone()))?;
         registry.register(Box::new(bridge_amount_locked.clone()))?;
+        registry.register(Box::new(bridge_transfer_rows.clone()))?;
         registry.register(Box::new(ai_requests_total.clone()))?;
         registry.register(Box::new(ai_outcomes_finalized.clone()))?;
         registry.register(Box::new(bns_names_registered.clone()))?;
@@ -260,6 +269,7 @@ impl Metrics {
             rpc_rate_limited_total,
             bridge_transfers_total,
             bridge_amount_locked,
+            bridge_transfer_rows,
             ai_requests_total,
             ai_outcomes_finalized,
             bns_names_registered,
@@ -316,6 +326,7 @@ mod tests {
             "budlum_mempool_bytes",
             "budlum_mempool_sender_count",
             "budlum_bridge_amount_locked",
+            "budlum_bridge_transfer_rows",
             "budlum_storage_db_size_bytes",
             "budlum_p2p_peers_connected",
             "budlum_p2p_gossip_duplicates",

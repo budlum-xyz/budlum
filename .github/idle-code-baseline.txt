@@ -1752,7 +1752,6 @@ src/network/peer_manager.rs	const	TIMEOUT_PENALTY
 src/network/peer_manager.rs	fn	ban_remaining
 src/network/peer_manager.rs	fn	consume_token
 src/network/peer_manager.rs	fn	consume_token_with_rate
-src/network/peer_manager.rs	fn	get_best_peers
 src/network/peer_manager.rs	fn	get_peer_info
 src/network/peer_manager.rs	fn	get_score
 src/network/peer_manager.rs	fn	max_tracked_peers

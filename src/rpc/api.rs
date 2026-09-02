@@ -436,6 +436,13 @@ pub trait BudlumApi {
     /// refused here, not at the viewer. The returned session id is served by
     /// `bud_storageRevealFrames`; sessions are capped at
     /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
+    ///
+    /// The viewer is not a field: `viewer_claim` is
+    /// `{ownerPublicKey, signature, issuedAt}`, an ML-DSA-87 signature by the
+    /// viewer's own key over `view_claim_digest(content, viewer, key_id,
+    /// owner, payload_commitment(packed), issuedAt)`. The viewer address is
+    /// derived from the key, so a caller cannot name a grantee it is not; a
+    /// claim older than `VIEW_CLAIM_MAX_AGE_SECS` is refused.
     #[method(name = "bud_storageOpenReveal")]
     async fn storage_open_reveal(
         &self,
@@ -443,7 +450,7 @@ pub trait BudlumApi {
         recipe: serde_json::Value,
         full_public: Option<serde_json::Value>,
         packed: String,
-        viewer: String,
+        viewer_claim: serde_json::Value,
         owner: String,
         key_id: String,
         meter_budget: Option<u64>,

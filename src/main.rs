@@ -1570,11 +1570,7 @@ async fn main() {
                             client.list_peers().await;
                         }
                         "sync" => {
-                            let msg = NetworkMessage::GetHeaders {
-                                locator: Vec::new(),
-                                limit: 2000,
-                            };
-                            client.broadcast("blocks".to_string(), msg).await;
+                            client.request_sync().await;
                         }
                         "help" => {
                             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
