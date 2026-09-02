@@ -590,8 +590,10 @@ pub fn mainnet_genesis() -> GenesisConfig {
 
         // Stake yield: 5% APY
         validator_annual_yield_ratio_fixed: (FIXED_POINT_SCALE * 5) / 100,
-        slot_duration_secs: 10,
-        epoch_length_slots: 32,
+        // The tokenomics epoch is the consensus epoch: 6 s slots, 100 slots,
+        // 600 s, so `epochs_per_year` (52 560) is a calendar year.
+        slot_duration_secs: 6,
+        epoch_length_slots: 100,
     };
 
     GenesisConfig {

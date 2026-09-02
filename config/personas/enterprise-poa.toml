@@ -3,7 +3,7 @@
 
 [network]
 profile = "mainnet"
-chain_id = 1
+chain_id = 45260
 genesis_file = "./config/mainnet-genesis.json"
 
 [node]

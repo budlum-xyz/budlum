@@ -1,6 +1,6 @@
 [network]
 profile = "mainnet"
-chain_id = 1
+chain_id = 45260
 # The genesis file must exist and its hash must match the launch record.
 # This checked-in genesis is an unlaunchable ceremony template. Freeze and record
 # the launch hash only after validator keys and tokenomics destinations are final.
@@ -24,11 +24,11 @@ identity_file = "./secrets/mainnet-node-id.key"
 # These are ceremony-ready bootstrap peers. Replace with actual operator
 # peer IDs and IPs during MAINNET_GENESIS_CEREMONY.
 # IPs use RFC 5737 TEST-NET-3 documentation range.
-bootnodes = [
-  "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWCeremonyBootstrap1BudlumMainnetNod0001",
-  "/ip4/203.0.113.11/tcp/4001/p2p/12D3KooWCeremonyBootstrap2BudlumMainnetNod0002",
-  "/ip4/203.0.113.12/tcp/4001/p2p/12D3KooWCeremonyBootstrap3BudlumMainnetNod0003"
-]
+# Empty on purpose. The ceremony records the real peer multiaddrs here; a
+# placeholder is refused at startup (`first_placeholder_peer`), and a made-up
+# peer id is worse than a placeholder: it fails to parse as base58 and breaks
+# profile loading instead of waiting for the ceremony.
+bootnodes = []
 # Kept in sync with MAINNET_DNS_SEEDS in chain_config.rs: the "placeholder"
 # marker is deliberate until the real TXT records are published (the
 # fail-closed guard is active).
@@ -48,7 +48,9 @@ trusted_proxies = []
 enabled = true
 
 [metrics]
-listener = "0.0.0.0:9090"
+# Loopback: scrape through a local agent or an authenticated reverse proxy.
+# The metrics endpoint has no authentication of its own.
+listener = "127.0.0.1:9090"
 
 [validator]
 backend = "pkcs11"

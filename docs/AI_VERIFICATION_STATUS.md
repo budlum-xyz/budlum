@@ -11,8 +11,9 @@ feature, while the code deliberately refuses to perform it.
 | Model registry, operator compute-bond, Pollen-gated data access | working | `src/ai_inference/`, `src/ai/registry.rs` |
 | Structural checks on an execution proof (commitments, model binding, program-hash match) | working | `verify_execution_proof_structural_with_model` |
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
-| Initial guest memory (weights, biases, input) bound by the AIR | working | `COL_MEM_INIT_ACC`, `initial_state_root` |
+| Initial guest memory (weights, biases, input) folded into an accumulator claim; the fold is collidable (see below), so the image is checked outside the proof | partial | `COL_MEM_INIT_ACC`, `initial_state_root` |
 | Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
+| Claimed output commitment bound to the proved guest result | open | `prove_mlp_inference` packages the host commitment; the guest output enters only the logged, non-binding accumulator (see "Bind the claimed output" below) |
 | STARK verification of an inference proof on the transaction path | working | `src/execution/executor.rs` |
 | Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `ai_inference::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
 | Model modality declaration checked against the read it is asked to serve | working | `AiModelSpec::modalities`, `ModalitySet` |
@@ -134,6 +135,10 @@ Three things were wrong before and are fixed:
 own outputs are folded into a Poseidon chain that is logged, but the AIR binds
 the event accumulator as a sum of low 32-bit limbs, so that log is a
 consistency signal, not a binding commitment.
+
+**Bind the claimed output.** Until an output commitment is an AIR public
+input, a proof establishes that a trace was executed, not that the packaged
+commitment is that trace's result; the status table lists it as open.
 
 ## The initial memory image is committed
 
