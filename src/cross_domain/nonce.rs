@@ -18,8 +18,37 @@ pub struct ReplayNonceStore {
     /// Used for safe height-based pruning that only removes entries after
     /// FINALITY_PRUNE_DEPTH blocks - ensuring replay protection covers the
     /// Finality window. Messages younger than the depth are never pruned.
-    #[serde(skip)]
+    ///
+    /// Persisted with the rest of the store. It used to be `#[serde(skip)]`,
+    /// which meant a restarted node reloaded every processed id with no
+    /// height next to it; `prune_processed_safe` filters on the heights, so
+    /// nothing was ever old enough to prune and the bound this map exists
+    /// for was gone after the first restart. Replay protection did not
+    /// suffer (the ids were kept); the memory bound did.
     processed_at_height: BTreeMap<MessageId, u64>,
+}
+
+/// On-disk shape of the store before `processed_at_height` was persisted.
+///
+/// Bincode is positional, so a record written by the older build ends after
+/// `processed_messages`; serde defaults alone cannot recover it. A store
+/// loaded through this shape has every id and no heights, exactly what the
+/// older build held in memory after a restart, so nothing it could prune
+/// before becomes prunable now, and nothing it refused becomes accepted.
+#[derive(Deserialize)]
+pub struct LegacyReplayNonceStoreV1 {
+    outbound_nonces: BTreeMap<(DomainId, DomainId, Address), u64>,
+    processed_messages: BTreeSet<MessageId>,
+}
+
+impl From<LegacyReplayNonceStoreV1> for ReplayNonceStore {
+    fn from(legacy: LegacyReplayNonceStoreV1) -> Self {
+        Self {
+            outbound_nonces: legacy.outbound_nonces,
+            processed_messages: legacy.processed_messages,
+            processed_at_height: BTreeMap::new(),
+        }
+    }
 }
 
 impl ReplayNonceStore {
@@ -198,6 +227,80 @@ mod audit_replay_regression {
 #[cfg(test)]
 mod v4_prune_tests {
     use super::*;
+
+    /// A store written by the older build still loads.
+    ///
+    /// The older row ends after `processed_messages`. Encoding that shape and
+    /// decoding it through `LegacyReplayNonceStoreV1` must give back every id
+    /// with no heights, which is what the older build itself held after a
+    /// restart. Decoding it as the current shape must fail, which is what
+    /// makes the fallback in `storage/db.rs` reachable rather than dead.
+    #[test]
+    fn legacy_store_rows_still_load() {
+        #[derive(serde::Serialize)]
+        struct OldRow {
+            outbound_nonces: BTreeMap<(DomainId, DomainId, Address), u64>,
+            processed_messages: BTreeSet<MessageId>,
+        }
+        let mut old = OldRow {
+            outbound_nonces: BTreeMap::new(),
+            processed_messages: BTreeSet::new(),
+        };
+        old.outbound_nonces
+            .insert((1, 2, Address::from([9u8; 32])), 7);
+        old.processed_messages.insert([3u8; 32]);
+        let bytes = bincode::serialize(&old).expect("old row serializes");
+
+        assert!(
+            bincode::deserialize::<ReplayNonceStore>(&bytes).is_err(),
+            "the current shape must not silently accept the shorter row"
+        );
+        let legacy: LegacyReplayNonceStoreV1 =
+            bincode::deserialize(&bytes).expect("the legacy shape decodes the old row");
+        let mut store = ReplayNonceStore::from(legacy);
+        assert!(store.is_processed(&[3u8; 32]));
+        assert_eq!(store.processed_count(), 1);
+        assert_eq!(store.next_nonce(1, 2, Address::from([9u8; 32])), 7);
+        assert!(store.mark_processed_at([3u8; 32], 5).is_err());
+    }
+
+    /// The heights survive a round trip through the store's own encoding.
+    ///
+    /// `processed_at_height` was marked `#[serde(skip)]`, so a node that
+    /// restarted (or restored from a snapshot) loaded every processed
+    /// message id with no height next to it. `prune_processed_safe` filters
+    /// on those heights, so on such a node nothing was ever old enough to
+    /// prune, and the set the bound was written for grew without bound for
+    /// the rest of the node's uptime. Replay protection was not weakened
+    /// (the ids were still there); the memory bound was gone.
+    ///
+    /// The store is persisted with bincode (`storage/db.rs`) and hashed into
+    /// the snapshot digest, so the round trip is asserted on bincode.
+    #[test]
+    fn processed_heights_survive_the_persisted_encoding() {
+        let mut store = ReplayNonceStore::new();
+        for i in 0..(MAX_PROCESSED_MESSAGES + 50) {
+            let mut id = [0u8; 32];
+            id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            store.mark_processed_at(id, 10).unwrap();
+        }
+        let bytes = bincode::serialize(&store).expect("the store serializes");
+        let mut reloaded: ReplayNonceStore =
+            bincode::deserialize(&bytes).expect("the store deserializes");
+        assert_eq!(reloaded.processed_count(), MAX_PROCESSED_MESSAGES + 50);
+        reloaded.prune_processed_safe(2000);
+        assert!(
+            reloaded.processed_count() <= MAX_PROCESSED_MESSAGES,
+            "a reloaded store must still be able to prune entries past the finality depth, \
+             got {} entries",
+            reloaded.processed_count()
+        );
+        // Replay protection is unchanged by the reload.
+        let mut recent = [0xEEu8; 32];
+        recent[0] = 1;
+        assert!(reloaded.mark_processed_at(recent, 2000).is_ok());
+        assert!(reloaded.mark_processed_at(recent, 2001).is_err());
+    }
 
     #[test]
     fn v4_13_height_aware_prune_preserves_recent_messages() {

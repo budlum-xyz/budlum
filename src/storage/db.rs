@@ -982,7 +982,15 @@ impl Storage {
     /// conditions.
     pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
         if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
-            let decoded = decode(&val)?;
+            // A row written before the replay store persisted its heights
+            // is one field shorter; the same fallback the domain loader uses.
+            let decoded = decode::<BridgeState>(&val).or_else(|_| {
+                bincode::deserialize::<crate::cross_domain::bridge::LegacyBridgeStateV1>(&val)
+                    .map(BridgeState::from)
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })
+            })?;
             Ok(Some(decoded))
         } else {
             Ok(None)

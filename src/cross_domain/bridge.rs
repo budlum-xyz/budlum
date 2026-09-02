@@ -149,6 +149,29 @@ pub struct BridgeState {
     pub replay: ReplayNonceStore,
 }
 
+/// On-disk `BridgeState` written before the replay store persisted its
+/// heights (see `LegacyReplayNonceStoreV1`). Only the last field differs;
+/// the loader in `storage/db.rs` falls back to this shape when the current
+/// one does not decode.
+#[derive(Deserialize)]
+pub struct LegacyBridgeStateV1 {
+    asset_locations: BTreeMap<AssetId, BridgeStatus>,
+    transfers: BTreeMap<MessageId, BridgeTransfer>,
+    expiry_queue: BTreeMap<u64, Vec<MessageId>>,
+    replay: crate::cross_domain::nonce::LegacyReplayNonceStoreV1,
+}
+
+impl From<LegacyBridgeStateV1> for BridgeState {
+    fn from(legacy: LegacyBridgeStateV1) -> Self {
+        Self {
+            asset_locations: legacy.asset_locations,
+            transfers: legacy.transfers,
+            expiry_queue: legacy.expiry_queue,
+            replay: legacy.replay.into(),
+        }
+    }
+}
+
 /// Split an inbound bridge amount into the recipient's share and the relayer's.
 ///
 /// # Why this exists
