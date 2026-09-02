@@ -253,7 +253,12 @@ impl LogFieldColumnar {
             }
             let n = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
             pos += 4;
-            if n > lines {
+            // Every entry carries at least its 4-byte length prefix, so the
+            // bytes left bound the count. A count that the input cannot hold
+            // is refused before it is allocated: `Vec::with_capacity` from a
+            // header-supplied number is an allocation bomb, and under
+            // `panic = "abort"` an allocation failure takes the process down.
+            if n > lines || n > payload_len.saturating_sub(pos) / 4 {
                 return None;
             }
             let mut col = Vec::with_capacity(n);
@@ -324,6 +329,26 @@ mod tests {
         assert_eq!(values[3], b"/index.html");
         assert_eq!(values[5], b"200");
         assert_eq!(values[6], b"1024");
+    }
+
+    /// A blob whose header claims a column count the body cannot hold used
+    /// to reach `Vec::with_capacity(n)` before any body byte was read; with
+    /// `lines` set to match, a few dozen bytes asked for gigabytes. The digest
+    /// is recomputed so only the count check can be what refuses it.
+    #[test]
+    fn a_column_count_the_body_cannot_hold_is_refused_before_allocation() {
+        let mut out = Vec::new();
+        out.extend_from_slice(&LOGFIELD_MAGIC);
+        out.push(LOGFIELD_VERSION);
+        out.extend_from_slice(&u32::MAX.to_le_bytes()); // lines
+        push_bytes(&mut out, b"tpl");
+        out.extend_from_slice(&u32::MAX.to_le_bytes()); // first column count
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_LOGFIELD_V1");
+        h.update(&out);
+        let d: [u8; 32] = h.finalize().into();
+        out.extend_from_slice(&d);
+        assert!(LogFieldColumnar::from_blob(&out).is_none());
     }
 
     #[test]

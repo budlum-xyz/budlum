@@ -349,6 +349,12 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
     if n as u64 > MAX_RECORDS || n == 0 {
         return None;
     }
+    // The smallest encoded value is one byte (`Bool`), so a record count
+    // above the bytes remaining before the digest cannot be honest. Refuse it
+    // here rather than let `Vec::with_capacity(n)` below allocate for it.
+    if n > bytes.len().saturating_sub(pos + 32) {
+        return None;
+    }
     // kolon tipleri
     if bytes.len() < pos + key_count {
         return None;
@@ -448,6 +454,30 @@ mod tests {
 
     fn sample_json() -> Vec<u8> {
         br#"[{"u":"u1","ts":"2026-08-01T10:00:00Z","a":"r","v":42,"s":200},{"u":"u1","ts":"2026-08-01T10:00:01Z","a":"w","v":7,"s":200},{"u":"u2","ts":"2026-08-01T10:00:00Z","a":"l","v":999,"s":404},{"u":"u2","ts":"2026-08-01T10:00:02Z","a":"d","v":1,"s":500}]"#.to_vec()
+    }
+
+    /// A header record count the body cannot hold (one key, one `Bool`
+    /// column, count near `MAX_RECORDS`, no values) used to reach
+    /// `Vec::with_capacity(n)` before the first value was parsed. The digest
+    /// is valid, so only the count-versus-remaining check can refuse it.
+    #[test]
+    fn a_record_count_the_body_cannot_hold_is_refused_before_allocation() {
+        let mut out = Vec::new();
+        out.extend_from_slice(&COLUMNAR_MAGIC);
+        out.push(COLUMNAR_VERSION);
+        out.push(ColumnarMode::Exact.to_u8());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(b'k');
+        out.extend_from_slice(&(MAX_RECORDS as u32 - 1).to_le_bytes());
+        out.push(ColType::Bool.to_u8());
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_COLUMNAR_V1");
+        h.update(&out);
+        let digest: [u8; 32] = h.finalize().into();
+        out.extend_from_slice(&digest);
+        assert!(columnar_from_blob(&out).is_none());
     }
 
     #[test]

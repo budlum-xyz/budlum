@@ -17,14 +17,17 @@ jobs:
   budlum:
     name: Budlum Core
     runs-on: ubuntu-latest
-    # Badge self-commit (Q5, loop-guarded) needs write only in this job;
-    # all other jobs stay at the global minimum (contents: read).
+    # Read only. The badge used to be self-committed from this job, which is
+    # why it once held `contents: write` and a persisted token; the badge is
+    # now verified by `badges-are-current` and nothing here pushes. A job
+    # that compiles and runs code from a pull request must not hold a
+    # write-capable token in its git configuration.
     permissions:
-      contents: write
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1  # zizmor: ignore[artipacked] badge bot self-commit intentionally uses GITHUB_TOKEN
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: true
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:

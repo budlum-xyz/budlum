@@ -20,6 +20,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Prevents stale disputes and provides finality to verifiers.
 /// Default: 10080 blocks ≈ 7 days at 1 block/minute.
 pub const DISPUTE_WINDOW_BLOCKS: u64 = 10_080;
+
+/// Furthest ahead a request deadline or a payment expiry may sit, in blocks
+/// (about a year at six-second slots).
+///
+/// A deadline needs a ceiling as well as a floor. Without one a requester
+/// pays `max_fee = 1` for `deadline_block = u64::MAX`, `prune_expired` never
+/// reaches the row, `reclaim_escrow` never matures, and the request sits in
+/// the state root for the life of the chain. The agent-payment path had this
+/// bound already; requests and model deadline windows now share it.
+pub const MAX_DEADLINE_HORIZON_BLOCKS: u64 = 5_256_000;
 pub const EQUIVOCATION_ERROR_PREFIX: &str = "EQUIVOCATION:";
 
 pub fn is_equivocation_error(error: &str) -> bool {
@@ -275,6 +285,12 @@ impl AiRegistry {
             return Err(format!(
                 "Request deadline exceeded: current_block={current_block}, deadline_block={}",
                 request.deadline_block
+            ));
+        }
+        if request.deadline_block > current_block.saturating_add(MAX_DEADLINE_HORIZON_BLOCKS) {
+            return Err(format!(
+                "Request deadline too far in the future: deadline_block={}, maximum is {} blocks from current_block={current_block}",
+                request.deadline_block, MAX_DEADLINE_HORIZON_BLOCKS
             ));
         }
         // effort.rs rule 2: a request that fits under no authorized operator's
@@ -562,6 +578,13 @@ impl AiRegistry {
         if request_deadline_blocks == 0 || result_deadline_blocks == 0 {
             return Err("Deadlines must be >= 1 block".into());
         }
+        if request_deadline_blocks > MAX_DEADLINE_HORIZON_BLOCKS
+            || result_deadline_blocks > MAX_DEADLINE_HORIZON_BLOCKS
+        {
+            return Err(format!(
+                "Deadline windows must be <= {MAX_DEADLINE_HORIZON_BLOCKS} blocks"
+            ));
+        }
 
         spec.min_verifier_count = min_verifier_count;
         spec.agreement_threshold = agreement_threshold;
@@ -687,6 +710,20 @@ impl AiRegistry {
             self.requests.remove(id);
             pruned += 1;
         }
+
+        // An execution proof is keyed by its request. Once the request is
+        // gone (expired unfinalized, or its outcome retired) the proof has no
+        // reader left, but up to 256 KiB of `proof_bytes` per verifier stayed
+        // in the map and was rehashed into `state_root` on every block. The
+        // settled agent-payment receipts are deliberately not swept here:
+        // `submit_agent_payment` refuses a `payment_id` found among them,
+        // and `payment_id` is caller-supplied rather than derived, so the
+        // receipt is the replay guard, not a record of one.
+        let before = self.execution_proofs.len();
+        self.execution_proofs.retain(|(request_id, _), _| {
+            !expired_request_ids.contains(request_id) && !prunable_outcomes.contains(request_id)
+        });
+        pruned += before - self.execution_proofs.len();
 
         pruned
     }
@@ -1371,11 +1408,10 @@ impl AiRegistry {
         // Future. Without a maximum, an attacker can create payments with
         // Expiry = u64::MAX, locking escrow forever. Cap at ~1 year (52560
         // Epochs × 100 blocks/epoch ≈ 5_256_000 blocks from current_block).
-        const MAX_PAYMENT_EXPIRY_HORIZON: u64 = 5_256_000;
-        if payment.expiry_block > current_block.saturating_add(MAX_PAYMENT_EXPIRY_HORIZON) {
+        if payment.expiry_block > current_block.saturating_add(MAX_DEADLINE_HORIZON_BLOCKS) {
             return Err(format!(
                 "Agent payment: expiry_block too far in the future (max {} blocks from current)",
-                MAX_PAYMENT_EXPIRY_HORIZON
+                MAX_DEADLINE_HORIZON_BLOCKS
             ));
         }
         if payment.is_expired(current_block) {

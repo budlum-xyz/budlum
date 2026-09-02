@@ -86,16 +86,23 @@ ourselves keeps the origin at `bud://<name>`.
 + * deliberately holds no verification logic of its own. Two places deciding
 + * what counts as verified is worse than one place deciding badly.
 + *
-+ * Flags:
++ * Flags (the components.conf entry above declares none, so Gecko applies
++ * its defaults; this list is what the scheme is meant to carry and what a
++ * later `protocol_flags` line must not exceed):
 + *   URI_STD               - bud://<name>/<path> parses as a standard URL, so
 + *                           each name gets its own origin. Without this two
 + *                           different names would share one origin.
 + *   URI_LOADABLE_BY_ANYONE- an ordinary page may link to bud://.
-+ *   URI_IS_POTENTIALLY_TRUSTWORTHY - content is verified by hash before it
-+ *                           reaches the parser, which is a stronger guarantee
-+ *                           than TLS gives; secure-context APIs are allowed.
 + *
 + * Not set, on purpose:
++ *   URI_IS_POTENTIALLY_TRUSTWORTHY - the bytes are hash-verified, but the
++ *                           name is not: .bud resolution carries no state
++ *                           proof today (`claim only`), so a lying node can
++ *                           put any bytes under any name. A potentially
++ *                           trustworthy origin unlocks service workers,
++ *                           `crypto.subtle` and secure cookies for those
++ *                           bytes. Until the resolution is `verified` the
++ *                           scheme stays an ordinary, non-secure context.
 + *   URI_DANGEROUS_TO_LOAD - would make the scheme unusable from the address
 + *                           bar, which is the only place it is used.
 + *   URI_IS_LOCAL_RESOURCE - bud:// is not local; it is content-addressed.

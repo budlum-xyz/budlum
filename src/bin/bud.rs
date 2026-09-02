@@ -108,9 +108,14 @@ enum TxAction {
         /// Transfer amount (base units).
         #[arg(long, required = true)]
         amount: u64,
-        /// The sender's 32-byte hex signing seed (private key).
-        #[arg(long, required = true)]
-        priv_key: String,
+        /// Path to a file holding the sender's 32-byte hex signing seed.
+        ///
+        /// The seed is never taken on the command line: `argv` is visible in
+        /// the process list, shell history and any log that captures the
+        /// invocation. Either this flag or the `BUD_PRIV_KEY` environment
+        /// variable must supply it.
+        #[arg(long)]
+        priv_key_file: Option<std::path::PathBuf>,
         /// Transaction fee (base units).
         #[arg(long, default_value_t = 0)]
         fee: u64,
@@ -233,6 +238,22 @@ fn parse_address(s: &str) -> Result<Address, String> {
 }
 
 /// Parse a 32-byte hex signing seed.
+/// The signing seed comes from a file (`--priv-key-file`) or from the
+/// `BUD_PRIV_KEY` environment variable, in that order, never from `argv`.
+fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
+    if let Some(path) = path {
+        return std::fs::read_to_string(path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()));
+    }
+    std::env::var("BUD_PRIV_KEY").map_err(|_| {
+        String::from(
+            "no signing seed: pass --priv-key-file <path> or set BUD_PRIV_KEY \
+             (the seed is not accepted as a command-line argument)",
+        )
+    })
+}
+
 fn parse_seed(hex_str: &str) -> Result<[u8; 32], String> {
     let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(clean).map_err(|e| format!("invalid hex priv key: {e}"))?;
@@ -259,11 +280,11 @@ fn run_tx_send(
     rpc_url: &str,
     to: &str,
     amount: u64,
-    priv_key: &str,
+    priv_key_file: Option<&std::path::Path>,
     fee: u64,
     nonce: Option<u64>,
 ) -> Result<(), String> {
-    let seed = parse_seed(priv_key)?;
+    let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
     let keypair = KeyPair::from_seed(&seed).map_err(|e| format!("key derivation: {e}"))?;
     let from = Address::from(keypair.public_key_bytes());
     let to_addr = parse_address(to)?;
@@ -447,10 +468,17 @@ fn main() {
             TxAction::Send {
                 to,
                 amount,
-                priv_key,
+                priv_key_file,
                 fee,
                 nonce,
-            } => run_tx_send(&cli.rpc_url, to, *amount, priv_key, *fee, *nonce),
+            } => run_tx_send(
+                &cli.rpc_url,
+                to,
+                *amount,
+                priv_key_file.as_deref(),
+                *fee,
+                *nonce,
+            ),
         },
         Command::Query { action } => match action {
             QueryAction::Balance { address } => run_query_balance(&cli.rpc_url, address),

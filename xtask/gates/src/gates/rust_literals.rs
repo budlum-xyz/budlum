@@ -176,6 +176,42 @@ pub fn scrub(text: &str) -> String {
     strip_line_comments(&after_blocks)
 }
 
+/// A fresh, exclusively created scratch directory under the system
+/// temporary directory.
+///
+/// The gates used to build the path from a fixed prefix and the process id
+/// and create it with `create_dir_all`, which follows a symlink already at
+/// that path. A local user who can guess the pid pre-plants
+/// `<tmp>/<prefix>-<pid> -> <anywhere>` and the gate's files land there
+/// (CWE-377). `create_dir` refuses an existing entry, symlink or not, and a
+/// nanosecond salt plus a retry counter makes the name unguessable in
+/// practice; the first candidate that is created is the one returned.
+///
+/// # Errors
+///
+/// When no candidate could be created, or on any error other than the path
+/// already existing.
+pub fn exclusive_scratch_dir(prefix: &str) -> Result<std::path::PathBuf, String> {
+    for attempt in 0..100u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let candidate =
+            std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(format!(
+                    "cannot create scratch dir {}: {e}",
+                    candidate.display()
+                ))
+            }
+        }
+    }
+    Err(format!("cannot find a free scratch dir name for {prefix}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

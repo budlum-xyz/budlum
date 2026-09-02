@@ -51,9 +51,6 @@ pub struct RelayerConfig {
     /// The relayer's Budlum address, in hex, 32 bytes, optionally 0x-prefixed.
     /// The stake is checked for the RELAYER role in the permissionless registry.
     pub relayer_address: String,
-    /// Optional: the relayer private key path or hex, an HSM later. For now it is
-    /// only logged.
-    pub relayer_key_hint: Option<String>,
     /// The poll interval, in seconds.
     pub poll_interval_secs: u64,
     /// Used for the minimum stake check; the default is 1000.
@@ -88,7 +85,6 @@ impl Default for RelayerConfig {
             direction: RelayDirection::EthToBud,
             required_confirmations: 64,
             relayer_address: "0x0".to_string(),
-            relayer_key_hint: None,
             poll_interval_secs: 10,
             min_stake: 1000,
         }
@@ -425,9 +421,14 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
                     .clone();
             }
             "--relayer-key" => {
-                i += 1;
-                config.relayer_key_hint =
-                    Some(args.get(i).ok_or("--relayer-key requires a value")?.clone());
+                // The flag used to accept a key value on the command line and
+                // then never use it. A secret in `argv` is visible in the
+                // process list and shell history; the relayer signs nothing
+                // today, so the flag is refused rather than silently kept.
+                return Err(String::from(
+                    "--relayer-key is not accepted: the relayer holds no signing key, and a \
+                     key would not be taken from the command line",
+                ));
             }
             "--poll-interval" => {
                 i += 1;
@@ -473,7 +474,6 @@ fn print_usage() {
     eprintln!("  --budlum-rpc <URL>         Budlum RPC endpoint");
     eprintln!("  --bridge-address <ADDR>    Ethereum bridge contract address");
     eprintln!("  --relayer-address <ADDR>   Relayer's Budlum address (hex, for registry check)");
-    eprintln!("  --relayer-key <HINT>       Optional private key hint / path (HSM future)");
     eprintln!("  --direction <DIR>          eth-to-bud (F10.2) | bud-to-eth (F10.5)");
     eprintln!("  --confirmations <N>        N-confirmation threshold (default: 64)");
     eprintln!("  --poll-interval <S>        Poll interval seconds (default: 10)");
