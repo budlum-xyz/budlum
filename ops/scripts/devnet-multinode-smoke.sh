@@ -104,19 +104,45 @@ echo "== [6/6] follower sync: node2 budlum_chain_height reaches node1 bud_blockN
 # equality would race against block production, and a lag of one is what a
 # live follower looks like. A follower that cannot sync stays at genesis (or
 # wherever it lost the stream) and fails this step.
-node2_tip() {
-  docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" exec -T node2 \
-    curl -sf --max-time 4 http://127.0.0.1:9090/metrics 2>/dev/null \
-    | awk '$1 == "budlum_chain_height" { print int($2) - 1; found = 1 } END { if (!found) print -1 }'
+# The read is two steps so a failure names its cause: -1 means the metrics
+# page could not be fetched inside the container (exec or curl failed), -2
+# means the page came back without the gauge. A registered gauge is exported
+# at 0 before its first write, so a follower still at genesis reads 0 - 1 =
+# -1 as a tip index would be ambiguous; the gauge value is printed raw and
+# converted below.
+node2_metrics_dump=""
+node2_chain_height() {
+  node2_metrics_dump=$(docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" exec -T node2 \
+    curl -sf --max-time 4 http://127.0.0.1:9090/metrics 2>&1) || { echo -1; return; }
+  printf '%s\n' "$node2_metrics_dump" \
+    | awk '$1 == "budlum_chain_height" { print int($2); found = 1 } END { if (!found) print -2 }'
 }
-synced=0; n1=0; n2=-1
+# Second witness, independent of the metrics listener: the follower logs
+# "Added block #N to local chain" for every block it validates. The highest N
+# in node2's log is its tip as seen by the node itself.
+node2_logged_tip() {
+  docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" logs --no-color --no-log-prefix node2 2>/dev/null \
+    | sed -n 's/.*Added block #\([0-9][0-9]*\) to local chain.*/\1/p' \
+    | sort -n | tail -1
+}
+synced=0; n1=0; n2=-1; h2=-1; l2=""
 for _ in $(seq 1 60); do
   n1=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))' 2>/dev/null || echo 0)
-  n2=$(node2_tip)
+  h2=$(node2_chain_height)
+  l2=$(node2_logged_tip)
+  # chain length -> tip index; a length of 0 (never emitted) stays at -1 ("no tip yet").
+  if [ "$h2" -ge 1 ]; then n2=$((h2 - 1)); else n2=-1; fi
+  # The log witness is used when it is ahead of the gauge (the gauge is
+  # written once per block add; the log line is written on the same path).
+  if [ -n "$l2" ] && [ "$l2" -gt "$n2" ]; then n2=$l2; fi
   if [ "$n1" -gt 0 ] && [ "$n2" -ge 0 ] && [ $((n1 - n2)) -le 1 ]; then synced=1; break; fi
   sleep 2
 done
-[ "$synced" = 1 ] || fail "node2 did not catch up with node1 (node1=$n1, node2=$n2)"
+if [ "$synced" != 1 ]; then
+  echo "node2 metrics read: raw gauge=$h2 (-1: fetch failed, -2: gauge absent); logged tip=${l2:-none}"
+  printf '%s\n' "$node2_metrics_dump" | head -5
+  fail "node2 did not catch up with node1 (node1=$n1, node2 tip=$n2)"
+fi
 echo "PASS [6/6]: follower sync (node1=$n1, node2=$n2)"
 
 echo "DEVNET-MULTINODE-SMOKE: 6/6 PASS"
