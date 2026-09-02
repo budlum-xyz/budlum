@@ -1058,7 +1058,11 @@ impl Storage {
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
-            let decoded = decode(&val)?;
+            // Rows written before the settled-ticket queue are one trailing
+            // field short; `decode_row` retries them as a current row with an
+            // empty queue. See its doc for why this is not a `Legacy` copy.
+            let decoded = crate::domain::storage_deal::StorageRegistry::decode_row(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
             Ok(Some(decoded))
         } else {
             Ok(None)

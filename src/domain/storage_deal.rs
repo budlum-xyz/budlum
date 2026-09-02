@@ -518,6 +518,24 @@ pub const STORAGE_REPLICATION_TARGET: u8 = 3;
 pub const DEMAND_REPLICA_STEP_SCALED: u64 = 8 * crate::storage::living_threshold::ACCESS_SCALE;
 pub const REALLOCATION_ACCEPTANCE_EPOCHS: u64 = 4;
 
+/// How long a ticket whose replacement deal opened stays in the registry.
+///
+/// A ticket is a work item: it exists so a slot that lost its holder gets a
+/// new one. Once `accept_reallocation_ticket` opens the replacement deal the
+/// work is done, and what remains is a record that says which deal replaced
+/// which. That record is worth keeping for a while (`lifecycle_state` reports
+/// `ActiveReplacement` from it, and `placements_that_diverged` measures the
+/// placement algorithm against it), but not forever: the map had no delete
+/// path at all, so every slash and every expiry on the chain grew it by one
+/// row for the life of the node.
+///
+/// The window is long compared with the acceptance deadline on purpose. The
+/// question the retained row answers is an audit question, so the row lives
+/// through several acceptance windows before it goes. Tickets that still
+/// wait for a taker (`Pending`, `UnderReplicated`) are never swept: they are
+/// the obligation itself, not a record of one.
+const REALLOCATION_RECORD_RETENTION_EPOCHS: u64 = 16 * REALLOCATION_ACCEPTANCE_EPOCHS;
+
 /// How long before a deal matures its operator may renew it unopposed.
 ///
 /// Renewal exists because the two ways a deal ends are not symmetric. A
@@ -715,6 +733,16 @@ pub struct StorageRegistry {
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
     pub confidential_owners: BTreeMap<ContentId, crate::core::address::Address>,
+    /// Epoch a ticket reached `ActiveReplacement`, keyed by that epoch, so
+    /// the sweep drops due rows without walking the whole map.
+    ///
+    /// Last field on purpose: the registry row is bincode, which is
+    /// positional, so a new field anywhere else would make every stored
+    /// registry unreadable. `#[serde(default)]` keeps JSON snapshots taken
+    /// before the field loadable; the bincode side is covered by
+    /// `LegacyStorageRegistryV1` in `storage/db.rs`.
+    #[serde(default)]
+    settled_tickets: BTreeMap<u64, Vec<u64>>,
 }
 
 use std::collections::BTreeMap;
@@ -1017,6 +1045,37 @@ impl StorageRegistry {
         Self::default()
     }
 
+    /// Decode a stored registry row, including rows written before
+    /// `settled_tickets` existed.
+    ///
+    /// Bincode is positional, so a row from the older build ends where
+    /// `confidential_owners` ends and the current shape refuses it. The
+    /// bridge state handles the same situation with a `LegacyBridgeStateVn`
+    /// copy of the struct; this registry has twenty-odd fields with their
+    /// own serde attributes, and a hand-kept copy of that is the kind of
+    /// thing that drifts. What the older build could have written is exactly
+    /// the current row minus one trailing empty map, and an empty
+    /// `BTreeMap` is eight zero bytes in bincode (a `u64` length of zero).
+    /// So the older row plus those eight bytes *is* a current row with an
+    /// empty queue, and that is what the retry decodes. A row that is
+    /// neither shape fails both attempts and the error surfaces.
+    ///
+    /// `registry_rows_written_before_the_settled_queue_still_load` proves
+    /// both halves: the current shape refuses the older row, and the retry
+    /// loads it to the same digest.
+    ///
+    /// # Errors
+    ///
+    /// The bincode error of the second attempt when neither shape decodes.
+    pub fn decode_row(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize::<Self>(bytes).or_else(|_| {
+            let mut padded = Vec::with_capacity(bytes.len() + 8);
+            padded.extend_from_slice(bytes);
+            padded.extend_from_slice(&0u64.to_le_bytes());
+            bincode::deserialize::<Self>(&padded)
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.next_deal_id == 0
             && self.next_challenge_id == 0
@@ -1026,6 +1085,7 @@ impl StorageRegistry {
             && self.challenges.is_empty()
             && self.results.is_empty()
             && self.reallocations.is_empty()
+            && self.settled_tickets.is_empty()
             && self.operator_cooldowns.is_empty()
             && self.operator_classes.is_empty()
             && self.manifests.is_empty()
@@ -1073,6 +1133,15 @@ impl StorageRegistry {
         }
         for ticket in self.reallocations.values() {
             hasher.update(bincode::serialize(ticket).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
+        // The settled-ticket queue decides which tickets the next sweep
+        // drops, so two registries with the same tickets and different
+        // queues would diverge one epoch later; fold it in now, not then.
+        for (epoch, ticket_ids) in &self.settled_tickets {
+            hasher.update(epoch.to_le_bytes());
+            for ticket_id in ticket_ids {
+                hasher.update(ticket_id.to_le_bytes());
+            }
         }
         for manifest in self.manifests.values() {
             hasher
@@ -2810,6 +2879,10 @@ impl StorageRegistry {
             ticket.status = ReallocationStatus::ActiveReplacement;
             ticket.replacement_deal_id = Some(replacement_deal_id);
         }
+        self.settled_tickets
+            .entry(start_epoch)
+            .or_default()
+            .push(ticket_id);
         Ok(replacement_deal_id)
     }
 
@@ -3067,6 +3140,48 @@ impl StorageRegistry {
             }
         }
         changed
+    }
+
+    /// Drop the tickets whose replacement deal opened
+    /// [`REALLOCATION_RECORD_RETENTION_EPOCHS`] or more epochs ago.
+    ///
+    /// Runs from the same epoch maintenance step as
+    /// [`Self::mark_overdue_reallocations_under_replicated`], so every node
+    /// drops the same rows at the same epoch and the registry digest stays
+    /// consensus-equal. Only a ticket still in `ActiveReplacement` is
+    /// dropped; the queue is a hint and the status is the fact, so a ticket
+    /// that is somehow back to waiting stays.
+    ///
+    /// Returns how many tickets were dropped.
+    pub fn sweep_settled_reallocations(&mut self, now_epoch: u64) -> usize {
+        let cutoff = now_epoch.saturating_sub(REALLOCATION_RECORD_RETENTION_EPOCHS);
+        let due: Vec<u64> = self
+            .settled_tickets
+            .range(..=cutoff)
+            .map(|(&epoch, _)| epoch)
+            .collect();
+        let mut dropped = 0;
+        for epoch in due {
+            let Some(ticket_ids) = self.settled_tickets.remove(&epoch) else {
+                continue;
+            };
+            for ticket_id in ticket_ids {
+                let settled = self
+                    .reallocations
+                    .get(&ticket_id)
+                    .is_some_and(|t| t.status == ReallocationStatus::ActiveReplacement);
+                if settled && self.reallocations.remove(&ticket_id).is_some() {
+                    dropped += 1;
+                }
+            }
+        }
+        dropped
+    }
+
+    /// Rows in the ticket map, for the `budlum_storage_reallocation_rows`
+    /// gauge: a number that only ever rises means the sweep is not running.
+    pub fn reallocation_ticket_count(&self) -> usize {
+        self.reallocations.len()
     }
 
     pub fn all_reallocation_tickets(&self) -> Vec<&StorageReallocationTicket> {
@@ -5267,6 +5382,129 @@ mod tests {
             reg.lifecycle_state(deal_id),
             Some(crate::storage::StorageLifecycleState::UnderReplicated)
         );
+    }
+
+    /// Slash, ticket, accept: the ticket that opened the replacement deal
+    /// is a record from then on, and records leave after the retention
+    /// window. The replacement deal itself is untouched.
+    #[test]
+    fn settled_reallocation_tickets_are_swept_after_retention() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+        let replacement = reg
+            .accept_reallocation_ticket(
+                ticket_id,
+                replacement_operator(),
+                151,
+                250,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+
+        // One epoch short of the window: the record stays.
+        let last_kept = 151 + REALLOCATION_RECORD_RETENTION_EPOCHS - 1;
+        assert_eq!(reg.sweep_settled_reallocations(last_kept), 0);
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+        assert_eq!(
+            reg.lifecycle_state(replacement),
+            Some(crate::storage::StorageLifecycleState::ActiveReplacement)
+        );
+
+        // At the window the record goes; the deal it opened does not.
+        assert_eq!(reg.sweep_settled_reallocations(last_kept + 1), 1);
+        assert_eq!(reg.reallocation_ticket_count(), 0);
+        assert!(reg.get_reallocation_ticket(ticket_id).is_none());
+        assert_eq!(deal_status(&reg, replacement), DealStatus::Active);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        // With the record gone the slashed deal reads as plain Slashed and
+        // the replacement as a plain active deal.
+        assert_eq!(
+            reg.lifecycle_state(deal_id),
+            Some(crate::storage::StorageLifecycleState::Slashed)
+        );
+        // A second sweep has nothing left to do.
+        assert_eq!(reg.sweep_settled_reallocations(last_kept + 100), 0);
+    }
+
+    /// A ticket nobody has taken is the obligation itself, not a record of
+    /// one: no retention window applies to it, however old it gets.
+    #[test]
+    fn waiting_tickets_are_never_swept() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let far = 150 + 100 * REALLOCATION_RECORD_RETENTION_EPOCHS;
+        assert_eq!(reg.sweep_settled_reallocations(far), 0);
+        assert_eq!(reg.mark_overdue_reallocations_under_replicated(far), 1);
+        assert_eq!(reg.sweep_settled_reallocations(far), 0);
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+    }
+
+    /// The registry row is bincode and positional. A row written before
+    /// `settled_tickets` existed is refused by the current shape, and the
+    /// loader's retry (`decode_row`) reads it as a registry with an empty
+    /// queue and the same digest. The older row is the current row minus
+    /// its trailing empty map, which is the only queue an older build could
+    /// have had.
+    #[test]
+    fn registry_rows_written_before_the_settled_queue_still_load() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        assert!(reg.settled_tickets.is_empty());
+
+        let current = bincode::serialize(&reg).unwrap();
+        let empty_map = 0u64.to_le_bytes();
+        assert!(current.ends_with(&empty_map));
+        let older = &current[..current.len() - empty_map.len()];
+
+        assert!(
+            bincode::deserialize::<StorageRegistry>(older).is_err(),
+            "the current shape must refuse the older row, or the retry is dead code"
+        );
+        let loaded = StorageRegistry::decode_row(older).unwrap();
+        assert_eq!(loaded.root(), reg.root());
+        assert_eq!(loaded.reallocation_ticket_count(), 1);
+        assert!(loaded.settled_tickets.is_empty());
+
+        // A current row still decodes on the first attempt, queue included.
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+        reg.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator(),
+            151,
+            250,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .unwrap();
+        let with_queue = bincode::serialize(&reg).unwrap();
+        let loaded = StorageRegistry::decode_row(&with_queue).unwrap();
+        assert_eq!(loaded.settled_tickets, reg.settled_tickets);
+        assert_eq!(loaded.root(), reg.root());
+
+        // Garbage is neither shape and fails loudly.
+        assert!(StorageRegistry::decode_row(&current[..7]).is_err());
     }
 
     #[test]

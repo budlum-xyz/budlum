@@ -59,6 +59,10 @@ pub struct Metrics {
     /// `SETTLED_RETENTION_BLOCKS`; a gauge that only ever rises means the
     /// sweep is not running.
     pub bridge_transfer_rows: IntGauge,
+    /// Rows in the storage reallocation ticket map. Settled tickets leave it
+    /// after `REALLOCATION_RECORD_RETENTION_EPOCHS`; a gauge that only ever
+    /// rises means the sweep is not running.
+    pub storage_reallocation_rows: IntGauge,
     pub ai_requests_total: IntCounter,
     pub ai_outcomes_finalized: IntCounter,
     pub bns_names_registered: IntCounter,
@@ -179,6 +183,10 @@ impl Metrics {
             "budlum_bridge_transfer_rows",
             "Rows in the bridge transfer table (settled rows are swept after the retention window)",
         )?;
+        let storage_reallocation_rows = IntGauge::new(
+            "budlum_storage_reallocation_rows",
+            "Rows in the storage reallocation ticket map (settled tickets are swept after the retention window)",
+        )?;
         let ai_requests_total = IntCounter::new(
             "budlum_ai_requests_total",
             "Total AI inference requests submitted",
@@ -230,6 +238,7 @@ impl Metrics {
         registry.register(Box::new(bridge_transfers_total.clone()))?;
         registry.register(Box::new(bridge_amount_locked.clone()))?;
         registry.register(Box::new(bridge_transfer_rows.clone()))?;
+        registry.register(Box::new(storage_reallocation_rows.clone()))?;
         registry.register(Box::new(ai_requests_total.clone()))?;
         registry.register(Box::new(ai_outcomes_finalized.clone()))?;
         registry.register(Box::new(bns_names_registered.clone()))?;
@@ -270,6 +279,7 @@ impl Metrics {
             bridge_transfers_total,
             bridge_amount_locked,
             bridge_transfer_rows,
+            storage_reallocation_rows,
             ai_requests_total,
             ai_outcomes_finalized,
             bns_names_registered,
@@ -327,6 +337,7 @@ mod tests {
             "budlum_mempool_sender_count",
             "budlum_bridge_amount_locked",
             "budlum_bridge_transfer_rows",
+            "budlum_storage_reallocation_rows",
             "budlum_storage_db_size_bytes",
             "budlum_p2p_peers_connected",
             "budlum_p2p_gossip_duplicates",

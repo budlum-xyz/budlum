@@ -205,6 +205,10 @@ impl Blockchain {
             );
             m.bridge_transfer_rows
                 .set(i64::try_from(self.state.bridge_state.transfer_count()).unwrap_or(i64::MAX));
+            m.storage_reallocation_rows.set(
+                i64::try_from(self.state.storage_registry.reallocation_ticket_count())
+                    .unwrap_or(i64::MAX),
+            );
             if let Some(ref store) = self.storage {
                 if let Ok(bytes) = store.size_on_disk() {
                     m.storage_db_size_bytes
