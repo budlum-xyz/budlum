@@ -28,8 +28,8 @@
     "tx_fee_burn_ratio_fixed": 10000,
     "block_reward": 50,
     "validator_annual_yield_ratio_fixed": 50000,
-    "slot_duration_secs": 10,
-    "epoch_length_slots": 32
+    "slot_duration_secs": 6,
+    "epoch_length_slots": 100
   },
   "ceremony_status": "template_ready",
   "ceremony_note": "A ceremony template. The genesis authority mainnet_genesis() in code and this file are kept equal by the test_mainnet_genesis_json_matches_code lock. The *_plan lists do NOT enter the hash; once real keypairs are produced in the ceremony, allocations and validators are updated in BOTH the code and the file together.",

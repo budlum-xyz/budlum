@@ -45,7 +45,7 @@ For security-sensitive findings, do not open a public issue. See [`SECURITY.md`]
 
 ### Requirements
 
-- Rust `1.70+`
+- Rust `1.97.1` (pinned in `rust-toolchain.toml`; `rustup` picks it up)
 - `protoc`
 - Optional: Nix, if you use the provided development shell
 
@@ -109,7 +109,7 @@ Changes in these areas need extra care:
 - `src/core/block.rs`
 - `src/storage/`
 - `src/network/protocol.rs`
-- `proto/protocol.proto`
+- `proto/budlum/network/protocol.proto`
 
 Before changing protocol-critical logic, consider:
 
@@ -164,4 +164,4 @@ Assume contributors are here to make the protocol better. Ask questions, explain
 
 ## License
 
-By contributing to Budlum Core, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing to Budlum Core, you agree that your contributions are licensed under the same terms as the repository, the PolyForm Shield License 1.0.0 (`LICENSE.md`). There is no separate contributor agreement.

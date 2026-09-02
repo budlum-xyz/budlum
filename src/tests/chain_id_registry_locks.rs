@@ -123,3 +123,39 @@ fn the_registry_collision_scan_can_detect_a_violation() {
         "mainnet's own id is in the taken list"
     );
 }
+
+/// The node profiles carry `network.chain_id` next to the network name. The
+/// loader refuses a profile whose id differs from the network's registered id
+/// (`NodeConfig::validate`), so a profile with the wrong number is a profile
+/// nobody can start. All six shipped profiles used to carry the pre-registry
+/// numbers (1, 42, 1337) and were refused at startup; this lock reads each one
+/// and compares it with the code the way the loader does.
+#[test]
+fn the_shipped_node_profiles_agree_with_the_code() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for (file, network) in [
+        ("config/mainnet.toml", Network::Mainnet),
+        ("config/testnet.toml", Network::Testnet),
+        ("config/devnet.toml", Network::Devnet),
+        ("config/personas/enterprise-poa.toml", Network::Mainnet),
+        ("config/personas/developer.toml", Network::Devnet),
+        ("config/personas/user-devnet.toml", Network::Devnet),
+    ] {
+        let raw = std::fs::read_to_string(root.join(file))
+            .unwrap_or_else(|e| panic!("{file} is readable: {e}"));
+        let parsed: toml::Value =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{file} is valid TOML: {e}"));
+        let declared = parsed
+            .get("network")
+            .and_then(|n| n.get("chain_id"))
+            .and_then(toml::Value::as_integer)
+            .unwrap_or_else(|| panic!("{file} has no numeric network.chain_id"));
+        assert_eq!(
+            u64::try_from(declared).ok(),
+            Some(network.chain_id().value()),
+            "{file} declares chain id {declared} but {} is {} in code",
+            network.name(),
+            network.chain_id().value()
+        );
+    }
+}

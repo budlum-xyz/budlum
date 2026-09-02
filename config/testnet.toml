@@ -1,6 +1,6 @@
 [network]
 profile = "testnet"
-chain_id = 42
+chain_id = 45261
 genesis_file = "./config/testnet-genesis.json"
 
 [node]
@@ -16,6 +16,8 @@ backup_retention_count = 24
 
 [p2p]
 identity_file = "./secrets/testnet-node-id.key"
+# No public testnet exists yet; the profile is refused for discovery until a
+# bootnode or DNS seed is recorded here. Pass --bootstrap for a private mesh.
 bootnodes = []
 dns_seeds = []
 max_peers = 75

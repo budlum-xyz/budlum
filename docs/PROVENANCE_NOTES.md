@@ -43,11 +43,9 @@ independent implementation.
   PolyForm Shield 1.0.0. Taking the upstream MIT option keeps this compatible:
   MIT permits redistribution under different terms provided the MIT notice is
   retained, which `NOTICE` does. No licence conflict.
-- **Gap:** there is currently **no attribution anywhere in the tree**, no
-  header, no `NOTICE`, no mention in the crate docs. Apache-2.0 §4 requires
-  retaining attribution notices for derivative works. This should be fixed
-  before mainnet; it is a paperwork gap, not a legal blocker, but it is the
-  clearest actionable item in this file.
+- **Attribution:** `docs/NOTICE` names Plonky3, its copyright holders and
+  its `MIT OR Apache-2.0` licence, and records the `bud_stark` relationship.
+  The gap this file first reported is closed.
 - Upstream: <https://github.com/Plonky3/Plonky3>
 
 ---
@@ -112,9 +110,7 @@ to be clean.
 
 ## Follow-ups
 
-1. **Add attribution for `bud_stark`.** A `NOTICE` file plus a header in
-   `bud_stark/mod.rs` naming Plonky3 and its `MIT OR Apache-2.0` licence.
-   Tracked as the one concrete gap this pass found.
+1. **Attribution for `bud_stark`:** done, see `docs/NOTICE`.
 2. **Snippet-level scan before mainnet.** Out of scope for CI and out of scope
    for what an assistant can assert. Needs FOSSA / Black Duck / ScanCode.
 3. **Conformance tests over novelty review** for the spec-based modules: RLP

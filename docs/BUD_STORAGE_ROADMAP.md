@@ -270,9 +270,10 @@ A `(4, 6)` audit reads five bytes whether the object is 800 bytes or 800 MB.
 
 That the relationship holds at that column. An operator who miscomputed a
 fraction `f` of columns fails a uniformly random one with probability `f`, so
-`r` rounds leave a cheat standing with probability `(1 - f)^r`:
+`r` rounds leave a cheat standing with probability `(1 - f)^r`. The table
+shows the complement, the probability the cheat is caught:
 
-| corrupted fraction | 1 round | 50 rounds |
+| corrupted fraction | caught after 1 round | caught after 50 rounds |
 |---|---|---|
 | 1% | 1.0% | 39.5% |
 | 5% | 5.0% | 92.3% |
@@ -437,8 +438,9 @@ would bound total load directly and is the better long-term shape.
 
 1. **Gap 2** (replica encoding): the challenge-layer half has landed;
    per-replica byte encoding remains and still changes the stored format.
-2. **Gap 3** (erasure coding): **closed**: schema, coder, and verified
-   reconstruction.
+2. **Gap 3** (erasure coding): schema, coder and verified reconstruction are
+   closed; production encoding and on-chain parity verification are still open
+   (see the two paragraphs above).
 3. **Gap 1** (real storage proof): blocked on `VerifyMerkle`.
 4. **Gap 4** (repair): **closed** - predicates, coder, and maintenance wiring landed; residual never-placed shard ticket type remains. Prior note was:
    the deal lifecycle remains.
