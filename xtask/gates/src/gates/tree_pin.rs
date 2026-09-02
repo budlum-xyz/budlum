@@ -36,10 +36,9 @@ pub const PIN_FILE: &str = "xtask/gates/pins/budzero-tree.pins";
 
 /// File extensions that are pinned: sources, manifests, lock files, the
 /// toolchain and audit policies, the `.bud` programs and the Nix flake.
-/// Markdown is not a build input and stays out; so does `.json`, because
-/// `budzero/state.json` is the CLI's default working state, an output the
-/// examples rewrite, not an input the build reads.
-pub const PINNED_EXTENSIONS: &[&str] = &["rs", "toml", "lock", "bud", "nix"];
+/// Markdown is not a build input and stays out. JSON is pinned because the
+/// checked-in `budzero/state.json` schema is an input to the CLI tests.
+pub const PINNED_EXTENSIONS: &[&str] = &["rs", "toml", "lock", "bud", "nix", "json"];
 
 /// Extension-less files that are pinned by name.
 pub const PINNED_BASENAMES: &[&str] = &[".gitignore", "LICENSE"];
@@ -333,11 +332,25 @@ pub fn self_test() -> Result<String, String> {
         }
         write_pins(&tmp)?;
     }
+    // Markdown stays excluded, while the checked-in state schema is pinned.
     std::fs::write(tmp.join("budzero/README.md"), "# notes\n").unwrap();
     std::fs::write(tmp.join("budzero/state.json"), "{}\n").unwrap();
+    if verify_tree(&tmp).is_ok() {
+        return Err(String::from(
+            "tree-pin self-test: an unpinned state.json was accepted",
+        ));
+    }
+    write_pins(&tmp)?;
+    std::fs::write(tmp.join("budzero/README.md"), "# edited notes\n").unwrap();
     verify_tree(&tmp).map_err(|e| {
-        format!("tree-pin self-test: markdown and the working state file must not be pinned: {e}")
+        format!("tree-pin self-test: markdown must remain excluded: {e}")
     })?;
+    std::fs::write(tmp.join("budzero/state.json"), "{\"changed\":true}\n").unwrap();
+    if verify_tree(&tmp).is_ok() {
+        return Err(String::from(
+            "tree-pin self-test: a modified state.json was accepted",
+        ));
+    }
 
     // Re-pin, then a tampered pin entry must be caught as a mismatch.
     write_pins(&tmp)?;
@@ -364,6 +377,6 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(
         "tree-pin self-test: add/delete/modify detection on sources and build \
-         inputs, markdown left out, tampered pins and missing pin file all behave",
+        inputs (including state.json), markdown left out, tampered pins and missing pin file all behave",
     ))
 }

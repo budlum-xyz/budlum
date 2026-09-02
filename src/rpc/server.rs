@@ -1037,7 +1037,7 @@ fn parse_grant_auth(
 /// address is derived from the key, the signature is checked over
 /// [`crate::storage::view_claim_digest`] of this exact request, and a claim
 /// older than [`crate::storage::VIEW_CLAIM_MAX_AGE_SECS`] is refused. A
-/// claim dated in the future is refused too, up to the same tolerance, so a
+/// claim dated in the future is refused too, so a
 /// caller cannot pre-sign claims that come alive later.
 fn verify_view_claim(
     claim: &serde_json::Value,
@@ -1061,11 +1061,11 @@ fn verify_view_claim(
             )
         })?;
     let max_age = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
-    if issued_at > now.saturating_add(max_age) || issued_at.saturating_add(max_age) < now {
+    if issued_at > now || issued_at.saturating_add(max_age) < now {
         return Err(ErrorObjectOwned::owned(
             -32602,
             format!(
-                "viewerClaim.issuedAt {issued_at} is outside the {max_age} s window around {now}"
+                "viewerClaim.issuedAt {issued_at} is in the future or more than {max_age} s older than {now}"
             ),
             None::<()>,
         ));
@@ -5839,7 +5839,7 @@ mod view_claim_tests {
         assert_eq!(err.code(), -32602, "{err:?}");
     }
 
-    /// A captured claim dies with the session window, in both directions.
+    /// A captured claim dies with the session window, and future claims are invalid.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_claim_outside_the_window_is_refused() {
@@ -5849,7 +5849,7 @@ mod view_claim_tests {
         let max = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
         let stale = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max - 1);
         assert!(verify_view_claim(&stale, &content, &key, &owner, &packed, NOW).is_err());
-        let future = signed_claim(&kp, &content, &key, &owner, &packed, NOW + max + 1);
+        let future = signed_claim(&kp, &content, &key, &owner, &packed, NOW + 1);
         assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
         let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
         assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());

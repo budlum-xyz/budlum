@@ -111,11 +111,13 @@ echo "== [6/6] follower sync: node2 budlum_chain_height reaches node1 bud_blockN
 # -1 as a tip index would be ambiguous; the gauge value is printed raw and
 # converted below.
 node2_metrics_dump=""
+node2_parsed_chain_height=-1
 node2_chain_height() {
   node2_metrics_dump=$(docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" exec -T node2 \
-    curl -sf --max-time 4 http://127.0.0.1:9090/metrics 2>&1) || { echo -1; return; }
-  printf '%s\n' "$node2_metrics_dump" \
+    curl -sf --max-time 4 http://127.0.0.1:9090/metrics 2>&1) || { node2_parsed_chain_height=-1; return; }
+  node2_parsed_chain_height=$(printf '%s\n' "$node2_metrics_dump" \
     | awk '$1 == "budlum_chain_height" { print int($2); found = 1 } END { if (!found) print -2 }'
+  )
 }
 # Second witness, independent of the metrics listener: the follower logs
 # "Added block #N to local chain" for every block it validates. The highest N
@@ -128,7 +130,8 @@ node2_logged_tip() {
 synced=0; n1=0; n2=-1; h2=-1; l2=""
 for _ in $(seq 1 60); do
   n1=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))' 2>/dev/null || echo 0)
-  h2=$(node2_chain_height)
+  node2_chain_height
+  h2=$node2_parsed_chain_height
   l2=$(node2_logged_tip)
   # chain length -> tip index; a length of 0 (never emitted) stays at -1 ("no tip yet").
   if [ "$h2" -ge 1 ]; then n2=$((h2 - 1)); else n2=-1; fi

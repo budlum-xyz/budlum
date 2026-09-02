@@ -3154,7 +3154,9 @@ impl StorageRegistry {
     ///
     /// Returns how many tickets were dropped.
     pub fn sweep_settled_reallocations(&mut self, now_epoch: u64) -> usize {
-        let cutoff = now_epoch.saturating_sub(REALLOCATION_RECORD_RETENTION_EPOCHS);
+        let Some(cutoff) = now_epoch.checked_sub(REALLOCATION_RECORD_RETENTION_EPOCHS) else {
+            return 0;
+        };
         let due: Vec<u64> = self
             .settled_tickets
             .range(..=cutoff)
@@ -5410,6 +5412,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reg.reallocation_ticket_count(), 1);
+
+        // Even an epoch-zero queue entry retains its ticket until the full
+        // window has elapsed. Saturating subtraction used to make every
+        // pre-window sweep treat epoch zero as already due.
+        reg.settled_tickets.entry(0).or_default().push(ticket_id);
+        assert_eq!(
+            reg.sweep_settled_reallocations(REALLOCATION_RECORD_RETENTION_EPOCHS - 1),
+            0
+        );
+        assert!(reg.get_reallocation_ticket(ticket_id).is_some());
+        reg.settled_tickets.remove(&0);
 
         // One epoch short of the window: the record stays.
         let last_kept = 151 + REALLOCATION_RECORD_RETENTION_EPOCHS - 1;
