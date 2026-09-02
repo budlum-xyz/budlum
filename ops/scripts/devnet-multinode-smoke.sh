@@ -9,6 +9,11 @@
 #   [4] /metrics (127.0.0.1:9090) HTTP 2xx plus a non-empty body
 #   [5] the operator RPC 127.0.0.1:8546 is unreachable from the host (not published, and the node
 #       binds only to 127.0.0.1); if it leaks, FAIL.
+#   [6] node2's chain height reaches node1's -> a follower really syncs. Steps 1-5 were all
+#       measured through node1, which produces the blocks itself; a network whose followers
+#       never sync passed them (found 2026-09-02: sync requests were published to gossip,
+#       where every receiver drops them). node2 opens no RPC, so its height is read from its
+#       own /metrics inside the container.
 set -u   # a manual fail instead of -e: the teardown/log step can still run on error
 
 RPC=http://127.0.0.1:8545
@@ -22,23 +27,23 @@ rpc() {
     -d "{\"jsonrpc\":\"2.0\",\"method\":\"$1\",\"params\":[],\"id\":1}" "$RPC"
 }
 
-echo "== [0/5] compose up (4 node + prometheus) =="
+echo "== [0/6] compose up (4 node + prometheus) =="
 # The CI overlay is what turns off RPC auth and publishes 8545. The base file
 # stays authenticated so it is safe to copy; the smoke probes need the
 # unauthenticated listener, so they ask for it explicitly.
 COMPOSE_FILES=(-f ops/docker-compose.yml -f ops/docker-compose.ci.yml)
 docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" up -d || fail "docker compose up"
 
-echo "== [1/5] RPC readiness: bud_netListening (max 120 s) =="
+echo "== [1/6] RPC readiness: bud_netListening (max 120 s) =="
 ready=0
 for _ in $(seq 1 60); do
   if rpc bud_netListening | grep -q '"result":true'; then ready=1; break; fi
   sleep 2
 done
 [ "$ready" = 1 ] || fail "bud_netListening did not become true within 120 s"
-echo "PASS [1/5]: bud_netListening=true"
+echo "PASS [1/6]: bud_netListening=true"
 
-echo "== [2/5] peer mesh: node1 bud_netPeerCount >= 0x3 (maks 120 sn) =="
+echo "== [2/6] peer mesh: node1 bud_netPeerCount >= 0x3 (maks 120 sn) =="
 # The peer count node1 reports over RPC is the only authoritative evidence: this counter
 # grows only on SwarmEvent::ConnectionEstablished, so it measures a P2P connection
 # that was really established. The old "log_nodes" fallback (searching node2..4 logs
@@ -56,9 +61,9 @@ except Exception: print("0x0")' 2>/dev/null || echo 0x0)
   sleep 2
 done
 [ "$ok" = 1 ] || fail "no 4-node P2P mesh evidence formed (node1 bud_netPeerCount=$hex, expected >= 0x3)"
-echo "PASS [2/5]: peer mesh (node1 bud_netPeerCount=$hex -> $count peers)"
+echo "PASS [2/6]: peer mesh (node1 bud_netPeerCount=$hex -> $count peers)"
 
-echo "== [3/5] consensus liveness: bud_blockNumber grows (a max 20 s window) =="
+echo "== [3/6] consensus liveness: bud_blockNumber grows (a max 20 s window) =="
 h1=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))')
 inc=0; h2=$h1
 for _ in 1 2 3 4; do
@@ -67,9 +72,9 @@ for _ in 1 2 3 4; do
   [ "$h2" -gt "$h1" ] && { inc=1; break; }
 done
 [ "$inc" = 1 ] || fail "the height is not advancing ($h1 -> $h2)"
-echo "PASS [3/5]: liveness ($h1 -> $h2)"
+echo "PASS [3/6]: liveness ($h1 -> $h2)"
 
-echo "== [4/5] /metrics endpoint =="
+echo "== [4/6] /metrics endpoint =="
 # A retry loop: the metrics server is opened with tokio::spawn, so when the RPC is ready
 # (step 1) it may not be listening yet. A single-shot curl produced a FAIL in that
 # race (observed 2026-08-14). The gate is not weakened: the metrics must still really
@@ -80,13 +85,39 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [ -n "$body" ] || fail "/metrics is unreachable (HTTP != 2xx after 30 attempts)"
-echo "PASS [4/5]: /metrics 2xx ($(printf '%s' "$body" | wc -l) lines)"
+echo "PASS [4/6]: /metrics 2xx ($(printf '%s' "$body" | wc -l) lines)"
 
-echo "== [5/5] operator RPC isolation (8546 must be closed from the host) =="
+echo "== [5/6] operator RPC isolation (8546 must be closed from the host) =="
 if curl -s --max-time 2 http://127.0.0.1:8546 >/dev/null 2>&1; then
   fail "the operator RPC 127.0.0.1:8546 is reachable from the host - LEAK"
 fi
-echo "PASS [5/5]: the operator RPC is unreachable from the host (connection refused)"
+echo "PASS [5/6]: the operator RPC is unreachable from the host (connection refused)"
 
-echo "DEVNET-MULTINODE-SMOKE: 5/5 PASS"
+echo "== [6/6] follower sync: node2 budlum_chain_height reaches node1 bud_blockNumber (max 120 s) =="
+# node1 produces the blocks, so its height says nothing about whether anyone
+# else follows. node2 has no RPC by design; its height is the
+# budlum_chain_height gauge on its own metrics listener, read from inside the
+# container. Units: bud_blockNumber is the tip index (chain length minus one),
+# budlum_chain_height is the chain length; the gauge is converted to a tip
+# index before comparing. The bar is "within one block of node1 at the moment
+# of reading": node1 keeps producing while the two reads happen, so exact
+# equality would race against block production, and a lag of one is what a
+# live follower looks like. A follower that cannot sync stays at genesis (or
+# wherever it lost the stream) and fails this step.
+node2_tip() {
+  docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" exec -T node2 \
+    curl -sf --max-time 4 http://127.0.0.1:9090/metrics 2>/dev/null \
+    | awk '$1 == "budlum_chain_height" { print int($2) - 1; found = 1 } END { if (!found) print -1 }'
+}
+synced=0; n1=0; n2=-1
+for _ in $(seq 1 60); do
+  n1=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))' 2>/dev/null || echo 0)
+  n2=$(node2_tip)
+  if [ "$n1" -gt 0 ] && [ "$n2" -ge 0 ] && [ $((n1 - n2)) -le 1 ]; then synced=1; break; fi
+  sleep 2
+done
+[ "$synced" = 1 ] || fail "node2 did not catch up with node1 (node1=$n1, node2=$n2)"
+echo "PASS [6/6]: follower sync (node1=$n1, node2=$n2)"
+
+echo "DEVNET-MULTINODE-SMOKE: 6/6 PASS"
 exit 0
