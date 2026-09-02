@@ -329,6 +329,8 @@ pub struct Node {
     pub sync_state: Arc<AtomicUsize>,
     /// Timestamp when sync_state was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
+    /// Outbound request currently responsible for the one active sync round.
+    active_sync_request: Option<request_response::OutboundRequestId>,
     pub pending_bitswap_fetches: PendingBitswapFetches,
     pub max_peers: usize,
     pub validator_address: Option<crate::core::address::Address>,
@@ -498,9 +500,15 @@ impl Node {
             m.p2p_sync_requests.inc();
         }
         let sync = &mut self.swarm.behaviour_mut().sync;
-        let _ = sync.send_request(&peer, req.to_bytes());
+        self.active_sync_request = Some(sync.send_request(&peer, req.to_bytes()));
         info!("Requesting headers from {peer} over /sync (limit {limit})");
         true
+    }
+
+    fn clear_sync_round(&mut self) {
+        self.sync_state.store(0, Ordering::SeqCst);
+        self.sync_started_at.store(0, Ordering::SeqCst);
+        self.active_sync_request = None;
     }
 
     /// The fields a peer advertises in its `Handshake` or `HandshakeAck`.
@@ -646,8 +654,8 @@ impl Node {
 
     /// Open a sync round with a peer that just told us it is ahead.
     async fn sync_if_behind(&mut self, peer_id: PeerId, peer_best_height: u64) {
-        let our_height = self.chain.get_height().await;
-        if peer_best_height > our_height {
+        let our_chain_length = self.chain.get_height().await.saturating_add(1);
+        if peer_best_height > our_chain_length {
             let locator = self.chain.get_locator().await;
             if !self.request_headers_from_peer(Some(peer_id), locator, 500) {
                 info!("Failed to request headers after handshake: a sync round is already open or no peer is eligible");
@@ -937,6 +945,7 @@ impl Node {
             peer_count,
             sync_state,
             sync_started_at,
+            active_sync_request: None,
             pending_bitswap_fetches: HashMap::new(),
             // The server budget. A battery-powered node lowers this through
             // `with_mobile_profile`, which derives it from the power mode
@@ -1406,8 +1415,7 @@ impl Node {
                                            now.saturating_sub(started),
                                            SYNC_TIMEOUT_SECS,
                                        );
-                                       self.sync_state.store(0, Ordering::SeqCst);
-                                       self.sync_started_at.store(0, Ordering::SeqCst);
+                                       self.clear_sync_round();
                                    }
                                }
                            }
@@ -2904,10 +2912,13 @@ impl Node {
                                                        }
                                                    }
                                                }
-                                               request_response::Message::Response { response, .. } => {
+                                               request_response::Message::Response { request_id, response } => {
                                                    if let Ok(msg) = NetworkMessage::from_bytes_validated(&response) {
                                                        match msg {
                                                            NetworkMessage::Headers(headers) => {
+                                                               if self.active_sync_request != Some(request_id) {
+                                                                   continue;
+                                                               }
                                                                let chain_id = self.chain.get_chain_id().await;
                                                                if NetworkMessage::validate_header_batch(&headers, chain_id).is_err() {
                                                                    {
@@ -2918,16 +2929,14 @@ impl Node {
                                                                    // be asked for the blocks. Closing it here
                                                                    // instead of waiting for SYNC_TIMEOUT_SECS
                                                                    // lets the next trigger pick another peer.
-                                                                   self.sync_state.store(0, Ordering::SeqCst);
-                                                                   self.sync_started_at.store(0, Ordering::SeqCst);
+                                                                   self.clear_sync_round();
                                                                    continue;
                                                                }
                                                                if headers.is_empty() {
                                                                    // The peer has nothing past our locator: we
                                                                    // are level with it. Nothing to fetch, so the
                                                                    // round closes now rather than at the timeout.
-                                                                   self.sync_state.store(0, Ordering::SeqCst);
-                                                                   self.sync_started_at.store(0, Ordering::SeqCst);
+                                                                   self.clear_sync_round();
                                                                }
                                                                if !headers.is_empty() {
                                                                    let from = headers[0].index;
@@ -2943,7 +2952,12 @@ impl Node {
                                                                        if let Some(ref m) = self.metrics {
                                                                            m.p2p_sync_requests.inc();
                                                                        }
-                                                                       let _ = self.swarm.behaviour_mut().sync.send_request(&peer, req.to_bytes());
+                                                                       self.active_sync_request = Some(
+                                                                           self.swarm
+                                                                               .behaviour_mut()
+                                                                               .sync
+                                                                               .send_request(&peer, req.to_bytes()),
+                                                                       );
                                                                    }
                                                                }
                                                                {
@@ -2952,11 +2966,15 @@ impl Node {
                                                                }
                                                            }
                                                            NetworkMessage::Blocks(blocks) => {
+                                                               if self.active_sync_request != Some(request_id) {
+                                                                   continue;
+                                                               }
                                                                if blocks.len() > crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS {
                                                                    {
                                                                        let mut pm = self.peer_manager_lock();
                                                                        pm.report_invalid_block(&peer);
                                                                    }
+                                                                   self.clear_sync_round();
                                                                    continue;
                                                                }
                                                                if !blocks.is_empty() {
@@ -2994,8 +3012,7 @@ impl Node {
                                                                        }
                                                                    }
                                                                }
-                                                               self.sync_state.store(0, Ordering::SeqCst);
-                                                               self.sync_started_at.store(0, Ordering::SeqCst);
+                                                               self.clear_sync_round();
                                                                {
                                                                    let mut pm = self.peer_manager_lock();
                                                                    pm.report_good_behavior(&peer);
@@ -3007,17 +3024,18 @@ impl Node {
                                                }
                                            }
                                        }
-                                       request_response::Event::OutboundFailure { peer, error, .. } => {
+                                       request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
                                            warn!("Outbound sync failure to {}: {:?}", peer, error);
                                            {
                                                let mut pm = self.peer_manager_lock();
                                                pm.report_timeout(&peer);
                                            }
-                                           // The request this round was waiting on is gone;
-                                           // close the round so the next trigger can ask
-                                           // another peer instead of waiting out the sweep.
-                                           self.sync_state.store(0, Ordering::SeqCst);
-                                           self.sync_started_at.store(0, Ordering::SeqCst);
+                                           // Handshake requests share `/sync` with chain sync.
+                                           // Only the request that owns the active round may
+                                           // close it; an unrelated failure must leave it alone.
+                                           if self.active_sync_request == Some(request_id) {
+                                               self.clear_sync_round();
+                                           }
                                        }
                                        request_response::Event::InboundFailure { peer, error, .. } => {
                                            warn!("Inbound sync failure from {}: {:?}", peer, error);

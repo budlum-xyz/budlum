@@ -164,6 +164,18 @@ impl ReplayNonceStore {
             ]));
         }
 
+        // State-root V2 migration: heights were added to persisted replay
+        // state after the original processed-message leaf was defined. Keep
+        // that membership leaf and commit the height map separately so a
+        // height-only state difference cannot produce the same root.
+        for (message_id, processed_at_height) in &self.processed_at_height {
+            leaves.push(crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_PROCESSED_HEIGHT_LEAF_V1",
+                message_id,
+                &processed_at_height.to_le_bytes(),
+            ]));
+        }
+
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 }
@@ -198,6 +210,17 @@ mod tests {
         store.mark_processed_at(id, 0).unwrap();
         assert!(store.is_processed(&id));
         assert!(store.mark_processed_at(id, 0).is_err()); // duplicate rejected
+    }
+
+    #[test]
+    fn processed_height_changes_the_replay_root() {
+        let id = [42u8; 32];
+        let mut first = ReplayNonceStore::new();
+        first.mark_processed_at(id, 7).unwrap();
+        let mut second = first.clone();
+        second.processed_at_height.insert(id, 8);
+
+        assert_ne!(first.root(), second.root());
     }
 }
 
