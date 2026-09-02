@@ -221,6 +221,14 @@ impl AiModelSpec {
         if self.request_deadline_blocks == 0 || self.result_deadline_blocks == 0 {
             return Err("Deadlines must be >= 1 block".into());
         }
+        if self.request_deadline_blocks > crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+            || self.result_deadline_blocks > crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+        {
+            return Err(format!(
+                "Deadline windows must be <= {} blocks",
+                crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+            ));
+        }
         // The execution_dims bounds: None means an old record (those cannot
         // ask for an execution proof, which is checked above). Some means at
         // least 2 layers (input plus output), at most 32 layers, and no layer

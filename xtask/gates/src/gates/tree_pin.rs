@@ -68,8 +68,19 @@ fn collect_dir(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> 
         .map_err(|e| format!("tree-pin: cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("tree-pin: read_dir entry: {e}"))?;
+        // `file_type` describes the entry itself, not a link target, so a
+        // committed symlink is neither followed into another directory nor
+        // hashed as a source file (CWE-61). `Path::is_dir` follows links:
+        // `budzero/loop -> .` recursed until the stack ran out, and a link
+        // out of the tree pinned files beyond the declared root.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if kind.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue; // build output, not source
             }
@@ -218,6 +229,40 @@ pub fn run(_root: &Path) -> Result<String, String> {
 }
 
 /// Self-test: every red-injection this gate must catch, caught.
+/// A committed directory symlink is not followed (CWE-61): `loop -> .`
+/// used to recurse until the stack ran out, and a link out of the tree
+/// pinned files beyond the declared root. Neither the loop nor the outside
+/// file may reach the pin set.
+fn symlink_canary(tmp: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        write_pins(tmp)?;
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&outside).map_err(|e| e.to_string())?;
+        std::fs::write(outside.join("leak.rs"), "pub fn leak() {}\n").map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(".", tmp.join("budzero/loop")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&outside, tmp.join("budzero/escape"))
+            .map_err(|e| e.to_string())?;
+        let pinned = collect_tree_files(tmp)?;
+        if pinned
+            .iter()
+            .any(|(k, _)| k.contains("loop") || k.contains("escape"))
+        {
+            return Err(String::from(
+                "tree-pin self-test: a directory symlink was followed",
+            ));
+        }
+        verify_tree(tmp).map_err(|e| {
+            format!("tree-pin self-test: symlinks must not change the pinned set: {e}")
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tmp;
+    }
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     // Isolated tree: two source files under budzero/.
     let tmp = std::env::temp_dir().join(format!("bud-tree-pin-{}", std::process::id()));
@@ -313,6 +358,8 @@ pub fn self_test() -> Result<String, String> {
             "tree-pin self-test: a missing pin file was accepted",
         ));
     }
+
+    symlink_canary(&tmp)?;
 
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(

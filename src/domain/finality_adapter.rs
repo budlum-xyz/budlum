@@ -674,25 +674,38 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
                 "BFT cert set hash does not match validator snapshot".into(),
             ));
         }
-        if let Ok(decoded_set_hash) = hex::decode(&validator_snapshot.set_hash) {
-            if decoded_set_hash.len() == 32 {
-                let mut snapshot_set_hash = [0u8; 32];
-                snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-                if domain.validator_set_hash != [0u8; 32]
-                    && snapshot_set_hash != domain.validator_set_hash
-                {
-                    return Ok(FinalityStatus::Rejected(
-                        "BFT validator snapshot does not match registered domain set".into(),
-                    ));
-                }
-                if commitment.validator_set_hash != [0u8; 32]
-                    && commitment.validator_set_hash != snapshot_set_hash
-                {
-                    return Ok(FinalityStatus::Rejected(
-                        "BFT commitment validator set does not match finality proof".into(),
-                    ));
-                }
-            }
+        // A set hash that cannot be decoded is a refusal, not a step to fall
+        // through. These two comparisons are the only things binding the
+        // proof's validator set to the one the domain registered and the one
+        // the commitment names; `FinalityCert::verify` compares the cert's
+        // string to the snapshot's and never re-derives either, so a proof
+        // whose set hash parses to nothing would otherwise name its own
+        // validator set and sign with it. The PoS adapter and both branches
+        // of the storage attestation adapter already refuse here; this was
+        // the one remaining fall-through.
+        let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
+            .ok()
+            .filter(|bytes| bytes.len() == 32)
+            .ok_or_else(|| {
+                FinalityError(format!(
+                    "BFT finality proof validator set hash is not 32 bytes of hex: {:?}",
+                    validator_snapshot.set_hash
+                ))
+            })?;
+        let mut snapshot_set_hash = [0u8; 32];
+        snapshot_set_hash.copy_from_slice(&decoded_set_hash);
+        if domain.validator_set_hash != [0u8; 32] && snapshot_set_hash != domain.validator_set_hash
+        {
+            return Ok(FinalityStatus::Rejected(
+                "BFT validator snapshot does not match registered domain set".into(),
+            ));
+        }
+        if commitment.validator_set_hash != [0u8; 32]
+            && commitment.validator_set_hash != snapshot_set_hash
+        {
+            return Ok(FinalityStatus::Rejected(
+                "BFT commitment validator set does not match finality proof".into(),
+            ));
         }
 
         // Cryptographic quorum + aggregate-signature verification.
@@ -1391,6 +1404,56 @@ mod tests {
                     &domain,
                     &commitment,
                     &FinalityProof::PoS {
+                        cert,
+                        validator_snapshot: snapshot,
+                    },
+                )
+                .expect_err("a set hash that cannot be decoded must not reach the cert");
+            assert!(
+                err.0.contains("set hash"),
+                "set hash {unparsable:?} is not 32 bytes of hex; it has to be refused as such, \
+                 but the proof fell through to: {}",
+                err.0
+            );
+        }
+    }
+
+    /// The BFT adapter had the fall-through the PoS test above closes for
+    /// PoS: an undecodable snapshot set hash skipped both validator-set
+    /// bindings and went straight to `cert.verify`, which only compares two
+    /// relayer-supplied strings. With a non-empty snapshot the proof names
+    /// its own validator set. It has to be refused before the certificate.
+    #[test]
+    fn bft_finality_refuses_a_set_hash_it_cannot_decode() {
+        let domain = default_domain(3, ConsensusKind::Bft, 45262, "bft-finality", 0);
+        let commitment = commitment(ConsensusKind::Bft);
+        let adapter = BftFinalityAdapter::default();
+
+        for unparsable in ["", "zz", "abcd", &"ab".repeat(31)] {
+            let mut snapshot = ValidatorSetSnapshot::new(0, vec![]);
+            snapshot.validators = vec![crate::chain::finality::ValidatorEntry {
+                address: crate::core::address::Address::from([9u8; 32]),
+                stake: 1,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: Vec::new(),
+            }];
+            snapshot.set_hash = unparsable.to_string();
+            let cert = FinalityCert {
+                epoch: 0,
+                checkpoint_height: commitment.domain_height,
+                checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                agg_sig_bls: vec![],
+                bitmap: vec![],
+                set_hash: snapshot.set_hash.clone(),
+            };
+            let err = adapter
+                .verify_finality(
+                    &domain,
+                    &commitment,
+                    &FinalityProof::Bft {
+                        round: 0,
+                        commit_hash: commitment.domain_block_hash,
                         cert,
                         validator_snapshot: snapshot,
                     },

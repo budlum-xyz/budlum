@@ -170,8 +170,7 @@ mod tests {
 
     #[test]
     fn parses_report() {
-        let dir = std::env::temp_dir().join(format!("budlum-geiger-t-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-geiger-t").unwrap();
         let f = dir.join("r.txt");
         std::fs::write(
             &f,

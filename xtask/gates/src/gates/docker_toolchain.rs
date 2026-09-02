@@ -309,8 +309,7 @@ mod tests {
 
     #[test]
     fn parses_channel_and_tag() {
-        let dir = std::env::temp_dir().join(format!("budlum-docker-t-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-docker-t").unwrap();
         std::fs::write(
             dir.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"1.97.1\"\n",

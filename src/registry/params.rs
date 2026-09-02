@@ -332,7 +332,7 @@ impl Default for RegistryParams {
             // Tolerated, low enough that sustained garbage-signature spam is
             // Caught within one epoch. Governance-tunable per network.
             max_invalid_votes_per_epoch: 20,
-            liveness_slashing_enabled: true,
+            liveness_slashing_enabled: false,
             // 1% - the rate the three hardcoded call sites already used, now
             // stated once and tunable.
             bridge_relayer_fee_ppm: 10_000,
@@ -722,5 +722,16 @@ mod tests {
         };
         let err = p.validate().expect_err("slash > scale must fail");
         assert!(err.contains("double_sign_slash_ratio_fixed"), "got: {err}");
+    }
+
+    /// The field's own documentation, the comment beside its default and the
+    /// epoch-close code (`OBSERVE mode by default`) all say liveness slashing
+    /// starts off. The value said `true`, so every fresh registry (and every
+    /// snapshot restore that fills the registry from `Default`) slashed and
+    /// jailed a validator after 20 missed epochs, which is what an honest
+    /// node's outage looks like. The default is the observe-only one.
+    #[test]
+    fn liveness_slashing_defaults_to_observe_only() {
+        assert!(!RegistryParams::default().liveness_slashing_enabled);
     }
 }
