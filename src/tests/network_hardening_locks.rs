@@ -343,8 +343,7 @@ mod tests {
             "New connection, requesting headers",
             "Fork detected at height",
             "is ahead of our chain",
-            "Failed to request headers after handshake",
-            "Failed to request headers after handshake ack",
+            "fn sync_if_behind(",
             "NetworkMessage::NewTip { height, hash: _ } => {",
         ];
         for marker in triggers {
@@ -357,6 +356,73 @@ mod tests {
                 "the sync trigger near {marker:?} must go through request_headers_from_peer"
             );
         }
+        // Both handshake directions, on both transports, hand the peer's
+        // height to `sync_if_behind`; that is how a follower learns it is
+        // behind before any block reaches it.
+        let calls = NODE_RS.matches("self.sync_if_behind(").count();
+        assert!(
+            calls >= 3,
+            "Handshake, HandshakeAck (gossip) and the /sync handshake arm must all call sync_if_behind, found {calls}"
+        );
+    }
+
+    /// The handshake is sent to the peer, not published to the mesh.
+    ///
+    /// On a connection that has just been established there is no gossip
+    /// mesh yet, so `gossipsub.publish` of the `Handshake` failed with
+    /// `NoPeersSubscribedToTopic` on every node of the devnet, nobody was
+    /// ever marked handshaked, and every block from the producer was dropped
+    /// as "before completing handshake" (measured in the four-node smoke:
+    /// node2 stayed at genesis while node1 reached height 147). The
+    /// handshake now goes over `/sync` to the peer that just connected, the
+    /// `/sync` request arm admits it before the handshaked gate (it is what
+    /// establishes that gate), and the ack travels back the same way.
+    #[test]
+    fn handshake_travels_over_the_peer_bound_channel() {
+        let lines = code_lines(NODE_RS);
+        let mut published = Vec::new();
+        for (i, (n, line)) in lines.iter().enumerate() {
+            let builds = line.contains("handshake_message(")
+                || line.contains("NetworkMessage::Handshake {")
+                || line.contains("NetworkMessage::HandshakeAck {");
+            if !builds || line.ends_with("=> {") || line.contains("Ok(NetworkMessage::") {
+                continue;
+            }
+            let window: Vec<&str> = lines[i..(i + 8).min(lines.len())]
+                .iter()
+                .map(|(_, l)| l.as_str())
+                .collect();
+            if window.iter().any(|l| l.contains("gossipsub.publish(")) {
+                published.push(format!("line {n}: {line}"));
+            }
+        }
+        assert!(
+            published.is_empty(),
+            "a handshake is published to gossip at {published:?}; on a fresh connection \
+             there is no mesh and the publish fails, so no peer ever becomes handshaked"
+        );
+
+        let connect_at = NODE_RS
+            .find("sending Handshake over /sync")
+            .expect("the connection-established arm must send the handshake over /sync");
+        let window = &NODE_RS[connect_at..(connect_at + 400).min(NODE_RS.len())];
+        assert!(
+            window.contains("sync.send_request(&peer_id, handshake.to_bytes())"),
+            "the opening handshake must be a /sync request to the connecting peer"
+        );
+
+        let request_arm_at = NODE_RS
+            .find("request_response::Message::Request { request, channel, .. } => {")
+            .expect("the /sync request arm must exist");
+        let arm = &NODE_RS[request_arm_at..(request_arm_at + 2500).min(NODE_RS.len())];
+        assert!(
+            arm.contains("(is_handshake || pm.is_handshaked(&peer))"),
+            "the /sync request arm must admit the handshake before the handshaked gate"
+        );
+        assert!(
+            arm.contains("!pm.is_banned(&peer)") && arm.contains("pm.check_rate_limit(&peer)"),
+            "the handshake exemption must not lift the ban or the rate limit"
+        );
     }
 
     /// The continuation of a sync round stays on the channel it started on.

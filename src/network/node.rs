@@ -269,6 +269,16 @@ fn handshake_origin_matches_peer(
     message_source == Some(propagation_source)
 }
 
+/// What a peer says about itself when it handshakes, in either direction.
+struct HandshakeFields {
+    version_major: u32,
+    version_minor: u32,
+    chain_id: u64,
+    best_height: u64,
+    validator_set_hash: String,
+    supported_schemes: Vec<String>,
+}
+
 fn supports_required_bls_scheme(schemes: &[String]) -> bool {
     schemes
         .iter()
@@ -491,6 +501,153 @@ impl Node {
         let _ = sync.send_request(&peer, req.to_bytes());
         info!("Requesting headers from {peer} over /sync (limit {limit})");
         true
+    }
+
+    /// The fields a peer advertises in its `Handshake` or `HandshakeAck`.
+    fn handshake_fields(msg: NetworkMessage) -> Option<(&'static str, HandshakeFields)> {
+        match msg {
+            NetworkMessage::Handshake {
+                version_major,
+                version_minor,
+                chain_id,
+                best_height,
+                validator_set_hash,
+                supported_schemes,
+            } => Some((
+                "Handshake",
+                HandshakeFields {
+                    version_major,
+                    version_minor,
+                    chain_id,
+                    best_height,
+                    validator_set_hash,
+                    supported_schemes,
+                },
+            )),
+            NetworkMessage::HandshakeAck {
+                version_major,
+                version_minor,
+                chain_id,
+                best_height,
+                validator_set_hash,
+                supported_schemes,
+            } => Some((
+                "HandshakeAck",
+                HandshakeFields {
+                    version_major,
+                    version_minor,
+                    chain_id,
+                    best_height,
+                    validator_set_hash,
+                    supported_schemes,
+                },
+            )),
+            _ => None,
+        }
+    }
+
+    /// Our side of the handshake: the same fields whether it opens the
+    /// exchange (`Handshake`) or answers it (`HandshakeAck`).
+    async fn handshake_message(&self, ack: bool) -> NetworkMessage {
+        let version_major = crate::core::encoding::PROTOCOL_VERSION_MAJOR;
+        let version_minor = crate::core::encoding::PROTOCOL_VERSION_MINOR;
+        let chain_id = self.chain.get_chain_id().await;
+        let best_height = self.chain.get_height().await + 1;
+        let validator_set_hash = self.chain.get_validator_set_hash().await;
+        let supported_schemes = vec![
+            "ED25519".to_string(),
+            crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            "DILITHIUM".to_string(),
+        ];
+        if ack {
+            NetworkMessage::HandshakeAck {
+                version_major,
+                version_minor,
+                chain_id,
+                best_height,
+                validator_set_hash,
+                supported_schemes,
+            }
+        } else {
+            NetworkMessage::Handshake {
+                version_major,
+                version_minor,
+                chain_id,
+                best_height,
+                validator_set_hash,
+                supported_schemes,
+            }
+        }
+    }
+
+    /// Admit or ban a peer on the fields of its `Handshake` / `HandshakeAck`.
+    ///
+    /// Returns the peer's advertised height when the handshake is accepted,
+    /// `None` when the peer was banned. The same rule for both directions
+    /// and both transports.
+    async fn admit_handshake(
+        &mut self,
+        peer_id: PeerId,
+        what: &str,
+        fields: HandshakeFields,
+    ) -> Option<u64> {
+        let HandshakeFields {
+            version_major,
+            version_minor,
+            chain_id,
+            best_height,
+            validator_set_hash,
+            supported_schemes,
+        } = fields;
+        let supported_schemes = supported_schemes.as_slice();
+        let my_chain_id = self.chain.get_chain_id().await;
+        if chain_id != my_chain_id {
+            warn!("Peer {peer_id} {what} has wrong chain_id {chain_id} (expected {my_chain_id}). Banning.");
+            self.peer_manager_lock().ban_peer(&peer_id);
+            return None;
+        }
+        if !crate::core::encoding::is_compatible_version(version_major, version_minor) {
+            warn!("Peer {peer_id} {what} has incompatible protocol v{version_major}.{version_minor}. Banning.");
+            self.peer_manager_lock().ban_peer(&peer_id);
+            return None;
+        }
+        if !supports_required_bls_scheme(supported_schemes) {
+            warn!(
+                "Peer {} {} does not advertise required BLS scheme {}. Banning.",
+                peer_id,
+                what,
+                crate::chain::finality::BLS_SCHEME_RFC9380_V1
+            );
+            self.peer_manager_lock().ban_peer(&peer_id);
+            return None;
+        }
+        info!(
+            "{what} from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
+            peer_id,
+            version_major,
+            version_minor,
+            chain_id,
+            best_height,
+            validator_set_hash,
+            supported_schemes
+        );
+        {
+            let mut pm = self.peer_manager_lock();
+            pm.set_handshaked(&peer_id, true);
+            pm.report_good_behavior(&peer_id);
+        }
+        Some(best_height)
+    }
+
+    /// Open a sync round with a peer that just told us it is ahead.
+    async fn sync_if_behind(&mut self, peer_id: PeerId, peer_best_height: u64) {
+        let our_height = self.chain.get_height().await;
+        if peer_best_height > our_height {
+            let locator = self.chain.get_locator().await;
+            if !self.request_headers_from_peer(Some(peer_id), locator, 500) {
+                info!("Failed to request headers after handshake: a sync round is already open or no peer is eligible");
+            }
+        }
     }
 
     /// The checks a gossip block must pass before its height is looked at.
@@ -1678,26 +1835,19 @@ impl Node {
                                    }
                                    info!("Connected to {peer_id}, Peers: {count}");
 
-                                   let handshake = NetworkMessage::Handshake {
-                                       version_major: crate::core::encoding::PROTOCOL_VERSION_MAJOR,
-                                       version_minor: crate::core::encoding::PROTOCOL_VERSION_MINOR,
-                                       chain_id: self.chain.get_chain_id().await,
-                                       best_height: self.chain.get_height().await + 1,
-                                       validator_set_hash: self.chain.get_validator_set_hash().await,
-                                       supported_schemes: vec![
-                                           "ED25519".to_string(),
-                                           crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
-                                           "DILITHIUM".to_string(),
-                                       ],
-                                   };
-
+                                   // The handshake goes to this peer over `/sync`, the
+                                   // peer-bound request_response protocol. It used to be
+                                   // published to the gossip topic, and on a connection
+                                   // this young the mesh does not exist yet: every node
+                                   // logged `NoPeersSubscribedToTopic`, no peer ever
+                                   // became handshaked, and every later block from the
+                                   // producer was dropped as "before completing
+                                   // handshake". A follower could not follow at all.
+                                   let handshake = self.handshake_message(false).await;
                                    let chain_len = self.chain.get_height().await + 1;
-                                   info!("DEBUG: Connected to {peer_id}, Chain length: {chain_len}, sending Handshake");
-
-                                   let topic = gossipsub::IdentTopic::new("blocks");
-                                   if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, handshake.to_bytes()) {
-                                       warn!("Failed to send Handshake: {e}");
-                                   }
+                                   info!("Connected to {peer_id}, Chain length: {chain_len}, sending Handshake over /sync");
+                                   let sync = &mut self.swarm.behaviour_mut().sync;
+                                   let _ = sync.send_request(&peer_id, handshake.to_bytes());
 
                                    if self.chain.get_height().await == 0 {
                                        if let Some(last_block) = self.chain.get_block(0).await {
@@ -2229,6 +2379,10 @@ impl Node {
                                            }
 
                                            NetworkMessage::Handshake { version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes } => {
+                                               // Kept for peers that still open the exchange on
+                                               // the topic. The signed source must be the
+                                               // propagating peer: a relayed handshake would
+                                               // mark the wrong peer as handshaked.
                                                if !handshake_origin_matches_peer(peer_id, message.source) {
                                                    warn!(
                                                        "Ignoring relayed/spoofed Handshake: propagation_source={}, signed_source={:?}",
@@ -2241,56 +2395,25 @@ impl Node {
                                                    }
                                                    continue;
                                                }
-                                               let my_chain_id = self.chain.get_chain_id().await;
-                                               if chain_id != my_chain_id {
-                                                   warn!("Peer {peer_id} has wrong chain_id {chain_id} (expected {my_chain_id}). Banning.");
-                                                   self.peer_manager_lock().ban_peer(&peer_id);
-                                                   continue;
-                                               }
-                                               if !crate::core::encoding::is_compatible_version(version_major, version_minor) {
-                                                   warn!("Peer {peer_id} has incompatible protocol v{version_major}.{version_minor}. Banning.");
-                                                   self.peer_manager_lock().ban_peer(&peer_id);
-                                                   continue;
-                                               }
-                                               if !supports_required_bls_scheme(&supported_schemes) {
-                                                   warn!(
-                                                       "Peer {} does not advertise required BLS scheme {}. Banning.",
-                                                       peer_id,
-                                                       crate::chain::finality::BLS_SCHEME_RFC9380_V1
-                                                   );
-                                                   self.peer_manager_lock()
-                                                       .ban_peer(&peer_id);
-                                                   continue;
-                                               }
-                                               info!("Handshake from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
-                                                   peer_id, version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes);
-                                               self.peer_manager_lock().set_handshaked(&peer_id, true);
-                                               let our_height = self.chain.get_height().await;
-                                               if best_height > our_height {
-                                                   let locator = self.chain.get_locator().await;
-                                                   if !self.request_headers_from_peer(Some(peer_id), locator, 500) {
-                                                       info!("Failed to request headers after handshake: a sync round is already open or no peer is eligible");
-                                                   }
-                                               }
-
-                                               let response = NetworkMessage::HandshakeAck {
-                                                   version_major: crate::core::encoding::PROTOCOL_VERSION_MAJOR,
-                                                   version_minor: crate::core::encoding::PROTOCOL_VERSION_MINOR,
-                                                   chain_id: my_chain_id,
-                                                   best_height: self.chain.get_height().await + 1,
-                                                   validator_set_hash: self.chain.get_validator_set_hash().await,
-                                                   supported_schemes: vec![
-                                                       "ED25519".to_string(),
-                                                       crate::chain::finality::BLS_SCHEME_RFC9380_V1
-                                                           .to_string(),
-                                                       "DILITHIUM".to_string(),
-                                                   ],
+                                               let fields = HandshakeFields {
+                                                   version_major,
+                                                   version_minor,
+                                                   chain_id,
+                                                   best_height,
+                                                   validator_set_hash,
+                                                   supported_schemes,
                                                };
-                                               let topic = gossipsub::IdentTopic::new("blocks");
-                                               let data = response.to_bytes();
-                                               if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
-                                                   warn!("Failed to send HandshakeAck: {e}");
-                                               }
+                                               let Some(peer_best_height) =
+                                                   self.admit_handshake(peer_id, "Handshake", fields).await
+                                               else {
+                                                   continue;
+                                               };
+                                               self.sync_if_behind(peer_id, peer_best_height).await;
+                                               // Answer on the peer-bound channel: the ack is
+                                               // for this peer, not for the mesh.
+                                               let response = self.handshake_message(true).await;
+                                               let sync = &mut self.swarm.behaviour_mut().sync;
+                                               let _ = sync.send_request(&peer_id, response.to_bytes());
                                            }
 
                                            NetworkMessage::HandshakeAck { version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes } => {
@@ -2306,41 +2429,20 @@ impl Node {
                                                    }
                                                    continue;
                                                }
-                                               let my_chain_id = self.chain.get_chain_id().await;
-                                               if chain_id != my_chain_id {
-                                                   warn!("Peer {peer_id} Ack with wrong chain_id {chain_id} (expected {my_chain_id}). Banning.");
-                                                   self.peer_manager_lock().ban_peer(&peer_id);
+                                               let fields = HandshakeFields {
+                                                   version_major,
+                                                   version_minor,
+                                                   chain_id,
+                                                   best_height,
+                                                   validator_set_hash,
+                                                   supported_schemes,
+                                               };
+                                               let Some(peer_best_height) =
+                                                   self.admit_handshake(peer_id, "HandshakeAck", fields).await
+                                               else {
                                                    continue;
-                                               }
-                                               if !crate::core::encoding::is_compatible_version(version_major, version_minor) {
-                                                   warn!("Peer {peer_id} Ack has incompatible protocol v{version_major}.{version_minor}. Banning.");
-                                                   self.peer_manager_lock().ban_peer(&peer_id);
-                                                   continue;
-                                               }
-                                               if !supports_required_bls_scheme(&supported_schemes) {
-                                                   warn!(
-                                                       "Peer {} Ack does not advertise required BLS scheme {}. Banning.",
-                                                       peer_id,
-                                                       crate::chain::finality::BLS_SCHEME_RFC9380_V1
-                                                   );
-                                                   self.peer_manager_lock()
-                                                       .ban_peer(&peer_id);
-                                                   continue;
-                                               }
-                                               info!("HandshakeAck from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
-                                                   peer_id, version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes);
-                                               {
-                                                   let mut pm = self.peer_manager_lock();
-                                                   pm.set_handshaked(&peer_id, true);
-                                                   pm.report_good_behavior(&peer_id);
-                                               }
-                                               let our_height = self.chain.get_height().await;
-                                               if best_height > our_height {
-                                                   let locator = self.chain.get_locator().await;
-                                                   if !self.request_headers_from_peer(Some(peer_id), locator, 500) {
-                                                       info!("Failed to request headers after handshake ack: a sync round is already open or no peer is eligible");
-                                                   }
-                                               }
+                                               };
+                                               self.sync_if_behind(peer_id, peer_best_height).await;
                                            }
 
                                            NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls } => {
@@ -2689,17 +2791,52 @@ impl Node {
                                        request_response::Event::Message { peer, message, .. } => {
                                            match message {
                                                request_response::Message::Request { request, channel, .. } => {
+                                                   // The handshake itself arrives here before the
+                                                   // peer is handshaked: it is what makes it so. It
+                                                   // still costs a rate token and a banned peer is
+                                                   // still refused; only the handshaked check is
+                                                   // what this message establishes.
+                                                   let parsed = NetworkMessage::from_bytes_validated(&request);
+                                                   let is_handshake = matches!(
+                                                       parsed,
+                                                       Ok(NetworkMessage::Handshake { .. })
+                                                           | Ok(NetworkMessage::HandshakeAck { .. })
+                                                   );
                                                    let request_allowed = {
                                                        let mut pm = self.peer_manager_lock();
                                                        // Security review (HIGH): a banned peer cannot
                                                        // issue a /sync request; the ban is checked
                                                        // together with the handshake and the rate limit.
                                                        !pm.is_banned(&peer)
-                                                           && pm.is_handshaked(&peer)
+                                                           && (is_handshake || pm.is_handshaked(&peer))
                                                            && pm.check_rate_limit(&peer)
                                                    };
                                                    if !request_allowed {
                                                        warn!("Rejected sync request from unhandshaked/rate-limited/banned peer {peer}");
+                                                       continue;
+                                                   }
+                                                   if is_handshake {
+                                                       let Some((what, fields)) = parsed.ok().and_then(Self::handshake_fields) else {
+                                                           continue;
+                                                       };
+                                                       let ack = what == "HandshakeAck";
+                                                       // The channel is answered so the requester's
+                                                       // request_response state machine closes
+                                                       // cleanly; the ack itself travels as its own
+                                                       // request, like the opening message.
+                                                       let sync = &mut self.swarm.behaviour_mut().sync;
+                                                       let _ = sync.send_response(channel, Vec::new());
+                                                       let Some(peer_best_height) =
+                                                           self.admit_handshake(peer, what, fields).await
+                                                       else {
+                                                           continue;
+                                                       };
+                                                       self.sync_if_behind(peer, peer_best_height).await;
+                                                       if !ack {
+                                                           let response = self.handshake_message(true).await;
+                                                           let sync = &mut self.swarm.behaviour_mut().sync;
+                                                           let _ = sync.send_request(&peer, response.to_bytes());
+                                                       }
                                                        continue;
                                                    }
                                                    if let Some(ref m) = self.metrics {
@@ -2827,7 +2964,9 @@ impl Node {
                                                                            for block in blocks {
                                                                                let h = self.chain.get_height().await;
                                                                                if block.index == h + 1 {
+                                                                                   let index = block.index;
                                                                                    if let Ok(pruned_cids) = self.chain.validate_and_add_block(block).await {
+                                                                                       info!("Added block #{index} to local chain");
                                                                                        for cid in pruned_cids {
                                                                                            let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                                        }
@@ -2839,7 +2978,9 @@ impl Node {
                                                                        for block in blocks {
                                                                            let h = self.chain.get_height().await;
                                                                            if block.index == h + 1 {
+                                                                               let index = block.index;
                                                                                if let Ok(pruned_cids) = self.chain.validate_and_add_block(block).await {
+                                                                                   info!("Added block #{index} to local chain");
                                                                                    for cid in pruned_cids {
                                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                                    }
