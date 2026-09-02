@@ -268,6 +268,240 @@ mod tests {
         }
     }
 
+    /// A sync request leaves this node over `/sync`, never over gossip.
+    ///
+    /// The gossip arms for `GetHeaders` and `GetBlocksRange` stopped
+    /// answering when the reflected-amplification finding was fixed: a reply
+    /// published to the topic reaches the whole mesh, not the asker. The
+    /// requesting side was never moved, so every `GetHeaders` this node sent
+    /// was published to a topic on which every receiver only logs and
+    /// `continue`s. No `Headers` ever came back, the request_response chain
+    /// never started, and a node that missed one block could not catch up
+    /// again. `sync_state` sat at 1 until `SYNC_TIMEOUT_SECS` reset it, and
+    /// the next trigger repeated the cycle.
+    ///
+    /// The lock is on the code, not on a comment: no code line may build a
+    /// `GetHeaders` or `GetBlocksRange` request and hand it to
+    /// `gossipsub.publish`. The two-line form (`let req = ...; publish(req)`)
+    /// is caught by looking at the window after each construction.
+    #[test]
+    fn sync_requests_are_never_published_to_gossip() {
+        let lines = code_lines(NODE_RS);
+        let mut offenders = Vec::new();
+        for (i, (n, line)) in lines.iter().enumerate() {
+            let builds_request = line.contains("NetworkMessage::GetHeaders {")
+                || line.contains("NetworkMessage::GetBlocksRange {");
+            if !builds_request || line.ends_with("=> {") {
+                continue;
+            }
+            let window: Vec<&str> = lines[i..(i + 12).min(lines.len())]
+                .iter()
+                .map(|(_, l)| l.as_str())
+                .collect();
+            if window.iter().any(|l| l.contains("gossipsub.publish(")) {
+                offenders.push(format!("line {n}: {line}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "node.rs publishes a sync request to gossip at {offenders:?}; every \
+             receiver ignores gossip sync requests, so the request is lost. \
+             Send it over `/sync` with `sync.send_request` instead."
+        );
+    }
+
+    /// The opening `GetHeaders` of a sync round goes out over `/sync`.
+    ///
+    /// The previous lock says where a request must not go; this one says
+    /// where it must go, so deleting the request altogether cannot satisfy
+    /// the pair. Each trigger (new connection, handshake, handshake ack, a
+    /// block ahead of us, a fork, a new tip) hands the request to one helper,
+    /// and that helper is the only place a `GetHeaders` is sent. The helper
+    /// picks a handshaked peer and calls `sync.send_request`.
+    #[test]
+    fn sync_rounds_start_over_the_peer_bound_channel() {
+        let at = NODE_RS
+            .find("fn request_headers_from_peer(")
+            .expect("the sync helper `request_headers_from_peer` must exist");
+        let body = &NODE_RS[at..(at + 3000).min(NODE_RS.len())];
+        let end = body.find("\n    }\n").unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("NetworkMessage::GetHeaders {"),
+            "the helper must build the GetHeaders request"
+        );
+        assert!(
+            body.contains("sync.send_request("),
+            "the helper must send it over the /sync request_response protocol"
+        );
+        assert!(
+            !body.contains("gossipsub.publish("),
+            "the helper must not fall back to gossip"
+        );
+
+        let triggers = [
+            "New connection, requesting headers",
+            "Fork detected at height",
+            "is ahead of our chain",
+            "fn sync_if_behind(",
+            "NetworkMessage::NewTip { height, hash: _ } => {",
+        ];
+        for marker in triggers {
+            let at = NODE_RS
+                .find(marker)
+                .unwrap_or_else(|| panic!("trigger marker {marker:?} must still exist"));
+            let window = &NODE_RS[at.saturating_sub(1800)..(at + 1800).min(NODE_RS.len())];
+            assert!(
+                window.contains("request_headers_from_peer("),
+                "the sync trigger near {marker:?} must go through request_headers_from_peer"
+            );
+        }
+        // Both handshake directions, on both transports, hand the peer's
+        // height to `sync_if_behind`; that is how a follower learns it is
+        // behind before any block reaches it.
+        let calls = NODE_RS.matches("self.sync_if_behind(").count();
+        assert!(
+            calls >= 3,
+            "Handshake, HandshakeAck (gossip) and the /sync handshake arm must all call sync_if_behind, found {calls}"
+        );
+    }
+
+    /// The handshake is sent to the peer, not published to the mesh.
+    ///
+    /// On a connection that has just been established there is no gossip
+    /// mesh yet, so `gossipsub.publish` of the `Handshake` failed with
+    /// `NoPeersSubscribedToTopic` on every node of the devnet, nobody was
+    /// ever marked handshaked, and every block from the producer was dropped
+    /// as "before completing handshake" (measured in the four-node smoke:
+    /// node2 stayed at genesis while node1 reached height 147). The
+    /// handshake now goes over `/sync` to the peer that just connected, the
+    /// `/sync` request arm admits it before the handshaked gate (it is what
+    /// establishes that gate), and the ack travels back the same way.
+    #[test]
+    fn handshake_travels_over_the_peer_bound_channel() {
+        let lines = code_lines(NODE_RS);
+        let mut published = Vec::new();
+        for (i, (n, line)) in lines.iter().enumerate() {
+            let builds = line.contains("handshake_message(")
+                || line.contains("NetworkMessage::Handshake {")
+                || line.contains("NetworkMessage::HandshakeAck {");
+            if !builds || line.ends_with("=> {") || line.contains("Ok(NetworkMessage::") {
+                continue;
+            }
+            let window: Vec<&str> = lines[i..(i + 8).min(lines.len())]
+                .iter()
+                .map(|(_, l)| l.as_str())
+                .collect();
+            if window.iter().any(|l| l.contains("gossipsub.publish(")) {
+                published.push(format!("line {n}: {line}"));
+            }
+        }
+        assert!(
+            published.is_empty(),
+            "a handshake is published to gossip at {published:?}; on a fresh connection \
+             there is no mesh and the publish fails, so no peer ever becomes handshaked"
+        );
+
+        let connect_at = NODE_RS
+            .find("sending Handshake over /sync")
+            .expect("the connection-established arm must send the handshake over /sync");
+        let window = &NODE_RS[connect_at..(connect_at + 400).min(NODE_RS.len())];
+        assert!(
+            window.contains("sync.send_request(&peer_id, handshake.to_bytes())"),
+            "the opening handshake must be a /sync request to the connecting peer"
+        );
+
+        let request_arm_at = NODE_RS
+            .find("request_response::Message::Request { request, channel, .. } => {")
+            .expect("the /sync request arm must exist");
+        let arm = &NODE_RS[request_arm_at..(request_arm_at + 2500).min(NODE_RS.len())];
+        assert!(
+            arm.contains("(is_handshake || pm.is_handshaked(&peer))"),
+            "the /sync request arm must admit the handshake before the handshaked gate"
+        );
+        assert!(
+            arm.contains("!pm.is_banned(&peer)") && arm.contains("pm.check_rate_limit(&peer)"),
+            "the handshake exemption must not lift the ban or the rate limit"
+        );
+    }
+
+    /// The continuation of a sync round stays on the channel it started on.
+    ///
+    /// A `Headers` batch that arrives over `/sync` is answered with a
+    /// `GetBlocksRange` over `/sync` to the same peer. The gossip `Headers`
+    /// arm used to publish its follow-up `GetBlocksRange` to the topic, where
+    /// it was ignored like the opening request. Gossip `Headers` is not a
+    /// reply this node asked for, so the arm validates and scores, and the
+    /// follow-up is issued over `/sync` if it is issued at all.
+    #[test]
+    fn sync_continuation_does_not_leave_the_peer_bound_channel() {
+        let gossip_arm_at = NODE_RS
+            .find("NetworkMessage::Headers(headers) => {")
+            .expect("the gossip Headers arm must exist");
+        let arm = &NODE_RS[gossip_arm_at..(gossip_arm_at + 2500).min(NODE_RS.len())];
+        let arm_end = arm
+            .find("NetworkMessage::GetBlocksRange { from, to } => {")
+            .unwrap_or(arm.len());
+        let arm = &arm[..arm_end];
+        let code: String = code_lines(arm).into_iter().map(|(_, l)| l + "\n").collect();
+        assert!(
+            !code.contains("gossipsub.publish("),
+            "the gossip Headers arm must not publish a GetBlocksRange to the topic"
+        );
+    }
+
+    /// A gossip block that is ahead of us, or forks from us, is checked
+    /// before it can start a sync round.
+    ///
+    /// `validate_block_size` was the only check on those two paths, so a peer
+    /// could send `index = u64::MAX` blocks with a fresh index in every
+    /// message (the gossip dedup cache keys on bytes, so each one is new) and
+    /// make this node compute a locator and open a sync round per message,
+    /// with no penalty to the sender. The cheap header checks (chain id,
+    /// the block hash matching its own contents) run first, a failure is
+    /// reported as an invalid block, and a sync round is not opened while one
+    /// is already running.
+    #[test]
+    fn out_of_order_gossip_blocks_are_checked_before_they_trigger_sync() {
+        let at = NODE_RS
+            .find("is ahead of our chain")
+            .expect("the ahead-of-chain path must exist");
+        let block_arm_start = NODE_RS[..at]
+            .rfind("NetworkMessage::Block(block) => {")
+            .expect("the gossip Block arm must precede the ahead-of-chain path");
+        let arm = &NODE_RS[block_arm_start..at];
+        let code: String = code_lines(arm).into_iter().map(|(_, l)| l + "\n").collect();
+        assert!(
+            code.contains("block_passes_cheap_checks(")
+                || code.contains("fn block_passes_cheap_checks("),
+            "the gossip Block arm must run the cheap header checks before the height comparison"
+        );
+        assert!(
+            code.contains("report_invalid_block("),
+            "a gossip block that fails the cheap checks must cost the sender"
+        );
+        let helper_at = NODE_RS
+            .find("fn block_passes_cheap_checks(")
+            .expect("block_passes_cheap_checks must exist");
+        let helper = &NODE_RS[helper_at..(helper_at + 1500).min(NODE_RS.len())];
+        assert!(
+            helper.contains("chain_id"),
+            "the cheap checks must compare chain_id"
+        );
+        assert!(
+            helper.contains("calculate_hash()"),
+            "the cheap checks must recompute the block hash"
+        );
+        let sync_helper_at = NODE_RS
+            .find("fn request_headers_from_peer(")
+            .expect("request_headers_from_peer must exist");
+        let sync_helper = &NODE_RS[sync_helper_at..(sync_helper_at + 3000).min(NODE_RS.len())];
+        assert!(
+            sync_helper.contains("sync_state.load(Ordering::SeqCst) == 1"),
+            "a sync round must not be opened while one is already running"
+        );
+    }
+
     /// Canary for the comment stripper: a mention inside a comment must not
     /// trip the lock, and real code must.
     #[test]

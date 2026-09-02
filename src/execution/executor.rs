@@ -989,9 +989,18 @@ impl Executor {
                                         "Bridge fee exceeds maximum representable balance",
                                     ));
                                 }
-                                // Use checked addition for bridge credits
+                                // This is the supply-creating path: the on-chain
+                                // counterpart of the asset arriving from the bridge
+                                // is minted here, the same as in
+                                // `Blockchain::mint_bridge_transfer_from_verified_event`.
+                                // `try_mint_balance` asks the fixed ceiling; a plain
+                                // `try_add_balance` only guarded `u64` overflow, so a
+                                // chain already at `BUD_TOTAL_SUPPLY` kept minting
+                                // through this entry point while the RPC entry point
+                                // refused. The relayer fee comes out of the same mint
+                                // and is subject to the same ceiling.
                                 state
-                                    .try_add_balance(&transfer.recipient, final_amount as u64)
+                                    .try_mint_balance(&transfer.recipient, final_amount as u64)
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_mint_overflow", &e)
                                     })?;
@@ -1000,7 +1009,7 @@ impl Executor {
                                 // Silently dropped - BUD lost to the void. The submit_relay_proof
                                 // Path correctly credits the relayer; this path should too.
                                 if fee > 0 {
-                                    state.try_add_balance(&tx.from, fee as u64).map_err(|e| {
+                                    state.try_mint_balance(&tx.from, fee as u64).map_err(|e| {
                                         BudlumError::validation("bridge_fee_overflow", &e)
                                     })?;
                                 }
@@ -1040,7 +1049,11 @@ impl Executor {
                                 })?;
                                 state
                                     .bridge_state
-                                    .unlock(transfer_id, msg.source_domain)
+                                    .unlock(
+                                        transfer_id,
+                                        msg.source_domain,
+                                        state.current_block_height,
+                                    )
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_unlock_failed", e.0)
                                     })?;

@@ -203,6 +203,8 @@ impl Blockchain {
                 )
                 .unwrap_or(i64::MAX),
             );
+            m.bridge_transfer_rows
+                .set(i64::try_from(self.state.bridge_state.transfer_count()).unwrap_or(i64::MAX));
             if let Some(ref store) = self.storage {
                 if let Ok(bytes) = store.size_on_disk() {
                     m.storage_db_size_bytes
@@ -2031,9 +2033,10 @@ impl Blockchain {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
 
+        let settled_height = self.chain.len() as u64;
         self.state
             .bridge_state
-            .unlock(transfer_id, message.source_domain)
+            .unlock(transfer_id, message.source_domain, settled_height)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
@@ -2603,7 +2606,7 @@ impl Blockchain {
                 .map_err(|e| e.to_string())?;
                 self.state
                     .bridge_state
-                    .unlock(transfer_id, message.source_domain)
+                    .unlock(transfer_id, message.source_domain, current_height)
                     .map_err(|e| e.to_string())?;
                 let transfer = self
                     .state

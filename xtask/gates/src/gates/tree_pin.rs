@@ -4,9 +4,19 @@
 //! The regeneration gate embeds canonical content for two producer files and
 //! pins four program hashes; everything else in `budzero/` is outside any
 //! integrity check. This gate closes that gap: it pins the Keccak-256 hash of
-//! every `.rs` file under `budzero/` (excluding build outputs) in
-//! `xtask/gates/pins/budzero-tree.pins` and turns the relay red when any file
-//! is added, deleted or modified against the pins.
+//! every source and build-input file under `budzero/` (excluding build
+//! outputs) in `xtask/gates/pins/budzero-tree.pins` and turns the relay red
+//! when any file is added, deleted or modified against the pins.
+//!
+//! What counts as a source: `.rs` files, and the files that decide what those
+//! sources compile into or run against. A pin set that covered only `.rs`
+//! left `Cargo.toml` (dependencies, features, lints), `Cargo.lock` (exact
+//! versions), `rust-toolchain.toml` (the compiler), `deny.toml` and
+//! `osv-scanner.toml` (the audit policy), the `.bud` example programs the
+//! CLI tests run, and the Nix flake outside the check: an edit to any of
+//! them changes the produced artefact or the audit result without moving a
+//! single pinned hash. The extension set is [`PINNED_EXTENSIONS`] plus the
+//! [`PINNED_BASENAMES`] that have no extension.
 //!
 //! Pins move with development, not with the wind: `--pin` rewrites the pin
 //! file from the current tree and must be committed together with the change
@@ -24,7 +34,27 @@ use super::regeneration::{hex32, keccak256};
 /// Pin file, relative to the repo root.
 pub const PIN_FILE: &str = "xtask/gates/pins/budzero-tree.pins";
 
-/// Collect every `.rs` file under `budzero/`, excluding `target/` build
+/// File extensions that are pinned: sources, manifests, lock files, the
+/// toolchain and audit policies, the `.bud` programs and the Nix flake.
+/// Markdown is not a build input and stays out; so does `.json`, because
+/// `budzero/state.json` is the CLI's default working state, an output the
+/// examples rewrite, not an input the build reads.
+pub const PINNED_EXTENSIONS: &[&str] = &["rs", "toml", "lock", "bud", "nix"];
+
+/// Extension-less files that are pinned by name.
+pub const PINNED_BASENAMES: &[&str] = &[".gitignore", "LICENSE"];
+
+/// Whether a file under `budzero/` takes part in the integrity pins.
+fn is_pinned_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        return PINNED_EXTENSIONS.contains(&ext);
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| PINNED_BASENAMES.contains(&n))
+}
+
+/// Collect every pinned file under `budzero/`, excluding `target/` build
 /// outputs. Returns (relpath, bytes) pairs sorted by relpath.
 fn collect_tree_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let base = root.join("budzero");
@@ -46,7 +76,7 @@ fn collect_dir(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> 
             collect_dir(base, &path, out)?;
             continue;
         }
-        if path.extension().is_some_and(|e| e == "rs") {
+        if is_pinned_file(&path) {
             let rel = path
                 .strip_prefix(base)
                 .map_err(|_| String::from("tree-pin: path outside budzero"))?;
@@ -228,6 +258,42 @@ pub fn self_test() -> Result<String, String> {
     }
     std::fs::remove_file(tmp.join("budzero/bud-vm/src/evil.rs")).unwrap();
 
+    // Build inputs are pinned too: a manifest, a lock file, the toolchain,
+    // an audit policy and a `.bud` program each count as a new unpinned file
+    // before they are pinned, and as a modification after. Markdown does
+    // not: a README edit must not move the pins.
+    for rel in [
+        "budzero/bud-vm/Cargo.toml",
+        "budzero/Cargo.lock",
+        "budzero/rust-toolchain.toml",
+        "budzero/deny.toml",
+        "budzero/example.bud",
+        "budzero/flake.nix",
+    ] {
+        let p = tmp.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "original\n").unwrap();
+        if verify_tree(&tmp).is_ok() {
+            return Err(format!(
+                "tree-pin self-test: an unpinned build input {rel} was accepted"
+            ));
+        }
+        write_pins(&tmp)?;
+        verify_tree(&tmp)?;
+        std::fs::write(&p, "edited\n").unwrap();
+        if verify_tree(&tmp).is_ok() {
+            return Err(format!(
+                "tree-pin self-test: a modified build input {rel} was accepted"
+            ));
+        }
+        write_pins(&tmp)?;
+    }
+    std::fs::write(tmp.join("budzero/README.md"), "# notes\n").unwrap();
+    std::fs::write(tmp.join("budzero/state.json"), "{}\n").unwrap();
+    verify_tree(&tmp).map_err(|e| {
+        format!("tree-pin self-test: markdown and the working state file must not be pinned: {e}")
+    })?;
+
     // Re-pin, then a tampered pin entry must be caught as a mismatch.
     write_pins(&tmp)?;
     let pin_path = tmp.join(PIN_FILE);
@@ -250,7 +316,7 @@ pub fn self_test() -> Result<String, String> {
 
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "tree-pin self-test: add/delete/modify detection, tampered pins and \
-         missing pin file all behave",
+        "tree-pin self-test: add/delete/modify detection on sources and build \
+         inputs, markdown left out, tampered pins and missing pin file all behave",
     ))
 }
