@@ -25,7 +25,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// The source files that are checked.
-const SOURCES: &[&str] = &["src/chain/blockchain.rs", "src/core/account.rs"];
+const SOURCES: &[&str] = &[
+    "src/chain/blockchain.rs",
+    "src/core/account.rs",
+    "src/execution/executor.rs",
+];
 
 /// The only function that checks the ceiling.
 const MINT_FN: &str = "try_mint_balance";
@@ -46,6 +50,15 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          storage deal refunds and operator bond refunds (money that was \
          already owed), and fee distribution (splitting a fee that was already paid). \
          None of these create new supply.",
+    ),
+    (
+        "src/execution/executor.rs",
+        3,
+        "bridge unlock inside a RelayerResult (the owner's locked money is \
+         returned and the relayer's cut is carved out of that same refund) and \
+         the producer's share of a transaction fee that was already paid. The \
+         bridge mint inside a RelayerResult is not on this list: it creates \
+         supply and goes through `try_mint_balance`.",
     ),
     (
         "src/core/account.rs",
