@@ -22,10 +22,10 @@
 
 use sha2::{Digest, Sha256};
 
-/// Uzunluk-onekli alan hash'i. `budlum-core::core::hash::hash_fields_bytes`.
+/// Length-prefixed field hash, mirroring `budlum-core::core::hash::hash_fields_bytes`.
 ///
-/// Uzunluk oneki olmasaydi `["a","bc"]` ile `["ab","c"]` ayni bayt dizisini
-/// and two different contents would share the same identity.
+/// Without the length prefix `["a","bc"]` and `["ab","c"]` would hash the same
+/// byte sequence and two different contents would share the same identity.
 #[must_use]
 pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -41,7 +41,7 @@ pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
 pub struct ContentId(pub [u8; 32]);
 
 impl ContentId {
-    /// Bir yigin baytin `ContentId`'si.
+    /// The `ContentId` of a byte string.
     #[must_use]
     pub fn of(chunk: &[u8]) -> Self {
         ContentId(hash_fields_bytes(&[b"BDLM_CONTENT_V1", chunk]))
@@ -73,7 +73,7 @@ impl std::fmt::Display for ContentId {
     }
 }
 
-/// Bir manifest'in shard'lari birlestirildikten sonra kimlik karsilastirmasi.
+/// Identity comparison after a manifest's shards have been joined.
 ///
 /// The comparison is not constant-time and does not need to be: both sides are
 /// public. Nothing here is secret, so there is nothing to leak.
@@ -98,8 +98,8 @@ mod tests {
 
     #[test]
     fn truncation_cannot_collide() {
-        // budlum-core'daki `content_id_collisions_impossible_for_truncated_payloads`
-        // testinin aynisi: uzunluk oneki bu esitligi imkansiz kilar.
+        // The same as `content_id_collisions_impossible_for_truncated_payloads`
+        // in budlum-core: the length prefix makes this equality impossible.
         let one = ContentId::of(b"ab");
         let two = ContentId::of(b"a").0;
         let three = ContentId::of(b"b").0;

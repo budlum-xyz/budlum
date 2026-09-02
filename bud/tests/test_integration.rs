@@ -117,7 +117,7 @@ fn the_full_integration_scenario() {
         "PoR: correct holding must verify"
     );
 
-    // 4a) Blok kurcalama → RED
+    // 4a) Block tampering is REFUSED
     let mut bad_blocks = blocks.clone();
     let first_idx = ch.indices[0] as usize;
     bad_blocks[first_idx][0] ^= 0x01;
@@ -389,7 +389,7 @@ fn json_columnar_orderfree_beats_exact_on_repetitive() {
     // the 50k measurement gives 12.07x vs 8.84x). Verified by producing the same corpus in Rust.
     use bud_core::bud_format_columnar::ColumnarMode;
     use bud_core::bud_format_pipe::{restore_json_columnar, store_json_columnar};
-    // deterministik PRNG (xorshift64*) - rand crate'siz
+    // deterministic PRNG (xorshift64*) - without the rand crate
     let mut state: u64 = 7;
     let mut rng = move || {
         let mut x = state;

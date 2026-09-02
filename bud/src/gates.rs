@@ -81,7 +81,7 @@ impl GateSuite {
     }
 
     pub fn kf2(core: &FidelityCore, fmt: &RenderFormat) -> GateResult {
-        // Fidelity: ayni cozunurlukte mi
+        // Fidelity: is the resolution the same?
         let rendered = core.render(fmt);
         match rendered {
             Ok((_, (w, h))) => {
@@ -146,7 +146,7 @@ impl GateSuite {
             Self::kx(true),
             Self::kx(false), // kasitli kirma
             Self::kf(cost_json, 0.016),
-            Self::kf(cost_jpeg, 0.016), // kasitli kirma - JPEG dusmeli
+            Self::kf(cost_jpeg, 0.016), // deliberate break - JPEG must fall
             Self::kf2(&core, &RenderFormat::Original),
             Self::kf2(&core, &RenderFormat::AvifSameRes),
             Self::kq(Suite::Dilithium5Aes256Blake3),

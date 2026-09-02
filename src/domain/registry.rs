@@ -22,8 +22,8 @@ pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 /// owner. Because the bond is refundable, an attacker with capital can raise that work
 /// permanently and still get their money back.
 ///
-/// Tavan bu bilesimi kirar: bagin geri alinabilirligi degismez, ama toplam
-/// the load is now bounded from above by a constant. A number within `u16` width was chosen
+/// The ceiling breaks that combination: the bond stays refundable, but the total
+/// load is now bounded from above by a constant. A number within `u16` width was chosen
 /// (4096, not 65 536): a Merkle tree with 4096 leaves is 12 levels deep and recomputing it in
 /// every block is a measurable cost; anything above that grows validator cost without
 /// corresponding to any legitimate need.
@@ -413,8 +413,8 @@ mod tests {
     fn the_registry_does_not_grow_past_its_ceiling() {
         let mut registry = ConsensusDomainRegistry::new();
 
-        // Filled up to the ceiling. Every registration must succeed: the ceiling
-        // dolmadan reddeden bir kapi mesru kullanimi engellerdi.
+        // Filled up to the ceiling. Every registration must succeed: a gate that
+        // refused before the ceiling was full would block legitimate use.
         for id in 0..MAX_REGISTERED_DOMAINS {
             let id = u32::try_from(id).expect("tavan u32'ye sigar");
             registry
@@ -449,15 +449,15 @@ mod tests {
             .expect_err("a duplicate registration must be refused");
         assert!(
             dup.contains("already registered"),
-            "yinelenme, tavandan once denetlenmeli: {dup}"
+            "a duplicate must be checked before the ceiling: {dup}"
         );
     }
 
-    /// Bir program listeye alinabilir ve geri cekilebilir.
+    /// A program can be admitted to the list and withdrawn again.
     ///
     /// Before the gate the list was only read: `submit_zk_proof` looked at it
     /// but no code wrote to it. An allowlist that is read but cannot be filled
-    /// listesi, yonetiliyormus gibi gorunen ve yonetilmeyen bir kapidir.
+    /// is a gate that looks governed and is not.
     #[test]
     fn a_zk_program_can_be_admitted_and_withdrawn() {
         let mut registry = ConsensusDomainRegistry::new();

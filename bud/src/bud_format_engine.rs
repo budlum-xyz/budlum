@@ -14,7 +14,7 @@
 //! transforms were applied) - the proof that "this .bud was produced with these
 //! transforms" (production proof + PACT). An invented ratio is impossible: the ratio
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 
@@ -159,7 +159,7 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
         return None;
     }
     let container = &result_blob[container_start..container_start + container_len];
-    // 1) erasure ise shard'lardan kur (k=4: ilk 4 shard)
+    // 1) if erasure, rebuild from the shards (k=4: the first 4 shards)
     let bytes: Vec<u8> = if erasure {
         if container.is_empty() || container[0] != 4 {
             return None; // k=4 beklenir
@@ -384,7 +384,7 @@ pub fn engine_restore_container(
     transform_kind: u8,
     erasure: bool,
 ) -> Option<Vec<u8>> {
-    // 1) erasure ise shard paketinden kur (k=4, p=2)
+    // 1) if erasure, rebuild from the shard packet (k=4, p=2)
     let bytes: Vec<u8> = if erasure {
         if container.is_empty() || container[0] != 4 {
             return None;

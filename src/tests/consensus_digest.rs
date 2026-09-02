@@ -24,7 +24,7 @@
 //!     `BTreeSet<(fee, hash)>` rule, the inclusion order is platform independent
 //!     (see the patch in `src/mempool/pool.rs`).
 //!   * Only consensus outputs enter the digest: the state root, the transaction order,
-//!     Bakiye/nonce. Duvar saati, float, artalan thread'i yok.
+//!     balances/nonces. No wall clock, no float, no background thread.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;

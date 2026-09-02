@@ -60,7 +60,7 @@ fn walk_into(dir: &Path, skip_dirs: &[&str], skip_files: &[&str], out: &mut Vec<
         // committed symlink to a directory is not followed (the python gate's
         // os.walk did not follow them either); a symlink to a file is still
         // scanned. Following directory symlinks would walk outside the
-        // repository boundary and re-scan in a loop (Strix CWE-61).
+        // repository boundary and re-scan in a loop (CWE-61).
         let Ok(kind) = entry.file_type() else {
             continue;
         };
@@ -250,7 +250,7 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    // A committed symlink to a directory must not be followed (Strix CWE-61):
+    // A committed symlink to a directory must not be followed (CWE-61):
     // a `loop -> .` would re-scan the same files forever, and a file reachable
     // only through the symlink is reported once, not twice.
     #[cfg(unix)]

@@ -55,7 +55,7 @@ impl Checkpoint {
         cp
     }
 
-    /// Domain-etiketli kriptografik hash (K3 deseni).
+    /// Domain-tagged cryptographic hash (the K3 pattern).
     pub fn compute_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -165,7 +165,7 @@ mod tests {
         );
         assert!(
             !Checkpoint::verify_chain(&[c1, c2]),
-            "prev hash uymayan zincir RED"
+            "a chain whose prev hash does not match is REFUSED"
         );
     }
 

@@ -281,7 +281,7 @@ mod tests {
         assert_ne!(
             bc.sovereign_template_root(),
             root_before,
-            "kabul edilen sablon koku degistirmeli"
+            "an accepted template must change the root"
         );
     }
 }

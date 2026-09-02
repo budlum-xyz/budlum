@@ -16,7 +16,7 @@ fn bin() -> String {
 pub fn run(root: &Path) -> Result<String, String> {
     let workflows = root.join(".github/workflows");
     let Ok(rd) = std::fs::read_dir(&workflows) else {
-        return Err(format!("workflow dizini yok: {}", workflows.display()));
+        return Err(format!("no workflow directory: {}", workflows.display()));
     };
     let mut files: Vec<String> = Vec::new();
     for e in rd.filter_map(Result::ok) {
@@ -56,7 +56,7 @@ pub fn self_test() -> Result<String, String> {
     let wf = dir.join("bad.yml");
     std::fs::write(
         &wf,
-        "name: badan-bozuk\non: [pushh]\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ github.boyle_alan_yok_xyz }}\"\n",
+        "name: deliberately-broken\non: [pushh]\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ github.no_such_field_xyz }}\"\n",
     )
     .map_err(|e| e.to_string())?;
     let out = std::process::Command::new(bin())

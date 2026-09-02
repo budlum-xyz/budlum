@@ -7,7 +7,7 @@
 //! runtime never supplies parsed attestation fields, so a self-attesting
 //! software runtime cannot fabricate an attestation by echoing fields back.
 //!
-//! Round 4 mutation testing showed that NO gate protects this split: reverting
+//! Mutation testing showed that NO gate protects this split: reverting
 //! to a runtime-supplied `attest()` would not fail any required check. This
 //! gate name-locks the structural split.
 
@@ -21,7 +21,7 @@ fn tee_files(root: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Strip Rust comments, ordinary strings and raw strings (preserving line
-/// structure) so dead text cannot satisfy the gate (Strix CWE-697).
+/// structure) so dead text cannot satisfy the gate (CWE-697).
 fn strip_rust_noise(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
@@ -37,7 +37,7 @@ fn strip_rust_noise(src: &str) -> String {
         if bytes[pos..].starts_with(b"/*") {
             // Rust block comments nest (`/* outer /* inner */ tail */`); a
             // flat scan stops at the first `*/` and leaves the tail looking
-            // like live code. Track depth instead (Strix CWE-697).
+            // like live code. Track depth instead (CWE-697).
             out.push(' ');
             out.push(' ');
             pos += 2;
@@ -145,7 +145,7 @@ fn read_all(root: &Path) -> Result<String, String> {
 
 /// Judge the current tree.
 /// `sign_with_privacy` must take the verifier AND call it inside its own
-/// body; a call elsewhere in the file does not count (Strix CWE-697: tee.rs
+/// body; a call elsewhere in the file does not count (CWE-697: tee.rs
 /// test helpers already call `verify_quote`).
 /// Does the attestation predicate at `needle` appear in a guard that returns
 /// an error from `sign_with_privacy`?
@@ -155,7 +155,7 @@ fn read_all(root: &Path) -> Result<String, String> {
 /// argument (`move |_| { return Err(..); }`), a named closure binding
 /// (`let f = || { return Err(..); }`) or a nested block
 /// (`if false { return Err(..); }`) is a decoy that leaves the outer
-/// attestation check fail-open (Strix CWE-697, round 5/6/7 findings). Track
+/// attestation check fail-open (CWE-697). Track
 /// brace depth line by line and accept only a depth-0 `return Err`.
 fn has_rejecting_guard(body: &str, needle: &str) -> bool {
     body.find(needle).is_some_and(|guard_start| {
@@ -192,7 +192,7 @@ fn has_rejecting_guard(body: &str, needle: &str) -> bool {
                                         }
                                     }
                                 }
-                                // Round 5/6/10 hardening kept from the
+                                // Hardening kept from the
                                 // bulgular branch: a closure/nested-fn decoy
                                 // (`||`, `| `, `fn `) or a nested conditional
                                 // (a `return Err` appearing after a nested
@@ -225,10 +225,10 @@ fn has_rejecting_guard(body: &str, needle: &str) -> bool {
 
 fn check_live_verifier_call(src: &str, problems: &mut Vec<String>) {
     // Strip comments and string/raw-string literals first so a decoy
-    // `sign_with_privacy` inside dead text cannot anchor the check (Strix
-    // CWE-697). Anchor to the `impl Wallet { .. }` block so an earlier live
-    // helper with the same signature cannot steal the anchor (Strix CWE-697,
-    // round 5 finding), and require the attestation RESULT to be used, so an
+    // `sign_with_privacy` inside dead text cannot anchor the check
+    // (CWE-697). Anchor to the `impl Wallet { .. }` block so an earlier live
+    // helper with the same signature cannot steal the anchor (CWE-697), and
+    // require the attestation RESULT to be used, so an
     // inert `verify_quote` call that does not drive the decision is rejected.
     let clean = strip_rust_noise(src);
     let sign_with_privacy_block = clean.find("impl Wallet {").and_then(|impl_start| {
@@ -273,8 +273,8 @@ fn check_live_verifier_call(src: &str, problems: &mut Vec<String>) {
             // Each attestation predicate must appear in a fail-closed guard
             // that returns an error from sign_with_privacy. Presence alone is
             // insufficient: `let measurement_ok = attestation.verify_measurement(..)`
-            // still leaves an unconditional success path (Strix CWE-697,
-            // round 5 finding: fail-open branches).
+            // still leaves an unconditional success path (CWE-697:
+            // fail-open branches).
             let measurement_gates_flow =
                 has_rejecting_guard(body, "if !attestation.verify_measurement(");
             let backend_gates_flow = has_rejecting_guard(body, "if attestation.backend !=");
@@ -315,7 +315,7 @@ fn judge(src: &str) -> Vec<String> {
             "wallet-core still references a runtime-supplied `attest` path. Attestation must come from a wallet-owned verifier over a raw quote.",
         ));
     }
-    // Rename-resistant and multi-line-signature resistant (Strix CWE-697):
+    // Rename-resistant and multi-line-signature resistant (CWE-697):
     // a method returning `Result<TeeAttestation>` outside the wallet-owned
     // verifier is a self-attestation path under any name. Normalize
     // whitespace first so a return type split across lines is still caught.
@@ -341,8 +341,8 @@ fn judge(src: &str) -> Vec<String> {
             // A method is safe only if its declaration sits inside the
             // wallet-owned `trait TeeQuoteVerifier { .. }` body. The bare
             // name `verify_quote` is not a pass: a runtime-owned trait may
-            // reuse that name and the gate must still reject it (Strix
-            // CWE-697). Impls of the verifier trait carry the trait's full
+            // reuse that name and the gate must still reject it
+            // (CWE-697). Impls of the verifier trait carry the trait's full
             // method body in the same block, so a block-level match covers
             // them: we accept the signature if it appears anywhere inside
             // `trait TeeQuoteVerifier { .. }` (which spans its impls only
@@ -354,7 +354,7 @@ fn judge(src: &str) -> Vec<String> {
             // `trait TeeQuoteVerifier { .. }` body OR inside an
             // `impl TeeQuoteVerifier for .. { .. }` block. A bare `verify_quote`
             // name under any OTHER trait is a runtime-owned attestation path
-            // and must be rejected (Strix CWE-697).
+            // and must be rejected (CWE-697).
             let in_trait = verifier_block.is_some_and(|block| block.contains(&full_signature));
             let in_impl = normalized
                 .split("impl TeeQuoteVerifier for")
@@ -488,7 +488,7 @@ pub fn sign_with_privacy(&self, message: &[u8], runtime: &dyn TeeAttester) -> Re
     }
 
     // A decoy `sign_with_privacy` inside a comment before the live one must
-    // not anchor the verifier-call check (Strix CWE-697).
+    // not anchor the verifier-call check (CWE-697).
     let decoy = "/* fn sign_with_privacy(&self, runtime: &dyn TeeQuoter, verifier: &dyn TeeQuoteVerifier) -> Result<[u8; 64], WalletError> { let quote = runtime.quote([0u8; 32]).unwrap(); let attestation = verifier.verify_quote(&quote).unwrap(); let _ = attestation; } */\npub fn sign_with_privacy(&self, runtime: &dyn TeeQuoter, verifier: &dyn TeeQuoteVerifier) -> Result<[u8; 64], WalletError> { Ok([0u8; 64]) }\n";
     let mut decoy_problems = Vec::new();
     check_live_verifier_call(decoy, &mut decoy_problems);
@@ -500,7 +500,7 @@ pub fn sign_with_privacy(&self, message: &[u8], runtime: &dyn TeeAttester) -> Re
 
     // A `return Err` nested inside a closure argument or inner block must not
     // satisfy the rejecting-guard check: the outer attestation check would
-    // stay fail-open (Strix CWE-697, round 7 finding).
+    // stay fail-open (CWE-697).
     let closure_decoy = "\nimpl Wallet {\n    pub fn sign_with_privacy(&self, message: &[u8], runtime: &dyn TeeQuoter, verifier: &dyn TeeQuoteVerifier) -> Result<[u8; 64], WalletError> {\n        let quote = runtime.quote([0u8; 32]).unwrap();\n        let attestation = verifier.verify_quote(&quote).unwrap();\n        if !attestation.verify_measurement(&[0u8; 32]) { let _d = move || { return Err(WalletError::TeeUnavailable(\"x\".into())); }; }\n        if attestation.backend != TeeBackendKind::ClientSgx { if false { return Err(WalletError::TeeUnavailable(\"x\".into())); } }\n        if !attestation.verify_report_data(&[0u8; 32]) { let _d = || { return Err(WalletError::TeeUnavailable(\"x\".into())); }; }\n        Ok([0u8; 64])\n    }\n}\n";
     let mut closure_problems = Vec::new();
     check_live_verifier_call(closure_decoy, &mut closure_problems);

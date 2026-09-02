@@ -16,7 +16,7 @@
 //! sections too (`MdSection::Blank`) and the trailing newline lives in a separate
 //! flag; both are separators in markdown, and dropping them means the document cannot be restored.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 

@@ -367,6 +367,12 @@ pub enum ChainCommand {
         at_epoch: u64,
         response: oneshot::Sender<Result<crate::storage::ViewGrant, String>>,
     },
+    SocialDelete {
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+        response: oneshot::Sender<Result<crate::storage::DeleteOutcome, String>>,
+    },
     /// Every grant row of one content, with how many of them are live. A read
     /// command: it moves nothing and cannot be refused by the mainnet guard.
     GetViewGrants {
@@ -994,6 +1000,26 @@ impl ChainHandle {
             .tx
             .send(ChainCommand::RevokeViewGrant {
                 grant_id,
+                auth,
+                at_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn social_delete(
+        &self,
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::DeleteOutcome, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SocialDelete {
+                content_id,
                 auth,
                 at_epoch,
                 response: tx,
@@ -3754,6 +3780,24 @@ impl ChainActor {
                         .state
                         .storage_registry
                         .revoke_view_grant(grant_id, &auth, at_epoch)
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::SocialDelete {
+                    content_id,
+                    auth,
+                    at_epoch,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .social_delete(content_id, &auth, at_epoch)
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }

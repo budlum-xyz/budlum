@@ -839,7 +839,11 @@ mod chaos_tests {
         tx_new.fee = 5;
         tx_new.sign(&sender);
         blockchain.add_transaction(tx_new).unwrap();
-        assert_eq!(blockchain.mempool.len(), 1, "RBF kazanani tek kalmali");
+        assert_eq!(
+            blockchain.mempool.len(),
+            1,
+            "only the RBF winner must remain"
+        );
 
         // Produce a block: ONLY the winner (fee=5, data=[2]) may enter the chain.
         let _ = blockchain.produce_block(Address::from([0x03; 32]));
@@ -849,7 +853,7 @@ mod chaos_tests {
         assert_eq!(blk.transactions[0].data, vec![2u8]);
         assert!(
             !blk.transactions.iter().any(|tx| tx.hash == old_hash),
-            "poisoned replace: eski tx asla zincire girmemeli"
+            "poisoned replace: the old tx must never enter the chain"
         );
 
         // The chain nonce is now 1, so the old conflicting transaction cannot come back.
@@ -860,7 +864,7 @@ mod chaos_tests {
         let res = blockchain.add_transaction(tx_back);
         assert!(
             res.is_err(),
-            "zincir nonce=1 iken nonce=0 tx kabul edilmemeli"
+            "a nonce=0 tx must not be accepted while the chain is at nonce=1"
         );
 
         // A nonce with a gap (the chain is at 1 and the transaction says 5) is refused outright.
@@ -869,7 +873,7 @@ mod chaos_tests {
         tx_gap.fee = 10;
         tx_gap.sign(&sender);
         let res = blockchain.add_transaction(tx_gap);
-        assert!(res.is_err(), "gap'li nonce kabul edilmemeli");
+        assert!(res.is_err(), "a nonce with a gap must not be accepted");
     }
 
     /// Chaos v2: a spam flood has to be evicted entirely by honest fee payers.
@@ -977,7 +981,7 @@ mod chaos_tests {
         chain_b.state.add_balance(&alice, 1000);
         chain_b.state.add_balance(&bob, 1000);
 
-        // Bakiye transferi模拟 - direkt state mutate (add/spend) ile.
+        // Simulated balance transfer - direct state mutation (add/spend).
         // Alice → Bob: 100
         chain_a.state.add_balance(&bob, 100);
         chain_a.state.add_balance(&alice, 0); // a no-op, for the conservation check
@@ -1048,7 +1052,7 @@ mod chaos_tests {
         }
         assert_eq!(chain_b.chain.len(), 6);
 
-        // Reorg: A, B'nin zincirini kabul etmeli (daha uzun = canonical).
+        // Reorg: A must accept B's chain (longer = canonical).
         let result = chain_a.try_reorg(chain_b.chain.clone());
         assert!(result.is_ok(), "reorg must succeed for longer chain");
 

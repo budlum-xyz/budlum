@@ -1,6 +1,6 @@
 # B.U.D.: where the storage layer stands and how it gets stronger
 
-B.U.D. is the system's heart: Lubot's training corpora, SocialFi content and
+B.U.D. is the system's heart: AI inference layer's training corpora, SocialFi content and
 every large object the chain refers to live behind it. This document records
 what the layer does today, measured against how comparable networks solve the
 same problems, and what the next steps are. It is a design note, not a promise

@@ -350,7 +350,7 @@ impl LightClient {
     /// parent hash is the anchor's block hash. An unanchored first header
     /// would let a crafted export substitute a self-consistent finalized
     /// segment from an unrelated fork that reuses the same validator set
-    /// (Strix CWE-345).
+    /// (CWE-345).
     ///
     /// # Errors
     ///

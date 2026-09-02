@@ -168,8 +168,8 @@ impl BudlumxyzRegistry {
         // the app snapshot the vote reviewed. The developer could have
         // changed `website_url` or `manifest_id` after the proposal passed;
         // awarding the badge to different content would make the governance
-        // approval attach to something the voters never evaluated (Strix
-        // HIGH, CWE-345).
+        // approval attach to something the voters never evaluated (HIGH,
+        // CWE-345).
         let current_url_hash: [u8; 32] = Sha256::digest(app.website_url.as_bytes()).into();
         if &app.developer != expected_developer
             || app.manifest_id != expected_manifest_id
@@ -202,7 +202,7 @@ impl BudlumxyzRegistry {
             // Length-prefixed so the commitment is injective over the
             // variable-length strings: without a prefix, distinct
             // (name, website_url) pairs can collide at the hash boundary
-            // (Strix HIGH, CWE-347).
+            // (HIGH, CWE-347).
             let name_bytes = app.name.as_bytes();
             hasher.update((name_bytes.len() as u64).to_le_bytes());
             hasher.update(name_bytes);

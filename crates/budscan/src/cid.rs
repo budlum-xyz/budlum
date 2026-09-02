@@ -70,7 +70,7 @@ fn b58_decode(s: &str) -> Option<Vec<u8>> {
             carry >>= 8;
         }
     }
-    // Bastaki '1'ler sifir baytlardir.
+    // Leading '1's are zero bytes.
     for ch in s.bytes() {
         if ch == b'1' {
             out.insert(0, 0);
@@ -102,7 +102,7 @@ fn b32_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// unsigned-varint oku; (deger, tuketilen bayt).
+/// Read an unsigned varint; returns (value, bytes consumed).
 fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
     let mut shift = 0;

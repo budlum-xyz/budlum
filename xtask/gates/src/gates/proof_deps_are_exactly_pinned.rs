@@ -117,7 +117,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 /// # Errors
 ///
-/// Kapi caret veya tilde yazimini tam pinden ayirt edemezse.
+/// If the gate cannot tell a caret or tilde spelling from an exact pin.
 pub fn self_test() -> Result<String, String> {
     let cases = [
         ("p3-fri = \"=0.6.3\"", Some(("p3-fri", "=0.6.3"))),
@@ -138,13 +138,15 @@ pub fn self_test() -> Result<String, String> {
             ));
         }
     }
-    let pinned = dependency("p3-fri = \"=0.6.3\"").ok_or("self_test: pin ayristirilamadi")?;
+    let pinned =
+        dependency("p3-fri = \"=0.6.3\"").ok_or("self_test: the pin could not be parsed")?;
     if !pinned.1.starts_with('=') {
-        return Err("self_test: tam pin `=` ile baslamiyor sayildi".into());
+        return Err("self_test: an exact pin was judged not to start with `=`".into());
     }
-    let loose = dependency("p3-fri = \"0.6\"").ok_or("self_test: caret ayristirilamadi")?;
+    let loose =
+        dependency("p3-fri = \"0.6\"").ok_or("self_test: the caret form could not be parsed")?;
     if loose.1.starts_with('=') {
-        return Err("self_test: caret yazimi tam pin sayildi".into());
+        return Err("self_test: a caret spelling was judged an exact pin".into());
     }
-    Ok("proof-deps-are-exactly-pinned self-test OK: caret, tilde, tablo yazimi ve yorum ayirt ediliyor".into())
+    Ok("proof-deps-are-exactly-pinned self-test OK: caret, tilde, table spelling and comments are told apart".into())
 }

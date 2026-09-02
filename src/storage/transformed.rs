@@ -120,8 +120,13 @@ impl ContentClass {
     }
 
     /// Whether zlib-if-shrinks may run.
+    ///
+    /// Public so the A1 container can follow the same policy the A0 pass
+    /// already measured: an entropy-coded, ciphertext, or executable class
+    /// refused zlib at classification, and re-attempting it at A1 would burn
+    /// CPU on bytes that cannot shrink.
     #[must_use]
-    const fn may_try_zlib(self) -> bool {
+    pub const fn may_try_zlib(self) -> bool {
         match self {
             Self::EntropyMedia | Self::EntropyArchive | Self::Ciphertext | Self::Exec => false,
             Self::Generic

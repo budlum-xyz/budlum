@@ -234,15 +234,16 @@ pub enum ContentSource {
     Derived(crate::storage::derived::DerivedSpec),
 }
 
-/// Kaynak rejiminin taahhut baytlari.
+/// The commitment bytes of the source regime.
 ///
-/// `Stored` **bos** dizi verir. Bu kasitli: kaynak alani manifest kimligine
-/// was added later, and `Stored` was the meaning of every manifest before it.
-/// Bos dizi, o manifest'lerin id'sinin birebir ayni kalmasini saglar - bir
-/// alan eklemek eski kimlikleri degistirmemeli.
+/// `Stored` yields an **empty** sequence. This is deliberate: the source field
+/// was added to the manifest identity later, and `Stored` was the meaning of
+/// every manifest before it. The empty sequence keeps the ids of those
+/// manifests exactly the same - adding a field must not change old identities.
 ///
-/// Diger rejimler enjektif kodlanir: etiket + ayirt edici parametreler.
-/// Iki rejim ancak ayni rejim ve ayni parametrelerse ayni baytlari uretir.
+/// The other regimes are encoded injectively: a tag plus the distinguishing
+/// parameters. Two regimes produce the same bytes only if they are the same
+/// regime with the same parameters.
 #[must_use]
 pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
     match source {

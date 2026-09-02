@@ -201,8 +201,8 @@ pub fn partial_registry_root(base_cost: u64, entries: &[RegistryEntry]) -> [u8; 
         hasher.update(e.name.as_bytes());
         hasher.update(e.owner);
         hasher.update(e.expires_at.to_le_bytes());
-        // Zincirdeki `root()` burada resolver/address/domain/storage alanlarini
-        // yaziyor. Yazilmiyorlar ve bu yuzden bu kok tutmuyor.
+        // The on-chain `root()` writes the resolver/address/domain/storage fields
+        // here. They are not written here, which is why this root does not hold.
         match e.content_id {
             Some(cid) => {
                 hasher.update([1u8]);

@@ -6,7 +6,7 @@
 //! must use `when_last_row`, never `is_halt`/`cpu_active` (which name the
 //! last CPU row).
 //!
-//! The Strix CWE-184 hardening is kept: the block scan runs on a literal- and
+//! The CWE-184 hardening is kept: the block scan runs on a literal- and
 //! comment-scrubbed view, so a commented-out or quoted binding block cannot
 //! be mistaken for the real one (literals first, then block comments with a
 //! depth counter, then line comments - the order the shell gate pinned).

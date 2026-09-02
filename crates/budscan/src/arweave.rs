@@ -145,7 +145,7 @@ pub enum ArweaveVerdict {
 #[must_use]
 pub fn verify(expected_root: &[u8], data: &[u8]) -> ArweaveVerdict {
     let produced = data_root(data);
-    // Strix HIGH (CWE-354): a short expected root used to be accepted as a
+    // HIGH (CWE-354): a short expected root used to be accepted as a
     // prefix, so an attacker could brute-force content for a prefix of 1 to 47
     // bytes and raise a truncated root to the strength of full verification. A
     // truncated root is now refused: verification is granted only on exact
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn a_truncated_expected_root_is_rejected_not_verified() {
-        // The Strix HIGH (CWE-354) regression: a truncated root of 1 to 47 bytes
+        // The HIGH (CWE-354) regression: a truncated root of 1 to 47 bytes
         // must not be raised to Verified merely for being a prefix of the correct
         // full-length root. The 32-byte prefix of the 48-byte full root is used
         // here, and it must be refused.

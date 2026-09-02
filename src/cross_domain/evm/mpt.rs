@@ -10,16 +10,16 @@
 //! - **Null**: the empty string `""` -> empty trie / missing child.
 //! - **Leaf**: `[hp_encoded_path, value]` - path terminator flag=1.
 //! - **Extension**: `[hp_encoded_path, child_ref]` - terminator flag=0.
-//! - **Branch**: `[c0, c1, ..., c15, value]` - 17 eleman (16 child + optional value).
+//! - **Branch**: `[c0, c1, ..., c15, value]` - 17 elements (16 children + optional value).
 //!
-//! `child_ref` ya 32-byte keccak256 hash'tir (node_map'te lookup) ya da inline
-//! an RLP-encoded node (32 bytes or fewer, the small-node optimization).
+//! `child_ref` is either a 32-byte keccak256 hash (looked up in node_map) or an inline
+//! RLP-encoded node (32 bytes or fewer, the small-node optimization).
 //!
 //! # Security
 //!
 //! - Node hash = `keccak256(rlp(node))`. The root is the hash of the root node.
 //! - A missing node, a broken path or a wrong root -> `Err` (the proof is invalid).
-//! - `keccak256` `sha3` crate'inden (mevcut; yeni dependency YOK).
+//! - `keccak256` comes from the `sha3` crate (already present; NO new dependency).
 
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 use sha3::{Digest, Keccak256};
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn verify_missing_node_rejected() {
-        // Proof'tan bir node'u atla → MissingNode.
+        // Skip a node of the proof → MissingNode.
         let key = b"hello";
         let value = b"world";
         let nibbles = to_nibbles(&keccak256(key));
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn verify_empty_trie_root_key_not_found() {
-        // Root = EMPTY_TRIE_ROOT ama proof'ta rlp("") node'u var.
+        // Root = EMPTY_TRIE_ROOT but the proof carries the rlp("") node.
         let empty_node = vec![0x80]; // rlp("") = 0x80
         let err = verify(&[empty_node], &EMPTY_TRIE_ROOT, b"any").unwrap_err();
         assert_eq!(err, MptError::KeyNotFound);

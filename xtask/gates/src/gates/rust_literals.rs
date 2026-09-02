@@ -1,6 +1,6 @@
 //! Rust literal and comment scrubbing shared by the source-scanning gates.
 //!
-//! Ported from the Strix CWE-184 hardening (follow-up work) that main's
+//! Ported from the CWE-184 hardening (follow-up work) that main's
 //! `check-consensus-maps-are-ordered.sh`, `check-cross-table-checks-use-last-
 //! row.sh` and `check-uncheckable-proof-paths-do-not-slash.sh` carried: a
 //! `/*` or `*/` inside a string is data, not a comment, and an `r` inside a

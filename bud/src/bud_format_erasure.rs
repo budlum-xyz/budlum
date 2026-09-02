@@ -1,7 +1,6 @@
-//! B.U.D. 2.0 - Cauchy MDS erasure, in the budlum `erasure.rs` pattern,
-//! 2026-08-16.
+//! B.U.D. 2.0 - Cauchy MDS erasure, in the `src/storage/erasure.rs` pattern.
 //!
-//! An independent, unsafe-free implementation inspired by the main repository's
+//! An independent, unsafe-free implementation following the design of
 //! `src/storage/erasure.rs`: a Cauchy MDS code over GF(2^8) mod 0x11D. It is
 //! systematic, so data shards pass through byte for byte and the Cauchy block
 //! produces the parity shards. The MDS guarantee is that the data is rebuilt if

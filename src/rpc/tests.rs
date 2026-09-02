@@ -609,12 +609,12 @@ mod rpc_tests {
 
         // The deal-open RPC now requires both the payer and the operator to
         // sign the exact deal parameters. Without these, an unsigned call
-        // could spend any account the caller names (Strix HIGH, CWE-862).
+        // could spend any account the caller names (HIGH, CWE-862).
         // The preimage also binds the manifest-derived shard size and the
         // manifest id, because the chain prices the escrow from the manifest
-        // entry; a signature must not survive a forged manifest (Strix HIGH,
+        // entry; a signature must not survive a forged manifest (HIGH,
         // CWE-347). A caller-chosen request_id is bound too, so one signed
-        // authorization cannot be replayed (Strix MEDIUM, CWE-294).
+        // authorization cannot be replayed (MEDIUM, CWE-294).
         let request_id: u64 = 7;
         let deal_msg = crate::core::hash::hash_fields_bytes(&[
             b"BUD_OPEN_DEAL_V1",
@@ -726,7 +726,7 @@ mod rpc_tests {
         );
         assert_eq!(outcome["proof_kind"], "interim_availability_only");
 
-        // Strix HIGH (CWE-862) regression: an unsigned deal open must be
+        // HIGH (CWE-862) regression: an unsigned deal open must be
         // refused before any balance changes. The signatures are required,
         // so an empty/forged pair is rejected by the RPC, never reaching the
         // chain path that debits escrow and locks bond.
@@ -787,7 +787,7 @@ mod rpc_tests {
             "a payer signature from the wrong key must be refused"
         );
 
-        // Strix HIGH (CWE-347) regression: the signed preimage binds the
+        // HIGH (CWE-347) regression: the signed preimage binds the
         // manifest-derived shard size and the manifest id, so a valid
         // signature cannot be replayed against a forged manifest that
         // declares a larger shard for the same shard_id. The chain prices
@@ -822,7 +822,7 @@ mod rpc_tests {
             "a signature must not survive a manifest that changes the escrow size"
         );
 
-        // Strix MEDIUM (CWE-294) regression: the same signed deal-open must
+        // MEDIUM (CWE-294) regression: the same signed deal-open must
         // not be replayable. The first call above opened an ACTIVE deal over
         // (manifest, shard, operator, replica 0, epochs 10..100); resending
         // the same signed request must be refused by the chain's duplicate

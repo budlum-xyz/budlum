@@ -9,8 +9,8 @@ use crate::ai::types::{
     AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
     AiVerifierStakeInfo, BoundedBytes,
 };
+use crate::ai_inference::effort::{tier_is_servable, EffortTier};
 use crate::core::address::Address;
-use crate::lubot::effort::{tier_is_servable, EffortTier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,7 +80,7 @@ pub struct AiRegistry {
 
     /// The effort ceiling an operator declared: the deepest tier it can serve.
     ///
-    /// `src/lubot/effort.rs` states two rules and marks the second one,
+    /// `src/ai_inference/effort.rs` states two rules and marks the second one,
     /// "declared capability gates eligibility", as unenforceable, because there
     /// was nowhere for an operator to declare its ceiling. This is that place.
     ///

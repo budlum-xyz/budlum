@@ -130,16 +130,16 @@ mod tests {
                     "refused for the wrong reason: {msg}"
                 )
             }
-            Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
+            Err(other) => panic!("expected a SemanticError, got: {other:?}"),
         }
     }
 
-    /// Esitlik karsilastirmasi **serbest** kalmali.
+    /// Equality comparison must stay **allowed**.
     ///
-    /// Measures that the gate itself is bounded. Beside the forbidden arithmetic and
-    /// siralamaya; `==` ve `!=` bu tiplerin varlik sebebi. Kapi onlari da
-    /// kesseydi tip kullanilamaz hale gelirdi ve bu test, asiri genis bir
-    /// yasagi yakalayan taraf.
+    /// Measures that the gate itself is bounded. Beside the forbidden arithmetic
+    /// and ordering, `==` and `!=` are the reason these types exist. Had the gate
+    /// cut them too the type would be unusable; this test is the side that
+    /// catches an over-broad ban.
     #[test]
     fn equality_on_opaque_identities_stays_allowed() {
         for op in ["==", "!="] {
@@ -346,17 +346,17 @@ mod tests {
                 msg.contains("field division"),
                 "refused but for another reason: {msg}"
             ),
-            Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
+            Err(other) => panic!("expected a SemanticError, got: {other:?}"),
         }
     }
 
     /// A control group: `/` must stay **free** over `field`.
     ///
-    /// The gate targets only `u64`. Without this test an overly broad
-    /// yasak (her tipte Div reddi) fark edilmeden gecerdi.
+    /// The gate targets only `u64`. Without this test an overly broad ban
+    /// (refusing Div on every type) would pass unnoticed.
     #[test]
     #[cfg(feature = "experimental")]
-    fn bolme_field_uzerinde_serbest_kalir() {
+    fn division_stays_allowed_on_field() {
         let source = r#"
             contract DivField {
                 pub fn bol(a: field, b: field) -> field {

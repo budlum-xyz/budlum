@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 - container .bud format v2 + structural splitting + role-expert multi-ratio
 //!
-//! Directions taken from the research findings (2026-08-16):
+//! Directions taken from the research findings:
 //! 1. **Structural splitting pre-step** (S.82 container/MIME/EBML, S.174 Parquet, inspiration-2 C):
 //!    content is first divided at structural boundaries (JSON record / CSV row / log line / code AST),
 //!    each piece gets its own ContentId - a format-aware cut before CDC16K (lossless).
@@ -1064,7 +1064,7 @@ mod tests {
         let mut t2 = enc.clone();
         t2.truncate(enc.len() - 3);
         assert!(BudV2File::decode(&t2).is_none(), "truncation is refused");
-        // (3) magic boz → red
+        // (3) a broken magic is refused
         let mut t3 = enc.clone();
         t3[0] = 0x00;
         assert!(BudV2File::decode(&t3).is_none(), "magic tamper red");
@@ -1200,7 +1200,7 @@ mod tests {
         let decoded = BudV2File::decode(&comp.encode()).unwrap();
         assert_eq!(decoded.chunk_codec, ChunkCodec::Huffman);
         assert_eq!(decoded.restore_original().unwrap(), data);
-        // kurcalama yine red
+        // tampering is still refused
         let mut bad = comp.encode();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(BudV2File::decode(&bad).is_none());
@@ -1285,7 +1285,7 @@ mod tests {
                 *b = rng.byte();
             }
             let slice = &buf[..len];
-            let _ = BudV2File::decode(slice); // her boyutta (0..256) panik yok
+            let _ = BudV2File::decode(slice); // no panic at any size (0..256)
             let _ = BudV2Header::from_bytes(slice);
             let _ = MultiHash::decode(slice);
             let _ = structural_split(StructuralKind::Json, slice);

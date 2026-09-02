@@ -1,7 +1,7 @@
 //! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters
 //!.
 //!
-//! Vision reference: B.U.D. merkeziyetsiz depolama vizyonu,
+//! Vision reference: the B.U.D. decentralised storage vision,
 //! §8.1. The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
 //! As a NEW enum variant (not a `Custom("...")` string) so the type system
 //! Forces every consumer to handle the storage parameters explicitly.

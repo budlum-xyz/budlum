@@ -91,7 +91,7 @@ const BASELINE: &[&str] = &[
     "src/execution/zkvm.rs",
     "src/gateway/service.rs",
     "src/light_client/mod.rs",
-    "src/lubot/mod.rs",
+    "src/ai_inference/mod.rs",
     "src/main.rs",
     "src/network/mobile.rs",
     "src/network/node.rs",

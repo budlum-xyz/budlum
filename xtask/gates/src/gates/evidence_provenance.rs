@@ -401,7 +401,7 @@ fn build_fixture(
     .map_err(|e| e.to_string())?;
     std::fs::write(
         dir.join("src/execution/executor.rs"),
-        "fn lubot(&mut self) { let _ = self.registry.slash_role_only(a, r, c, s); }\n",
+        "fn ai_inference(&mut self) { let _ = self.registry.slash_role_only(a, r, c, s); }\n",
     )
     .map_err(|e| e.to_string())?;
 

@@ -120,10 +120,9 @@ impl Registration {
     ///
     /// This registry and `src/registry/permissionless.rs` must give the same answer
     /// to the same questions; both state the same lifecycle of the same roles.
-    /// dongusunu anlatiyor. Gorev atama `is_active` sorar, sorumluluk
-    /// `is_slashable` sorar: cikmakta olan bir uyenin bondu hala kilitli
-    /// it can be held responsible for work it did, but no new work may be
-    /// verilemez.
+    /// Task assignment asks `is_active`, responsibility asks `is_slashable`: an
+    /// exiting member's bond is still locked, so it can be held responsible for
+    /// work it did, but no new work may be given to it.
     pub fn is_slashable(&self) -> bool {
         matches!(
             self.status,
@@ -360,7 +359,7 @@ impl VerifierRegistry {
         self.register(account, crate::role::roles::VALIDATOR, stake, current_epoch)
     }
 
-    pub fn register_lubot_operator(
+    pub fn register_ai_operator(
         &mut self,
         account: Address,
         stake: u64,
@@ -368,7 +367,7 @@ impl VerifierRegistry {
     ) -> Result<(), RegistryError> {
         self.register(
             account,
-            crate::role::roles::LUBOT_OPERATOR,
+            crate::role::roles::AI_OPERATOR,
             stake,
             current_epoch,
         )
@@ -506,7 +505,7 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // Strix HIGH (2026-08-17): slashing must be idempotent - replaying the same
+        // HIGH (2026-08-17): slashing must be idempotent - replaying the same
         // report must not burn the remaining stake again. Refuse if already Slashed.
         if matches!(reg.status, MemberStatus::Slashed) {
             return Err(RegistryError::AlreadySlashed { account, role });
@@ -621,8 +620,8 @@ impl VerifierRegistry {
     // (the 2026-08-22 decision, G0; aligned with the core
     // `src/registry/permissionless.rs` on the same day with the same decision - the
     // two registries must give the same answer to the same question). Responsibility
-    // lives in `Registration::is_slashable`: the exiting member's lock
-    // suresince kesilebiliriligi surer, ama yeni is almaz.
+    // lives in `Registration::is_slashable`: the exiting member stays slashable
+    // for the length of its lock, but takes no new work.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::RELAYER)
             .is_some_and(Registration::is_active)
@@ -637,8 +636,8 @@ impl VerifierRegistry {
         self.is_active(account, crate::role::roles::MASTER_VERIFIER)
     }
 
-    pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        self.get(account, crate::role::roles::LUBOT_OPERATOR)
+    pub fn is_active_ai_operator(&self, account: &Address) -> bool {
+        self.get(account, crate::role::roles::AI_OPERATOR)
             .is_some_and(Registration::is_active)
     }
 
@@ -831,7 +830,7 @@ mod tests {
         }
     }
 
-    /// Cikmakta olan uye yeni gorev almaz ama kesilebilir kalir.
+    /// An exiting member takes no new task but stays slashable.
     ///
     /// This mirrors the test of the same name inside
     /// `src/registry/permissionless.rs`. The two registries state the same lifecycle
@@ -856,7 +855,7 @@ mod tests {
 
         assert!(
             !reg.is_active(&a, roles::RELAYER),
-            "cikmakta olana yeni gorev verilmez"
+            "an exiting member is given no new task"
         );
         assert!(
             !reg.is_active_relayer(&a),
@@ -865,7 +864,7 @@ mod tests {
         assert!(
             reg.get(&a, roles::RELAYER)
                 .is_some_and(|r| r.is_slashable()),
-            "bond hala kilitli: sorumluluk surer"
+            "the bond is still locked: responsibility continues"
         );
     }
 
@@ -1114,13 +1113,13 @@ mod tests {
     }
 
     #[test]
-    fn d4_lubot_and_content_validator_roles() {
+    fn d4_ai_and_content_validator_roles() {
         let mut reg = VerifierRegistry::new();
-        reg.register_lubot_operator(addr(20), MIN_REGISTRATION_STAKE, 0)
+        reg.register_ai_operator(addr(20), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         reg.register_content_validator(addr(21), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        assert!(reg.is_active_lubot_operator(&addr(20)));
+        assert!(reg.is_active_ai_operator(&addr(20)));
         assert!(reg.is_active_content_validator(&addr(21)));
     }
 }

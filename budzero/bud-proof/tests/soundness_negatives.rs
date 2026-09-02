@@ -51,7 +51,7 @@ type WorkingProof = (
     Vec<u64>,
 );
 
-/// Tek bir public input alanini kurcalayan islev.
+/// A function that tampers with a single public input field.
 type Corruptor = fn(&mut ExecutionPublicInputs);
 
 fn working_proof() -> WorkingProof {
@@ -105,7 +105,6 @@ fn working_proof() -> WorkingProof {
 ///
 /// Without this test the refusal tests below mean nothing - the old harness left
 /// five tests green for the wrong reason precisely because this control was missing.
-/// sebepten yesil gostermisti.
 #[test]
 fn an_untampered_proof_is_accepted() {
     let (envelope, pi, bytecode) = working_proof();

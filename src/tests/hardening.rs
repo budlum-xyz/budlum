@@ -331,9 +331,9 @@ mod hardening_tests {
 
     /// The resolved-value warning of `main.rs`: with an `RpcSecurityConfig`
     /// carrying `auth_required=false`, this check has to produce a `warn!`. The
-    /// verification extracts a helper function and a `tracing` subscriber
-    /// Ile log yakalayarak. (`tracing` global subscriber zaten
-    /// It may not be installed under test; in practice this test only
+    /// verification extracts a helper function and captures the log with a
+    /// `tracing` subscriber. (The global `tracing` subscriber
+    /// may not be installed under test; in practice this test only
     /// verifies that the code path compiles and is called under the right
     /// condition; the real warning behaviour is verified manually in the
     /// integration tests.

@@ -22,7 +22,7 @@
 //! and from those using a fixed ratio table: candidates are finalised by format
 //! expertise AND measurement evidence AND content class AND a majority vote.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 

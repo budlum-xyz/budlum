@@ -72,7 +72,7 @@ mod poa_isolation_tests {
             .unwrap();
         poa_reg.approve(POA_DOMAIN, admin, poa_member).unwrap();
 
-        // Permissionless validator ekle (stake ile)
+        // Add a permissionless validator (with stake)
         perm_state.add_balance(&permissionless_validator, 10_000);
         perm_state.add_validator(permissionless_validator, 5_000);
 
@@ -247,7 +247,7 @@ mod poa_isolation_tests {
         let admin = Address::from([0xAD; 32]);
         poa.add_admin(POA_DOMAIN, admin);
 
-        // Permissionless validator - stake ile
+        // Permissionless validator - with stake
         let perm_validator = Address::from([0xBB; 32]);
         perm_state.add_balance(&perm_validator, 10_000);
         perm_state.add_validator(perm_validator, 5_000);

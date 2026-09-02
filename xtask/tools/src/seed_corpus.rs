@@ -1,11 +1,11 @@
-//! `BudZero` ZKVM fuzz tohum korpusu ureteci.
+//! The `BudZero` ZKVM fuzz seed corpus generator.
 //!
 //! Replaces `scripts/generate_zkvm_seed_corpus.sh`.
 //!
 //! # The silent failure of the shell version
 //!
-//! Betik tohumlari `printf "\x01\x01..."` ile yaziyordu. `printf`'in kacis
-//! The interpretation of an escape sequence **varies by shell and by build**:
+//! The script wrote the seeds with `printf "\x01\x01..."`. `printf`'s
+//! interpretation of an escape sequence **varies by shell and by build**:
 //! bash's builtin `printf` understands `\x`, `/usr/bin/printf` (coreutils)
 //! understands `\x`, but dash's builtin does not and writes the string
 //! literally. So the same script produced an 8-byte binary file under `bash`
@@ -15,13 +15,13 @@
 //! interpret.
 //!
 //! The script's last line also counted with `ls -1 "$OUT_DIR"/*.bud | wc -l`;
-//! bu, dizin bos oldugunda glob'un genislememesi yuzunden `ls: no such
-//! file` yazip **1** sayardi. Burada sayim yazilan dosyalarin kendisinden
-//! geliyor.
+//! when the directory was empty the glob did not expand, so it printed
+//! `ls: no such file` and counted **1**. Here the count comes from the files
+//! that were actually written.
 
 use std::path::{Path, PathBuf};
 
-/// Bir tohum: dosya adi ve tam ikili icerigi.
+/// One seed: the file name and its exact binary content.
 struct Seed {
     name: &'static str,
     what: &'static str,
@@ -39,7 +39,7 @@ const SEEDS: &[Seed] = &[
     },
     Seed {
         name: "02_branch_loop.bud",
-        what: "Jmp (0x0A) ile dallanma dongusu",
+        what: "a branch loop with Jmp (0x0A)",
         bytes: &[
             0x0a, 0x01, 0x02, 0x03, 0x05, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00,
@@ -52,7 +52,7 @@ const SEEDS: &[Seed] = &[
     },
     Seed {
         name: "04_poseidon_hash.bud",
-        what: "Poseidon (0x1D) hash turu",
+        what: "a Poseidon (0x1D) hash round",
         bytes: &[0x1d, 0x01, 0x02, 0x03, 0x0a, 0x00, 0x00, 0x00],
     },
     Seed {
@@ -150,7 +150,7 @@ pub fn self_test() -> Result<String, String> {
 
     if count != SEEDS.len() {
         return Err(format!(
-            "{} tohum bekleniyordu, {count} bulundu",
+            "{} seeds were expected, {count} found",
             SEEDS.len()
         ));
     }
@@ -168,7 +168,7 @@ mod tests {
         for seed in SEEDS {
             assert!(
                 seed.bytes.iter().any(|b| *b < 0x20),
-                "{} yazdirilabilir ASCII; shell'in printf hatasi",
+                "{} is printable ASCII; the shell printf failure",
                 seed.name
             );
         }

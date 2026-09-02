@@ -390,7 +390,7 @@ fn run(cli: Cli) -> Result<String, String> {
             if n < 1 {
                 return Err("BFT: n must be >= 1".into());
             }
-            // STRIX: votes are REALLY signed (each validator with its own ed25519 key)
+            // votes are REALLY signed (each validator with its own ed25519 key)
             use ed25519_dalek::SigningKey;
             let votes: Vec<RatioVote> = (0..n)
                 .map(|i| {
@@ -663,7 +663,7 @@ fn run(cli: Cli) -> Result<String, String> {
                 return Err("the block could not be verified".into());
             }
             let blob = block.to_blob();
-            // Strix LOW (CWE-59, 2026-08-17): a fixed epoch-named output in /tmp let a
+            // LOW (CWE-59, 2026-08-17): a fixed epoch-named output in /tmp let a
             // local attacker place a symlink beforehand and truncate the target file.
             // The output is now user-chosen; if the existing file is a symlink the
             // write is refused (a new file is opened).

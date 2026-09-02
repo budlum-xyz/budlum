@@ -62,6 +62,11 @@ pub enum CodecError {
     MuxNotLinked,
     /// Empty frame list.
     EmptyFrames,
+    /// Declared frame count is larger than the blob can physically hold.
+    BadFrameCount {
+        /// Declared count.
+        count: u64,
+    },
 }
 
 impl std::fmt::Display for CodecError {
@@ -70,6 +75,9 @@ impl std::fmt::Display for CodecError {
             Self::Forbidden(k) => write!(f, "three codec {k:?} forbidden by K-QR-KODEK gate"),
             Self::MuxNotLinked => write!(f, "three codec mux adapter not linked in this build"),
             Self::EmptyFrames => write!(f, "three codec refuses empty frame list"),
+            Self::BadFrameCount { count } => {
+                write!(f, "three codec refuses declared frame count {count}")
+            }
         }
     }
 }
@@ -149,6 +157,13 @@ impl FrameMux for RawFrameConcat {
             a.copy_from_slice(s);
             u32::from_le_bytes(a) as usize
         };
+        // The declared count cannot exceed what the blob can physically hold:
+        // every frame costs at least its 4-byte length header. Bound it before
+        // `Vec::with_capacity(n)` turns a forged count into a huge reservation.
+        let max_frames = (blob.len().saturating_sub(8)) / 4;
+        if n > max_frames {
+            return Err(CodecError::BadFrameCount { count: n as u64 });
+        }
         let mut out = Vec::with_capacity(n);
         let mut off = 8usize;
         for _ in 0..n {
@@ -210,6 +225,23 @@ mod tests {
                 .split(CodecKind::RawFrames, &blob)
                 .unwrap_err(),
             CodecError::EmptyFrames
+        );
+    }
+
+    /// A tiny blob that declares a 4-billion-frame count must be refused before
+    /// the reader reserves a `Vec` for it.
+    #[test]
+    fn split_refuses_a_forged_frame_count() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(RAW_CONCAT_MAGIC.as_slice());
+        blob.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            RawFrameConcat
+                .split(CodecKind::RawFrames, &blob)
+                .unwrap_err(),
+            CodecError::BadFrameCount {
+                count: u32::MAX as u64
+            }
         );
     }
 }

@@ -799,7 +799,7 @@ fn real_bitcoin_merkle_roots_match_committed_vectors() {
 fn bitcoin_merkle_single_leaf_equals_txid() {
     for &(height, expected, txids) in MERKLE_VECTORS {
         if txids.len() == 1 {
-            assert_eq!(expected, txids[0], "tek-yaprak blok {height}");
+            assert_eq!(expected, txids[0], "single-leaf block {height}");
         }
     }
 }

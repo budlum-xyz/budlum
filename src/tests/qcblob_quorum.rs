@@ -1,5 +1,5 @@
-//! (security audit, section 4) The minimum signature count of `import_qc_blob`
-//! (2/3 quorum) test'leri. Yeterli imza olmadan QcBlob insert
+//! (security audit, section 4) Tests of the minimum signature count of
+//! `import_qc_blob` (2/3 quorum). A QcBlob insert without enough signatures
 //! must not be accepted below the threshold; exactly the threshold must be
 //! accepted; an empty signature set must be refused.
 //!

@@ -74,7 +74,7 @@ fn f03_f04_f07_proof_required_models_cannot_register() {
         .register_model(AiModelSpec {
             model_id: AiModelId([1u8; 32]),
             model_hash: [2u8; 32],
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             owner: addr(3),
             min_verifier_count: 1,
             agreement_threshold: 1,
@@ -114,7 +114,7 @@ fn f06_f13_verify_inference_and_merkle_stay_closed() {
 fn f12_grant_builder_is_requester_bound() {
     let owner = addr(2);
     let requester = addr(9);
-    let grant = crate::lubot::build_lubot_inference_grant(
+    let grant = crate::ai_inference::build_ai_inference_grant(
         crate::pollen::AssetId([1; 32]),
         owner,
         requester,
@@ -266,7 +266,7 @@ fn a_model_hash_that_contradicts_its_dims_is_refused() {
         .register_model(AiModelSpec {
             model_id: AiModelId([9u8; 32]),
             model_hash: [2u8; 32],
-            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
             owner: addr(3),
             min_verifier_count: 1,
             agreement_threshold: 1,
@@ -296,7 +296,7 @@ fn a_model_hash_that_contradicts_its_dims_is_refused() {
 ///
 /// It shows that the gate refuses only the wrong case and does not also refuse
 /// the right one -
-/// yoksa "her seyi reddet" de bir kapi sayilirdi.
+/// otherwise "refuse everything" would count as a gate too.
 #[test]
 fn a_model_hash_that_matches_its_dims_registers() {
     let dims = vec![2u16, 1];
@@ -312,7 +312,7 @@ fn a_model_hash_that_matches_its_dims_registers() {
     reg.register_model(AiModelSpec {
         model_id: AiModelId([10u8; 32]),
         model_hash: [2u8; 32],
-        modalities: crate::lubot::perception::ModalitySet::text_only(),
+        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         owner: addr(3),
         min_verifier_count: 1,
         agreement_threshold: 1,

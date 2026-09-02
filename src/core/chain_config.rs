@@ -324,10 +324,10 @@ const MAINNET_FALLBACK_BOOTNODES: &[&str] = &[];
 const TESTNET_FALLBACK_BOOTNODES: &[&str] = &[];
 // // Ceremony (2026-07-16): ceremony DNS seeds.
 // Replace with actual operator-published DNS TXT records during ceremony.
-// Fail-closed onarim: hedef ceremony domain'leri
-// `_dnsaddr.bootstrap-{1,2}.mainnet.budlum.network` - operatorler ceremony'de
-// GERCEK TXT publish edene kadar "placeholder" marker'i bilinclidir; guard
-// keeps blocking the mainnet boot (regression 4129861 closed).
+// Fail-closed repair: the target ceremony domains are
+// `_dnsaddr.bootstrap-{1,2}.mainnet.budlum.network`. Until the operators
+// publish the REAL TXT records at the ceremony the "placeholder" marker is
+// deliberate; the guard keeps blocking the mainnet boot (regression 4129861 closed).
 const MAINNET_DNS_SEEDS: &[&str] = &[
     "_dnsaddr.placeholder-seed-1.mainnet.budlum.network",
     "_dnsaddr.placeholder-seed-2.mainnet.budlum.network",

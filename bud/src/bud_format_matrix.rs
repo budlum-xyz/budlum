@@ -271,7 +271,7 @@ pub const MATRIX: &[MatrixEntry] = &[
         single_ratio: 2.50,
         multiplier_kind: "fleet",
         multiplier: 25.43,
-        note: "zstd 2.5x × filo dedup (ortak fontlar)",
+        note: "zstd 2.5x × fleet dedup (shared fonts)",
     },
     MatrixEntry {
         class: "zip",

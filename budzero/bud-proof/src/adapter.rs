@@ -11,6 +11,26 @@ use tiny_keccak::{Hasher, Keccak};
 /// scattered across the codebase, or a bump is silently half-applied.
 pub const PROOF_FORMAT_VERSION: u32 = 1;
 
+/// A proof larger than this is refused before it is deserialized or hashed:
+/// the allocation cap that closes the parse-time side of a bloated-proof DoS
+/// (the storage side is the slashing-evidence byte bounds, B1).
+pub const MAX_ENVELOPE_PROOF_BYTES: usize = 10 * 1024 * 1024;
+
+/// Envelope metadata strings are bounded so a crafted envelope cannot make a
+/// verifier allocate without limit at parse time.
+const MAX_ENVELOPE_STRING_LEN: usize = 256;
+
+/// The serialized-envelope cap: any file or wire blob beyond this is refused
+/// before parsing, so parse-time allocation is bounded by construction.
+const MAX_ENVELOPE_SERIALIZED_LEN: usize =
+    MAX_ENVELOPE_PROOF_BYTES + MAX_ENVELOPE_STRING_LEN * 4 + 4096;
+
+/// A program or trace longer than this cannot carry a verifiable canonical
+/// proof and is refused before hashing or degree computation. Generous on
+/// purpose: the canonical programs are a few dozen steps; this only cuts off
+/// sizes that could overflow the `3 * trace_len + 1` degree derivation.
+pub const MAX_TRACE_LEN: usize = 1 << 20;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionPublicInputs {
     pub chain_id: u64,
@@ -38,7 +58,7 @@ pub struct ExecutionPublicInputs {
     /// the event list.
     pub event_digest: [u8; 32],
     /// Post-execution storage-write digest, bound by the AIR at
-    /// `public_inputs[48..56]` (Strix HIGH CWE-345, 2026-08-17). The VM
+    /// `public_inputs[48..56]` (HIGH CWE-345, 2026-08-17). The VM
     /// computes this from every `SWrite` (slot, value) pair; the proof now
     /// commits to it, so a storage-mutating program cannot verify while its
     /// actual state transition is unbound.
@@ -184,6 +204,19 @@ impl ExecutionPublicInputs {
         hasher.finalize(&mut res);
         res
     }
+
+    /// Reject a public-input shape that a verifier must not act on: a
+    /// `trace_len` above [`MAX_TRACE_LEN`] would overflow the degree
+    /// derivation before any proof bytes are read.
+    pub fn validate_shape(&self) -> Result<(), VerifyError> {
+        if self.trace_len as usize > MAX_TRACE_LEN {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "trace_len {} exceeds the {MAX_TRACE_LEN} cap",
+                self.trace_len
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -195,6 +228,56 @@ pub struct ProofEnvelope {
     pub public_inputs_hash: [u8; 32],
     pub proof_bytes: Vec<u8>,
     pub degree_bits: u32,
+}
+
+impl ProofEnvelope {
+    /// Reject an envelope whose fields could make a verifier allocate or
+    /// compute beyond reason: oversized proof bytes, oversized metadata
+    /// strings, or a nonsense `degree_bits`.
+    pub fn validate_shape(&self) -> Result<(), VerifyError> {
+        if self.proof_bytes.len() > MAX_ENVELOPE_PROOF_BYTES {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "proof bytes {} exceed the {MAX_ENVELOPE_PROOF_BYTES} cap",
+                self.proof_bytes.len()
+            )));
+        }
+        for (name, value) in [
+            ("backend", self.backend.as_str()),
+            ("p3_version", self.p3_version.as_str()),
+            ("fri_params_id", self.fri_params_id.as_str()),
+        ] {
+            if value.len() > MAX_ENVELOPE_STRING_LEN {
+                return Err(VerifyError::InvalidEnvelope(format!(
+                    "{name} length {} exceeds the {MAX_ENVELOPE_STRING_LEN} cap",
+                    value.len()
+                )));
+            }
+        }
+        if self.degree_bits > 64 {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "degree_bits {} exceeds the 64 cap",
+                self.degree_bits
+            )));
+        }
+        Ok(())
+    }
+
+    /// Decode a serialized envelope with the parse-time bound applied before
+    /// any allocation: the input length is checked against
+    /// [`MAX_ENVELOPE_SERIALIZED_LEN`] first, then the parsed shape is
+    /// re-checked by [`Self::validate_shape`].
+    pub fn from_json_bounded(input: &str) -> Result<Self, VerifyError> {
+        if input.len() > MAX_ENVELOPE_SERIALIZED_LEN {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "serialized envelope of {} bytes exceeds the {MAX_ENVELOPE_SERIALIZED_LEN} cap",
+                input.len()
+            )));
+        }
+        let envelope: Self =
+            serde_json::from_str(input).map_err(|e| VerifyError::InvalidEnvelope(e.to_string()))?;
+        envelope.validate_shape()?;
+        Ok(envelope)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -228,6 +311,102 @@ pub trait ProverAdapter {
         expected_inputs: &ExecutionPublicInputs,
         program: &[u64],
     ) -> Result<(), VerifyError>;
+}
+
+#[cfg(test)]
+mod envelope_bounds_tests {
+    use super::*;
+
+    fn valid_envelope() -> ProofEnvelope {
+        ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: [0u8; 32],
+            proof_bytes: vec![0u8; 64],
+            degree_bits: 16,
+        }
+    }
+
+    #[test]
+    fn valid_envelope_passes_shape() {
+        assert!(valid_envelope().validate_shape().is_ok());
+    }
+
+    #[test]
+    fn oversized_proof_bytes_are_rejected() {
+        let mut env = valid_envelope();
+        env.proof_bytes = vec![0u8; MAX_ENVELOPE_PROOF_BYTES + 1];
+        assert!(matches!(
+            env.validate_shape(),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+    }
+
+    #[test]
+    fn oversized_metadata_strings_are_rejected() {
+        let mut env = valid_envelope();
+        env.backend = "x".repeat(MAX_ENVELOPE_STRING_LEN + 1);
+        assert!(matches!(
+            env.validate_shape(),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+    }
+
+    #[test]
+    fn nonsense_degree_bits_are_rejected() {
+        let mut env = valid_envelope();
+        env.degree_bits = 65;
+        assert!(matches!(
+            env.validate_shape(),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+    }
+
+    #[test]
+    fn bounded_json_decode_roundtrips_and_rejects_oversize() {
+        let env = valid_envelope();
+        let json = serde_json::to_string(&env).expect("serialize");
+        let decoded = ProofEnvelope::from_json_bounded(&json).expect("bounded decode");
+        assert_eq!(decoded.proof_bytes, env.proof_bytes);
+        assert_eq!(decoded.backend, env.backend);
+
+        // An input larger than the serialized cap is refused before parsing.
+        let oversized = format!(
+            "{{\"pad\":\"{}\"}}",
+            "a".repeat(MAX_ENVELOPE_SERIALIZED_LEN)
+        );
+        assert!(matches!(
+            ProofEnvelope::from_json_bounded(&oversized),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+    }
+
+    #[test]
+    fn oversized_trace_len_is_rejected() {
+        let mut pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1_000_000,
+            gas_used: 0,
+            exit_code: 0,
+            trace_len: 12,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        assert!(pi.validate_shape().is_ok());
+        pi.trace_len = (MAX_TRACE_LEN as u64) + 1;
+        assert!(matches!(
+            pi.validate_shape(),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+    }
 }
 
 #[cfg(test)]

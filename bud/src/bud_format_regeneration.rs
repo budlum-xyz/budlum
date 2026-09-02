@@ -16,7 +16,7 @@
 //! for audit (I2). A failed production lowers the reputation score (the
 //! provider.rs pattern).
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 

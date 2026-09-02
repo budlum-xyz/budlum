@@ -233,7 +233,7 @@ pub const COL_GAS_LIMIT: usize = 695; // 1 column - vm.gas_limit, first row
 pub const COL_EVENT_DIGEST_0: usize = 696; // 380..387 - event_digest accumulator (8 × u32 limbs, additive)
 pub const COL_EXIT_CODE: usize = 704; // 1 column - 0=normal Halt, 1=error (set on Halt row)
 pub const COL_CHAIN_ID: usize = 705; // 1 column - vm.gas_limit sibling; chain_id is bound via first-row public input
-                                     // Strix HIGH CWE-345 (2026-08-17): post-execution storage-write digest.
+                                     // HIGH CWE-345 (2026-08-17): post-execution storage-write digest.
                                      // 8 u32 limbs, bound at the last real row against public_inputs[48..56].
 pub const COL_STATE_WRITES_0: usize = 745;
 
@@ -1679,7 +1679,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         }
 
         // (2b) state_writes_digest: last real row, COL_STATE_WRITES_0..7 ==
-        //      public[48..56] (Strix HIGH CWE-345, 2026-08-17). Without this
+        //      public[48..56] (HIGH CWE-345, 2026-08-17). Without this
         //      the proof never commits to the VM's post-execution storage
         //      writes; a storage-mutating program could verify while its
         //      actual state transition stayed unbound.
@@ -1690,7 +1690,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_zero(cur[COL_FINAL_ROOT_0 + j].into() - public_inputs[18 + j].into());
         }
 
-        // (2c) state-write accumulator carry + first-row zero (Strix HIGH)
+        // (2c) state-write accumulator carry + first-row zero (HIGH)
         for j in 0..8 {
             builder
                 .when_transition()
@@ -2879,7 +2879,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             //                    (COL_STATE_WRITES_0..7 = 4 x u64), s6..s7=0
             // DOMAIN_NULLIFIER = 0x4e554c4c49464552 ("NULLIFER") - must match bud-vm.
             let domain_nullifier = AB::Expr::from(AB::F::from_u64(0x4e554c4c49464552));
-            // Strix HIGH CWE-345: prev_acc lane k (u64) from the 8 x u32-limb
+            // HIGH CWE-345: prev_acc lane k (u64) from the 8 x u32-limb
             // accumulator committed in COL_STATE_WRITES_0..7.
             let acc_lane = |k: usize| {
                 cur[COL_STATE_WRITES_0 + 2 * k].into()
@@ -2979,8 +2979,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                         sum += sbox_out[j].clone() * AB::Expr::from(AB::F::from_u64(MDS[0][j]));
                     }
                     poseidon_out = sum;
-                    // Strix HIGH CWE-345: SWrite son round ciktisinin ilk 4
-                    // lane becomes the next accumulator (8 x u32 limbs).
+                    // HIGH CWE-345: the first 4 lanes of the last-round SWrite
+                    // output become the next accumulator (8 x u32 limbs).
                     for k in 0..4 {
                         let mut out_k: AB::Expr = AB::Expr::ZERO;
                         for j in 0..8 {

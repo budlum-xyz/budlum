@@ -288,7 +288,7 @@ fn all_ranges() -> Vec<ColRange> {
             start: COL_SYSCALL_IS_3,
             end: COL_SYSCALL_IS_3 + 1,
         },
-        // Strix HIGH CWE-345 (2026-08-17): state_writes_digest 8 u32 limbs.
+        // HIGH CWE-345 (2026-08-17): state_writes_digest 8 u32 limbs.
         ColRange {
             name: "state_writes_digest",
             start: COL_STATE_WRITES_0,

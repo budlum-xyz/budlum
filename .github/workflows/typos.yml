@@ -112,7 +112,7 @@ jobs:
           echo "32d349aea9b5b6644bb9a8ab8cb44314ce5912d730a16b1466511fc6c69a7ffc  /tmp/th.tar.gz" \
             | sha256sum -c - || {
               echo "the sha256 did not match. If the version changed the hash must be updated in this file;" >&2
-              echo "indirilen hash'i kabul etmek pinlemeyi anlamsiz yapar." >&2
+              echo "accepting the downloaded hash would make the pin meaningless." >&2
               exit 1
             }
           mkdir -p /tmp/th && tar -xzf /tmp/th.tar.gz -C /tmp/th trufflehog

@@ -4,15 +4,15 @@
 //! # Size constants
 //!
 //! This file used to redefine the ML-DSA-87 lengths as its own `pub const`s
-//! and used the `[u8; ML_DSA_87_PUBLIC_KEY_LEN]` / `[u8; ML_DSA_87_SIGNATURE_LEN]`cipliak
-//! numbers everywhere. Two definitions of the same number diverge silently
-//! when one of them changes. The lengths now come from
-//! `crate::crypto::primitives`'ten geliyor; tek tanim var.
+//! and used bare numbers instead of `[u8; ML_DSA_87_PUBLIC_KEY_LEN]` /
+//! `[u8; ML_DSA_87_SIGNATURE_LEN]` everywhere. Two definitions of the same number
+//! diverge silently when one of them changes. The lengths now come from
+//! `crate::crypto::primitives`; there is a single definition.
 //!
-//! Because the directory was never reachable from `lib.rs` this file did not compile; its own
-//! testi bile derlenmezdi (`GuardianVote.signature` alani `[u8; ML_DSA_87_SIGNATURE_LEN]`
-//! the test said `vec![1u8; 4627]`). Code that does not compile is code no gate
-//! gormedigi koddur.
+//! Because the directory was never reachable from `lib.rs` this file did not
+//! compile; even its own test did not build (`GuardianVote.signature` is
+//! `[u8; ML_DSA_87_SIGNATURE_LEN]`, the test said `vec![1u8; 4627]`). Code that
+//! does not compile is code no gate sees.
 //!
 //! `validate_all` is now called by `registry::QuantumAccountRegistry`:
 //! an account enters the registry only if it passes this check, and every path that

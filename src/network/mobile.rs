@@ -174,7 +174,7 @@ impl NetworkStatus {
 /// Storage state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStatus {
-    /// Toplam depolama (bayt).
+    /// Total storage, in bytes.
     pub total_bytes: u64,
     /// Usable storage, in bytes.
     pub available_bytes: u64,
@@ -216,9 +216,9 @@ pub struct ChallengePolicy {
     pub max_proof_tasks: u32,
     /// Is sync-committee participation on?
     pub sync_committee_participation: bool,
-    /// Storage attestation kabul ediyor mu?
+    /// Does it accept storage attestation?
     pub storage_attestation: bool,
-    /// Background sync aktif mi?
+    /// Is background sync active?
     pub background_sync: bool,
 }
 

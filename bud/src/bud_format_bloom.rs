@@ -93,7 +93,7 @@ impl BloomDedupIndex {
         self.bits.len() * 8
     }
 
-    /// RAM tasarrufu vs tam 32-bayt hash seti (exact tutulmazsa).
+    /// RAM saving against a full 32-byte hash set (when exact hashes are not kept).
     pub fn ram_saving_vs_full(&self) -> f64 {
         let full = self.inserted * 32;
         if full == 0 {

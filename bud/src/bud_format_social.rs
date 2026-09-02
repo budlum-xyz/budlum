@@ -96,7 +96,7 @@ impl SocialBridgeRecord {
 
     /// The record identity: source URI + owner + content hash + OWNERSHIP +
     /// time (domain-tagged).
-    /// STRIX fix: ownership (Owned/Licensed) is part of the identity. If the
+    /// ownership (Owned/Licensed) is part of the identity. If the
     /// label changes the identity changes, so ownership manipulation is caught
     /// on the chain (the K74 guarantee).
     pub fn record_hash(&self) -> [u8; 32] {
@@ -201,11 +201,11 @@ mod tests {
             b"post".to_vec(),
             200,
         );
-        // kaynak silindi (bos) -> yetkili kalir
+        // source deleted (empty) -> still authorised
         assert!(rec.verify_source(b""));
-        // kaynak icerigi farkli -> sapma RED
+        // source content differs -> drift REFUSED
         assert!(!rec.verify_source(b"different"));
-        // kaynak ayni -> OK
+        // source identical -> OK
         assert!(rec.verify_source(b"post"));
     }
 
@@ -223,8 +223,8 @@ mod tests {
 }
 
 #[test]
-fn strix_ownership_kimlige_bagli() {
-    // STRIX fix: if the ownership label changes the identity changes, so the
+fn ownership_is_bound_to_identity() {
+    // if the ownership label changes the identity changes, so the
     // manipulation is caught.
     let mut a = SocialBridgeRecord {
         source_uri: "x.com/post/1".to_string(),
@@ -240,9 +240,9 @@ fn strix_ownership_kimlige_bagli() {
     let h_licensed = a.record_hash();
     assert_ne!(
         h_owned, h_licensed,
-        "sahiplik degisimi kimligi degistirmeli"
+        "a change of ownership must change the identity"
     );
-    // ayni sahiplikte deterministik
+    // deterministic under the same ownership
     let b = SocialBridgeRecord {
         source_uri: "x.com/post/1".to_string(),
         owner_did: "did:bud:alice".to_string(),

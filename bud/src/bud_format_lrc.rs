@@ -1,11 +1,11 @@
-//! B.U.D. 2.0 - LRC, local reconstruction codes, in the budlum pattern,
-//! 2026-08-16.
+//! B.U.D. 2.0 - LRC, local reconstruction codes, in the `src/storage/lrc.rs`
+//! pattern.
 //!
-//! An independent, unsafe-free implementation inspired by the main repository's
+//! An independent, unsafe-free implementation following the design of
 //! `src/storage/lrc.rs`: a local reconstruction code, which brings the overhead
 //! of Reed-Solomon down from 0.6x to 0.03x.
 //!
-//! The measurement table, from the main repository:
+//! The measurement table, from `src/storage/lrc.rs`:
 //!
 //!   RS (10,16)             -> 1.600x, repairing from 10 shards
 //!   RS (20,26)             -> 1.300x
@@ -77,7 +77,7 @@ impl LrcScheme {
         Some(shard / (self.k / self.l).max(1))
     }
 
-    /// The comparison against RS(10,16) from the main repository's table, used as
+    /// The comparison against RS(10,16) from the `src/storage/lrc.rs` table, used as
     /// a canary.
     pub fn beats_rs_overhead(&self) -> bool {
         // RS(10,16) is 1.6x, so LRC must stay below 1.3x.
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn lrc_multiplier_beats_rs() {
-        // The main repository's measurement: RS(10,16) at 1.6x against LRC with
+        // The `src/storage/lrc.rs` measurement: RS(10,16) at 1.6x against LRC with
         // k=2000, L=50 and G=12 at 1.031x.
         let lrc = LrcScheme::new(2000, 50, 12).expect("valid");
         assert!(

@@ -21,7 +21,7 @@
 //! ```
 
 use crate::core::hash::hash_fields_bytes;
-use crate::storage::qr_png::{frame_to_qr_png, QrPngError};
+use crate::storage::qr_png::{frame_to_qr_png, QrPngError, MAX_PNG_SIDE_PX};
 use crate::storage::qr_recipe::ThreeRecipePublic;
 
 /// Wire magic.
@@ -47,6 +47,13 @@ pub enum QrVideoError {
     CommitmentMismatch,
     /// Decode of a QR PNG failed.
     Decode(String),
+    /// An optical frame larger than one pinned QR symbol can carry.
+    FrameTooLarge {
+        /// The frame length seen.
+        len: usize,
+        /// The symbol capacity.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for QrVideoError {
@@ -58,6 +65,9 @@ impl std::fmt::Display for QrVideoError {
             Self::Png(s) => write!(f, "qr video png: {s}"),
             Self::CommitmentMismatch => write!(f, "qr video commitment mismatch"),
             Self::Decode(s) => write!(f, "qr video decode: {s}"),
+            Self::FrameTooLarge { len, max } => {
+                write!(f, "qr video frame too large: {len} > {max}")
+            }
         }
     }
 }
@@ -97,6 +107,19 @@ impl QrVideo {
         }
         if optical_frames.len() as u32 > MAX_VIDEO_FRAMES {
             return Err(QrVideoError::TooMany(optical_frames.len() as u32));
+        }
+        // Refuse an unrenderable frame before drawing any of them: the
+        // carousel wire allows drops larger than one pinned QR symbol (other
+        // transports carry them fine), but this container cannot.
+        if let Some(len) = optical_frames
+            .iter()
+            .map(Vec::len)
+            .find(|l| *l > crate::storage::qr_matrix::MAX_QR_PAYLOAD)
+        {
+            return Err(QrVideoError::FrameTooLarge {
+                len,
+                max: crate::storage::qr_matrix::MAX_QR_PAYLOAD,
+            });
         }
         let recipe_commitment = crate::storage::qr_recipe::three_recipe_digest(recipe);
         let mut png_frames = Vec::with_capacity(optical_frames.len());
@@ -275,12 +298,20 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     if width == 0 || height == 0 {
         return Err("no ihdr".into());
     }
-    let raw = inflate_zlib_stored(&idat)?;
+    // A hostile IHDR can declare any u32 geometry; the IDAT must then inflate
+    // to `h * (1 + w*3)` bytes, which is the unbounded allocation this ceiling
+    // closes. Our encoder never emits a side over `MAX_PNG_SIDE_PX`, so
+    // anything larger is refused before a single inflated byte is produced.
+    if width > MAX_PNG_SIDE_PX || height > MAX_PNG_SIDE_PX {
+        return Err("png side too large".into());
+    }
     let w = width as usize;
     let h = height as usize;
     let row = 1 + w * 3;
-    if raw.len() != h * row {
-        return Err(format!("raw len {} != {}", raw.len(), h * row));
+    let expected = h.checked_mul(row).ok_or("png dims overflow")?;
+    let raw = inflate_zlib_stored(&idat, expected)?;
+    if raw.len() != expected {
+        return Err(format!("raw len {} != {}", raw.len(), expected));
     }
     let mut grey = vec![0u8; w * h];
     for y in 0..h {
@@ -299,13 +330,22 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     Ok((w, h, grey))
 }
 
-fn inflate_zlib_stored(z: &[u8]) -> Result<Vec<u8>, String> {
+fn inflate_zlib_stored(z: &[u8], limit: usize) -> Result<Vec<u8>, String> {
     // Our encoder writes zlib stored only - parse that; also accept flate2 for safety.
+    // `limit` is the IHDR-derived byte count the caller expects; reading one
+    // past it turns a zip-bomb IDAT (tiny input, huge stream) into a bounded
+    // error instead of a multi-gigabyte allocation.
     use flate2::read::ZlibDecoder;
     use std::io::Read;
-    let mut d = ZlibDecoder::new(z);
+    let d = ZlibDecoder::new(z);
     let mut out = Vec::new();
-    d.read_to_end(&mut out).map_err(|e| e.to_string())?;
+    let capped = (limit as u64).saturating_add(1);
+    d.take(capped)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
+    if out.len() > limit {
+        return Err("inflate too large".into());
+    }
     Ok(out)
 }
 
@@ -352,6 +392,32 @@ mod tests {
         assert_eq!(
             hex(&h.finalize()),
             "bab09b692296eb54e81010842ab0d000e91553f86e0a4a4e7242bbecfc2fbe3e"
+        );
+    }
+
+    /// A frame no pinned QR symbol can carry must be refused before any
+    /// frame is drawn, with the size named in the refusal. The carousel
+    /// wire itself stays transport-agnostic; this container is the QR one.
+    #[test]
+    fn oversized_frame_is_refused_before_render() {
+        let pc = [0u8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 1,
+                block_len: 8,
+                total_len: 8,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let fat = vec![1u8; crate::storage::qr_matrix::MAX_QR_PAYLOAD + 1];
+        assert_eq!(
+            QrVideo::from_optical_frames(&recipe, &pc, &[b"once".to_vec(), fat], 10).unwrap_err(),
+            QrVideoError::FrameTooLarge {
+                len: crate::storage::qr_matrix::MAX_QR_PAYLOAD + 1,
+                max: crate::storage::qr_matrix::MAX_QR_PAYLOAD,
+            }
         );
     }
 
@@ -534,5 +600,60 @@ mod tests {
             }
         }
         (out, dropped, refused)
+    }
+
+    /// Minimal PNG chunk writer. The decode side does not check CRC, but it
+    /// does advance past the 4-byte CRC field, so each chunk must carry it.
+    fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        c.extend_from_slice(ty);
+        c.extend_from_slice(data);
+        c.extend_from_slice(&[0u8; 4]); // CRC-32 slot (unchecked by decoder)
+        c
+    }
+
+    fn png_with_ihdr_and_idat(w: u32, h: u32, idat: &[u8]) -> Vec<u8> {
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.push(8); // bit depth
+        ihdr.push(2); // color RGB
+        ihdr.push(0); // compression
+        ihdr.push(0); // filter
+        ihdr.push(0); // interlace
+        p.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        p.extend_from_slice(&chunk(b"IDAT", idat));
+        p.extend_from_slice(&chunk(b"IEND", &[]));
+        p
+    }
+
+    /// A hostile IHDR declaring a side over the encoder ceiling must be
+    /// refused before a single inflated byte is produced.
+    #[test]
+    fn hostile_oversize_ihdr_is_refused_before_inflate() {
+        let bomb = png_with_ihdr_and_idat(
+            1_000_000,
+            1_000_000,
+            &[0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff],
+        );
+        assert_eq!(decode_png_grey(&bomb), Err("png side too large".into()));
+    }
+
+    /// A tiny IDAT that inflates far past the IHDR-declared size (zip bomb)
+    /// must stop at the expected byte count instead of allocating the full
+    /// stream.
+    #[test]
+    fn zip_bomb_idat_is_refused() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        // Inflates to 1 MiB of zeros; the 100x100 RGB8 IHDR expects 30100 bytes.
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let idat = enc.finish().unwrap();
+        let bomb = png_with_ihdr_and_idat(100, 100, &idat);
+        assert_eq!(decode_png_grey(&bomb), Err("inflate too large".into()));
     }
 }

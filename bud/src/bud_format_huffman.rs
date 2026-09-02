@@ -376,9 +376,9 @@ mod tests {
 
     #[test]
     fn reject_tampered_and_bombs() {
-        let data = b"merhaba dunya bu bir test verisi";
+        let data = b"hello world this is some test data";
         let c = HuffmanCoder::compress(data);
-        // payload kurcalama (panik yok)
+        // payload tampering (no panic)
         let mut t = c.clone();
         let last = t.len() - 1;
         t[last] ^= 0xFF;

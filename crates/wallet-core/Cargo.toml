@@ -15,7 +15,11 @@ crate-type = ["cdylib", "rlib"]
 # signature scheme. The node already links the same family via the
 # `pq-ml-dsa` validator feature; the wallet pins Category 5 (256-bit
 # quantum security) rather than inheriting Category 3.
-ml-dsa = { version = "0.1.1", features = ["alloc", "zeroize"] }
+ml-dsa = { version = "0.1.1", features = ["alloc", "zeroize", "rand_core"] }
+# rand_core 0.10 traits only (no getrandom feature): the hedged-signing
+# adapter below implements TryRng by hand from the crate's own CSPRNG path,
+# so wasm builds keep working exactly as before.
+rand_core = { version = "0.10", default-features = false }
 sha3 = "0.10"
 sha2 = "0.10"
 hex = "0.4"

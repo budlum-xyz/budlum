@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn sifir_butce_red() {
+    fn zero_budget_is_denied() {
         assert!(matches!(decide_qos(0, 1, 0, 0, 1), QosVerdict::Denied));
     }
 }

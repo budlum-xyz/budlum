@@ -122,7 +122,7 @@ fn min_bytes(n: u64) -> Vec<u8> {
 }
 
 /// Build the RLP of the real header in Yellow Paper field order.
-/// Pre-London 15 alan; London+ 16. alan `baseFeePerGas`.
+/// Pre-London 15 fields; London+ adds the 16th, `baseFeePerGas`.
 fn build_header_rlp(h: &EthHeaderFixture) -> Vec<u8> {
     let mut items = vec![
         Item::String(from_hex(&h.parent_hash)),       // 1. parentHash
@@ -288,8 +288,8 @@ fn fixture_file_parses_and_fields_are_well_formed() {
                 h.name
             );
         }
-        assert_eq!(h.beneficiary.len(), 40, "{}: beneficiary 20 bayt", h.name);
-        assert_eq!(h.nonce.len(), 16, "{}: nonce 8 bayt", h.name);
-        assert_eq!(h.logs_bloom.len(), 512, "{}: logsBloom 256 bayt", h.name);
+        assert_eq!(h.beneficiary.len(), 40, "{}: beneficiary 20 bytes", h.name);
+        assert_eq!(h.nonce.len(), 16, "{}: nonce 8 bytes", h.name);
+        assert_eq!(h.logs_bloom.len(), 512, "{}: logsBloom 256 bytes", h.name);
     }
 }

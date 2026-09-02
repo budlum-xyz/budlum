@@ -168,7 +168,7 @@ pub struct AiModelSpec {
     #[serde(default)]
     pub execution_dims: Option<Vec<u16>>,
     /// The set of modalities the model declared at registration
-    /// ([`crate::lubot::perception::ModalitySet`]).
+    /// ([`crate::ai_inference::perception::ModalitySet`]).
     ///
     /// Default `text_only`: every model registered before this field read
     /// text, and re-reading them as declaring nothing (`ModalitySet::none`)
@@ -176,8 +176,8 @@ pub struct AiModelSpec {
     /// the registration RPC exposes the field, and a model that declares
     /// `none` refuses every request, which is the correct behavior for a
     /// declaration that was lost.
-    #[serde(default = "crate::lubot::perception::ModalitySet::text_only")]
-    pub modalities: crate::lubot::perception::ModalitySet,
+    #[serde(default = "crate::ai_inference::perception::ModalitySet::text_only")]
+    pub modalities: crate::ai_inference::perception::ModalitySet,
 }
 
 impl AiModelSpec {
@@ -285,10 +285,10 @@ pub struct AiInferenceRequest {
     /// cannot answer a different reading than the one the requester paid
     /// for, for the same reason the effort tier is inside the id.
     #[serde(default)]
-    pub perception: Option<crate::lubot::perception::PerceptionRequest>,
+    pub perception: Option<crate::ai_inference::perception::PerceptionRequest>,
     /// How much work the requester is paying for.
     ///
-    /// `src/lubot/effort.rs` promised two rules and could keep neither while
+    /// `src/ai_inference/effort.rs` promised two rules and could keep neither while
     /// no request carried a tier. The second of them is why this field is
     /// inside `calculate_id`: without that, an operator could accept a `5.0x`
     /// request, answer it with `0.5x` work, and claim the higher fee, because
@@ -298,22 +298,22 @@ pub struct AiInferenceRequest {
     /// `1.0x`, which is what those requests meant: the baseline was the only
     /// amount of work anyone could ask for.
     #[serde(default)]
-    pub effort: crate::lubot::effort::EffortTier,
+    pub effort: crate::ai_inference::effort::EffortTier,
 }
 
-/// The canonical commitment over an input ref: `LUBOT_INPUT_COMMIT_V1`
+/// The canonical commitment over an input ref: `AI_INPUT_COMMIT_V1`
 /// domain tag + the ref bytes.
 ///
-/// Admission (`lubot::admit_inference_request`) verifies that a request's
+/// Admission (`ai_inference::admit_inference_request`) verifies that a request's
 /// `input_commitment` equals this value. Without that check, an attacker can
 /// submit the same content under arbitrarily many distinct commitments -
 /// each yielding a distinct request id - and multiply operator work without
-/// paying for new content. The builder (`lubot::inference`) uses the same
+/// paying for new content. The builder (`ai_inference::inference`) uses the same
 /// function, so honest requests pass unchanged.
 #[must_use]
 pub fn canonical_input_commitment(input_ref: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"LUBOT_INPUT_COMMIT_V1");
+    hasher.update(b"AI_INPUT_COMMIT_V1");
     hasher.update(input_ref);
     hasher.finalize().into()
 }
@@ -373,7 +373,7 @@ impl AiInferenceRequest {
     }
 }
 
-/// AI inference result submitted by an active bonded Lubot operator (RoleId 8).
+/// AI inference result submitted by an active bonded AI inference layer operator (RoleId 8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiInferenceResult {
     pub request_id: AiRequestId,

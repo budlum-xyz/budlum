@@ -15,7 +15,7 @@
 //! or string, depending on the field type). Lossless: the lines are rebuilt
 //! EXACTLY from the template and the columns.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 
@@ -136,7 +136,7 @@ impl LogFieldColumnar {
         // not carry the capacity (a cloned empty Vec is born without one). So
         // the intent to preallocate silently vanished for 6 of the 7 columns.
         // Building each column one by one makes the intent real
-        // uygular (clippy::repeat_vec_with_capacity).
+        // (clippy::repeat_vec_with_capacity).
         let mut columns: Vec<Vec<Vec<u8>>> =
             (0..7).map(|_| Vec::with_capacity(lines.len())).collect();
         for line in &lines {

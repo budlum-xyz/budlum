@@ -83,8 +83,8 @@ impl From<LegacyConsensusDomainV1> for ConsensusDomain {
             pow_parameters: None,
             // The migrated legacy record had no such field, so which programs
             // this domain permits is unknown. An unknown
-            // Allow = no allowance: the list is left empty and the field explicitly
-            // Bir program listesi verene kadar zk ile ilerletilemez.
+            // Allow = no allowance: the list is left empty, and the domain cannot
+            // be advanced by zk until a program list is given.
             zk_program_allowlist: Vec::new(),
         }
     }

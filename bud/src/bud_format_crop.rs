@@ -1,11 +1,10 @@
-//! B.U.D. 2.0 - crop derivation, in the pattern of the main repository's
-//! `derived.rs`, 2026-08-16.
+//! B.U.D. 2.0 - crop derivation, in the pattern of `src/storage/derived.rs`.
 //!
-//! Inspired by the main repository: an MCU-aligned JPEG crop is REPRODUCIBLE as
+//! The idea from `src/storage/derived.rs`: an MCU-aligned JPEG crop is REPRODUCIBLE as
 //! a deterministic derivative of the master image, so it does not have to be
 //! stored. That is I7, the derivation ladder.
 //!
-//! The evidence, measured in the main repository: three aligned crops were
+//! The evidence, measured in `src/storage`: three aligned crops were
 //! EXACTLY identical to the corresponding sub-rectangle of the master's
 //! coefficient array, and two deliberately misaligned crops were not. So:
 //!
@@ -146,7 +145,7 @@ mod tests {
     #[test]
     fn mcu_alignment_detected() {
         // A 4:2:0 MCU is 16x16: aligned edges are byte-exactly reproducible, which
-        // is what the main repository measured.
+        // is what `src/storage` measured.
         assert!(CropDerivation::is_mcu_aligned(0, 0, 16, 16));
         assert!(CropDerivation::is_mcu_aligned(16, 32, 64, 48));
         assert!(

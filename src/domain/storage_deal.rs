@@ -31,6 +31,7 @@ use crate::domain::storage_params::StorageDomainParams;
 use crate::domain::Hash32;
 use crate::storage::content_id::ContentId;
 use crate::storage::manifest::ContentManifest;
+use bincode::Options;
 use bud_proof::ProverAdapter;
 use serde::{Deserialize, Serialize};
 
@@ -139,6 +140,40 @@ pub enum OperatorClass {
 /// take down the whole validator set at once rather than a single node.
 /// Hashing a fixed marker keeps the root deterministic across nodes.
 const SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/storage-registry";
+
+/// Hard byte budget for one deserialized proof envelope.
+///
+/// A challenge answer is operator-supplied, so a proof blob must be bounded
+/// before it is parsed: the envelope's nested `proof_bytes` is copied out of
+/// the blob, so an oversized blob doubles whatever the operator sent and lets
+/// one answer hold a whole block's worth of bytes hostage in memory. 1 MiB
+/// matches the block ceiling and covers the 256 KiB execution-proof ceiling
+/// plus the envelope's version-string metadata with room to spare.
+const MAX_PROOF_ENVELOPE_BYTES: u64 = 1024 * 1024;
+
+/// Deserialize a [`bud_proof::ProofEnvelope`] under [`MAX_PROOF_ENVELOPE_BYTES`].
+fn deserialize_proof_envelope(
+    proof_bytes: &[u8],
+) -> Result<bud_proof::ProofEnvelope, StorageError> {
+    if proof_bytes.len() as u64 > MAX_PROOF_ENVELOPE_BYTES {
+        return Err(StorageError::InvalidMerkleProof(format!(
+            "proof envelope exceeds the {MAX_PROOF_ENVELOPE_BYTES} byte ceiling"
+        )));
+    }
+    // Fixint, not the `bincode::options()` varint default: envelopes are
+    // written by `bincode::serialize`, which is fixint, and a varint reader
+    // would reject every honest envelope before it ever saw the limit.
+    // `with_limit` also bounds the deserializer's own decoded-byte accounting,
+    // so a length-prefixed field cannot ask for more than the budget even on
+    // the io::Read path.
+    bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_PROOF_ENVELOPE_BYTES)
+        .deserialize::<bud_proof::ProofEnvelope>(proof_bytes)
+        .map_err(|e| {
+            StorageError::InvalidMerkleProof(format!("failed to deserialize ProofEnvelope: {e}"))
+        })
+}
 
 impl OperatorClass {
     /// Whether this class may hold `replica_index = 0`.
@@ -1841,6 +1876,51 @@ impl StorageRegistry {
         Ok(deal_id)
     }
 
+    /// Social/DM delete for one content (plan G5, CK.5): owner-authorised,
+    /// it revokes every live grant the owner issued for the content and
+    /// rotates the payload key id (delete implies rotate). Grants issued by
+    /// someone else are not the owner's word and are left alone.
+    ///
+    /// The hook seam runs on [`NopThreeHook`](crate::storage::three_hooks::NopThreeHook)
+    /// here because this binary is headless: a gateway installs its own sink
+    /// at its boundary. The revocations themselves are the durable state a
+    /// block commits; serving checks them regardless of who heard the event.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for unknown content, a caller who
+    /// is not the owner, or an unreadable authorisation.
+    pub fn social_delete(
+        &mut self,
+        content_id: ContentId,
+        auth: &crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
+        let owner = self
+            .owner_of(&content_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        let caller = auth
+            .derived_owner()
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        if caller != owner {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner,
+            });
+        }
+        let digest = crate::storage::social_delete_digest(&content_id, &caller, at_epoch);
+        auth.verify(&digest, &owner)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        let mut hook = crate::storage::three_hooks::NopThreeHook;
+        Ok(crate::storage::process_social_delete(
+            &mut self.view_grants,
+            content_id,
+            owner,
+            at_epoch,
+            &mut hook,
+        ))
+    }
+
     /// Open a retrieval challenge. Anyone can call this (no role
     /// Required) - the opener_bond is the anti-spam mechanism.
     #[allow(clippy::too_many_arguments)]
@@ -2467,12 +2547,7 @@ impl StorageRegistry {
             return Ok(());
         }
 
-        let envelope =
-            bincode::deserialize::<bud_proof::ProofEnvelope>(proof_bytes).map_err(|e| {
-                StorageError::InvalidMerkleProof(format!(
-                    "failed to deserialize ProofEnvelope: {e}"
-                ))
-            })?;
+        let envelope = deserialize_proof_envelope(proof_bytes)?;
 
         let (program, expected_inputs) =
             Self::storage_challenge_expected_program_and_inputs(context, storage_root, range_hash);
@@ -2919,8 +2994,8 @@ impl StorageRegistry {
 
     /// Write the placement advice onto the pending tickets.
     ///
-    /// `assign_shard` rendezvous hashing ile shard basina deterministik bir
-    /// chooses a holder: the same shard, the same entropy and the same
+    /// `assign_shard` uses rendezvous hashing to choose one deterministic holder
+    /// per shard: the same shard, the same entropy and the same
     /// candidate set give the same answer on every node. The answer here is a
     /// **recommendation**, whoever accepts the ticket takes it
     /// (`accept_reallocation_ticket` did not change).
@@ -3078,26 +3153,21 @@ impl StorageRegistry {
                 "proof too short (< 64 bytes)".into(),
             ));
         }
-        // Try deserializing as ProofEnvelope via bincode.
+        // Try deserializing as ProofEnvelope via bincode, under the envelope
+        // byte budget so a hostile length prefix is refused before allocation.
         // The ProofEnvelope has: proof_format_version(u32), backend(String),
         // P3_version(String), fri_params_id(String), public_inputs_hash([u8;32]),
         // proof_bytes(Vec<u8>), degree_bits(u32).
-        match bincode::deserialize::<bud_proof::ProofEnvelope>(proof_bytes) {
-            Ok(envelope) => {
-                // Minimal sanity: proof_bytes inside envelope must not be empty.
-                if envelope.proof_bytes.is_empty() {
-                    return Err(StorageError::InvalidMerkleProof(
-                        "ProofEnvelope.proof_bytes is empty".into(),
-                    ));
-                }
-                // Log the proof acceptance (storage_root validated off-chain).
-                let _ = storage_root;
-                Ok(())
-            }
-            Err(e) => Err(StorageError::InvalidMerkleProof(format!(
-                "failed to deserialize ProofEnvelope: {e}"
-            ))),
+        let envelope = deserialize_proof_envelope(proof_bytes)?;
+        // Minimal sanity: proof_bytes inside envelope must not be empty.
+        if envelope.proof_bytes.is_empty() {
+            return Err(StorageError::InvalidMerkleProof(
+                "ProofEnvelope.proof_bytes is empty".into(),
+            ));
         }
+        // Log the proof acceptance (storage_root validated off-chain).
+        let _ = storage_root;
+        Ok(())
     }
 
     // ---- Queries (all read-only, no state change) --------------------
@@ -3984,7 +4054,7 @@ mod tests {
                 stored.content_size(),
                 stored.total_size,
             ),
-            "Stored kimligi degismemeli"
+            "the Stored identity must not change"
         );
     }
 
@@ -4557,9 +4627,9 @@ mod tests {
         let (deal_id, _) = open_one(&mut reg, &m);
         let cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
-            .expect("meydan okuma acilmali");
+            .expect("the challenge must open");
         reg.finalize_missed_challenge(cid, 150)
-            .expect("kacirilan meydan okuma bilet acmali");
+            .expect("a missed challenge must open a ticket");
         reg
     }
 
@@ -5462,7 +5532,7 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Gate (9d82f61): None her zaman MerkleProofRequired vermeli.
+        // Gate (9d82f61): None must always yield MerkleProofRequired.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -5487,7 +5557,7 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
-        // Format gate: deserialize edilemeyen blob InvalidMerkleProof vermeli.
+        // Format gate: a blob that cannot be deserialized must yield InvalidMerkleProof.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -5507,6 +5577,25 @@ mod tests {
                 Some([0x42u8; 32]),
             )
             .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
+    }
+
+    #[test]
+    fn oversized_proof_envelope_is_refused_before_parsing() {
+        // A challenge answer must not carry a block-sized proof blob: the
+        // envelope ceiling refuses it before bincode parses it, so the nested
+        // `proof_bytes` is never copied into memory.
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; MAX_PROOF_ENVELOPE_BYTES as usize + 1],
+            degree_bits: 8,
+        };
+        let blob = bincode::serialize(&envelope).expect("test envelope serialize");
+        let err = StorageRegistry::validate_merkle_proof_format(&blob, &[0u8; 32]).unwrap_err();
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
     }
 

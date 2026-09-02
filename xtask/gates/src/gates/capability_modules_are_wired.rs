@@ -676,7 +676,7 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// against twelve findings, because nine of them named modules whose only
 /// problem was a stale `WIRING` marker, and that class stopped firing once
 /// the comment handling changed. Nine entries suppressing nothing is the same
-/// defect this branch found three times elsewhere: a number written down
+/// defect found three times elsewhere in this tree: a number written down
 /// rather than counted. `no_pending_entry_is_dead` keeps them equal.
 /// `src/registry/evidence.rs` came off this list by being answered rather
 /// than reclassified. Its marker said a production submitter was missing; the

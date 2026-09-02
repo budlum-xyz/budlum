@@ -116,7 +116,7 @@ mod tests {
         let member = addr(0xAA);
         let mut poa = onboarded(admin, member, 100);
 
-        // Horizon=100 → blok 100'de hâlâ yetkili (now_block > expiry reddeder)
+        // Horizon=100 → still authorised at block 100 (now_block > expiry refuses)
         assert!(poa.whitelist(DOMAIN, 100).contains(&member));
         // It expired at block 101 and dropped off.
         assert!(!poa.whitelist(DOMAIN, 101).contains(&member));

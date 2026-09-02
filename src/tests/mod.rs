@@ -25,7 +25,7 @@ pub mod sharding_e2e;
 // Plus: the B.U.D. end-to-end test and the module-independence invariants.
 // A three-actor scenario (operator A, operator B and observer C) with 9
 // permissionless, whitelist and data-sovereignty invariants (plan section 0.5
-// + §4 kabul kriterleri).
+// + §4 acceptance criteria).
 #[cfg(test)]
 pub mod bud_e2e;
 #[cfg(test)]
@@ -52,6 +52,8 @@ pub mod wall_clock_locks;
 // On `AccountState`, so these test files now exercise the real code paths
 // Again. They were the regression tests for patch series.
 #[cfg(test)]
+pub mod ai_inference_runtime;
+#[cfg(test)]
 pub mod disaster_recovery;
 #[cfg(test)]
 pub mod finality_adversarial;
@@ -63,8 +65,6 @@ pub mod hardening;
 pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
-#[cfg(test)]
-pub mod lubot_runtime;
 pub mod migration_v2;
 #[cfg(test)]
 pub mod permissionless;

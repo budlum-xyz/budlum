@@ -2,7 +2,7 @@
 //!
 //! # The failure this closes
 //!
-//! `src/lubot/verify.rs` built `ExecutionPublicInputs` with `chain_id: 1`.
+//! `src/ai_inference/verify.rs` built `ExecutionPublicInputs` with `chain_id: 1`.
 //! The chain's real id is 45262. `chain_id` is a public input: it is the
 //! field that ties a proof to the chain it was produced for. Pinned to a
 //! literal, two things follow. The proofs produced here belong to no real

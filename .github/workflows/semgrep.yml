@@ -12,7 +12,7 @@
 #
 # `rust.lang.security.temp-dir.temp-dir` is excluded: the self-test canaries in
 # xtask/gates set up temporary trees with `temp_dir().join("budlum-gates-
-# <adi>-<pid>-<nanos>")` ile kurar. Ad pid + nanos ile benzersizdir (shell
+# <name>-<pid>-<nanos>")`. The name is unique by pid + nanos (the equivalent
 # of shell `mktemp -d`), the content is only a fixture and not a security
 # operation; xtask/gates is deliberately built with zero dependencies (which is
 # why the tempfile crate cannot be used). The rule triggers on no file in main,
@@ -82,12 +82,12 @@ jobs:
 
       # --exclude-rule rust.lang.security.args.args:
       # The rule targets argv[0] being used as the basis of a security decision.
-      # Iki isabet var (src/main.rs, src/bin/budlum-relayer.rs) ve ikisi de
-      # Argv[0]'i HIC okumuyor: ayristirma sirasiyla index 1 ve 3'ten basliyor,
+      # There are two hits (src/main.rs, src/bin/budlum-relayer.rs) and neither
+      # reads argv[0] at all: parsing starts at index 1 and 3 respectively.
       # No authorization/identity decision depends on this vector. Inline
       # `nosemgrep` markers had been added and Semgrep applies them correctly -
-      # Ama SARIF'e `suppressions: [{kind: inSource}]` ile YINE yaziyor ve
-      # but GitHub lists suppressed results as open alerts. The result: two
+      # but it STILL writes them to the SARIF with `suppressions: [{kind: inSource}]`,
+      # and GitHub lists suppressed results as open alerts. The result: two
       # permanent false alerts in the Security tab. Excluding the rule at scan level
       # keeps the SARIF clean; the markers stay in the source as justification.
       #
@@ -109,7 +109,7 @@ jobs:
 
       - name: Upload SARIF (findings visible in the Security tab even on FAIL)
         if: always()
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           sarif_file: semgrep.sarif
           category: semgrep

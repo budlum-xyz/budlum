@@ -34,7 +34,7 @@
 //! proof of an equivocation paid to be ignored, which is the opposite of the
 //! incentive a permissionless reporting channel needs.
 //!
-//! `SlashingReport::verify_double_sign` (test-only since the Strix CWE-347 fix) is the answer. A double-sign proof
+//! `SlashingReport::verify_double_sign` (test-only since the CWE-347 fix) is the answer. A double-sign proof
 //! does not need a trusted sender: it carries two signatures by the offender
 //! over two different block hashes at one height, and only the offender's key
 //! can produce that pair. The chain checks the pair itself, before charging
@@ -520,7 +520,7 @@ impl SlashingReport {
     /// [`EvidenceError`] naming the first check that failed. A caller must
     /// treat every error as "not proven" rather than "proven innocent": a
     /// malformed report is not evidence of anything.
-    /// Test-only since the Strix CWE-347 fix: the permissionless RPC path no
+    /// Test-only since the CWE-347 fix: the permissionless RPC path no
     /// longer promotes `Unverified` reports, and the consensus path verifies
     /// equivocation at ingest against the validator snapshot, so this raw
     /// signature-over-two-hashes check survives as a regression harness.
@@ -569,7 +569,7 @@ impl SlashingReport {
 
 /// Decode a block hash from the hex a report carries into the bytes that were
 /// signed. Test-only like `verify_double_sign`: production no longer
-/// verifies raw signature-over-two-hashes evidence since the Strix CWE-347
+/// verifies raw signature-over-two-hashes evidence since the CWE-347
 /// fix.
 #[cfg(test)]
 fn decode_block_hash(hex_hash: &str) -> Result<[u8; 32], EvidenceError> {

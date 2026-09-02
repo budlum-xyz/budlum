@@ -14,7 +14,7 @@
 //!
 //! - It does not encode QR video yet (A2-A4).
 //! - It does not write a full content QR recipe (A5).
-//! - Decimen source is not copied (AGPL); only the measured rule we already
+//! - No external transport library is linked; only the measured rule we already
 //!   pinned: try zlib only when it shrinks; never claim QR as storage.
 //!
 //! # Wire layout
@@ -144,6 +144,22 @@ impl std::error::Error for PayloadError {}
 /// [`PayloadError::Empty`] on zero-length content;
 /// [`PayloadError::TooLarge`] when `content` exceeds [`MAX_PAYLOAD_CONTENT`].
 pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, PayloadError> {
+    pack_payload_opts(kind, content, true)
+}
+
+/// Pack with an explicit zlib policy.
+///
+/// [`pack_payload`] always attempts shrink-only zlib. This variant lets the A0
+/// content class decide: an entropy-coded, ciphertext, or executable class
+/// already refused zlib at classification, so re-attempting it here only burns
+/// CPU on bytes that cannot shrink. Passing `false` stores the body raw. The
+/// packed bytes a reader unpacks are identical either way; only the attempt is
+/// skipped.
+pub fn pack_payload_opts(
+    kind: PayloadKind,
+    content: &[u8],
+    allow_zlib: bool,
+) -> Result<Vec<u8>, PayloadError> {
     if content.is_empty() {
         return Err(PayloadError::Empty);
     }
@@ -154,9 +170,13 @@ pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, Payloa
         });
     }
     let content_sha = calculate_hash_bytes(content);
-    let (body, flags) = match try_zlib9(content) {
-        Some(z) if z.len() < content.len() => (z, FLAG_ZLIB),
-        _ => (content.to_vec(), 0u8),
+    let (body, flags) = if allow_zlib {
+        match try_zlib9(content) {
+            Some(z) if z.len() < content.len() => (z, FLAG_ZLIB),
+            _ => (content.to_vec(), 0u8),
+        }
+    } else {
+        (content.to_vec(), 0u8)
     };
 
     let mut out = Vec::with_capacity(THREE_PAYLOAD_HEADER_LEN + body.len());
@@ -250,7 +270,18 @@ fn try_zlib9(data: &[u8]) -> Option<Vec<u8>> {
 fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, ()> {
     let mut decoder = ZlibDecoder::new(data);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out).map_err(|_| ())?;
+    // Cap the expansion before reading. A hostile body may declare a small
+    // `orig_len` in the header yet carry a zlib stream that inflates far past
+    // [`MAX_PAYLOAD_CONTENT`]; without the cap, `read_to_end` allocates the
+    // whole bomb before the length check below can refuse it.
+    decoder
+        .by_ref()
+        .take(MAX_PAYLOAD_CONTENT as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| ())?;
+    if out.len() > MAX_PAYLOAD_CONTENT {
+        return Err(());
+    }
     Ok(out)
 }
 
@@ -283,6 +314,41 @@ mod tests {
             hex(&payload_commitment(&packed)),
             "7e380b6b1a1e981793bc14e8970fefe3a25cff3895bac65b5e5cc2c9f855ac0d"
         );
+    }
+
+    /// A packed body may declare a small `orig_len` yet carry a zlib stream
+    /// that inflates far past [`MAX_PAYLOAD_CONTENT`]. Unpack must refuse
+    /// without first ballooning memory: the inflate read is capped, so a bomb
+    /// is an `Inflate` error, not a multi-gigabyte allocation.
+    #[test]
+    fn unpack_refuses_a_zlib_body_that_expands_past_the_cap() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+        // A highly compressible body that would inflate well past the cap.
+        let big = vec![b'A'; MAX_PAYLOAD_CONTENT + 1_048_576];
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(&big).unwrap();
+        let zlib_body = enc.finish().unwrap();
+        assert!(
+            zlib_body.len() < big.len(),
+            "a repeated body must shrink, otherwise it is not a bomb payload"
+        );
+
+        // Hand-build the wire header declaring orig_len = 1 (a lie) and the bomb.
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&THREE_PAYLOAD_MAGIC);
+        packed.push(THREE_PAYLOAD_VERSION);
+        packed.push(FLAG_ZLIB);
+        packed.push(PayloadKind::ContentBytes.tag());
+        packed.extend_from_slice(&1u64.to_le_bytes());
+        packed.extend_from_slice(&[0u8; 32]); // sha never reached
+        packed.extend_from_slice(&zlib_body);
+
+        match unpack_payload(&packed) {
+            Err(PayloadError::Inflate) => {}
+            other => panic!("the bomb must be refused as Inflate, got {other:?}"),
+        }
     }
 
     #[test]
@@ -322,6 +388,24 @@ mod tests {
             pack_payload(PayloadKind::ContentBytes, b"").unwrap_err(),
             PayloadError::Empty
         );
+    }
+
+    /// The zlib policy knob is real: with the attempt allowed, repetitive text
+    /// carries the zlib flag; with it refused, the same text is stored raw and
+    /// still unpacks to the same bytes.
+    #[test]
+    fn pack_opts_without_zlib_skips_the_attempt_and_still_round_trips() {
+        let content = b"policy knob text ".repeat(300);
+        let with_zlib = pack_payload(PayloadKind::ContentBytes, &content).unwrap();
+        let without = pack_payload_opts(PayloadKind::ContentBytes, &content, false).unwrap();
+
+        assert!(packed_is_zlib(&with_zlib));
+        assert!(!packed_is_zlib(&without));
+
+        let (_, raw_with) = unpack_payload(&with_zlib).unwrap();
+        let (_, raw_without) = unpack_payload(&without).unwrap();
+        assert_eq!(raw_with, content.as_slice());
+        assert_eq!(raw_without, content.as_slice());
     }
 
     #[test]

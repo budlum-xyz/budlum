@@ -13,6 +13,7 @@
 //! copy. Three independent derivations that agree are the property - a
 //! shared helper would be one point of failure restated three times.
 
+use crate::canonical_recovery::{Reconciliation, PIN_SOURCE_COUNT};
 use crate::canonical_set::{program_hash_of, CANONICAL_PROGRAM_HASHES};
 use bud_isa::{Instruction, Opcode};
 use bud_vm::private_transfer::{
@@ -51,6 +52,50 @@ struct Slot {
 
 fn hex32(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Decode a 64-character pin hex string into its 32 bytes.
+fn pin_bytes(hex: &str) -> Result<[u8; 32], String> {
+    if hex.len() != 64 {
+        return Err(format!(
+            "a canonical pin must be 32 bytes of hex, got {} bytes",
+            hex.len() / 2
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("canonical pin carries a non-hex byte: {e}"))?;
+    }
+    Ok(out)
+}
+
+/// Reconcile the independent pin sources for the private-transfer program
+/// (K2 of the regeneration design). The schema is pinned in independent
+/// places; at boot two of them are wired - the VM builder stream and the
+/// canonical-set pin table - and the reconciliation is a strict majority over
+/// the sources actually present. A torn source is re-derived from the schema,
+/// and a split fails closed instead of guessing which side is right.
+fn reconcile_private_transfer_pin(stream: &[u64]) -> Result<(), String> {
+    let builder_hash = program_hash_of(stream);
+    let table_hash = pin_bytes(CANONICAL_PROGRAM_HASHES[2])?;
+    let pins: Vec<[u8; 32]> = vec![builder_hash, table_hash];
+    debug_assert!(pins.len() <= PIN_SOURCE_COUNT);
+    match crate::canonical_recovery::reconcile(&pins) {
+        Reconciliation::Unanimous { .. } => Ok(()),
+        Reconciliation::Repaired { hash, .. } => {
+            if hash == builder_hash {
+                Ok(())
+            } else {
+                Err(format!(
+                    "transfer pin repaired to {} but the schema derives {}",
+                    hex32(&hash),
+                    hex32(&builder_hash)
+                ))
+            }
+        }
+        Reconciliation::Split => Err("transfer pin sources split; refusing to guess a side".into()),
+    }
 }
 
 /// Compare every emitted word against its pinned slot. The words are decoded
@@ -214,6 +259,7 @@ fn verify_private_transfer_program() -> Result<CanonicalCheckProgram, String> {
         },
     ];
     check_slots("private-transfer-check", &stream, &slots)?;
+    reconcile_private_transfer_pin(&stream)?;
     check_against_pin(
         "private-transfer-check",
         PRIVATE_TRANSFER_PROGRAM_VERSION,

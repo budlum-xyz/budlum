@@ -12,7 +12,7 @@ const SHA256: &str = "277f2bd8fd37cf60c42ab7afca6faa884e65440fa31e02b44bdaae60f6
 
 /// Resolve the zizmor binary, downloading the pinned release when needed.
 ///
-/// Fail-closed by construction (Strix CWE-426): every failure - download,
+/// Fail-closed by construction (CWE-426): every failure - download,
 /// checksum, extraction, missing binary - returns `Err`, never a bare
 /// command name. A bare `zizmor` fallback would resolve through PATH, and
 /// in `repo-lint` a malicious PR can place a fake `zizmor` in a writable
@@ -27,7 +27,7 @@ fn bin_path() -> Result<PathBuf, String> {
     // a malicious PR could plant a binary at a fixed `/tmp/zizmor-<ver>`
     // path and have the gate execute it, bypassing the workflow-security
     // scan. Every run therefore downloads the pinned release and verifies
-    // its sha256 before the binary is ever invoked (Strix CWE-494).
+    // its sha256 before the binary is ever invoked (CWE-494).
     let tgz = std::env::temp_dir().join(format!("zizmor-{VERSION}.tar.gz"));
     let url = format!(
         "https://github.com/zizmorcore/zizmor/releases/download/v{VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
@@ -103,7 +103,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         .current_dir(root)
         .output();
     match out {
-        Ok(o) if o.status.success() => Ok(String::from("zizmor temiz (0 bulgu).")),
+        Ok(o) if o.status.success() => Ok(String::from("zizmor clean (0 findings).")),
         Ok(o) => Err(format!(
             "zizmor findings:\n{}",
             String::from_utf8_lossy(&o.stdout)

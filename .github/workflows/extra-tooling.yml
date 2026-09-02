@@ -386,18 +386,18 @@ jobs:
       # counts them and compares against the harness count in the source.
       # Which harnesses run is read from the source rather than repeated here,
       # is not written down: the two lists can drift apart silently. The evidence is at 0.67
-      # `--exclude-harness` yok, `--harness` var ve tekrarlanabiliyor, o
+      # there is no `--exclude-harness`; `--harness` exists and may be repeated,
       # so the selection is by inclusion rather than exclusion.
       #
-      # `--exact` is NOT USED and that was measured. It refused the plain name; the
-      # onekiyle (`budlum_kani::proofs::x`) de reddetti. 0.67.0 kaynagina
-      # bakildiginda `--exact` `mangled_name` ile karsilastiriyor ve o ad
+      # `--exact` is NOT USED and that was measured. It refused the plain name and
+      # the prefixed one (`budlum_kani::proofs::x`) alike. Reading the 0.67.0
+      # source, `--exact` compares against `mangled_name`, in which the
       # crate prefix is absent and the correct form would be `proofs::x`. But that
       # means binding a gate to Kani's internal naming: if the naming scheme changes
       # in the next version the gate silently matches no harness.
       #
-      # `--exact` olmadan `--harness` bir alt-dize filtresidir. Buradaki
-      # Because the names are unique it selects the same nine, and more importantly
+      # Without `--exact`, `--harness` is a substring filter. Because the
+      # names here are unique it selects the same nine, and more importantly
       # the NUMBER of matches is verified by the gate: expecting nine and running
       # eight is caught by the `kani` gate. The filter loosened, the gate did not.
       - name: Kani proofs (fast set)
@@ -496,8 +496,8 @@ jobs:
             echo "$h: $result in ${elapsed}s"
             echo "| $h | $result | $elapsed |" >> "$GITHUB_STEP_SUMMARY"
           done
-          # Bir harness gercekten BOZULDUYSA (FAILED/UNKNOWN) bu is kirmizi
+          # If a harness is really BROKEN (FAILED/UNKNOWN) this job goes red.
           # TIMEOUT is the expected state and is reported as measured:
-          # bunu kirmizi saymak, bilinen bir gercegi her hafta alarma cevirir
-          # ve alarm anlamini kaybeder.
+          # counting it as red would turn a known fact into a weekly alarm,
+          # and the alarm would lose its meaning.
           exit "$rc_all"

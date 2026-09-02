@@ -7,7 +7,6 @@ use crate::bud_stark::{
     verify_with_preprocessed as stark_verify_with_preprocessed, StarkConfig,
 };
 use crate::plonky3_air::*;
-const MAX_PROOF_BYTES: usize = 10 * 1024 * 1024;
 use bud_vm::{Step, Vm};
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::ExtensionMmcs;
@@ -331,7 +330,7 @@ pub fn trace_matrix(
     for (i, step) in trace.iter().enumerate() {
         let row_start = i * TRACE_WIDTH;
         let op = step.instruction.opcode as u8;
-        // Strix HIGH CWE-345 (2026-08-17): state-write accumulator. Row 0
+        // HIGH CWE-345 (2026-08-17): state-write accumulator. Row 0
         // starts at zero; later rows are filled by the post-loop carry below
         // (which never overwrites the fresh value an SWrite row wrote into
         // the following row).
@@ -460,7 +459,7 @@ pub fn trace_matrix(
 
         let imm = step.instruction.imm;
         values[row_start + COL_IMM] = if imm < 0 {
-            // unsigned_abs(): -imm i32::MIN'de panic eder (Strix, 2026-08-17).
+            // unsigned_abs(): -imm i32::MIN'de panic eder (2026-08-17).
             Goldilocks::new(0) - Goldilocks::new(imm.unsigned_abs() as u64)
         } else {
             Goldilocks::new(imm as u64)
@@ -665,13 +664,13 @@ pub fn trace_matrix(
         let poseidon_init: Option<[u64; 8]> = match opcode {
             bud_isa::Opcode::Poseidon => Some([step.src1_val, step.src2_val, 0, 0, 0, 0, 0, 0]),
             bud_isa::Opcode::PrivacyCommit => {
-                // Strix HIGH (CWE-682, 2026-08-17): VM layout'i
+                // HIGH (CWE-682, 2026-08-17): VM layout'i
                 // poseidon4_hash3(amount=rs1, blinding=rs2, recipient=imm).
                 // recipient must be BYTE-IDENTICAL to COL_IMM in the trace:
                 // a negative imm carries the Goldilocks modular negative
                 // (P - |imm|), not the i64->u64 two's complement.
                 let imm = step.instruction.imm;
-                // unsigned_abs(): -imm panics at i32::MIN (Strix, 2026-08-17).
+                // unsigned_abs(): -imm panics at i32::MIN (2026-08-17).
                 let recipient = if imm < 0 {
                     bud_vm::GOLDILOCKS_P.wrapping_sub(imm.unsigned_abs() as u64)
                 } else {
@@ -701,7 +700,7 @@ pub fn trace_matrix(
                 ])
             }
             bud_isa::Opcode::SWrite => {
-                // Strix HIGH CWE-345: SWrite feeds the state-write chain.
+                // HIGH CWE-345: SWrite feeds the state-write chain.
                 // slot = imm (matching the AIR's storage_addr = STORAGE_BASE +
                 // COL_IMM and the memory-event slot resolution), val = rs1.
                 // prev accumulator lanes come from the trace's current
@@ -787,7 +786,7 @@ pub fn trace_matrix(
                         sum = (sum + mds[0][j] as u128 * sbox[j] as u128) % P as u128;
                     }
                     poseidon_out = sum as u64;
-                    // Strix HIGH CWE-345: for SWrite the WHOLE final state is
+                    // HIGH CWE-345: for SWrite the WHOLE final state is
                     // needed (first 4 lanes become the next accumulator), not
                     // just lane 0.
                     if opcode == bud_isa::Opcode::SWrite {
@@ -803,7 +802,7 @@ pub fn trace_matrix(
                 }
             }
 
-            // Strix HIGH CWE-345: SWrite writes the next accumulator into the
+            // HIGH CWE-345: SWrite writes the next accumulator into the
             // NEXT row's COL_STATE_WRITES_0..7 (first 4 lanes of the final
             // gadget state, split into 8 x u32 limbs).
             if opcode == bud_isa::Opcode::SWrite {
@@ -886,7 +885,7 @@ pub fn trace_matrix(
             // Synthetic Halt). The prover passes the right value
             // Through `public_inputs.exit_code`; the AIR binds it.
             values[row_start + COL_EXIT_CODE] = Goldilocks::new(public_inputs.exit_code);
-            // Strix HIGH CWE-345 (2026-08-17): the last real row's
+            // HIGH CWE-345 (2026-08-17): the last real row's
             // COL_STATE_WRITES_0..7 is the carried accumulator value (filled
             // by the post-loop carry below), NOT a copy of the public input;
             // the AIR binds it to public[48..56].
@@ -1193,7 +1192,7 @@ pub fn trace_matrix(
         }
     }
 
-    // Strix HIGH CWE-345: state-write accumulator carry across ALL rows
+    // HIGH CWE-345: state-write accumulator carry across ALL rows
     // (real + padding), applied AFTER the per-step loop. For every row whose
     // PREVIOUS row is not an SWrite, the accumulator copies forward; an
     // SWrite row already wrote its next value into the following row inside
@@ -1631,7 +1630,7 @@ pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     }
     // One more slot so event_digest stays at 8 public values ([40..48]).
     vals.push(Goldilocks::from_u64(0));
-    // state_writes_digest: 8 u32 limbs -> public_inputs[48..56] (Strix HIGH
+    // state_writes_digest: 8 u32 limbs -> public_inputs[48..56] (HIGH,
     // CWE-345, 2026-08-17).
     for chunk in pi.state_writes_digest.chunks_exact(4) {
         let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
@@ -1704,6 +1703,19 @@ impl ProverAdapter for Plonky3Adapter {
             proof_len = envelope.proof_bytes.len(),
             "Verifying proof"
         );
+        // Shape bounds first: nothing below may allocate or compute off an
+        // unbounded field. A trace_len above the cap would overflow the
+        // `3 * trace_len + 1` degree derivation; a program above the cap
+        // cannot be a canonical program and is refused before it is hashed.
+        envelope.validate_shape()?;
+        expected_inputs.validate_shape()?;
+        if program.len() > crate::adapter::MAX_TRACE_LEN {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "program length {} exceeds the {} cap",
+                program.len(),
+                crate::adapter::MAX_TRACE_LEN
+            )));
+        }
         if envelope.proof_format_version != PROOF_FORMAT_VERSION {
             return Err(VerifyError::InvalidEnvelope(
                 "Unsupported proof format version".to_string(),
@@ -1758,8 +1770,10 @@ impl ProverAdapter for Plonky3Adapter {
 
         let public_values = to_public_values(expected_inputs);
 
-        let bounded_bytes =
-            &envelope.proof_bytes[..envelope.proof_bytes.len().min(MAX_PROOF_BYTES)];
+        let bounded_bytes = &envelope.proof_bytes[..envelope
+            .proof_bytes
+            .len()
+            .min(crate::adapter::MAX_ENVELOPE_PROOF_BYTES)];
         let p3_proof: crate::bud_stark::Proof<MyConfig> = postcard::from_bytes(bounded_bytes)
             .map_err(|e| VerifyError::DeserializationError(e.to_string()))?;
 
@@ -4289,9 +4303,8 @@ mod tests {
     /// check - before the constraint check is ever reached.
     ///
     /// The reason is good news for the proof system: the public inputs enter
-    /// the Fiat-Shamir
-    /// transcript'ine absorbe ediliyor (`prover.rs` `observe_slice`,
-    /// mirror in `verifier.rs`). When one of them changes the whole challenge
+    /// the Fiat-Shamir transcript by absorption (`prover.rs` `observe_slice`,
+    /// mirrored in `verifier.rs`). When one of them changes the whole challenge
     /// chain changes and the FRI queries do not hold. The binding is
     /// established in the transcript layer **before** the constraint layer;
     /// that is exactly the property the "Last Challenge Attack" class
@@ -4310,8 +4323,8 @@ mod tests {
     /// * when `observe_slice(public_values)` is broken **partially** (by
     ///   dropping the last value) the test stays green - that value is bound
     ///   by the AIR constraint as well.
-    /// * Absorbe **tamamen** kaldirildiginda `public input 1` serbest kaliyor
-    ///   and the test goes red - that is, some values are bound only by the
+    /// * When the absorption is removed **entirely**, `public input 1` is left
+    ///   free and the test goes red - that is, some values are bound only by the
     ///   transcript and not by the constraint layer.
     ///
     /// Together the two give full coverage; removing either opens a hole.
@@ -4862,7 +4875,7 @@ mod tests {
         });
     }
 
-    /// Strix HIGH (CWE-682, 2026-08-17) regression: a negative imm, with the
+    /// HIGH (CWE-682, 2026-08-17) regression: a negative imm, with the
     /// VM layout poseidon4_hash3(amount=rs1, blinding=rs2, recipient=imm). The
     /// old witness truncated imm to u32 and called it "blinding"; with a
     /// negative imm the proof does not prove the commitment the VM computed
@@ -4883,8 +4896,8 @@ mod tests {
         });
     }
 
-    /// Strix HIGH (2026-08-17): i32::MIN imm ile normalization panic etmemeli.
-    /// -imm i32 overflow yapar; unsigned_abs() |-2^31| = 2^31 doner.
+    /// HIGH (2026-08-17): normalization must not panic on an i32::MIN imm.
+    /// -imm overflows i32; unsigned_abs() returns |-2^31| = 2^31.
     #[test]
     fn d2_proves_privacy_commit_i32_min_imm() {
         let amount = 1u64;

@@ -106,7 +106,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut pos = 5usize;
-    // STRIX FIX: no PANIC on truncated or corrupt input; the bounds are checked
+    // no PANIC on truncated or corrupt input; the bounds are checked
     // with .get().
     let n = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
@@ -282,8 +282,8 @@ mod tests {
     }
 
     #[test]
-    fn strix_truncation_does_not_panic() {
-        // STRIX: a truncated or corrupt transform input must return None and must
+    fn truncation_does_not_panic() {
+        // a truncated or corrupt transform input must return None and must
         // not PANIC.
         let z = sample_opc();
         let t = office_transform(&z).unwrap();

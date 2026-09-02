@@ -17,14 +17,14 @@
 //! module realises that scenario (the cost of the dedup index enters the price -
 //! the V7 lesson).
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
 #![forbid(unsafe_code)]
 
 use crate::bud_format_container::content_id;
 use sha3::{Digest, Sha3_256};
 
-// OOM protection: a ceiling on the caller-controlled chunk count (the STRIX pattern)
+// OOM protection: a ceiling on the caller-controlled chunk count
 pub const MAX_MULTIFILE_CHUNKS: usize = 1 << 20;
 pub const MULTI_MAGIC: [u8; 8] = *b"\xB5MFLE\0\0\0";
 pub const MULTI_VERSION: u8 = 1;
@@ -185,7 +185,7 @@ impl TenantMultifileStore {
             return None;
         }
         let chunk_count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
-        // The STRIX pattern: block OOM from a caller-controlled chunk_count
+        // block OOM from a caller-controlled chunk_count
         if chunk_count > MAX_MULTIFILE_CHUNKS {
             return None;
         }
@@ -308,11 +308,11 @@ mod tests {
     #[test]
     fn multifile_roundtrip_and_tamper() {
         let mut store = TenantMultifileStore::new();
-        store.add_file(&b"dosya 1 icerigi ".repeat(10), 16);
+        store.add_file(&b"file 1 content  ".repeat(10), 16);
         store.add_file(&b"file 2 has different content".repeat(10), 16);
         let blob = store.to_blob();
         let back = TenantMultifileStore::from_blob(&blob).expect("blob");
-        assert_eq!(back.restore(0).unwrap(), b"dosya 1 icerigi ".repeat(10));
+        assert_eq!(back.restore(0).unwrap(), b"file 1 content  ".repeat(10));
         assert_eq!(
             back.restore(1).unwrap(),
             b"file 2 has different content".repeat(10)
@@ -338,7 +338,7 @@ mod tests {
 }
 
 #[test]
-fn strix_oom_chunk_count_is_refused() {
+fn oom_chunk_count_is_refused() {
     // a caller-controlled huge chunk_count -> None (no OOM)
     let mut bytes = vec![0u8; 64];
     bytes[0..8].copy_from_slice(b"\xB5MFLE\0\0\0");

@@ -11,8 +11,8 @@
 //!    section 0.5: "third parties keep opening challenges").
 //!
 //! 2. **The `team_independence_invariants` module** - 9 invariants:
-//!    Whitelist YOK, admin/pause hook YOK, "Budlum ekibi servisi"
-//!    NO dependency, permissionless challenges, different accounts can compete
+//!    NO whitelist, NO admin/pause hook, NO dependency on a "Budlum team
+//!    service", permissionless challenges, different accounts can compete
 //!    for the same shard, and so on (plan sections 4 and 0.5).
 
 use crate::core::address::Address;
@@ -441,8 +441,8 @@ fn invariant_3_any_account_can_challenge_any_deal() {
         .unwrap();
 
     // This invariant measures "who may open a challenge", not the rate limit.
-    // Consecutive challenges for the same (operator, manifest) pair have a
-    // MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS (=4) epoch bosluk sart; hepsini
+    // Consecutive challenges for the same (operator, manifest) pair require a
+    // MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS (=4) epoch gap, a
     // cooldown; opening in the same epoch is refused with ChallengeRateLimited.
     // Challenge_epoch is the 4th argument; deadline_epoch the 5th.
     let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
@@ -526,8 +526,8 @@ fn invariant_5_opener_bond_must_be_positive() {
     );
 }
 
-/// Invariant 6: slashing only happens through a missed deadline -
-/// "operator verileri yok etti" gibi ekstra-supreme iddialar zincir
+/// Invariant 6: slashing only happens through a missed deadline - extra-legal
+/// claims such as "the operator destroyed the data" cannot slash on chain;
 /// it CANNOT be done otherwise. This guards against the "false-green path" risk
 /// of vision section 9.1.
 #[test]
@@ -564,7 +564,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
         .unwrap();
     assert_eq!(reg.get_deal(deal).unwrap().status, DealStatus::Active);
     // Before trying to open another challenge that has expired
-    // Finalize edemeyiz - yeni bir deal ile test edelim.
+    // We cannot finalize - test with a new deal.
     let deal2 = reg
         .open_deal(
             1,

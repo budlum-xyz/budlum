@@ -1,7 +1,7 @@
 //! The fidelity core - whatever the resolution is, it is preserved; the format
 //! is free to change.
-//! ContentId = SHA3-256(domain-tag || length || kanonik baytlar) - kriptografik (K3 fix)
-//! Render deterministik, float yok, IHDR boyut birebir
+//! ContentId = SHA3-256(domain-tag || length || canonical bytes) - cryptographic (K3 fix).
+//! Rendering is deterministic, float free, and the IHDR size is exact.
 
 use sha3::{Digest, Sha3_256};
 
@@ -40,7 +40,7 @@ impl ContentId {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         // K3 fix (2026-08-16): DefaultHasher and SipHash are NOT cryptographic (a collision can be forged
         // forged). The real cryptographic hash: SHA3-256, domain-tagged + length-prefixed
-        // (budlum src/storage/content_id.rs deseniyle ayni: BDLM_CONTENT_V1).
+        // (the same pattern as src/storage/content_id.rs: BDLM_CONTENT_V1).
         let mut h = Sha3_256::new();
         h.update(b"BDLM_CONTENT_V1");
         h.update((bytes.len() as u64).to_le_bytes());
@@ -80,19 +80,19 @@ impl FidelityCore {
         }
     }
 
-    /// Render - deterministik, float yok
+    /// Render - deterministic, float free.
     /// The KF2 gate: the rendered result has to carry the same resolution.
     pub fn render(&self, fmt: &RenderFormat) -> Result<(Vec<u8>, (u32, u32)), FidelityError> {
         match fmt {
             RenderFormat::Original => Ok((self.canonical.clone(), (self.width, self.height))),
             RenderFormat::AvifSameRes | RenderFormat::WebPLossless | RenderFormat::Av1SameRes => {
                 // The format may change but the resolution is preserved.
-                // Iskelette ayni bayt donduruluyor, gercekte transcode
+                // The skeleton returns the same bytes; production transcodes.
                 Ok((self.canonical.clone(), (self.width, self.height)))
             }
             RenderFormat::Thumbnail { w, h } => {
                 // Derived - a separate ContentId; cannot stand in for the original
-                // Deterministik nearest-neighbor (float yok)
+                // Deterministic nearest-neighbour (float free)
                 Ok((self.canonical.clone(), (*w, *h)))
             }
         }
