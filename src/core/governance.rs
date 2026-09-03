@@ -83,6 +83,7 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "swap_fee_ppm",
     "bridge_fee_ppm",
     "ai_model_register_fee",
+    "liveness_slashing_enabled",
 ];
 
 pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
@@ -156,12 +157,28 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
                 .parse::<u64>()
                 .map_err(|e| format!("invalid ai_model_register_fee: {e}"))?;
         }
+        "liveness_slashing_enabled" => {
+            params.liveness_slashing_enabled = parse_governance_bool(key, value)?;
+        }
         // The whitelist is checked above, but a name added there and not
         // here must refuse the proposal rather than take the node down inside
         // `create_proposal` (that is how `ai_model_register_fee` panicked).
         other => return Err(format!("governance parameter has no validator: {other}")),
     }
     params.validate()
+}
+
+/// Governance parameter values travel as strings; a switch accepts exactly
+/// `true` or `false`. Any other spelling is refused rather than being read as
+/// off, so a mistyped activation cannot pass a vote as a no-op.
+pub fn parse_governance_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!(
+            "invalid {key}: expected true or false, got {other:?}"
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -695,6 +712,22 @@ mod tests {
             Ok(())
         );
         assert!(validate_governance_parameter_update("ai_model_register_fee", "x").is_err());
+        // The liveness switch is a governance decision, not an operator
+        // config: it has to be reachable here, and only as an exact boolean.
+        assert_eq!(
+            validate_governance_parameter_update("liveness_slashing_enabled", "true"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_governance_parameter_update("liveness_slashing_enabled", "false"),
+            Ok(())
+        );
+        for bad in ["1", "yes", "True", ""] {
+            assert!(
+                validate_governance_parameter_update("liveness_slashing_enabled", bad).is_err(),
+                "{bad:?} must not switch liveness slashing"
+            );
+        }
     }
 
     /// The governance root is part of the state root, so it must not depend
