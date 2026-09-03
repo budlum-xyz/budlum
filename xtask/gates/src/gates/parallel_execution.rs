@@ -33,9 +33,14 @@ fn read(root: &Path, rel: &str) -> Result<String, String> {
 /// The byte span of a function body, counting braces but not the ones inside
 /// strings, chars and comments. `root()` has a `match` and serialized
 /// literals in it, so a naive count ends in the wrong place.
+///
+/// Offsets are byte offsets throughout. The scan used to index a `Vec<char>`
+/// and add the character index to a byte offset from `str::find`, so a body
+/// with any non-ASCII character in or before it (a doc comment with a
+/// typographic quote is enough) was sliced short or split mid-character.
 fn span_of(src: &str, name: &str) -> Option<(usize, usize)> {
     let at = src.find(&format!("fn {name}("))?;
-    let bytes: Vec<char> = src[at..].chars().collect();
+    let bytes: Vec<(usize, char)> = src[at..].char_indices().collect();
     let mut i = 0usize;
     let mut open: Option<usize> = None;
     let mut depth = 0usize;
@@ -45,9 +50,9 @@ fn span_of(src: &str, name: &str) -> Option<(usize, usize)> {
     let mut in_block = false;
     let mut esc = false;
     while i < bytes.len() {
-        let c = bytes[i];
+        let (pos, c) = bytes[i];
         let next = if i + 1 < bytes.len() {
-            bytes[i + 1]
+            bytes[i + 1].1
         } else {
             ' '
         };
@@ -89,13 +94,13 @@ fn span_of(src: &str, name: &str) -> Option<(usize, usize)> {
         } else if c == '{' {
             depth += 1;
             if open.is_none() {
-                open = Some(i);
+                open = Some(pos);
             }
         } else if c == '}' {
             depth -= 1;
             if depth == 0 {
                 if let Some(o) = open {
-                    return Some((at + o, at + i + 1));
+                    return Some((at + o, at + pos + 1));
                 }
             }
         }
@@ -328,9 +333,37 @@ pub fn self_test() -> Result<String, String> {
             "canary: an exception held while a second writer existed",
         ));
     }
+    // A multi-byte character ahead of the body must not move the span. With
+    // char indices added to a byte offset, the slice fell short of the fold's
+    // end, so the last folded map read as dropped; and a genuinely dropped fold
+    // behind such a character has to stay visible.
+    let accented = good.replace(
+        "    pub fn root(&self) -> Hash32 {",
+        "    /// Kök: her tablo katlanır, sıra sabittir.\n    pub fn root(&self) -> Hash32 {",
+    );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), &accented).map_err(|e| e.to_string())?;
+    if let Err(e) = run(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "canary: a non-ASCII comment before the fold shifted the span: {e}"
+        ));
+    }
+    let accented_dropped = accented.replace(
+        "        for x in &self.confidential_owners { h.update(x.0.to_le_bytes()); }\n",
+        "",
+    );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), accented_dropped)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a dropped fold behind a non-ASCII comment passed",
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "state-root determinism canary OK (full fold and single-writer exception PASS; a \
-         dropped fold, an unfolded new table and a second writer each FAIL).",
+        "state-root determinism canary OK (full fold and single-writer exception PASS, also \
+         behind a non-ASCII comment; a dropped fold, an unfolded new table and a second \
+         writer each FAIL).",
     ))
 }

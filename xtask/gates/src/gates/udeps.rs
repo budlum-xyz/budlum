@@ -23,8 +23,12 @@ fn parse_udeps(text: &str) -> Vec<String> {
                 continue;
             }
         }
-        // A dependency line: "├─── "chrono"" (or "└─── "group"")
-        let t = line.trim_start();
+        // A dependency line: "├─── "chrono"" (or "└─── "group""). When a
+        // package has more than one dependency group, the groups before the
+        // last are drawn with a continuing rule: `│    ├─── "chrono"`. That
+        // bar is not whitespace, so trimming did not reach the branch and
+        // every dependency in a non-final group fell out of the parse.
+        let t = line.trim_start().trim_start_matches(['│', ' ']);
         if let Some(rest) = t.strip_prefix("├─── ").or_else(|| t.strip_prefix("└─── "))
         {
             if let Some(dep) = rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
@@ -98,11 +102,14 @@ pub fn run(root: &Path, out: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when the parser misreads the real udeps tree format.
 pub fn self_test() -> Result<String, String> {
-    let real = "info: Loading depinfo from \"x.d\"\nunused dependencies:\n`budlum-core v0.1.0 (/x/budlum)`\n└─── dependencies\n     ├─── \"chrono\"\n     └─── \"group\"\nNote: They might be false-positive.\n`bud-node v0.1.0 (/x/budzero/bud-node)`\n└─── dependencies\n     └─── \"serde_json\"\n";
+    // Two dependency groups under one package: the first is drawn with the
+    // continuing `│` rule, the last without it. Both must parse.
+    let real = "info: Loading depinfo from \"x.d\"\nunused dependencies:\n`budlum-core v0.1.0 (/x/budlum)`\n├─── dependencies\n│    ├─── \"chrono\"\n│    └─── \"group\"\n└─── dev-dependencies\n     └─── \"tempfile\"\nNote: They might be false-positive.\n`bud-node v0.1.0 (/x/budzero/bud-node)`\n└─── dependencies\n     └─── \"serde_json\"\n";
     let parsed = parse_udeps(real);
     let expected = [
         "budlum-core:chrono",
         "budlum-core:group",
+        "budlum-core:tempfile",
         "bud-node:serde_json",
     ];
     if parsed != expected {
