@@ -47,6 +47,11 @@ pub struct RelayerWorker {
     /// `None` keeps the previous in-memory behaviour, which is what the tests
     /// and any embedded use rely on; a deployed relayer sets this.
     cursor_path: Option<std::path::PathBuf>,
+    /// Requests of the block under the cursor whose attempt is over, by
+    /// transaction hash. Cleared when the cursor moves past the block. Kept
+    /// so that a block held back by one retried request does not have its
+    /// other requests relayed again on the next pass.
+    settled: std::collections::HashSet<String>,
 }
 
 impl RelayerWorker {
@@ -57,6 +62,7 @@ impl RelayerWorker {
             relayer_keypair: None,
             adapters: Arc::new(AdapterRegistry::new()),
             cursor_path: None,
+            settled: std::collections::HashSet::new(),
         }
     }
 
@@ -170,7 +176,7 @@ impl RelayerWorker {
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         info!(
             "Universal Relayer Worker started for {}",
             self.relayer_address
@@ -213,7 +219,7 @@ impl RelayerWorker {
                 continue;
             }
 
-            for h in (relayed_through + 1)..=finalized {
+            'heights: for h in (relayed_through + 1)..=finalized {
                 // The cursor only moves past a height that was actually
                 // read. A block that storage cannot hand over is retried on
                 // the next pass instead of being skipped with its relay
@@ -227,6 +233,14 @@ impl RelayerWorker {
                 };
                 for tx in block.transactions {
                     if let TransactionType::UniversalRelay(ext_tx) = tx.tx_type {
+                        // A request whose result already reached the chain
+                        // on an earlier pass over this held block is not
+                        // relayed twice: the external action is not
+                        // idempotent, and the chain refuses the second result
+                        // anyway.
+                        if self.settled.contains(&tx.hash) {
+                            continue;
+                        }
                         info!(
                             chain = ?ext_tx.chain,
                             target = %ext_tx.target_address,
@@ -234,11 +248,33 @@ impl RelayerWorker {
                             "Relayer: Detected external transaction request"
                         );
 
-                        self.process_relay(tx.from, ext_tx).await;
+                        match self.process_relay(tx.from, ext_tx).await {
+                            RelayOutcome::Submitted => {
+                                self.settled.insert(tx.hash.clone());
+                            }
+                            RelayOutcome::Refused => {
+                                // A refusal at the adapter is a fact about
+                                // the request: retrying it changes nothing
+                                // and the chain-side deadline reclaims it.
+                                self.settled.insert(tx.hash.clone());
+                            }
+                            RelayOutcome::Retry => {
+                                // The block stays under the cursor; the
+                                // next pass comes back to this request.
+                                warn!(
+                                    height = h,
+                                    request = %tx.hash,
+                                    "Relayer: result not accepted yet; holding the cursor and retrying"
+                                );
+                                break 'heights;
+                            }
+                        }
                     }
                 }
                 relayed_through = h;
                 self.save_cursor(relayed_through);
+                // Everything in this block is behind the cursor now.
+                self.settled.clear();
             }
         }
     }
@@ -290,11 +326,17 @@ impl RelayerWorker {
         Ok(result)
     }
 
+    /// Relay one request and say what became of it.
+    ///
+    /// The block cursor used to move past a request whatever happened here:
+    /// a connection failure, a missing signing key and a full mempool all
+    /// left a paid request behind for good. The caller now holds the cursor
+    /// on [`RelayOutcome::Retry`] and comes back to the request.
     async fn process_relay(
         &self,
         user: Address,
         ext_tx: crate::core::transaction::ExternalTransaction,
-    ) {
+    ) -> RelayOutcome {
         let result = match Self::build_verified_result(&self.adapters, &ext_tx).await {
             Ok(result) => result,
             Err(e) => {
@@ -308,7 +350,7 @@ impl RelayerWorker {
                     "Relayer: refusing to submit a relay result that is not backed by a \
                      verified adapter observation"
                 );
-                return;
+                return relay_outcome_for(&e);
             }
         };
 
@@ -332,7 +374,22 @@ impl RelayerWorker {
         match &self.relayer_keypair {
             Some(kp) => {
                 result_tx.sign(kp);
-                let _ = self.chain.add_transaction(result_tx).await;
+                match self.chain.add_transaction(result_tx).await {
+                    Ok(()) => RelayOutcome::Submitted,
+                    Err(e) => {
+                        // Not accepted by the chain handle: mempool full,
+                        // actor gone, nonce raced. The external action has
+                        // happened, so this is retried rather than dropped;
+                        // the chain's replay protection refuses a second
+                        // result for the same request if one did land.
+                        warn!(
+                            error = %e,
+                            "Relayer: chain did not accept the signed relay result; \
+                             holding the request for retry"
+                        );
+                        RelayOutcome::Retry
+                    }
+                }
             }
             None => {
                 error!(
@@ -340,8 +397,46 @@ impl RelayerWorker {
                      Refusing to submit unsigned relay result (P8-01 fail-closed). \
                      Use RelayerWorker::with_signing_key() to bind a key."
                 );
+                RelayOutcome::Retry
             }
         }
+    }
+}
+
+/// What the relay loop does with a request after one attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayOutcome {
+    /// The signed result was accepted by the chain handle.
+    Submitted,
+    /// The request itself cannot be relayed (no adapter for its chain, or
+    /// the adapter's own proof did not verify). Retrying changes nothing;
+    /// the request is left to the chain-side deadline.
+    Refused,
+    /// A transient failure: the external chain could not be reached, the
+    /// confirmation timed out, the signing key is missing, or the chain
+    /// handle did not take the result. The cursor is held and the request is
+    /// attempted again on the next pass.
+    Retry,
+}
+
+/// Sort an adapter failure into "try again" and "never".
+///
+/// Only failures that name the request as the problem are final. A chain
+/// without an adapter stays without one until the operator restarts with a
+/// different configuration, and a proof the adapter itself rejects is not
+/// going to verify on the next pass either. Everything else is the network
+/// or the remote node having a bad minute.
+fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
+    match error {
+        AdapterError::UnsupportedChain(_) | AdapterError::ProofVerificationFailed(_) => {
+            RelayOutcome::Refused
+        }
+        AdapterError::ConnectionFailed(_)
+        | AdapterError::TransactionNotFound(_)
+        | AdapterError::ProofGenerationFailed(_)
+        | AdapterError::SubmissionFailed(_)
+        | AdapterError::ConfirmationTimeout
+        | AdapterError::Other(_) => RelayOutcome::Retry,
     }
 }
 
@@ -422,5 +517,150 @@ mod cursor_persistence {
         let w = worker_with(None);
         w.save_cursor(99);
         assert_eq!(w.load_cursor(), None);
+    }
+}
+
+#[cfg(test)]
+mod relay_outcomes {
+    use super::*;
+    use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
+    use crate::cross_domain::chain_adapter::ChainAdapter;
+    use crate::cross_domain::event_tree::MerkleProof;
+
+    /// The smallest adapter whose proof its own verifier accepts, so the
+    /// relay reaches the signing step.
+    struct ConsistentAdapter;
+
+    fn leaf_for(tx_hash: &str) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[b"RELAY_OUTCOME_TEST_LEAF", tx_hash.as_bytes()])
+    }
+
+    #[async_trait::async_trait]
+    impl ChainAdapter for ConsistentAdapter {
+        fn chain_type(&self) -> ExternalChain {
+            ExternalChain::Ethereum
+        }
+
+        async fn generate_receipt_proof(
+            &self,
+            tx_hash: &str,
+        ) -> Result<(MerkleProof, [u8; 32], String), AdapterError> {
+            let leaf = leaf_for(tx_hash);
+            Ok((
+                MerkleProof {
+                    leaf,
+                    index: 0,
+                    siblings: Vec::new(),
+                },
+                leaf,
+                tx_hash.to_string(),
+            ))
+        }
+
+        fn verify_receipt_proof(
+            &self,
+            proof: &MerkleProof,
+            external_state_root: &[u8; 32],
+            expected_tx_hash: &str,
+        ) -> Result<(), AdapterError> {
+            if proof.leaf != leaf_for(expected_tx_hash) || !proof.verify(*external_state_root) {
+                return Err(AdapterError::ProofVerificationFailed("leaf".into()));
+            }
+            Ok(())
+        }
+
+        async fn submit_transaction(
+            &self,
+            _ext_tx: &ExternalTransaction,
+        ) -> Result<String, AdapterError> {
+            Ok("0xconsistent".to_string())
+        }
+
+        async fn wait_for_confirmation(
+            &self,
+            tx_hash: &str,
+            _confirmations: u32,
+        ) -> Result<RelayerExternalResult, AdapterError> {
+            let (proof, root, hash) = self.generate_receipt_proof(tx_hash).await?;
+            Ok(RelayerExternalResult {
+                chain: ExternalChain::Ethereum,
+                tx_hash: hash,
+                success: true,
+                message: None,
+                receipt_proof: bincode::serialize(&proof).expect("proof serialize"),
+                external_state_root: root,
+            })
+        }
+    }
+
+    /// A chain without an adapter, or a proof the adapter itself rejects,
+    /// is final: the cursor must not be held forever on a request that can
+    /// never succeed.
+    #[test]
+    fn failures_that_name_the_request_are_final() {
+        assert_eq!(
+            relay_outcome_for(&AdapterError::UnsupportedChain(ExternalChain::Solana)),
+            RelayOutcome::Refused
+        );
+        assert_eq!(
+            relay_outcome_for(&AdapterError::ProofVerificationFailed("leaf".into())),
+            RelayOutcome::Refused
+        );
+    }
+
+    /// Everything that is the network's or the remote node's fault is
+    /// retried: the request is paid for, and the next pass may succeed.
+    #[test]
+    fn transient_failures_hold_the_cursor() {
+        for error in [
+            AdapterError::ConnectionFailed("rpc down".into()),
+            AdapterError::TransactionNotFound("0x1".into()),
+            AdapterError::ProofGenerationFailed("no receipt yet".into()),
+            AdapterError::SubmissionFailed("nonce too low".into()),
+            AdapterError::ConfirmationTimeout,
+            AdapterError::Other("?".into()),
+        ] {
+            assert_eq!(relay_outcome_for(&error), RelayOutcome::Retry, "{error}");
+        }
+    }
+
+    /// A worker without a signing key cannot finish a relay; the request is
+    /// held rather than recorded as done, so binding a key later lets the
+    /// worker pick it up instead of skipping past it.
+    #[tokio::test]
+    async fn a_missing_signing_key_holds_the_request() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let handle = ChainHandle::new(tx);
+        // Answer the nonce and chain id lookups the worker makes before
+        // it notices there is no key to sign with.
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    crate::chain::chain_actor::ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(0);
+                    }
+                    crate::chain::chain_actor::ChainCommand::GetChainId(reply) => {
+                        let _ = reply.send(1);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(Box::new(ConsistentAdapter))
+            .expect("a consistent adapter registers");
+        let worker =
+            RelayerWorker::new(handle, Address::from([7u8; 32])).with_adapters(Arc::new(registry));
+        let request = ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: 7,
+        };
+        let outcome = worker
+            .process_relay(Address::from([8u8; 32]), request)
+            .await;
+        assert_eq!(outcome, RelayOutcome::Retry);
     }
 }
