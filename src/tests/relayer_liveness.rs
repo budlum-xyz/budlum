@@ -29,6 +29,15 @@ fn fresh_chain() -> Blockchain {
     Blockchain::new(consensus, None, 45262, None)
 }
 
+/// The default is observe-only (`liveness_slashing_enabled = false`), so the
+/// end-to-end slashing tests opt in explicitly instead of relying on a default
+/// that a later change can flip underneath them.
+fn enable_liveness_slashing(bc: &mut Blockchain) {
+    let mut params = *bc.state.registry.params();
+    params.liveness_slashing_enabled = true;
+    bc.state.registry.set_params(params);
+}
+
 fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
     CrossDomainMessage::new(CrossDomainMessageParams {
         source_domain: 1,
@@ -379,6 +388,7 @@ fn liveness_slash_applied_through_blockchain_flow() {
     // End-to-end: reports generated at the chain level are routed through the
     // Existing report->slash flow and the target validator ends up slashed.
     let mut bc = fresh_chain();
+    enable_liveness_slashing(&mut bc);
     let v = addr(0x2A);
     bc.state.add_validator(v, 10_000);
     bc.state.sync_validator_registration(&v);
@@ -416,6 +426,7 @@ fn liveness_counter_resets_on_participation() {
 #[test]
 fn liveness_slash_uses_configured_rate() {
     let mut bc = fresh_chain();
+    enable_liveness_slashing(&mut bc);
     let v = addr(0x23);
     let stake = 10_000u64;
     bc.state.add_validator(v, stake);
