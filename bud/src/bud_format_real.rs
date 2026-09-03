@@ -205,11 +205,16 @@ mod tests {
         }
         let frame = enc.finish().expect("finish"); // 256 KiB of zeros, no content size
         assert_eq!(
-            zstd::zstd_safe::get_frame_content_size(&frame).ok().flatten(),
+            zstd::zstd_safe::get_frame_content_size(&frame)
+                .ok()
+                .flatten(),
             None,
             "the fixture must be a frame without a stated size, or the header check hides the path"
         );
-        assert!(zstd_decompress_safe(&frame, 4096).is_none(), "past the ceiling: refused");
+        assert!(
+            zstd_decompress_safe(&frame, 4096).is_none(),
+            "past the ceiling: refused"
+        );
         assert_eq!(
             zstd_decompress_safe(&frame, 256 * 1024).map(|v| v.len()),
             Some(256 * 1024),
