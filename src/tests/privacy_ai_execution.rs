@@ -16,6 +16,7 @@ use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
 use crate::execution::executor::Executor;
 use crate::privacy::{L1NoteRegistry, PrivateTransferSubmit};
+use budlum_note_packing::hash_from_field;
 
 fn funded_state(addr: Address, balance: u64) -> AccountState {
     let mut st = AccountState::new();
@@ -30,9 +31,9 @@ fn private_transfer_submit_spend_and_create() {
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
 
-    let c_in = [1u8; 32];
-    let n1 = [2u8; 32];
-    let c_out = [3u8; 32];
+    let c_in = hash_from_field(1);
+    let n1 = hash_from_field(2);
+    let c_out = hash_from_field(3);
     state.note_registry.insert_note(c_in).unwrap();
 
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
@@ -68,9 +69,9 @@ fn private_transfer_double_spend_fails() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let c_in = [9u8; 32];
-    let n1 = [8u8; 32];
-    let c_out = [7u8; 32];
+    let c_in = hash_from_field(9);
+    let n1 = hash_from_field(8);
+    let c_out = hash_from_field(7);
     state.note_registry.insert_note(c_in).unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
     let sub = PrivateTransferSubmit {
@@ -93,13 +94,14 @@ fn private_transfer_double_spend_fails() {
     tx.sign(&kp);
     Executor::apply_transaction(&mut state, &tx).unwrap();
     // Reuse nullifier with new note
-    let c2 = [6u8; 32];
+    let c2 = hash_from_field(6);
+    let c_out2 = hash_from_field(5);
     state.note_registry.insert_note(c2).unwrap();
-    let digest2 = PrivateTransferSubmit::compute_public_digest(&[n1], &[[5u8; 32]]);
+    let digest2 = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out2]);
     let sub2 = PrivateTransferSubmit {
         spent_commitments: vec![c2],
         nullifiers: vec![n1],
-        output_commitments: vec![[5u8; 32]],
+        output_commitments: vec![c_out2],
         authorization_sig: kp.sign(&digest2).to_vec(),
         public_digest: digest2,
     };
@@ -122,7 +124,7 @@ fn privacy_note_insert_tx() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let c = [42u8; 32];
+    let c = hash_from_field(42);
     let mut tx = Transaction::new_with_chain_id(
         from,
         Address::zero(),
