@@ -2848,8 +2848,14 @@ impl StorageRegistry {
             ticket.status = ReallocationStatus::ActiveReplacement;
             ticket.replacement_deal_id = Some(replacement_deal_id);
         }
+        // The retention clock starts no earlier than the ticket itself.
+        // `start_epoch` is the acceptor's number and `open_deal` only checks
+        // it against `end_epoch`; keyed on it alone, a start far in the past
+        // made the record due at the very next sweep, which is how a
+        // replacement operator would erase the slash record it just filled.
+        let settled_epoch = start_epoch.max(ticket.opened_epoch);
         self.settled_tickets
-            .entry(start_epoch)
+            .entry(settled_epoch)
             .or_default()
             .push(ticket_id);
         Ok(replacement_deal_id)
@@ -5416,6 +5422,44 @@ mod tests {
         );
         // A second sweep has nothing left to do.
         assert_eq!(reg.sweep_settled_reallocations(last_kept + 100), 0);
+    }
+
+    /// A start epoch below the ticket's own epoch does not shorten the
+    /// record's retention: the queue key is the later of the two.
+    #[test]
+    fn a_backdated_start_epoch_does_not_shorten_record_retention() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+        assert_eq!(
+            reg.get_reallocation_ticket(ticket_id).unwrap().opened_epoch,
+            150
+        );
+        reg.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator(),
+            1,
+            250,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .unwrap();
+
+        // Keyed on the backdated start, the record would be due at epoch
+        // 1 + retention; keyed on the ticket's epoch it stays until 150 +
+        // retention.
+        let last_kept = 150 + REALLOCATION_RECORD_RETENTION_EPOCHS - 1;
+        assert_eq!(reg.sweep_settled_reallocations(last_kept), 0);
+        assert!(reg.get_reallocation_ticket(ticket_id).is_some());
+        assert_eq!(reg.sweep_settled_reallocations(last_kept + 1), 1);
+        assert!(reg.get_reallocation_ticket(ticket_id).is_none());
     }
 
     /// A ticket nobody has taken is the obligation itself, not a record of
