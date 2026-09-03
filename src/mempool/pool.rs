@@ -385,6 +385,11 @@ impl Mempool {
         self.transactions.clear();
         self.by_sender.clear();
         self.by_fee.clear();
+        // The counter is debited only by `remove_transaction`, which cannot
+        // run for entries this call already dropped. Without the reset the
+        // stale total grows with every drain until an empty pool refuses
+        // every admission with `PoolBytesFull`.
+        self.resident_bytes = 0;
         txs
     }
 
@@ -633,6 +638,30 @@ mod tests {
             assert_eq!(pool.resident_bytes(), recompute(&pool), "after a removal");
         }
         assert_eq!(pool.resident_bytes(), 0, "an emptied pool holds no bytes");
+    }
+
+    /// A drained pool holds no bytes and still admits transactions.
+    #[test]
+    fn a_drained_pool_forgets_its_bytes() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 100,
+            max_per_sender: 100,
+            min_fee: 1,
+            max_pool_bytes: 80 * 1024,
+            ..Default::default()
+        });
+        pool.add_transaction(create_test_tx_sized(1, 0, 10, 32 * 1024))
+            .unwrap();
+        pool.add_transaction(create_test_tx_sized(2, 0, 10, 32 * 1024))
+            .unwrap();
+        assert_eq!(pool.drain().len(), 2);
+        assert_eq!(
+            pool.resident_bytes(),
+            0,
+            "a drained pool still charges bytes"
+        );
+        pool.add_transaction(create_test_tx_sized(3, 0, 10, 32 * 1024))
+            .expect("a drained pool must still admit transactions");
     }
 
     /// A replacement is charged the difference, not the whole body.
