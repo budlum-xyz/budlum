@@ -305,10 +305,18 @@ fn strip_comments_and_strings(src: &str) -> String {
                 out.push(' ');
             }
             b'\'' => {
-                // A char literal or a lifetime. Copy it through; neither
-                // carries an item name that matters here.
-                out.push('\'');
-                i += 1;
+                // A char literal is a literal and goes the way of a string.
+                // Copied through, `'"'` opened a string that ran to the next
+                // quote and inverted code and string for the rest of the
+                // file: the definitions after it vanished from the scan. A
+                // lifetime or a label carries no item name and is copied.
+                if let Some(end) = char_literal_end(b, i) {
+                    out.push(' ');
+                    i = end;
+                } else {
+                    out.push('\'');
+                    i += 1;
+                }
             }
             _ => {
                 let ch_len = src[i..].chars().next().map_or(1, char::len_utf8);
@@ -318,6 +326,39 @@ fn strip_comments_and_strings(src: &str) -> String {
         }
     }
     out
+}
+
+/// The byte just past the char literal that opens at `b[at]`, or [`None`]
+/// when the quote begins a lifetime or a label instead. A literal is one
+/// character, or a backslash escape (`'\''`, `'\n'`, `'\x41'`,
+/// `'\u{1F600}'`), between two quotes.
+fn char_literal_end(b: &[u8], at: usize) -> Option<usize> {
+    let mut j = at + 1;
+    if *b.get(j)? == b'\\' {
+        j += 1;
+        match *b.get(j)? {
+            b'x' => j += 3,
+            b'u' => {
+                while *b.get(j)? != b'}' {
+                    j += 1;
+                }
+                j += 1;
+            }
+            _ => j += 1,
+        }
+    } else {
+        let first = *b.get(j)?;
+        j += if first < 0x80 {
+            1
+        } else if first >= 0xF0 {
+            4
+        } else if first >= 0xE0 {
+            3
+        } else {
+            2
+        };
+    }
+    (*b.get(j)? == b'\'').then_some(j + 1)
 }
 
 /// Remove `use` and `pub use` statements. A re-export is an import, not a use.
@@ -1198,6 +1239,61 @@ fn vacuity_canary(tmp: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A char literal holding a quote is a literal, not the start of a string.
+///
+/// # Errors
+///
+/// Returns the first canary that misbehaves.
+fn char_literal_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
+    // A char literal holding a double quote is a literal, not the start of
+    // a string. Copied through as if it were a lifetime, `'"'` opened a
+    // string that swallowed the code up to the next real quote, and the
+    // definitions and calls behind it vanished from the scan. The file
+    // below defines and calls an item after such a literal; both must be
+    // seen, so the idle item stays a finding and the called one does not.
+    if accepts_with(
+        clean,
+        tmp,
+        "char_quote",
+        &[(
+            "src/quoted.rs",
+            "fn q(c: char) -> bool { c == '\"' }\n\
+             pub fn behind_a_quote() -> u32 { 5 }\n\
+             fn r(s: &str) -> bool { s.starts_with(\"x\") }\n",
+        )],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: an idle item defined after a '\"' char literal was not seen",
+        ));
+    }
+    if !accepts_with(
+        clean,
+        tmp,
+        "char_quote_wired",
+        &[
+            (
+                "src/quoted.rs",
+                "fn q(c: char) -> bool { c == '\"' }\n\
+                 pub fn behind_a_quote() -> u32 { 5 }\n",
+            ),
+            (
+                "src/quoted_caller.rs",
+                "fn q(c: char) -> bool { c == '\\'' }\n\
+                 fn c() -> u32 { crate::quoted::behind_a_quote() }\n\
+                 fn r(s: &str) -> bool { s.starts_with(\"x\") }\n",
+            ),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a call made after a '\"' char literal was not counted",
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
     let clean = tmp.join("clean");
@@ -1261,6 +1357,8 @@ pub fn self_test() -> Result<String, String> {
     }
 
     cfg_test_canaries(&clean, &tmp)?;
+
+    char_literal_canaries(&clean, &tmp)?;
 
     baseline_canaries(&clean, &tmp)?;
 
