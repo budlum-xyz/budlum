@@ -170,7 +170,7 @@ pub struct SqliteChunk {
 }
 
 /// The marker a redacted token is replaced with.
-const REDACTION_TOKEN: &str = "[REDACTED]";
+const REDACTED_MARK: &str = "[REDACTED]";
 
 /// Key names whose value is a secret when it follows `=` or `:`. The
 /// compound names match anywhere in the key (`AWS_SECRET_ACCESS_KEY`,
@@ -222,19 +222,19 @@ impl SecretRedactor {
     /// the value that follows a secret key name and a `=` or `:`.
     pub fn redact(content: &str) -> (String, Vec<String>) {
         let mut out = String::with_capacity(content.len());
-        let mut kinds: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for piece in Self::pieces(content) {
             match piece {
                 Piece::Secret(_, kind) => {
-                    if !kinds.iter().any(|k| k == kind) {
-                        kinds.push(kind.to_string());
+                    if !seen.iter().any(|k| k == kind) {
+                        seen.push(kind.to_string());
                     }
-                    out.push_str(REDACTION_TOKEN);
+                    out.push_str(REDACTED_MARK);
                 }
                 Piece::Plain(text) => out.push_str(text),
             }
         }
-        (out, kinds)
+        (out, seen)
     }
 
     /// Every secret token of `content`, in order: what a redaction of
@@ -511,7 +511,7 @@ mod tests {
     /// at a byte index used to panic inside a multi-byte character.
     #[test]
     fn escape_cell_cuts_characters_not_bytes() {
-        let cell = "ğ".repeat(300);
+        let cell = "é".repeat(300);
         let cut = CompactTable::escape_cell(&cell, 240);
         assert_eq!(cut.chars().count(), 240);
         assert!(cut.ends_with('…'));
