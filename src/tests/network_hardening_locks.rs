@@ -31,13 +31,18 @@ mod tests {
     /// reads the whole arm and nothing after it. A fixed byte window used to
     /// stand in for this; it silently read past a short arm and stopped short
     /// of a long one, so the lock measured a distance rather than an arm.
+    ///
+    /// Both markers must exist. A missing `end` used to widen the window to
+    /// the end of the file, and a presence check then matched a control in a
+    /// later arm while the arm under test had none.
     fn arm_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let from = source
             .find(start)
             .unwrap_or_else(|| panic!("the arm `{start}` must exist"));
         let to = source[from..]
             .find(end)
-            .map_or(source.len(), |at| from + at);
+            .map(|at| from + at)
+            .unwrap_or_else(|| panic!("the arm `{end}` must follow `{start}`"));
         &source[from..to]
     }
 
