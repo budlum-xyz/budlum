@@ -503,17 +503,15 @@ pub fn run(root: &Path) -> Result<String, String> {
     Err(msg)
 }
 
+/// A fresh scratch tree this process alone created.
+///
+/// `remove_dir_all` followed by `create_dir_all` on a predictable name
+/// leaves a window in which another local user can plant a symlink at that
+/// path and receive the fixture writes. `exclusive_scratch_dir` creates the
+/// directory with `create_dir`, which fails if anything already sits there.
 fn scratch_dir() -> Result<PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-map-keys-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(dir.join("src")).map_err(|e| format!("cannot create scratch dir: {e}"))?;
+    let dir = super::rust_literals::exclusive_scratch_dir("budlum-gates-map-keys")?;
+    fs::create_dir(dir.join("src")).map_err(|e| format!("cannot create scratch dir: {e}"))?;
     Ok(dir)
 }
 
