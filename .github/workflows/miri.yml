@@ -53,6 +53,11 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
       - name: Miri - budzero bud-vm
+        # `bud-vm` is a member of the `budzero/` workspace, not of the root
+        # manifest (the root only path-depends on it), so the step runs from
+        # there; from the root `-p bud-vm` resolves through the dependency
+        # graph, which is not the same selection.
+        working-directory: budzero
         run: |
           echo "Running Miri on bud-vm module..."
           cargo +nightly-2026-07-19 miri test -p bud-vm --lib 2>&1 | tee /tmp/miri-budvm.txt
