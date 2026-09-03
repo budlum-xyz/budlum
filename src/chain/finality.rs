@@ -79,10 +79,20 @@ impl ValidatorSetSnapshot {
     }
 
     pub fn quorum_stake(&self) -> u64 {
-        self.total_stake
-            .saturating_mul(FINALITY_QUORUM_NUMERATOR)
-            .div_euclid(FINALITY_QUORUM_DENOMINATOR)
-            .saturating_add(1)
+        // `new` saturates the stake sum, so a total of `u64::MAX` says the
+        // real total is not representable. No partial stake may count as a
+        // supermajority of a number nobody knows: the threshold is the top of
+        // the range. Below that the product is widened so the multiply cannot
+        // saturate; `saturating_mul` on u64 clamped the product to `u64::MAX`
+        // and the division then handed back a third of the range, a threshold
+        // a minority could pass.
+        if self.total_stake == u64::MAX {
+            return u64::MAX;
+        }
+        let threshold = (u128::from(self.total_stake) * u128::from(FINALITY_QUORUM_NUMERATOR))
+            / u128::from(FINALITY_QUORUM_DENOMINATOR)
+            + 1;
+        u64::try_from(threshold).unwrap_or(u64::MAX)
     }
 
     /// Hybrid finality requires both stake quorum and validator-count quorum.
@@ -1173,6 +1183,14 @@ mod tests {
         // A wrapped product would make the threshold tiny; saturating keeps
         // it at the top of the range so no partial stake can pass it.
         assert_eq!(snap.quorum_stake(), u64::MAX);
+
+        // One below the saturated total is a real number and gets the real
+        // two-thirds threshold, not a third of it (what a saturating multiply
+        // followed by the division produced).
+        snap.total_stake = u64::MAX - 1;
+        assert_eq!(snap.quorum_stake(), 12_297_829_382_473_034_410);
+        snap.total_stake = 3000;
+        assert_eq!(snap.quorum_stake(), 2001);
     }
 
     #[test]
