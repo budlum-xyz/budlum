@@ -291,6 +291,85 @@ fn relayer_result_bridge_mint_is_bound_to_the_supply_ceiling() {
     );
 }
 
+/// The mint is one supply event, checked once, before the bridge state moves.
+///
+/// The ceiling used to be asked credit by credit. With headroom for the
+/// recipient's share and not for the relayer's fee, the transfer was marked
+/// minted, the replay id was spent, the recipient was credited, and then the
+/// fee credit failed. The block producer's projection kept that half-applied
+/// state and went on validating later transactions against it. Now the whole
+/// `final_amount + fee` is checked first, and a refusal leaves the transfer
+/// locked, the replay id unspent and both balances untouched.
+#[test]
+fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
+    use crate::cross_domain::bridge::{AssetId, BridgeStatus};
+
+    let owner = Address::from([0x1B; 32]);
+    let recipient = Address::from([0x1C; 32]);
+    let mut state = AccountState::new();
+    let asset = AssetId([0x7B; 32]);
+    state
+        .bridge_state
+        .register_asset(asset, 1)
+        .expect("asset registers");
+    let (_transfer, lock_event) = state
+        .bridge_state
+        .lock(1, 2, 20, 0, asset, owner, recipient, 100, 1_000)
+        .expect("lock succeeds");
+    let message = lock_event.message.expect("lock carries its message");
+    let params = *state.registry.params();
+    let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        100,
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .expect("100 units cover the minimum fee");
+    assert!(fee > 0, "the case needs a nonzero fee");
+
+    // Headroom for the recipient's share exactly, and nothing for the fee.
+    let headroom_before = u128::from(state.supply_capacity_remaining());
+    let fill = headroom_before - final_amount - 1;
+    state.add_balance(&owner, u64::try_from(fill).expect("fits"));
+    let fee_payer_balance = state.get_balance(&relayer_addr());
+    state.add_balance(&relayer_addr(), 1);
+    assert_eq!(u128::from(state.supply_capacity_remaining()), final_amount);
+
+    let mut res = make_result("0xLOCK_ON_ETHEREUM_2");
+    res.message = Some(message.clone());
+    seal_single_leaf(&mut res);
+    let tx = relayer_tx(res, 1);
+    let root = match &tx.tx_type {
+        TransactionType::RelayerResult(result) => result.external_state_root,
+        _ => unreachable!(),
+    };
+    state
+        .external_roots
+        .insert(ExternalChain::Ethereum.domain_id(), root);
+
+    let err = Executor::apply_transaction(&mut state, &tx)
+        .expect_err("a mint whose fee does not fit under the ceiling must be refused");
+    assert!(err.contains("supply cap"), "got: {err}");
+    assert_eq!(state.get_balance(&recipient), 0, "recipient not credited");
+    assert_eq!(
+        state.get_balance(&relayer_addr()),
+        fee_payer_balance + 1,
+        "relayer neither credited nor charged"
+    );
+    let transfer = state
+        .bridge_state
+        .get_transfer(&message.message_id)
+        .expect("the transfer row stays");
+    assert_eq!(
+        transfer.status,
+        BridgeStatus::Locked { domain: 1 },
+        "the lock is still open"
+    );
+    assert!(
+        !state.bridge_state.replay.is_processed(&message.message_id),
+        "the replay id is not spent by a refused mint"
+    );
+}
+
 /// The supply gate reads every file that mints, not only the two it started with.
 ///
 /// `minting-paths-are-counted` proves the ceiling by listing every

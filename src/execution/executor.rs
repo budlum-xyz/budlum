@@ -946,24 +946,19 @@ impl Executor {
                     if res.success {
                         match msg.kind {
                             crate::cross_domain::message::MessageKind::BridgeLock => {
-                                // Inbound lock from external chain -> Mint on Budlum
-                                state
-                                    .bridge_state
-                                    .mint(msg, state.current_block_height)
-                                    .map_err(|e| {
-                                        BudlumError::validation("bridge_mint_failed", e.0)
-                                    })?;
-                                // Previously a placeholder (nonce-based fee,
-                                // No recipient credit). Now uses the same logic as
-                                // Submit_relay_proof: fetch the transfer, deduct 1% relayer
-                                // Fee, credit recipient.
+                                // Inbound lock from external chain -> Mint on Budlum.
+                                // The amounts and the ceiling are settled before the
+                                // bridge state moves: once `mint` has run, the replay
+                                // id is spent and the transfer reads as minted, so a
+                                // refusal after it would leave a consumed lock with
+                                // nothing, or only part, credited.
                                 let transfer = state
                                     .bridge_state
                                     .get_transfer(&msg.message_id)
                                     .ok_or_else(|| {
                                         BudlumError::validation(
                                             "bridge_mint_failed",
-                                            "Failed to retrieve transfer after mint",
+                                            "Unknown bridge transfer for mint",
                                         )
                                     })?
                                     .clone();
@@ -989,6 +984,23 @@ impl Executor {
                                         "Bridge fee exceeds maximum representable balance",
                                     ));
                                 }
+                                let minted = (final_amount as u64)
+                                    .checked_add(fee as u64)
+                                    .ok_or_else(|| {
+                                        BudlumError::validation(
+                                            "bridge_mint_failed",
+                                            "Bridge amount exceeds maximum representable balance",
+                                        )
+                                    })?;
+                                state.ensure_mint_headroom(minted).map_err(|e| {
+                                    BudlumError::validation("bridge_mint_overflow", &e)
+                                })?;
+                                state
+                                    .bridge_state
+                                    .mint(msg, state.current_block_height)
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_mint_failed", e.0)
+                                    })?;
                                 // This is the supply-creating path: the on-chain
                                 // counterpart of the asset arriving from the bridge
                                 // is minted here, the same as in
