@@ -1238,6 +1238,16 @@ impl AiRegistry {
         verifier: &Address,
         proof: AiExecutionProof,
     ) -> Result<(), String> {
+        // Cancellation is terminal. `submit_result` already refuses results
+        // for a cancelled request; a proof attached to a result that was
+        // accepted before the cancellation must not reopen the request, or
+        // `try_finalize_with_proofs` emits an outcome after the refund.
+        if self.cancelled_requests.contains(request_id) {
+            return Err(format!(
+                "Request {} has been cancelled - proofs not accepted",
+                request_id.to_hex()
+            ));
+        }
         // Verify that a result exists for this verifier
         let results = self
             .results
@@ -1296,7 +1306,7 @@ impl AiRegistry {
         &mut self,
         request_id: &AiRequestId,
     ) -> Option<AiInferenceOutcome> {
-        if self.outcomes.contains_key(request_id) {
+        if self.outcomes.contains_key(request_id) || self.cancelled_requests.contains(request_id) {
             return None;
         }
         let request = self.requests.get(request_id)?.clone();
