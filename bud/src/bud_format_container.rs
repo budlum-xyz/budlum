@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - container .bud format v2 + structural splitting + role-expert multi-ratio
+//! B.U.D. 2.0 - container .bud format v2 + structural splitting
 //!
 //! Directions taken from the research findings:
 //! 1. **Structural splitting pre-step** (S.82 container/MIME/EBML, S.174 Parquet, inspiration-2 C):
@@ -9,8 +9,12 @@
 //!    - a multihash-like field (K34): hash_algo code + digest - upgradable to BLAKE3/SHA3/SHA512
 //!    - format_class registry (K23/K43): the registry is updated when a new format is added
 //!    - deterministic, lossless (KF2: resolution is preserved, the format may change)
-//! 2. **Role-expert multi-ratio** (inspiration-2 E + S.123 AgentNet): every format is an "expert role",
-//!    its own pipeline produces a candidate ratio, and BFT finality picks the best-evidenced candidate.
+//!
+//! Ratio selection is not in this module. An earlier "role-expert" candidate
+//! list lived here with hand-written ratios and the original bytes as its
+//! payload; nothing called it and it measured nothing, so it was removed.
+//! The measured selection is `MultiRatioConsensus` in `bud_format` and the
+//! vote in `bud_format_bft`.
 //!
 //! Code: no unsafe, deterministic, with tests. #![forbid(unsafe_code)] is kept.
 
@@ -153,7 +157,7 @@ pub fn structural_join(_kind: StructuralKind, chunks: &[StructuralChunk]) -> Vec
     out
 }
 
-// ── 3. Konteyner .bud v2: multihash + format registry + rol-uzman ────────────
+// ── 3. Container .bud v2: multihash + format registry ────────────────────────
 
 /// Multihash-like: a hash algorithm code + digest (K34).
 /// 0x12 = SHA-256, 0x16 = SHA3-256, 0x1e = BLAKE3-256, 0x13 = SHA-512 (temsili).
@@ -164,12 +168,9 @@ pub struct MultiHash {
 }
 
 impl MultiHash {
-    pub fn sha3_256(bytes: &[u8]) -> Self {
-        MultiHash {
-            algo: 0x16,
-            digest: content_id(bytes),
-        }
-    }
+    /// The multihash code of SHA3-256, the only algorithm a v2 header carries.
+    const SHA3_256: u8 = 0x16;
+
     pub fn encode(&self) -> Vec<u8> {
         let mut v = vec![self.algo, 32];
         v.extend_from_slice(&self.digest);
@@ -228,94 +229,6 @@ impl FormatCodec {
     }
 }
 
-/// A role-expert pipeline candidate (inspiration-2 E): every format expert
-/// produces its own ratio.
-#[derive(Debug, Clone)]
-pub struct ExpertCandidate {
-    pub expert: &'static str, // "json-expert", "log-expert" ...
-    pub pipe: &'static str,   // "structural+zstd19", "columnar+dict" ...
-    pub ratio: f64,           // the measured ratio (never hand-written; from measurement)
-    pub lossless: bool,       // the losslessness guarantee (KF2)
-    pub payload: Vec<u8>,
-}
-
-/// Role-expert multi-candidate producer: several candidates per format
-/// (deterministic). The ratios are not placeholders; they come from real
-/// measurement (measured on the runner side, then pinned).
-pub fn expert_candidates(
-    codec: FormatCodec,
-    original: &[u8],
-    structural: &[StructuralChunk],
-) -> Vec<ExpertCandidate> {
-    // Structural splitting is the common input for every expert; different
-    // pipelines produce candidates.
-    let ratio_base = if structural.len() > 1 {
-        // split repetition ratio: piece count / unique pieces (dedup potential)
-        let uniq = {
-            let mut v: Vec<[u8; 32]> = structural.iter().map(|c| c.content_id).collect();
-            v.sort();
-            v.dedup();
-            v.len()
-        };
-        if uniq > 0 {
-            structural.len() as f64 / uniq as f64
-        } else {
-            1.0
-        }
-    } else {
-        1.0
-    };
-    let _ = original;
-    match codec {
-        FormatCodec::Json => vec![
-            ExpertCandidate {
-                expert: "json-expert",
-                pipe: "structural+zstd19",
-                ratio: ratio_base * 7.83, // measured: JSON zstd-19 7.83x (measure_ratios.py seed=7, EK13)
-                lossless: true,
-                payload: original.to_vec(),
-            },
-            ExpertCandidate {
-                expert: "json-expert",
-                pipe: "structural+xz9",
-                ratio: ratio_base * 8.07, // measured: JSON xz9 8.07x (EK13)
-                lossless: true,
-                payload: original.to_vec(),
-            },
-        ],
-        FormatCodec::Log => vec![ExpertCandidate {
-            expert: "log-expert",
-            pipe: "structural+zstd19",
-            ratio: ratio_base * 6.17, // measured: LOG zstd-19 6.17x (EK13)
-            lossless: true,
-            payload: original.to_vec(),
-        }],
-        FormatCodec::Csv => vec![ExpertCandidate {
-            expert: "csv-expert",
-            pipe: "structural+zstd19",
-            ratio: ratio_base * 3.55, // measured: CSV zstd-19 3.55x (EK13)
-            lossless: true,
-            payload: original.to_vec(),
-        }],
-        _ => vec![ExpertCandidate {
-            expert: "binary-expert",
-            pipe: "structural+zstd19",
-            ratio: ratio_base * 1.0,
-            lossless: true,
-            payload: original.to_vec(),
-        }],
-    }
-}
-
-/// Pick the best LOSSLESS candidate from the set (BFT finality lives in
-/// another module - here it is a deterministic max).
-pub fn select_best_lossless(candidates: Vec<ExpertCandidate>) -> Option<ExpertCandidate> {
-    candidates
-        .into_iter()
-        .filter(|c| c.lossless && c.ratio >= 1.0)
-        .max_by(|a, b| a.ratio.total_cmp(&b.ratio)) // K38: total_cmp NaN panik yapmaz
-}
-
 /// The .bud v2 container header: magic v2 (high-bit set) + multihash + format
 /// + piece count.
 #[derive(Debug, Clone)]
@@ -341,7 +254,10 @@ impl BudV2Header {
         BudV2Header {
             magic: Self::MAGIC,
             codec,
-            content_id: MultiHash { algo: 0x16, digest },
+            content_id: MultiHash {
+                algo: MultiHash::SHA3_256,
+                digest,
+            },
             chunk_count: chunks.len() as u32,
             total_len,
         }
@@ -382,7 +298,7 @@ impl BudV2Header {
     }
 
     pub fn verify(&self) -> bool {
-        self.magic == Self::MAGIC && self.content_id.algo == 0x16
+        self.magic == Self::MAGIC && self.content_id.algo == MultiHash::SHA3_256
     }
 }
 
@@ -678,11 +594,6 @@ pub fn structural_split_compact(
     out
 }
 
-/// Piece count (a helper for diagnostic tests).
-pub fn structural_chunks(kind: StructuralKind, data: &[u8]) -> usize {
-    structural_split(kind, data).len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,52 +636,15 @@ mod tests {
 
     #[test]
     fn multihash_encode_decode() {
-        let mh = MultiHash::sha3_256(b"hello");
+        let mh = MultiHash {
+            algo: MultiHash::SHA3_256,
+            digest: content_id(b"hello"),
+        };
         let enc = mh.encode();
         assert_eq!(enc.len(), 34);
         let dec = MultiHash::decode(&enc).unwrap();
         assert_eq!(dec, mh);
         assert!(MultiHash::decode(&[0u8; 10]).is_none());
-    }
-
-    #[test]
-    fn select_best_lossless_nan_safe() {
-        // K38: a candidate with a NaN ratio must not break the ordering (total_cmp)
-        let nan_cand = ExpertCandidate {
-            expert: "nan-expert",
-            pipe: "structural+nan",
-            ratio: f64::NAN,
-            lossless: true,
-            payload: vec![],
-        };
-        let ok_cand = ExpertCandidate {
-            expert: "ok-expert",
-            pipe: "structural+zstd19",
-            ratio: 7.83,
-            lossless: true,
-            payload: vec![],
-        };
-        let best = select_best_lossless(vec![nan_cand, ok_cand])
-            .expect("NaN is dropped, the OK candidate is chosen");
-        assert_eq!(best.ratio, 7.83);
-        assert!(select_best_lossless(vec![]).is_none());
-    }
-
-    #[test]
-    fn expert_select_best_lossless() {
-        let json = br#"[{"x":1},{"x":2}]"#;
-        let chunks = structural_split(StructuralKind::Json, json);
-        let cands = expert_candidates(FormatCodec::Json, json, &chunks);
-        assert!(
-            cands.len() >= 2,
-            "the JSON expert must produce several candidates"
-        );
-        let best = select_best_lossless(cands).unwrap();
-        assert!(
-            best.ratio >= 7.5,
-            "the best lossless candidate must be chosen"
-        );
-        assert!(best.lossless);
     }
 
     #[test]
