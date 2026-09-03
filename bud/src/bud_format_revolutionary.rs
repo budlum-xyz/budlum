@@ -31,12 +31,19 @@ impl CompactTable {
         }
     }
 
+    /// Escape a cell for the table and cut it to `max_chars` characters.
+    ///
+    /// The limit counts characters, not bytes. The byte count was used
+    /// before, and `String::truncate` at a byte index inside a multi-byte
+    /// character panics; every row passes through here with the default
+    /// limit of 240, so a long non-ASCII cell took the whole table down.
     pub fn escape_cell(s: &str, max_chars: usize) -> String {
-        let mut text = s.replace("|", "\\|").replace("\n", " ");
+        let mut text = s.replace('|', "\\|").replace('\n', " ");
         text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if max_chars > 0 && text.len() > max_chars {
-            text.truncate(max_chars - 1);
-            text.push('…');
+        if max_chars > 0 && text.chars().count() > max_chars {
+            let mut cut: String = text.chars().take(max_chars - 1).collect();
+            cut.push('…');
+            return cut;
         }
         text
     }
@@ -162,22 +169,178 @@ pub struct SqliteChunk {
     pub content_hash: [u8; 32],
 }
 
+/// The marker a redacted token is replaced with.
+const REDACTION_TOKEN: &str = "[REDACTED]";
+
+/// Key names whose value is a secret when it follows `=` or `:`. The
+/// compound names match anywhere in the key (`AWS_SECRET_ACCESS_KEY`,
+/// `openai_api_key`); the bare words must be the whole key, or prose such as
+/// "the token: abc" would lose its next word.
+const COMPOUND_SECRET_KEYS: [(&str, &str); 7] = [
+    ("aws_secret", "aws_secret"),
+    ("api_key", "api_key"),
+    ("apikey", "api_key"),
+    ("private_key", "private_key"),
+    ("client_secret", "secret"),
+    ("access_token", "token"),
+    ("auth_token", "token"),
+];
+const BARE_SECRET_KEYS: [(&str, &str); 4] = [
+    ("secret", "secret"),
+    ("token", "token"),
+    ("password", "password"),
+    ("passwd", "password"),
+];
+
+/// One piece of a text: a secret token with its kind, or anything else kept
+/// verbatim.
+enum Piece<'a> {
+    Secret(&'a str, &'static str),
+    Plain(&'a str),
+}
+
+/// What the scanner remembers between tokens: the kind a key name just seen
+/// introduces, and whether a `=` or `:` has armed it for the next token.
+#[derive(Default)]
+struct KeyState {
+    after_key: Option<&'static str>,
+    value_of: Option<&'static str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SecretRedactor;
 
 impl SecretRedactor {
+    /// Replace every secret token in `content` with `[REDACTED]` and name
+    /// the kinds that were found, in order of first appearance.
+    ///
+    /// The whole token goes, not its marker. The first version replaced the
+    /// four bytes `AKIA` or the three bytes `sk-` and left the key body
+    /// standing in the rendered table and in `SqliteChunk.content`, which is
+    /// where the secret was going to be read from. Two shapes are matched: a
+    /// token that is itself a known key (`AKIA...`, `sk-...`, `ghp_...`), and
+    /// the value that follows a secret key name and a `=` or `:`.
     pub fn redact(content: &str) -> (String, Vec<String>) {
-        // Strip cloud and model-provider API keys
-        let mut redacted = content.to_string();
-        let mut secrets = Vec::new();
-        // Simple pattern: AKIA, sk- etc
-        for pattern in &["AKIA", "sk-", "aws_secret", "api_key"] {
-            if content.contains(pattern) {
-                secrets.push(pattern.to_string());
-                redacted = redacted.replace(pattern, "[REDACTED]");
+        let mut out = String::with_capacity(content.len());
+        let mut kinds: Vec<String> = Vec::new();
+        for piece in Self::pieces(content) {
+            match piece {
+                Piece::Secret(_, kind) => {
+                    if !kinds.iter().any(|k| k == kind) {
+                        kinds.push(kind.to_string());
+                    }
+                    out.push_str(REDACTION_TOKEN);
+                }
+                Piece::Plain(text) => out.push_str(text),
             }
         }
-        (redacted, secrets)
+        (out, kinds)
+    }
+
+    /// Every secret token of `content`, in order: what a redaction of
+    /// `content` must not contain.
+    fn secret_tokens(content: &str) -> Vec<String> {
+        Self::pieces(content)
+            .into_iter()
+            .filter_map(|piece| match piece {
+                Piece::Secret(token, _) => Some(token.to_string()),
+                Piece::Plain(_) => None,
+            })
+            .collect()
+    }
+
+    fn is_token_char(ch: char) -> bool {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '+')
+    }
+
+    /// Classify one token and update what it means for the next one.
+    fn classify<'a>(token: &'a str, state: &mut KeyState) -> Piece<'a> {
+        let kind = state.value_of.take().or_else(|| Self::secret_kind(token));
+        state.after_key = if kind.is_none() {
+            Self::key_kind(token)
+        } else {
+            None
+        };
+        match kind {
+            Some(kind) => Piece::Secret(token, kind),
+            None => Piece::Plain(token),
+        }
+    }
+
+    /// Cut `content` into tokens and separators, deciding for each token
+    /// whether it is a secret.
+    fn pieces(content: &str) -> Vec<Piece<'_>> {
+        let mut out = Vec::new();
+        let mut token_start: Option<usize> = None;
+        let mut state = KeyState::default();
+        for (idx, ch) in content.char_indices() {
+            if Self::is_token_char(ch) {
+                token_start.get_or_insert(idx);
+                continue;
+            }
+            if let Some(start) = token_start.take() {
+                out.push(Self::classify(&content[start..idx], &mut state));
+            }
+            if matches!(ch, '=' | ':') {
+                if state.after_key.is_some() {
+                    state.value_of = state.after_key;
+                }
+            } else if !(ch.is_whitespace() || matches!(ch, '"' | '\'')) {
+                state = KeyState::default();
+            }
+            out.push(Piece::Plain(&content[idx..idx + ch.len_utf8()]));
+        }
+        if let Some(start) = token_start {
+            out.push(Self::classify(&content[start..], &mut state));
+        }
+        out
+    }
+
+    /// The kind of secret a bare token is, if it is one.
+    fn secret_kind(token: &str) -> Option<&'static str> {
+        let alnum_dash = |t: &str| {
+            t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+        if token.len() == 20
+            && token.starts_with("AKIA")
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            return Some("aws_access_key");
+        }
+        if token.len() >= 18 && token.starts_with("sk-") && alnum_dash(token) {
+            return Some("sk_key");
+        }
+        if token.len() >= 22
+            && ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
+                .iter()
+                .any(|p| token.starts_with(p))
+            && alnum_dash(token)
+        {
+            return Some("github_token");
+        }
+        None
+    }
+
+    /// The token without the prefix that names its kind: what is left of
+    /// `AKIAIOSFODNN7EXAMPLE` when only `AKIA` was struck out.
+    fn token_body(token: &str) -> &str {
+        ["AKIA", "sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
+            .iter()
+            .find_map(|prefix| token.strip_prefix(prefix))
+            .unwrap_or(token)
+    }
+
+    /// The kind a key name introduces, if the name says its value is secret.
+    fn key_kind(token: &str) -> Option<&'static str> {
+        let lower = token.to_ascii_lowercase();
+        COMPOUND_SECRET_KEYS
+            .iter()
+            .find(|(name, _)| lower.contains(name))
+            .or_else(|| BARE_SECRET_KEYS.iter().find(|(name, _)| lower == *name))
+            .map(|(_, kind)| *kind)
     }
 }
 
@@ -247,8 +410,18 @@ impl RevolutionaryGates {
         }
         Ok(())
     }
+    /// No secret token of `original` survives in `redacted`, neither whole
+    /// nor as the body left after its prefix. The check used to look for the
+    /// four bytes `AKIA` only, so a redaction that stripped the marker and
+    /// kept the key body passed it.
     pub fn k_bud_secret_redact(original: &str, redacted: &str) -> Result<(), &'static str> {
-        if original.contains("AKIA") && redacted.contains("AKIA") {
+        let survived = SecretRedactor::secret_tokens(original)
+            .iter()
+            .any(|secret| {
+                redacted.contains(secret.as_str())
+                    || redacted.contains(SecretRedactor::token_body(secret))
+            });
+        if survived {
             return Err("K-BUD-SECRET-REDACT: secret not stripped");
         }
         Ok(())
@@ -303,10 +476,46 @@ mod tests {
         assert!(RevolutionaryGates::k_bud_evidence(&ev).is_ok());
     }
     #[test]
-    fn secret_redact() {
-        let (redacted, _secrets) = SecretRedactor::redact("my key AKIA123 and sk-abc");
-        assert!(!redacted.contains("AKIA"));
-        assert!(RevolutionaryGates::k_bud_secret_redact("my key AKIA123", &redacted).is_ok());
+    fn secret_redact_removes_the_whole_token() {
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        let sk = "sk-abcdefghijklmnopqrstuvwxyz";
+        let text = format!("my key {aws} and {sk}, api_key=\"hunter2secret\" done");
+        let (redacted, kinds) = SecretRedactor::redact(&text);
+        assert!(!redacted.contains(aws), "{redacted}");
+        assert!(!redacted.contains(sk), "{redacted}");
+        assert!(!redacted.contains("hunter2secret"), "{redacted}");
+        assert!(
+            !redacted.contains("IOSFODNN7EXAMPLE"),
+            "the key body must go too"
+        );
+        assert!(redacted.contains("my key [REDACTED] and [REDACTED], api_key=\"[REDACTED]\" done"));
+        assert_eq!(kinds, vec!["aws_access_key", "sk_key", "api_key"]);
+        assert!(RevolutionaryGates::k_bud_secret_redact(&text, &redacted).is_ok());
+    }
+
+    /// The gate refuses the redaction the first version produced: marker
+    /// stripped, key body kept.
+    #[test]
+    fn secret_redact_gate_sees_a_surviving_key_body() {
+        let text = "my key AKIAIOSFODNN7EXAMPLE";
+        let marker_only = text.replace("AKIA", "[REDACTED]");
+        assert!(RevolutionaryGates::k_bud_secret_redact(text, &marker_only).is_err());
+        assert!(RevolutionaryGates::k_bud_secret_redact(text, "my key [REDACTED]").is_ok());
+        // Prose that merely mentions the prefixes is not a secret.
+        let (same, kinds) = SecretRedactor::redact("the sk- prefix and the AKIA prefix");
+        assert_eq!(same, "the sk- prefix and the AKIA prefix");
+        assert!(kinds.is_empty());
+    }
+
+    /// A cell longer than the limit is cut at a character boundary. Cutting
+    /// at a byte index used to panic inside a multi-byte character.
+    #[test]
+    fn escape_cell_cuts_characters_not_bytes() {
+        let cell = "ğ".repeat(300);
+        let cut = CompactTable::escape_cell(&cell, 240);
+        assert_eq!(cut.chars().count(), 240);
+        assert!(cut.ends_with('…'));
+        assert_eq!(CompactTable::escape_cell("a|b\nc", 240), "a\\|b c");
     }
     #[test]
     fn columnar() {
