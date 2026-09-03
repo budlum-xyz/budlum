@@ -713,8 +713,12 @@ mod tests {
                 )
                 .unwrap();
             let p = gov.find_proposal_mut(id).unwrap();
-            for (i, v) in order.iter().enumerate() {
-                p.add_vote(*v, 100 + i as u64, i % 2 == 0, 1).unwrap();
+            // Weight and side belong to the voter, not to the position in
+            // the insertion order; otherwise the two builds tally different
+            // totals and the comparison measures the test, not the map.
+            for v in order {
+                let b = v.as_bytes()[0];
+                p.add_vote(*v, 100 + u64::from(b), b % 2 == 0, 1).unwrap();
             }
             gov.root()
         };

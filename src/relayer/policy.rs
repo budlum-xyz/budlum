@@ -440,7 +440,7 @@ impl RelayerPolicyRegistry {
 
     /// Whether the intent was settled, including settlements whose row has
     /// since been pruned.
-    pub fn is_settled(&self, intent_id: &[u8; 32]) -> bool {
+    fn is_settled(&self, intent_id: &[u8; 32]) -> bool {
         self.settled_intents.contains(intent_id) || self.settlements.contains_key(intent_id)
     }
 
