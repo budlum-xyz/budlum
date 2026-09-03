@@ -12,7 +12,7 @@ feature, while the code deliberately refuses to perform it.
 | Structural checks on an execution proof (commitments, model binding, program-hash match) | working | `verify_execution_proof_structural_with_model` |
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
 | Initial guest memory (weights, biases, input) folded into an accumulator claim; the fold is collidable (see below), so the image is checked outside the proof | partial | `COL_MEM_INIT_ACC`, `initial_state_root` |
-| Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
+| Claimed weights digest checked against the registered digest, outside the proof (the prover's word on which weights sat in memory; the AIR does not constrain the image, see "What this is and is not") | partial | `AiModelSpec::execution_weights_digest` |
 | Claimed output commitment bound to the proved guest result | open | `prove_mlp_inference` packages the host commitment; the guest output enters only the logged, non-binding accumulator (see "Bind the claimed output" below) |
 | STARK verification of an inference proof on the transaction path | working | `src/execution/executor.rs` |
 | Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `ai_inference::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
