@@ -199,12 +199,6 @@ impl PoSEngine {
             timestamp: block.timestamp,
         };
 
-        let mut checkpoints = self
-            .checkpoints
-            .write()
-            .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
-        checkpoints.push(checkpoint.clone());
-
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
             // cosmetic loss. On restart the node would not know the block was
@@ -217,6 +211,15 @@ impl PoSEngine {
                 ))
             })?;
         }
+
+        // The durable write comes first. An in-memory checkpoint pushed
+        // before a failed write anchored this process to a height the disk
+        // never learned, and the two disagreed until the next restart.
+        let mut checkpoints = self
+            .checkpoints
+            .write()
+            .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
+        checkpoints.push(checkpoint);
         Ok(())
     }
     /// The last checkpoint this node has established, and its hash.
@@ -910,15 +913,21 @@ impl ConsensusEngine for PoSEngine {
                 slashing_evidence.push(evidence);
             }
         } else {
-            seen_blocks.insert(key, (header, signature));
             if block.index > 0 && block.index.is_multiple_of(epoch_length) {
                 // `add_checkpoint` fails when the checkpoint cannot be
                 // persisted. Discarding that here reported the block as
                 // recorded with an anchor that lived only in memory; after a
                 // restart the node reloaded no checkpoint and would accept a
                 // reorganisation below it. The caller logs the error.
+                //
+                // The sighting is recorded only once the checkpoint is
+                // durable. Inserted first, a failed write left the block in
+                // `seen_blocks`, and the retry found it there, took the
+                // double-sign branch's "same hash" exit and never wrote the
+                // checkpoint at all.
                 self.add_checkpoint(block, storage)?;
             }
+            seen_blocks.insert(key, (header, signature));
 
             // Prune seen_blocks to prevent unbounded growth.
             // Keep entries from the last 2 epochs only, older double-sign evidence
