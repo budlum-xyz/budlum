@@ -72,8 +72,13 @@ fn body_of(blob: &str, name: &str) -> Option<String> {
     let start = blob.find(&needle)?;
     let rest = &blob[start + needle.len()..];
     let open = rest.find('{')? + start + needle.len();
+    // The scan starts after the opening brace, which `depth` already
+    // counts. Starting on it counted the brace twice, so the body's own
+    // `}` never brought the depth back to zero, the scan ran to the end of
+    // the blob and returned `None`, and the caller took `None` as "skip":
+    // no required test's body was ever checked for a refusal.
     let mut depth = 1i32;
-    let mut i = open;
+    let mut i = open + 1;
     let b = blob.as_bytes();
     while i < b.len() {
         match b[i] {
@@ -91,26 +96,43 @@ fn body_of(blob: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Drop comments, string literals and char literals, so an assertion named
+/// in a message or a comment does not count as an assertion made.
+///
+/// A `'` opens a char literal only when one closes it within a few bytes
+/// (`'x'`, `'\n'`); otherwise it is a lifetime or an apostrophe in a
+/// comment. Taking every `'` as a quote let the apostrophe in a comment
+/// such as `the row's successor` swallow the code that followed it, up to
+/// the next apostrophe, and with it the `is_err()` the check was looking
+/// for.
 fn strip_strings(text: &str) -> String {
     let mut out = String::new();
     let b = text.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'"' || b[i] == b'\'' {
-            let q = b[i];
-            out.push(if q == b'"' { '"' } else { '\'' });
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if b[i] == b'"' {
+            out.push('"');
             i += 1;
             while i < b.len() {
                 if b[i] == b'\\' && i + 1 < b.len() {
                     i += 2;
                     continue;
                 }
-                if b[i] == q {
+                if b[i] == b'"' {
                     i += 1;
                     break;
                 }
                 i += 1;
             }
+        } else if b[i] == b'\'' {
+            let close = (i + 2..=(i + 4).min(b.len().saturating_sub(1)))
+                .find(|&j| b[j] == b'\'' && !(b[j - 1] == b'\\' && j == i + 2));
+            out.push('\'');
+            i = close.map_or(i + 1, |j| j + 1);
         } else {
             out.push(b[i] as char);
             i += 1;
@@ -220,8 +242,41 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a name carrying no #[test] passed"));
     }
+    // A test that tampers and then asserts success is coverage on paper:
+    // its body has to be read, and read to its own closing brace, or this
+    // check is a no-op. It was one, for as long as the body scan started on
+    // the opening brace and never returned a body.
+    let paper = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    let r = tamper();\n    assert!(r.is_ok());\n}",
+    );
+    assert_ne!(paper, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), paper).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a required test that asserts success after tampering passed",
+        ));
+    }
+    // An apostrophe in a comment is not a quote. One before the assertion
+    // used to open a "char literal" that ran to the next apostrophe and hid
+    // the `is_err()` behind it.
+    let apostrophe = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    // the row's successor\n    let r = tamper();\n    \
+         assert!(r.is_err());\n    let _ = 'x';\n}",
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), apostrophe)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: an apostrophe in a comment hid the refusal assertion that followed it",
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "forgery-tests canary OK: with a test it PASSes and without one it FAILs.",
+        "forgery-tests canary OK: with a test it PASSes, without one it FAILs, and a test \
+         asserting success after tampering FAILs.",
     ))
 }

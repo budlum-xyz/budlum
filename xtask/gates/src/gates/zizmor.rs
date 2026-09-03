@@ -28,7 +28,12 @@ fn bin_path() -> Result<PathBuf, String> {
     // path and have the gate execute it, bypassing the workflow-security
     // scan. Every run therefore downloads the pinned release and verifies
     // its sha256 before the binary is ever invoked (CWE-494).
-    let tgz = std::env::temp_dir().join(format!("zizmor-{VERSION}.tar.gz"));
+    // A private directory, created exclusively for this run: a fixed
+    // `/tmp/zizmor-<ver>.tar.gz` and a fixed `/tmp/zizmor` were paths
+    // another process on the runner could write between the checksum and
+    // the extraction, or between the extraction and the run (CWE-377).
+    let work = private_work_dir()?;
+    let tgz = work.join(format!("zizmor-{VERSION}.tar.gz"));
     let url = format!(
         "https://github.com/zizmorcore/zizmor/releases/download/v{VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
     );
@@ -70,7 +75,7 @@ fn bin_path() -> Result<PathBuf, String> {
         .args(["-xzf"])
         .arg(&tgz)
         .arg("-C")
-        .arg(std::env::temp_dir())
+        .arg(&work)
         .status()
         .map_err(|e| format!("zizmor could not be extracted (tar): {e}"))?
         .success();
@@ -80,10 +85,8 @@ fn bin_path() -> Result<PathBuf, String> {
         ));
     }
     // The archive contains the binary at the root of the extract dir; look
-    // for it next to the tgz. It was just produced by tar from the verified
-    // archive (tar overwrites any pre-existing file of the same name), so it
-    // is safe to run.
-    let extracted = std::env::temp_dir().join("zizmor");
+    // for it next to the tgz, inside the directory only this run knows.
+    let extracted = work.join("zizmor");
     if extracted.is_file() {
         return Ok(extracted);
     }
@@ -91,6 +94,34 @@ fn bin_path() -> Result<PathBuf, String> {
         "no binary was found in the zizmor archive: {}",
         extracted.display()
     ))
+}
+
+/// A fresh directory under the temp root that did not exist before this
+/// call, owner-only on Unix. `create_dir` (not `create_dir_all`) fails if
+/// the path already exists, so a pre-planted directory is refused rather
+/// than reused.
+fn private_work_dir() -> Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "budlum-gates-zizmor-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).map_err(|e| {
+        format!(
+            "cannot create a private work directory {}: {e}",
+            dir.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot restrict {}: {e}", dir.display()))?;
+    }
+    Ok(dir)
 }
 
 /// # Errors

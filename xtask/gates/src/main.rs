@@ -1259,12 +1259,15 @@ fn main() {
             return;
         }
         // `--all` and a bare `--self-test` both mean every gate; the flag was
-        // already read above, so the two arms are one. Gates that take a log
-        // path or positional roots are left out: they cannot run without
-        // their argument, and their CI steps call them directly.
+        // already read above, so the two arms are one. On the run path the
+        // gates that take a log path or positional roots are left out: they
+        // cannot run without their argument, and their CI steps call them
+        // directly. A canary takes no argument, so the self-test path keeps
+        // them; filtered there too, `--all --self-test` reported success
+        // while about twenty gates had proven nothing.
         Some(&"--all" | &"--self-test") => GATES
             .iter()
-            .filter(|g| g.run_log.is_none() && g.run_args.is_none())
+            .filter(|g| self_test || (g.run_log.is_none() && g.run_args.is_none()))
             .collect(),
         Some(name) => {
             if let Some(g) = GATES.iter().find(|g| g.name == *name) {
