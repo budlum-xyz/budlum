@@ -76,8 +76,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Errors if one of the corrupt copies is not refused (a vacuous gate).
 pub fn self_test() -> Result<String, String> {
-    let dir = std::env::temp_dir().join("budlum-fixture-gate-self-test");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-fixture-gate-self-test")?;
     std::fs::create_dir_all(dir.join("config/fixtures"))
         .map_err(|e| format!("the temporary directory could not be created: {e}"))?;
     let fixture = dir.join(FIXTURE_PATH);

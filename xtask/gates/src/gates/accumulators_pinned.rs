@@ -303,11 +303,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-acc-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-acc")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
     let good = "pub const COL_EVENT_DIGEST_0: usize = 1;\npub const COL_MEM_INIT_ACC: usize = 2;\npub const COL_REG_INIT_ACC: usize = 3;\npub const COL_GAS_USED: usize = 4;\nlet cur_event_0: AB::Expr = cur[COL_EVENT_DIGEST_0].into();\nbuilder.when_transition().assert_eq(cur_event_0.clone(), nxt_event_0.clone() + log_rs1);\nbuilder.when_first_row().assert_zero(cur_event_0.clone() - zero.clone());\nlet mem_acc: AB::Expr = cur[COL_MEM_INIT_ACC].into();\nbuilder.when_transition().assert_eq(mem_acc.clone(), nxt_mem.clone());\nbuilder.when_first_row().assert_zero(mem_acc.clone() - zero.clone());\nlet reg_acc: AB::Expr = cur[COL_REG_INIT_ACC].into();\nbuilder.when_transition().assert_eq(reg_acc.clone(), nxt_reg.clone());\nbuilder.when_first_row().assert_zero(reg_acc.clone() - zero.clone());\nlet gas: AB::Expr = cur[COL_GAS_USED].into();\nbuilder.when_transition().assert_eq(gas.clone(), nxt_gas.clone() + cost);\nbuilder.when_first_row().assert_zero(gas.clone() - zero.clone());\n";

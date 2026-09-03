@@ -75,11 +75,7 @@ pub fn self_test() -> Result<String, String> {
             "canary: real tree not found (run from the repo root)",
         ));
     }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let tmp = std::env::temp_dir().join(format!("budlum-gates-spb-{}-{nanos}", std::process::id()));
+    let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-spb")?;
     for sub in ["src/domain", "src/chain"] {
         std::fs::create_dir_all(tmp.join(sub)).map_err(|e| e.to_string())?;
     }

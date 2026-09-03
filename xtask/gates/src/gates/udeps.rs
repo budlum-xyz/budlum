@@ -120,13 +120,7 @@ pub fn self_test() -> Result<String, String> {
     // A tool that died before producing a report must not read as clean. The
     // check runs through `run` so the canary measures the gate, not the
     // parser in isolation.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("budlum-gates-udeps-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-udeps")?;
     let broken = dir.join("bozuk.txt");
     std::fs::write(
         &broken,

@@ -447,12 +447,7 @@ const TEST_NAMES: [&str; 7] = [
 
 /// Write one fixture tree and check the gate's verdict.
 fn check_fixture(mode: &str, expect_ok: bool, label: &str) -> Result<(), String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("budlum-gates-value-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-value")?;
     let _ = std::fs::create_dir_all(dir.join("src/registry"));
     let _ = std::fs::create_dir_all(dir.join("src/core"));
 

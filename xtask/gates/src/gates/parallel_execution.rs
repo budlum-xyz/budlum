@@ -272,11 +272,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-par-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-par")?;
     std::fs::create_dir_all(dir.join("src/domain")).map_err(|e| e.to_string())?;
     let maps = (0..9)
         .map(|i| format!("    map_{i}: BTreeMap<u64, u64>,"))
@@ -339,7 +335,7 @@ pub fn self_test() -> Result<String, String> {
     // behind such a character has to stay visible.
     let accented = good.replace(
         "    pub fn root(&self) -> Hash32 {",
-        "    /// Kök: her tablo katlanır, sıra sabittir.\n    pub fn root(&self) -> Hash32 {",
+        "    /// The root folds every table, na\u{ef}ve order, r\u{e9}sum\u{e9} of the state.\n    pub fn root(&self) -> Hash32 {",
     );
     std::fs::write(dir.join("src/domain/storage_deal.rs"), &accented).map_err(|e| e.to_string())?;
     if let Err(e) = run(&dir) {
