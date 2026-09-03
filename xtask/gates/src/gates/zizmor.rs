@@ -156,11 +156,20 @@ pub fn self_test() -> Result<String, String> {
         "budlum-gates-zizmor-{}-{nanos}",
         std::process::id()
     ));
-    let _ = std::fs::create_dir_all(&dir);
-    let wf = dir.join("bad.yml");
+    // A workflow carrying a documented finding, at the path zizmor collects
+    // from. The previous fixture was a harmless `run: echo hi` at the top of
+    // the scratch directory: zizmor collected no inputs there, exited 3 with
+    // "no audit was performed", and the non-zero status passed as a refusal.
+    // The canary was proving that zizmor fails on nothing, not that it sees
+    // anything. Now the fixture expands attacker-controlled event data
+    // inside `run:`, and the audit's own identifier must appear in the
+    // report, so an exit code from any other cause cannot stand in for it.
+    let workflows = dir.join(".github/workflows");
+    std::fs::create_dir_all(&workflows).map_err(|e| e.to_string())?;
     std::fs::write(
-        &wf,
-        "name: badan\non: [push]\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
+        workflows.join("bad.yml"),
+        "name: bad\non:\n  pull_request_target:\njobs:\n  x:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo \"${{ github.event.pull_request.title }}\"\n",
     )
     .map_err(|e| e.to_string())?;
     let bin = bin_path()?;
@@ -170,12 +179,26 @@ pub fn self_test() -> Result<String, String> {
         .output();
     let _ = std::fs::remove_dir_all(&dir);
     match out {
-        Ok(o) if o.status.success() => {
-            Err(String::from("canary: zizmor ran but that is not evidence"))
-        }
-        Ok(_) => Ok(String::from(
-            "canary OK: zizmor refused the broken/suspicious workflow.",
+        Ok(o) if o.status.success() => Err(String::from(
+            "canary: zizmor passed a workflow that expands pull-request data into a shell",
         )),
+        Ok(o) => {
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            if report.contains("template-injection") {
+                Ok(String::from(
+                    "canary OK: zizmor reported template-injection on the injected workflow.",
+                ))
+            } else {
+                Err(format!(
+                    "canary: zizmor exited non-zero without the template-injection finding, \
+                     so it did not audit the fixture:\n{report}"
+                ))
+            }
+        }
         Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.display())),
     }
 }
