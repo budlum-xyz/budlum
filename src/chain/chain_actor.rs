@@ -2819,23 +2819,24 @@ impl ChainActor {
                 stake: validator.stake,
             })
             .collect();
-        if !placement_candidates.is_empty() {
+        let annotated = if placement_candidates.is_empty() {
+            0
+        } else {
             let entropy = crate::core::hash::hash_fields_bytes(&[
                 b"BDLM_MAINTENANCE_PLACEMENT_V1",
                 &self.blockchain.chain_id.to_le_bytes(),
                 self.blockchain.last_block().hash.as_bytes(),
                 &current_epoch.to_le_bytes(),
             ]);
-            let annotated = self
-                .blockchain
+            self.blockchain
                 .state
                 .storage_registry
-                .annotate_expected_holders(&entropy, &placement_candidates);
-            if annotated > 0 {
-                tracing::info!(
-                    "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
-                );
-            }
+                .annotate_expected_holders(&entropy, &placement_candidates)
+        };
+        if annotated > 0 {
+            tracing::info!(
+                "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
+            );
         }
         for (ticket_id, expected, actual) in self
             .blockchain
@@ -2891,7 +2892,11 @@ impl ChainActor {
         if under_replicated > 0 {
             tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
         }
-        let registry_changed = under_replicated > 0 || swept > 0 || !repair_band.is_empty();
+        // An advisory written into a pending ticket is registry state too: a
+        // tick that only annotated used to skip the write, and a crash before
+        // the next persisting tick dropped every advisory of this epoch.
+        let registry_changed =
+            annotated > 0 || under_replicated > 0 || swept > 0 || !repair_band.is_empty();
         if registry_changed {
             if let Err(error) = self.blockchain.persist_storage_registry() {
                 tracing::error!("Failed to persist storage reallocation status: {error}");
