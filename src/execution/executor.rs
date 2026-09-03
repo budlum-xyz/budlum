@@ -29,7 +29,7 @@ pub struct Executor;
 ///
 /// The gate is deliberately the same on every network (`_chain_id` is
 /// unread): an unproven execution is as worthless on devnet as on mainnet.
-pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3";
+pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3-Keccak-Goldilocks";
 
 fn ai_execution_backend_allowed(_chain_id: u64, backend: &str) -> bool {
     backend == AI_EXECUTION_BACKEND_PLONKY3
@@ -2220,7 +2220,7 @@ impl Executor {
 
         // Execute passed governance proposals
         // (e.g. whitelist/dewhitelist verifiers) and apply their actions.
-        let governance_actions = state.governance.execute_passed_proposals();
+        let governance_actions = state.governance.execute_passed_proposals(state.epoch_index);
         for action in governance_actions {
             match action {
                 crate::core::governance::GovernanceAction::WhitelistVerifier(addr) => {
@@ -2314,7 +2314,10 @@ mod tests {
 
         assert!(!ai_execution_backend_allowed(mainnet, "test"));
         assert!(!ai_execution_backend_allowed(mainnet, "test-backend"));
-        assert!(ai_execution_backend_allowed(mainnet, "Plonky3"));
+        assert!(ai_execution_backend_allowed(
+            mainnet,
+            "Plonky3-Keccak-Goldilocks"
+        ));
         assert!(!ai_execution_backend_allowed(devnet, "test"));
     }
 
@@ -2329,8 +2332,12 @@ mod tests {
         let devnet = crate::core::chain_config::Network::Devnet
             .chain_id()
             .value();
-        assert!(ai_execution_backend_allowed(devnet, "Plonky3"));
+        assert!(ai_execution_backend_allowed(
+            devnet,
+            "Plonky3-Keccak-Goldilocks"
+        ));
         for spoofed in [
+            "Plonky3",
             "Plonky3-nightly",
             "not-really-Plonky3-at-all",
             "Plonky3 with a local patch",

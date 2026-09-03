@@ -2918,7 +2918,7 @@ mod tests {
         // applying it would be the second write of one vote.
         proposal.status = ProposalStatus::Passed;
         state.governance.proposals.push(proposal);
-        let actions = state.governance.execute_passed_proposals();
+        let actions = state.governance.execute_passed_proposals(u64::MAX);
         assert!(
             !actions.iter().any(|a| matches!(
                 a,

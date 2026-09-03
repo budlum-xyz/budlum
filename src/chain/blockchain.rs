@@ -5196,14 +5196,14 @@ impl Blockchain {
     pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         let epoch =
             checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
-        let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
         // The aggregator is always started for the current epoch, so the set
         // is known by construction; `build_validator_snapshot` is the same
         // value the lookup would return.
         let snapshot = self
             .validator_snapshot_for_epoch(epoch)
             .unwrap_or_else(|| self.build_validator_snapshot(epoch));
-        aggregator.set_validator_snapshot(snapshot);
+        let aggregator =
+            FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
     }
