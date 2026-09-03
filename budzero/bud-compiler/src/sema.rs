@@ -31,6 +31,10 @@ pub enum Type {
     /// is expected is a bug worth catching.
     Hash32,
     Struct(String),
+    /// A storage mapping `Map<K,V>`: key type, value type. Only a storage
+    /// field can have it; it is read as `name[key]` and written as
+    /// `name[key] = value`, and the VM keys the slot on a hash of the key.
+    Map(Box<Type>, Box<Type>),
     Void,
     Unknown,
 }
@@ -52,6 +56,7 @@ impl Type {
             Type::Address => "Address".into(),
             Type::Hash32 => "Hash32".into(),
             Type::Struct(n) => n.clone(),
+            Type::Map(k, v) => format!("Map<{},{}>", k.name(), v.name()),
             Type::Void => "()".into(),
             Type::Unknown => "?".into(),
         }
@@ -97,6 +102,21 @@ impl Type {
             "Address" => Ok(Type::Address),
             "Hash32" => Ok(Type::Hash32),
             _ => {
+                // The parser spells a mapping storage field `Map<K,V>`. This
+                // used to fall through to `Type::Struct("Map<K,V>")`, and
+                // `check_struct_type` then refused every mapping declaration
+                // as an undefined struct before code generation ran.
+                if let Some(inner) = s.strip_prefix("Map<").and_then(|r| r.strip_suffix('>')) {
+                    let (k, v) = inner.split_once(',').ok_or_else(|| {
+                        format!("`{s}` is not a mapping type: expected `Map<K,V>`")
+                    })?;
+                    let key = Type::from_str(k.trim())?;
+                    let value = Type::from_str(v.trim())?;
+                    if matches!(key, Type::Map(..)) || matches!(value, Type::Map(..)) {
+                        return Err(format!("`{s}`: a mapping cannot nest a mapping"));
+                    }
+                    return Ok(Type::Map(Box::new(key), Box::new(value)));
+                }
                 if let Some((_, why)) = RESERVED_TYPE_NAMES.iter().find(|(n, _)| *n == s) {
                     return Err(format!("`{s}` is not a BudL type: {why}"));
                 }
@@ -290,12 +310,44 @@ impl SemanticAnalyzer {
     /// Would silently become a phantom struct type, and field access on
     /// Values of that type would then skip validation entirely.
     fn check_struct_type(&self, ty: &Type, ctx: &str, errors: &mut Vec<CompileError>) {
-        if let Type::Struct(name) = ty {
-            if !self.structs.contains_key(name) {
+        match ty {
+            Type::Struct(name) => {
+                if !self.structs.contains_key(name) {
+                    errors.push(CompileError::SemanticError(format!(
+                        "Undefined struct type '{}' in {}",
+                        name, ctx
+                    )));
+                }
+            }
+            // A mapping is checked through its key and value types.
+            Type::Map(key, value) => {
+                self.check_struct_type(key, &format!("the key of {ctx}"), errors);
+                self.check_struct_type(value, &format!("the value of {ctx}"), errors);
+            }
+            _ => {}
+        }
+    }
+
+    /// The value type of the storage mapping `name`, or `Unknown` with an
+    /// error when `name` is not a declared mapping. Reading `total[3]` from
+    /// a `total: u64` field used to type as `u64` and pass.
+    fn mapping_value_type(&self, name: &str, errors: &mut Vec<CompileError>) -> Type {
+        match self.storage.get(name) {
+            Some(Type::Map(_, value)) => (**value).clone(),
+            Some(other) => {
                 errors.push(CompileError::SemanticError(format!(
-                    "Undefined struct type '{}' in {}",
-                    name, ctx
+                    "storage field '{}' is {}, not a mapping",
+                    name,
+                    other.name()
                 )));
+                Type::Unknown
+            }
+            None => {
+                errors.push(CompileError::SemanticError(format!(
+                    "Undefined storage mapping '{}'",
+                    name
+                )));
+                Type::Unknown
             }
         }
     }
@@ -371,9 +423,18 @@ impl SemanticAnalyzer {
             Stmt::StorageWrite(_, expr) => {
                 self.analyze_expr(expr, env, errors);
             }
-            Stmt::MappingWrite(_, key, val) => {
+            Stmt::MappingWrite(name, key, val) => {
                 self.analyze_expr(key, env, errors);
-                self.analyze_expr(val, env, errors);
+                let val_ty = self.analyze_expr(val, env, errors);
+                let expected = self.mapping_value_type(name, errors);
+                if expected != Type::Unknown && val_ty != Type::Unknown && val_ty != expected {
+                    errors.push(CompileError::SemanticError(format!(
+                        "mapping '{}' holds {}, got {}",
+                        name,
+                        expected.name(),
+                        val_ty.name()
+                    )));
+                }
             }
             Stmt::If(cond, then_branch, else_branch) => {
                 let cond_ty = self.analyze_expr(cond, env, errors);
@@ -475,9 +536,9 @@ impl SemanticAnalyzer {
                 }
             }
             Expr::StorageRead(_) => Type::U64,
-            Expr::MappingRead(_, key) => {
+            Expr::MappingRead(name, key) => {
                 self.analyze_expr(key, env, errors);
-                Type::U64
+                self.mapping_value_type(name, errors)
             }
             Expr::FieldAccess(base, field) => {
                 let base_ty = self.analyze_expr(base, env, errors);
