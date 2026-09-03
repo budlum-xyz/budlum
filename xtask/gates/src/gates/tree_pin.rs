@@ -342,9 +342,8 @@ pub fn self_test() -> Result<String, String> {
     }
     write_pins(&tmp)?;
     std::fs::write(tmp.join("budzero/README.md"), "# edited notes\n").unwrap();
-    verify_tree(&tmp).map_err(|e| {
-        format!("tree-pin self-test: markdown must remain excluded: {e}")
-    })?;
+    verify_tree(&tmp)
+        .map_err(|e| format!("tree-pin self-test: markdown must remain excluded: {e}"))?;
     std::fs::write(tmp.join("budzero/state.json"), "{\"changed\":true}\n").unwrap();
     if verify_tree(&tmp).is_ok() {
         return Err(String::from(
