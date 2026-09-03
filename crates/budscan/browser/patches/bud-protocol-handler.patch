@@ -12,7 +12,7 @@ ourselves keeps the origin at `bud://<name>`.
 
 --- a/netwerk/build/components.conf
 +++ b/netwerk/build/components.conf
-@@ -120,6 +120,13 @@ Classes = [
+@@ -120,6 +120,20 @@ Classes = [
          'constructor': 'nsViewSourceHandler::Create',
          'headers': ['/netwerk/protocol/viewsource/nsViewSourceHandler.h'],
      },
@@ -22,6 +22,13 @@ ourselves keeps the origin at `bud://<name>`.
 +        'type': 'mozilla::net::BudProtocolHandler',
 +        'headers': ['/netwerk/protocol/bud/BudProtocolHandler.h'],
 +        'processes': ProcessSelector.ALLOW_IN_SOCKET_PROCESS,
++        'protocol_config': {
++            'scheme': 'bud',
++            'flags': [
++                'URI_STD',
++                'URI_LOADABLE_BY_ANYONE',
++            ],
++        },
 +    },
      {
          'cid': '{9c7ec5d1-23f9-11d5-aea8-8fcc0793e97f}',
@@ -64,7 +71,7 @@ ourselves keeps the origin at `bud://<name>`.
 +FINAL_LIBRARY = "xul"
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudProtocolHandler.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,61 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -86,9 +93,12 @@ ourselves keeps the origin at `bud://<name>`.
 + * deliberately holds no verification logic of its own. Two places deciding
 + * what counts as verified is worse than one place deciding badly.
 + *
-+ * Flags (the components.conf entry above declares none, so Gecko applies
-+ * its defaults; this list is what the scheme is meant to carry and what a
-+ * later `protocol_flags` line must not exceed):
++ * Flags, declared in the components.conf entry's `protocol_config`. Gecko
++ * reads a scheme's flags from that static table, and every scheme has to
++ * carry exactly one loadability flag: with none declared,
++ * nsContentSecurityManager refuses the channel before this handler is
++ * asked, so an entry without `protocol_config` is a scheme that never
++ * loads. The list below is the whole of what the scheme carries:
 + *   URI_STD               - bud://<name>/<path> parses as a standard URL, so
 + *                           each name gets its own origin. Without this two
 + *                           different names would share one origin.
