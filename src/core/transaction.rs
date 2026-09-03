@@ -713,6 +713,10 @@ impl Transaction {
         // the wrong domain and then relabelled V5, which `verify` rejects.
         self.signature_version = SIGNATURE_VERSION_V5;
         self.signer_public_key = pubkey.to_vec();
+        // A V5 transaction carries no multisig authorization: `verify`
+        // refuses one. A stale V6 authorization left here would enter the
+        // preimage and produce a transaction that can never verify.
+        self.authorization = None;
         let signing_hash = self.signing_hash();
         let signature = keypair.sign(&signing_hash);
         self.signature = Some(signature.to_vec());
@@ -2090,8 +2094,16 @@ mod v29_signing_tests {
             for prior in [SIGNATURE_VERSION_V4, SIGNATURE_VERSION_V6] {
                 let mut tx = tx_for(keypair.address());
                 tx.signature_version = prior;
+                // A stale multisig authorization is dropped by the V5 signer
+                // rather than being signed into a transaction that cannot verify.
+                tx.authorization = Some(MultisigAuthorizationV6 {
+                    owners: vec![keypair.public_key_bytes().to_vec()],
+                    threshold: 1,
+                    signatures: Vec::new(),
+                });
                 tx.sign_v5(&keypair);
                 assert_eq!(tx.signature_version, SIGNATURE_VERSION_V5);
+                assert!(tx.authorization.is_none());
                 assert!(
                     tx.verify(),
                     "prior version {prior} must not leak into the hash"
