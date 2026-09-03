@@ -859,9 +859,26 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    // 4. Reproduce the canonical program-hash value.
-    let sample: [u64; 3] = [7, 8, 9];
-    let regenerated = keccak256(&canonical_program_bytes(&sample));
+    // 4. The canonical program-hash value: the storage-challenge program
+    //    reproduced above, hashed, and held against pin 0.
+    //
+    // This used to hash a placeholder `[7, 8, 9]`. The token the DDC workflow
+    // compares across compilers and the relay report signs was therefore the
+    // digest of three arbitrary words, while its documentation, `relay.rs`
+    // and `canonical_program_hash_pins()[0]` all described it as the
+    // storage-challenge hash; and pin 0 itself was compared against nothing,
+    // so the one canonical program this gate reproduces by hand was the one
+    // whose pin could drift unnoticed.
+    let regenerated = keccak256(&canonical_program_bytes(&first));
+    let storage_pin = canonical_program_hash_pins()[0];
+    if hex32(&regenerated) != storage_pin {
+        return Err(format!(
+            "regeneration: the storage-challenge program drifted. The hash reproduced \
+             from the ISA rule is {}, but pin 0 is {storage_pin}. Re-measure the pin \
+             from the rule and update both sides together.",
+            hex32(&regenerated)
+        ));
+    }
 
     // DISCOVER and inspect every production point.
     let producers = discover_producers(root);
@@ -1482,6 +1499,26 @@ mod tests {
         assert_eq!(
             got, PINNED_PRIVATE_TRANSFER_PROGRAM_HASH,
             "independent reproduction of the private-transfer check program drifted from the canonical value"
+        );
+    }
+
+    /// Pin 0 is the storage-challenge hash, and the gate's `program-hash`
+    /// token is that value: the hash of the reproduced program, not of a
+    /// placeholder.
+    #[test]
+    fn storage_challenge_reproduction_matches_pin_zero() {
+        let got = hex32(&keccak256(&canonical_program_bytes(
+            &regenerate_storage_challenge_program(),
+        )));
+        assert_eq!(
+            got,
+            canonical_program_hash_pins()[0],
+            "independent reproduction of the storage-challenge program drifted from pin 0"
+        );
+        let placeholder = hex32(&keccak256(&canonical_program_bytes(&[7, 8, 9])));
+        assert_ne!(
+            got, placeholder,
+            "the token must be the program's hash, not a sample's"
         );
     }
 
