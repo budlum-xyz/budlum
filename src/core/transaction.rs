@@ -707,12 +707,15 @@ impl Transaction {
                 self.from, expected_from
             );
         }
-        self.hash = self.calculate_hash();
+        // Version and key go in before the signing hash is taken: both the
+        // preimage and the domain tag carry the version, so a transaction that
+        // arrives here with a V4 or V6 marker would otherwise be signed under
+        // the wrong domain and then relabelled V5, which `verify` rejects.
+        self.signature_version = SIGNATURE_VERSION_V5;
+        self.signer_public_key = pubkey.to_vec();
         let signing_hash = self.signing_hash();
         let signature = keypair.sign(&signing_hash);
         self.signature = Some(signature.to_vec());
-        self.signer_public_key = pubkey.to_vec();
-        self.signature_version = SIGNATURE_VERSION_V5;
         self.hash = self.calculate_hash();
     }
     /// Signs on behalf of a multisig account.
@@ -1658,6 +1661,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                     put_u64(out, pi.exit_code);
                     put_u64(out, pi.trace_len);
                     put_fixed(out, &pi.event_digest);
+                    put_fixed(out, &pi.state_writes_digest);
                 }
                 None => put_u8(out, 0),
             }
@@ -1876,6 +1880,7 @@ mod v29_signing_tests {
              aims the proof at a different registration"
         );
 
+        let proof_with_writes = proof.clone();
         let mut tx = signed_variant(TransactionType::AiAttachExecutionProof {
             request_id: crate::ai::types::AiRequestId([0u8; 32]),
             proof,
@@ -1892,6 +1897,24 @@ mod v29_signing_tests {
         assert!(
             !tx.verify(),
             "the public inputs are the claim the STARK is checked against"
+        );
+
+        let mut tx = signed_variant(TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId([0u8; 32]),
+            proof: proof_with_writes,
+        });
+        let TransactionType::AiAttachExecutionProof {
+            proof: attached, ..
+        } = &mut tx.tx_type
+        else {
+            unreachable!();
+        };
+        if let Some(pi) = attached.public_inputs.as_mut() {
+            pi.state_writes_digest = [9u8; 32];
+        }
+        assert!(
+            !tx.verify(),
+            "the write-set digest is part of the claim; it is signed like the rest"
         );
     }
 
@@ -2057,6 +2080,24 @@ mod v29_signing_tests {
             }
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "the set is signed and cannot be altered");
+        }
+
+        /// A transaction that arrives at `sign_v5` under another version marker
+        /// is still signed and verified in the V5 domain.
+        #[test]
+        fn sign_v5_signs_in_the_v5_domain_whatever_the_prior_version() {
+            let keypair = WalletKeyPair::generate();
+            for prior in [SIGNATURE_VERSION_V4, SIGNATURE_VERSION_V6] {
+                let mut tx = tx_for(keypair.address());
+                tx.signature_version = prior;
+                tx.sign_v5(&keypair);
+                assert_eq!(tx.signature_version, SIGNATURE_VERSION_V5);
+                assert!(
+                    tx.verify(),
+                    "prior version {prior} must not leak into the hash"
+                );
+                assert_eq!(tx.hash, tx.calculate_hash());
+            }
         }
 
         /// A V5 transaction cannot carry an authorization.
