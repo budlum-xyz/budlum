@@ -808,7 +808,6 @@ budzero/bud-proof/src/bud_stark/verifier.rs	const	MAX_VERIFIER_DEGREE_BITS
 budzero/bud-proof/src/bud_stark/verifier.rs	enum	VerificationError
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	recompose_quotient_from_chunks
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	verify_constraints
-budzero/bud-proof/src/bud_stark/verifier.rs	fn	verify_with_preprocessed
 budzero/bud-proof/src/plonky3_air.rs	const	POSEIDON_HALF_FULL
 budzero/bud-proof/src/plonky3_air.rs	const	PREPROCESSED_WIDTH
 budzero/bud-proof/src/plonky3_prover.rs	fn	to_public_values
@@ -989,7 +988,6 @@ crates/ai-inference/crates/ai-tune/src/plan.rs	fn	full_sft
 crates/ai-inference/crates/ai-tune/src/schema.rs	const	MAX_RECORD_BYTES
 crates/ai-inference/crates/ai-tune/src/schema.rs	enum	SchemaError
 crates/note-packing/src/lib.rs	const	FIELD_BYTES
-crates/note-packing/src/lib.rs	fn	is_canonical_field
 crates/wallet-core/src/bip39_wordlist.rs	const	BIP39_WORDLIST
 crates/wallet-core/src/lib.rs	const	ADDRESS_VERSION_V2
 crates/wallet-core/src/lib.rs	const	MAX_MULTISIG_OWNERS
@@ -2015,7 +2013,6 @@ src/storage/provider.rs	fn	provider_challenge_id
 src/storage/provider.rs	struct	ProviderChallengeResult
 src/storage/provider.rs	struct	PutReceipt
 src/storage/provider.rs	struct	StorageProof
-src/storage/provider.rs	trait	StorageProvider
 src/storage/provider.rs	type	ChallengeId
 src/storage/provider.rs	type	DealId
 src/storage/pruning.rs	fn	archive_node_default
