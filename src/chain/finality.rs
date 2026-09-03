@@ -35,6 +35,8 @@ pub struct ValidatorEntry {
 
 impl ValidatorSetSnapshot {
     pub fn new(epoch: u64, validators: Vec<ValidatorEntry>) -> Self {
+        // `total_stake` is a summary for exports and readers; it saturates.
+        // The quorum is measured against `stake_sum`, which does not.
         let total_stake = validators
             .iter()
             .fold(0u64, |acc, v| acc.saturating_add(v.stake));
@@ -78,21 +80,26 @@ impl ValidatorSetSnapshot {
         self.validators.iter().position(|v| &v.address == address)
     }
 
-    pub fn quorum_stake(&self) -> u64 {
-        // `new` saturates the stake sum, so a total of `u64::MAX` says the
-        // real total is not representable. No partial stake may count as a
-        // supermajority of a number nobody knows: the threshold is the top of
-        // the range. Below that the product is widened so the multiply cannot
-        // saturate; `saturating_mul` on u64 clamped the product to `u64::MAX`
-        // and the division then handed back a third of the range, a threshold
-        // a minority could pass.
-        if self.total_stake == u64::MAX {
-            return u64::MAX;
-        }
-        let threshold = (u128::from(self.total_stake) * u128::from(FINALITY_QUORUM_NUMERATOR))
+    /// Exact stake held by the whole set.
+    ///
+    /// Summed in `u128`, so a set whose stakes add up past `u64::MAX` keeps
+    /// its real total. `total_stake` saturates there, and a threshold taken
+    /// from a saturated total was met by a saturated partial sum: with stakes
+    /// `[MAX, MAX, 1, 1, 1, 1]`, four signers holding `MAX + 3` of a real
+    /// `2 * MAX + 4` compared as `MAX >= MAX` and finalized with a third of
+    /// the stake. Every quorum comparison sums in `u128` for the same reason.
+    fn stake_sum(&self) -> u128 {
+        self.validators.iter().map(|v| u128::from(v.stake)).sum()
+    }
+
+    /// The stake a certificate has to carry: strictly more than two thirds
+    /// of [`Self::stake_sum`]. Exact, never saturated: `saturating_mul` on
+    /// `u64` clamped the product to `u64::MAX` and the division then handed
+    /// back a third of the range, a threshold a minority could pass.
+    pub fn quorum_stake(&self) -> u128 {
+        (self.stake_sum() * u128::from(FINALITY_QUORUM_NUMERATOR))
             / u128::from(FINALITY_QUORUM_DENOMINATOR)
-            + 1;
-        u64::try_from(threshold).unwrap_or(u64::MAX)
+            + 1
     }
 
     /// Hybrid finality requires both stake quorum and validator-count quorum.
@@ -603,14 +610,14 @@ impl FinalityAggregator {
 
     fn check_prevote_quorum(&mut self) {
         let snapshot = &self.validator_snapshot;
-        let mut voted_stake: u64 = 0;
+        let mut voted_stake: u128 = 0;
         let mut voted_count: usize = 0;
         for validator in self
             .prevotes
             .keys()
             .filter_map(|addr| snapshot.find_validator(addr))
         {
-            voted_stake = voted_stake.saturating_add(validator.stake);
+            voted_stake += u128::from(validator.stake);
             voted_count += 1;
         }
         if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
@@ -620,14 +627,14 @@ impl FinalityAggregator {
 
     fn check_precommit_quorum(&mut self) {
         let snapshot = &self.validator_snapshot;
-        let mut voted_stake: u64 = 0;
+        let mut voted_stake: u128 = 0;
         let mut voted_count: usize = 0;
         for validator in self
             .precommits
             .keys()
             .filter_map(|addr| snapshot.find_validator(addr))
         {
-            voted_stake = voted_stake.saturating_add(validator.stake);
+            voted_stake += u128::from(validator.stake);
             voted_count += 1;
         }
         if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
@@ -728,14 +735,14 @@ impl FinalityCert {
             }
         }
 
-        let mut voted_stake: u64 = 0;
+        let mut voted_stake: u128 = 0;
         let mut voted_count: usize = 0;
         let mut signers_pks = Vec::new();
         for (idx, validator) in snapshot.validators.iter().enumerate() {
             let byte_idx = idx / 8;
             let bit_idx = idx % 8;
             if (self.bitmap[byte_idx] & (1 << bit_idx)) != 0 {
-                voted_stake = voted_stake.saturating_add(validator.stake);
+                voted_stake += u128::from(validator.stake);
                 voted_count += 1;
 
                 let pk_bytes: [u8; 96] =
@@ -1172,25 +1179,54 @@ mod tests {
         assert!(stray.verify(&snap).unwrap_err().contains("out-of-range"));
     }
 
+    /// The quorum is measured against the exact stake sum, not the
+    /// saturated `total_stake` summary.
+    ///
+    /// Two validators of `2^63` each add up to `2^64`, one past `u64::MAX`.
+    /// The summary saturates; the threshold does not, and a single signer
+    /// holding half the stake stays below it. With `[MAX, MAX, 1, 1, 1, 1]`
+    /// the saturated comparison let four signers holding `MAX + 3` of a real
+    /// `2 * MAX + 4` finalize as `MAX >= MAX`; the exact one refuses them and
+    /// accepts the four that really hold more than two thirds.
     #[test]
-    fn quorum_stake_saturates_instead_of_wrapping() {
-        let (mut snap, _) = make_snapshot_with_keys(2, u64::MAX / 2 + 1);
-        snap.total_stake = snap
-            .validators
-            .iter()
-            .fold(0u64, |acc, v| acc.saturating_add(v.stake));
-        assert_eq!(snap.total_stake, u64::MAX);
-        // A wrapped product would make the threshold tiny; saturating keeps
-        // it at the top of the range so no partial stake can pass it.
-        assert_eq!(snap.quorum_stake(), u64::MAX);
+    fn quorum_stake_is_exact_past_the_u64_range() {
+        let (snap, _) = make_snapshot_with_keys(2, u64::MAX / 2 + 1);
+        assert_eq!(snap.total_stake, u64::MAX, "the summary saturates");
+        assert_eq!(snap.stake_sum(), 1u128 << 64);
+        assert_eq!(snap.quorum_stake(), 12_297_829_382_473_034_411);
+        assert!(u128::from(snap.validators[0].stake) < snap.quorum_stake());
 
-        // One below the saturated total is a real number and gets the real
-        // two-thirds threshold, not a third of it (what a saturating multiply
-        // followed by the division produced).
-        snap.total_stake = u64::MAX - 1;
-        assert_eq!(snap.quorum_stake(), 12_297_829_382_473_034_410);
-        snap.total_stake = 3000;
-        assert_eq!(snap.quorum_stake(), 2001);
+        let stakes = [u64::MAX, u64::MAX, 1, 1, 1, 1];
+        let validators: Vec<ValidatorEntry> = stakes
+            .iter()
+            .enumerate()
+            .map(|(i, stake)| {
+                let (_, pk_bytes, _) = make_test_key(i as u8);
+                let mut addr_bytes = [0u8; 32];
+                addr_bytes[0] = (i + 1) as u8;
+                ValidatorEntry {
+                    address: Address::from(addr_bytes),
+                    stake: *stake,
+                    bls_public_key: pk_bytes,
+                    pop_signature: Vec::new(),
+                    pq_public_key: Vec::new(),
+                }
+            })
+            .collect();
+        let snap = ValidatorSetSnapshot::new(1, validators);
+        let real_total = 2 * u128::from(u64::MAX) + 4;
+        assert_eq!(snap.stake_sum(), real_total);
+        assert_eq!(snap.quorum_stake(), real_total * 2 / 3 + 1);
+        let minority = u128::from(u64::MAX) + 3;
+        assert!(
+            minority < snap.quorum_stake(),
+            "MAX + 3 is a third, not two"
+        );
+        let majority = 2 * u128::from(u64::MAX) + 2;
+        assert!(majority >= snap.quorum_stake());
+
+        let (small, _) = make_snapshot_with_keys(3, 1000);
+        assert_eq!(small.quorum_stake(), 2001);
     }
 
     #[test]
@@ -1246,7 +1282,7 @@ mod tests {
             })
             .collect();
         let snap = ValidatorSetSnapshot::new(1, validators);
-        assert!(snap.validators[0].stake >= snap.quorum_stake());
+        assert!(u128::from(snap.validators[0].stake) >= snap.quorum_stake());
         assert_eq!(snap.quorum_count(), 3);
 
         let pc = Precommit {
