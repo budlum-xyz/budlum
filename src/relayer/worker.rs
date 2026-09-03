@@ -52,6 +52,12 @@ pub struct RelayerWorker {
     /// so that a block held back by one retried request does not have its
     /// other requests relayed again on the next pass.
     settled: std::collections::HashSet<String>,
+    /// Verified external observations of the block under the cursor whose
+    /// result the chain has not taken yet, by request hash. A retry submits
+    /// the stored result again instead of repeating the external action:
+    /// the chain's replay guard refuses a second result, it does not undo a
+    /// second transfer on the other chain. Cleared with `settled`.
+    observed: std::collections::HashMap<String, crate::core::transaction::RelayerExternalResult>,
 }
 
 impl RelayerWorker {
@@ -63,6 +69,7 @@ impl RelayerWorker {
             adapters: Arc::new(AdapterRegistry::new()),
             cursor_path: None,
             settled: std::collections::HashSet::new(),
+            observed: std::collections::HashMap::new(),
         }
     }
 
@@ -248,7 +255,7 @@ impl RelayerWorker {
                             "Relayer: Detected external transaction request"
                         );
 
-                        match self.process_relay(tx.from, ext_tx).await {
+                        match self.process_relay(&tx.hash, tx.from, ext_tx).await {
                             RelayOutcome::Submitted => {
                                 self.settled.insert(tx.hash.clone());
                             }
@@ -275,6 +282,7 @@ impl RelayerWorker {
                 self.save_cursor(relayed_through);
                 // Everything in this block is behind the cursor now.
                 self.settled.clear();
+                self.observed.clear();
             }
         }
     }
@@ -332,25 +340,58 @@ impl RelayerWorker {
     /// a connection failure, a missing signing key and a full mempool all
     /// left a paid request behind for good. The caller now holds the cursor
     /// on [`RelayOutcome::Retry`] and comes back to the request.
+    ///
+    /// The external action runs once per request. Its verified result is
+    /// kept under the request hash until the chain takes the signed result
+    /// transaction, so a retry after a full mempool or a raced nonce repeats
+    /// the local submission and not the transfer on the other chain.
     async fn process_relay(
-        &self,
+        &mut self,
+        request: &str,
         user: Address,
         ext_tx: crate::core::transaction::ExternalTransaction,
     ) -> RelayOutcome {
-        let result = match Self::build_verified_result(&self.adapters, &ext_tx).await {
-            Ok(result) => result,
-            Err(e) => {
-                // Refuse, loudly. Submitting an unverified success here would
-                // be worse than submitting nothing: the relayer's signature
-                // would make a fabricated external outcome look authentic.
-                warn!(
-                    chain = ?ext_tx.chain,
-                    target = %ext_tx.target_address,
-                    error = %e,
-                    "Relayer: refusing to submit a relay result that is not backed by a \
-                     verified adapter observation"
-                );
-                return relay_outcome_for(&e);
+        // Relayer MUST sign result TXs.
+        // Fail-closed: if no signing key is configured, refuse to submit.
+        // Unsigned TXs in the chain would allow forged relay results. The
+        // check comes before the external action: without a key the result
+        // could never be delivered, so nothing external is done in its name.
+        let Some(kp) = self.relayer_keypair.clone() else {
+            error!(
+                "CRITICAL: Relayer worker has no signing key configured. \
+                 Refusing to submit unsigned relay result (P8-01 fail-closed). \
+                 Use RelayerWorker::with_signing_key() to bind a key."
+            );
+            return RelayOutcome::Retry;
+        };
+
+        let result = if let Some(kept) = self.observed.get(request) {
+            info!(
+                request,
+                "Relayer: resubmitting the verified result of an earlier pass; the external \
+                 action is not repeated"
+            );
+            kept.clone()
+        } else {
+            match Self::build_verified_result(&self.adapters, &ext_tx).await {
+                Ok(result) => {
+                    self.observed.insert(request.to_string(), result.clone());
+                    result
+                }
+                Err(e) => {
+                    // Refuse, loudly. Submitting an unverified success here
+                    // would be worse than submitting nothing: the relayer's
+                    // signature would make a fabricated external outcome
+                    // look authentic.
+                    warn!(
+                        chain = ?ext_tx.chain,
+                        target = %ext_tx.target_address,
+                        error = %e,
+                        "Relayer: refusing to submit a relay result that is not backed by a \
+                         verified adapter observation"
+                    );
+                    return relay_outcome_for(&e);
+                }
             }
         };
 
@@ -367,35 +408,22 @@ impl RelayerWorker {
             self.chain.get_chain_id().await,
             TransactionType::RelayerResult(result),
         );
-
-        // Relayer MUST sign result TXs.
-        // Fail-closed: if no signing key is configured, refuse to submit.
-        // Unsigned TXs in the chain would allow forged relay results.
-        match &self.relayer_keypair {
-            Some(kp) => {
-                result_tx.sign(kp);
-                match self.chain.add_transaction(result_tx).await {
-                    Ok(()) => RelayOutcome::Submitted,
-                    Err(e) => {
-                        // Not accepted by the chain handle: mempool full,
-                        // actor gone, nonce raced. The external action has
-                        // happened, so this is retried rather than dropped;
-                        // the chain's replay protection refuses a second
-                        // result for the same request if one did land.
-                        warn!(
-                            error = %e,
-                            "Relayer: chain did not accept the signed relay result; \
-                             holding the request for retry"
-                        );
-                        RelayOutcome::Retry
-                    }
-                }
+        result_tx.sign(&kp);
+        match self.chain.add_transaction(result_tx).await {
+            Ok(()) => {
+                self.observed.remove(request);
+                RelayOutcome::Submitted
             }
-            None => {
-                error!(
-                    "CRITICAL: Relayer worker has no signing key configured. \
-                     Refusing to submit unsigned relay result (P8-01 fail-closed). \
-                     Use RelayerWorker::with_signing_key() to bind a key."
+            Err(e) => {
+                // Not accepted by the chain handle: mempool full, actor
+                // gone, nonce raced. The external action has happened and
+                // its result is kept under the request hash, so the retry
+                // signs and submits that result again; the chain's replay
+                // protection refuses a second result if one did land.
+                warn!(
+                    error = %e,
+                    "Relayer: chain did not accept the signed relay result; \
+                     holding the request for retry"
                 );
                 RelayOutcome::Retry
             }
@@ -654,7 +682,7 @@ mod relay_outcomes {
         registry
             .register(Box::new(ConsistentAdapter))
             .expect("a consistent adapter registers");
-        let worker =
+        let mut worker =
             RelayerWorker::new(handle, Address::from([7u8; 32])).with_adapters(Arc::new(registry));
         let request = ExternalTransaction {
             chain: ExternalChain::Ethereum,
@@ -663,8 +691,132 @@ mod relay_outcomes {
             external_nonce: 7,
         };
         let outcome = worker
-            .process_relay(Address::from([8u8; 32]), request)
+            .process_relay("req-1", Address::from([8u8; 32]), request)
             .await;
         assert_eq!(outcome, RelayOutcome::Retry);
+        assert!(
+            worker.observed.is_empty(),
+            "without a key nothing external is done, so there is nothing to keep"
+        );
+    }
+
+    /// An adapter that counts its submissions: the external action is the
+    /// thing a retry must not repeat.
+    struct CountingAdapter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl ChainAdapter for CountingAdapter {
+        fn chain_type(&self) -> ExternalChain {
+            ExternalChain::Ethereum
+        }
+
+        async fn generate_receipt_proof(
+            &self,
+            tx_hash: &str,
+        ) -> Result<(MerkleProof, [u8; 32], String), AdapterError> {
+            ConsistentAdapter.generate_receipt_proof(tx_hash).await
+        }
+
+        fn verify_receipt_proof(
+            &self,
+            proof: &MerkleProof,
+            external_state_root: &[u8; 32],
+            expected_tx_hash: &str,
+        ) -> Result<(), AdapterError> {
+            ConsistentAdapter.verify_receipt_proof(proof, external_state_root, expected_tx_hash)
+        }
+
+        async fn submit_transaction(
+            &self,
+            ext_tx: &ExternalTransaction,
+        ) -> Result<String, AdapterError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ConsistentAdapter.submit_transaction(ext_tx).await
+        }
+
+        async fn wait_for_confirmation(
+            &self,
+            tx_hash: &str,
+            confirmations: u32,
+        ) -> Result<RelayerExternalResult, AdapterError> {
+            ConsistentAdapter
+                .wait_for_confirmation(tx_hash, confirmations)
+                .await
+        }
+    }
+
+    /// The chain refusing the signed result is a local failure. The retry
+    /// signs and submits the kept result again; the external transaction
+    /// is not sent a second time.
+    #[tokio::test]
+    async fn a_rejected_result_is_resubmitted_without_a_second_external_action() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let handle = ChainHandle::new(tx);
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted_in_actor = accepted.clone();
+        // The first result is refused (a full mempool), the second is taken.
+        tokio::spawn(async move {
+            let mut seen = 0usize;
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    crate::chain::chain_actor::ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(0);
+                    }
+                    crate::chain::chain_actor::ChainCommand::GetChainId(reply) => {
+                        let _ = reply.send(1);
+                    }
+                    crate::chain::chain_actor::ChainCommand::AddTransaction(_, reply) => {
+                        seen += 1;
+                        if seen == 1 {
+                            let _ = reply.send(Err("mempool full".to_string()));
+                        } else {
+                            accepted_in_actor.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let submissions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(Box::new(CountingAdapter(submissions.clone())))
+            .expect("a counting adapter registers");
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+        let mut worker = RelayerWorker::new(handle, Address::from([7u8; 32]))
+            .with_adapters(Arc::new(registry))
+            .with_signing_key(key);
+        let request = ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: 7,
+        };
+
+        let first = worker
+            .process_relay("req-2", Address::from([8u8; 32]), request.clone())
+            .await;
+        assert_eq!(first, RelayOutcome::Retry);
+        assert_eq!(submissions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            worker.observed.contains_key("req-2"),
+            "the verified result is kept for the retry"
+        );
+
+        let second = worker
+            .process_relay("req-2", Address::from([8u8; 32]), request)
+            .await;
+        assert_eq!(second, RelayOutcome::Submitted);
+        assert_eq!(
+            submissions.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the external transaction must not be sent twice"
+        );
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            !worker.observed.contains_key("req-2"),
+            "a delivered result is not kept"
+        );
     }
 }
