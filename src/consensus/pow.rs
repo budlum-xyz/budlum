@@ -196,11 +196,25 @@ impl PoWEngine {
     /// the top but destroy it at the bottom - devnet runs at difficulty 1 or 2,
     /// and a shift large enough to save difficulty 32 flattens those to zero.
     /// Bitcoin carries chainwork in 256 bits for this reason, so this does too.
+    ///
+    /// One forward pass. The retarget boundaries below a height are folded in
+    /// as the walk reaches them, which is the same sequence
+    /// `difficulty_for_next_block` computes for each prefix; calling that per
+    /// block made this quadratic in chain length, and fork choice calls it
+    /// for both candidates on every comparison.
     #[must_use]
     pub fn accumulated_work(&self, chain: &[Block]) -> U256 {
+        let interval = self.config.adjustment_interval as usize;
+        let mut difficulty = self.config.difficulty;
+        let mut next_boundary = interval;
         let mut score = U256::ZERO;
         for index in 1..chain.len() {
-            let difficulty = self.difficulty_for_next_block(&chain[..index]);
+            if interval > 0 {
+                while next_boundary < index {
+                    difficulty = self.fold_retarget_boundary(difficulty, chain, next_boundary);
+                    next_boundary = next_boundary.saturating_add(interval);
+                }
+            }
             // 16^d == 2^(4d); take the exponent directly so no intermediate
             // has to fit a narrower type.
             let work = U256::pow2(
@@ -211,6 +225,24 @@ impl PoWEngine {
             score = score.saturating_add(work);
         }
         score
+    }
+
+    /// Apply the retarget at `boundary` (a slice position inside `chain`) to
+    /// `difficulty`, or return it unchanged when the block there is not on an
+    /// adjustment height. Shared by the per-prefix and the single-pass walks
+    /// so the two cannot drift apart.
+    fn fold_retarget_boundary(&self, difficulty: usize, chain: &[Block], boundary: usize) -> usize {
+        let interval = self.config.adjustment_interval as usize;
+        let boundary_block = &chain[boundary];
+        if boundary_block.index > 0
+            && boundary_block
+                .index
+                .is_multiple_of(self.config.adjustment_interval)
+        {
+            let first_index = boundary.saturating_add(1).saturating_sub(interval);
+            return self.adjusted_difficulty(difficulty, &chain[first_index], boundary_block);
+        }
+        difficulty
     }
 
     pub fn get_difficulty(&self) -> usize {
@@ -291,16 +323,7 @@ impl PoWEngine {
         }
         let mut boundary = interval;
         while boundary < chain.len() {
-            let boundary_block = &chain[boundary];
-            if boundary_block.index > 0
-                && boundary_block
-                    .index
-                    .is_multiple_of(self.config.adjustment_interval)
-            {
-                let first_index = boundary.saturating_add(1).saturating_sub(interval);
-                difficulty =
-                    self.adjusted_difficulty(difficulty, &chain[first_index], boundary_block);
-            }
+            difficulty = self.fold_retarget_boundary(difficulty, chain, boundary);
             boundary = boundary.saturating_add(interval);
         }
         difficulty
@@ -588,6 +611,59 @@ mod tests {
             "adjusted difficulty must be within [1, 32] clamp, got {}",
             diff_after_record
         );
+    }
+
+    /// The single-pass accumulator must agree with the per-prefix definition
+    /// on a chain whose difficulty actually moves at the boundaries.
+    #[test]
+    fn accumulated_work_single_pass_matches_per_prefix_definition() {
+        let engine = PoWEngine::with_config(PoWConfig {
+            difficulty: 2,
+            target_block_time: 10,
+            adjustment_interval: 3,
+        });
+        let mut chain: Vec<Block> = Vec::new();
+        let mut genesis = Block::new(0, "0".repeat(64), vec![]);
+        genesis.timestamp = 0;
+        genesis.hash = genesis.calculate_hash();
+        chain.push(genesis);
+        for i in 1..=14u64 {
+            let prev_hash = chain[(i - 1) as usize].hash.clone();
+            let mut b = Block::new(i, prev_hash, vec![]);
+            // Alternate fast and slow stretches so the retarget goes both ways.
+            b.timestamp = if (i / 3) % 2 == 0 {
+                i as u128 * 1_000
+            } else {
+                i as u128 * 90_000
+            };
+            b.hash = b.calculate_hash();
+            chain.push(b);
+        }
+
+        let mut expected = U256::ZERO;
+        let mut seen = std::collections::BTreeSet::new();
+        for index in 1..chain.len() {
+            let difficulty = engine.difficulty_for_next_block(&chain[..index]);
+            seen.insert(difficulty);
+            expected = expected.saturating_add(U256::pow2(difficulty as u32 * 4));
+        }
+        assert!(
+            seen.len() > 1,
+            "the fixture must exercise a retarget: {seen:?}"
+        );
+        assert_eq!(engine.accumulated_work(&chain), expected);
+
+        // A zero interval means a flat difficulty, in both walks.
+        let flat = PoWEngine::with_config(PoWConfig {
+            difficulty: 3,
+            target_block_time: 10,
+            adjustment_interval: 0,
+        });
+        let mut flat_expected = U256::ZERO;
+        for _ in 1..chain.len() {
+            flat_expected = flat_expected.saturating_add(U256::pow2(12));
+        }
+        assert_eq!(flat.accumulated_work(&chain), flat_expected);
     }
 
     #[test]

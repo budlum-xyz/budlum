@@ -193,12 +193,14 @@ pub trait ConsensusEngine: Send + Sync {
         if new_chain.len() <= current_chain.len() {
             return false;
         }
-        let common_ancestor = current_chain
+        // Depth is measured from the slice position, not from `Block::index`:
+        // the slices handed in here are not required to start at height zero,
+        // and `len - index - 1` underflows on a suffix.
+        let ancestor_pos = current_chain
             .iter()
-            .rev()
-            .find(|b| new_chain.iter().any(|nb| nb.hash == b.hash));
-        if let Some(ancestor) = common_ancestor {
-            let reorg_depth = current_chain.len() - ancestor.index as usize - 1;
+            .rposition(|b| new_chain.iter().any(|nb| nb.hash == b.hash));
+        if let Some(pos) = ancestor_pos {
+            let reorg_depth = current_chain.len() - pos - 1;
             if reorg_depth > MAX_REORG_DEPTH {
                 tracing::warn!(
                     "Rejecting deep reorg: {} blocks (max: {})",
@@ -252,5 +254,47 @@ mod tests {
             MAX_REORG_DEPTH,
             "the chain layer must re-export this constant, not redeclare it"
         );
+    }
+
+    /// `can_reorg` used `len - Block::index - 1`, which only holds when the
+    /// slice starts at height zero. A suffix (the shape a sync round hands
+    /// over) underflowed in debug builds and produced a wrapped depth in
+    /// release builds. Depth now comes from the slice position.
+    #[test]
+    fn can_reorg_measures_depth_from_slice_position() {
+        fn block(height: u64, prev: &str) -> Block {
+            let mut b = Block::new_with_chain_id(height, prev.to_string(), vec![], 1);
+            b.hash = b.calculate_hash();
+            b
+        }
+        let engine = crate::consensus::pow::PoWEngine::new(0);
+
+        // Current chain is a suffix starting at height 1000.
+        let mut current = vec![block(1000, "root")];
+        for h in 1001..1003 {
+            let prev = current.last().unwrap().hash.clone();
+            current.push(block(h, &prev));
+        }
+        // New chain forks from the first suffix block and is longer.
+        let mut new_chain = vec![current[0].clone()];
+        for h in 1001..1005 {
+            let prev = new_chain.last().unwrap().hash.clone();
+            new_chain.push(block(h, &format!("{prev}-fork")));
+        }
+        // Depth from the ancestor is 2, well under MAX_REORG_DEPTH.
+        assert!(engine.can_reorg(&current, &new_chain));
+
+        // A fork deeper than MAX_REORG_DEPTH is still refused on a suffix.
+        let mut deep_current = vec![block(1000, "root")];
+        for h in 1001..(1001 + MAX_REORG_DEPTH as u64 + 1) {
+            let prev = deep_current.last().unwrap().hash.clone();
+            deep_current.push(block(h, &prev));
+        }
+        let mut deep_new = vec![deep_current[0].clone()];
+        for h in 1001..(1001 + MAX_REORG_DEPTH as u64 + 2) {
+            let prev = deep_new.last().unwrap().hash.clone();
+            deep_new.push(block(h, &format!("{prev}-fork")));
+        }
+        assert!(!engine.can_reorg(&deep_current, &deep_new));
     }
 }

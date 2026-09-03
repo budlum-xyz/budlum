@@ -164,8 +164,10 @@ impl QcBlob {
         Ok(proof.into_iter().map(|digest| digest.to_vec()).collect())
     }
 
+    /// `created_epoch` arrives with the deserialized blob, so the sum must
+    /// not be able to overflow on a hostile value.
     pub fn is_expired(&self, current_epoch: u64) -> bool {
-        current_epoch > self.created_epoch + QC_BLOB_TTL_EPOCHS
+        current_epoch > self.created_epoch.saturating_add(QC_BLOB_TTL_EPOCHS)
     }
 
     pub fn validate_size(&self) -> Result<(), String> {
@@ -208,6 +210,15 @@ impl QcBlob {
             return Err("QcBlob checkpoint hash is empty".into());
         }
         if let Some(epoch) = current_epoch {
+            // A blob cannot have been created after the epoch it attests, so a
+            // self-declared later `created_epoch` is not allowed to stretch
+            // the TTL window.
+            if self.created_epoch > self.epoch {
+                return Err(format!(
+                    "QcBlob created epoch {} is above its epoch {}",
+                    self.created_epoch, self.epoch
+                ));
+            }
             if self.is_expired(epoch) {
                 return Err(format!(
                     "QcBlob expired at epoch {} (created at {})",
@@ -696,6 +707,34 @@ mod tests {
                 .unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn ttl_arithmetic_saturates_and_created_epoch_is_bounded() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(2);
+        let entries = make_signed_entries(&snapshot, &keys, "cp_hash");
+        let mut blob = QcBlob::new(snapshot.epoch, 100, "cp_hash".into(), entries);
+
+        // A hostile creation epoch must neither overflow nor read as fresh.
+        blob.created_epoch = u64::MAX;
+        assert!(!blob.is_expired(u64::MAX));
+        let err = blob
+            .verify_against_snapshot(&snapshot, None, Some(snapshot.epoch))
+            .expect_err("created_epoch above the attested epoch is refused");
+        assert!(err.contains("is above its epoch"), "{err}");
+
+        // The honest value still verifies with a current epoch inside the TTL.
+        blob.created_epoch = snapshot.epoch;
+        blob.verify_against_snapshot(&snapshot, None, Some(snapshot.epoch + QC_BLOB_TTL_EPOCHS))
+            .expect("inside the TTL window");
+        let err = blob
+            .verify_against_snapshot(
+                &snapshot,
+                None,
+                Some(snapshot.epoch + QC_BLOB_TTL_EPOCHS + 1),
+            )
+            .expect_err("one past the TTL window");
+        assert!(err.contains("expired"), "{err}");
     }
 
     #[test]
