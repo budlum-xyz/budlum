@@ -44,10 +44,13 @@ fn baseline(root: &Path) -> Result<u64, String> {
 /// A `compiler-message` line carrying a `warning` level and a `clippy::`
 /// code counts as one pedantic/nursery warning.
 fn is_clippy_warning(line: &str) -> bool {
-    line.contains("\"reason\":\"compiler-message\"")
-        || line.contains("\"reason\": \"compiler-message\"")
-            && (line.contains("\"level\":\"warning\"") || line.contains("\"level\": \"warning\""))
-            && line.contains("clippy::")
+    // All three fields, grouped. Written without the parentheses this read
+    // as `reason || (reason && level && code)`, so a bare `reason` counted:
+    // every rustc note and error in the stream inflated the number.
+    let compiler_message = line.contains("\"reason\":\"compiler-message\"")
+        || line.contains("\"reason\": \"compiler-message\"");
+    let warning = line.contains("\"level\":\"warning\"") || line.contains("\"level\": \"warning\"");
+    compiler_message && warning && line.contains("clippy::")
 }
 
 fn count_json(path: &Path) -> Result<u64, String> {
@@ -110,6 +113,14 @@ pub fn self_test() -> Result<String, String> {
         let mut s = String::new();
         for _ in 0..n {
             s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"clippy::x\"},\"rendered\":\"\"}}\n");
+        }
+        // Lines that carry the reason but not the level or not the code:
+        // a rustc error, a rustc warning, a note. None of them is a
+        // pedantic/nursery warning, and none of them may count.
+        for _ in 0..n {
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"code\":{\"code\":\"E0308\"},\"rendered\":\"\"}}\n");
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"unused_variables\"},\"rendered\":\"\"}}\n");
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"note\",\"code\":null,\"rendered\":\"clippy::x\"}}\n");
         }
         std::fs::write(dir.join(name), s).map_err(|e| e.to_string())
     };

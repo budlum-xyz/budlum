@@ -144,6 +144,32 @@ fn script_requirements(script: &std::path::Path) -> (String, Vec<String>) {
     (scope, names)
 }
 
+/// Is `path` inside the declared `required_tests_scope`?
+///
+/// A scope is `.*` (everything) or one or more path prefixes, `a/b` or
+/// `(a/b|c)`, matched at a path boundary: `src/tests` covers
+/// `src/tests/x.rs` and `src/tests.rs`, not `src/tests_extra/x.rs`. An
+/// earlier form of this check compared the scope text with a string built
+/// from the scope text, which was true for every scope, so a required
+/// name counted wherever it lived.
+fn path_in_scope(path: &str, scope: &str) -> bool {
+    if scope == ".*" {
+        return true;
+    }
+    scope
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split('|')
+        .map(|alt| alt.trim().trim_matches('/'))
+        .filter(|alt| !alt.is_empty())
+        .any(|alt| {
+            path == alt
+                || path
+                    .strip_prefix(alt)
+                    .is_some_and(|rest| rest.starts_with('/') || rest == ".rs")
+        })
+}
+
 /// # Errors
 ///
 /// Returns a finding per required name that is not a real test.
@@ -182,22 +208,12 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         scripts_with_lists += 1;
-        let scope_regex = format!("^({scope})(/|\\.rs$|$)");
         let mut missing: Vec<String> = Vec::new();
         for name in &names {
             total += 1;
             let test_matches = marked
                 .iter()
-                .filter(|(p, n)| {
-                    n == name && {
-                        let p = p.as_str();
-                        // scope match: path matches scope pattern (simple prefix-or-regex)
-                        let trimmed = scope.trim_start_matches('(').trim_end_matches(')');
-                        p.contains(trimmed.trim_matches('*').trim_matches('/'))
-                            || scope == ".*"
-                            || scope_regex.contains(trimmed)
-                    }
-                })
+                .filter(|(p, n)| n == name && path_in_scope(p, &scope))
                 .count();
             let function_matches = fns.iter().filter(|n| *n == name).count();
             if test_matches != 1 || function_matches != 1 {
@@ -271,8 +287,38 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a name carrying no #[test] passed"));
     }
+    // The scope is a rule, not a comment: a required test that lives
+    // outside the declared scope does not count. The old check compared
+    // the scope with itself and let every location through.
+    std::fs::write(
+        dir.join("ops/scripts/check-example-gate.sh"),
+        "required_tests_scope=\"src/tests\"\nrequired_tests=(\n  a_real_test\n)\n",
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/lib.rs"), "#[test]\nfn a_real_test() {}\n")
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a required test outside the declared scope was accepted",
+        ));
+    }
+    let _ = std::fs::create_dir_all(dir.join("src/tests"));
+    std::fs::write(dir.join("src/lib.rs"), "mod tests;\n").map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("src/tests/mod.rs"),
+        "#[test]\nfn a_real_test() {}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a required test inside the declared scope was refused",
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "required-tests canary OK: with a test it PASSes and without one it FAILs.",
+        "required-tests canary OK: with a test it PASSes, without one it FAILs, and the \
+         scope is enforced.",
     ))
 }
