@@ -42,9 +42,24 @@
 //!   * `use` statements - an import is a declaration of intent. The intent is
 //!     checked by looking for the use of the name somewhere else.
 //!
+//! One part of a `use` statement is kept: a rename. `use bud_vm::POSEIDON_MDS
+//! as MDS;` followed by `MDS[i][j]` reaches `POSEIDON_MDS` exactly as the
+//! unaliased name would, so the original of an alias counts as mentioned
+//! wherever the alias is. An alias nobody uses reaches nothing.
+//!
 //! A `pub use` re-export is deliberately treated as an import, not a use.
 //! `bud/src/lib.rs` re-exports its whole surface, so counting re-exports would
 //! mark every item in that crate as reached and measure nothing.
+//!
+//! A trait is the one kind of item a file can use without ever repeating its
+//! name: `use bud_state::StateBackend;` followed by `state.commit()` calls a
+//! trait method, and the text shows only the import. So for a `pub trait`, a
+//! private `use` in another file counts as a use. The premise is the
+//! compiler's: rustc's `unused_imports` lint, denied in CI, refuses a private
+//! import that resolves no name and no method call, so such an import cannot
+//! land. A `pub use` of a trait is still a re-export and still counts for
+//! nothing, and a private import of a function or a type rescues nothing
+//! either, because those are named at every use and the text shows it.
 //!
 //! # What is out of scope
 //!
@@ -306,18 +321,108 @@ fn strip_comments_and_strings(src: &str) -> String {
 }
 
 /// Remove `use` and `pub use` statements. A re-export is an import, not a use.
+///
+/// A `use` is found wherever it begins, not only at the head of a
+/// `;`-delimited segment: after `mod m {`, after a closing brace, after an
+/// attribute. Checked at the segment head alone, an import inside a nested
+/// module or one that followed an item body stayed in the text, and the
+/// name it imported counted as reached.
 fn strip_use_statements(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
-    for line_or_stmt in src.split_inclusive(';') {
-        let trimmed = line_or_stmt.trim_start();
-        let is_use = trimmed.starts_with("use ")
-            || trimmed.starts_with("pub use ")
-            || trimmed.starts_with("pub(crate) use ")
-            || trimmed.starts_with("pub(super) use ");
-        if is_use {
-            out.push(' ');
-        } else {
-            out.push_str(line_or_stmt);
+    for segment in src.split_inclusive(';') {
+        match use_start(segment) {
+            Some(at) => {
+                out.push_str(&segment[..at]);
+                out.push(' ');
+            }
+            None => out.push_str(segment),
+        }
+    }
+    out
+}
+
+/// Byte offset of the `use` keyword (or the `pub` that introduces it) that
+/// begins a `use` item in `segment`, if the segment ends with one.
+fn use_start(segment: &str) -> Option<usize> {
+    let b = segment.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        let rest = &segment[i..];
+        let starts_item = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        if starts_item {
+            for head in ["use ", "pub use ", "pub(crate) use ", "pub(super) use "] {
+                if rest.starts_with(head) {
+                    return Some(i);
+                }
+            }
+        }
+        i += rest.chars().next().map_or(1, char::len_utf8);
+    }
+    None
+}
+
+/// What one file's `use` statements say, kept after the statements themselves
+/// are scrubbed away.
+#[derive(Default)]
+struct Imports {
+    /// `use path::Original as Alias;` pairs, alias first.
+    aliases: Vec<(String, String)>,
+    /// The last path segment of every private (non-`pub`) `use`. Only a
+    /// `pub trait` may be reached through one of these: see the module notes.
+    private_names: BTreeSet<String>,
+}
+
+impl Imports {
+    /// Add the original name behind every alias the scrubbed text uses. An
+    /// alias that appears nowhere outside its own `use` reaches nothing.
+    fn reach_originals(&self, ids: &mut BTreeSet<String>) {
+        for (alias, original) in &self.aliases {
+            if ids.contains(alias) {
+                ids.insert(original.clone());
+            }
+        }
+    }
+}
+
+/// Read the aliases and the private imports out of a file whose comments and
+/// strings are already gone. Nested groups are handled by looking at each
+/// `,`- or `{`-delimited leaf: `use a::{B as C, d::E};` yields the alias
+/// `C -> B` and the private names `B`, `E`.
+fn imports_in(prose_free: &str) -> Imports {
+    let mut out = Imports::default();
+    for segment in prose_free.split_inclusive(';') {
+        let Some(at) = use_start(segment) else {
+            continue;
+        };
+        let stmt = &segment[at..];
+        let is_pub = stmt.starts_with("pub");
+        let body = stmt.trim_start_matches("pub").trim_start();
+        let body = body
+            .strip_prefix('(')
+            .and_then(|b| b.split_once(')'))
+            .map_or(body, |(_, rest)| rest.trim_start());
+        let Some(body) = body.strip_prefix("use ") else {
+            continue;
+        };
+        for leaf in body.split([',', '{', '}', ';']) {
+            let leaf = leaf.trim();
+            if leaf.is_empty() {
+                continue;
+            }
+            let (path, alias) = match leaf.split_once(" as ") {
+                Some((p, a)) => (p.trim(), Some(a.trim())),
+                None => (leaf, None),
+            };
+            let original = path.rsplit("::").next().map_or(path, str::trim);
+            if original.is_empty() || original == "*" || original == "self" {
+                continue;
+            }
+            if let Some(alias) = alias.filter(|a| *a != "_" && !a.is_empty()) {
+                out.aliases.push((alias.to_string(), original.to_string()));
+            }
+            if !is_pub {
+                out.private_names.insert(original.to_string());
+            }
         }
     }
     out
@@ -535,6 +640,7 @@ fn scan(root: &Path) -> Scan {
     }
 
     let mut scrubbed: BTreeMap<String, String> = BTreeMap::new();
+    let mut imports: BTreeMap<String, Imports> = BTreeMap::new();
     for path in &files {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
@@ -544,7 +650,9 @@ fn scan(root: &Path) -> Scan {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        let s = strip_use_statements(&strip_comments_and_strings(&strip_cfg_test(&text)));
+        let prose_free = strip_comments_and_strings(&strip_cfg_test(&text));
+        let s = strip_use_statements(&prose_free);
+        imports.insert(rel.clone(), imports_in(&prose_free));
         scrubbed.insert(rel, s);
     }
 
@@ -560,7 +668,13 @@ fn scan(root: &Path) -> Scan {
 
     let refs: BTreeMap<&String, BTreeSet<String>> = scrubbed
         .iter()
-        .map(|(rel, s)| (rel, identifiers_in(s)))
+        .map(|(rel, s)| {
+            let mut ids = identifiers_in(s);
+            if let Some(imp) = imports.get(rel) {
+                imp.reach_originals(&mut ids);
+            }
+            (rel, ids)
+        })
         .collect();
 
     let mut idle = Vec::new();
@@ -585,7 +699,11 @@ fn scan(root: &Path) -> Scan {
         let reached = refs
             .iter()
             .any(|(rel, ids)| **rel != item.file && ids.contains(name));
-        if !reached {
+        let imported_trait = item.kind == "trait"
+            && imports
+                .iter()
+                .any(|(rel, imp)| *rel != item.file && imp.private_names.contains(name));
+        if !reached && !imported_trait {
             idle.push(item.clone());
         }
     }
@@ -812,6 +930,33 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         ));
     }
 
+    // An import inside a nested module, or one that follows an item body,
+    // is still an import. Found only at the head of a `;` segment, a
+    // `use` after `mod m {` or after a `}` stayed in the text and the name
+    // it named was taken as reached.
+    if accepts_with(
+        clean,
+        tmp,
+        "nested_use",
+        &[
+            (
+                "src/idle.rs",
+                "pub fn only_imported_inside() -> u32 { 9 }\n",
+            ),
+            (
+                "src/importer.rs",
+                "pub mod inner {\n    use crate::idle::only_imported_inside;\n}\n\
+                 fn f() -> u32 { 1 }\n\
+                 pub use crate::idle::only_imported_inside as again;\n",
+            ),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a use inside a nested module or after an item body counted as a caller",
+        ));
+    }
+
     // A name that appears only in a comment or a string is not a caller.
     if accepts_with(
         clean,
@@ -832,6 +977,109 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The two things a `use` statement can settle: an alias that the file then
+/// uses reaches the original, and a private import of a trait is a use of
+/// that trait. Each comes with its negative, or the rule would be a hole.
+///
+/// # Errors
+/// Returns the first canary that misbehaves.
+fn import_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
+    let cases: [(&str, bool, &str, &str); 4] = [
+        (
+            "alias_used",
+            true,
+            "use crate::idle::NOBODY_NAMES_THIS_DIRECTLY as N;\nfn f() -> u32 { N }\n",
+            "canary: a constant reached through a used alias was reported idle",
+        ),
+        (
+            "alias_unused",
+            false,
+            "use crate::idle::NOBODY_NAMES_THIS_DIRECTLY as N;\nfn f() -> u32 { 1 }\n",
+            "canary: an alias nobody uses rescued the item it renames",
+        ),
+        (
+            "alias_reexported",
+            false,
+            "pub use crate::idle::NOBODY_NAMES_THIS_DIRECTLY as N;\n",
+            "canary: a pub use with a rename counted as a caller",
+        ),
+        (
+            "alias_only_in_prose",
+            false,
+            "use crate::idle::NOBODY_NAMES_THIS_DIRECTLY as N;\nfn f() -> u32 { /* N */ 1 }\n",
+            "canary: an alias mentioned only in a comment reached its original",
+        ),
+    ];
+    expect_each(
+        clean,
+        tmp,
+        "pub const NOBODY_NAMES_THIS_DIRECTLY: u32 = 5;\n",
+        &cases,
+    )?;
+    trait_import_canaries(clean, tmp)
+}
+
+/// Stage `idle_body` as `src/idle.rs` beside each importer and check that
+/// the gate's verdict is the one the case expects.
+///
+/// # Errors
+/// Returns the complaint of the first case whose verdict is wrong.
+fn expect_each(
+    clean: &Path,
+    tmp: &Path,
+    idle_body: &str,
+    cases: &[(&str, bool, &str, &str)],
+) -> Result<(), String> {
+    for (tag, must_pass, importer, complaint) in cases {
+        let passed = accepts_with(
+            clean,
+            tmp,
+            tag,
+            &[("src/idle.rs", idle_body), ("src/importer.rs", importer)],
+        )?;
+        if passed != *must_pass {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(String::from(*complaint));
+        }
+    }
+    Ok(())
+}
+
+/// A trait's methods are called without its name, so a private import of a
+/// `pub trait` is a use; a re-export or a test-only import is not.
+///
+/// # Errors
+/// Returns the first canary that misbehaves.
+fn trait_import_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
+    let trait_cases: [(&str, bool, &str, &str); 3] = [
+        (
+            "trait_imported",
+            true,
+            "use crate::idle::NobodyNamesThis;\nfn f(x: &dyn std::any::Any) -> u32 { x.go() }\n",
+            "canary: a trait reached only through a private import was reported \
+             idle; its methods are called without its name",
+        ),
+        (
+            "trait_reexported",
+            false,
+            "pub use crate::idle::NobodyNamesThis;\n",
+            "canary: a pub use of a trait counted as a use",
+        ),
+        (
+            "trait_imported_in_tests",
+            false,
+            "#[cfg(test)]\nmod tests {\n    use crate::idle::NobodyNamesThis;\n}\n",
+            "canary: a trait imported only by a test module passed as reached",
+        ),
+    ];
+    expect_each(
+        clean,
+        tmp,
+        "pub trait NobodyNamesThis {\n    fn go(&self) -> u32;\n}\n",
+        &trait_cases,
+    )
 }
 
 /// The ratchet canaries: a recorded item must be exempt, and a recorded item
@@ -938,6 +1186,24 @@ fn cfg_test_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The vacuity floor must fire on a near-empty tree.
+///
+/// # Errors
+/// Returns the canary complaint if the near-empty tree passes.
+fn vacuity_canary(tmp: &Path) -> Result<(), String> {
+    let empty = tmp.join("empty");
+    fs::create_dir_all(empty.join("src")).map_err(|e| format!("cannot create empty tree: {e}"))?;
+    fs::write(empty.join("src/only.rs"), "pub fn a() {}\n")
+        .map_err(|e| format!("cannot write vacuity fixture: {e}"))?;
+    if run(&empty).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a near-empty tree passed, so the gate can be vacuous",
+        ));
+    }
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
     let clean = tmp.join("clean");
@@ -978,6 +1244,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     not_a_caller_canaries(&clean, &tmp)?;
+    import_canaries(&clean, &tmp)?;
 
     // The control group: a real caller must clear the finding, or the gate is
     // simply always red and teaches nothing.
@@ -1045,22 +1312,14 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    // The vacuity floor must fire on a near-empty tree.
-    let empty = tmp.join("empty");
-    fs::create_dir_all(empty.join("src")).map_err(|e| format!("cannot create empty tree: {e}"))?;
-    fs::write(empty.join("src/only.rs"), "pub fn a() {}\n")
-        .map_err(|e| format!("cannot write vacuity fixture: {e}"))?;
-    if run(&empty).is_ok() {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: a near-empty tree passed, so the gate can be vacuous",
-        ));
-    }
+    vacuity_canary(&tmp)?;
 
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
         "no-idle-code canary OK (wired PASSes, idle fn/struct/enum/const FAIL, re-export and \
-         test-only and prose FAIL, a real caller PASSes, baseline exempts, stale baseline FAILs, \
-         an unmentioned ambiguous name FAILs, a mentioned one PASSes, empty tree FAILs).",
+         test-only and prose FAIL, a real caller PASSes, a used alias PASSes and an unused, \
+         re-exported or commented one FAILs, a privately imported trait PASSes and a re-exported \
+         or test-imported one FAILs, baseline exempts, stale baseline FAILs, an unmentioned \
+         ambiguous name FAILs, a mentioned one PASSes, empty tree FAILs).",
     ))
 }
