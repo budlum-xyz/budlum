@@ -244,6 +244,13 @@ impl LogFieldColumnar {
             return None;
         }
         let lines = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
+        // The header count is bound the same way `encode` bounds its input:
+        // no empty container, nothing above `MAX_LINES`. `decode` indexes
+        // every column by the first column's length, so each column below
+        // has to hold exactly `lines` entries or a short one panics there.
+        if lines == 0 || lines > MAX_LINES {
+            return None;
+        }
         let mut pos = HDR;
         let fixed_template = read_bytes(bytes, &mut pos)?;
         let mut columns = Vec::with_capacity(7);
@@ -258,7 +265,7 @@ impl LogFieldColumnar {
             // is refused before it is allocated: `Vec::with_capacity` from a
             // header-supplied number is an allocation bomb, and under
             // `panic = "abort"` an allocation failure takes the process down.
-            if n > lines || n > payload_len.saturating_sub(pos) / 4 {
+            if n != lines || n > payload_len.saturating_sub(pos) / 4 {
                 return None;
             }
             let mut col = Vec::with_capacity(n);
@@ -337,18 +344,73 @@ mod tests {
     /// is recomputed so only the count check can be what refuses it.
     #[test]
     fn a_column_count_the_body_cannot_hold_is_refused_before_allocation() {
+        let claimed = (MAX_LINES / 2) as u32;
         let mut out = Vec::new();
         out.extend_from_slice(&LOGFIELD_MAGIC);
         out.push(LOGFIELD_VERSION);
-        out.extend_from_slice(&u32::MAX.to_le_bytes()); // lines
+        out.extend_from_slice(&claimed.to_le_bytes()); // lines, within MAX_LINES
         push_bytes(&mut out, b"tpl");
-        out.extend_from_slice(&u32::MAX.to_le_bytes()); // first column count
+        out.extend_from_slice(&claimed.to_le_bytes()); // first column count
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_LOGFIELD_V1");
         h.update(&out);
         let d: [u8; 32] = h.finalize().into();
         out.extend_from_slice(&d);
         assert!(LogFieldColumnar::from_blob(&out).is_none());
+    }
+
+    /// A header line count outside what `encode` can produce (zero or above
+    /// `MAX_LINES`) is refused, and so is a blob whose columns do not all
+    /// hold exactly that many entries: `decode` walks every column by the
+    /// first column's length, so a shorter column used to panic there.
+    #[test]
+    fn column_lengths_must_match_the_header_line_count() {
+        let seal = |mut out: Vec<u8>| {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_BUD_LOGFIELD_V1");
+            h.update(&out);
+            let d: [u8; 32] = h.finalize().into();
+            out.extend_from_slice(&d);
+            out
+        };
+        let header = |lines: u32| {
+            let mut out = Vec::new();
+            out.extend_from_slice(&LOGFIELD_MAGIC);
+            out.push(LOGFIELD_VERSION);
+            out.extend_from_slice(&lines.to_le_bytes());
+            push_bytes(&mut out, b"tpl");
+            out
+        };
+        for lines in [0u32, (MAX_LINES + 1) as u32, u32::MAX] {
+            let mut out = header(lines);
+            for _ in 0..7 {
+                out.extend_from_slice(&0u32.to_le_bytes());
+            }
+            assert!(
+                LogFieldColumnar::from_blob(&seal(out)).is_none(),
+                "lines={lines} must be refused"
+            );
+        }
+        // Two lines claimed; column 5 carries a single entry.
+        let mut out = header(2);
+        for ci in 0..7 {
+            let n: u32 = if ci == 5 { 1 } else { 2 };
+            out.extend_from_slice(&n.to_le_bytes());
+            for _ in 0..n {
+                push_bytes(&mut out, b"x");
+            }
+        }
+        assert!(LogFieldColumnar::from_blob(&seal(out)).is_none());
+        // The same layout with every column at two entries parses.
+        let mut out = header(2);
+        for _ in 0..7 {
+            out.extend_from_slice(&2u32.to_le_bytes());
+            push_bytes(&mut out, b"x");
+            push_bytes(&mut out, b"x");
+        }
+        let parsed = LogFieldColumnar::from_blob(&seal(out)).expect("well formed blob");
+        assert_eq!(parsed.lines, 2);
+        assert!(parsed.columns.iter().all(|c| c.len() == 2));
     }
 
     #[test]
