@@ -267,6 +267,11 @@ jobs:
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
           toolchain: nightly
+          # `-Zbuild-std` rebuilds the standard library from source; without
+          # this component the canary stops at "Cargo.lock does not exist,
+          # unable to build with the standard library" before TSan ever runs
+          # (that is what the 2026-08-31 scheduled run died on).
+          components: rust-src
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
@@ -307,8 +312,15 @@ jobs:
           EOF
           cd /tmp/tsan-canary
           export RUSTFLAGS="-Zsanitizer=thread"
-          if cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu 2>&1 \
-             | tee /tmp/tsan-canary.log | grep -q "WARNING: ThreadSanitizer"; then
+          # Capture the output into a file first: under `set -euo pipefail` a
+          # non-zero exit anywhere in the pipeline decides the condition, and
+          # TSan exits non-zero precisely when it finds the race. The pipeline
+          # form made a successful catch read as a failed canary.
+          set +e
+          cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu \
+            > /tmp/tsan-canary.log 2>&1
+          set -e
+          if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-canary.log; then
             echo "canary OK: TSan caught the deliberately written race."
           else
             echo "CANARY FAILED: TSan could not catch a data race, so even a clean report" >&2
