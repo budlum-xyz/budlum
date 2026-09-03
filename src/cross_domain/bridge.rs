@@ -628,6 +628,19 @@ impl BridgeState {
                 ]));
             }
         }
+        // The expiry queue decides the height at which `sweep_expired_locks`
+        // turns a `Locked` row back to `Active`, so it is committed for the
+        // same reason: a loaded state whose queue lost or gained an entry
+        // has the same rows as its peers and a different root at expiry.
+        for (height, message_ids) in &self.expiry_queue {
+            for message_id in message_ids {
+                leaves.push(hash_fields_bytes(&[
+                    b"BDLM_BRIDGE_EXPIRY_V1",
+                    &height.to_le_bytes(),
+                    message_id,
+                ]));
+            }
+        }
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
@@ -1015,6 +1028,41 @@ mod tests {
         let back: BridgeState = bincode::deserialize(&bytes).unwrap();
         assert_eq!(back.root(), bridge.root());
         assert!(!back.settled_queue.is_empty());
+    }
+
+    /// The expiry queue is part of the committed root.
+    ///
+    /// It decides the height at which a `Locked` row becomes `Active`
+    /// again. Two states with the same rows and different queues agreed on
+    /// the root until that height and disagreed from it on; the queue is
+    /// hashed with its own tag so the disagreement is visible at once.
+    #[test]
+    fn expiry_queue_is_committed_in_the_root() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"expiry-asset"]));
+        let owner = Address::from([0x31u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        bridge
+            .lock(1, 2, 20, 0, asset, owner, owner, 5, 300)
+            .unwrap();
+
+        let mut forgot_the_queue = bridge.clone();
+        forgot_the_queue.expiry_queue.clear();
+        assert_eq!(forgot_the_queue.transfers, bridge.transfers);
+        assert_ne!(
+            forgot_the_queue.root(),
+            bridge.root(),
+            "same rows, different expiry queue: the roots must differ now"
+        );
+
+        let mut moved = bridge.clone();
+        let entries = moved.expiry_queue.remove(&300).unwrap();
+        moved.expiry_queue.insert(301, entries);
+        assert_ne!(
+            moved.root(),
+            bridge.root(),
+            "the height an entry expires at is part of the commitment"
+        );
     }
 
     /// Regression: mutating transfer amount without going through state
