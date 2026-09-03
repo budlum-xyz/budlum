@@ -60,6 +60,9 @@ fuzz_target!(|data: &[u8]| {
     let ops = (take(data, &mut i) as usize % MAX_OPS) + 1;
     let mut last_message_id = None;
     let mut last_lock_msg = None;
+    // (source, burn) domains of the last lock. Assets rotate per step, so the
+    // step's own `src_dom` is not the domain the remembered transfer used.
+    let mut last_lock_domains: Option<(u32, u32)> = None;
 
     for step in 0..ops {
         let op = take(data, &mut i) % 6;
@@ -90,6 +93,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                     tree.push(event);
                     last_message_id = Some(transfer.message_id);
+                    last_lock_domains = Some((src_dom, src_dom.wrapping_add(1).max(2)));
                 }
             }
             1 => {
@@ -100,17 +104,23 @@ fuzz_target!(|data: &[u8]| {
             }
             2 => {
                 // Burn
-                if let Some(mid) = last_message_id {
-                    let burn_dom = src_dom.wrapping_add(1).max(2);
+                if let (Some(mid), Some((_, burn_dom))) = (last_message_id, last_lock_domains) {
                     let _ = bridge.burn(mid, burn_dom);
                 }
             }
             3 => {
-                // Unlock (must use burn domain after burn)
-                if let Some(mid) = last_message_id {
-                    let burn_dom = src_dom.wrapping_add(1).max(2);
-                    let _ = bridge.unlock(mid, burn_dom, height);
-                    let _ = bridge.unlock(mid, src_dom, height); // wrong domain - Err ok
+                // Unlock (must use burn domain after burn). The wrong-domain
+                // probe goes first: once the transfer is Unlocked the status
+                // check fires before the domain check, so probing afterwards
+                // would never reach the domain branch.
+                if let (Some(mid), Some((lock_dom, burn_dom))) =
+                    (last_message_id, last_lock_domains)
+                {
+                    assert!(
+                        bridge.unlock(mid, lock_dom, height).is_err(),
+                        "unlock from the lock (source) domain must be refused"
+                    );
+                    let _ = bridge.unlock(mid, burn_dom, height); // Err unless burned
                 }
             }
             4 => {
