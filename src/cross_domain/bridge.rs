@@ -150,65 +150,22 @@ pub struct BridgeState {
     pub replay: ReplayNonceStore,
     /// Settled queue: the height a transfer reached a terminal status
     /// (`Unlocked`, or `Active` again after its lock expired) -> [message_id].
-    /// `sweep_expired_locks` drops those rows [`SETTLED_RETENTION_BLOCKS`]
+    /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
     /// later. Without it `transfers` only ever grew: every row stayed for
     /// the life of the chain, and with it the per-block cost of `root()`,
     /// which hashes every row into the state root.
     ///
-    /// Last field on purpose: the on-disk row is bincode, which is
-    /// positional, so `LegacyBridgeStateV2` (everything but this field)
-    /// decodes an older row exactly. `serde(default)` covers the
-    /// self-describing JSON snapshot the same way.
-    #[serde(default)]
+    /// Part of the committed state. `drop_settled_rows` removes a transfer
+    /// row, and with it a leaf of [`Self::root`], at a height this queue
+    /// decides; two nodes with the same rows and different queues would
+    /// therefore compute different bridge roots later, so the queue is
+    /// hashed into the root as well and a persisted row without it is not
+    /// loaded. The readers that filled it with an empty map on load
+    /// (`LegacyBridgeStateV1`, `LegacyBridgeStateV2`) are gone for that
+    /// reason: no network has launched, so there is no old row to be loyal
+    /// to, and a node that pruned on a different schedule than its peers
+    /// would have split from them at the first retention cutoff.
     settled_queue: BTreeMap<u64, Vec<MessageId>>,
-}
-
-/// On-disk `BridgeState` written before the replay store persisted its
-/// heights (see `LegacyReplayNonceStoreV1`) and before the settled queue
-/// existed. The loader in `storage/db.rs` falls back to this shape when the
-/// current one does not decode.
-#[derive(Deserialize)]
-pub struct LegacyBridgeStateV1 {
-    asset_locations: BTreeMap<AssetId, BridgeStatus>,
-    transfers: BTreeMap<MessageId, BridgeTransfer>,
-    expiry_queue: BTreeMap<u64, Vec<MessageId>>,
-    replay: crate::cross_domain::nonce::LegacyReplayNonceStoreV1,
-}
-
-impl From<LegacyBridgeStateV1> for BridgeState {
-    fn from(legacy: LegacyBridgeStateV1) -> Self {
-        Self {
-            asset_locations: legacy.asset_locations,
-            transfers: legacy.transfers,
-            expiry_queue: legacy.expiry_queue,
-            settled_queue: BTreeMap::new(),
-            replay: legacy.replay.into(),
-        }
-    }
-}
-
-/// On-disk `BridgeState` written with persisted replay heights but before
-/// the settled queue existed. Bincode is positional, so the missing trailing
-/// field makes the current shape refuse the row; this shape accepts it and
-/// starts with an empty queue, which keeps every row, as that build did.
-#[derive(Deserialize)]
-pub struct LegacyBridgeStateV2 {
-    asset_locations: BTreeMap<AssetId, BridgeStatus>,
-    transfers: BTreeMap<MessageId, BridgeTransfer>,
-    expiry_queue: BTreeMap<u64, Vec<MessageId>>,
-    replay: ReplayNonceStore,
-}
-
-impl From<LegacyBridgeStateV2> for BridgeState {
-    fn from(legacy: LegacyBridgeStateV2) -> Self {
-        Self {
-            asset_locations: legacy.asset_locations,
-            transfers: legacy.transfers,
-            expiry_queue: legacy.expiry_queue,
-            settled_queue: BTreeMap::new(),
-            replay: legacy.replay,
-        }
-    }
 }
 
 /// Blocks a settled transfer row stays readable after it reached a terminal
@@ -581,7 +538,7 @@ impl BridgeState {
     ///
     /// `settled_height` is the block this unlock lands in; the row becomes
     /// history at that height and is dropped by the sweep
-    /// [`SETTLED_RETENTION_BLOCKS`] later.
+    /// `SETTLED_RETENTION_BLOCKS` later.
     pub fn unlock(
         &mut self,
         message_id: MessageId,
@@ -658,6 +615,19 @@ impl BridgeState {
                 &transfer.expiry_height.to_le_bytes(),
             ]));
         }
+        // The settled queue decides when a transfer leaf above disappears,
+        // so it is part of what the root commits to: two nodes with equal
+        // rows and unequal queues would agree now and disagree at the
+        // retention cutoff.
+        for (height, message_ids) in &self.settled_queue {
+            for message_id in message_ids {
+                leaves.push(hash_fields_bytes(&[
+                    b"BDLM_BRIDGE_SETTLED_V1",
+                    &height.to_le_bytes(),
+                    message_id,
+                ]));
+            }
+        }
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
@@ -715,7 +685,7 @@ impl BridgeState {
         released
     }
 
-    /// Drop the rows of transfers that settled [`SETTLED_RETENTION_BLOCKS`]
+    /// Drop the rows of transfers that settled `SETTLED_RETENTION_BLOCKS`
     /// or more blocks ago. Runs inside the block-apply sweep, so every node
     /// drops the same rows at the same height and the bridge root stays
     /// consensus-equal.
@@ -994,20 +964,21 @@ mod tests {
         assert_eq!(SETTLED_RETENTION_BLOCKS, 10_000);
     }
 
-    /// A state persisted before the settled queue existed still loads; its
-    /// rows are simply kept, which is what the older build did anyway.
+    /// A persisted row without the settled queue is refused, and the queue
+    /// is part of the committed root.
     ///
-    /// The bincode `BRIDGE_STATE` row is positional and one field short, so
-    /// it goes through `LegacyBridgeStateV2`; the current shape must refuse
-    /// the older row, or the fallback would be dead code. The JSON snapshot
-    /// is self-describing and the missing field defaults; it is exercised
-    /// on a state with no transfers because `serde_json` refuses a map
-    /// keyed by `[u8; 32]`, which is a separate finding about the V2
-    /// snapshot, not about this field.
+    /// The row used to load through a fallback shape that left the queue
+    /// empty. The queue decides the height at which `drop_settled_rows`
+    /// removes a transfer leaf from `root()`, so a node that loaded such a
+    /// row kept rows its peers dropped and split from them at the first
+    /// retention cutoff. Now the shorter bincode row does not decode, the
+    /// JSON form without the field does not either, and two states with the
+    /// same rows and different queues have different roots today.
     #[test]
-    fn a_state_persisted_without_the_settled_queue_still_loads() {
+    fn a_state_without_the_settled_queue_is_refused_and_the_queue_is_committed() {
         let mut bridge = BridgeState::new();
         let id = settled_round(&mut bridge, 4, 500);
+        assert!(bridge.get_transfer(&id).is_some());
 
         let empty = BridgeState::new();
         let mut value = serde_json::to_value(&empty).unwrap();
@@ -1016,33 +987,34 @@ mod tests {
             .unwrap()
             .remove("settled_queue")
             .expect("the field must be present to be removed");
-        let loaded: BridgeState = serde_json::from_value(value).unwrap();
-        assert_eq!(loaded.root(), empty.root());
-        assert!(loaded.settled_queue.is_empty());
-
-        #[derive(Serialize)]
-        struct OlderRow<'a> {
-            asset_locations: &'a BTreeMap<AssetId, BridgeStatus>,
-            transfers: &'a BTreeMap<MessageId, BridgeTransfer>,
-            expiry_queue: &'a BTreeMap<u64, Vec<MessageId>>,
-            replay: &'a ReplayNonceStore,
-        }
-        let older = bincode::serialize(&OlderRow {
-            asset_locations: &bridge.asset_locations,
-            transfers: &bridge.transfers,
-            expiry_queue: &bridge.expiry_queue,
-            replay: &bridge.replay,
-        })
-        .unwrap();
         assert!(
-            bincode::deserialize::<BridgeState>(&older).is_err(),
-            "the current shape must refuse the older row, or the fallback is dead code"
+            serde_json::from_value::<BridgeState>(value).is_err(),
+            "a JSON state without the queue must not load with an empty one"
         );
-        let legacy: LegacyBridgeStateV2 = bincode::deserialize(&older).unwrap();
-        let loaded = BridgeState::from(legacy);
-        assert!(loaded.get_transfer(&id).is_some());
-        assert_eq!(loaded.root(), bridge.root());
-        assert!(loaded.settled_queue.is_empty());
+
+        // The older bincode row is exactly the current row minus its
+        // trailing map: bincode is positional and an empty `BTreeMap` is a
+        // zero `u64` length, so strip those eight bytes from a state whose
+        // queue is empty and the result is what the older build wrote.
+        let mut forgot_the_queue = bridge.clone();
+        forgot_the_queue.settled_queue.clear();
+        let current = bincode::serialize(&forgot_the_queue).unwrap();
+        let empty_map = 0u64.to_le_bytes();
+        assert!(current.ends_with(&empty_map));
+        let older = &current[..current.len() - empty_map.len()];
+        assert!(
+            bincode::deserialize::<BridgeState>(older).is_err(),
+            "the shorter bincode row must be refused"
+        );
+
+        // Same rows, different queue: different root, today, not at the cutoff.
+        assert_eq!(forgot_the_queue.transfers, bridge.transfers);
+        assert_ne!(forgot_the_queue.root(), bridge.root());
+        // The full round trip keeps the queue and the root.
+        let bytes = bincode::serialize(&bridge).unwrap();
+        let back: BridgeState = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.root(), bridge.root());
+        assert!(!back.settled_queue.is_empty());
     }
 
     /// Regression: mutating transfer amount without going through state

@@ -982,25 +982,23 @@ impl Storage {
     /// conditions.
     pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
         if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
-            // Older rows are shorter: one written before the settled queue
-            // existed (V2), and one written before the replay store persisted
-            // its heights as well (V1). Bincode is positional, so each older
-            // shape is tried in turn; the same fallback the domain loader uses.
-            let decoded = decode::<BridgeState>(&val)
-                .or_else(|_| {
-                    bincode::deserialize::<crate::cross_domain::bridge::LegacyBridgeStateV2>(&val)
-                        .map(BridgeState::from)
-                        .map_err(|error| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-                        })
-                })
-                .or_else(|_| {
-                    bincode::deserialize::<crate::cross_domain::bridge::LegacyBridgeStateV1>(&val)
-                        .map(BridgeState::from)
-                        .map_err(|error| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-                        })
-                })?;
+            // One shape only. Two shorter shapes used to be accepted here
+            // and filled in with empty maps: one without the settled queue,
+            // one without the replay heights as well. Both maps feed a
+            // committed root (`bridge_state_root`, `replay_nonce_root`), so
+            // a node that loaded a shorter row committed roots its peers
+            // could not reproduce. A row this shape does not decode is
+            // reported, not repaired.
+            let decoded = decode::<BridgeState>(&val).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "BRIDGE_STATE row does not decode as the current BridgeState shape; \
+                         a row from an older build cannot be loaded without changing the \
+                         committed bridge and replay roots, so it is refused: {error}"
+                    ),
+                )
+            })?;
             Ok(Some(decoded))
         } else {
             Ok(None)
@@ -1058,11 +1056,22 @@ impl Storage {
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
-            // Rows written before the settled-ticket queue are one trailing
-            // field short; `decode_row` retries them as a current row with an
-            // empty queue. See its doc for why this is not a `Legacy` copy.
-            let decoded = crate::domain::storage_deal::StorageRegistry::decode_row(&val)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            // One shape only. A row written before the settled-ticket queue
+            // used to be padded with an empty queue and accepted; the queue
+            // is part of the registry root and decides when a ticket row is
+            // dropped, so the padded node split from its peers at the first
+            // retention cutoff. Such a row is reported, not repaired.
+            let decoded =
+                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
+                             shape; a row from an older build cannot be loaded without changing \
+                             the committed registry root, so it is refused: {error}"
+                        ),
+                    )
+                })?;
             Ok(Some(decoded))
         } else {
             Ok(None)
