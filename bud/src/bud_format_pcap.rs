@@ -220,13 +220,18 @@ pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     let mut out = g;
     let mut ts_abs: i64 = 0;
     for (i, d) in dts.iter().enumerate() {
-        let l = *lens.get(i)? as usize;
-        if transformed.len() < pos + l + 1 {
+        // The length comes from the untrusted varint stream. `pos + l + 1`
+        // in plain arithmetic wraps for a length near `u64::MAX`, the bound
+        // check then passes, and the slice below starts past its end: a
+        // panic, which under `panic = "abort"` takes the process down.
+        let l = usize::try_from(*lens.get(i)?).ok()?;
+        let end = pos.checked_add(l)?;
+        if end >= transformed.len() {
             return None;
         }
-        let raw = &transformed[pos..pos + l];
-        let sep = transformed[pos + l];
-        pos += l + 1;
+        let raw = &transformed[pos..end];
+        let sep = transformed[end];
+        pos = end + 1;
         if sep != 0xFC {
             return None;
         }
@@ -362,6 +367,28 @@ mod tests {
         let mut p = sample_pcap();
         p.truncate(40); // global hdr + half a record
         assert!(pcap_transform(&p).is_none() || pcap_transform(&p).is_some()); // no panic
+    }
+
+    /// A record length of `u64::MAX` in the varint stream. `pos + l + 1`
+    /// wrapped back to `pos`, the bound check passed, and
+    /// `&transformed[pos..pos + l]` started past its end: a panic, which
+    /// under `panic = "abort"` was a process abort on a crafted input.
+    #[test]
+    fn pcap_restore_refuses_a_wrapping_record_length() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"PCAP2|");
+        blob.extend_from_slice(&[0xD4, 0xC3, 0xB2, 0xA1]);
+        blob.extend_from_slice(&[0u8; PCAP_GLOBAL_HDR - 4]);
+        blob.push(0xFF);
+        blob.extend_from_slice(&1u32.to_le_bytes()); // one record
+        blob.extend_from_slice(&varint(0)); // delta ts
+        blob.push(0xFE);
+        blob.extend_from_slice(&varint(u64::MAX)); // the record length
+        blob.push(0xFD);
+        blob.extend_from_slice(&varint(0)); // orig_len delta
+        blob.push(0xFB);
+        blob.extend_from_slice(&[0u8; 8]); // some bytes to slice into
+        assert!(pcap_restore(&blob).is_none(), "refused, not aborted");
     }
 
     #[test]
