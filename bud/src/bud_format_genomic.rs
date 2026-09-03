@@ -85,6 +85,11 @@ pub fn two_bit_encode(seq: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn two_bit_decode(data: &[u8], n: usize) -> Option<Vec<u8>> {
+    // `n` bases need `ceil(n / 4)` bytes; a short buffer is refused, not
+    // indexed past its end.
+    if data.len() < n.div_ceil(4) {
+        return None;
+    }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let b = (data[i / 4] >> (2 * (i % 4))) & 0x3;
@@ -128,6 +133,15 @@ mod tests {
         let enc = two_bit_encode(seq).unwrap();
         assert_eq!(enc.len(), 3); // 12 baz / 4
         assert_eq!(two_bit_decode(&enc, seq.len()).unwrap(), seq.to_vec());
+    }
+
+    #[test]
+    fn a_short_buffer_is_refused_not_indexed() {
+        let enc = two_bit_encode(b"ACGTACGT").unwrap();
+        assert_eq!(enc.len(), 2);
+        assert!(two_bit_decode(&enc, 9).is_none());
+        assert!(two_bit_decode(&enc[..1], 8).is_none());
+        assert_eq!(two_bit_decode(&enc, 8).unwrap(), b"ACGTACGT".to_vec());
     }
 
     #[test]
