@@ -17,7 +17,7 @@ by line. Findings that rest on a measurement quote the measurement.
 
 ---
 
-## Requires attribution: action needed
+## Derived code: attribution recorded
 
 ### `budzero/bud-proof/src/bud_stark/`: derived from Plonky3 `p3-uni-stark`
 
