@@ -38,7 +38,9 @@ allowed_ips = []
 trusted_proxies = []
 
 [metrics]
-listener = "0.0.0.0:9090"
+# Loopback: scrape through a local agent or an authenticated reverse proxy.
+# The metrics endpoint has no authentication of its own.
+listener = "127.0.0.1:9090"
 
 [validator]
 backend = "pkcs11"

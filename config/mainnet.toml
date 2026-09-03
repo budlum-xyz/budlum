@@ -46,6 +46,15 @@ public_listener = "0.0.0.0:8545"
 operator_listener = "127.0.0.1:8546"
 trusted_proxies = []
 enabled = true
+# A listener on 0.0.0.0 is reachable from the internet, so the key is not
+# optional here. Without these two lines the node inherits `auth_required =
+# true` with no key source and refuses to start; with them it starts and asks
+# every caller for `BUDLUM_RPC_API_KEY`. Empty `allowed_ips` is app-layer
+# allow-all (the key still binds); narrow it or firewall the port.
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = []
+rate_limit_per_minute = 600
 
 [metrics]
 # Loopback: scrape through a local agent or an authenticated reverse proxy.

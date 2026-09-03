@@ -159,3 +159,72 @@ fn the_shipped_node_profiles_agree_with_the_code() {
         );
     }
 }
+
+/// A shipped profile that listens on every interface carries a key, and its
+/// metrics listener stays on loopback.
+///
+/// `mainnet.toml` and `testnet.toml` bound the public RPC to `0.0.0.0` with
+/// no `auth_required` and no `api_key_env`. The code default is
+/// `auth_required = true`, so the node either refused to start (no key
+/// source) or, once an operator flipped the flag to get past that, served
+/// every method to the internet with no key. The metrics listener has no
+/// authentication of its own, and two profiles put it on `0.0.0.0` as well.
+/// This lock reads every checked-in profile the way the loader does: a
+/// public listener off loopback requires `auth_required = true` and a named
+/// key variable, and the metrics listener is loopback everywhere.
+#[test]
+fn profiles_that_listen_on_every_interface_carry_a_key() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for entry in ["config", "config/personas"]
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(root.join(dir)).expect("profile directory is readable"))
+    {
+        let path = entry.expect("profile entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let file = path.strip_prefix(&root).unwrap().display().to_string();
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let parsed: toml::Value =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{file} is valid TOML: {e}"));
+        seen += 1;
+
+        let rpc = parsed.get("rpc");
+        let listener = rpc
+            .and_then(|r| r.get("public_listener"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("127.0.0.1:0");
+        let is_loopback = listener.starts_with("127.") || listener.starts_with("[::1]");
+        if !is_loopback {
+            let auth = rpc
+                .and_then(|r| r.get("auth_required"))
+                .and_then(toml::Value::as_bool);
+            let key_env = rpc
+                .and_then(|r| r.get("api_key_env"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            assert_eq!(
+                auth,
+                Some(true),
+                "{file} listens on {listener} and must say auth_required = true"
+            );
+            assert!(
+                !key_env.trim().is_empty(),
+                "{file} listens on {listener} and must name api_key_env"
+            );
+        }
+
+        if let Some(metrics) = parsed
+            .get("metrics")
+            .and_then(|m| m.get("listener"))
+            .and_then(toml::Value::as_str)
+        {
+            assert!(
+                metrics.starts_with("127.") || metrics.starts_with("[::1]"),
+                "{file} exposes the unauthenticated metrics endpoint on {metrics}"
+            );
+        }
+    }
+    assert!(seen >= 7, "expected the shipped profiles, read {seen}");
+}

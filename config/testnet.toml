@@ -29,9 +29,16 @@ public_listener = "0.0.0.0:18545"
 operator_listener = "127.0.0.1:18546"
 trusted_proxies = []
 enabled = true
+# Same rule as mainnet: a 0.0.0.0 listener carries a key or does not start.
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = []
+rate_limit_per_minute = 600
 
 [metrics]
-listener = "0.0.0.0:19090"
+# Loopback: scrape through a local agent or an authenticated reverse proxy.
+# The metrics endpoint has no authentication of its own.
+listener = "127.0.0.1:19090"
 
 [validator]
 key_file = "./secrets/testnet-validator.key"
