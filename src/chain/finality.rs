@@ -93,7 +93,7 @@ impl ValidatorSetSnapshot {
     }
 
     /// The stake a certificate has to carry: strictly more than two thirds
-    /// of [`Self::stake_sum`]. Exact, never saturated: `saturating_mul` on
+    /// of the summed validator stake. Exact, never saturated: `saturating_mul` on
     /// `u64` clamped the product to `u64::MAX` and the division then handed
     /// back a third of the range, a threshold a minority could pass.
     pub fn quorum_stake(&self) -> u128 {
