@@ -735,14 +735,37 @@ impl Blockchain {
                 }
             }
 
-            if let Ok(Some(stored_bridge_state)) = store.load_bridge_state() {
-                state.bridge_state = stored_bridge_state;
+            // A bridge or registry row that does not decode is a database
+            // from another build, not an empty one. Starting with a fresh
+            // bridge state or registry over a chain whose blocks committed
+            // to the stored one would produce roots no peer accepts, so the
+            // node stops and says which row it could not read.
+            match store.load_bridge_state() {
+                Ok(Some(stored_bridge_state)) => state.bridge_state = stored_bridge_state,
+                Ok(None) => {}
+                Err(e) => {
+                    error!("CRITICAL ERROR: stored bridge state is unreadable: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Stored bridge state is unreadable: {e}");
+                }
             }
             if let Ok(Some(stored_universal_relayer)) = store.load_universal_relayer() {
                 universal_relayer = stored_universal_relayer;
             }
-            if let Ok(Some(stored_storage_registry)) = store.load_storage_registry() {
-                state.storage_registry = stored_storage_registry;
+            match store.load_storage_registry() {
+                Ok(Some(stored_storage_registry)) => {
+                    state.storage_registry = stored_storage_registry;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!("CRITICAL ERROR: stored storage registry is unreadable: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Stored storage registry is unreadable: {e}");
+                }
             }
             if let Ok(Some(stored_proof_claims)) = store.load_proof_claim_registry() {
                 proof_claims = stored_proof_claims;

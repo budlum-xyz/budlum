@@ -36,29 +36,17 @@ pub struct ReplayNonceStore {
     processed_at_height: BTreeMap<MessageId, u64>,
 }
 
-/// On-disk shape of the store before `processed_at_height` was persisted.
+/// There is no reader for the store shape that ended after
+/// `processed_messages`.
 ///
-/// Bincode is positional, so a record written by the older build ends after
-/// `processed_messages`; serde defaults alone cannot recover it. A store
-/// loaded through this shape has every id and no heights, exactly what the
-/// older build held in memory after a restart, so nothing it could prune
-/// before becomes prunable now, and nothing it refused becomes accepted.
-#[derive(Deserialize)]
-pub struct LegacyReplayNonceStoreV1 {
-    outbound_nonces: BTreeMap<(DomainId, DomainId, Address), u64>,
-    processed_messages: BTreeSet<MessageId>,
-}
-
-impl From<LegacyReplayNonceStoreV1> for ReplayNonceStore {
-    fn from(legacy: LegacyReplayNonceStoreV1) -> Self {
-        Self {
-            outbound_nonces: legacy.outbound_nonces,
-            processed_messages: legacy.processed_messages,
-            processed_at_height: BTreeMap::new(),
-        }
-    }
-}
-
+/// One existed (`LegacyReplayNonceStoreV1`): it decoded the shorter row and
+/// filled `processed_at_height` with nothing. `root()` hashes every height
+/// entry, `BridgeState::replay_root` hands that root to `build_global_header`
+/// as `replay_nonce_root`, so a node that loaded the shorter row committed a
+/// different global header than a peer holding the same ids with their
+/// heights. No network has launched, so no such row exists to be loyal to;
+/// the loader in `storage/db.rs` refuses a row the current shape does not
+/// decode, and says why, instead of quietly diverging.
 impl ReplayNonceStore {
     pub fn new() -> Self {
         Self {
@@ -255,15 +243,15 @@ mod audit_replay_regression {
 mod v4_prune_tests {
     use super::*;
 
-    /// A store written by the older build still loads.
+    /// The row shape that ended after `processed_messages` is refused.
     ///
-    /// The older row ends after `processed_messages`. Encoding that shape and
-    /// decoding it through `LegacyReplayNonceStoreV1` must give back every id
-    /// with no heights, which is what the older build itself held after a
-    /// restart. Decoding it as the current shape must fail, which is what
-    /// makes the fallback in `storage/db.rs` reachable rather than dead.
+    /// It used to be decoded through a legacy shape that left every height
+    /// empty, which put a different `replay_nonce_root` into this node's
+    /// global header than its peers computed. A shorter row now fails to
+    /// decode, and the loader reports it, instead of loading a store whose
+    /// committed root nobody else can reproduce.
     #[test]
-    fn legacy_store_rows_still_load() {
+    fn a_row_without_heights_is_refused() {
         #[derive(serde::Serialize)]
         struct OldRow {
             outbound_nonces: BTreeMap<(DomainId, DomainId, Address), u64>,
@@ -282,13 +270,6 @@ mod v4_prune_tests {
             bincode::deserialize::<ReplayNonceStore>(&bytes).is_err(),
             "the current shape must not silently accept the shorter row"
         );
-        let legacy: LegacyReplayNonceStoreV1 =
-            bincode::deserialize(&bytes).expect("the legacy shape decodes the old row");
-        let mut store = ReplayNonceStore::from(legacy);
-        assert!(store.is_processed(&[3u8; 32]));
-        assert_eq!(store.processed_count(), 1);
-        assert_eq!(store.next_nonce(1, 2, Address::from([9u8; 32])), 7);
-        assert!(store.mark_processed_at([3u8; 32], 5).is_err());
     }
 
     /// The heights survive a round trip through the store's own encoding.

@@ -1045,37 +1045,6 @@ impl StorageRegistry {
         Self::default()
     }
 
-    /// Decode a stored registry row, including rows written before
-    /// `settled_tickets` existed.
-    ///
-    /// Bincode is positional, so a row from the older build ends where
-    /// `confidential_owners` ends and the current shape refuses it. The
-    /// bridge state handles the same situation with a `LegacyBridgeStateVn`
-    /// copy of the struct; this registry has twenty-odd fields with their
-    /// own serde attributes, and a hand-kept copy of that is the kind of
-    /// thing that drifts. What the older build could have written is exactly
-    /// the current row minus one trailing empty map, and an empty
-    /// `BTreeMap` is eight zero bytes in bincode (a `u64` length of zero).
-    /// So the older row plus those eight bytes *is* a current row with an
-    /// empty queue, and that is what the retry decodes. A row that is
-    /// neither shape fails both attempts and the error surfaces.
-    ///
-    /// `registry_rows_written_before_the_settled_queue_still_load` proves
-    /// both halves: the current shape refuses the older row, and the retry
-    /// loads it to the same digest.
-    ///
-    /// # Errors
-    ///
-    /// The bincode error of the second attempt when neither shape decodes.
-    pub fn decode_row(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize::<Self>(bytes).or_else(|_| {
-            let mut padded = Vec::with_capacity(bytes.len() + 8);
-            padded.extend_from_slice(bytes);
-            padded.extend_from_slice(&0u64.to_le_bytes());
-            bincode::deserialize::<Self>(&padded)
-        })
-    }
-
     pub fn is_empty(&self) -> bool {
         self.next_deal_id == 0
             && self.next_challenge_id == 0
@@ -3143,7 +3112,7 @@ impl StorageRegistry {
     }
 
     /// Drop the tickets whose replacement deal opened
-    /// [`REALLOCATION_RECORD_RETENTION_EPOCHS`] or more epochs ago.
+    /// `REALLOCATION_RECORD_RETENTION_EPOCHS` or more epochs ago.
     ///
     /// Runs from the same epoch maintenance step as
     /// [`Self::mark_overdue_reallocations_under_replicated`], so every node
@@ -5468,13 +5437,17 @@ mod tests {
     }
 
     /// The registry row is bincode and positional. A row written before
-    /// `settled_tickets` existed is refused by the current shape, and the
-    /// loader's retry (`decode_row`) reads it as a registry with an empty
-    /// queue and the same digest. The older row is the current row minus
-    /// its trailing empty map, which is the only queue an older build could
-    /// have had.
+    /// `settled_tickets` existed is refused.
+    ///
+    /// The loader used to pad such a row with an empty queue and accept it.
+    /// The queue is hashed into `root()` and decides when
+    /// `sweep_settled_reallocations` drops a ticket, so a node that loaded
+    /// the padded row kept tickets its peers dropped and split from them at
+    /// the first retention cutoff. No network has launched, so there is no
+    /// older row to be loyal to; the shorter row fails to decode and the
+    /// loader reports it.
     #[test]
-    fn registry_rows_written_before_the_settled_queue_still_load() {
+    fn registry_rows_written_before_the_settled_queue_are_refused() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -5488,17 +5461,12 @@ mod tests {
         let empty_map = 0u64.to_le_bytes();
         assert!(current.ends_with(&empty_map));
         let older = &current[..current.len() - empty_map.len()];
-
         assert!(
             bincode::deserialize::<StorageRegistry>(older).is_err(),
-            "the current shape must refuse the older row, or the retry is dead code"
+            "the shorter row must be refused, not padded"
         );
-        let loaded = StorageRegistry::decode_row(older).unwrap();
-        assert_eq!(loaded.root(), reg.root());
-        assert_eq!(loaded.reallocation_ticket_count(), 1);
-        assert!(loaded.settled_tickets.is_empty());
 
-        // A current row still decodes on the first attempt, queue included.
+        // A current row decodes, queue included, to the same root.
         let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
         reg.accept_reallocation_ticket(
             ticket_id,
@@ -5512,12 +5480,9 @@ mod tests {
         )
         .unwrap();
         let with_queue = bincode::serialize(&reg).unwrap();
-        let loaded = StorageRegistry::decode_row(&with_queue).unwrap();
+        let loaded: StorageRegistry = bincode::deserialize(&with_queue).unwrap();
         assert_eq!(loaded.settled_tickets, reg.settled_tickets);
         assert_eq!(loaded.root(), reg.root());
-
-        // Garbage is neither shape and fails loudly.
-        assert!(StorageRegistry::decode_row(&current[..7]).is_err());
     }
 
     #[test]
