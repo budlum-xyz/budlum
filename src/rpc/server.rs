@@ -1107,6 +1107,11 @@ fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjec
             format!("reveal: session table full ({max})"),
             None::<()>,
         ),
+        RevealGatewayError::Revoked { id } => ErrorObjectOwned::owned(
+            -32005,
+            format!("reveal: session {id} grant revoked"),
+            None::<()>,
+        ),
         RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
     }
 }
@@ -2565,11 +2570,32 @@ impl BudlumApiServer for RpcServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // The grant is asked again on every frame call. A session was checked
+        // once at open and then served until its TTL, so a grant revoked on
+        // chain kept serving frames for up to the whole TTL. The scope is
+        // read under the lock, the chain is asked without it, and the answer
+        // is applied under the lock again; a session closed in between is
+        // reported as unknown, which is what it is.
+        let scope: Option<crate::storage::GrantScope> = {
+            let gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.grant_scope(session_id)
+                .map_err(reveal_gateway_rpc_error)?
+        };
+        let grant_allows = match scope {
+            None => true,
+            Some(scope) => self
+                .chain
+                .may_view_content(scope.content_id, scope.viewer, scope.key_id, scope.owner)
+                .await
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?,
+        };
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
         let (frames, fold) = gw
-            .emit_frames(session_id, seq_start, count, now)
+            .emit_frames(session_id, seq_start, count, now, grant_allows)
             .map_err(reveal_gateway_rpc_error)?;
         let frames_hex: Vec<String> = frames.iter().map(hex::encode).collect();
         Ok(serde_json::json!({

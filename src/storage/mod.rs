@@ -161,8 +161,8 @@ pub use transformed::{
 };
 
 pub use reveal_gateway::{
-    RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES, MAX_FRAMES_PER_CALL,
-    MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
+    GrantScope, RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES,
+    MAX_FRAMES_PER_CALL, MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
 };
 pub use three_nft::{
     meta_tracks_public_recipe, MetadataVisibility, PinRow, PreviewMode, ThreeNftMeta,
