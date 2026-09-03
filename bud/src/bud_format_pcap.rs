@@ -240,7 +240,9 @@ pub fn pcap_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         ts_abs = ts_abs.wrapping_add(dt);
         let od = *orig_deltas.get(i)?;
         let orig_delta = (od >> 1) as i64 ^ -((od & 1) as i64);
-        let orig_len = u32::try_from(l as i64 + orig_delta).ok()?;
+        // `orig_delta` is attacker-chosen; the signed add overflowed before
+        // the `u32` conversion could refuse it.
+        let orig_len = u32::try_from(i64::try_from(l).ok()?.checked_add(orig_delta)?).ok()?;
         let ts_sec = ts_abs.div_euclid(1_000_000);
         let ts_usec = ts_abs.rem_euclid(1_000_000);
         let mut hdr = Vec::with_capacity(16);
@@ -388,6 +390,27 @@ mod tests {
         blob.extend_from_slice(&varint(0)); // orig_len delta
         blob.push(0xFB);
         blob.extend_from_slice(&[0u8; 8]); // some bytes to slice into
+        assert!(pcap_restore(&blob).is_none(), "refused, not aborted");
+    }
+
+    /// An `orig_len` delta of `i64::MAX` overflowed the signed add before
+    /// `u32::try_from` could refuse it.
+    #[test]
+    fn pcap_restore_refuses_an_overflowing_orig_len_delta() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"PCAP2|");
+        blob.extend_from_slice(&[0xD4, 0xC3, 0xB2, 0xA1]);
+        blob.extend_from_slice(&[0u8; PCAP_GLOBAL_HDR - 4]);
+        blob.push(0xFF);
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(&varint(0));
+        blob.push(0xFE);
+        blob.extend_from_slice(&varint(1)); // one payload byte
+        blob.push(0xFD);
+        blob.extend_from_slice(&varint(u64::MAX - 1)); // zigzag of i64::MAX
+        blob.push(0xFB);
+        blob.push(0x00); // the payload byte
+        blob.push(0xFC); // its separator
         assert!(pcap_restore(&blob).is_none(), "refused, not aborted");
     }
 
