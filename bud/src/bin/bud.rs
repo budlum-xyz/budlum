@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus};
 use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote};
 use bud_core::bud_format_checkpoint::Checkpoint;
-use bud_core::bud_format_container::BudV2File;
+use bud_core::bud_format_container::{BudV2File, BudV2Header, ChunkCodec, MultiHash};
 use bud_core::bud_format_pact::PactRecord;
 use bud_core::bud_format_production::BudProductionRecord;
 
@@ -341,7 +341,14 @@ fn run(cli: Cli) -> Result<String, String> {
             } else {
                 store(&data)
             }
-            .ok_or("v2 store failed (size/capacity limit - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)")?;
+            .ok_or_else(|| {
+                format!(
+                    "v2 store failed: a container holds at most {} chunks of {} bytes, {} bytes in total",
+                    BudV2File::MAX_CHUNK_COUNT,
+                    BudV2File::MAX_CHUNK_BYTES,
+                    BudV2File::MAX_TOTAL_BYTES
+                )
+            })?;
             write_file(&output, &enc)?;
             let cc = chunk_count(&enc).unwrap_or(0);
             Ok(format!(
@@ -714,12 +721,20 @@ fn run(cli: Cli) -> Result<String, String> {
         }
         Commands::Check { input } => {
             let bytes = read_file(&input)?;
-            // v2 magic (\xB5 high-bit) -> container; otherwise v1
-            if bytes.first() == Some(&0xB5) {
-                let out = restore(&bytes).ok_or("v2 integrity failed")?;
+            // v2 magic (high bit set) -> container; otherwise v1
+            if bytes.first() == Some(&BudV2Header::MAGIC[0]) {
+                let file = BudV2File::decode(&bytes).ok_or("v2 integrity failed")?;
+                let out = file.restore_original().ok_or("v2 integrity failed")?;
+                let MultiHash { algo, digest } = file.header.content_id;
+                let chunks = match file.chunk_codec {
+                    ChunkCodec::Raw => "raw",
+                    ChunkCodec::Huffman => "huffman",
+                    ChunkCodec::Zstd => "zstd",
+                };
                 Ok(format!(
-                    "check v2: OK - {} bytes verified (magic+chunk content_id+root)",
-                    out.len()
+                    "check v2: OK - {} bytes verified (magic, chunk content_id, root {} algo 0x{algo:02x}, {chunks} chunks)",
+                    out.len(),
+                    hex8(&digest)
                 ))
             } else {
                 let file = BudFile::from_bytes(&bytes).map_err(|e| format!("v1 parse: {e}"))?;

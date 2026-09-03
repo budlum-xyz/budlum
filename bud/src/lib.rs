@@ -110,9 +110,8 @@ pub use bud_format_columnar::{
     JsonColumnar, COLUMNAR_MAGIC,
 };
 pub use bud_format_container::{
-    content_id, expert_candidates, select_best_lossless, structural_chunks, structural_join,
-    structural_split, structural_split_compact, BudV2File, BudV2Header, ChunkCodec, FormatCodec,
-    MultiHash, StructuralKind,
+    content_id, structural_join, structural_split, structural_split_compact, BudV2File,
+    BudV2Header, ChunkCodec, FormatCodec, MultiHash, StructuralKind,
 };
 pub use bud_format_crop::{CropDerivation, CROP_MAGIC, MCU_SIZE};
 pub use bud_format_culling::{ClusterTier, CullingPlan, CULL_MAGIC};

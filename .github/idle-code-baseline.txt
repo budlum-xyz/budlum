@@ -24,7 +24,6 @@ bud/src/bud_format.rs	const	HOT_TIER
 bud/src/bud_format.rs	const	ICE_TIER
 bud/src/bud_format.rs	const	IMAGE_REVOLUTIONARY
 bud/src/bud_format.rs	const	LOSSY_ALLOWED
-bud/src/bud_format.rs	const	MAX_CHUNK_BYTES
 bud/src/bud_format.rs	const	MAX_DECOMPRESSED_BYTES
 bud/src/bud_format.rs	const	MAX_RATIO
 bud/src/bud_format.rs	const	PDF_REVOLUTIONARY
@@ -477,10 +476,8 @@ bud/src/bud_format_ratioconsensus.rs	fn	holds_ceiling
 bud/src/bud_format_ratioconsensus.rs	fn	weighted_score
 bud/src/bud_format_ratioconsensus.rs	struct	RatioCandidateAgent
 bud/src/bud_format_ratioconsensus.rs	struct	RatioConsensus
-bud/src/bud_format_real.rs	const	ZSTD_MAX_DECOMPRESSED
 bud/src/bud_format_real.rs	fn	is_bud_hfm
 bud/src/bud_format_real.rs	fn	measured_ratios
-bud/src/bud_format_real.rs	fn	zstd_decompress_safe
 bud/src/bud_format_real.rs	struct	RealBench
 bud/src/bud_format_real.rs	struct	RealCompressor
 bud/src/bud_format_recipe.rs	const	RECIPE_BOUNTY_RATIO
