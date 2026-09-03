@@ -27,6 +27,20 @@ mod tests {
             .collect()
     }
 
+    /// The source between two match arms: from `start` up to `end`, so a lock
+    /// reads the whole arm and nothing after it. A fixed byte window used to
+    /// stand in for this; it silently read past a short arm and stopped short
+    /// of a long one, so the lock measured a distance rather than an arm.
+    fn arm_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source
+            .find(start)
+            .unwrap_or_else(|| panic!("the arm `{start}` must exist"));
+        let to = source[from..]
+            .find(end)
+            .map_or(source.len(), |at| from + at);
+        &source[from..to]
+    }
+
     /// No bare `.lock().unwrap()` in the networking event loop.
     ///
     /// A `std::sync::Mutex` is poisoned when a thread panics while holding it.
@@ -411,10 +425,11 @@ mod tests {
             "the opening handshake must be a /sync request to the connecting peer"
         );
 
-        let request_arm_at = NODE_RS
-            .find("request_response::Message::Request { request, channel, .. } => {")
-            .expect("the /sync request arm must exist");
-        let arm = &NODE_RS[request_arm_at..(request_arm_at + 2500).min(NODE_RS.len())];
+        let arm = arm_between(
+            NODE_RS,
+            "request_response::Message::Request { request, channel, .. } => {",
+            "request_response::Message::Response {",
+        );
         assert!(
             arm.contains("(is_handshake || pm.is_handshaked(&peer))"),
             "the /sync request arm must admit the handshake before the handshaked gate"
@@ -435,14 +450,11 @@ mod tests {
     /// follow-up is issued over `/sync` if it is issued at all.
     #[test]
     fn sync_continuation_does_not_leave_the_peer_bound_channel() {
-        let gossip_arm_at = NODE_RS
-            .find("NetworkMessage::Headers(headers) => {")
-            .expect("the gossip Headers arm must exist");
-        let arm = &NODE_RS[gossip_arm_at..(gossip_arm_at + 2500).min(NODE_RS.len())];
-        let arm_end = arm
-            .find("NetworkMessage::GetBlocksRange { from, to } => {")
-            .unwrap_or(arm.len());
-        let arm = &arm[..arm_end];
+        let arm = arm_between(
+            NODE_RS,
+            "NetworkMessage::Headers(headers) => {",
+            "NetworkMessage::GetBlocksRange { from, to } => {",
+        );
         let code: String = code_lines(arm).into_iter().map(|(_, l)| l + "\n").collect();
         assert!(
             !code.contains("gossipsub.publish("),

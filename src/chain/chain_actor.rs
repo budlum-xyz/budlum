@@ -2888,8 +2888,11 @@ impl ChainActor {
         if swept > 0 {
             tracing::info!("B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {current_epoch}");
         }
-        if under_replicated > 0 || swept > 0 || !repair_band.is_empty() {
+        if under_replicated > 0 {
             tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
+        }
+        let registry_changed = under_replicated > 0 || swept > 0 || !repair_band.is_empty();
+        if registry_changed {
             if let Err(error) = self.blockchain.persist_storage_registry() {
                 tracing::error!("Failed to persist storage reallocation status: {error}");
             }
