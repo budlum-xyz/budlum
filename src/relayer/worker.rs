@@ -582,10 +582,14 @@ mod relay_outcomes {
             _confirmations: u32,
         ) -> Result<RelayerExternalResult, AdapterError> {
             let (proof, root, hash) = self.generate_receipt_proof(tx_hash).await?;
+            // The outcome is what the proof says about the root, the way a
+            // real adapter reads it off the receipt; nothing here asserts
+            // success on its own.
+            let observed = proof.verify(root);
             Ok(RelayerExternalResult {
                 chain: ExternalChain::Ethereum,
                 tx_hash: hash,
-                success: true,
+                success: observed,
                 message: None,
                 receipt_proof: bincode::serialize(&proof).expect("proof serialize"),
                 external_state_root: root,
