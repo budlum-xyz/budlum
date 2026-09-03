@@ -1201,6 +1201,7 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
 fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
     let code = match &e {
         crate::storage::emit::EmitError::Empty
+        | crate::storage::emit::EmitError::ZeroBlockLen
         | crate::storage::emit::EmitError::TooLarge { .. }
         | crate::storage::emit::EmitError::BurstTooWide { .. }
         | crate::storage::emit::EmitError::FrameOutOfRange { .. }
