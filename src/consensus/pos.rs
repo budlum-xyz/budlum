@@ -912,7 +912,12 @@ impl ConsensusEngine for PoSEngine {
         } else {
             seen_blocks.insert(key, (header, signature));
             if block.index > 0 && block.index.is_multiple_of(epoch_length) {
-                let _ = self.add_checkpoint(block, storage);
+                // `add_checkpoint` fails when the checkpoint cannot be
+                // persisted. Discarding that here reported the block as
+                // recorded with an anchor that lived only in memory; after a
+                // restart the node reloaded no checkpoint and would accept a
+                // reorganisation below it. The caller logs the error.
+                self.add_checkpoint(block, storage)?;
             }
 
             // Prune seen_blocks to prevent unbounded growth.
