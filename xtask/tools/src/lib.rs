@@ -50,10 +50,19 @@ pub mod devnet;
 pub mod prepush;
 pub mod seed_corpus;
 
-/// Depo kokunu bul.
+/// Find the repository root.
 ///
-/// `CARGO_MANIFEST_DIR` points at this crate (`xtask/tools`); the root is two
-/// directories up. If the environment variable is absent, walk up from the working directory.
+/// The working directory decides: the tools walk up from it to the first
+/// directory holding both a `Cargo.toml` and a `src/` tree. Only when that
+/// walk finds nothing does the path compiled into the binary count, and it
+/// is checked the same way before it is trusted.
+///
+/// The order matters. `option_env!("CARGO_MANIFEST_DIR")` is the checkout the
+/// binary was *built* in, and it used to be consulted first. A tool built in
+/// one checkout and run in another then pointed `prepush`, `devnet` and
+/// `backup_drill` at the stale tree for as long as it still had a manifest,
+/// and ran commands or wrote files there rather than where the operator
+/// stood.
 ///
 /// # Panics
 ///
@@ -61,23 +70,26 @@ pub mod seed_corpus;
 /// working directory has no work to do anyway.
 #[must_use]
 pub fn repo_root() -> PathBuf {
-    if let Some(dir) = option_env!("CARGO_MANIFEST_DIR") {
-        let manifest = Path::new(dir);
-        if let Some(root) = manifest.parent().and_then(Path::parent) {
-            if root.join("Cargo.toml").is_file() {
-                return root.to_path_buf();
-            }
-        }
-    }
-    let mut cur = std::env::current_dir().expect("the working directory could not be read");
-    loop {
-        if cur.join("Cargo.toml").is_file() && cur.join("src").is_dir() {
-            return cur;
-        }
-        if !cur.pop() {
-            return std::env::current_dir().expect("the working directory could not be read");
-        }
-    }
+    let cwd = std::env::current_dir().expect("the working directory could not be read");
+    root_above(&cwd).unwrap_or_else(|| {
+        option_env!("CARGO_MANIFEST_DIR")
+            .and_then(|dir| Path::new(dir).parent().and_then(Path::parent))
+            .filter(|root| is_repo_root(root))
+            .map_or(cwd, Path::to_path_buf)
+    })
+}
+
+/// The nearest repository root at or above `start`, if there is one.
+fn root_above(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| is_repo_root(dir))
+        .map(Path::to_path_buf)
+}
+
+/// A repository root carries the workspace manifest and the source tree.
+fn is_repo_root(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file() && dir.join("src").is_dir()
 }
 
 /// Run a command and return **without losing** the exit code.
@@ -146,6 +158,38 @@ mod tests {
             root.join("Cargo.toml").is_file(),
             "the root has to carry a manifest: {}",
             root.display()
+        );
+        assert!(
+            root.join("src").is_dir(),
+            "the root has to carry the source tree: {}",
+            root.display()
+        );
+    }
+
+    /// The directory the tool is run from wins over the path compiled into
+    /// the binary: a checkout with a manifest and a source tree above the
+    /// working directory is the root, whatever `CARGO_MANIFEST_DIR` said at
+    /// build time.
+    #[test]
+    fn repo_root_follows_the_working_directory() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .subsec_nanos();
+        let fake =
+            std::env::temp_dir().join(format!("budlum-tools-root-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(fake.join("src/deeper")).expect("scratch tree");
+        std::fs::write(fake.join("Cargo.toml"), "[workspace]\n").expect("scratch manifest");
+        let found = root_above(&fake.join("src/deeper"));
+        let _ = std::fs::remove_dir_all(&fake);
+        assert_eq!(
+            found.as_deref(),
+            Some(fake.as_path()),
+            "the tools must act on the checkout the operator stands in"
+        );
+        assert!(
+            root_above(Path::new("/")).is_none(),
+            "no root above `/` is an honest None, so the fallback runs only then"
         );
     }
 
