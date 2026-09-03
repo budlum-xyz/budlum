@@ -2262,6 +2262,26 @@ impl Blockchain {
             ));
         }
 
+        // 1g. The committed root has to be the value the proof constrains.
+        //
+        // `final_state_root` becomes the domain's `last_committed_hash` below,
+        // and bridge verification reads it as the domain's root. The AIR does
+        // not derive that field from the trace: it binds it to itself
+        // (`plonky3_air.rs`, constraint (2)), so a prover may put any 32 bytes
+        // there and still hold a valid proof. The field the AIR does derive
+        // from the execution is `state_writes_digest` (constraint (2b), the
+        // SWrite chain). `build_public_inputs` sets the two equal; a submission
+        // where they differ was produced by something else and would commit a
+        // root nothing proved. Refused before the fee, like the other shape
+        // checks: the submitter has not asked the chain to verify anything yet.
+        let pi = &submission.public_inputs;
+        if pi.final_state_root != pi.state_writes_digest {
+            return Err(
+                "zk proof final_state_root is not the proven state_writes_digest; the committed root must be the value the circuit binds"
+                    .to_string(),
+            );
+        }
+
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
         let fee = self.state.registry.params().proof_submission_fee;
         let mut charged_fee = false;

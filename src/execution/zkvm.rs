@@ -225,6 +225,15 @@ fn build_public_inputs(
     // Log accumulator packed as eight little-endian u32 limbs (limb 0 holds
     // The sum of Log values). Using keccak here made every prove/verify fail
     // Against BudZero main task2 (InvalidProof), forcing the CI pin.
+    //
+    // `final_state_root` is the storage-write digest, on purpose. The AIR
+    // binds `state_writes_digest` to the SWrite chain (constraint (2b)) and
+    // binds `final_state_root` only to itself: it is a prover-supplied value
+    // the circuit copies into the last row, nothing derives it. The chain
+    // stores it as the domain's `last_committed_hash`, so the only value that
+    // makes that record a commitment to a real transition is the one the
+    // proof constrains. `submit_zk_proof` refuses a submission where the two
+    // differ; this is where the equality is produced.
     ExecutionPublicInputs {
         chain_id: DEFAULT_CHAIN_ID,
         program_hash: hash_u64_words(program),
