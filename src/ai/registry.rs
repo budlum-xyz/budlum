@@ -568,23 +568,18 @@ impl AiRegistry {
             ));
         }
 
-        // Validate new thresholds before applying
-        if min_verifier_count == 0 {
-            return Err("min_verifier_count must be >= 1".into());
-        }
-        if agreement_threshold == 0 || agreement_threshold > min_verifier_count {
-            return Err("agreement_threshold must be between 1 and min_verifier_count".into());
-        }
-        if request_deadline_blocks == 0 || result_deadline_blocks == 0 {
-            return Err("Deadlines must be >= 1 block".into());
-        }
-        if request_deadline_blocks > MAX_DEADLINE_HORIZON_BLOCKS
-            || result_deadline_blocks > MAX_DEADLINE_HORIZON_BLOCKS
-        {
-            return Err(format!(
-                "Deadline windows must be <= {MAX_DEADLINE_HORIZON_BLOCKS} blocks"
-            ));
-        }
+        // Validate the candidate through the same `AiModelSpec::validate` that
+        // registration uses, so an update cannot reach a state registration
+        // would have refused (the ref-byte caps were missing from an earlier
+        // hand-written copy of these checks).
+        let mut candidate = spec.clone();
+        candidate.min_verifier_count = min_verifier_count;
+        candidate.agreement_threshold = agreement_threshold;
+        candidate.max_input_ref_bytes = max_input_ref_bytes;
+        candidate.max_output_ref_bytes = max_output_ref_bytes;
+        candidate.request_deadline_blocks = request_deadline_blocks;
+        candidate.result_deadline_blocks = result_deadline_blocks;
+        candidate.validate()?;
 
         spec.min_verifier_count = min_verifier_count;
         spec.agreement_threshold = agreement_threshold;
@@ -734,7 +729,8 @@ impl AiRegistry {
     /// Agreement, or deadline expiry before threshold reached).
     ///
     /// Returns `(requester_address, max_fee)` on success.
-    /// Errors if: request not found, already finalized, not yet expired, or already reclaimed.
+    /// Errors if: request not found, already finalized, not yet expired,
+    /// already reclaimed, or already cancelled (the refund went out then).
     pub fn reclaim_fee(
         &mut self,
         request_id: &AiRequestId,
@@ -757,6 +753,15 @@ impl AiRegistry {
         if self.reclaimed_fees.contains(request_id) {
             return Err(format!(
                 "Request {} fee already reclaimed",
+                request_id.to_hex()
+            ));
+        }
+
+        // A cancelled request has already had its max_fee refunded by
+        // `cancel_request`; reclaiming it again would pay the same escrow twice.
+        if self.cancelled_requests.contains(request_id) {
+            return Err(format!(
+                "Request {} was cancelled - fee already refunded",
                 request_id.to_hex()
             ));
         }
@@ -787,13 +792,14 @@ impl AiRegistry {
     }
 
     /// Cancel a pending inference request.
-    /// Only the original requester can cancel, and only before the deadline.
-    /// A cancelled request cannot receive further results and its max_fee
-    /// Is eligible for refund. Cancellation is irreversible.
+    /// Only the original requester can cancel, at any point before the
+    /// request is finalised. A cancelled request cannot receive further
+    /// results and its max_fee is refunded exactly once, here; `reclaim_fee`
+    /// refuses a cancelled request afterwards. Cancellation is irreversible.
     ///
     /// Returns `(requester, max_fee)` on success for the executor to process refund.
     /// Errors if: request not found, not the requester, already finalized,
-    /// Already reclaimed, already cancelled, or deadline not yet passed.
+    /// already reclaimed, or already cancelled.
     pub fn cancel_request(
         &mut self,
         request_id: &AiRequestId,
@@ -834,11 +840,10 @@ impl AiRegistry {
             return Err(format!("Request {} already cancelled", request_id.to_hex()));
         }
 
-        // Cannot cancel before the deadline has passed, the request is
-        // Still valid and verifiers may still submit results.
-        // Cancellation is for requests where the requester no longer wants
-        // To wait, but verifiers might still be working. We allow
-        // Cancellation at any point before finalization.
+        // No deadline check: cancellation is for a requester who no longer
+        // wants to wait while verifiers may still be working, so it is allowed
+        // at any point before finalisation. Results submitted after this point
+        // are rejected by `submit_result`.
         let requester = request.requester;
         let max_fee = request.max_fee;
 

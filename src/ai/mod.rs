@@ -1875,6 +1875,20 @@ mod tests {
         let result = registry.update_model_spec(&model_id, &owner, 2, 5, 1024, 2048, 100, 50);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("agreement_threshold"));
+
+        // Ref-byte caps: an update must not exceed what registration refuses.
+        let over = crate::ai::types::MAX_INFERENCE_REF_BYTES as u64 + 1;
+        let err = registry
+            .update_model_spec(&model_id, &owner, 2, 2, over, 2048, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("max_input_ref_bytes"), "{err}");
+        let err = registry
+            .update_model_spec(&model_id, &owner, 2, 2, 1024, over, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("max_output_ref_bytes"), "{err}");
+        // A rejected update leaves the spec (and its version) untouched.
+        let spec = registry.models.get(&model_id).unwrap();
+        assert_eq!((spec.max_input_ref_bytes, spec.version), (1024, 1));
     }
 
     #[test]
@@ -3036,6 +3050,21 @@ mod tests {
         let result = registry.cancel_request(&req_id, &owner, 201);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already reclaimed"));
+    }
+
+    #[test]
+    fn test_reclaim_cancelled_request_rejected() {
+        // The refund goes out on cancel; the same escrow must not be paid a
+        // second time through reclaim_fee after the deadline passes.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let (requester, max_fee) = registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert_eq!((requester, max_fee), (owner, 100));
+
+        let err = registry.reclaim_fee(&req_id, 200).unwrap_err();
+        assert!(err.contains("cancelled"), "unexpected error: {err}");
+        assert!(!registry.reclaimed_fees.contains(&req_id));
     }
 
     #[test]
