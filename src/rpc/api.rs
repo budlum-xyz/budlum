@@ -858,8 +858,6 @@ pub trait BudlumApi {
     #[method(name = "bud_aiGetModel")]
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a model registration transaction.
-    #[method(name = "bud_aiRegisterModel")]
     /// Prepare an AI model registration transaction template.
     ///
     /// The governance-tunable registration fee
@@ -867,12 +865,10 @@ pub trait BudlumApi {
     /// `tx.amount`; the template sets amount 0 - the caller signs the final
     /// amount. Below-fee registrations are rejected atomically by the
     /// executor (`ai_model_register_fee_insufficient`).
-    /// Register an AI model (template; the governance-tunable registration
-    /// fee must be attached as tx.amount - see `ai_model_register_fee`).
     ///
-    /// The modality bits (`ModalitySet`). Absent means the old behaviour
-    /// (`text_only`). 0 reads nothing (`none` - a deliberate refusal). 1 is
-    /// text.
+    /// `modalities` carries the modality bits (`ModalitySet`). Absent means
+    /// the old behaviour (`text_only`). 0 reads nothing (`none` - a
+    /// deliberate refusal). 1 is text.
     #[method(name = "bud_aiRegisterModel")]
     async fn ai_register_model(
         &self,
