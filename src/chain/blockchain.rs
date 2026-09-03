@@ -1707,17 +1707,15 @@ impl Blockchain {
             }
         }
 
-        self.state
-            .bridge_state
-            .mint(&message, self.chain.len() as u64)
-            .map_err(|e| e.to_string())?;
-
-        // Q9: Deduct relayer fee from arriving asset if inbound to Budlum
+        // Amounts and the ceiling are settled before the bridge state moves:
+        // after `mint` the replay id is spent and the transfer reads as
+        // minted, so a refusal there would consume the lock and credit
+        // nothing, or only the recipient.
         let transfer = self
             .state
             .bridge_state
             .get_transfer(&message.message_id)
-            .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
+            .ok_or_else(|| "Unknown bridge transfer for mint".to_string())?
             .clone();
 
         // Fee comes out of the arriving asset, which is what lets a user
@@ -1742,6 +1740,17 @@ impl Blockchain {
         if fee > u64::MAX as u128 {
             return Err("Bridge fee exceeds maximum representable balance (u64 overflow)".into());
         }
+        let minted = (final_amount as u64)
+            .checked_add(fee as u64)
+            .ok_or_else(|| "Bridge amount exceeds maximum representable balance".to_string())?;
+        self.state
+            .ensure_mint_headroom(minted)
+            .map_err(|e| format!("Bridge mint: {e}"))?;
+
+        self.state
+            .bridge_state
+            .mint(&message, self.chain.len() as u64)
+            .map_err(|e| e.to_string())?;
 
         // Credit the recipient and the relayer
         // Using try_add_balance to prevent silent u64 overflow capping.
@@ -2559,16 +2568,13 @@ impl Blockchain {
         // Integrate BridgeState transition
         match message.kind {
             MessageKind::BridgeLock => {
-                self.state
-                    .bridge_state
-                    .mint(&message, current_height)
-                    .map_err(|e| e.to_string())?;
-                // Deduct relayer fee (Decision 9: 1%)
+                // Same order as the verified-event path: amounts and ceiling
+                // first, bridge state second, credits last.
                 let transfer = self
                     .state
                     .bridge_state
                     .get_transfer(&message.message_id)
-                    .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
+                    .ok_or_else(|| "Unknown bridge transfer for mint".to_string())?
                     .clone();
 
                 let params = *self.state.registry.params();
@@ -2591,6 +2597,18 @@ impl Blockchain {
                         "Bridge fee {fee} exceeds maximum representable balance"
                     ));
                 }
+                let minted = (final_amount as u64)
+                    .checked_add(fee as u64)
+                    .ok_or_else(|| {
+                        "Bridge amount exceeds maximum representable balance".to_string()
+                    })?;
+                self.state
+                    .ensure_mint_headroom(minted)
+                    .map_err(|e| format!("Bridge relay mint: {e}"))?;
+                self.state
+                    .bridge_state
+                    .mint(&message, current_height)
+                    .map_err(|e| e.to_string())?;
 
                 // Try_add_balance for relay bridge mint
                 // The same supply creation, the second entry coming from the
