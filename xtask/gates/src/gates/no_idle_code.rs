@@ -123,7 +123,6 @@ impl Item {
 /// first inner block would end the match early.
 fn strip_cfg_test(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
-    let bytes = src.as_bytes();
     let mut i = 0usize;
     while i < src.len() {
         let Some(rel) = src[i..].find("#[cfg(test)]") else {
@@ -132,30 +131,98 @@ fn strip_cfg_test(src: &str) -> String {
         };
         let at = i + rel;
         out.push_str(&src[i..at]);
-        // Find the opening brace of the block this attribute decorates.
-        let Some(brel) = src[at..].find('{') else {
-            i = at + "#[cfg(test)]".len();
-            continue;
-        };
-        let open = at + brel;
-        let mut depth = 0usize;
-        let mut k = open;
-        while k < bytes.len() {
-            match bytes[k] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            k += 1;
-        }
-        i = (k + 1).min(src.len());
+        i = cfg_test_end(src, at + "#[cfg(test)]".len());
     }
     out
+}
+
+/// Byte offset just past the item, block or statement that a `#[cfg(test)]`
+/// ending at `from` decorates, so the whole of it can be dropped.
+///
+/// The decorated thing ends at the first of: a balanced `{ ... }` (an item
+/// body, a module, a block), a `;` at brace depth zero (a `use`, a trait
+/// method signature, a statement such as `panic!("... {e}");`), or an
+/// enclosing `}` (a tail expression). Comments, string and char literals
+/// are stepped over on the way, so a `{` inside a format string or a `;`
+/// inside a doc comment cannot decide where the item ends. The scan used
+/// to take the first `{` it met: for a statement that was the placeholder
+/// inside its string, the literal's tail `");` stayed behind, and from that
+/// stray quote the rest of the file read as one string, so every call
+/// after it went unseen and its callee was reported idle.
+fn cfg_test_end(src: &str, from: usize) -> usize {
+    let b = src.as_bytes();
+    let mut k = from;
+    let mut depth = 0usize;
+    while k < b.len() {
+        match b[k] {
+            b'/' if k + 1 < b.len() && b[k + 1] == b'/' => {
+                while k < b.len() && b[k] != b'\n' {
+                    k += 1;
+                }
+            }
+            b'/' if k + 1 < b.len() && b[k + 1] == b'*' => {
+                let mut d = 1usize;
+                k += 2;
+                while k < b.len() && d > 0 {
+                    if b[k] == b'/' && k + 1 < b.len() && b[k + 1] == b'*' {
+                        d += 1;
+                        k += 2;
+                    } else if b[k] == b'*' && k + 1 < b.len() && b[k + 1] == b'/' {
+                        d -= 1;
+                        k += 2;
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+            b'"' => {
+                k += 1;
+                while k < b.len() {
+                    if b[k] == b'\\' {
+                        k += 2;
+                        continue;
+                    }
+                    if b[k] == b'"' {
+                        k += 1;
+                        break;
+                    }
+                    k += 1;
+                }
+            }
+            b'\'' => {
+                // `'x'`, `'"'`, `'{'` are char literals; `'\n'` is an escaped
+                // one; anything else is a lifetime and one byte long.
+                if k + 2 < b.len() && b[k + 1] == b'\\' {
+                    k += 2;
+                    while k < b.len() && b[k] != b'\'' {
+                        k += 1;
+                    }
+                    k += 1;
+                } else if k + 2 < b.len() && b[k + 2] == b'\'' {
+                    k += 3;
+                } else {
+                    k += 1;
+                }
+            }
+            b'{' => {
+                depth += 1;
+                k += 1;
+            }
+            b'}' => {
+                if depth == 0 {
+                    return k;
+                }
+                depth -= 1;
+                k += 1;
+                if depth == 0 {
+                    return k;
+                }
+            }
+            b';' if depth == 0 => return k + 1,
+            _ => k += 1,
+        }
+    }
+    src.len()
 }
 
 /// Replace comments and string literals with spaces, preserving byte length
@@ -813,6 +880,64 @@ fn baseline_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
 /// # Errors
 ///
 /// Returns the first canary that misbehaves.
+/// `#[cfg(test)]` scrubbing must drop exactly the decorated thing, or callers
+/// after it vanish and their callees are reported idle.
+fn cfg_test_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
+    // The attribute decorates a statement, not a block, and the statement
+    // carries a `{` inside a string: the first `{` after the attribute is a
+    // format placeholder. The scrubber used to take it for the block, keep
+    // the tail `");` of the literal, and from that stray quote on read the
+    // rest of the file as one string, so a caller placed after it was never
+    // seen and its callee was reported idle.
+    if !accepts_with(
+        clean,
+        tmp,
+        "cfg_test_statement",
+        &[
+            (
+                "src/idle.rs",
+                "pub fn called_after_the_attribute() -> u32 { 6 }\n",
+            ),
+            (
+                "src/caller.rs",
+                "fn c(e: u32) -> u32 {\n    #[cfg(test)]\n    panic!(\"unreadable: {e}\");\n    \
+                 crate::idle::called_after_the_attribute()\n}\n",
+            ),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a cfg(test) statement with a braced string hid the caller after it",
+        ));
+    }
+
+    // The block form still has to go in full: a caller that lives only
+    // inside a `#[cfg(test)]` module is not a caller, and a test module
+    // whose strings carry `;` or `}` must not end early and leak its calls.
+    if accepts_with(
+        clean,
+        tmp,
+        "cfg_test_module",
+        &[
+            (
+                "src/idle.rs",
+                "pub fn only_tests_call_this() -> u32 { 8 }\n",
+            ),
+            (
+                "src/caller.rs",
+                "#[cfg(test)]\nmod tests {\n    const S: &str = \"a; b } c\";\n    \
+                 fn c() -> u32 { crate::idle::only_tests_call_this() }\n}\n",
+            ),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a call made only from a cfg(test) module with a braced string was taken as wiring",
+        ));
+    }
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
     let clean = tmp.join("clean");
@@ -873,6 +998,8 @@ pub fn self_test() -> Result<String, String> {
             "canary: a genuinely called item was reported idle; the gate is too wide",
         ));
     }
+
+    cfg_test_canaries(&clean, &tmp)?;
 
     baseline_canaries(&clean, &tmp)?;
 
