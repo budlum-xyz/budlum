@@ -530,7 +530,7 @@ fn run(cli: Cli) -> Result<String, String> {
             let ts = if ts == 0 { 1_768_000_000u64 } else { ts }; // deterministic test
             let rec = BudProductionRecord::new(
                 file.header.codec,
-                Box::leak(pipe.clone().into_boxed_str()),
+                &pipe,
                 &original,
                 bytes.len() as u64,
                 ts,
