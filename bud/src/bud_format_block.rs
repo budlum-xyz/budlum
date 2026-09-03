@@ -156,7 +156,9 @@ impl RegenerationBlock {
 
     pub fn from_blob(bytes: &[u8]) -> Option<Self> {
         const HDR: usize = 8 + 1 + 8 + 32 + 4;
-        if bytes.len() < HDR + 32 + 32 + 8 + 8 + 32
+        // The fixed tail after the challenges: segment_root, byte_budget,
+        // ts_unix, hash. A block with no challenges is exactly HDR + tail.
+        if bytes.len() < HDR + 32 + 8 + 8 + 32
             || bytes[0..8] != BLOCK_MAGIC
             || bytes[8] != BLOCK_VERSION
         {
@@ -260,6 +262,22 @@ mod tests {
         let mut extra = blob.clone();
         extra.push(0x00);
         assert!(RegenerationBlock::from_blob(&extra).is_none());
+    }
+
+    /// A block with no challenges is a legal block (an idle epoch); its blob
+    /// round-trips. The old minimum length demanded one challenge's worth of
+    /// bytes and refused the empty block's own output.
+    #[test]
+    fn an_empty_block_round_trips() {
+        let block = RegenerationBlock::new(3, [1u8; 32], vec![], [2u8; 32], 10, 1_768_000_000)
+            .expect("the empty block");
+        let blob = block.to_blob();
+        let back = RegenerationBlock::from_blob(&blob).expect("its own blob parses");
+        assert_eq!(back.hash, block.hash);
+        assert!(back.pact_challenges.is_empty());
+        let mut short = blob.clone();
+        short.pop();
+        assert!(RegenerationBlock::from_blob(&short).is_none());
     }
 
     #[test]
