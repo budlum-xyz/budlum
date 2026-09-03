@@ -214,23 +214,32 @@ impl RelayerWorker {
             }
 
             for h in (relayed_through + 1)..=finalized {
-                if let Some(block) = self.chain.get_block(h).await {
-                    for tx in block.transactions {
-                        if let TransactionType::UniversalRelay(ext_tx) = tx.tx_type {
-                            info!(
-                                chain = ?ext_tx.chain,
-                                target = %ext_tx.target_address,
-                                height = h,
-                                "Relayer: Detected external transaction request"
-                            );
+                // The cursor only moves past a height that was actually
+                // read. A block that storage cannot hand over is retried on
+                // the next pass instead of being skipped with its relay
+                // requests, which the user has already paid for.
+                let Some(block) = self.chain.get_block(h).await else {
+                    warn!(
+                        height = h,
+                        "Relayer: finalized block unavailable; holding the cursor and retrying"
+                    );
+                    break;
+                };
+                for tx in block.transactions {
+                    if let TransactionType::UniversalRelay(ext_tx) = tx.tx_type {
+                        info!(
+                            chain = ?ext_tx.chain,
+                            target = %ext_tx.target_address,
+                            height = h,
+                            "Relayer: Detected external transaction request"
+                        );
 
-                            self.process_relay(tx.from, ext_tx).await;
-                        }
+                        self.process_relay(tx.from, ext_tx).await;
                     }
                 }
+                relayed_through = h;
+                self.save_cursor(relayed_through);
             }
-            relayed_through = finalized;
-            self.save_cursor(relayed_through);
         }
     }
 

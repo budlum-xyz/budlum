@@ -51,7 +51,7 @@ use crate::core::address::Address;
 use crate::core::transaction::ExternalChain;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_RELAYER_INTENTS: usize = 10_000;
 pub const MAX_RELAYER_BIDS_PER_INTENT: usize = 64;
@@ -329,6 +329,12 @@ pub struct RelayerPolicyRegistry {
     pub bids: BTreeMap<[u8; 32], Vec<SolverBid>>,
     #[serde(with = "crate::core::map_keys")]
     pub settlements: BTreeMap<[u8; 32], IntentSettlement>,
+    /// Every intent id that was ever settled. Settlement rows are pruned by
+    /// age to bound the map; this set is what keeps a pruned intent from
+    /// being settled a second time, so it is never pruned while the intent
+    /// itself is still known.
+    #[serde(default)]
+    pub settled_intents: BTreeSet<[u8; 32]>,
 }
 
 impl RelayerPolicyRegistry {
@@ -360,7 +366,7 @@ impl RelayerPolicyRegistry {
             .intents
             .get(&bid.intent_id)
             .ok_or_else(|| "RelayerPolicyRegistry intent not found".to_string())?;
-        if self.settlements.contains_key(&bid.intent_id) {
+        if self.is_settled(&bid.intent_id) {
             return Err("RelayerPolicyRegistry intent already settled".into());
         }
         if intent.deadline_block <= current_block {
@@ -400,7 +406,7 @@ impl RelayerPolicyRegistry {
             .intents
             .get(&intent_id)
             .ok_or_else(|| "RelayerPolicyRegistry intent not found".to_string())?;
-        if self.settlements.contains_key(&intent_id) {
+        if self.is_settled(&intent_id) {
             return Err("RelayerPolicyRegistry intent already settled".into());
         }
         if intent.deadline_block <= current_block {
@@ -428,9 +434,20 @@ impl RelayerPolicyRegistry {
             status: IntentSettlementStatus::Executed,
         };
         self.settlements.insert(intent_id, settlement.clone());
+        self.settled_intents.insert(intent_id);
         Ok(settlement)
     }
 
+    /// Whether the intent was settled, including settlements whose row has
+    /// since been pruned.
+    pub fn is_settled(&self, intent_id: &[u8; 32]) -> bool {
+        self.settled_intents.contains(intent_id) || self.settlements.contains_key(intent_id)
+    }
+
+    /// Drop intents past their deadline together with their bids. The replay
+    /// guard of an expired intent goes with it: once the deadline has passed,
+    /// `settle_intent` refuses the intent on its own, so the guard has
+    /// nothing left to protect.
     pub fn prune_expired(&mut self, current_block: u64) -> usize {
         let expired: Vec<[u8; 32]> = self
             .intents
@@ -440,20 +457,30 @@ impl RelayerPolicyRegistry {
         for id in &expired {
             self.intents.remove(id);
             self.bids.remove(id);
+            self.settled_intents.remove(id);
         }
         expired.len()
     }
 
+    /// Bound the settlement rows, evicting the oldest `settled_at_block`
+    /// first (ties broken by id, so every node evicts the same rows). The
+    /// intent id stays in `settled_intents`, so a pruned settlement cannot be
+    /// paid twice.
     pub fn prune_settlements(&mut self, max_settlements: usize) -> usize {
         if self.settlements.len() <= max_settlements {
             return 0;
         }
         let to_remove = self.settlements.len() - max_settlements;
-        let keys: Vec<[u8; 32]> = self.settlements.keys().take(to_remove).copied().collect();
-        for key in &keys {
+        let mut by_age: Vec<(u64, [u8; 32])> = self
+            .settlements
+            .iter()
+            .map(|(id, settlement)| (settlement.settled_at_block, *id))
+            .collect();
+        by_age.sort_unstable();
+        for (_, key) in by_age.iter().take(to_remove) {
             self.settlements.remove(key);
         }
-        keys.len()
+        to_remove
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -488,6 +515,10 @@ impl RelayerPolicyRegistry {
                 IntentSettlementStatus::Expired => 3,
                 IntentSettlementStatus::Slashed => 4,
             }]);
+        }
+        for id in &self.settled_intents {
+            hasher.update(b"settled");
+            hasher.update(id);
         }
         hasher.finalize().into()
     }
@@ -812,6 +843,65 @@ mod tests {
             .contains("bid expired"));
     }
 
+    /// Pruning settlement rows must not reopen a settled intent. Rows go
+    /// oldest first by `settled_at_block`, the replay guard stays until the
+    /// intent itself expires.
+    #[test]
+    fn pruned_settlement_still_blocks_a_second_settlement() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let mut registry = RelayerPolicyRegistry::new();
+        let bid_for = |intent_id, relayer, quoted_fee| SolverBid {
+            intent_id,
+            relayer,
+            quoted_fee,
+            proof_commitment: [3u8; 32],
+            bond: 10,
+            expires_at_block: 80,
+        };
+        let mut ids = Vec::new();
+        for nonce in 0..3u64 {
+            let mut intent = intent(owner, &policy);
+            intent.replay_nonce = nonce;
+            intent.intent_id = intent.calculate_id();
+            let id = registry.submit_intent(intent, &policy, 10).unwrap();
+            registry.submit_bid(bid_for(id, addr(9), 40), 10).unwrap();
+            ids.push(id);
+        }
+        // Settled out of key order: the age order is ids[1], ids[2], ids[0].
+        registry.settle_intent(ids[0], addr(9), 40, 30).unwrap();
+        registry.settle_intent(ids[1], addr(9), 40, 20).unwrap();
+        registry.settle_intent(ids[2], addr(9), 40, 25).unwrap();
+
+        // Keeping one row evicts the two oldest, whatever their ids sort to.
+        assert_eq!(registry.prune_settlements(1), 2);
+        assert_eq!(
+            registry.settlements.keys().copied().collect::<Vec<_>>(),
+            vec![ids[0]]
+        );
+
+        // Every intent stays settled: no second payment and no fresh bid.
+        for id in &ids {
+            assert!(registry.is_settled(id));
+            assert!(registry
+                .settle_intent(*id, addr(9), 40, 35)
+                .unwrap_err()
+                .contains("already settled"));
+        }
+        assert!(registry
+            .submit_bid(bid_for(ids[1], addr(8), 30), 35)
+            .unwrap_err()
+            .contains("already settled"));
+
+        // The guard lives exactly as long as the intent it protects.
+        assert_eq!(registry.prune_expired(50), 3);
+        assert!(registry.settled_intents.is_empty());
+        assert!(registry
+            .settle_intent(ids[1], addr(9), 40, 50)
+            .unwrap_err()
+            .contains("not found"));
+    }
+
     /// The policy layer is unreachable from consensus, and the relay fee goes
     /// To the block producer rather than the relayer.
     ///
@@ -843,7 +933,15 @@ mod tests {
         let at = executor_src
             .find("TransactionType::UniversalRelay(ext_tx)")
             .expect("the relay arm must still exist");
-        let arm = &executor_src[at..at + 600];
+        // A bounded window that stops at the next arm; the end is clamped to
+        // the source length and moved back onto a char boundary, so a short
+        // tail or a multi-byte character cannot turn this into a slice panic.
+        let tail = &executor_src[at..];
+        let mut window_end = tail.len().min(600);
+        while !tail.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
+        let arm = &tail[..window_end];
         let end = arm
             .find("TransactionType::RelayerResult")
             .unwrap_or(arm.len());
