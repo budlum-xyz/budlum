@@ -112,9 +112,11 @@ pub struct RegistryParams {
     /// Deliberate, hard-to-reverse economic action: the underlying `slash`
     /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
     /// Fully jails the offender. Per decision ("observe first,
-    /// Validate on live/testnet, then activate"), this stays OFF until an
-    /// Operator/governance explicitly enables it - the mechanism is fully wired
-    /// And tested, but never auto-activates. Set to `true` to enable.
+    /// Validate on live/testnet, then activate"), this stays OFF until
+    /// governance explicitly enables it - the mechanism is fully wired and
+    /// tested, but never auto-activates. Governance-settable: in
+    /// `GOVERNANCE_PARAMETER_WHITELIST`, applied by
+    /// `apply_registry_parameter_update` from the strings `true` / `false`.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
