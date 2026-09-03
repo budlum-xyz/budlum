@@ -1269,8 +1269,6 @@ src/chain/genesis.rs	struct	BootstrapDomainConfig
 src/chain/genesis.rs	struct	GenesisConsensusKeys
 src/chain/snapshot.rs	enum	SnapshotAuthError
 src/chain/snapshot.rs	fn	calculate_digest
-src/chain/snapshot.rs	fn	load_latest_snapshot
-src/chain/snapshot.rs	fn	load_latest_snapshot_v2
 src/chain/snapshot.rs	fn	migration_report
 src/chain/snapshot.rs	fn	reseal_after_manual_edit
 src/chain/snapshot.rs	fn	save_snapshot
@@ -1377,8 +1375,6 @@ src/core/chain_config.rs	const	MAX_VOTES_PER_MSG
 src/core/chain_config.rs	const	PROTOCOL_VERSION
 src/core/chain_config.rs	const	SLOT_MS
 src/core/chain_config.rs	fn	finality_quorum
-src/core/chain_config.rs	fn	magic_bytes
-src/core/chain_config.rs	fn	mempool_config
 src/core/chain_config.rs	struct	ChainId
 src/core/chain_config.rs	struct	ConsensusParams
 src/core/constitution.rs	enum	ConstitutionParameterKey
@@ -1906,7 +1902,6 @@ src/storage/assignment.rs	fn	displaced_shards
 src/storage/content_id.rs	const	DEFAULT_CHUNK_SIZE_BYTES
 src/storage/content_id.rs	fn	of_subrange
 src/storage/db.rs	fn	apply_migrations
-src/storage/db.rs	fn	load_validator_snapshots
 src/storage/db.rs	fn	put_content
 src/storage/db.rs	fn	recover_interrupted_commit
 src/storage/derived.rs	const	DERIVED_BLOCK_PIXELS
