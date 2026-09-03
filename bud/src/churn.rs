@@ -1,5 +1,5 @@
-//! Validator churn - Quad-Ring + fixture'lar + LRC/MSR trafik
-//! Crash-only, 3/4 quorum, XOR repair
+//! Validator churn: the Quad-Ring, the churn fixtures and the LRC/MSR traffic.
+//! Crash-only, 3/4 quorum, XOR repair.
 
 #[derive(Debug, Clone)]
 pub struct QuadRing {
@@ -21,19 +21,26 @@ impl QuadRing {
         (self.k + 1) as f64 / self.k as f64
     }
 
-    // Recovering a single lost block with XOR - skeleton correctness.
-    pub fn repair_one_missing(blocks: &[Vec<u8>], parity: &[u8]) -> Vec<u8> {
-        // blocks = kalan k-1 blok + parity XOR'la kayip
-        let mut out = vec![0u8; parity.len()];
+    /// Recover the one lost block: the XOR of the surviving `blocks` and the
+    /// `parity`.
+    ///
+    /// XOR erasure repair is defined for blocks of one length only, so every
+    /// block must be as long as the parity. `None` when one is not. The
+    /// first version zipped the slices, which stops at the shorter operand:
+    /// a short block left its tail out of the result and a long block lost
+    /// its tail, and the function returned the wrong bytes as the recovered
+    /// block with no way for the caller to tell.
+    pub fn repair_one_missing(blocks: &[Vec<u8>], parity: &[u8]) -> Option<Vec<u8>> {
+        if blocks.iter().any(|b| b.len() != parity.len()) {
+            return None;
+        }
+        let mut out = parity.to_vec();
         for b in blocks {
             for (o, ib) in out.iter_mut().zip(b.iter()) {
                 *o ^= *ib;
             }
         }
-        for (o, p) in out.iter_mut().zip(parity.iter()) {
-            *o ^= *p;
-        }
-        out
+        Some(out)
     }
 }
 
@@ -178,6 +185,36 @@ mod tests {
         );
         assert!(QuadRing::new(0).is_none());
     }
+    /// The lost block comes back exactly, and a length mismatch is refused
+    /// rather than repaired into wrong bytes.
+    #[test]
+    fn repair_one_missing_recovers_the_block_or_refuses() {
+        let blocks = [vec![1u8, 2, 3, 4], vec![10, 20, 30, 40], vec![7, 7, 7, 7]];
+        let lost = vec![9u8, 8, 7, 6];
+        let mut parity = lost.clone();
+        for b in &blocks {
+            for (p, x) in parity.iter_mut().zip(b) {
+                *p ^= *x;
+            }
+        }
+        assert_eq!(
+            QuadRing::repair_one_missing(&blocks, &parity),
+            Some(lost),
+            "the XOR of the survivors and the parity is the lost block"
+        );
+        let short = [vec![1u8, 2, 3], vec![10, 20, 30, 40], vec![7, 7, 7, 7]];
+        assert!(
+            QuadRing::repair_one_missing(&short, &parity).is_none(),
+            "a short block cannot take part in an XOR repair"
+        );
+        let long = [
+            vec![1u8, 2, 3, 4, 5],
+            vec![10, 20, 30, 40],
+            vec![7, 7, 7, 7],
+        ];
+        assert!(QuadRing::repair_one_missing(&long, &parity).is_none());
+    }
+
     #[test]
     fn all_fixtures_count_10() {
         assert_eq!(ChurnFixture::all().len(), 10);
