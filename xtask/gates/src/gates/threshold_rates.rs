@@ -432,14 +432,7 @@ fn operators_with_different_hardware_may_disagree() {
 ";
 
 fn expect_module(src: Option<&str>, label: &str, expect_ok: bool) -> Result<(), String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-threshold-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-threshold")?;
     let _ = std::fs::create_dir_all(dir.join("src/storage"));
     if let Some(src) = src {
         std::fs::write(dir.join("src/storage/living_threshold.rs"), src)

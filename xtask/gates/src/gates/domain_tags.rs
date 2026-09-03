@@ -164,12 +164,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Returns a finding when the canary tree does not behave: matching tree
 /// passes, an unlisted used tag is caught, a listed-but-unused tag is caught.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let tmp =
-        std::env::temp_dir().join(format!("budlum-gates-dtags-{}-{nanos}", std::process::id()));
+    let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-dtags")?;
     let _ = fs::remove_dir_all(&tmp);
     for d in ["src/crypto", "budzero", "crates/wallet-core/src", "bud/src"] {
         fs::create_dir_all(tmp.join(d)).map_err(|e| format!("cannot create fixture dir: {e}"))?;

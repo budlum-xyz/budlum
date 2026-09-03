@@ -197,15 +197,7 @@ fn build_fixture(
 /// Returns the first canary that misbehaves. The canaries mirror the shell
 /// gate's seven one for one.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let tmp = std::env::temp_dir().join(format!(
-        "budlum-gates-docker-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&tmp);
+    let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-docker")?;
 
     let good_from = "rust:1.97.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000";
     let good_copy = "COPY Cargo.toml rust-toolchain.toml ./";

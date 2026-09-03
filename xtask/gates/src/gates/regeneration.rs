@@ -988,12 +988,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Returns a finding if the canary tree does not behave as expected: the correct
 /// tree must pass, a tree deviating from the canonical feed must be caught.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let tmp =
-        std::env::temp_dir().join(format!("budlum-gates-regen-{}-{nanos}", std::process::id()));
+    let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-regen")?;
     let _ = fs::remove_dir_all(&tmp);
 
     for d in [

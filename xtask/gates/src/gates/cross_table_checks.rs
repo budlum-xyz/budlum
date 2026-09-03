@@ -127,11 +127,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-ct-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ct")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
     let good = "pub const COL_MEM_INIT_ACC: usize = 731;\npub const COL_REG_INIT_ACC: usize = 736;\n        {\n            let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();\n            let expected = public_inputs[10].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n        {\n            let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();\n            let expected = public_inputs[12].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n";

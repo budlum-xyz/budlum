@@ -97,24 +97,11 @@ fn bin_path() -> Result<PathBuf, String> {
 }
 
 /// A fresh directory under the temp root that did not exist before this
-/// call, owner-only on Unix. `create_dir` (not `create_dir_all`) fails if
-/// the path already exists, so a pre-planted directory is refused rather
-/// than reused.
+/// call, owner-only on Unix. The exclusive create refuses a pre-planted
+/// path rather than reusing it; the mode keeps the extracted binary from
+/// being read or swapped by another local user before it runs.
 fn private_work_dir() -> Result<PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-zizmor-{}-{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&dir).map_err(|e| {
-        format!(
-            "cannot create a private work directory {}: {e}",
-            dir.display()
-        )
-    })?;
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-zizmor")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -148,14 +135,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Returns a finding when the gate cannot fail (zizmor unavailable or the
 /// canary workflow passes).
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-zizmor-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-zizmor")?;
     // A workflow carrying a documented finding, at the path zizmor collects
     // from. The previous fixture was a harmless `run: echo hi` at the top of
     // the scratch directory: zizmor collected no inputs there, exited 3 with

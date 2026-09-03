@@ -682,14 +682,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 /// Write a fixture tree, run the gate, check the verdict.
 fn check_fixture(files: &[(&str, &str)], expect_ok: bool, label: &str) -> Result<(), String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-orphan-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-orphan")?;
     for (rel, content) in files {
         let path = dir.join(rel);
         if let Some(parent) = path.parent() {

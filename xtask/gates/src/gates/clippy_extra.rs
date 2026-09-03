@@ -96,15 +96,7 @@ pub fn run(root: &Path, json: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when the canary JSON does not behave.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-clippy-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-clippy")?;
     let _ = std::fs::create_dir_all(dir.join(".github"));
     std::fs::write(dir.join(".github/clippy-extra-baseline.txt"), "11\n")
         .map_err(|e| e.to_string())?;

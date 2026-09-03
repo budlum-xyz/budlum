@@ -144,14 +144,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-ai_inference-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ai_inference")?;
     std::fs::create_dir_all(dir.join("crates/ai-inference/crates/ai-core/src"))
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("crates/ai-inference/crates/ai-data/src"))

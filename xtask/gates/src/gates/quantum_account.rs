@@ -139,11 +139,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-qa-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-qa")?;
     std::fs::create_dir_all(dir.join("src/account_abstraction")).map_err(|e| e.to_string())?;
     let acct = "pub struct QuantumAccount {\n    pub pq_public_key: [u8; ML_DSA_87_PUBLIC_KEY_LEN],\n}\n\nimpl QuantumAccount {\n    pub fn address_from_public_key(k: &[u8; ML_DSA_87_PUBLIC_KEY_LEN]) -> [u8; 32] {\n        let mut h = Sha3_256::new();\n        h.update(ADDRESS_DOMAIN_V2);\n        h.update(k);\n        h.finalize().into()\n    }\n    pub fn seed_from_entropy(entropy: &[u8]) -> Result<[u8; 32], SeedError> {\n        if entropy.len() < 16 { return Err(SeedError::TooShort); }\n        Ok(h(entropy))\n    }\n    pub fn guardian_root(guardians: &[[u8; 32]]) -> [u8; 32] {\n        let mut h = Sha3_256::new();\n        for g in guardians { h.update(g); }\n        h.finalize().into()\n    }\n}\n";
     let reg = "impl Registry {\n    pub fn register(&mut self, account: QuantumAccount) -> Result<(), E> {\n        let derived = QuantumAccount::address_from_public_key(&account.pq_public_key);\n        if let Err(reason) = account.validate_all() { return Err(E(reason)); }\n        self.insert(derived, account);\n        Ok(())\n    }\n    pub fn replace(&mut self, candidate: QuantumAccount) -> Result<(), E> {\n        if let Err(reason) = candidate.validate_all() { return Err(E(reason)); }\n        Ok(())\n    }\n}\n";

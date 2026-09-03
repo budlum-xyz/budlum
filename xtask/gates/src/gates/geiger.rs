@@ -107,15 +107,7 @@ pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
 /// Returns a finding when the canary report does not behave: a first-party
 /// `2/N` line must fail, a clean report must pass.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-geiger-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-geiger")?;
     let clean = dir.join("temiz.txt");
     let dirty = dir.join("kirli.txt");
     // The canary uses cargo-geiger's REAL line format: five counters,

@@ -166,12 +166,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("budlum-gates-pool-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-pool")?;
     std::fs::create_dir_all(dir.join("src/mempool")).map_err(|e| e.to_string())?;
     let good = "pub struct Pool {\n    by_sender: HashMap<Address, BTreeMap<u64, String>>,\n    by_fee: BTreeMap<u64, BTreeSet<String>>,\n    min_fee: u64,\n}\n\nfn charged_bytes(tx: &Transaction) -> usize { tx.data.len() }\n\nimpl Pool {\n    pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {\n        for (_, hashes) in self.by_fee.iter().rev() { for h in hashes { push(h); } }\n        out\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn test_same_fee_canonical_order_by_hash() {}\n}\n";
     std::fs::write(dir.join("src/mempool/pool.rs"), good).map_err(|e| e.to_string())?;

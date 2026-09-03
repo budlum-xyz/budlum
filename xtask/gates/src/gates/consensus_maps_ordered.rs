@@ -536,15 +536,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 }
 
 fn scratch_dir() -> Result<std::path::PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-consensus-map-{}-{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create scratch dir: {e}"))?;
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-consensus-map")?;
     Ok(dir)
 }
 
