@@ -219,7 +219,10 @@ mod tests {
         let secret = [0x42u8; 32];
         let a = ShamirShare::split(&secret, 2, 3).unwrap();
         let b = ShamirShare::split(&secret, 2, 3).unwrap();
-        assert_ne!(a[0].1, b[0].1, "two splits of one secret must not agree on a share");
+        assert_ne!(
+            a[0].1, b[0].1,
+            "two splits of one secret must not agree on a share"
+        );
         // The old derivation made share x=1 of byte 0 equal to
         // secret ^ c1 with a public c1; the same public c1 no longer explains
         // the share. Measure over many splits: the first share byte is not a
@@ -228,7 +231,10 @@ mod tests {
         for _ in 0..64 {
             seen.insert(ShamirShare::split(&secret, 2, 3).unwrap()[0].1[0]);
         }
-        assert!(seen.len() > 8, "share bytes must vary across splits, got {seen:?}");
+        assert!(
+            seen.len() > 8,
+            "share bytes must vary across splits, got {seen:?}"
+        );
         // And the threshold still holds: any 2 of the 3 rebuild the secret.
         for combo in [[0usize, 1], [1, 2], [0, 2]] {
             let chosen: Vec<(u8, Vec<u8>)> = combo.iter().map(|&i| a[i].clone()).collect();
@@ -245,7 +251,11 @@ mod tests {
         for (k, n) in [(34usize, 40usize), (100, 120), (255, 255)] {
             let shares = ShamirShare::split(&secret, k, n).unwrap();
             assert_eq!(shares.len(), n);
-            assert_eq!(ShamirShare::combine(&shares[..k], k).unwrap(), secret, "k={k} n={n}");
+            assert_eq!(
+                ShamirShare::combine(&shares[..k], k).unwrap(),
+                secret,
+                "k={k} n={n}"
+            );
             assert!(ShamirShare::combine(&shares[..k - 1], k).is_none());
         }
     }
