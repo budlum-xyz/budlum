@@ -19,9 +19,9 @@ fn private_transfer_fee_market_gates_inclusion() {
     // Minimal, shape-valid private transfer payload. TEE spent_commitment
     // Hiding is out of scope; we only exercise the fee-market gate here.
     let sub = PrivateTransferSubmit {
-        spent_commitments: vec![[1u8; 32]],
-        nullifiers: vec![[2u8; 32]],
-        output_commitments: vec![[3u8; 32]],
+        spent_commitments: vec![budlum_note_packing::hash_from_field(1)],
+        nullifiers: vec![budlum_note_packing::hash_from_field(2)],
+        output_commitments: vec![budlum_note_packing::hash_from_field(3)],
         authorization_sig: vec![0u8; 64],
         public_digest: [0u8; 32],
     };

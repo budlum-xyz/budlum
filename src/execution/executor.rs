@@ -1825,6 +1825,14 @@ impl Executor {
                         "privacy note insertion is disabled on mainnet until full proof verification is wired",
                     ));
                 }
+                // The same boundary `PrivateTransferSubmit::validate_shape`
+                // holds: only a packed field element is a note.
+                if !crate::privacy::is_note_hash(commitment) {
+                    return Err(BudlumError::validation(
+                        "privacy_note_shape",
+                        "commitment is not a packed field element",
+                    ));
+                }
                 state
                     .note_registry
                     .insert_note(*commitment)
