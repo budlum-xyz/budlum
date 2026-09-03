@@ -263,9 +263,10 @@ fn symlink_canary(tmp: &Path) -> Result<(), String> {
 }
 
 pub fn self_test() -> Result<String, String> {
-    // Isolated tree: two source files under budzero/.
-    let tmp = std::env::temp_dir().join(format!("bud-tree-pin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
+    // Isolated tree: two source files under budzero/. The directory is
+    // created exclusively, so a path planted there by another local user
+    // is refused instead of receiving the fixture writes.
+    let tmp = super::rust_literals::exclusive_scratch_dir("bud-tree-pin")?;
     let a_path = tmp.join("budzero/bud-vm/src/a.rs");
     let b_path = tmp.join("budzero/bud-proof/src/b.rs");
     std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
