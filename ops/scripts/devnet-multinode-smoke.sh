@@ -138,7 +138,9 @@ for _ in $(seq 1 60); do
   # The log witness is used when it is ahead of the gauge (the gauge is
   # written once per block add; the log line is written on the same path).
   if [ -n "$l2" ] && [ "$l2" -gt "$n2" ]; then n2=$l2; fi
-  if [ "$n1" -gt 0 ] && [ "$n2" -ge 0 ] && [ $((n1 - n2)) -le 1 ]; then synced=1; break; fi
+  # Lag is bounded in both directions: a follower tip ahead of node1 is a
+  # divergent or stale reading, not a synced follower.
+  if [ "$n1" -gt 0 ] && [ "$n2" -ge 0 ] && [ "$n2" -le "$n1" ] && [ $((n1 - n2)) -le 1 ]; then synced=1; break; fi
   sleep 2
 done
 if [ "$synced" != 1 ]; then
