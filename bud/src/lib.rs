@@ -192,7 +192,7 @@ pub use price::{Expansion, PriceError, PriceModel};
 pub use provider::{Provider, ProviderClass, ProviderError};
 pub use quantum::{QuantumError, QuantumSuite};
 pub use quantum_chain::{
-    DualWallet, FiatShamirTranscript, HybridFinalityVote, HybridTx, MobileSelfProvider, PqVrf,
+    DualWallet, FiatShamirTranscript, HybridFinalityVote, HybridTx, MobileSelfProvider,
     QuantumChainGates, Sha3Hasher, MAX_BLOCK_BYTES, PQ_SCHEME_ID_FINAL,
 };
 pub use ratio::{FormatClass, Pipe, RatioResult};

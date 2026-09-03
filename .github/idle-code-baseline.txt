@@ -744,7 +744,6 @@ bud/src/quantum_chain.rs	fn	from_bip39_seed
 bud/src/quantum_chain.rs	fn	handshake_ml_kem_ok
 bud/src/quantum_chain.rs	fn	has_dual
 bud/src/quantum_chain.rs	fn	hash_fields
-bud/src/quantum_chain.rs	fn	is_below_threshold
 bud/src/quantum_chain.rs	fn	is_online
 bud/src/quantum_chain.rs	fn	kq_block
 bud/src/quantum_chain.rs	fn	kq_feat
@@ -754,7 +753,6 @@ bud/src/quantum_chain.rs	fn	kq_media_device_only
 bud/src/quantum_chain.rs	fn	kq_p2p
 bud/src/quantum_chain.rs	fn	kq_stark
 bud/src/quantum_chain.rs	fn	kq_tx
-bud/src/quantum_chain.rs	fn	kq_vrf
 bud/src/quantum_chain.rs	fn	kq_wallet
 bud/src/quantum_chain.rs	fn	should_displace
 bud/src/quantum_chain.rs	fn	verify_quorum
@@ -763,9 +761,6 @@ bud/src/quantum_chain.rs	struct	FiatShamirTranscript
 bud/src/quantum_chain.rs	struct	HybridFinalityVote
 bud/src/quantum_chain.rs	struct	HybridTx
 bud/src/quantum_chain.rs	struct	MobileSelfProvider
-bud/src/quantum_chain.rs	struct	PqVrf
-bud/src/quantum_chain.rs	struct	PqVrfOutput
-bud/src/quantum_chain.rs	struct	PqVrfProof
 bud/src/quantum_chain.rs	struct	QuantumChainGates
 bud/src/quantum_chain.rs	struct	Sha3Hasher
 bud/src/quantum_chain.rs	struct	Sha3Sponge
