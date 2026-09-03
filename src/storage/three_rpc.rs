@@ -20,6 +20,11 @@
 //!
 //! The gateway is still responsible for calling `may_view` on the grant side;
 //! this module re-derives it for the reveal path so a handler cannot forget.
+//! The registry's `may_view` lets the owner in without a grant, and the raw
+//! registry does not know who owns a content id; so the registry path takes
+//! the recorded owner from its caller (the manifest is the authority) and
+//! refuses a request whose `owner` field says otherwise. Without that, a
+//! caller who named itself both viewer and owner opened any sealed recipe.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -129,16 +134,27 @@ impl RevealHandle {
 /// Open a reveal session. Rejects a sealed recipe with no live grant, and a
 /// sealed recipe with no opening; applies the caller's meter budget.
 ///
+/// `recorded_owner` is who the manifest (or confidential commit) says owns
+/// `req.content_id`; the caller reads it from the authority it holds.
+/// `req.owner` is a claim and is checked against it, because the registry
+/// admits the owner with no grant and would otherwise admit anyone who
+/// claimed to be one.
+///
 /// # Errors
 ///
-/// [`RevealRpcError::Forbidden`] without a live grant (sealed), or with a
-/// non-owner viewer and no grant; [`RevealRpcError::NeedFullRecipe`] for a
-/// sealed recipe missing its public opening.
+/// [`RevealRpcError::Forbidden`] when `req.owner` is not the recorded owner,
+/// without a live grant (sealed), or with a non-owner viewer and no grant;
+/// [`RevealRpcError::NeedFullRecipe`] for a sealed recipe missing its public
+/// opening.
 pub fn open_reveal_session(
     registry: &ViewGrantRegistry,
+    recorded_owner: &Address,
     req: &RevealRequest,
 ) -> Result<RevealHandle, RevealRpcError> {
-    let grant_allows = registry.may_view(&req.content_id, &req.viewer, &req.key_id, &req.owner);
+    if req.owner != *recorded_owner {
+        return Err(RevealRpcError::Forbidden);
+    }
+    let grant_allows = registry.may_view(&req.content_id, &req.viewer, &req.key_id, recorded_owner);
     open_reveal_session_prechecked(req, grant_allows)
 }
 
@@ -230,7 +246,7 @@ mod rpc_tests {
             key_id,
         );
         assert_eq!(
-            open_reveal_session(&reg, &r).unwrap_err(),
+            open_reveal_session(&reg, &owner, &r).unwrap_err(),
             RevealRpcError::Forbidden
         );
 
@@ -244,10 +260,37 @@ mod rpc_tests {
             1,
         )
         .unwrap();
-        let mut handle = open_reveal_session(&reg, &r).unwrap();
+        let mut handle = open_reveal_session(&reg, &owner, &r).unwrap();
         // And the handle produces frames under the gate.
         let (frames, _) = handle.emit_frames(0, 1).unwrap();
         assert!(!frames.is_empty());
+    }
+
+    /// Naming oneself the owner is not being the owner.
+    ///
+    /// The registry lets the owner open with no grant. A request whose
+    /// `viewer` and `owner` were both the caller used to go through that
+    /// shortcut for content somebody else owns; the recorded owner now
+    /// decides, and a request that names anyone else is refused before the
+    /// registry is asked.
+    #[test]
+    fn a_caller_who_names_itself_owner_is_refused() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let stranger = addr(3);
+        let key_id = [7u8; 32];
+        let reg = ViewGrantRegistry::new();
+        let sealed = ThreeRecipe::Sealed(full.clone().seal());
+
+        let r = req(sealed, Some(full), packed, stranger, stranger, key_id);
+        assert!(
+            reg.may_view(&r.content_id, &r.viewer, &r.key_id, &r.owner),
+            "the raw registry would have let the self-styled owner in"
+        );
+        assert_eq!(
+            open_reveal_session(&reg, &owner, &r).unwrap_err(),
+            RevealRpcError::Forbidden
+        );
     }
 
     /// A revoked grant blocks a *new* session; the revoked one cannot reopen.
@@ -273,12 +316,12 @@ mod rpc_tests {
         let r = req(sealed, Some(full), packed, viewer, owner, key_id);
 
         // Opens while the grant is live.
-        assert!(open_reveal_session(&reg, &r).is_ok());
+        assert!(open_reveal_session(&reg, &owner, &r).is_ok());
 
         // Revoke; a fresh request for a new session is now refused.
         reg.revoke(grant_id, owner, 5).unwrap();
         assert_eq!(
-            open_reveal_session(&reg, &r).unwrap_err(),
+            open_reveal_session(&reg, &owner, &r).unwrap_err(),
             RevealRpcError::Forbidden
         );
     }
@@ -305,7 +348,7 @@ mod rpc_tests {
         let mut r = req(sealed, Some(full), packed, viewer, owner, key_id);
         // Each frame charges 2 units; a budget of 3 allows one frame but not two.
         r.meter_budget = Some(3);
-        let mut handle = open_reveal_session(&reg, &r).unwrap();
+        let mut handle = open_reveal_session(&reg, &owner, &r).unwrap();
         assert!(handle.emit_frames(0, 1).is_ok());
         assert!(matches!(
             handle.emit_frames(1, 2),

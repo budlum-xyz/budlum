@@ -19,6 +19,7 @@
 //! already made. Both funnel into the same meter-and-budget construction, so
 //! a sealed recipe with no live grant is refused either way.
 
+use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::three_rpc::{
     open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
@@ -164,17 +165,23 @@ impl RevealGateway {
 
     /// Open a session with a live-grant check derived from `registry`.
     ///
+    /// `recorded_owner` is the owner the manifest names for the content; see
+    /// [`open_reveal_session`] for why the request's own `owner` field is
+    /// not trusted.
+    ///
     /// # Errors
     ///
-    /// [`RevealGatewayError::Reveal`] when the grant check or the emitter
-    /// refuses; [`RevealGatewayError::SessionLimit`] at the cap.
+    /// [`RevealGatewayError::Reveal`] when the owner claim, the grant check
+    /// or the emitter refuses; [`RevealGatewayError::SessionLimit`] at the
+    /// cap.
     pub fn open(
         &mut self,
         registry: &ViewGrantRegistry,
+        recorded_owner: &Address,
         req: RevealRequest,
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
-        let handle = open_reveal_session(registry, &req)?;
+        let handle = open_reveal_session(registry, recorded_owner, &req)?;
         self.admit(handle, now)
     }
 
@@ -307,7 +314,6 @@ impl RevealGateway {
 #[cfg(test)]
 mod gateway_tests {
     use super::*;
-    use crate::core::address::Address;
     use crate::storage::content_id::ContentId;
     use crate::storage::qr_carousel::CarouselEncoder;
     use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
@@ -460,6 +466,7 @@ mod gateway_tests {
 
         let refused = gw.open(
             &reg,
+            &owner,
             req(
                 sealed.clone(),
                 Some(full.clone()),
@@ -489,6 +496,7 @@ mod gateway_tests {
         let id = gw
             .open(
                 &reg,
+                &owner,
                 req(sealed, Some(full), packed, viewer, owner, key_id, None),
                 100,
             )
