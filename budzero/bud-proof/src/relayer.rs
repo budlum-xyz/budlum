@@ -122,13 +122,23 @@ mod hex_ser {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
         let text = String::deserialize(d)?;
-        if text.len() != 64 {
+        // Decode from the bytes, never by slicing the `str`: a 64-byte
+        // string holding a multi-byte character put a slice boundary inside
+        // that character, and the parse of a foreign report became a panic.
+        let bytes = text.as_bytes();
+        if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {
             return Err(serde::de::Error::custom("expected 64 hex characters"));
         }
+        let nibble = |b: u8| -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => b - b'A' + 10,
+            }
+        };
         let mut out = [0u8; 32];
         for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
-                .map_err(serde::de::Error::custom)?;
+            *byte = (nibble(bytes[i * 2]) << 4) | nibble(bytes[i * 2 + 1]);
         }
         Ok(out)
     }
@@ -742,6 +752,24 @@ mod tests {
         let parsed: CanonicalRelayReport = serde_json::from_str(&json).expect("json parses");
         assert_eq!(parsed, report);
         assert!(parsed.verify_report_sig());
+    }
+
+    /// A foreign report whose hash field is 64 bytes long but not ASCII. The
+    /// old decoder sliced the `str` by byte index and panicked inside the
+    /// multi-byte character; a monitor parsing a report it did not write
+    /// must get an error, not an abort.
+    #[test]
+    fn a_non_ascii_hash_field_is_an_error_not_a_panic() {
+        let (envelope, pi, program) = prove_canonical();
+        let report = verify_and_report_at(&envelope, &pi, &program, 1_700_000_000);
+        let json = report.report_json().expect("relay report serializes");
+        let good = hex32(&report.program_hash);
+        let bad = format!("{}{}", "\u{20ac}".repeat(21), "a"); // 64 bytes, 22 chars
+        assert_eq!(bad.len(), 64);
+        let forged = json.replacen(&good, &bad, 1);
+        assert_ne!(forged, json, "the program hash was replaced");
+        let parsed: Result<CanonicalRelayReport, _> = serde_json::from_str(&forged);
+        assert!(parsed.is_err(), "refused as a deserialization error");
     }
 
     fn prove_transfer() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
