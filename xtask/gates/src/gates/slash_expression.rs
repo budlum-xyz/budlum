@@ -62,6 +62,23 @@ fn slash_body(code: &str) -> Option<String> {
 }
 
 /// Normalized body: comments stripped, whitespace collapsed.
+/// Whether a normalized `slash_penalty` body clamps its result to the bond:
+/// it compares the wide quotient against `u64::MAX` and, on the wide side,
+/// yields `stake`. The yield is matched as an operation in any of the forms
+/// Rust writes it: an early `return stake`, a block whose tail is `stake`,
+/// or a `.min(stake)`. Matching the `return` keyword alone accepted exactly
+/// one of those spellings and refused a correct clamp written as a tail
+/// expression, while a body that returned `stake` for some other reason and
+/// never compared anything would have passed.
+fn clamps_to_stake(normalized_body: &str) -> bool {
+    let compares_wide = normalized_body.contains(">u128::from(u64::MAX)");
+    let yields_stake = normalized_body.contains("returnstake")
+        || normalized_body.contains("{stake}")
+        || normalized_body.contains(".min(stake)")
+        || normalized_body.contains("stake.min(");
+    compares_wide && yields_stake
+}
+
 fn normalized(body: &str) -> String {
     body.lines()
         .map(|l| l.split("//").next().unwrap_or("").trim())
@@ -174,7 +191,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             bodies[1].chars().take(200).collect::<String>()
         ));
     }
-    if !bodies[0].contains("u128::from(u64::MAX)") || !bodies[0].contains("returnstake") {
+    if !clamps_to_stake(&bodies[0]) {
         return Err(String::from(
             "FAIL: slash_penalty no longer clamps; the identity check would be \
              comparing two copies of the bug.",
@@ -208,14 +225,36 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::create_dir_all(dir.join("src/core"));
     let _ = std::fs::create_dir_all(dir.join("budzero/verifier-registry/src"));
-    // A clamp expression for the homes.
-    let body = "pub fn slash_penalty() -> u64 {\n    let x = u128::from(u64::MAX);\n    let stake = 1u128;\n    let r = stake * x / FIXED_POINT_SCALE;\n    return stake.saturating_sub(r as u64);\n}\n";
+    // A clamp written with an early return, and the same clamp written as a
+    // tail expression: both are the operation, and both must pass.
+    let body = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    (r as u64).min(stake)\n}\n";
+    let tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        (r as u64).min(stake)\n    }\n}\n";
+    for (tag, clamp) in [("early return", body), ("tail expression", tail)] {
+        std::fs::write(dir.join("src/core/chain_config.rs"), clamp).unwrap();
+        std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), clamp).unwrap();
+        if let Err(e) = run(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!(
+                "canary: a clean tree ({tag} clamp) was refused: {e}"
+            ));
+        }
+    }
+    // Both homes agree, and neither clamps: identical copies of the bug.
+    let unclamped = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return 0;\n    }\n    r as u64\n}\n";
+    std::fs::write(dir.join("src/core/chain_config.rs"), unclamped).unwrap();
+    std::fs::write(
+        dir.join("budzero/verifier-registry/src/params.rs"),
+        unclamped,
+    )
+    .unwrap();
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: two agreeing homes that never yield the stake passed",
+        ));
+    }
     std::fs::write(dir.join("src/core/chain_config.rs"), body).unwrap();
     std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), body).unwrap();
-    if run(&dir).is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a clean tree was refused"));
-    }
     // Drift one home.
     let drifted = body.replace("u64::MAX", "u64::MIN");
     std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), drifted).unwrap();
@@ -225,6 +264,7 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "slash canary OK (clean PASSes, a diverging home FAILs).",
+        "slash canary OK (an early-return clamp and a tail-expression clamp PASS, two \
+         agreeing unclamped homes FAIL, a diverging home FAILs).",
     ))
 }

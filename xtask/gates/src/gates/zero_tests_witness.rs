@@ -57,19 +57,30 @@ fn strip_comments(text: &str) -> String {
         .join("\n")
 }
 
+/// The statements of a source fragment, comments gone and every run of
+/// whitespace collapsed, so that a chain rustfmt spread over several lines is
+/// one string again. Matching per line was a hole: a long builder chain is
+/// formatted as `builder\n    .when(..)\n    .assert_one(..);`, and no single
+/// line of that carried all three tokens, so the direct form passed.
+fn statements(text: &str) -> Vec<String> {
+    strip_comments(text)
+        .split(';')
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
 /// `reg (==|!=) 0` in the body.
 fn tests_zero(body: &str, reg: &str) -> bool {
-    strip_comments(body)
-        .lines()
-        .any(|l| l.contains(&format!("{reg} == 0")) || l.contains(&format!("{reg} != 0")))
+    statements(body)
+        .iter()
+        .any(|s| s.contains(&format!("{reg} == 0")) || s.contains(&format!("{reg} != 0")))
 }
 
 /// The AIR constrains the register directly with `assert_one`, bypassing the
 /// witness: `.when(is_<snake>)...assert_one(<air_reg>)`.
 fn has_direct_assert(air_code: &str, snake: &str, air_reg: &str) -> bool {
-    let stripped = strip_comments(air_code);
-    stripped.lines().any(|l| {
-        l.contains(&format!("when(is_{snake}")) && l.contains("assert_one") && l.contains(air_reg)
+    statements(air_code).iter().any(|s| {
+        s.contains(&format!("when(is_{snake}")) && s.contains("assert_one") && s.contains(air_reg)
     })
 }
 
@@ -185,8 +196,33 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a direct assert_one passed"));
     }
+    // The same bypass as rustfmt writes it, one call per line.
+    let split_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder\n            .when(is_assert.clone())\n            .assert_one(rs1_val.clone());\n";
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), split_air)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a direct assert_one split across lines passed",
+        ));
+    }
+    // A zero test the VM writes across lines is still a zero test.
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good_air)
+        .map_err(|e| e.to_string())?;
+    let split_vm = good_vm.replace(
+        "if src1_val == 0 { return Err(VmError::AssertionFailed); }",
+        "if src1_val\n                    == 0\n                {\n                    return Err(VmError::AssertionFailed);\n                }",
+    );
+    std::fs::write(dir.join("budzero/bud-vm/src/lib.rs"), split_vm).map_err(|e| e.to_string())?;
+    if let Err(e) = run(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "canary: a zero test written across lines was not recognised: {e}"
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "zero-test canary OK: the witness form PASSes and the direct form FAILs.",
+        "zero-test canary OK: the witness form PASSes, the direct form FAILs on one line and \
+         across lines, and a multi-line zero test is still recognised.",
     ))
 }

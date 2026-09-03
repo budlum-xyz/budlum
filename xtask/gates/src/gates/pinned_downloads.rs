@@ -71,7 +71,11 @@ fn checksum_url(lower: &str) -> bool {
         let end = token
             .find(|c: char| c.is_whitespace() || c == '\\')
             .unwrap_or(token.len());
-        let url = &token[..end];
+        // A quoted URL keeps its closing quote inside the token, and a URL at
+        // the end of a sentence keeps the full stop. Both hid the extension
+        // and the path word from the two suffix rules, so `"...tool.sha256"`
+        // passed as if it were not a checksum download.
+        let url = token[..end].trim_end_matches(['"', '\'', ')', ',', ';', '.']);
         if ends_with_checksum_ext(url) || ends_with_checksum_path(url) || has_checksum_query(url) {
             return true;
         }
@@ -205,6 +209,16 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Pinned hash written in-repo must pass.
+    // The checksum URL inside quotes, as a shell author writes it: the
+    // closing quote is part of the whitespace-delimited token.
+    let quoted = "run: |\n  curl -sSfLO \"https://github.com/x/y/releases/download/v1/tool.sha256\"\n  curl -sSfLO 'https://example.com/release/checksums'\n";
+    std::fs::write(dir.join(".github/workflows/ci.yml"), quoted).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a quoted checksum URL passed; the closing quote hid the suffix",
+        ));
+    }
     let good = "run: |\n  curl -sSfL -o /tmp/tool.tar.gz https://github.com/x/y/releases/download/v1/tool.tar.gz\n  echo \"abc123  /tmp/tool.tar.gz\" | sha256sum -c -\n";
     std::fs::write(dir.join(".github/workflows/ci.yml"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
@@ -214,6 +228,7 @@ pub fn self_test() -> Result<String, String> {
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "pinned-downloads canary OK (network checksum FAILs, in-repo hash PASSes).",
+        "pinned-downloads canary OK (network checksum FAILs, also upper-cased, in a query \
+         string and inside quotes; in-repo hash PASSes).",
     ))
 }
