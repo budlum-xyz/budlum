@@ -527,9 +527,12 @@ mod tests {
         signers: usize,
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
-        let mut agg =
-            FinalityAggregator::new(snapshot.epoch, header.index, checkpoint_hash.clone());
-        agg.set_validator_snapshot(snapshot.clone());
+        let mut agg = FinalityAggregator::new(
+            snapshot.epoch,
+            header.index,
+            checkpoint_hash.clone(),
+            snapshot.clone(),
+        );
 
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let vote = Prevote {

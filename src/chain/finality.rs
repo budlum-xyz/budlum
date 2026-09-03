@@ -35,7 +35,9 @@ pub struct ValidatorEntry {
 
 impl ValidatorSetSnapshot {
     pub fn new(epoch: u64, validators: Vec<ValidatorEntry>) -> Self {
-        let total_stake = validators.iter().map(|v| v.stake).sum();
+        let total_stake = validators
+            .iter()
+            .fold(0u64, |acc, v| acc.saturating_add(v.stake));
         let set_hash = Self::compute_hash(&validators);
         ValidatorSetSnapshot {
             epoch,
@@ -77,7 +79,10 @@ impl ValidatorSetSnapshot {
     }
 
     pub fn quorum_stake(&self) -> u64 {
-        (self.total_stake * FINALITY_QUORUM_NUMERATOR) / FINALITY_QUORUM_DENOMINATOR + 1
+        self.total_stake
+            .saturating_mul(FINALITY_QUORUM_NUMERATOR)
+            .div_euclid(FINALITY_QUORUM_DENOMINATOR)
+            .saturating_add(1)
     }
 
     /// Hybrid finality requires both stake quorum and validator-count quorum.
@@ -370,7 +375,10 @@ pub struct FinalityAggregator {
     pub checkpoint_hash: String,
     pub prevotes: HashMap<Address, Prevote>,
     pub precommits: HashMap<Address, Precommit>,
-    pub validator_snapshot: Option<ValidatorSetSnapshot>,
+    /// The set every vote is checked against. Required at construction: an
+    /// aggregator without a snapshot used to skip membership and BLS checks
+    /// and could still emit consensus-verified equivocation reports.
+    pub validator_snapshot: ValidatorSetSnapshot,
     pub prevote_quorum_reached: bool,
     pub precommit_quorum_reached: bool,
     /// Equivocation (double-sign) evidence detected while ingesting votes.
@@ -392,14 +400,19 @@ pub struct FinalityAggregator {
 }
 
 impl FinalityAggregator {
-    pub fn new(epoch: u64, checkpoint_height: u64, checkpoint_hash: String) -> Self {
+    pub fn new(
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        validator_snapshot: ValidatorSetSnapshot,
+    ) -> Self {
         FinalityAggregator {
             epoch,
             checkpoint_height,
             checkpoint_hash,
             prevotes: HashMap::new(),
             precommits: HashMap::new(),
-            validator_snapshot: None,
+            validator_snapshot,
             prevote_quorum_reached: false,
             precommit_quorum_reached: false,
             detected_equivocations: Vec::new(),
@@ -416,10 +429,6 @@ impl FinalityAggregator {
         std::mem::take(&mut self.detected_equivocations)
     }
 
-    pub fn set_validator_snapshot(&mut self, snapshot: ValidatorSetSnapshot) {
-        self.validator_snapshot = Some(snapshot);
-    }
-
     pub fn add_prevote(&mut self, vote: Prevote) -> Result<(), String> {
         if vote.epoch != self.epoch {
             return Err("Prevote epoch mismatch".into());
@@ -434,17 +443,16 @@ impl FinalityAggregator {
         // Vote is only ever treated as equivocation if it is itself validly
         // Signed. A garbage/forged signature is rejected here and never enters
         // The aggregate, guaranteeing that an honest subset can always finalize.
-        if let Some(ref snapshot) = self.validator_snapshot {
-            let entry = snapshot
-                .find_validator(&vote.voter_id)
-                .ok_or("Voter not in validator set")?;
-            verify_bls_sig(
-                &entry.bls_public_key,
-                &vote.signing_message(),
-                &vote.sig_bls,
-            )
-            .map_err(|e| format!("Invalid prevote signature: {e}"))?;
-        }
+        let entry = self
+            .validator_snapshot
+            .find_validator(&vote.voter_id)
+            .ok_or("Voter not in validator set")?;
+        verify_bls_sig(
+            &entry.bls_public_key,
+            &vote.signing_message(),
+            &vote.sig_bls,
+        )
+        .map_err(|e| format!("Invalid prevote signature: {e}"))?;
 
         // Equivocation detection . A validly-signed vote for a
         // DIFFERENT checkpoint hash than one already seen from this voter is a
@@ -479,17 +487,16 @@ impl FinalityAggregator {
         }
 
         // Membership + ingest-time BLS signature verification .
-        if let Some(ref snapshot) = self.validator_snapshot {
-            let entry = snapshot
-                .find_validator(&vote.voter_id)
-                .ok_or("Voter not in validator set")?;
-            verify_bls_sig(
-                &entry.bls_public_key,
-                &vote.signing_message(),
-                &vote.sig_bls,
-            )
-            .map_err(|e| format!("Invalid precommit signature: {e}"))?;
-        }
+        let entry = self
+            .validator_snapshot
+            .find_validator(&vote.voter_id)
+            .ok_or("Voter not in validator set")?;
+        verify_bls_sig(
+            &entry.bls_public_key,
+            &vote.signing_message(),
+            &vote.sig_bls,
+        )
+        .map_err(|e| format!("Invalid precommit signature: {e}"))?;
 
         // Equivocation detection .
         self.detect_precommit_equivocation(&vote);
@@ -585,38 +592,36 @@ impl FinalityAggregator {
     }
 
     fn check_prevote_quorum(&mut self) {
-        if let Some(ref snapshot) = self.validator_snapshot {
-            let mut voted_stake: u64 = 0;
-            let mut voted_count: usize = 0;
-            for validator in self
-                .prevotes
-                .keys()
-                .filter_map(|addr| snapshot.find_validator(addr))
-            {
-                voted_stake = voted_stake.saturating_add(validator.stake);
-                voted_count += 1;
-            }
-            if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
-                self.prevote_quorum_reached = true;
-            }
+        let snapshot = &self.validator_snapshot;
+        let mut voted_stake: u64 = 0;
+        let mut voted_count: usize = 0;
+        for validator in self
+            .prevotes
+            .keys()
+            .filter_map(|addr| snapshot.find_validator(addr))
+        {
+            voted_stake = voted_stake.saturating_add(validator.stake);
+            voted_count += 1;
+        }
+        if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
+            self.prevote_quorum_reached = true;
         }
     }
 
     fn check_precommit_quorum(&mut self) {
-        if let Some(ref snapshot) = self.validator_snapshot {
-            let mut voted_stake: u64 = 0;
-            let mut voted_count: usize = 0;
-            for validator in self
-                .precommits
-                .keys()
-                .filter_map(|addr| snapshot.find_validator(addr))
-            {
-                voted_stake = voted_stake.saturating_add(validator.stake);
-                voted_count += 1;
-            }
-            if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
-                self.precommit_quorum_reached = true;
-            }
+        let snapshot = &self.validator_snapshot;
+        let mut voted_stake: u64 = 0;
+        let mut voted_count: usize = 0;
+        for validator in self
+            .precommits
+            .keys()
+            .filter_map(|addr| snapshot.find_validator(addr))
+        {
+            voted_stake = voted_stake.saturating_add(validator.stake);
+            voted_count += 1;
+        }
+        if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
+            self.precommit_quorum_reached = true;
         }
     }
 
@@ -625,24 +630,27 @@ impl FinalityAggregator {
             return None;
         }
 
-        let snapshot = self.validator_snapshot.as_ref()?;
+        let snapshot = &self.validator_snapshot;
 
         let mut bitmap = vec![0u8; snapshot.validators.len().div_ceil(8)];
         let mut agg_sig = G1Projective::identity();
 
         for (addr, precommit) in &self.precommits {
             if let Some(idx) = snapshot.validator_index(addr) {
+                // The bit is set only once the signature is in the aggregate:
+                // a claimed signer whose contribution is missing makes the
+                // pairing fail with no diagnostic. Every recorded precommit
+                // was verified at ingest, so neither branch fires in
+                // practice, but the certificate must stay consistent if it
+                // ever does.
+                let Ok(sig_bytes) = <[u8; 48]>::try_from(precommit.sig_bls.as_slice()) else {
+                    continue;
+                };
+                let Some(sig_affine) = G1Affine::from_compressed(&sig_bytes).into_option() else {
+                    continue;
+                };
+                agg_sig += G1Projective::from(sig_affine);
                 bitmap[idx / 8] |= 1 << (idx % 8);
-
-                let sig_bytes: [u8; 48] = precommit
-                    .sig_bls
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "Invalid precommit signature length".to_string())
-                    .ok()?;
-                if let Some(sig_affine) = G1Affine::from_compressed(&sig_bytes).into_option() {
-                    agg_sig += G1Projective::from(sig_affine);
-                }
             }
         }
 
@@ -689,13 +697,34 @@ impl FinalityCert {
             return Err("Epoch mismatch".into());
         }
 
+        // The bitmap has one canonical shape per snapshot. Padding bytes or
+        // out-of-range bits do not change the pairing, but they make
+        // byte-distinct certificates for one checkpoint, and `FinalityCert`
+        // is compared and stored by value.
+        let expected_bitmap_len = snapshot.validators.len().div_ceil(8);
+        if self.bitmap.len() != expected_bitmap_len {
+            return Err(format!(
+                "Non-canonical finality certificate bitmap length: {} bytes, expected {}",
+                self.bitmap.len(),
+                expected_bitmap_len
+            ));
+        }
+        let trailing_bits = snapshot.validators.len() % 8;
+        if trailing_bits != 0 {
+            if let Some(last) = self.bitmap.last() {
+                if last >> trailing_bits != 0 {
+                    return Err("Finality certificate bitmap has out-of-range signer bits".into());
+                }
+            }
+        }
+
         let mut voted_stake: u64 = 0;
         let mut voted_count: usize = 0;
         let mut signers_pks = Vec::new();
         for (idx, validator) in snapshot.validators.iter().enumerate() {
             let byte_idx = idx / 8;
             let bit_idx = idx % 8;
-            if byte_idx < self.bitmap.len() && (self.bitmap[byte_idx] & (1 << bit_idx)) != 0 {
+            if (self.bitmap[byte_idx] & (1 << bit_idx)) != 0 {
                 voted_stake = voted_stake.saturating_add(validator.stake);
                 voted_count += 1;
 
@@ -1013,8 +1042,7 @@ mod tests {
     #[test]
     fn test_aggregator_prevote_flow() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snap.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         for i in 0..3 {
             let vote = signed_prevote(&snap, &sks, i, 1, 10, "cp_hash");
@@ -1026,8 +1054,7 @@ mod tests {
     #[test]
     fn test_aggregator_rejects_duplicate() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snap.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         let vote = signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash");
         agg.add_prevote(vote.clone()).unwrap();
@@ -1037,8 +1064,7 @@ mod tests {
     #[test]
     fn test_aggregator_rejects_wrong_epoch() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snap.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         // Wrong epoch: rejected before signature check.
         let vote = signed_prevote(&snap, &sks, 0, 99, 10, "cp_hash");
@@ -1050,8 +1076,7 @@ mod tests {
         // (Option A) a garbage signature is rejected AT INGEST and
         // Never enters the aggregate.
         let (snap, _) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snap.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         let vote = Prevote {
             epoch: 1,
@@ -1070,8 +1095,7 @@ mod tests {
     #[test]
     fn test_precommit_requires_prevote_quorum() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snap.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         // No prevote quorum yet: rejected before signature check.
         let pc = Precommit {
@@ -1087,8 +1111,7 @@ mod tests {
     #[test]
     fn test_full_finality_flow() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snap.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         for i in 0..3 {
             let vote = signed_prevote(&snap, &sks, i, 1, 10, "cp_hash");
@@ -1127,6 +1150,29 @@ mod tests {
         assert_eq!(cert.signer_count(4), 3);
 
         assert!(cert.verify(&snap).is_ok());
+
+        // The same signers with a padded bitmap or an out-of-range bit are a
+        // different byte string for the same checkpoint; refused as
+        // non-canonical rather than accepted as a second valid certificate.
+        let mut padded = cert.clone();
+        padded.bitmap.push(0);
+        assert!(padded.verify(&snap).unwrap_err().contains("bitmap length"));
+        let mut stray = cert.clone();
+        stray.bitmap[0] |= 1 << 4; // validator index 4 does not exist in a set of 4
+        assert!(stray.verify(&snap).unwrap_err().contains("out-of-range"));
+    }
+
+    #[test]
+    fn quorum_stake_saturates_instead_of_wrapping() {
+        let (mut snap, _) = make_snapshot_with_keys(2, u64::MAX / 2 + 1);
+        snap.total_stake = snap
+            .validators
+            .iter()
+            .fold(0u64, |acc, v| acc.saturating_add(v.stake));
+        assert_eq!(snap.total_stake, u64::MAX);
+        // A wrapped product would make the threshold tiny; saturating keeps
+        // it at the top of the range so no partial stake can pass it.
+        assert_eq!(snap.quorum_stake(), u64::MAX);
     }
 
     #[test]
