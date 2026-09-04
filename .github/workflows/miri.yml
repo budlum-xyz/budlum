@@ -47,6 +47,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Miri - crypto crate
         run: |
+          set -euo pipefail
           echo "Running Miri on crypto module..."
           cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- crypto 2>&1 | tee /tmp/miri-crypto.txt
           echo "Miri crypto: $(grep -c 'test result: ok' /tmp/miri-crypto.txt || echo '0') suites passed"
@@ -59,6 +60,7 @@ jobs:
         # graph, which is not the same selection.
         working-directory: budzero
         run: |
+          set -euo pipefail
           echo "Running Miri on bud-vm module..."
           cargo +nightly-2026-07-19 miri test -p bud-vm --lib 2>&1 | tee /tmp/miri-budvm.txt
           echo "Miri bud-vm: $(grep -c 'test result: ok' /tmp/miri-budvm.txt || echo '0') suites passed"
@@ -66,6 +68,7 @@ jobs:
           MIRIFLAGS: "-Zmiri-disable-isolation"
       - name: Miri - storage module
         run: |
+          set -euo pipefail
           echo "Running Miri on storage module..."
           cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage 2>&1 | tee /tmp/miri-storage.txt
           echo "Miri storage: $(grep -c 'test result: ok' /tmp/miri-storage.txt || echo '0') suites passed"
