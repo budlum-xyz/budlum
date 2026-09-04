@@ -197,6 +197,16 @@ mod tests {
                 "contract C { storage { m: Map<u64,Nope>, } pub fn main() { } }",
                 "Undefined struct type 'Nope'",
             ),
+            // The key type is checked, not only the value type: a comparison
+            // is a bool, and a Map<u64,u64> is keyed by u64.
+            (
+                "contract C { storage { m: Map<u64,u64>, } pub fn main() { let x = m[1 == 1]; } }",
+                "keyed by u64, got bool",
+            ),
+            (
+                "contract C { storage { m: Map<u64,u64>, } pub fn main() { m[2 < 3] = 1; } }",
+                "keyed by u64, got bool",
+            ),
         ] {
             match compile(source, IsaProfile::Production) {
                 Ok(_) => panic!("compiled although it should be refused: {source}"),
