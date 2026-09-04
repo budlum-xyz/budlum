@@ -158,7 +158,7 @@ State after stabilization:
 
 * `cargo check --workspace --all-targets` clean.
 * `cargo clippy --workspace --all-targets -- -D warnings` clean.
-* `cargo test --workspace` -> 44 tests, 0 failures.
+* `cargo test --workspace` -> 0 failures (the count at the time of writing is not kept here; CI measures the current one).
 * The `bud-proof` tests produce and verify proofs over the Goldilocks field with 29 unit tests + 1 integration test.
 * The proof byte string is transportable through `postcard` (bounded deserialization, DoS protected).
 * The folder skeleton for the main trace and the auxiliary trace binds to the same AIR.
