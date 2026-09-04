@@ -45,7 +45,7 @@ ourselves keeps the origin at `bud://<name>`.
      "viewsource",
 --- /dev/null
 +++ b/netwerk/protocol/bud/moz.build
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,23 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -135,7 +135,7 @@ ourselves keeps the origin at `bud://<name>`.
 +#endif  // mozilla_net_BudProtocolHandler_h
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudProtocolHandler.cpp
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,56 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -194,7 +194,7 @@ ourselves keeps the origin at `bud://<name>`.
 +}  // namespace mozilla
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudChannel.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,58 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -255,7 +255,7 @@ ourselves keeps the origin at `bud://<name>`.
 +#endif  // mozilla_net_BudChannel_h
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudChannel.cpp
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,54 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
