@@ -18,7 +18,7 @@ has been corrected.
 
 --- a/browser/components/urlbar/UrlbarInput.sys.mjs
 +++ b/browser/components/urlbar/UrlbarInput.sys.mjs
-@@ -1892,6 +1892,20 @@ export class UrlbarInput {
+@@ -1892,6 +1892,21 @@ export class UrlbarInput {
        return uri.spec;
      }
  
@@ -52,7 +52,7 @@ has been corrected.
  export var UrlbarUtils = {
 --- /dev/null
 +++ b/browser/components/urlbar/BudScan.sys.mjs
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,64 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
