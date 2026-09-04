@@ -633,22 +633,27 @@ impl AiRegistry {
     /// Recently-expired data for a configurable retention window.
     ///
     /// Prunable items:
-    /// - Requests whose effective deadline has passed + retention_blocks
+    /// - Requests whose effective deadline has passed + retention_blocks,
+    ///   reclaimed and cancelled ones included
     /// - Results associated with pruned requests
     /// - Outcomes that have been finalized + retention_blocks
-    /// - Reclaimed fee records older than retention_blocks
+    /// - Reclaimed and cancelled markers whose request row is gone
     ///
     /// Returns the number of items pruned.
     pub fn prune_expired(&mut self, current_block: u64, retention_blocks: u64) -> usize {
         let mut pruned = 0;
 
-        // Prune expired, unfinalized requests (and their results)
+        // Prune expired, unfinalized requests (and their results). A
+        // reclaimed or cancelled request is terminal: nothing can act on it
+        // again, so it retires on the same schedule. Reclaimed rows used to
+        // be kept, and their markers were swept only once the row was gone,
+        // so both stayed in `state_root` forever.
         let expired_request_ids: Vec<AiRequestId> = self
             .requests
             .iter()
             .filter(|(id, req)| {
-                if self.outcomes.contains_key(id) || self.reclaimed_fees.contains(id) {
-                    return false; // Don't prune finalized or reclaimed requests
+                if self.outcomes.contains_key(id) {
+                    return false; // finalized requests retire with their outcome
                 }
                 // Check if deadline + retention has passed
                 let model = self.models.get(&req.model_id);
@@ -670,24 +675,15 @@ impl AiRegistry {
             pruned += 1;
         }
 
-        // Prune reclaimed fee records older than retention
-        let reclaimed_to_prune: Vec<AiRequestId> = self
-            .reclaimed_fees
-            .iter()
-            .filter(|id| {
-                // Find the request to check its deadline
-                // If request was already pruned, use the ID itself
-                // Since we can't determine exact time without the request,
-                // We prune reclaimed fees whose requests have been pruned
-                !self.requests.contains_key(id)
-            })
-            .cloned()
-            .collect();
-
-        for id in &reclaimed_to_prune {
-            self.reclaimed_fees.remove(id);
-            pruned += 1;
-        }
+        // The terminal markers guard the refund paths of a request row.
+        // Once the row is gone every path refuses with "not found", so a
+        // marker without a row is dead weight in `state_root`.
+        let requests = &self.requests;
+        let before = self.reclaimed_fees.len() + self.cancelled_requests.len();
+        self.reclaimed_fees.retain(|id| requests.contains_key(id));
+        self.cancelled_requests
+            .retain(|id| requests.contains_key(id));
+        pruned += before - (self.reclaimed_fees.len() + self.cancelled_requests.len());
 
         // Prune finalized outcomes older than retention
         let prunable_outcomes: Vec<AiRequestId> = self

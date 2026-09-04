@@ -1634,6 +1634,80 @@ mod tests {
         assert!(!registry.requests.contains_key(&req_id));
     }
 
+    /// A reclaimed request and its marker used to stay in the registry
+    /// forever: the row was excluded from pruning, and the marker was swept
+    /// only once the row was gone. Both now retire on the request's own
+    /// schedule, and the refund paths still refuse the retired request.
+    #[test]
+    fn test_p5_prune_retires_reclaimed_and_cancelled_requests() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+        let request = |input: &[u8]| {
+            let mut req = AiInferenceRequest {
+                request_id: AiRequestId::default(),
+                requester: owner,
+                model_id,
+                input_commitment: [2u8; 32],
+                input_ref: BoundedBytes::try_new(input.to_vec()).unwrap(),
+                max_fee: 100,
+                callback: None,
+                submitted_at_block: 10,
+                deadline_block: 110,
+                effort: crate::ai_inference::effort::EffortTier::default(),
+                perception: None,
+            };
+            req.request_id = req.calculate_id();
+            req
+        };
+        let reclaimed = registry.submit_request(request(b"reclaimed"), 5).unwrap();
+        let cancelled = registry.submit_request(request(b"cancelled"), 5).unwrap();
+        registry
+            .reclaim_fee(&reclaimed, 200)
+            .expect("past the deadline");
+        registry
+            .cancel_request(&cancelled, &owner, 20)
+            .expect("the requester cancels");
+
+        // Within retention everything stays, markers included.
+        assert_eq!(registry.prune_expired(200, 100), 0);
+        assert!(registry.reclaimed_fees.contains(&reclaimed));
+        assert!(registry.cancelled_requests.contains(&cancelled));
+
+        // Past retention the rows and their markers retire together.
+        assert_eq!(registry.prune_expired(300, 100), 4);
+        assert!(registry.requests.is_empty());
+        assert!(registry.reclaimed_fees.is_empty());
+        assert!(registry.cancelled_requests.is_empty());
+        // A retired request cannot be refunded again through either path.
+        assert!(registry.reclaim_fee(&reclaimed, 400).is_err());
+        assert!(registry.reclaim_fee(&cancelled, 400).is_err());
+        assert!(registry.cancel_request(&reclaimed, &owner, 400).is_err());
+    }
+
     #[test]
     fn test_p5_max_fee_zero_rejected() {
         let mut registry = AiRegistry::new();
