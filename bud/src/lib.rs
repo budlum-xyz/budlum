@@ -101,7 +101,7 @@ pub use bud_fixed_point::{
 pub use bud_format::{
     BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus, BUD_MAGIC, BUD_VERSION,
 };
-pub use bud_format_bft::{BftRatioConsensus, RatioFinalityCert, RatioVote};
+pub use bud_format_bft::{BftRatioConsensus, RatioFinalityCert, RatioVote, ValidatorSet};
 pub use bud_format_block::{PactChallengeInBlock, RegenerationBlock, BLOCK_MAGIC};
 pub use bud_format_catalog::{by_name, catalog_detect, catalog_size, FormatCatalogEntry, CATALOG};
 pub use bud_format_checkpoint::Checkpoint;

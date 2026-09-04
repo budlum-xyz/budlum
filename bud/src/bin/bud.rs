@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus};
-use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote};
+use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote, ValidatorSet};
 use bud_core::bud_format_checkpoint::Checkpoint;
 use bud_core::bud_format_container::{BudV2File, BudV2Header, ChunkCodec, MultiHash};
 use bud_core::bud_format_pact::PactRecord;
@@ -394,30 +394,37 @@ fn run(cli: Cli) -> Result<String, String> {
             validator,
             n,
         } => {
-            if n < 1 {
-                return Err("BFT: n must be >= 1".into());
+            if !(1..=255).contains(&n) {
+                return Err("BFT: n must be between 1 and 255 (one derived key per validator)".into());
             }
-            // votes are REALLY signed (each validator with its own ed25519 key)
+            // A demonstration set of n validators with derived ed25519 keys;
+            // the votes are really signed, and the certificate is checked
+            // against that registered set, not against the keys it carries.
             use ed25519_dalek::SigningKey;
-            let votes: Vec<RatioVote> = (0..n)
-                .map(|i| {
-                    let sk = SigningKey::from_bytes(&[(i as u8).wrapping_add(1); 32]);
-                    let vk = sk.verifying_key().to_bytes();
-                    let v = RatioVote {
-                        validator_id: format!("{validator}-{i}"),
+            let keys: Vec<SigningKey> = (0..n)
+                .map(|i| SigningKey::from_bytes(&[(i as u8).wrapping_add(1); 32]))
+                .collect();
+            let validators =
+                ValidatorSet::new(keys.iter().map(|k| k.verifying_key().to_bytes()).collect())
+                    .map_err(|e| format!("BFT validators: {e}"))?;
+            let votes: Vec<RatioVote> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, sk)| {
+                    let id = format!("{validator}-{i}");
+                    RatioVote {
+                        signature: RatioVote::sign(sk, &id, pipe_id, ratio),
+                        validator_id: id,
                         pipe_id,
                         ratio,
-                        public_key: vk,
-                        signature: vec![],
-                    };
-                    let mut v = v;
-                    v.signature = RatioVote::sign(&sk, pipe_id, ratio);
-                    v
+                        public_key: sk.verifying_key().to_bytes(),
+                    }
                 })
                 .collect();
-            let cert = BftRatioConsensus::finalize_ratio(votes, n)
+            let cert = BftRatioConsensus::finalize_ratio(votes, &validators)
                 .map_err(|e| format!("BFT finalize: {e}"))?;
-            cert.verify(n).map_err(|e| format!("BFT verify: {e}"))?;
+            cert.verify(&validators)
+                .map_err(|e| format!("BFT verify: {e}"))?;
             Ok(format!(
                 "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (2n/3 majority)"
             ))
