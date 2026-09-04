@@ -103,7 +103,16 @@ impl TenantMultifileStore {
     /// (lossless: base + delta = the new version). A simple block-based delta:
     /// identical blocks become a reference, differing blocks are stored in
     /// full.
-    pub fn add_delta(&mut self, prev: &[u8], next: &[u8], chunk_size: usize) -> Vec<u8> {
+    ///
+    /// A changed block is written with its own length (u32 LE) so that a
+    /// trailing partial block round-trips; the reader used to assume every
+    /// changed block was a full `chunk_size`, and a changed tail made
+    /// `apply_delta` fail. `None` when `chunk_size` is zero or above
+    /// `MAX_CHUNK` (`slice::chunks` panics on zero).
+    pub fn add_delta(&mut self, prev: &[u8], next: &[u8], chunk_size: usize) -> Option<Vec<u8>> {
+        if chunk_size == 0 || chunk_size > MAX_CHUNK {
+            return None;
+        }
         let mut delta = Vec::new();
         let prev_chunks: Vec<&[u8]> = prev.chunks(chunk_size).collect();
         let next_chunks: Vec<&[u8]> = next.chunks(chunk_size).collect();
@@ -113,16 +122,20 @@ impl TenantMultifileStore {
                 // reference: a 1 byte marker, no cid - unchanged
                 delta.push(0x00);
             } else {
-                // changed: the full block
+                // changed: the marker, the block length, the block
                 delta.push(0x01);
+                delta.extend_from_slice(&(nc.len() as u32).to_le_bytes());
                 delta.extend_from_slice(nc);
             }
         }
-        delta
+        Some(delta)
     }
 
     /// Apply a delta: base + delta = the new version (the losslessness proof).
     pub fn apply_delta(&self, prev: &[u8], delta: &[u8], chunk_size: usize) -> Option<Vec<u8>> {
+        if chunk_size == 0 || chunk_size > MAX_CHUNK {
+            return None;
+        }
         let prev_chunks: Vec<&[u8]> = prev.chunks(chunk_size).collect();
         let mut out = Vec::new();
         let mut pos = 0usize;
@@ -136,11 +149,13 @@ impl TenantMultifileStore {
                 let p = prev_chunks.get(i)?;
                 out.extend_from_slice(p);
             } else if flag == 0x01 {
-                if delta.len() < pos + chunk_size {
+                let len = u32::from_le_bytes(delta.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if len == 0 || len > chunk_size {
                     return None;
                 }
-                out.extend_from_slice(&delta[pos..pos + chunk_size]);
-                pos += chunk_size;
+                out.extend_from_slice(delta.get(pos..pos + len)?);
+                pos += len;
             } else {
                 return None; // corrupt delta
             }
@@ -284,8 +299,11 @@ mod tests {
             }
         }
         let mut store = TenantMultifileStore::new();
-        let delta = store.add_delta(&base, &next, DEFAULT_CHUNK);
-        // delta = a 1 byte marker per block plus the changed blocks
+        let delta = store
+            .add_delta(&base, &next, DEFAULT_CHUNK)
+            .expect("chunk size");
+        // delta = a 1 byte marker per block plus the changed blocks, each with
+        // its 4 byte length
         let blocks = base.len().div_ceil(DEFAULT_CHUNK);
         assert!(
             delta.len() < base.len() / 50,
@@ -295,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             delta.len(),
-            blocks + 5 * DEFAULT_CHUNK,
+            blocks + 5 * (4 + DEFAULT_CHUNK),
             "5 changed blocks in full"
         );
         // apply: base + delta = next (lossless)
@@ -303,6 +321,30 @@ mod tests {
             .apply_delta(&base, &delta, DEFAULT_CHUNK)
             .expect("apply");
         assert_eq!(restored, next, "the delta is lossless");
+    }
+
+    /// A change inside the trailing partial block. The reader used to demand
+    /// a full `chunk_size` for every changed block, so this delta could be
+    /// written but never applied. A zero chunk size is refused, not a panic.
+    #[test]
+    fn a_changed_trailing_partial_block_round_trips() {
+        let base = b"0123456789".to_vec(); // 4 + 4 + 2 with chunk 4
+        let mut next = base.clone();
+        next[9] = b'X';
+        let store = TenantMultifileStore::new();
+        let mut s2 = TenantMultifileStore::new();
+        let delta = s2.add_delta(&base, &next, 4).expect("chunk size");
+        assert_eq!(store.apply_delta(&base, &delta, 4).expect("applies"), next);
+        // A longer new version whose tail is also partial.
+        let longer = b"0123456789abc".to_vec();
+        let delta = s2.add_delta(&base, &longer, 4).expect("chunk size");
+        assert_eq!(
+            store.apply_delta(&base, &delta, 4).expect("applies"),
+            longer
+        );
+        assert!(s2.add_delta(&base, &next, 0).is_none());
+        assert!(store.apply_delta(&base, &delta, 0).is_none());
+        assert!(store.apply_delta(&base, &delta, MAX_CHUNK + 1).is_none());
     }
 
     #[test]
