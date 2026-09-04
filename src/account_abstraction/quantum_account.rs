@@ -301,7 +301,7 @@ pub use crate::storage::pact_binding::{Pact, PactRegistry};
 
 /// One guardian's vote on a recovery proposal: the guardian's ML-DSA-87
 /// public key, the digest of the proposal it approves, and its signature
-/// over that digest under [`GUARDIAN_VOTE_DOMAIN_V1`].
+/// over that digest under `GUARDIAN_VOTE_DOMAIN_V1`.
 #[derive(Debug, Clone)]
 pub struct GuardianVote {
     pub guardian_id: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
@@ -310,12 +310,12 @@ pub struct GuardianVote {
 }
 
 /// The bytes a guardian signs: the domain tag, then the proposal digest.
-pub const GUARDIAN_VOTE_DOMAIN_V1: &[u8] = b"BUDLUM_GUARDIAN_VOTE_V1";
+const GUARDIAN_VOTE_DOMAIN_V1: &[u8] = b"BUDLUM_GUARDIAN_VOTE_V1";
 
 impl GuardianVote {
-    /// The message a vote's signature covers.
-    #[must_use]
-    pub fn signed_message(proposal_digest: &[u8; 32]) -> Vec<u8> {
+    /// The message a vote's signature covers. Private until a signer in
+    /// this tree produces votes; the finality check is the only reader.
+    fn signed_message(proposal_digest: &[u8; 32]) -> Vec<u8> {
         let mut m = Vec::with_capacity(GUARDIAN_VOTE_DOMAIN_V1.len() + 32);
         m.extend_from_slice(GUARDIAN_VOTE_DOMAIN_V1);
         m.extend_from_slice(proposal_digest);
@@ -503,17 +503,31 @@ mod tests {
         assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 3).is_err());
     }
 
+    /// Vote records filled with bytes reach neither the threshold nor the
+    /// quorum: a vote is counted only after its signature verifies, and
+    /// these never do. Before the check, four such records finalised any
+    /// recovery on a four-guardian account.
     #[test]
-    fn guardian_finality_needs_both_the_threshold_and_two_thirds() {
+    fn unsigned_vote_records_never_finalise() {
+        let guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]> =
+            (1u8..=4).map(|id| [id; ML_DSA_87_PUBLIC_KEY_LEN]).collect();
         let vote = |id: u8| GuardianVote {
             guardian_id: [id; ML_DSA_87_PUBLIC_KEY_LEN],
             proposal_digest: [0u8; 32],
             signature: SIG,
         };
-        assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2), vote(3)], 4, 2).is_ok());
-        // Passes the threshold but not the 2n/3 quorum: 2 votes, quorum is 3 for n=4.
-        assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2)], 4, 2).is_err());
-        assert!(BftGuardianFinality::finalize(vec![vote(1)], 4, 2).is_err());
+        let proposal = [0u8; 32];
+        for count in 1..=4u8 {
+            let votes: Vec<GuardianVote> = (1..=count).map(vote).collect();
+            assert!(
+                BftGuardianFinality::finalize(votes, &guardians, 2, &proposal).is_err(),
+                "{count} unsigned records must not finalise"
+            );
+        }
+        // the guardian set and threshold are checked before any vote
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], &[], 1, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], &guardians, 0, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], &guardians, 5, &proposal).is_err());
     }
 
     /// A seed cannot be derived from a short input.
