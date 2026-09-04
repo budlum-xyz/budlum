@@ -154,8 +154,15 @@ impl TenantMultifileStore {
                 if len == 0 || len > chunk_size {
                     return None;
                 }
-                out.extend_from_slice(delta.get(pos..pos + len)?);
-                pos += len;
+                let end = pos.checked_add(len)?;
+                // Only the last block of a file may be short. A short block
+                // followed by another frame used to be accepted, and the
+                // output then carried the next chunks at the wrong offsets.
+                if len < chunk_size && end != delta.len() {
+                    return None;
+                }
+                out.extend_from_slice(delta.get(pos..end)?);
+                pos = end;
             } else {
                 return None; // corrupt delta
             }
@@ -345,6 +352,29 @@ mod tests {
         assert!(s2.add_delta(&base, &next, 0).is_none());
         assert!(store.apply_delta(&base, &delta, 0).is_none());
         assert!(store.apply_delta(&base, &delta, MAX_CHUNK + 1).is_none());
+    }
+
+    /// A partial changed block is valid only at the end of the delta. The
+    /// frame `01 01 X 00` (a one-byte block, then a reference) restored
+    /// `Xefgh` instead of being refused.
+    #[test]
+    fn a_short_block_before_another_frame_is_refused() {
+        let store = TenantMultifileStore::new();
+        let prev = b"abcdefgh";
+        let short_then_reference = [0x01, 0x01, 0, 0, 0, b'X', 0x00];
+        assert!(store.apply_delta(prev, &short_then_reference, 4).is_none());
+        let short_then_changed = [
+            0x01, 0x01, 0, 0, 0, b'X', 0x01, 0x04, 0, 0, 0, b'w', b'x', b'y', b'z',
+        ];
+        assert!(store.apply_delta(prev, &short_then_changed, 4).is_none());
+        // The same short block at the end is a legitimate final chunk.
+        let reference_then_short = [0x00, 0x01, 0x01, 0, 0, 0, b'X'];
+        assert_eq!(
+            store
+                .apply_delta(prev, &reference_then_short, 4)
+                .expect("valid tail"),
+            b"abcdX"
+        );
     }
 
     #[test]

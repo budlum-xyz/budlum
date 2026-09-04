@@ -210,6 +210,10 @@ struct KeyState {
 #[derive(Debug, Clone)]
 pub struct SecretRedactor;
 
+/// GitHub's token prefixes: the classic five and the fine-grained personal
+/// access token, which was missing from the list and passed through.
+const GITHUB_TOKEN_PREFIXES: [&str; 6] = ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
+
 impl SecretRedactor {
     /// Replace every secret token in `content` with `[REDACTED]` and name
     /// the kinds that were found, in order of first appearance.
@@ -314,9 +318,7 @@ impl SecretRedactor {
             return Some("sk_key");
         }
         if token.len() >= 22
-            && ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
-                .iter()
-                .any(|p| token.starts_with(p))
+            && GITHUB_TOKEN_PREFIXES.iter().any(|p| token.starts_with(p))
             && alnum_dash(token)
         {
             return Some("github_token");
@@ -327,8 +329,9 @@ impl SecretRedactor {
     /// The token without the prefix that names its kind: what is left of
     /// `AKIAIOSFODNN7EXAMPLE` when only `AKIA` was struck out.
     fn token_body(token: &str) -> &str {
-        ["AKIA", "sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
+        ["AKIA", "sk-"]
             .iter()
+            .chain(GITHUB_TOKEN_PREFIXES.iter())
             .find_map(|prefix| token.strip_prefix(prefix))
             .unwrap_or(token)
     }
@@ -491,6 +494,22 @@ mod tests {
         assert!(redacted.contains("my key [REDACTED] and [REDACTED], api_key=\"[REDACTED]\" done"));
         assert_eq!(kinds, vec!["aws_access_key", "sk_key", "api_key"]);
         assert!(RevolutionaryGates::k_bud_secret_redact(&text, &redacted).is_ok());
+    }
+
+    /// A fine-grained GitHub token (`github_pat_...`) is a secret like the
+    /// classic `ghp_` one; the prefix was missing and the token survived.
+    #[test]
+    fn secret_redact_strips_fine_grained_github_tokens() {
+        let pat = "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ";
+        let classic = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let text = format!("token {pat} then {classic} end");
+        let (redacted, kinds) = SecretRedactor::redact(&text);
+        assert_eq!(redacted, "token [REDACTED] then [REDACTED] end");
+        assert_eq!(kinds, vec!["github_token"], "kinds are reported once each");
+        assert!(RevolutionaryGates::k_bud_secret_redact(&text, &redacted).is_ok());
+        // The gate sees the body of a fine-grained token that lost only its prefix.
+        let body_kept = text.replace("github_pat_", "[REDACTED]");
+        assert!(RevolutionaryGates::k_bud_secret_redact(&text, &body_kept).is_err());
     }
 
     /// The gate refuses the redaction the first version produced: marker
