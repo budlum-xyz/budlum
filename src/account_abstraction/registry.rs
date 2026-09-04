@@ -31,12 +31,18 @@ pub enum QuantumAccountRegistryError {
     InvalidAccount { address: [u8; 32], reason: String },
     /// The same address was registered a second time.
     AlreadyRegistered { address: [u8; 32] },
-    /// Bilinmeyen adres.
+    /// The address is not in the registry.
     NotRegistered { address: [u8; 32] },
     /// The address does not match the address derived from the account's public key.
     AddressDoesNotMatchKey {
         declared: [u8; 32],
         derived: [u8; 32],
+    },
+    /// An update tried to change a field that is bound at registration: the
+    /// address, the public key, or the pact root.
+    BoundFieldChanged {
+        address: [u8; 32],
+        field: &'static str,
     },
     /// The account's `pact_root` does not match the root of the presented pact set.
     PactRootDoesNotMatchRegistry {
@@ -75,6 +81,11 @@ impl std::fmt::Display for QuantumAccountRegistryError {
                 "declared address {} does not match the address derived from the public key {}",
                 hex::encode(declared),
                 hex::encode(derived)
+            ),
+            Self::BoundFieldChanged { address, field } => write!(
+                f,
+                "quantum account {} update changes its {field}, which is bound at registration",
+                hex::encode(address)
             ),
             Self::PactRootDoesNotMatchRegistry { declared, computed } => write!(
                 f,
@@ -145,7 +156,6 @@ impl QuantumAccountRegistry {
     /// not a binding. The same class existed in `ProofFixture::bind_verified`: a field
     /// being non-zero does not mean there is something
     /// behind it.
-    /// gelmez.
     ///
     /// There are two gates. The presented registry's own root must be recomputable from the
     /// pacts inside it, **and** the account's `pact_root` must equal that
@@ -200,10 +210,18 @@ impl QuantumAccountRegistry {
     /// must not be left to every writing path being careful on its
     /// own.
     ///
+    /// Three fields are bound at registration and stay bound here: the
+    /// address (the map key), the public key it was derived from, and the
+    /// pact root that `register_with_pacts` checked against a real pact set.
+    /// `validate_all` looks at thresholds and storage, not at those
+    /// bindings, so without this check an update could move an account onto
+    /// another key or name a pact set nobody presented. A pact root changes
+    /// through a registration path that sees the new pact set, not here.
+    ///
     /// # Errors
     ///
-    /// Errors if the address is not registered or the change makes the account
-    /// invalid.
+    /// Errors if the address is not registered, the change touches a bound
+    /// field, or the change makes the account invalid.
     pub fn update<F>(
         &mut self,
         address: &[u8; 32],
@@ -218,6 +236,20 @@ impl QuantumAccountRegistry {
             .ok_or(QuantumAccountRegistryError::NotRegistered { address: *address })?;
         let mut candidate = current.clone();
         change(&mut candidate);
+        let bound = [
+            ("address", candidate.address != current.address),
+            (
+                "public key",
+                candidate.pq_public_key != current.pq_public_key,
+            ),
+            ("pact root", candidate.pact_root != current.pact_root),
+        ];
+        if let Some((field, _)) = bound.iter().find(|(_, changed)| *changed) {
+            return Err(QuantumAccountRegistryError::BoundFieldChanged {
+                address: *address,
+                field,
+            });
+        }
         if let Err(reason) = candidate.validate_all() {
             return Err(QuantumAccountRegistryError::InvalidAccount {
                 address: *address,
@@ -278,7 +310,7 @@ mod tests {
         let mut registry = QuantumAccountRegistry::new();
         let err = registry
             .register(account_with(5, 3))
-            .expect_err("esik gardiyan sayisini asamaz");
+            .expect_err("the threshold cannot exceed the guardian count");
         assert!(matches!(
             err,
             QuantumAccountRegistryError::InvalidAccount { .. }
@@ -341,6 +373,53 @@ mod tests {
         );
     }
 
+    /// The key, the address and the pact root are fixed at registration. An
+    /// update that rewrites any of them is refused and the record is
+    /// untouched; a change to an unbound field on the same account goes
+    /// through, so the refusal is about the field and not the path.
+    #[test]
+    fn an_update_cannot_move_the_account_onto_another_key_or_pact_set() {
+        let mut registry = QuantumAccountRegistry::new();
+        let account = account_with(2, 3);
+        let address = account.address;
+        registry.register(account).expect("valid account");
+
+        let other_key = [9u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        let other_address = QuantumAccount::address_from_public_key(&other_key);
+        let attempts: [(&str, Box<dyn Fn(&mut QuantumAccount)>); 4] = [
+            ("public key", Box::new(move |a| a.pq_public_key = other_key)),
+            ("address", Box::new(move |a| a.address = other_address)),
+            (
+                "public key",
+                Box::new(move |a| {
+                    a.pq_public_key = other_key;
+                    a.address = other_address;
+                }),
+            ),
+            ("pact root", Box::new(|a| a.pact_root = [4u8; 32])),
+        ];
+        for (expected, change) in attempts {
+            let err = registry
+                .update(&address, |a| change(a))
+                .expect_err("a bound field must not change through update");
+            match err {
+                QuantumAccountRegistryError::BoundFieldChanged { field, .. } => {
+                    assert_eq!(field, expected);
+                }
+                other => panic!("expected BoundFieldChanged, got {other:?}"),
+            }
+        }
+        let stored = registry.get(&address).expect("still registered");
+        assert_eq!(stored.pq_public_key, [3u8; ML_DSA_87_PUBLIC_KEY_LEN]);
+        assert_eq!(stored.address, address);
+        assert_eq!(stored.pact_root, [0u8; 32]);
+
+        registry
+            .update(&address, |a| a.nonce += 1)
+            .expect("an unbound field still updates");
+        assert_eq!(registry.get(&address).map(|a| a.nonce), Some(1));
+    }
+
     /// An account carrying a real pact set must be registrable.
     #[test]
     fn an_account_bound_to_its_pact_set_registers() {
@@ -368,7 +447,7 @@ mod tests {
         let mut registry = QuantumAccountRegistry::new();
         registry
             .register_with_pacts(account, &pacts)
-            .expect("kok eslesiyor");
+            .expect("the root matches");
         assert!(registry.is_registered(&address));
     }
 
