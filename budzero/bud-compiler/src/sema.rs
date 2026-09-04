@@ -331,25 +331,52 @@ impl SemanticAnalyzer {
     /// The value type of the storage mapping `name`, or `Unknown` with an
     /// error when `name` is not a declared mapping. Reading `total[3]` from
     /// a `total: u64` field used to type as `u64` and pass.
-    fn mapping_value_type(&self, name: &str, errors: &mut Vec<CompileError>) -> Type {
+    /// The declared key and value types of a storage mapping, or two
+    /// `Unknown`s (with an error recorded) when `name` is not one.
+    fn mapping_types(&self, name: &str, errors: &mut Vec<CompileError>) -> (Type, Type) {
         match self.storage.get(name) {
-            Some(Type::Map(_, value)) => (**value).clone(),
+            Some(Type::Map(key, value)) => ((**key).clone(), (**value).clone()),
             Some(other) => {
                 errors.push(CompileError::SemanticError(format!(
                     "storage field '{}' is {}, not a mapping",
                     name,
                     other.name()
                 )));
-                Type::Unknown
+                (Type::Unknown, Type::Unknown)
             }
             None => {
                 errors.push(CompileError::SemanticError(format!(
                     "Undefined storage mapping '{}'",
                     name
                 )));
-                Type::Unknown
+                (Type::Unknown, Type::Unknown)
             }
         }
+    }
+
+    /// Type-check one `name[key]` access and return the value type. The key
+    /// is compared with the declared key type: `Map<K,V>` records both, and
+    /// for a while only `V` was checked, so a `Map<u64,u64>` indexed with a
+    /// `bool` or an `Address` compiled, the mistake the type was added to
+    /// catch.
+    fn mapping_access_type(
+        &mut self,
+        name: &str,
+        key: &Expr,
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<CompileError>,
+    ) -> Type {
+        let key_ty = self.analyze_expr(key, env, errors);
+        let (expected_key, value) = self.mapping_types(name, errors);
+        if expected_key != Type::Unknown && key_ty != Type::Unknown && key_ty != expected_key {
+            errors.push(CompileError::SemanticError(format!(
+                "mapping '{}' is keyed by {}, got {}",
+                name,
+                expected_key.name(),
+                key_ty.name()
+            )));
+        }
+        value
     }
 
     /// A value used as a condition (`if` / `while` / `constrain`) is
@@ -424,9 +451,8 @@ impl SemanticAnalyzer {
                 self.analyze_expr(expr, env, errors);
             }
             Stmt::MappingWrite(name, key, val) => {
-                self.analyze_expr(key, env, errors);
                 let val_ty = self.analyze_expr(val, env, errors);
-                let expected = self.mapping_value_type(name, errors);
+                let expected = self.mapping_access_type(name, key, env, errors);
                 if expected != Type::Unknown && val_ty != Type::Unknown && val_ty != expected {
                     errors.push(CompileError::SemanticError(format!(
                         "mapping '{}' holds {}, got {}",
@@ -536,10 +562,7 @@ impl SemanticAnalyzer {
                 }
             }
             Expr::StorageRead(_) => Type::U64,
-            Expr::MappingRead(name, key) => {
-                self.analyze_expr(key, env, errors);
-                self.mapping_value_type(name, errors)
-            }
+            Expr::MappingRead(name, key) => self.mapping_access_type(name, key, env, errors),
             Expr::FieldAccess(base, field) => {
                 let base_ty = self.analyze_expr(base, env, errors);
                 if let Type::Struct(sname) = base_ty {
