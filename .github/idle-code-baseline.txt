@@ -1313,7 +1313,6 @@ src/consensus/pow.rs	fn	difficulty_for_next_block
 src/consensus/pow.rs	fn	get_difficulty
 src/consensus/pow.rs	fn	saturating_to_u128
 src/consensus/pow.rs	struct	PoWConfig
-src/consensus/pow.rs	struct	U256
 src/consensus/qc.rs	const	CURRENT_VERSION
 src/consensus/qc.rs	enum	QcProofKind
 src/consensus/qc.rs	fn	compute_merkle_root
