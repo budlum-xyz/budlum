@@ -336,11 +336,15 @@ pub fn self_test() -> Result<String, String> {
     // byte slice, and a panic in a gate is a red job, not a verdict.
     let ends_with_word = "let b = builder";
     if !statements(ends_with_word).is_empty() {
-        return Err(String::from("canary: a trailing `builder` word was read as a statement"));
+        return Err(String::from(
+            "canary: a trailing `builder` word was read as a statement",
+        ));
     }
     let wide = "builder\u{2192}x; builder.when_transition().assert_zero(a);";
     if statements(wide).len() != 1 {
-        return Err(String::from("canary: a wide character after `builder` broke the scan"));
+        return Err(String::from(
+            "canary: a wide character after `builder` broke the scan",
+        ));
     }
     Ok(String::from(
         "accumulators canary OK: pinned PASSes and unpinned FAILs; the statement scanner survives a trailing word and a wide character.",

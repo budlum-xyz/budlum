@@ -487,7 +487,9 @@ mod tests {
         let bad = good.replace("@@ -0,0 +1,2 @@", "@@ -0,0 +1,3 @@");
         let errors = hunk_count_errors("bad.patch", &bad);
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("declares 0 old and 3 new") && errors[0].contains("has 0 and 2"));
+        assert!(
+            errors[0].contains("declares 0 old and 3 new") && errors[0].contains("has 0 and 2")
+        );
         match check_patch_shape("bad.patch", &bad, &["browser/"]) {
             Verdict::Fail(problems) => assert!(problems[0].contains("corrupt")),
             other => panic!("{other:?}"),

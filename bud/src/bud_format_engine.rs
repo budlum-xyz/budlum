@@ -544,7 +544,11 @@ mod tests {
         assert_eq!(with_ec.container[0], 4u8, "k=4");
         assert_eq!(with_ec.container[1], 2u8, "p=2");
         let recorded = u64::from_le_bytes(with_ec.container[2..10].try_into().unwrap());
-        assert_eq!(recorded, without.container.len() as u64, "the pack records the container length");
+        assert_eq!(
+            recorded,
+            without.container.len() as u64,
+            "the pack records the container length"
+        );
     }
 
     #[test]

@@ -278,9 +278,11 @@ mod tests {
         let v2 = vote("val-0", &sks[0], 7, 16.68); // the same validator!
         let v3 = vote("val-2", &sks[2], 7, 16.68);
         let v4 = vote("val-3", &sks[3], 7, 16.68);
-        let cert =
-            BftRatioConsensus::finalize_ratio(vec![v1.clone(), v2, v3.clone(), v4.clone()], &validators)
-                .unwrap();
+        let cert = BftRatioConsensus::finalize_ratio(
+            vec![v1.clone(), v2, v3.clone(), v4.clone()],
+            &validators,
+        )
+        .unwrap();
         assert!(
             cert.verify(&validators).is_err(),
             "a repeated validator must be refused"

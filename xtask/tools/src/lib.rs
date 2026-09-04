@@ -194,7 +194,8 @@ mod tests {
         std::fs::write(fake.join("Cargo.toml"), "[package]\n").expect("scratch manifest");
         std::fs::write(fake.join("xtask/gates/Cargo.toml"), "[package]\n")
             .expect("scratch gates manifest");
-        std::fs::write(fake.join("bud/Cargo.toml"), "[package]\n").expect("scratch member manifest");
+        std::fs::write(fake.join("bud/Cargo.toml"), "[package]\n")
+            .expect("scratch member manifest");
         let found = root_above(&fake.join("src/deeper"));
         // From inside a member crate the walk has to continue up to the
         // checkout root; the crate has a manifest and a `src/` of its own.
