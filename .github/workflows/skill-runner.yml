@@ -27,6 +27,7 @@ jobs:
           persist-credentials: false
       - name: Skill files (if any)
         run: |
+          set -euo pipefail
           if [ -d bud2 ]; then
             echo "skill py files: $(find bud2 -name '*.py' | wc -l)"
             find bud2 -name "*.py" | sort
