@@ -275,10 +275,29 @@ impl EvmChainAdapter {
     /// "verify", a receipt whose status appeared unchecked.
     ///
     /// Now there is a single verification and the returned type is what it proves.
+    ///
+    /// The proof names its own `required_confirmations`, and the relayer
+    /// writes that field. The adapter's `required_confirmations` is the
+    /// operator's floor (`DEFAULT_CONFIRMATIONS` unless configured), so a
+    /// proof that demands less than the floor is refused here, before the
+    /// header chain is walked against the smaller number. Without this the
+    /// configured window was a default the relayer could lower to one in the
+    /// proof it sent.
+    ///
+    /// # Errors
+    ///
+    /// `VerifyError::Header` when the proof demands fewer confirmations than
+    /// this adapter requires; otherwise whatever `verify_evm_receipt` returns.
     pub fn verify_deposit(
         &self,
         proof: &EvmDepositProof<'_>,
     ) -> Result<VerifiedDeposit, VerifyError> {
+        if proof.required_confirmations < self.required_confirmations {
+            return Err(VerifyError::Header(format!(
+                "proof demands {} confirmations, adapter floor is {}",
+                proof.required_confirmations, self.required_confirmations
+            )));
+        }
         verify_evm_receipt(proof)
     }
 }
@@ -410,6 +429,44 @@ mod tests {
         adapter.required_confirmations = 0;
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("zero confirmations"), "got: {err}");
+    }
+
+    /// The confirmation window is the adapter's, not the proof's. A proof
+    /// that names one confirmation against a 64-confirmation adapter is
+    /// refused before any header is decoded; a proof at or above the floor
+    /// goes on to the orchestrator, which then fails on the empty header
+    /// list rather than on the floor.
+    #[test]
+    fn verify_deposit_holds_the_configured_confirmation_floor() {
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let topic0 = DEFAULT_DEPOSIT_TOPIC0;
+        let emitter = vec![7u8; 20];
+        let proof_with = |required: u32| EvmDepositProof {
+            target_header: &[],
+            confirmation_headers: &[],
+            required_confirmations: required,
+            proof_nodes: &[],
+            receipt_key: &[],
+            tx_hash: "0x1",
+            emitter_address: &emitter,
+            deposit_topic0: &topic0,
+            sync_attestation: None,
+        };
+        let below = adapter.verify_deposit(&proof_with(1)).unwrap_err();
+        match below {
+            VerifyError::Header(m) => assert!(m.contains("adapter floor is 64"), "got: {m}"),
+            other => panic!("expected the floor refusal, got {other:?}"),
+        }
+        let zero = adapter.verify_deposit(&proof_with(0)).unwrap_err();
+        assert!(matches!(zero, VerifyError::Header(_)));
+        // at the floor the refusal comes from the empty target header, not the floor
+        let at_floor = adapter
+            .verify_deposit(&proof_with(DEFAULT_CONFIRMATIONS))
+            .unwrap_err();
+        match at_floor {
+            VerifyError::Header(m) => assert!(!m.contains("adapter floor"), "got: {m}"),
+            other => panic!("expected a header decode error, got {other:?}"),
+        }
     }
 
     #[test]
