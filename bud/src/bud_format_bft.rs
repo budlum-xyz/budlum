@@ -1,7 +1,7 @@
 //! BFT finality for the .bud compression ratio, decided by vote.
 //!
-//! Ratio engines produce candidates, validators sign them, and 2n/3 votes on
-//! the same pipe_id finalise it.
+//! Ratio engines produce candidates, validators sign them, and more than two
+//! thirds of the set voting for the same pipe_id finalise it.
 //!
 //! A vote counts only if its identity holds up: the voter's key must be one
 //! of the registered validator keys, one key casts one vote, the signed
@@ -57,9 +57,18 @@ impl ValidatorSet {
         self.keys.is_empty()
     }
 
-    /// 2n/3 rounded up.
+    /// The strict supermajority `n - f` with `f = (n - 1) / 3` faults
+    /// tolerated, which is `floor(2n/3) + 1`.
+    ///
+    /// Two certificates from this quorum always share at least `f + 1`
+    /// validators, so at least one honest one, and an honest validator
+    /// signs one ratio per pipe. `ceil(2n/3)` was used before; for three
+    /// validators that is two, and two certificates of two votes can
+    /// overlap in the single Byzantine validator alone, so both could
+    /// verify while the honest pair had signed different ratios.
     pub fn quorum(&self) -> usize {
-        (self.keys.len() * 2).div_ceil(3)
+        let n = self.keys.len();
+        n - (n - 1) / 3
     }
 
     pub fn contains(&self, key: &[u8; 32]) -> bool {
@@ -121,7 +130,7 @@ impl RatioFinalityCert {
     pub fn verify(&self, validators: &ValidatorSet) -> Result<(), &'static str> {
         let quorum = validators.quorum();
         if self.votes.len() < quorum {
-            return Err("K-BUD-BFT: quorum <2n/3");
+            return Err("K-BUD-BFT: votes below the supermajority quorum");
         }
         if self.quorum != quorum {
             return Err("K-BUD-BFT: certificate quorum does not match the validator set");
@@ -351,6 +360,59 @@ mod tests {
         assert_eq!(set(&[sk(1), sk(2), sk(3), sk(4), sk(5)]).quorum(), 4);
     }
 
+    /// The quorum is a strict supermajority: any two quorums share an honest
+    /// validator. `ceil(2n/3)` gave two of three and four of six, where two
+    /// certificates can overlap in the one Byzantine validator alone.
+    #[test]
+    fn the_quorum_is_a_strict_supermajority() {
+        assert_eq!(set(&[sk(1), sk(2), sk(3)]).quorum(), 3);
+        assert_eq!(set(&[sk(1), sk(2), sk(3), sk(4)]).quorum(), 3);
+        assert_eq!(set(&[sk(1), sk(2), sk(3), sk(4), sk(5), sk(6)]).quorum(), 5);
+        assert_eq!(
+            set(&[sk(1), sk(2), sk(3), sk(4), sk(5), sk(6), sk(7)]).quorum(),
+            5
+        );
+        for n in 1..=40usize {
+            let keys: Vec<SigningKey> = (1..=n as u8).map(sk).collect();
+            let q = set(&keys).quorum();
+            let f = (n - 1) / 3;
+            assert!(
+                2 * q > n + f,
+                "n={n}: two quorums of {q} may miss every honest validator"
+            );
+            assert_eq!(q, n * 2 / 3 + 1, "n={n}");
+        }
+    }
+
+    /// Three validators, one of them signing both sides: with a quorum of
+    /// two, both certificates verified. With three, neither does.
+    #[test]
+    fn two_conflicting_certificates_cannot_both_verify() {
+        let sks = [sk(1), sk(2), sk(3)];
+        let validators = set(&sks);
+        let left = vec![
+            vote("val-0", &sks[0], 7, 16.68),
+            vote("val-1", &sks[1], 7, 16.68),
+        ];
+        let right = vec![
+            vote("val-1", &sks[1], 7, 12.5),
+            vote("val-2", &sks[2], 7, 12.5),
+        ];
+        for votes in [left, right] {
+            let ratio = votes[0].ratio;
+            let cert = RatioFinalityCert {
+                pipe_id: 7,
+                ratio,
+                votes,
+                quorum: validators.quorum(),
+            };
+            assert!(
+                cert.verify(&validators).is_err(),
+                "a two-vote certificate for {ratio} verified against three validators"
+            );
+        }
+    }
+
     #[test]
     fn a_wrong_signature_length_is_refused() {
         let mut v = vote("val-0", &sk(1), 7, 16.68);
@@ -405,10 +467,10 @@ mod tests {
         let votes = (0..3)
             .map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68))
             .collect();
-        // 3/5 < 2n/3, so finalize already refuses at the quorum check
+        // 3 of 5 is below the quorum of 4, so finalize refuses at the quorum check
         assert!(
             BftRatioConsensus::finalize_ratio(votes, &validators).is_err(),
-            "3/5 is below 2n/3 and must be refused"
+            "3 of 5 is below the supermajority quorum and must be refused"
         );
     }
 }

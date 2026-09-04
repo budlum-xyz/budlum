@@ -97,7 +97,12 @@ pub struct HybridFinalityVote {
 }
 impl HybridFinalityVote {
     pub fn verify_quorum(bls_ok: bool, pq_ok: bool, count: usize, n: usize) -> bool {
-        let quorum = (n * 2).div_ceil(3);
+        if n == 0 {
+            return false;
+        }
+        // Strict supermajority, `floor(2n/3) + 1`: two quorums always share
+        // an honest signer. `ceil(2n/3)` admitted two of three.
+        let quorum = n - (n - 1) / 3;
         bls_ok && pq_ok && count >= quorum
     }
 }
@@ -300,6 +305,10 @@ mod tests {
     fn finality_same_set() {
         assert!(HybridFinalityVote::verify_quorum(true, true, 3, 4));
         assert!(!HybridFinalityVote::verify_quorum(true, false, 3, 4));
+        // Two of three is not a supermajority; three of three is.
+        assert!(!HybridFinalityVote::verify_quorum(true, true, 2, 3));
+        assert!(HybridFinalityVote::verify_quorum(true, true, 3, 3));
+        assert!(!HybridFinalityVote::verify_quorum(true, true, 0, 0));
     }
     #[test]
     fn dual_wallet_required() {
