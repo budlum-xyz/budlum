@@ -442,7 +442,9 @@ pub trait BudlumApi {
     /// viewer's own key over `view_claim_digest(content, viewer, key_id,
     /// owner, payload_commitment(packed), issuedAt)`. The viewer address is
     /// derived from the key, so a caller cannot name a grantee it is not; a
-    /// claim older than `VIEW_CLAIM_MAX_AGE_SECS` is refused.
+    /// claim older than `VIEW_CLAIM_MAX_AGE_SECS` is refused. `owner` is
+    /// checked against the owner the chain recorded for `content_id` and a
+    /// mismatch is refused by name (`-32006`) before any grant is looked up.
     #[method(name = "bud_storageOpenReveal")]
     async fn storage_open_reveal(
         &self,

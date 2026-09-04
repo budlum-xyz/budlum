@@ -166,6 +166,11 @@ pub fn open_reveal_session(
 /// authority that owns it and still enforced again by [`RevealSession::open`],
 /// which refuses a sealed recipe under a `false` decision.
 ///
+/// This path does not see `recorded_owner`, so the caller owns that check:
+/// the chain's `may_view` compares `req.owner` with the manifest owner and
+/// answers `false` on a mismatch, and the RPC handler refuses a mismatching
+/// `owner` by name before it asks for the decision at all.
+///
 /// # Errors
 ///
 /// [`RevealRpcError::Forbidden`] for a sealed recipe under a `false` decision,
