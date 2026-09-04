@@ -153,7 +153,16 @@ impl ExeSectionSplit {
 pub struct PdfStreamSplit {
     pub text: Vec<u8>, // PDF structure (objects, dictionaries) - compresses well with zstd
     pub streams: Vec<Vec<u8>>, // stream contents (already compressed - kept apart)
+    /// Where in `text` each stream body was cut out: the offset right after
+    /// the `stream` keyword and its line break, in stream order. `decode`
+    /// puts body `i` back at `gaps[i]`; without these offsets the text and
+    /// the bodies could not be joined into the original bytes again.
+    pub gaps: Vec<u32>,
 }
+
+/// The PDF split blob layout: text, then per stream its gap offset and body.
+/// Version 1 stored no offsets and its `decode` returned the text alone.
+const PDF_SPLIT_VERSION: u8 = 2;
 
 impl PdfStreamSplit {
     /// Split the PDF into text + streams (lossless: joining gives the original).
@@ -163,13 +172,12 @@ impl PdfStreamSplit {
         }
         let mut text = Vec::with_capacity(data.len());
         let mut streams = Vec::new();
+        let mut gaps = Vec::new();
         let mut pos = 0usize;
         while pos < data.len() {
             // look for "stream\r\n" or "stream\n" (the start of a stream)
             if let Some(rel) = find_sub(&data[pos..], b"stream") {
                 let abs = pos + rel;
-                // append the part before the stream to the text
-                text.extend_from_slice(&data[pos..abs]);
                 // the line break after the stream keyword
                 let mut s = abs + 6;
                 if data.get(s) == Some(&b'\r') {
@@ -178,7 +186,10 @@ impl PdfStreamSplit {
                 if data.get(s) == Some(&b'\n') {
                     s += 1;
                 }
-                // endstream ara
+                // the text keeps everything up to and including the keyword
+                // and its line break; only the body is cut out
+                text.extend_from_slice(&data[pos..s]);
+                gaps.push(u32::try_from(text.len()).ok()?);
                 let end_rel = find_sub(&data[s..], b"endstream")?;
                 let end = s + end_rel;
                 streams.push(data[s..end].to_vec());
@@ -194,43 +205,46 @@ impl PdfStreamSplit {
         if streams.is_empty() {
             return None; // no streams -> separation is pointless (the caller falls back to raw)
         }
-        Some(PdfStreamSplit { text, streams })
+        Some(PdfStreamSplit {
+            text,
+            streams,
+            gaps,
+        })
     }
 
-    /// Join -> the original (the losslessness proof).
-    pub fn decode(&self) -> Vec<u8> {
-        // Stream contents cannot be rebuilt from a "stream\n...\nendstream"
-        // template, so the blob keeps the streams with their ORIGINAL BYTES and
-        // joins them with the text. Note: because encode keeps the stream body
-        // apart, decode is text + stream bodies; rebuilding the whole original
-        // needs text + body + endstream, not the body alone. In practice: this
-        // module's blob keeps the streams as bodies and decode reapplies the
-        // template to rebuild the original (losslessness is proven by the test
-        // below).
+    /// Join -> the original bytes: the text up to each gap, then the body that
+    /// was cut out there. `None` when the offsets do not fit the text (a
+    /// hand-built or forged split); `from_blob` refuses such offsets as well.
+    pub fn decode(&self) -> Option<Vec<u8>> {
+        if self.gaps.len() != self.streams.len() {
+            return None;
+        }
         let mut out = Vec::with_capacity(
             self.text.len() + self.streams.iter().map(|s| s.len()).sum::<usize>(),
         );
-        // The text carries a placeholder where the streams were (encode
-        // appended up to endstream), and the stream bodies go back into the
-        // "stream\n...\nendstream" gap in the text. Instead of that, decode
-        // joins the text pieces and the streams in order. The simplest correct
-        // way is to place the stream bodies into the empty
-        // "stream\n\nendstream" in the text. (Encode does not leave that gap,
-        // which is why for this module the blob must keep the streams with
-        // their original position information. The test verifies the
-        // losslessness.)
-        out.extend_from_slice(&self.text);
-        out
+        let mut cursor = 0usize;
+        for (gap, body) in self.gaps.iter().zip(&self.streams) {
+            let gap = *gap as usize;
+            if gap < cursor || gap > self.text.len() {
+                return None;
+            }
+            out.extend_from_slice(&self.text[cursor..gap]);
+            out.extend_from_slice(body);
+            cursor = gap;
+        }
+        out.extend_from_slice(&self.text[cursor..]);
+        Some(out)
     }
 
-    /// Blob: text + stream bodies + digest (losslessness: the text preserves the stream positions).
+    /// Blob: text + (gap offset, stream body) pairs + digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&PDF_SPLIT_MAGIC);
-        out.push(SPLIT_VERSION);
+        out.push(PDF_SPLIT_VERSION);
         push_bytes(&mut out, &self.text);
         out.extend_from_slice(&(self.streams.len() as u32).to_le_bytes());
-        for s in &self.streams {
+        for (gap, s) in self.gaps.iter().zip(&self.streams) {
+            out.extend_from_slice(&gap.to_le_bytes());
             push_bytes(&mut out, s);
         }
         let mut h = Sha3_256::new();
@@ -242,7 +256,8 @@ impl PdfStreamSplit {
 
     pub fn from_blob(bytes: &[u8]) -> Option<Self> {
         const HDR: usize = 8 + 1;
-        if bytes.len() < HDR + 32 || bytes[0..8] != PDF_SPLIT_MAGIC || bytes[8] != SPLIT_VERSION {
+        if bytes.len() < HDR + 32 || bytes[0..8] != PDF_SPLIT_MAGIC || bytes[8] != PDF_SPLIT_VERSION
+        {
             return None;
         }
         let payload_len = bytes.len() - 32;
@@ -262,15 +277,29 @@ impl PdfStreamSplit {
         if n > 1_000_000 {
             return None;
         }
-        let mut streams = Vec::with_capacity(n);
+        let mut streams = Vec::new();
+        let mut gaps: Vec<u32> = Vec::new();
         for _ in 0..n {
+            if bytes.len() < pos + 4 {
+                return None;
+            }
+            let gap = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?);
+            pos += 4;
+            if gap as usize > text.len() || gaps.last().is_some_and(|&prev| gap < prev) {
+                return None;
+            }
+            gaps.push(gap);
             let s = read_bytes(bytes, &mut pos)?;
             streams.push(s);
         }
         if pos != payload_len {
             return None;
         }
-        Some(PdfStreamSplit { text, streams })
+        Some(PdfStreamSplit {
+            text,
+            streams,
+            gaps,
+        })
     }
 }
 
@@ -351,15 +380,56 @@ mod tests {
             .text
             .windows(8)
             .any(|w| w == [0x78, 0x9C, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]));
+        assert_eq!(split.decode().expect("decode"), pdf, "PDF split must be lossless");
         // blob roundtrip
         let blob = split.to_blob();
         let back = PdfStreamSplit::from_blob(&blob).expect("blob");
         assert_eq!(back.streams.len(), 2);
         assert_eq!(back.streams[0], split.streams[0]);
+        assert_eq!(back.gaps, split.gaps);
+        assert_eq!(back.decode().expect("decode"), pdf, "the blob path is lossless too");
         // kurcalama red
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(PdfStreamSplit::from_blob(&bad).is_none());
+    }
+
+    /// A `\r\n` line break after `stream`, a body that itself contains the
+    /// word `stream`, and a body ending in a line break: each has to come
+    /// back byte for byte. A split whose gap offsets point past the text or
+    /// run backwards is refused instead of producing something else.
+    #[test]
+    fn pdf_stream_split_rebuilds_every_byte() {
+        let mut pdf = b"%PDF-1.4\r\n4 0 obj\r\n<< /Length 12 >>\r\nstream\r\n".to_vec();
+        pdf.extend_from_slice(b"ab stream cd");
+        pdf.extend_from_slice(b"\r\nendstream\r\nendobj\r\n5 0 obj\nstream\n\n\nendstream\n%%EOF");
+        let split = PdfStreamSplit::encode(&pdf).expect("encode");
+        assert_eq!(split.streams.len(), 2);
+        assert_eq!(split.decode().expect("decode"), pdf);
+        assert_eq!(
+            PdfStreamSplit::from_blob(&split.to_blob())
+                .expect("blob")
+                .decode()
+                .expect("decode"),
+            pdf
+        );
+        let mut forged = split.clone();
+        forged.gaps[1] = forged.text.len() as u32 + 1;
+        assert!(forged.decode().is_none());
+        let mut backwards = split.clone();
+        backwards.gaps.swap(0, 1);
+        assert!(backwards.decode().is_none());
+        let mut short = split.clone();
+        short.gaps.pop();
+        assert!(short.decode().is_none());
+        // the same offsets inside a sealed blob are refused by the parser
+        let mut body = forged.to_blob();
+        body.truncate(body.len() - 32);
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_PDF_V1");
+        h.update(&body);
+        body.extend_from_slice(&h.finalize());
+        assert!(PdfStreamSplit::from_blob(&body).is_none());
     }
 
     #[test]
