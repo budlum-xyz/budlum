@@ -127,7 +127,7 @@ enum TxAction {
 
 #[derive(Subcommand)]
 enum QueryAction {
-    /// Adres bakiyesini sorgula (`bud_getBalance`).
+    /// Query an address balance (`bud_getBalance`).
     Balance {
         /// Address (hex, `0x` prefix optional).
         address: String,
@@ -419,7 +419,7 @@ fn build_manifest(name: &str, source_hash: &str) -> Result<DeveloperOsManifest, 
 
 fn run_project_id(name: &str, source_hash: &str) -> Result<(), String> {
     let manifest = build_manifest(name, source_hash)?;
-    println!("proje: {name}");
+    println!("project: {name}");
     println!("chain_id: {}", manifest.chain_id);
     println!("project id: 0x{}", hex::encode(manifest.project_id()));
     Ok(())

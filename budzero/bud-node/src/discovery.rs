@@ -134,6 +134,9 @@ impl ContentDiscovery {
     /// Mark a CID as announced to the DHT.
     pub fn mark_announced(&self, cid: &ContentId) {
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        if cache.config.max_cached_cids == 0 {
+            return;
+        }
 
         // Evict oldest if at capacity.
         if cache.last_announced.len() >= cache.config.max_cached_cids
@@ -163,6 +166,11 @@ impl ContentDiscovery {
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
         let max = cache.config.max_providers_per_cid;
         let max_cids = cache.config.max_cached_cids;
+        // A zero cap means no entry at all; with the map empty there is no
+        // victim to evict, so the insertion below would exceed the cap.
+        if max_cids == 0 || max == 0 {
+            return;
+        }
         if !cache.providers.contains_key(cid) && cache.providers.len() >= max_cids {
             // Evict a CID this node does not announce first; a CID it does
             // announce is still in use for re-announcement.
@@ -301,6 +309,25 @@ mod tests {
         assert_eq!(disc.cached_provider_count(), 3);
         let newest = ContentId::of(b"foreign chunk 9");
         assert_eq!(disc.get_providers(&newest), vec![peer]);
+    }
+
+    /// A zero cap admits nothing. With the map empty no eviction victim
+    /// exists, so the insert used to go through and the cache held one
+    /// entry more than its configured maximum.
+    #[test]
+    fn a_zero_cid_cap_admits_nothing() {
+        let config = DiscoveryConfig {
+            reannounce_interval: Duration::from_secs(3600),
+            max_providers_per_cid: 10,
+            max_cached_cids: 0,
+        };
+        let disc = ContentDiscovery::new(config);
+        let cid = ContentId::of(b"unwanted chunk");
+        disc.add_provider(&cid, PeerId::random());
+        disc.mark_announced(&cid);
+        assert_eq!(disc.cached_provider_count(), 0);
+        assert_eq!(disc.cached_cid_count(), 0);
+        assert!(disc.get_providers(&cid).is_empty());
     }
 
     #[test]
