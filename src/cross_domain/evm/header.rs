@@ -278,7 +278,7 @@ mod tests {
             HeaderError::ZeroConfirmations
         );
         assert_eq!(
-            verify_chain(&target, &[one.clone()], 0).unwrap_err(),
+            verify_chain(&target, std::slice::from_ref(&one), 0).unwrap_err(),
             HeaderError::ZeroConfirmations
         );
         assert!(verify_chain(&target, &[one], 1).is_ok());

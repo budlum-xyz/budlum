@@ -384,23 +384,27 @@ mod tests {
         let address = account.address;
         registry.register(account).expect("valid account");
 
-        let other_key = [9u8; ML_DSA_87_PUBLIC_KEY_LEN];
-        let other_address = QuantumAccount::address_from_public_key(&other_key);
-        let attempts: [(&str, Box<dyn Fn(&mut QuantumAccount)>); 4] = [
-            ("public key", Box::new(move |a| a.pq_public_key = other_key)),
-            ("address", Box::new(move |a| a.address = other_address)),
-            (
-                "public key",
-                Box::new(move |a| {
-                    a.pq_public_key = other_key;
-                    a.address = other_address;
-                }),
-            ),
-            ("pact root", Box::new(|a| a.pact_root = [4u8; 32])),
+        const OTHER_KEY: [u8; ML_DSA_87_PUBLIC_KEY_LEN] = [9u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        assert_ne!(
+            QuantumAccount::address_from_public_key(&OTHER_KEY),
+            address,
+            "the other key must derive another address"
+        );
+        type Change = fn(&mut QuantumAccount);
+        let attempts: [(&str, Change); 4] = [
+            ("public key", |a| a.pq_public_key = OTHER_KEY),
+            ("address", |a| {
+                a.address = QuantumAccount::address_from_public_key(&OTHER_KEY);
+            }),
+            ("public key", |a| {
+                a.pq_public_key = OTHER_KEY;
+                a.address = QuantumAccount::address_from_public_key(&OTHER_KEY);
+            }),
+            ("pact root", |a| a.pact_root = [4u8; 32]),
         ];
         for (expected, change) in attempts {
             let err = registry
-                .update(&address, |a| change(a))
+                .update(&address, change)
                 .expect_err("a bound field must not change through update");
             match err {
                 QuantumAccountRegistryError::BoundFieldChanged { field, .. } => {
