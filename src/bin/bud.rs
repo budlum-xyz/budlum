@@ -447,14 +447,17 @@ fn run_project_bind_proof(
         .ok_or_else(|| format!("the manifest has no proof record named '{fixture}'"))?;
 
     // A record arrives `Pending` from the local template; binding is meaningful on a
-    // record that claims the verifier has run.
-    record.status = ProofFixtureStatus::Verified;
-    record.proof_hash = verified;
-    let bound = record.clone();
-
-    bound
+    // record that claims the verifier has run. The hash the record already
+    // carries is what gets compared with the verified envelope; it is not
+    // overwritten first, since a record rewritten to the supplied hash would
+    // pass the comparison whatever it said before, and the mismatch check
+    // would never fire.
+    let mut candidate = record.clone();
+    candidate.status = ProofFixtureStatus::Verified;
+    candidate
         .bind_verified(verified)
         .map_err(|e| format!("proof binding refused: {e:?}"))?;
+    *record = candidate;
     println!("proof record '{fixture}' bound to the verified envelope");
     println!("proof hash: 0x{}", hex::encode(verified));
     println!("project id: 0x{}", hex::encode(manifest.project_id()));
@@ -556,6 +559,17 @@ mod tests {
     fn binding_a_proof_to_its_own_hash_passes() {
         let proof = "01".repeat(32);
         run_project_bind_proof("demo-app", SOURCE_HASH, "zkvm-smoke", &proof).unwrap();
+    }
+
+    /// A record whose own hash differs from the verified envelope is refused.
+    /// The record used to be rewritten to the supplied hash before the
+    /// comparison, so this case passed.
+    #[test]
+    fn binding_a_proof_to_another_hash_is_refused() {
+        let other = "02".repeat(32);
+        let err = run_project_bind_proof("demo-app", SOURCE_HASH, "zkvm-smoke", &other)
+            .expect_err("a record speaking of another proof must be refused");
+        assert!(err.contains("ProofFixtureHashMismatch"), "{err}");
     }
 
     /// A record absent from the manifest cannot be bound.
