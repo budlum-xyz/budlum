@@ -380,14 +380,22 @@ mod tests {
             .text
             .windows(8)
             .any(|w| w == [0x78, 0x9C, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]));
-        assert_eq!(split.decode().expect("decode"), pdf, "PDF split must be lossless");
+        assert_eq!(
+            split.decode().expect("decode"),
+            pdf,
+            "PDF split must be lossless"
+        );
         // blob roundtrip
         let blob = split.to_blob();
         let back = PdfStreamSplit::from_blob(&blob).expect("blob");
         assert_eq!(back.streams.len(), 2);
         assert_eq!(back.streams[0], split.streams[0]);
         assert_eq!(back.gaps, split.gaps);
-        assert_eq!(back.decode().expect("decode"), pdf, "the blob path is lossless too");
+        assert_eq!(
+            back.decode().expect("decode"),
+            pdf,
+            "the blob path is lossless too"
+        );
         // kurcalama red
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;

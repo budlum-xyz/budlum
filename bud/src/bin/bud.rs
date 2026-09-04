@@ -395,7 +395,9 @@ fn run(cli: Cli) -> Result<String, String> {
             n,
         } => {
             if !(1..=255).contains(&n) {
-                return Err("BFT: n must be between 1 and 255 (one derived key per validator)".into());
+                return Err(
+                    "BFT: n must be between 1 and 255 (one derived key per validator)".into(),
+                );
             }
             // A demonstration set of n validators with derived ed25519 keys;
             // the votes are really signed, and the certificate is checked

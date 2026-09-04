@@ -297,7 +297,10 @@ pub fn self_test() -> Result<String, String> {
         "fn rejects_a_forged_difference() {\n    /* is_err() /* nested */ still a comment */\n    \
          let r = tamper();\n    assert!(r.is_ok());\n}",
     );
-    assert_ne!(commented, good, "the fixture must contain the rewritten test");
+    assert_ne!(
+        commented, good,
+        "the fixture must contain the rewritten test"
+    );
     std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), commented)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {

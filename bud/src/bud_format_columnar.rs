@@ -598,10 +598,17 @@ mod tests {
     fn str_cells_keep_the_json_kind_through_the_blob() {
         let d = br#"[{"v":1,"s":"a","n":null,"o":{"k":[1,2]}},{"v":-2,"s":null,"n":"x","o":[]}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
-        assert_eq!(col.col_types, vec![ColType::Str, ColType::Str, ColType::Str, ColType::Str]);
+        assert_eq!(
+            col.col_types,
+            vec![ColType::Str, ColType::Str, ColType::Str, ColType::Str]
+        );
         let blob = columnar_to_blob(&col).expect("blob");
         let back = columnar_from_blob(&blob).expect("from_blob");
-        assert_eq!(columnar_decode(&back).unwrap(), d, "the blob path is lossless");
+        assert_eq!(
+            columnar_decode(&back).unwrap(),
+            d,
+            "the blob path is lossless"
+        );
         assert_eq!(columnar_decode(&back), columnar_decode(&col));
         // a hand-built column whose typed cell does not fit is refused, not stringified
         let mut wrong = col.clone();
