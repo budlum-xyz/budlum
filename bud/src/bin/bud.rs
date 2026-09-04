@@ -6,7 +6,7 @@
 //!   bud store   <in> <out> [--min-chunk 65536]                               write v2 container (K38)
 //!   bud restore <in> <out>                                                   read v2 container (verify)
 //!   bud bench   <file>                                                       speed + cost measurement
-//!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (2n/3)
+//!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (more than two thirds)
 //!   bud check   <file>                                                       integrity + gate check
 //!
 //! Error path: every command performs real file I/O; on error -> exit code 1 + message.
@@ -94,7 +94,7 @@ enum Commands {
         #[arg(short, long)]
         file: PathBuf,
     },
-    /// BFT finality: n validators, a 2n/3 majority for the same pipe_id/ratio
+    /// BFT finality: n validators, more than two thirds voting the same pipe_id/ratio
     BftVote {
         #[arg(long)]
         pipe_id: u16,
@@ -428,7 +428,7 @@ fn run(cli: Cli) -> Result<String, String> {
             cert.verify(&validators)
                 .map_err(|e| format!("BFT verify: {e}"))?;
             Ok(format!(
-                "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (2n/3 majority)"
+                "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (supermajority)"
             ))
         }
         Commands::Pact {
