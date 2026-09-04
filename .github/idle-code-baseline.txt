@@ -1162,7 +1162,6 @@ src/bin/budlum-relayer.rs	fn	get_block_number
 src/bin/budlum-relayer.rs	fn	get_deposit_logs
 src/bin/budlum-relayer.rs	fn	parse_args
 src/bin/budlum-relayer.rs	fn	run_relayer
-src/bin/budlum-relayer.rs	fn	submit_slashing_report_for_invalid_relay
 src/bin/budlum-relayer.rs	struct	BudlumBurnEvent
 src/bin/budlum-relayer.rs	struct	BudlumClient
 src/bin/budlum-relayer.rs	struct	EthClient
