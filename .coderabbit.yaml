@@ -1,9 +1,9 @@
 # Review-bot configuration. The merge gate for this repository is a review
 # approval from the bots; CodeRabbit only approves when this workflow is on,
 # once every one of its comments is resolved and the latest commit has been
-# reviewed. Pull requests that target a `parca-*` branch (the split mirror
-# repository) are reviewed automatically as well, not only those that target
-# the default branch.
+# reviewed. Reviews are requested by hand, one pull request at a time, so the
+# hourly review allowance goes to the branch that actually changed instead of
+# being spent by every push at once.
 language: "en-US"
 reviews:
   profile: "chill"
@@ -11,8 +11,7 @@ reviews:
   poem: false
   auto_review:
     enabled: true
+    auto_incremental_review: false
     drafts: false
-    base_branches:
-      - "parca-.*"
 chat:
   auto_reply: true
