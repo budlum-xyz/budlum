@@ -237,8 +237,7 @@ pub fn touched_files(diff: &str) -> Vec<String> {
 /// line is context (both), `\` is a no-newline marker (neither). The body
 /// ends at the next hunk header, the next file header or the end of the
 /// text.
-#[must_use]
-pub fn hunk_count_errors(name: &str, diff: &str) -> Vec<String> {
+fn hunk_count_errors(name: &str, diff: &str) -> Vec<String> {
     let lines: Vec<&str> = diff.split('\n').collect();
     let mut problems = Vec::new();
     let mut i = 0;
