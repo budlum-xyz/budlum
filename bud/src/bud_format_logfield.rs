@@ -95,6 +95,18 @@ pub fn parse_nginx_line(line: &[u8]) -> Option<(Vec<&[u8]>, Vec<Vec<u8>>)> {
     parts.push(status);
     parts.push(size);
     let _ = parts;
+    // Lossless means the rebuild is byte-identical. The reader accepted
+    // lines the writer cannot reproduce: a trailing referer or user agent,
+    // doubled spaces, a status or size with leading zeros, a missing final
+    // newline. Such a line is refused here, so the caller falls back to the
+    // raw bytes instead of silently storing a different log.
+    let status_num: u16 = status.parse().ok()?;
+    let size_num: u64 = size.parse().ok()?;
+    let rebuilt =
+        format!("{remote} - - [{time}] \"{method} {path} {proto}\" {status_num} {size_num}\n");
+    if rebuilt.as_bytes() != line {
+        return None;
+    }
     // the fixed template pieces (between the fields):
     // "" - - "[" "]" "\"" " " "\"" " " "\n"
     let fixed: Vec<&[u8]> = vec![b" - - [", b"] \"", b" ", b" ", b"\" ", b" ", b"\n"];
@@ -448,6 +460,34 @@ mod tests {
         assert!(parse_nginx_line(b"broken line").is_none());
         assert!(LogFieldColumnar::encode(b"broken line\nsecond line\n").is_none());
         assert!(LogFieldColumnar::encode(b"").is_none());
+    }
+
+    /// Lines the old parser accepted and the writer rebuilt differently.
+    /// Each is refused now, so no log is stored as a different log.
+    #[test]
+    fn a_line_the_rebuild_cannot_reproduce_is_refused() {
+        let good = b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 512\n";
+        assert!(parse_nginx_line(good).is_some());
+        let lossy: [&[u8]; 4] = [
+            // combined format: referer and user agent after the size
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 512 \"-\" \"curl\"\n",
+            // doubled space before the status
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\"  200 512\n",
+            // leading zero in the size
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 0512\n",
+            // no final newline
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 512",
+        ];
+        for line in lossy {
+            assert!(
+                parse_nginx_line(line).is_none(),
+                "refused: {}",
+                String::from_utf8_lossy(line)
+            );
+        }
+        let mut text = good.to_vec();
+        text.extend_from_slice(lossy[0]);
+        assert!(LogFieldColumnar::encode(&text).is_none());
     }
 
     #[test]
