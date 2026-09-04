@@ -175,7 +175,20 @@ fn the_shipped_node_profiles_agree_with_the_code() {
 #[test]
 fn profiles_that_listen_on_every_interface_carry_a_key() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut seen = 0;
+    // The seven shipped profiles by path. A count alone let an unrelated
+    // TOML stand in for a required profile: a missing `rpc` table reads as
+    // a loopback default and a missing `metrics` table is skipped, so the
+    // replaced profile passed without being checked.
+    const SHIPPED: [&str; 7] = [
+        "config/archive.toml",
+        "config/devnet.toml",
+        "config/mainnet.toml",
+        "config/personas/developer.toml",
+        "config/personas/enterprise-poa.toml",
+        "config/personas/user-devnet.toml",
+        "config/testnet.toml",
+    ];
+    let mut seen: Vec<String> = Vec::new();
     for entry in ["config", "config/personas"]
         .iter()
         .flat_map(|dir| std::fs::read_dir(root.join(dir)).expect("profile directory is readable"))
@@ -188,7 +201,7 @@ fn profiles_that_listen_on_every_interface_carry_a_key() {
         let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file}: {e}"));
         let parsed: toml::Value =
             toml::from_str(&raw).unwrap_or_else(|e| panic!("{file} is valid TOML: {e}"));
-        seen += 1;
+        seen.push(file.clone());
 
         let rpc = parsed.get("rpc");
         let listener = rpc
@@ -226,5 +239,11 @@ fn profiles_that_listen_on_every_interface_carry_a_key() {
             );
         }
     }
-    assert!(seen >= 7, "expected the shipped profiles, read {seen}");
+    seen.sort();
+    for shipped in SHIPPED {
+        assert!(
+            seen.iter().any(|s| s == shipped),
+            "the shipped profile {shipped} was not read; found {seen:?}"
+        );
+    }
 }
