@@ -29,7 +29,7 @@
 use serde_json::Value;
 
 pub const COLUMNAR_MAGIC: [u8; 8] = *b"\xB5COL\0\0\0\0";
-pub const COLUMNAR_VERSION: u8 = 2; // v2: type-aware columns
+pub const COLUMNAR_VERSION: u8 = 3; // v3: `Str` cells carry the JSON kind of the value
 pub const MAX_RECORDS: u64 = 10_000_000;
 pub const MAX_COLUMNS: usize = 256;
 pub const MAX_VALUE_BYTES: u64 = 1024 * 1024; // ceiling for a single string value (bomb guard)
@@ -264,21 +264,37 @@ fn push_value(out: &mut Vec<u8>, t: ColType, v: &Value) -> bool {
             None => false,
         },
         ColType::Str => {
-            let s = match v {
-                Value::String(s) => s.as_bytes(),
-                Value::Null => b"",
-                _ => return false, // mixed type (the column is tagged Str but the value does not fit)
-            };
-            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            out.extend_from_slice(s);
+            push_str_cell(out, v);
             true
         }
     }
 }
 
-/// A deterministic blob (fed into the pipeline): magic + mode + key/column counts
-/// + type bytes + length-prefixed values. Bomb guarded and panic free.
-pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
+/// The kind byte in front of every `Str` cell: the cell holds a JSON string's
+/// bytes, or the JSON text of some other value.
+const STR_CELL_STRING: u8 = 0;
+const STR_CELL_JSON: u8 = 1;
+
+/// A `Str` column holds whatever did not fit a typed column: strings, but
+/// also nulls, arrays, objects, and the numbers of a column that degraded to
+/// `Str` on a type mismatch. The cell used to hold only the bytes, so a null
+/// came back as `""` and a number as `"1"`: the blob path changed the data
+/// while the in-memory path did not. The kind byte keeps the two apart.
+fn push_str_cell(out: &mut Vec<u8>, v: &Value) {
+    let (kind, text) = match v {
+        Value::String(s) => (STR_CELL_STRING, s.clone()),
+        other => (STR_CELL_JSON, other.to_string()),
+    };
+    out.push(kind);
+    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// A deterministic blob (fed into the pipeline): magic, mode, key and column
+/// counts, type bytes, length-prefixed values. Bomb guarded and panic free.
+/// `None` when a typed column holds a value of another kind, which
+/// `columnar_encode` never produces.
+pub fn columnar_to_blob(col: &JsonColumnar) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(&COLUMNAR_MAGIC);
     out.push(COLUMNAR_VERSION);
@@ -298,10 +314,12 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
         let t = col.col_types[ci];
         for v in c {
             if !push_value(&mut out, t, v) {
-                // type-mismatching value: write it as Str (a lossless fallback)
-                let s = v.to_string();
-                out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                out.extend_from_slice(s.as_bytes());
+                // A typed column cannot hold this value. `columnar_encode`
+                // degrades such a column to `Str`, so this only happens for a
+                // hand-built `JsonColumnar`; the reader parses the cell by
+                // the column type, so an untyped byte here would not come
+                // back as this value. Refuse the blob instead of lying.
+                return None;
             }
         }
     }
@@ -312,7 +330,7 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
     h.update(&out);
     let digest: [u8; 32] = h.finalize().into();
     out.extend_from_slice(&digest);
-    out
+    Some(out)
 }
 
 /// Blob -> JsonColumnar (strict validation: magic, mode, types, size ceilings, digest).
@@ -431,19 +449,30 @@ fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
             Some(Value::Bool(b != 0))
         }
         ColType::Str => {
-            if bytes.len() < *pos + 4 {
+            if bytes.len() < *pos + 5 {
                 return None;
             }
-            let sl = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().ok()?) as usize;
-            *pos += 4;
+            let kind = bytes[*pos];
+            let sl = u32::from_le_bytes(bytes[*pos + 1..*pos + 5].try_into().ok()?) as usize;
+            *pos += 5;
             if sl as u64 > MAX_VALUE_BYTES || bytes.len() < *pos + sl {
                 return None;
             }
-            let s = std::str::from_utf8(&bytes[*pos..*pos + sl])
-                .ok()?
-                .to_string();
+            let text = std::str::from_utf8(&bytes[*pos..*pos + sl]).ok()?;
             *pos += sl;
-            Some(Value::String(s))
+            match kind {
+                STR_CELL_STRING => Some(Value::String(text.to_string())),
+                STR_CELL_JSON => {
+                    let v: Value = serde_json::from_str(text).ok()?;
+                    // A JSON string under the JSON kind would have two
+                    // encodings for one value; the writer never does that.
+                    if v.is_string() {
+                        return None;
+                    }
+                    Some(v)
+                }
+                _ => None,
+            }
         }
     }
 }
@@ -491,7 +520,7 @@ mod tests {
         assert_eq!(col.col_types[3], ColType::U64, "column v is numeric");
         assert_eq!(col.col_types[4], ColType::U64, "column s is numeric");
         // blob roundtrip
-        let blob = columnar_to_blob(&col);
+        let blob = columnar_to_blob(&col).expect("blob");
         let col2 = columnar_from_blob(&blob).expect("the blob decodes");
         assert_eq!(col2.mode, ColumnarMode::Exact);
         assert_eq!(col2.col_types, col.col_types, "tipler blob'da korunur");
@@ -560,6 +589,52 @@ mod tests {
         );
         let back = columnar_decode(&col).unwrap();
         assert_eq!(back, d, "lossless (the stringified value returns to JSON)");
+    }
+
+    /// The blob path must agree with the in-memory path: a column that
+    /// degraded to `Str` because of a negative number, a null in a string
+    /// column, and nested values all come back as the JSON they were.
+    #[test]
+    fn str_cells_keep_the_json_kind_through_the_blob() {
+        let d = br#"[{"v":1,"s":"a","n":null,"o":{"k":[1,2]}},{"v":-2,"s":null,"n":"x","o":[]}]"#;
+        let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
+        assert_eq!(col.col_types, vec![ColType::Str, ColType::Str, ColType::Str, ColType::Str]);
+        let blob = columnar_to_blob(&col).expect("blob");
+        let back = columnar_from_blob(&blob).expect("from_blob");
+        assert_eq!(columnar_decode(&back).unwrap(), d, "the blob path is lossless");
+        assert_eq!(columnar_decode(&back), columnar_decode(&col));
+        // a hand-built column whose typed cell does not fit is refused, not stringified
+        let mut wrong = col.clone();
+        wrong.col_types[0] = ColType::U64;
+        assert!(columnar_to_blob(&wrong).is_none());
+        // a JSON-kind cell holding a string would be a second spelling of a value
+        let single = columnar_encode(br#"[{"s":"a"}]"#, ColumnarMode::Exact).unwrap();
+        let blob = columnar_to_blob(&single).expect("blob");
+        let mut body = blob[..blob.len() - 32].to_vec();
+        let cell = body.len() - (1 + 4 + 1);
+        assert_eq!(body[cell], STR_CELL_STRING);
+        body.truncate(cell);
+        body.push(STR_CELL_JSON);
+        body.extend_from_slice(&3u32.to_le_bytes());
+        body.extend_from_slice(b"\"a\"");
+        let sealed = seal(&body);
+        assert!(columnar_from_blob(&sealed).is_none());
+        // the same cell under an unknown kind byte is refused as well
+        body[cell] = 9;
+        assert!(columnar_from_blob(&seal(&body)).is_none());
+    }
+
+    /// Append the digest `columnar_to_blob` writes, so a hand-edited body
+    /// reaches the value parser instead of failing the digest check.
+    fn seal(body: &[u8]) -> Vec<u8> {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_COLUMNAR_V1");
+        h.update(body);
+        let digest: [u8; 32] = h.finalize().into();
+        let mut out = body.to_vec();
+        out.extend_from_slice(&digest);
+        out
     }
 
     #[test]
