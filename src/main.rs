@@ -252,12 +252,15 @@ async fn main() {
         if validators.is_empty() {
             validators = network_defaults.validators.clone();
         }
+        // After the fill above, an empty set means neither the operator nor
+        // the network defaults named a validator. Only devnet may start
+        // without one; any other chain id would get a genesis that no
+        // validator can extend, reported as success.
         if chain_id
             != budlum_core::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
             && validators.is_empty()
-            && !network_defaults.validators.is_empty()
         {
             eprintln!("Error: this network genesis requires an explicit or default validator set");
             std::process::exit(1);
@@ -478,32 +481,44 @@ async fn main() {
             }
         };
         println!("Starting Database Integrity Audit on: {}", config.db_path);
-        match storage.check_integrity() {
+        // The exit status carries the verdict: automation reading only the
+        // status must not take a failed audit, a failed repair or an audit
+        // that could not run for a clean database.
+        let status = match storage.check_integrity() {
+            Ok(errors) if errors.is_empty() => {
+                println!("Integrity Audit PASSED. No corruptions found.");
+                0
+            }
             Ok(errors) => {
-                if errors.is_empty() {
-                    println!("Integrity Audit PASSED. No corruptions found.");
-                } else {
-                    println!("Integrity Audit FAILED! Found {} errors.", errors.len());
-                    for err in errors {
-                        println!("- {err}");
-                    }
-                    if config.repair_db {
-                        println!("Attempting automatic repair...");
-                        if let Err(e) = storage.repair_index() {
-                            eprintln!("FAIL Repair failed: {e}");
-                        } else {
+                println!("Integrity Audit FAILED! Found {} errors.", errors.len());
+                for err in errors {
+                    println!("- {err}");
+                }
+                if config.repair_db {
+                    println!("Attempting automatic repair...");
+                    match storage.repair_index() {
+                        Ok(()) => {
                             println!(
                                 "OK Repair successful. Please run --check-db again to verify."
                             );
+                            1
                         }
-                    } else {
-                        println!("Tip: Run with --repair-db to attempt index reconstruction.");
+                        Err(e) => {
+                            eprintln!("FAIL Repair failed: {e}");
+                            1
+                        }
                     }
+                } else {
+                    println!("Tip: Run with --repair-db to attempt index reconstruction.");
+                    1
                 }
             }
-            Err(e) => eprintln!("System error during audit: {e}"),
-        }
-        return;
+            Err(e) => {
+                eprintln!("System error during audit: {e}");
+                1
+            }
+        };
+        std::process::exit(status);
     }
 
     if config.repair_db {
@@ -520,9 +535,9 @@ async fn main() {
         println!("Starting manual Database Repair on: {}", config.db_path);
         if let Err(e) = storage.repair_index() {
             eprintln!("Repair failed: {e}");
-        } else {
-            println!("Repair complete. Re-indexing finished.");
+            std::process::exit(1);
         }
+        println!("Repair complete. Re-indexing finished.");
         return;
     }
 
@@ -549,19 +564,18 @@ async fn main() {
         .and_then(|s| load_signing_key(s))
         .map(|key| Address::from(key.public_key_bytes()));
 
-    // F2 config-driven: set env var for VM VerifyMerkle gate from TOML [features] verify_merkle
-    std::env::set_var(
-        "BUDLUM_VERIFY_MERKLE",
-        config.features_verify_merkle.to_string(),
-    );
-    println!(
-        "   VerifyMerkle: {} (config-driven F2, MainnetActivation)",
-        if config.features_verify_merkle {
-            "enabled (full)"
-        } else {
-            "disabled (staged rollout)"
-        }
-    );
+    // `[features] verify_merkle` does not reach the VM: `bud-vm` decodes
+    // with `MainnetActivation::default()` and reads no environment variable
+    // (the old `BUDLUM_VERIFY_MERKLE` hook was removed as a configuration
+    // attack vector). The flag is only refused on mainnet by
+    // `validate_strict_rules`; reporting it as an applied setting would
+    // claim a wiring that does not exist.
+    if config.features_verify_merkle {
+        println!(
+            "   VerifyMerkle: requested by [features] verify_merkle, not applied \
+             (the VM uses MainnetActivation defaults; see bud-vm)"
+        );
+    }
 
     println!("Budlum Node - v0.2.0 (Framework Edition)");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -915,7 +929,14 @@ async fn main() {
             if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
                 existing.status = DomainStatus::Active;
                 if let Some(store) = blockchain.storage.as_ref() {
-                    let _ = store.save_consensus_domain(existing);
+                    // A dropped error here would log the domain as active
+                    // while a restart reads the previous status back.
+                    if let Err(e) = store.save_consensus_domain(existing) {
+                        tracing::error!(
+                            "BFT bootstrap domain {}: status change not persisted: {e}",
+                            domain.id
+                        );
+                    }
                 }
             }
             tracing::info!(
@@ -928,7 +949,12 @@ async fn main() {
             if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
                 existing.status = DomainStatus::Frozen;
                 if let Some(store) = blockchain.storage.as_ref() {
-                    let _ = store.save_consensus_domain(existing);
+                    if let Err(e) = store.save_consensus_domain(existing) {
+                        tracing::error!(
+                            "PoA bootstrap domain {}: status change not persisted: {e}",
+                            domain.id
+                        );
+                    }
                 }
             }
             tracing::warn!(
@@ -1268,7 +1294,11 @@ async fn main() {
                 .allowed_ips
                 .iter()
                 .all(|ip| ip == "127.0.0.1" || ip == "::1");
-        if !has_localhost_only && !rpc_security.allowed_ips.is_empty() {
+        if rpc_security.allowed_ips.is_empty() {
+            tracing::warn!(
+                "[SECURITY] Public RPC allowed_ips is empty: every source address is accepted and only authentication and rate limiting stand between the network and the RPC."
+            );
+        } else if !has_localhost_only {
             tracing::warn!(
                 "[SECURITY] Public RPC allowed_ips was widened: {:?}. Run this only on a trusted or private network.",
                 rpc_security.allowed_ips
@@ -1354,11 +1384,21 @@ async fn main() {
         };
         println!("Prometheus metrics on {metrics_bind}/metrics");
         loop {
-            if let Ok((stream, _)) = listener.accept().await {
-                let m = metrics_clone.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let _ = hyper::server::conn::http1::Builder::new()
+            // A persistent `accept` error (file descriptor limit reached,
+            // for one) used to spin this loop at full speed. Log it and
+            // yield before the retry.
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    tracing::warn!("Metrics server accept failed: {e}; retrying shortly");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let m = metrics_clone.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(
                             io,
                             service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -1408,14 +1448,26 @@ async fn main() {
                             }),
                         )
                         .await;
-                });
-            }
+            });
         }
     });
 
-    // Start Relayer Worker if configured
-    if config.role == "relayer" || config.role == "validator" {
-        let relayer_addr = cli_producer_address.unwrap_or(Address::zero());
+    // Start Relayer Worker if configured. Without a producer address there is
+    // no identity to attribute relay actions to; the worker is not started
+    // with the zero address in that slot, the same way the block producer
+    // below declines without one.
+    let relayer_identity = if config.role == "relayer" || config.role == "validator" {
+        let identity = cli_producer_address;
+        if identity.is_none() {
+            tracing::warn!(
+                "Relayer: no relayer address configured (--validator-address / validator key); the relayer worker is not started."
+            );
+        }
+        identity
+    } else {
+        None
+    };
+    if let Some(relayer_addr) = relayer_identity {
         // Persist the relay cursor next to the chain database. Without a path
         // The worker resumes from `get_finalized_height()` at boot, so every
         // Request that finalized while it was down is skipped: the user has

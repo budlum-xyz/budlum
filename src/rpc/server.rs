@@ -5783,7 +5783,7 @@ mod render_format_tests {
 
 #[cfg(test)]
 mod view_claim_tests {
-    use super::verify_view_claim;
+    use super::{check_claimed_owner, verify_view_claim};
     use crate::core::address::Address;
     use crate::storage::ContentId;
 
