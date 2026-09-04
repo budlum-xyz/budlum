@@ -53,9 +53,16 @@ pub mod seed_corpus;
 /// Find the repository root.
 ///
 /// The working directory decides: the tools walk up from it to the first
-/// directory holding both a `Cargo.toml` and a `src/` tree. Only when that
-/// walk finds nothing does the path compiled into the binary count, and it
-/// is checked the same way before it is trusted.
+/// directory holding a `Cargo.toml`, a `src/` tree and the `xtask/gates`
+/// crate. Only when that walk finds nothing does the path compiled into the
+/// binary count, and it is checked the same way before it is trusted.
+///
+/// The third marker is what tells the checkout root from a member crate.
+/// `bud/`, `budzero/bud-proof/`, `xtask/gates/` and `xtask/tools/` each
+/// carry a manifest and a `src/` tree too, so a tool started inside one of
+/// them used to take that crate for the root and run `.git`, `data`,
+/// `target` and `fuzz/corpus` work there. The root manifest is a package,
+/// not a workspace, so `[workspace]` cannot be the marker.
 ///
 /// The order matters. `option_env!("CARGO_MANIFEST_DIR")` is the checkout the
 /// binary was *built* in, and it used to be consulted first. A tool built in
@@ -87,9 +94,12 @@ fn root_above(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// A repository root carries the workspace manifest and the source tree.
+/// A repository root carries the manifest, the source tree and the gates
+/// crate; a member crate carries the first two only.
 fn is_repo_root(dir: &Path) -> bool {
-    dir.join("Cargo.toml").is_file() && dir.join("src").is_dir()
+    dir.join("Cargo.toml").is_file()
+        && dir.join("src").is_dir()
+        && dir.join("xtask/gates/Cargo.toml").is_file()
 }
 
 /// Run a command and return **without losing** the exit code.
@@ -179,13 +189,32 @@ mod tests {
         let fake =
             std::env::temp_dir().join(format!("budlum-tools-root-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(fake.join("src/deeper")).expect("scratch tree");
-        std::fs::write(fake.join("Cargo.toml"), "[workspace]\n").expect("scratch manifest");
+        std::fs::create_dir_all(fake.join("xtask/gates/src")).expect("scratch gates crate");
+        std::fs::create_dir_all(fake.join("bud/src")).expect("scratch member crate");
+        std::fs::write(fake.join("Cargo.toml"), "[package]\n").expect("scratch manifest");
+        std::fs::write(fake.join("xtask/gates/Cargo.toml"), "[package]\n")
+            .expect("scratch gates manifest");
+        std::fs::write(fake.join("bud/Cargo.toml"), "[package]\n").expect("scratch member manifest");
         let found = root_above(&fake.join("src/deeper"));
+        // From inside a member crate the walk has to continue up to the
+        // checkout root; the crate has a manifest and a `src/` of its own.
+        let from_member = root_above(&fake.join("bud/src"));
+        let from_gates = root_above(&fake.join("xtask/gates/src"));
         let _ = std::fs::remove_dir_all(&fake);
         assert_eq!(
             found.as_deref(),
             Some(fake.as_path()),
             "the tools must act on the checkout the operator stands in"
+        );
+        assert_eq!(
+            from_member.as_deref(),
+            Some(fake.as_path()),
+            "a member crate is not the repository root"
+        );
+        assert_eq!(
+            from_gates.as_deref(),
+            Some(fake.as_path()),
+            "the gates crate is not the repository root"
         );
         assert!(
             root_above(Path::new("/")).is_none(),
