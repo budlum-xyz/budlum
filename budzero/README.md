@@ -5,7 +5,7 @@ STARK-provable execution for **[Budlum](https://github.com/budlum-xyz/budlum)**â
 A compact deterministic ISA, a gas-metered VM that emits execution traces, and a [Plonky3](https://github.com/Plonky3/Plonky3) 0.5.x STARK prover/verifier. Domains produce state; BudZKVM proves the computation that produced it.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](../LICENSE.md)
+[![License: PolyForm Shield 1.0.0](https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg)](../LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 
 ---
@@ -74,6 +74,7 @@ This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is n
 | `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | OK `proves_verify_merkle_valid_64_depth` green (matrix chain + full prove/verify) |
 | Production gate | `MainnetActivation` default **off** (staged ceremony rollout); ISA `is_experimental()==false` |
+| `VerifyInference` | Opcode, gas and activation gate exist; **no verification circuit yet**, so the gate stays off and no proof claims inference correctness |
 | Termination / halt (Z-C/D) | Landed .zk |
 | Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
 |  performance benches | Planned Tur **13.5** |
@@ -110,10 +111,12 @@ CI enforces:
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace`: **124 tests, the valid count** (CI evidenced, 2026-07-18)
+3. `cargo test --workspace` (run from `budzero/`): the count is whatever CI
+   measures on the current tree; it is not copied into this file, because a
+   copied number drifts the moment a test is added.
 
-The module separation rule: this number is reported on its own row in the root
-README dashboard table; it is not mixed into the total Core count (755 lib).
+The module separation rule: the BudZero count is reported on its own row in
+the root README dashboard table; it is not mixed into the Core count.
 
 No `#[allow(clippy::â€¦)]` as a substitute for fixing lints on new work.
 
