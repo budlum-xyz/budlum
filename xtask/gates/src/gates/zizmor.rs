@@ -18,9 +18,30 @@ const SHA256: &str = "277f2bd8fd37cf60c42ab7afca6faa884e65440fa31e02b44bdaae60f6
 /// in `repo-lint` a malicious PR can place a fake `zizmor` in a writable
 /// PATH directory, so executing from PATH would run attacker-controlled
 /// code.
-fn bin_path() -> Result<PathBuf, String> {
+/// The resolved binary and, when this run downloaded it, the private
+/// directory holding it. The directory is removed when the value drops, so
+/// a run leaves nothing behind in the temp root: each run used to leave its
+/// own copy of the archive and the binary there, and a runner that hosts
+/// many gate runs filled its temp file system with them.
+struct ZizmorBin {
+    path: PathBuf,
+    work: Option<PathBuf>,
+}
+
+impl Drop for ZizmorBin {
+    fn drop(&mut self) {
+        if let Some(work) = self.work.take() {
+            let _ = std::fs::remove_dir_all(work);
+        }
+    }
+}
+
+fn bin_path() -> Result<ZizmorBin, String> {
     if let Ok(b) = std::env::var("ZIZMOR_BIN") {
-        return Ok(PathBuf::from(b));
+        return Ok(ZizmorBin {
+            path: PathBuf::from(b),
+            work: None,
+        });
     }
     // No unverified cache. This gate runs inside `repo-lint`, where earlier
     // steps execute PR-controlled Rust code from xtask/gates via `cargo run`;
@@ -33,6 +54,12 @@ fn bin_path() -> Result<PathBuf, String> {
     // another process on the runner could write between the checksum and
     // the extraction, or between the extraction and the run (CWE-377).
     let work = private_work_dir()?;
+    // Owned from here on: every early return below drops it, and with it
+    // the directory, the archive and whatever was extracted.
+    let owned = ZizmorBin {
+        path: work.join("zizmor"),
+        work: Some(work.clone()),
+    };
     let tgz = work.join(format!("zizmor-{VERSION}.tar.gz"));
     let url = format!(
         "https://github.com/zizmorcore/zizmor/releases/download/v{VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
@@ -86,13 +113,12 @@ fn bin_path() -> Result<PathBuf, String> {
     }
     // The archive contains the binary at the root of the extract dir; look
     // for it next to the tgz, inside the directory only this run knows.
-    let extracted = work.join("zizmor");
-    if extracted.is_file() {
-        return Ok(extracted);
+    if owned.path.is_file() {
+        return Ok(owned);
     }
     Err(format!(
         "no binary was found in the zizmor archive: {}",
-        extracted.display()
+        owned.path.display()
     ))
 }
 
@@ -116,7 +142,7 @@ fn private_work_dir() -> Result<PathBuf, String> {
 /// Returns zizmor's findings when it reports any, or a bootstrap/run failure.
 pub fn run(root: &Path) -> Result<String, String> {
     let bin = bin_path()?;
-    let out = std::process::Command::new(&bin)
+    let out = std::process::Command::new(&bin.path)
         .arg(".")
         .current_dir(root)
         .output();
@@ -126,7 +152,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             "zizmor findings:\n{}",
             String::from_utf8_lossy(&o.stdout)
         )),
-        Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.display())),
+        Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.path.display())),
     }
 }
 
@@ -153,11 +179,22 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     let bin = bin_path()?;
-    let out = std::process::Command::new(&bin)
+    let out = std::process::Command::new(&bin.path)
         .arg(".")
         .current_dir(&dir)
         .output();
     let _ = std::fs::remove_dir_all(&dir);
+    let bin_shown = bin.path.display().to_string();
+    let work = bin.work.clone();
+    drop(bin);
+    if let Some(work) = work {
+        if work.exists() {
+            return Err(format!(
+                "canary: the private zizmor directory {} survived the run",
+                work.display()
+            ));
+        }
+    }
     match out {
         Ok(o) if o.status.success() => Err(String::from(
             "canary: zizmor passed a workflow that expands pull-request data into a shell",
@@ -179,6 +216,6 @@ pub fn self_test() -> Result<String, String> {
                 ))
             }
         }
-        Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.display())),
+        Err(e) => Err(format!("zizmor did not run ({bin_shown}): {e}")),
     }
 }
