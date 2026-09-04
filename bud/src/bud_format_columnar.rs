@@ -33,6 +33,10 @@ pub const COLUMNAR_VERSION: u8 = 3; // v3: `Str` cells carry the JSON kind of th
 pub const MAX_RECORDS: u64 = 10_000_000;
 pub const MAX_COLUMNS: usize = 256;
 pub const MAX_VALUE_BYTES: u64 = 1024 * 1024; // ceiling for a single string value (bomb guard)
+/// Ceiling for one key's UTF-8 length. `columnar_from_blob` refuses a longer
+/// key, so `columnar_encode` refuses it too: a writer that accepts what the
+/// reader refuses stores a container it cannot restore.
+const MAX_KEY_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnarMode {
@@ -119,6 +123,9 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     if keys.is_empty() || keys.len() > MAX_COLUMNS {
         return None;
     }
+    if keys.iter().any(|k| k.len() > MAX_KEY_BYTES) {
+        return None;
+    }
     // are all records objects with the SAME key set?
     let mut canon: Vec<String> = keys.clone();
     canon.sort();
@@ -180,6 +187,12 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             // type mismatch -> turn the column into Str (later values are stringified)
             if cell_type(v) != col_types[ci] {
                 col_types[ci] = ColType::Str;
+            }
+            // The reader refuses a `Str` cell above `MAX_VALUE_BYTES`. Any
+            // value can end in a `Str` cell (its column may degrade later),
+            // so the bound is applied to the text every value would become.
+            if str_cell_len(v) > MAX_VALUE_BYTES {
+                return None;
             }
             columns[ci].push(v.clone());
         }
@@ -280,6 +293,15 @@ const STR_CELL_JSON: u8 = 1;
 /// `Str` on a type mismatch. The cell used to hold only the bytes, so a null
 /// came back as `""` and a number as `"1"`: the blob path changed the data
 /// while the in-memory path did not. The kind byte keeps the two apart.
+/// The byte length a value has as a `Str` cell, which is what the reader's
+/// `MAX_VALUE_BYTES` is measured against.
+fn str_cell_len(v: &Value) -> u64 {
+    match v {
+        Value::String(s) => s.len() as u64,
+        other => other.to_string().len() as u64,
+    }
+}
+
 fn push_str_cell(out: &mut Vec<u8>, v: &Value) {
     let (kind, text) = match v {
         Value::String(s) => (STR_CELL_STRING, s.clone()),
@@ -352,7 +374,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         }
         let kl = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        if kl > 1024 || bytes.len() < pos + kl {
+        if kl > MAX_KEY_BYTES || bytes.len() < pos + kl {
             return None;
         }
         let k = std::str::from_utf8(&bytes[pos..pos + kl]).ok()?.to_string();
@@ -670,6 +692,33 @@ mod tests {
             }
             let _ = columnar_from_blob(&buf[..len]);
         }
+    }
+
+    /// The writer refuses what the reader refuses. A value above
+    /// `MAX_VALUE_BYTES` or a key above `MAX_KEY_BYTES` used to encode,
+    /// serialise and pass the digest, and then `columnar_from_blob` returned
+    /// `None`: a stored container nobody could restore. With `None` from
+    /// `columnar_encode` the engine keeps the raw JSON instead.
+    #[test]
+    fn the_writer_refuses_what_the_reader_refuses() {
+        let long = "x".repeat(MAX_VALUE_BYTES as usize + 1);
+        let too_long_value = format!(r#"[{{"v":"{long}"}}]"#);
+        assert!(columnar_encode(too_long_value.as_bytes(), ColumnarMode::Exact).is_none());
+        // a number column degrades to Str on a later string, so the bound is
+        // measured on every value, not only on the ones in a Str column
+        let degraded = format!(r#"[{{"v":1}},{{"v":"{long}"}}]"#);
+        assert!(columnar_encode(degraded.as_bytes(), ColumnarMode::Exact).is_none());
+        let long_key = "k".repeat(MAX_KEY_BYTES + 1);
+        let too_long_key = format!(r#"[{{"{long_key}":1}}]"#);
+        assert!(columnar_encode(too_long_key.as_bytes(), ColumnarMode::Exact).is_none());
+        // exactly at the bounds both sides agree
+        let at_value = "x".repeat(MAX_VALUE_BYTES as usize);
+        let at_key = "k".repeat(MAX_KEY_BYTES);
+        let at = format!(r#"[{{"{at_key}":"{at_value}"}}]"#);
+        let col = columnar_encode(at.as_bytes(), ColumnarMode::Exact).expect("at the bound");
+        let blob = columnar_to_blob(&col).expect("blob");
+        let back = columnar_from_blob(&blob).expect("the reader accepts the bound");
+        assert_eq!(columnar_decode(&back).unwrap(), at.as_bytes());
     }
 
     #[test]
