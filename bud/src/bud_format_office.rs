@@ -149,28 +149,34 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
         local.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
         local.extend_from_slice(&0u16.to_le_bytes()); // extra_len
-        local.extend_from_slice(nb);
+                                                      // The central directory points at the local header, which begins
+                                                      // where this entry's bytes begin: 30 header bytes, the name, the data.
+                                                      // The offset used to skip the header and name, so every entry after
+                                                      // the first pointed inside the previous entry's data.
         let local_start = offset;
+        local.extend_from_slice(nb);
         local.extend_from_slice(data);
-        // central
+        // The 46-byte central directory record. It used to carry two extra
+        // zero bytes (time, date and crc written as 2 + 4 + 4), so the whole
+        // directory was misaligned for any reader.
         central.extend_from_slice(&ZIP_CENTRAL.to_le_bytes());
-        central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]);
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(nb.len() as u16).to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // made by, needed
+        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0u16.to_le_bytes()); // method STORE
+        central.extend_from_slice(&0u16.to_le_bytes()); // time
+        central.extend_from_slice(&0u16.to_le_bytes()); // date
+        central.extend_from_slice(&0u32.to_le_bytes()); // crc
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
+        central.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+        central.extend_from_slice(&0u16.to_le_bytes()); // extra_len
+        central.extend_from_slice(&0u16.to_le_bytes()); // comment_len
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         central.extend_from_slice(&local_start.to_le_bytes());
         central.extend_from_slice(nb);
-        offset = local_start + data.len() as u32;
+        offset = local_start + 30 + nb.len() as u32 + data.len() as u32;
     }
     let mut out = local;
     let cd_start = out.len() as u32;
@@ -237,7 +243,11 @@ mod tests {
             local.extend_from_slice(nb);
             central.extend_from_slice(&ZIP_CENTRAL.to_le_bytes());
             central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]);
-            central.extend_from_slice(&[0u8; 26]);
+            central.extend_from_slice(&[0u8; 12]); // flags, method, time, date, crc
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
+            central.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+            central.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attrs
             central.extend_from_slice(&offset.to_le_bytes());
             central.extend_from_slice(nb);
             local.extend_from_slice(data);
@@ -246,11 +256,12 @@ mod tests {
         let mut out = local;
         let cd = out.len() as u32;
         out.extend_from_slice(&central);
+        let cd_len = out.len() as u32 - cd; // the directory alone, before EOCD
         out.extend_from_slice(&ZIP_EOCD.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
         out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(out.len() as u32 - cd).to_le_bytes());
+        out.extend_from_slice(&cd_len.to_le_bytes());
         out.extend_from_slice(&cd.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out
@@ -270,6 +281,30 @@ mod tests {
         let z = sample_opc();
         let t = office_transform(&z).unwrap();
         let r = office_restore(&t).unwrap();
+        // The restored ZIP is the sample ZIP, byte for byte: the central
+        // directory offsets point at each local header, not into the
+        // previous entry's data.
+        assert_eq!(r, z, "the STORE repack reproduces the sample exactly");
+        // Every central-directory offset lands on a local header whose name
+        // is the entry's own.
+        let n = u16::from_le_bytes(r[r.len() - 12..r.len() - 10].try_into().unwrap()) as usize;
+        let cd = u32::from_le_bytes(r[r.len() - 6..r.len() - 2].try_into().unwrap()) as usize;
+        let mut p = cd;
+        for _ in 0..n {
+            assert_eq!(
+                u32::from_le_bytes(r[p..p + 4].try_into().unwrap()),
+                ZIP_CENTRAL
+            );
+            let name_len = u16::from_le_bytes(r[p + 28..p + 30].try_into().unwrap()) as usize;
+            let off = u32::from_le_bytes(r[p + 42..p + 46].try_into().unwrap()) as usize;
+            let name = &r[p + 46..p + 46 + name_len];
+            assert_eq!(
+                u32::from_le_bytes(r[off..off + 4].try_into().unwrap()),
+                ZIP_LOCAL
+            );
+            assert_eq!(&r[off + 30..off + 30 + name_len], name);
+            p += 46 + name_len;
+        }
         // After the STORE repack the unpacked bytes are the same, in name and
         // data.
         let a = zip_read(&z).unwrap();
