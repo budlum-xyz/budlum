@@ -1538,7 +1538,24 @@ async fn main() {
             loop {
                 line.clear();
                 use tokio::io::AsyncBufReadExt;
-                if stdin.read_line(&mut line).await.is_ok() {
+                // `Ok(0)` is end of file: a daemon with stdin closed or
+                // redirected from `/dev/null` gets it on every call, and a
+                // loop that treats it as an empty command spins on one
+                // core for the life of the process. The console is over;
+                // this branch parks so the other `select!` arms keep the
+                // node running.
+                match stdin.read_line(&mut line).await {
+                    Ok(0) => {
+                        tracing::info!("stdin closed; the interactive console is off");
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("stdin read failed: {e}; the interactive console is off");
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(_) => {}
+                }
+                {
                     let cmd = line.trim();
                     match cmd {
                         "tx" => {
