@@ -1039,6 +1039,24 @@ fn parse_grant_auth(
 /// older than [`crate::storage::VIEW_CLAIM_MAX_AGE_SECS`] is refused. A
 /// claim dated in the future is refused too, so a
 /// caller cannot pre-sign claims that come alive later.
+/// The `owner` field of a reveal request against the owner the chain
+/// recorded for the content. A recorded owner that is somebody else is
+/// refused by name; content with no recorded owner is left to the grant
+/// lookup, which opens nothing sealed for it.
+fn check_claimed_owner(
+    recorded: Option<Address>,
+    claimed: &Address,
+) -> Result<(), ErrorObjectOwned> {
+    match recorded {
+        Some(recorded) if recorded != *claimed => Err(ErrorObjectOwned::owned(
+            -32006,
+            "reveal: owner is not the recorded owner of this content",
+            None::<()>,
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn verify_view_claim(
     claim: &serde_json::Value,
     content_id: &crate::storage::ContentId,
@@ -2496,6 +2514,20 @@ impl BudlumApiServer for RpcServer {
         // grantee and have this node build frames for content it holds no
         // grant on. The derived address is what the grant lookup asks about.
         let viewer = verify_view_claim(&viewer_claim, &content_id, &key_id, &owner, &packed, now)?;
+
+        // `owner` is a claim in the request; the chain holds who owns this
+        // content. A claim naming another address is refused here by name.
+        // The registry's `may_view` refuses it too, but silently, as a
+        // `false` grant, so a caller naming itself owner of somebody else's
+        // sealed content saw a generic refusal and an honest owner with a
+        // typo in the field saw the same one. Content with no recorded
+        // owner keeps the registry's answer: no grant, sealed refused.
+        let recorded = self
+            .chain
+            .confidential_owner(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        check_claimed_owner(recorded, &owner)?;
 
         // The grant decision is the chain's; the gateway re-enforces it on the
         // sealed path, but the authority that owns the registry answers it.
@@ -5764,6 +5796,21 @@ mod view_claim_tests {
             Address::from([4u8; 32]),
             b"packed-bytes".to_vec(),
         )
+    }
+
+    /// The `owner` field is checked against the chain's record before the
+    /// grant lookup. A request naming another address as owner of recorded
+    /// content is refused by name; the recorded owner passes; content with no
+    /// record is left to the grant lookup rather than refused here.
+    #[test]
+    fn the_claimed_owner_must_be_the_recorded_owner() {
+        let recorded = Address::from([4u8; 32]);
+        let stranger = Address::from([5u8; 32]);
+        let err = check_claimed_owner(Some(recorded), &stranger).unwrap_err();
+        assert_eq!(err.code(), -32006, "{err:?}");
+        assert!(err.message().contains("recorded owner"), "{err:?}");
+        assert!(check_claimed_owner(Some(recorded), &recorded).is_ok());
+        assert!(check_claimed_owner(None, &stranger).is_ok());
     }
 
     /// A claim without a key or a signature is refused before any crypto.
