@@ -114,6 +114,25 @@ fn strip_strings(text: &str) -> String {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            // A block comment, nested as Rust nests them. Left in place, a
+            // `/* is_err() */` next to `assert!(tamper().is_ok())` gave the
+            // refusal check the token it wanted while the executable
+            // assertion accepted the forgery.
+            let mut depth = 1usize;
+            i += 2;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
         } else if b[i] == b'"' {
             out.push('"');
             i += 1;
@@ -268,6 +287,23 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
             "canary: an apostrophe in a comment hid the refusal assertion that followed it",
+        ));
+    }
+    // A refusal token inside a block comment is not an assertion. The
+    // comment is nested, as Rust allows, so a scanner that stops at the
+    // first `*/` would leave the tail of it in the code.
+    let commented = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    /* is_err() /* nested */ still a comment */\n    \
+         let r = tamper();\n    assert!(r.is_ok());\n}",
+    );
+    assert_ne!(commented, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), commented)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a refusal token inside a block comment passed as an assertion",
         ));
     }
     let _ = std::fs::remove_dir_all(&dir);
