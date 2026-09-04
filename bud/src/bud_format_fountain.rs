@@ -15,7 +15,7 @@ pub const LT_MAGIC: [u8; 8] = *b"\xB5LT01\0\0\0";
 /// mask with a `k <= 16` bound, and the encoder's distinct-pick bookkeeping
 /// is a 64-slot table. Encoding more than the decoder can ever solve would
 /// produce symbols nobody can open.
-pub const LT_MAX_BLOCKS: usize = 16;
+const LT_MAX_BLOCKS: usize = 16;
 
 /// Produce n symbols from k blocks (deterministic - seeded generator).
 ///
