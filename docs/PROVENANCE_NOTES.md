@@ -100,6 +100,22 @@ hardest: they are consensus-critical and have no upstream to compare against.
 | `src/core/block.rs`, `src/core/account.rs` | Block hashing and state-root folding, domain-separated with `BDLM_*` tags. Structure is conventional Merkle accounting; the specific layout is project-specific. **Origin unclear.** |
 | `src/tokenomics/` | Fixed-supply emission, vesting, burn. Economic design, not a ported algorithm. **Original as far as can be determined.** |
 
+## Design references (idea level, no code copied)
+
+Studied projects that influenced a design decision. They are recorded here
+and in `docs/NOTICE` so the names are stated where attribution belongs.
+The `no_upstream_brands` gate keeps these names out of code and
+identifiers; this file is on the gate's attribution exemption list for
+that reason.
+
+| module | studied project | licence | what was taken | what was not taken |
+|---|---|---|---|---|
+| `crates/ai-inference/crates/ai-serve/src/residency.rs` | JustVugg/colibri, pure C on-device MoE engine (https://github.com/JustVugg/colibri) | Apache-2.0 | The placement principle: keep the dense part of a mixture-of-experts model resident, stage the routed experts across a VRAM/RAM/disk hierarchy, and let placement never change semantics. | The runtime: colibri's streaming, prefetch, heat maps and eviction live in C runtime code that is not present in the tree. The in-tree module is a Rust planner that plans placements and refuses to change the semantic profile. Different language, different layer, no shared lines. |
+| bounded-buffer and ceiling behaviour, `docs/ARCHITECTURE.md` | 1jehuang/jcode, coding agent (https://github.com/1jehuang/jcode) | MIT | The memory discipline: bounded buffers and explicit ceilings as the default, and a ceiling that silently turns a feature off being treated as a design failure. | jcode is a JavaScript agent. The in-tree behaviour is Rust RPC and proof-cache code written in this tree. No shared code. |
+| `crates/ai-inference/crates/ai-core/src/system_prompt.rs` | a corpus of published system prompts (consulted for structure; not redistributed, no single upstream named) | n/a | The discipline of stating machine-checkable limits inside the prompt itself. | The prompt text is original: it states this protocol's own admission limits and is checked against the tree by the `ai-inference-prompt-is-true` gate. No prompt text was reproduced. |
+
+---
+
 ## Not reviewed here
 
 `src/ai/`, `src/pollen/`, `src/socialfi/`, `src/storage/`, `src/hub/`,
