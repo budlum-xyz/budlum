@@ -38,9 +38,10 @@
 //!
 //! To be moved in the second round: the five scripts called from workflows
 //! (`audit-deps`, `generate-sbom`, `smoke_rpc`, `docker-smoke-mainnet`,
-//! `devnet-multinode-smoke`), each together with its own workflow change; and
-//! `coverage-report.sh`, which is not called but parses `cargo llvm-cov`
-//! output, so its counterpart is not a tool but a parser.
+//! `devnet-multinode-smoke`), each together with its own workflow change.
+//! `coverage-report.sh` was not called and parsed `cargo llvm-cov` output; its
+//! counterpart is the `module-coverage` gate in `xtask/gates`, and the script
+//! is gone.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -33,7 +33,9 @@ enabled = true
 auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 allowed_ips = ["127.0.0.1", "::1"]
-trusted_proxies = []
+# The TLS-terminating reverse proxy on this host; forwarded client addresses
+# are honoured only from it.
+trusted_proxies = ["127.0.0.1"]
 rate_limit_per_minute = 600
 
 [metrics]

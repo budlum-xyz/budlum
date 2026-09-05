@@ -27,11 +27,13 @@ banned_peer_db = "./data/testnet/banned-peers.json"
 mdns_enabled = false
 
 [rpc]
-public_listener = "0.0.0.0:18545"
+# Same shape as mainnet: plain HTTP on loopback, TLS terminated by a reverse
+# proxy on this host, the API key never on the wire in clear text.
+public_listener = "127.0.0.1:18545"
 operator_listener = "127.0.0.1:18546"
-trusted_proxies = []
+trusted_proxies = ["127.0.0.1"]
 enabled = true
-# Same rule as mainnet: a 0.0.0.0 listener carries a key or does not start.
+# Same rule as mainnet: the key is required whatever the bind address.
 auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 allowed_ips = []

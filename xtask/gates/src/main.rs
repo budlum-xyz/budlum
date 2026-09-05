@@ -85,6 +85,7 @@ mod gates {
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
+    pub mod genesis_schema;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
@@ -100,6 +101,7 @@ mod gates {
     pub mod mermaid;
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
     pub mod network_hardening_gate;
@@ -657,6 +659,26 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "genesis-schema",
+        replaces: None,
+        run: gates::genesis_schema::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::genesis_schema::self_test,
+    },
+    Gate {
+        name: "module-coverage",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "module-coverage reads a coverage report; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::module_coverage::run),
+        run_args: None,
+        self_test: gates::module_coverage::self_test,
     },
     Gate {
         name: "license-consistency",

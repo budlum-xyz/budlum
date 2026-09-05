@@ -332,8 +332,12 @@ jobs:
         # says only this job compiles alone. `--each-feature` never combines
         # two features, so the two PQ backends (mutually exclusive by the
         # duplicate-definition refusal in crypto/primitives.rs) each go
-        # through singly.
-        run: cargo hack check --each-feature --exclude-no-default-features --locked
+        # through singly. Without an `--exclude-features` list cargo-hack
+        # appends one extra `--all-features` run, and that run enables both
+        # backends at once; measured on 233c9b6, it failed with the duplicate
+        # definitions the refusal exists to produce. `--exclude-all-features`
+        # drops that one run and keeps every single-feature run.
+        run: cargo hack check --each-feature --exclude-no-default-features --exclude-all-features --locked
 
   hadolint:
     name: Hadolint (Dockerfile lint)

@@ -4,10 +4,13 @@
 # The FIRST bare-number line of this file is the baseline
 # (scripts/check-cargo-vet.sh reads it with `grep -E '^[0-9]+$' | head -1`).
 #
-# 437 = the first real measurement in which cargo-vet actually RAN in this
+# 437 was the first real measurement in which cargo-vet actually RAN in this
 # repository (2026-07-26). Before that supply-chain/config.toml contained
 # invented keys so the tool fell over with a parse error; the file's existence
 # gave the impression of auditing, but not a single dependency had been audited.
+# The bare number above is the current baseline and has been lowered since
+# (434 as of 2026-09-04, CI measuring 433 with the libp2p-connection-limits
+# audit); the history below keeps the 437 figures as the measurements they were.
 #
 # Rule: this number MUST NOT RISE. Lowering it is free and encouraged - when it
 # drops, this file is lowered in a deliberate PR (the ratchet tightens). Raising
@@ -16,8 +19,8 @@
 # Import coverage was measured (2026-07-26): `cargo vet regenerate imports`
 # pulled 268 audit records for 158 crates from six trusted sources (Mozilla,
 # Google, Bytecode Alliance, ISRG, Embark, Zcash) - imports.lock is 74 KB. Even
-# so the number stays at 437: the measurement gave an identical result with
-# imports.lock full and completely empty (437 = 437, zero crates closed).
+# so the number stayed at 437 then: the measurement gave an identical result
+# with imports.lock full and completely empty (437 = 437, zero crates closed).
 # The reason is that cargo-vet requires an exact version/delta match; the
 # fetched audits do not cover our locked versions. So the baseline is NOT
 # inflated by "imports not fetched yet", it shows the real audit debt.
