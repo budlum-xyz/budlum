@@ -351,6 +351,16 @@ fn guarded_mainnet_peer_entries(entries: &[&str]) -> Vec<String> {
     }
 }
 
+/// Whether a node on this profile has any way to find a peer.
+///
+/// mDNS is refused outside devnet, so a mainnet or testnet node whose
+/// bootnode list and DNS-seed list are both empty would come up, listen, and
+/// never meet another node while looking healthy. Startup refuses that
+/// instead of idling.
+pub fn has_peer_source(network: Network, bootnodes: &[String], dns_seeds: &[String]) -> bool {
+    network == Network::Devnet || !bootnodes.is_empty() || !dns_seeds.is_empty()
+}
+
 /// Returns the first entry in the input list carrying a placeholder/dummy
 /// marker (case-insensitive). `None` on a clean list.
 pub fn first_placeholder_peer(entries: &[String]) -> Option<String> {
@@ -501,6 +511,24 @@ mod tests {
         // An empty list: not the guard, but the existing "empty bootnode" rule
         // applies.
         assert!(first_placeholder_peer(&[]).is_none());
+    }
+
+    /// The public profiles cannot use mDNS, so without a bootnode or a DNS
+    /// seed there is nothing to dial; only devnet may start alone.
+    #[test]
+    fn public_profiles_need_a_bootnode_or_a_dns_seed() {
+        let none: Vec<String> = Vec::new();
+        let peer = vec![
+            "/ip4/139.59.10.20/tcp/5001/p2p/12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+                .to_string(),
+        ];
+        let seed = vec!["_dnsaddr.seed-1.testnet.budlum.xyz".to_string()];
+        assert!(!has_peer_source(Network::Testnet, &none, &none));
+        assert!(!has_peer_source(Network::Mainnet, &none, &none));
+        assert!(has_peer_source(Network::Devnet, &none, &none));
+        assert!(has_peer_source(Network::Testnet, &peer, &none));
+        assert!(has_peer_source(Network::Testnet, &none, &seed));
+        assert!(has_peer_source(Network::Mainnet, &peer, &seed));
     }
 
     /// Mainnet is the strictest security profile.

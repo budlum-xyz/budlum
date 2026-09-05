@@ -16,8 +16,10 @@ backup_retention_count = 24
 
 [p2p]
 identity_file = "./secrets/testnet-node-id.key"
-# No public testnet exists yet; the profile is refused for discovery until a
-# bootnode or DNS seed is recorded here. Pass --bootstrap for a private mesh.
+# No public testnet exists yet, so there is no maintained bootnode or DNS seed
+# to record. mDNS is devnet-only, and a node with no peer source refuses to
+# start (`has_peer_source`): record the peers of your mesh here or pass
+# --bootstrap.
 bootnodes = []
 dns_seeds = []
 max_peers = 75
