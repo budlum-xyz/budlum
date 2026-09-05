@@ -58,6 +58,8 @@ pub enum ChainCommand {
     GetBaseFee(oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
+    /// Whether the mempool still holds the transaction with this hash.
+    MempoolContains(String, oneshot::Sender<bool>),
     HandleFinalityCert(FinalityCert, oneshot::Sender<Result<(), String>>),
     HandlePrevote(Prevote, oneshot::Sender<Result<(), String>>),
     HandlePrecommit(
@@ -721,6 +723,19 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetMempoolSize(tx)).await;
         rx.await.unwrap_or(0)
+    }
+
+    /// Whether the mempool still holds `hash`.
+    ///
+    /// `add_transaction` confirms admission, not execution: the pool can
+    /// expire or evict the transaction afterwards. A submitter that must see
+    /// its transaction through to a block asks this to tell "still queued"
+    /// from "lost". An unreachable actor reads as `false`, the direction in
+    /// which the caller resubmits rather than waits forever.
+    pub async fn mempool_contains(&self, hash: String) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::MempoolContains(hash, tx)).await;
+        rx.await.unwrap_or(false)
     }
 
     pub async fn handle_finality_cert(&self, cert: FinalityCert) -> Result<(), String> {
@@ -3056,6 +3071,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetMempoolSize(tx) => {
                     let _ = tx.send(self.blockchain.mempool.len());
+                }
+                ChainCommand::MempoolContains(hash, tx) => {
+                    let _ = tx.send(self.blockchain.mempool.get(&hash).is_some());
                 }
                 ChainCommand::GetValidatorAddress(tx) => {
                     let addr = self
