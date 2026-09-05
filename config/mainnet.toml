@@ -42,15 +42,22 @@ banned_peer_db = "./data/mainnet/banned-peers.json"
 mdns_enabled = false
 
 [rpc]
-public_listener = "0.0.0.0:8545"
+# The node speaks plain HTTP. Every request carries `BUDLUM_RPC_API_KEY`, so
+# a listener reachable from the network would send the key in clear text.
+# The public listener therefore binds loopback and a TLS-terminating reverse
+# proxy on the same host (nginx, caddy, haproxy) is the only thing that
+# reaches it; the proxy's address goes in `trusted_proxies` so the client IP
+# it forwards is honoured for allow-lists and rate limits. Binding 0.0.0.0
+# here is a deliberate, logged decision, never the shipped default.
+public_listener = "127.0.0.1:8545"
 operator_listener = "127.0.0.1:8546"
-trusted_proxies = []
+trusted_proxies = ["127.0.0.1"]
 enabled = true
-# A listener on 0.0.0.0 is reachable from the internet, so the key is not
-# optional here. Without these two lines the node inherits `auth_required =
-# true` with no key source and refuses to start; with them it starts and asks
-# every caller for `BUDLUM_RPC_API_KEY`. Empty `allowed_ips` is app-layer
-# allow-all (the key still binds); narrow it or firewall the port.
+# The key is not optional even behind the proxy: TLS says who the server
+# is, the key says who the caller is. Without these two lines the node
+# inherits `auth_required = true` with no key source and refuses to start.
+# Empty `allowed_ips` is app-layer allow-all (the key still binds); narrow
+# it or firewall the port.
 auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 allowed_ips = []

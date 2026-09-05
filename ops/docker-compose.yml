@@ -30,7 +30,9 @@ services:
       # 8545 (public RPC) is deliberately not published. docker-compose.ci.yml
       # adds it for the smoke harness.
       - "4001:4001"
-      - "9090:9090"
+      # Metrics carry no authentication of their own: loopback only, scraped
+      # by the Prometheus service over the compose network.
+      - "127.0.0.1:9090:9090"
     volumes:
       - node1_data:/home/budlum/data
       - node1_secrets:/home/budlum/secrets
@@ -168,7 +170,9 @@ services:
     image: prom/prometheus:latest
     container_name: budlum-prometheus
     ports:
-      - "9091:9090"
+      # The Prometheus UI is unauthenticated; reach it through an SSH tunnel
+      # or an authenticating proxy, not from the network.
+      - "127.0.0.1:9091:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus

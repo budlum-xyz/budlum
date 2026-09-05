@@ -63,6 +63,17 @@ reason = "pqcrypto-traits unmaintained (upstream PQClean is being archived) - to
 # in 0.18.2 and rqrr 0.10.1 requires `lru ^0.16`, so the fix is not selectable
 # until rqrr releases against lru 0.18 (upgrade is tracked; this is not a
 # substitute for it).
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0253"
-reason = "lru pop() UAF requires a stored KEY whose Drop panics during the pop. The only lru instantiation in the tree is rqrr 0.10.1's LruCache<u8, ColoredRegion> (prepare.rs): the key type is u8, which has no Drop implementation and cannot panic, so the advisory's precondition is unreachable in this codebase (VEX: vulnerable code not reachable)."
+# Scoped to the one package and version the reasoning was written for: the
+# waiver lapses on its own when lru moves (a new version is a new
+# reachability question) and when the date passes (the rqrr upgrade that
+# selects lru 0.18 is due before then). A second lru user in any lockfile is
+# a different instantiation, so it is not covered either: the name+version
+# match is per package entry, and the root lock is the only one carrying lru
+# (checked 2026-09-05 across all ten scanned lockfiles).
+[[PackageOverrides]]
+name = "lru"
+version = "0.16.4"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+effectiveUntil = 2026-12-01
+reason = "RUSTSEC-2026-0253: lru pop() UAF requires a stored KEY whose Drop panics during the pop. The only lru instantiation in the tree is rqrr 0.10.1's LruCache<u8, ColoredRegion> (prepare.rs): the key type is u8, which has no Drop implementation and cannot panic, so the advisory's precondition is unreachable in this codebase (VEX: vulnerable code not reachable). RUSTSEC-2026-0002 is fixed in 0.16.3 and does not apply to 0.16.4."

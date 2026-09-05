@@ -570,7 +570,16 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
 /// inline" - from coming back through a different function.
 #[test]
 fn the_worker_source_contains_no_fabricated_success_literal() {
-    let src = include_str!("../relayer/worker.rs");
+    let whole = include_str!("../relayer/worker.rs");
+    // Only the shipped half is measured. The file carries its own test
+    // module after `#[cfg(test)]`, and a fixture there builds the observation
+    // an adapter would hand back, `success: true` included; that is test
+    // input, not a fabricated result, and it never compiles into the node.
+    let src = whole.split("#[cfg(test)]").next().unwrap_or(whole);
+    assert!(
+        whole.contains("#[cfg(test)]"),
+        "worker.rs no longer carries a test module; narrow the scan another way"
+    );
     // Comments are allowed to name the thing they forbid, that is how the
     // next reader learns why the branch is missing. Only executable lines are
     // measured.

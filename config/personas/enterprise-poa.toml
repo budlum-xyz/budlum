@@ -27,15 +27,17 @@ banned_peer_db = "./data/mainnet/banned-peers.json"
 mdns_enabled = false
 
 [rpc]
-public_listener = "0.0.0.0:8545"
+# Loopback, behind a TLS-terminating reverse proxy on this host: the node
+# speaks plain HTTP and the API key must not cross the network in clear text.
+public_listener = "127.0.0.1:8545"
 operator_listener = "127.0.0.1:8546"
 enabled = true
 auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 # Prefer firewall; empty allowed_ips = app-layer allow-all (still need API key).
 allowed_ips = []
-# If behind reverse proxy, list proxy IPs. X-Real-IP only honored then ( B2).
-trusted_proxies = []
+# The proxy's address: X-Forwarded-For / X-Real-IP are honoured only from it.
+trusted_proxies = ["127.0.0.1"]
 
 [metrics]
 # Loopback: scrape through a local agent or an authenticated reverse proxy.

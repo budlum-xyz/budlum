@@ -160,20 +160,22 @@ fn the_shipped_node_profiles_agree_with_the_code() {
     }
 }
 
-/// A shipped profile that listens on every interface carries a key, and its
-/// metrics listener stays on loopback.
+/// Every shipped profile keeps both RPC listeners and the metrics listener
+/// on loopback, and the public profiles carry a key.
 ///
 /// `mainnet.toml` and `testnet.toml` bound the public RPC to `0.0.0.0` with
 /// no `auth_required` and no `api_key_env`. The code default is
 /// `auth_required = true`, so the node either refused to start (no key
 /// source) or, once an operator flipped the flag to get past that, served
-/// every method to the internet with no key. The metrics listener has no
-/// authentication of its own, and two profiles put it on `0.0.0.0` as well.
-/// This lock reads every checked-in profile the way the loader does: a
-/// public listener off loopback requires `auth_required = true` and a named
-/// key variable, and the metrics listener is loopback everywhere.
+/// every method to the internet with no key. The key was added, and then
+/// the second half of the problem stood alone: the node speaks plain HTTP,
+/// so a `0.0.0.0` listener sends that key across the network in clear text.
+/// The shipped answer is loopback plus a TLS-terminating reverse proxy on the
+/// same host, with the proxy in `trusted_proxies`. The metrics listener has
+/// no authentication of its own and was on `0.0.0.0` in two profiles as
+/// well. This lock reads every checked-in profile the way the loader does.
 #[test]
-fn profiles_that_listen_on_every_interface_carry_a_key() {
+fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // The seven shipped profiles by path. A count alone let an unrelated
     // TOML stand in for a required profile: a missing `rpc` table reads as
@@ -204,12 +206,32 @@ fn profiles_that_listen_on_every_interface_carry_a_key() {
         seen.push(file.clone());
 
         let rpc = parsed.get("rpc");
+        let is_loopback =
+            |listener: &str| listener.starts_with("127.") || listener.starts_with("[::1]");
         let listener = rpc
             .and_then(|r| r.get("public_listener"))
             .and_then(toml::Value::as_str)
             .unwrap_or("127.0.0.1:0");
-        let is_loopback = listener.starts_with("127.") || listener.starts_with("[::1]");
-        if !is_loopback {
+        assert!(
+            is_loopback(listener),
+            "{file} binds the public RPC to {listener}: the node speaks plain HTTP and \
+             every call carries the API key, so the shipped profiles stay on loopback \
+             behind a TLS-terminating reverse proxy"
+        );
+        let operator = rpc
+            .and_then(|r| r.get("operator_listener"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("127.0.0.1:0");
+        assert!(
+            is_loopback(operator),
+            "{file} binds the unauthenticated operator RPC to {operator}"
+        );
+        let profile = parsed
+            .get("network")
+            .and_then(|n| n.get("profile"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        if profile == "mainnet" || profile == "testnet" {
             let auth = rpc
                 .and_then(|r| r.get("auth_required"))
                 .and_then(toml::Value::as_bool);
@@ -220,11 +242,22 @@ fn profiles_that_listen_on_every_interface_carry_a_key() {
             assert_eq!(
                 auth,
                 Some(true),
-                "{file} listens on {listener} and must say auth_required = true"
+                "{file} is a {profile} profile and must say auth_required = true; TLS \
+                 names the server, the key names the caller"
             );
             assert!(
                 !key_env.trim().is_empty(),
-                "{file} listens on {listener} and must name api_key_env"
+                "{file} is a {profile} profile and must name api_key_env"
+            );
+            let proxies = rpc
+                .and_then(|r| r.get("trusted_proxies"))
+                .and_then(toml::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            assert!(
+                proxies > 0,
+                "{file} is a {profile} profile behind a reverse proxy and must name it in \
+                 trusted_proxies, or forwarded client addresses are ignored"
             );
         }
 

@@ -1082,9 +1082,9 @@ jobs:
           cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
       - name: Module analysis canary (not vacuous)
-        run: python3 ./ops/scripts/check_module_coverage.py --self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)
-        run: python3 ./ops/scripts/check_module_coverage.py coverage/cov.json
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/cov.json
       - name: BudZero coverage measurement (llvm-cov nextest, budzero workspace)
         # `cd` was used without checking its exit code. If the directory is not found
         # the shell stays at the root, the next command measures the ROOT workspace and
@@ -1096,7 +1096,7 @@ jobs:
           cd budzero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
       - name: Module coverage report - budzero (report mode)
-        run: python3 ./ops/scripts/check_module_coverage.py coverage/budzero-cov.json
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/budzero-cov.json
       - name: Coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1629,7 +1629,10 @@ jobs:
           else
             echo "SKIP (honest marker): main has no buf.yaml yet - the baseline is established by this wave."
           fi
+      # The scheduling keys (chain_id, epochs_per_year, slot_duration_secs,
+      # epoch_length_slots) must be strictly positive; the python version
+      # declared that set and never applied it, so a zero-slot epoch passed.
       - name: genesis schema gate + canary
         run: |
-          python3 ./ops/scripts/check_genesis_schema.py --self-test
-          python3 ./ops/scripts/check_genesis_schema.py config/mainnet-genesis.json
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema

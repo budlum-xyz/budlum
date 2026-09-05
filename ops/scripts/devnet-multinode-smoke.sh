@@ -4,7 +4,11 @@
 # security/liveness claims below (all through node1, 127.0.0.1:8545 -
 # node2..4 deliberately open no RPC; compose is hardened that way):
 #   [1] bud_netListening == true -> the P2P stack is alive
-#   [2] peer mesh evidence from node2..4     -> a 4-node mesh (P2P log evidence; peerCount fallback)
+#   [2] node1 bud_netPeerCount >= 3 and every follower's own connected-peer
+#       gauge >= 1 -> the star that compose dials (node2..4 -> node1) is up,
+#       seen from both ends. Follower-to-follower links are not asserted:
+#       compose dials only node1, so a mesh between followers would be
+#       discovery luck, not a property this file can promise.
 #   [3] bud_blockNumber grows across two measurements -> 4-node consensus liveness
 #   [4] /metrics (127.0.0.1:9090) HTTP 2xx plus a non-empty body
 #   [5] the operator RPC 127.0.0.1:8546 is unreachable from the host (not published, and the node
@@ -43,13 +47,14 @@ done
 [ "$ready" = 1 ] || fail "bud_netListening did not become true within 120 s"
 echo "PASS [1/6]: bud_netListening=true"
 
-echo "== [2/6] peer mesh: node1 bud_netPeerCount >= 0x3 (maks 120 sn) =="
-# The peer count node1 reports over RPC is the only authoritative evidence: this counter
-# grows only on SwarmEvent::ConnectionEstablished, so it measures a P2P connection
-# that was really established. The old "log_nodes" fallback (searching node2..4 logs
-# for patterns such as 'Connected to') weakened the gate: even if the nodes connected
-# only to node1 instead of each other, or did not connect at all, some patterns could
-# match and make it look like a mesh. A single criterion was kept.
+echo "== [2/6] peer connectivity: node1 bud_netPeerCount >= 0x3, node2..4 gauge >= 1 (max 120 s) =="
+# The peer count node1 reports over RPC grows only on
+# SwarmEvent::ConnectionEstablished, so it measures connections that were
+# really established. On its own it proves node1's fanout, nothing about the
+# other end: the same three connections are therefore read again from each
+# follower's own budlum_p2p_peers_connected gauge, inside the container
+# (node2..4 open no RPC). The old "log_nodes" fallback that grepped follower
+# logs for 'Connected to' was dropped; a log pattern is not a connection.
 ok=0; hex=0x0; count=0
 for _ in $(seq 1 60); do
   hex=$(rpc bud_netPeerCount \
@@ -60,8 +65,26 @@ except Exception: print("0x0")' 2>/dev/null || echo 0x0)
   if [ "$count" -ge 3 ]; then ok=1; break; fi
   sleep 2
 done
-[ "$ok" = 1 ] || fail "no 4-node P2P mesh evidence formed (node1 bud_netPeerCount=$hex, expected >= 0x3)"
-echo "PASS [2/6]: peer mesh (node1 bud_netPeerCount=$hex -> $count peers)"
+[ "$ok" = 1 ] || fail "node1 did not reach three peers (bud_netPeerCount=$hex, expected >= 0x3)"
+# Each follower, from its own side. The gauge is registered at 0 and set on
+# every connection change, so a follower that never connected reads 0.
+follower_peers() {
+  docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" exec -T "$1" \
+    curl -sf --max-time 4 http://127.0.0.1:9090/metrics 2>/dev/null \
+    | awk '$1 == "budlum_p2p_peers_connected" { print int($2); found = 1 } END { if (!found) print -1 }'
+}
+follower_report=""
+for node in node2 node3 node4; do
+  peers=-1
+  for _ in $(seq 1 30); do
+    peers=$(follower_peers "$node")
+    [ "$peers" -ge 1 ] && break
+    sleep 2
+  done
+  [ "$peers" -ge 1 ] || fail "$node reports no connected peer (budlum_p2p_peers_connected=$peers; -1: gauge unreadable)"
+  follower_report="$follower_report $node=$peers"
+done
+echo "PASS [2/6]: connectivity (node1 bud_netPeerCount=$hex -> $count peers; follower gauges:$follower_report)"
 
 echo "== [3/6] consensus liveness: bud_blockNumber grows (a max 20 s window) =="
 h1=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))')

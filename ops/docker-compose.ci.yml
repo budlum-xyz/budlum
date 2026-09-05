@@ -18,11 +18,13 @@
 services:
   node1:
     # Publish the public RPC to the host so the smoke script can reach it at
-    # 127.0.0.1:8545. Only ever bound on a CI runner.
+    # 127.0.0.1:8545. Bound to loopback: this overlay turns RPC auth off, and a
+    # runner with a reachable address must not serve that listener to anyone
+    # but the smoke script.
     ports:
       - "4001:4001"
-      - "8545:8545"
-      - "9090:9090"
+      - "127.0.0.1:8545:8545"
+      - "127.0.0.1:9090:9090"
     environment:
       - RUST_LOG=info
       # Disabled so the smoke probes can call JSON-RPC without credentials.
