@@ -500,8 +500,10 @@ mod tests {
     /// classic `ghp_` one; the prefix was missing and the token survived.
     #[test]
     fn secret_redact_strips_fine_grained_github_tokens() {
-        let pat = "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ";
-        let classic = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        // Assembled at run time: a token-shaped literal in the tree trips the
+        // secret scanners the CI runs, and they cannot tell a fixture apart.
+        let pat = format!("github_pat_{}_{}", "1".repeat(22), "x".repeat(59));
+        let classic = format!("ghp_{}", "y".repeat(36));
         let text = format!("token {pat} then {classic} end");
         let (redacted, kinds) = SecretRedactor::redact(&text);
         assert_eq!(redacted, "token [REDACTED] then [REDACTED] end");

@@ -396,7 +396,9 @@ mod tests {
             ("address", |a| {
                 a.address = QuantumAccount::address_from_public_key(&OTHER_KEY);
             }),
-            ("public key", |a| {
+            // Both bound fields moved together: the refusal names the first
+            // in the check's fixed order, which is the address.
+            ("address", |a| {
                 a.pq_public_key = OTHER_KEY;
                 a.address = QuantumAccount::address_from_public_key(&OTHER_KEY);
             }),
