@@ -107,7 +107,10 @@ pub struct EvmDepositProof<'a> {
     /// header's hash and `number` one higher. RFC Q2, N-conf.
     pub confirmation_headers: &'a [&'a [u8]],
     /// Required confirmation count, the reorg window. Mainnet uses roughly
-    /// 64, and governance tunes it.
+    /// 64, and governance tunes it. Zero is refused by `verify_chain`, and
+    /// `EvmChainAdapter::verify_deposit` refuses a value below the adapter's
+    /// configured floor: the relayer writes this field, so on its own it is
+    /// the relayer's choice of window, not the operator's.
     pub required_confirmations: u32,
     /// MPT proof nodes, from `receiptsRoot` down to the target receipt.
     pub proof_nodes: &'a [Vec<u8>],

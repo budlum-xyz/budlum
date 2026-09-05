@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DomainCommitmentRegistry {
+    #[serde(with = "crate::core::map_keys")]
     commitments: BTreeMap<(DomainId, u64, u64), DomainCommitment>,
     seen_blocks: HashSet<(DomainId, u64, Hash32)>,
 }

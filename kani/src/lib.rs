@@ -515,10 +515,14 @@ mod proofs {
         // Scaled so the pair spans the full ratio range while staying two
         // 16-bit symbols rather than two 64-bit ones. Same reason as the
         // overshoot harness: two symbolic operands in a 128-bit multiply is
-        // what CBMC cannot close in CI time.
-        let step = FIXED_POINT_SCALE / u64::from(u16::MAX);
-        let lo = u64::from(lower) * step;
-        let hi = u64::from(higher) * step;
+        // what CBMC cannot close in CI time. The step rounds up and the
+        // products are clamped, so `hi` reaches `FIXED_POINT_SCALE` itself:
+        // with a truncated step of 15 the pair topped out at 983_025 and the
+        // endpoint the default slash ratio uses was never evaluated. `min`
+        // is monotonic, so the assumption `lower <= higher` carries over.
+        let step = FIXED_POINT_SCALE.div_ceil(u64::from(u16::MAX));
+        let lo = (u64::from(lower) * step).min(FIXED_POINT_SCALE);
+        let hi = (u64::from(higher) * step).min(FIXED_POINT_SCALE);
 
         assert!(
             penalty_for(stake, lo) <= penalty_for(stake, hi),
@@ -786,7 +790,8 @@ mod proofs {
     ///
     /// The layer loop duplicates the odd tail and halves the layer each round,
     /// so it must reach a single-node layer for every leaf count. Bounded to
-    /// eight leaves; the bound is what keeps the query in CI budget.
+    /// `MAX_MIRROR_LEAVES` leaves; the bound is what keeps the query in CI
+    /// budget.
     #[kani::proof]
     #[kani::unwind(5)]
     fn merkle_tree_terminates_with_a_single_root() {

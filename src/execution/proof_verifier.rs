@@ -416,6 +416,16 @@ mod tests {
     #[test]
     fn valid_proof_verifies_against_bud_proof_backend() {
         let (envelope, inputs, program) = real_bundle();
+        // The structural gate must accept the id the prover actually emits;
+        // it once pinned `"Plonky3"`, a name no prover writes, so a genuine
+        // envelope was refused before verification and a spoofed one that
+        // passed the gate was refused by the library.
+        ProofVerifier::validate_envelope_structure(&envelope)
+            .expect("a prover-emitted envelope passes the structural gate");
+        assert_eq!(
+            envelope.backend,
+            crate::execution::executor::AI_EXECUTION_BACKEND_PLONKY3
+        );
         let verified = ProofVerifier::verify(&envelope, &inputs, &program, 1_000_000).unwrap();
         assert_eq!(verified.program_hash, inputs.program_hash);
         assert_eq!(verified.final_state_root, inputs.final_state_root);

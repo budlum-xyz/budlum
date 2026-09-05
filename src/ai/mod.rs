@@ -1634,6 +1634,80 @@ mod tests {
         assert!(!registry.requests.contains_key(&req_id));
     }
 
+    /// A reclaimed request and its marker used to stay in the registry
+    /// forever: the row was excluded from pruning, and the marker was swept
+    /// only once the row was gone. Both now retire on the request's own
+    /// schedule, and the refund paths still refuse the retired request.
+    #[test]
+    fn test_p5_prune_retires_reclaimed_and_cancelled_requests() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+        let request = |input: &[u8]| {
+            let mut req = AiInferenceRequest {
+                request_id: AiRequestId::default(),
+                requester: owner,
+                model_id,
+                input_commitment: [2u8; 32],
+                input_ref: BoundedBytes::try_new(input.to_vec()).unwrap(),
+                max_fee: 100,
+                callback: None,
+                submitted_at_block: 10,
+                deadline_block: 110,
+                effort: crate::ai_inference::effort::EffortTier::default(),
+                perception: None,
+            };
+            req.request_id = req.calculate_id();
+            req
+        };
+        let reclaimed = registry.submit_request(request(b"reclaimed"), 5).unwrap();
+        let cancelled = registry.submit_request(request(b"cancelled"), 5).unwrap();
+        registry
+            .reclaim_fee(&reclaimed, 200)
+            .expect("past the deadline");
+        registry
+            .cancel_request(&cancelled, &owner, 20)
+            .expect("the requester cancels");
+
+        // Within retention everything stays, markers included.
+        assert_eq!(registry.prune_expired(200, 100), 0);
+        assert!(registry.reclaimed_fees.contains(&reclaimed));
+        assert!(registry.cancelled_requests.contains(&cancelled));
+
+        // Past retention the rows and their markers retire together.
+        assert_eq!(registry.prune_expired(300, 100), 4);
+        assert!(registry.requests.is_empty());
+        assert!(registry.reclaimed_fees.is_empty());
+        assert!(registry.cancelled_requests.is_empty());
+        // A retired request cannot be refunded again through either path.
+        assert!(registry.reclaim_fee(&reclaimed, 400).is_err());
+        assert!(registry.reclaim_fee(&cancelled, 400).is_err());
+        assert!(registry.cancel_request(&reclaimed, &owner, 400).is_err());
+    }
+
     #[test]
     fn test_p5_max_fee_zero_rejected() {
         let mut registry = AiRegistry::new();
@@ -1875,6 +1949,20 @@ mod tests {
         let result = registry.update_model_spec(&model_id, &owner, 2, 5, 1024, 2048, 100, 50);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("agreement_threshold"));
+
+        // Ref-byte caps: an update must not exceed what registration refuses.
+        let over = crate::ai::types::MAX_INFERENCE_REF_BYTES as u64 + 1;
+        let err = registry
+            .update_model_spec(&model_id, &owner, 2, 2, over, 2048, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("max_input_ref_bytes"), "{err}");
+        let err = registry
+            .update_model_spec(&model_id, &owner, 2, 2, 1024, over, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("max_output_ref_bytes"), "{err}");
+        // A rejected update leaves the spec (and its version) untouched.
+        let spec = registry.models.get(&model_id).unwrap();
+        assert_eq!((spec.max_input_ref_bytes, spec.version), (1024, 1));
     }
 
     #[test]
@@ -3039,6 +3127,21 @@ mod tests {
     }
 
     #[test]
+    fn test_reclaim_cancelled_request_rejected() {
+        // The refund goes out on cancel; the same escrow must not be paid a
+        // second time through reclaim_fee after the deadline passes.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let (requester, max_fee) = registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert_eq!((requester, max_fee), (owner, 100));
+
+        let err = registry.reclaim_fee(&req_id, 200).unwrap_err();
+        assert!(err.contains("cancelled"), "unexpected error: {err}");
+        assert!(!registry.reclaimed_fees.contains(&req_id));
+    }
+
+    #[test]
     fn test_cancel_blocks_results() {
         // After cancellation, results are rejected.
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
@@ -3054,6 +3157,57 @@ mod tests {
         let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 20);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    /// Cancellation is terminal on the proof path too. A result accepted
+    /// before the cancellation could still take an execution proof, and the
+    /// re-evaluation that follows the attach could emit an outcome for a
+    /// request whose fee had already been refunded.
+    #[test]
+    fn test_cancel_blocks_proofs_and_late_finalization() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+        // One agreeing result: below the threshold, so nothing finalizes.
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        registry.cancel_request(&req_id, &owner, 20).unwrap();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: [2u8; 32],
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let attached = registry.attach_execution_proof(&req_id, &v1, proof);
+        assert!(attached.is_err());
+        assert!(attached.unwrap_err().contains("cancelled"));
+        assert!(!registry.has_execution_proof(&req_id, &v1));
+
+        // Even with an agreeing set already in the result table, the
+        // re-evaluation must not produce an outcome for a cancelled request.
+        let second = AiInferenceResult {
+            request_id: req_id,
+            verifier: v2,
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+            result_nonce: 2,
+            signature: vec![1],
+            submitted_at_block: 25,
+        };
+        registry.results.entry(req_id).or_default().push(second);
+        assert!(registry.try_finalize_with_proofs(&req_id).is_none());
+        assert!(!registry.outcomes.contains_key(&req_id));
+        assert!(registry.is_cancelled(&req_id));
     }
 
     #[test]

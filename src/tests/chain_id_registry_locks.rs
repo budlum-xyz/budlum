@@ -123,3 +123,160 @@ fn the_registry_collision_scan_can_detect_a_violation() {
         "mainnet's own id is in the taken list"
     );
 }
+
+/// The node profiles carry `network.chain_id` next to the network name. The
+/// loader refuses a profile whose id differs from the network's registered id
+/// (`NodeConfig::validate`), so a profile with the wrong number is a profile
+/// nobody can start. All six shipped profiles used to carry the pre-registry
+/// numbers (1, 42, 1337) and were refused at startup; this lock reads each one
+/// and compares it with the code the way the loader does.
+#[test]
+fn the_shipped_node_profiles_agree_with_the_code() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for (file, network) in [
+        ("config/mainnet.toml", Network::Mainnet),
+        ("config/testnet.toml", Network::Testnet),
+        ("config/devnet.toml", Network::Devnet),
+        ("config/personas/enterprise-poa.toml", Network::Mainnet),
+        ("config/personas/developer.toml", Network::Devnet),
+        ("config/personas/user-devnet.toml", Network::Devnet),
+    ] {
+        let raw = std::fs::read_to_string(root.join(file))
+            .unwrap_or_else(|e| panic!("{file} is readable: {e}"));
+        let parsed: toml::Value =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{file} is valid TOML: {e}"));
+        let declared = parsed
+            .get("network")
+            .and_then(|n| n.get("chain_id"))
+            .and_then(toml::Value::as_integer)
+            .unwrap_or_else(|| panic!("{file} has no numeric network.chain_id"));
+        assert_eq!(
+            u64::try_from(declared).ok(),
+            Some(network.chain_id().value()),
+            "{file} declares chain id {declared} but {} is {} in code",
+            network.name(),
+            network.chain_id().value()
+        );
+    }
+}
+
+/// Every shipped profile keeps both RPC listeners and the metrics listener
+/// on loopback, and the public profiles carry a key.
+///
+/// `mainnet.toml` and `testnet.toml` bound the public RPC to `0.0.0.0` with
+/// no `auth_required` and no `api_key_env`. The code default is
+/// `auth_required = true`, so the node either refused to start (no key
+/// source) or, once an operator flipped the flag to get past that, served
+/// every method to the internet with no key. The key was added, and then
+/// the second half of the problem stood alone: the node speaks plain HTTP,
+/// so a `0.0.0.0` listener sends that key across the network in clear text.
+/// The shipped answer is loopback plus a TLS-terminating reverse proxy on the
+/// same host, with the proxy in `trusted_proxies`. The metrics listener has
+/// no authentication of its own and was on `0.0.0.0` in two profiles as
+/// well. This lock reads every checked-in profile the way the loader does.
+#[test]
+fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // The seven shipped profiles by path. A count alone let an unrelated
+    // TOML stand in for a required profile: a missing `rpc` table reads as
+    // a loopback default and a missing `metrics` table is skipped, so the
+    // replaced profile passed without being checked.
+    const SHIPPED: [&str; 7] = [
+        "config/archive.toml",
+        "config/devnet.toml",
+        "config/mainnet.toml",
+        "config/personas/developer.toml",
+        "config/personas/enterprise-poa.toml",
+        "config/personas/user-devnet.toml",
+        "config/testnet.toml",
+    ];
+    let mut seen: Vec<String> = Vec::new();
+    for entry in ["config", "config/personas"]
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(root.join(dir)).expect("profile directory is readable"))
+    {
+        let path = entry.expect("profile entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let file = path.strip_prefix(&root).unwrap().display().to_string();
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let parsed: toml::Value =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{file} is valid TOML: {e}"));
+        seen.push(file.clone());
+
+        let rpc = parsed.get("rpc");
+        let is_loopback =
+            |listener: &str| listener.starts_with("127.") || listener.starts_with("[::1]");
+        let listener = rpc
+            .and_then(|r| r.get("public_listener"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("127.0.0.1:0");
+        assert!(
+            is_loopback(listener),
+            "{file} binds the public RPC to {listener}: the node speaks plain HTTP and \
+             every call carries the API key, so the shipped profiles stay on loopback \
+             behind a TLS-terminating reverse proxy"
+        );
+        let operator = rpc
+            .and_then(|r| r.get("operator_listener"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("127.0.0.1:0");
+        assert!(
+            is_loopback(operator),
+            "{file} binds the unauthenticated operator RPC to {operator}"
+        );
+        let profile = parsed
+            .get("network")
+            .and_then(|n| n.get("profile"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        if profile == "mainnet" || profile == "testnet" {
+            let auth = rpc
+                .and_then(|r| r.get("auth_required"))
+                .and_then(toml::Value::as_bool);
+            let key_env = rpc
+                .and_then(|r| r.get("api_key_env"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            assert_eq!(
+                auth,
+                Some(true),
+                "{file} is a {profile} profile and must say auth_required = true; TLS \
+                 names the server, the key names the caller"
+            );
+            assert!(
+                !key_env.trim().is_empty(),
+                "{file} is a {profile} profile and must name api_key_env"
+            );
+            let proxies = rpc
+                .and_then(|r| r.get("trusted_proxies"))
+                .and_then(toml::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            assert!(
+                proxies > 0,
+                "{file} is a {profile} profile behind a reverse proxy and must name it in \
+                 trusted_proxies, or forwarded client addresses are ignored"
+            );
+        }
+
+        if let Some(metrics) = parsed
+            .get("metrics")
+            .and_then(|m| m.get("listener"))
+            .and_then(toml::Value::as_str)
+        {
+            assert!(
+                metrics.starts_with("127.") || metrics.starts_with("[::1]"),
+                "{file} exposes the unauthenticated metrics endpoint on {metrics}"
+            );
+        }
+    }
+    seen.sort();
+    for shipped in SHIPPED {
+        assert!(
+            seen.iter().any(|s| s == shipped),
+            "the shipped profile {shipped} was not read; found {seen:?}"
+        );
+    }
+}

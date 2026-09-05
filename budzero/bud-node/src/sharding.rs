@@ -19,6 +19,7 @@
 //! than none: it tells the next reader not to look.
 
 use crate::store::ContentId;
+use libp2p::kad::{KBucketDistance, KBucketKey, RecordKey, U256};
 use libp2p::PeerId;
 
 /// Sharding configuration.
@@ -81,8 +82,13 @@ impl ShardManager {
         if self.config.mobile_mode && !self.is_resource_buffer_sufficient() {
             return false; // Skip caching on mobile if low on battery/budget
         }
-        let distance = self.xor_distance(cid);
-        distance <= self.config.max_xor_distance
+        // The threshold is a `u128`, the distance is 256 bits wide. A
+        // distance with any of its upper 128 bits set is farther than every
+        // threshold this type can express, so it is never "close". Truncating
+        // to the low half first (`low_u128`) used to let such a distance pass
+        // whenever its low half happened to be small, including as an exact
+        // match under a zero threshold.
+        self.xor_distance(cid).0 <= U256::from(self.config.max_xor_distance)
     }
 
     /// Resource budget check for mobile devices (Mock/Placeholder).
@@ -93,23 +99,20 @@ impl ShardManager {
         true
     }
 
-    /// Calculate the XOR distance between the local PeerId and a CID.
+    /// Calculate the XOR distance between the local PeerId and a CID, in
+    /// Kademlia's own key space.
     ///
-    /// Both PeerId and ContentId (V1) are based on SHA-256 (32 bytes).
-    pub fn xor_distance(&self, cid: &ContentId) -> u128 {
-        let peer_bytes = self.local_peer_id.to_bytes();
-        // Take the last 16 bytes for a u128 distance metric.
-        // PeerId bytes vary in length, so we hash it to get a fixed 32 bytes.
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::default();
-        hasher.update(&peer_bytes);
-        let peer_hash = hasher.finalize();
-
-        let mut dist_bytes = [0u8; 16];
-        for i in 0..16 {
-            dist_bytes[i] = peer_hash[i + 16] ^ cid.0[i + 16];
-        }
-        u128::from_be_bytes(dist_bytes)
+    /// The DHT places both sides through `kbucket::Key`: `SHA-256(peer_id
+    /// bytes)` for the peer and `SHA-256(record key)` for the CID, where the
+    /// record key is the raw CID (`ContentDiscovery::cid_to_key`). The CID
+    /// used to enter the XOR unhashed, so `should_cache` was measuring in a
+    /// space the DHT does not use, and "close" here was not "close" there.
+    /// The full 256-bit distance is returned; `should_cache` compares all
+    /// of it against the threshold.
+    pub fn xor_distance(&self, cid: &ContentId) -> KBucketDistance {
+        let peer = KBucketKey::from(self.local_peer_id);
+        let key = KBucketKey::new(RecordKey::new(&cid.0));
+        peer.distance(&key)
     }
 }
 
@@ -132,6 +135,51 @@ mod tests {
         let d1 = manager.xor_distance(&cid);
         let d2 = manager.xor_distance(&cid);
         assert_eq!(d1, d2);
+    }
+
+    /// The distance is the one Kademlia computes between the peer's bucket
+    /// key and the record key of the CID, not an XOR against raw CID bytes.
+    #[test]
+    fn xor_distance_matches_the_dht_key_space() {
+        let peer = random_peer_id();
+        let manager = ShardManager::new(peer, ShardingConfig::default());
+        let cid = ContentId([0x42; 32]);
+        let expected = KBucketKey::from(peer).distance(&KBucketKey::new(RecordKey::new(&cid.0)));
+        assert_eq!(manager.xor_distance(&cid), expected);
+
+        // The raw-byte XOR the code used to compute is a different number.
+        use sha2::{Digest, Sha256};
+        let peer_hash = Sha256::digest(peer.to_bytes());
+        let mut raw = [0u8; 32];
+        for i in 0..32 {
+            raw[i] = peer_hash[i] ^ cid.0[i];
+        }
+        assert_ne!(manager.xor_distance(&cid).0, U256::from_big_endian(&raw));
+    }
+
+    /// The threshold is compared against the whole 256-bit distance. With
+    /// the widest threshold a `u128` can hold, only a CID whose distance has
+    /// no upper bit set is close; that is one CID in 2^128. Truncating to
+    /// the low half used to make this threshold admit every CID.
+    #[test]
+    fn the_widest_u128_threshold_does_not_admit_every_cid() {
+        let peer = random_peer_id();
+        let manager = ShardManager::new(
+            peer,
+            ShardingConfig {
+                max_xor_distance: u128::MAX,
+                ..Default::default()
+            },
+        );
+        let admitted = (0u8..32)
+            .filter(|i| manager.should_cache(&ContentId([*i; 32])))
+            .count();
+        assert_eq!(
+            admitted, 0,
+            "a 256-bit distance above u128::MAX was called close"
+        );
+        // The full distance really does carry upper bits for these CIDs.
+        assert!(manager.xor_distance(&ContentId([7u8; 32])).0 > U256::from(u128::MAX));
     }
 
     #[test]

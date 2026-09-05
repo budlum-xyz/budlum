@@ -203,6 +203,12 @@ impl Blockchain {
                 )
                 .unwrap_or(i64::MAX),
             );
+            m.bridge_transfer_rows
+                .set(i64::try_from(self.state.bridge_state.transfer_count()).unwrap_or(i64::MAX));
+            m.storage_reallocation_rows.set(
+                i64::try_from(self.state.storage_registry.reallocation_ticket_count())
+                    .unwrap_or(i64::MAX),
+            );
             if let Some(ref store) = self.storage {
                 if let Ok(bytes) = store.size_on_disk() {
                     m.storage_db_size_bytes
@@ -729,14 +735,37 @@ impl Blockchain {
                 }
             }
 
-            if let Ok(Some(stored_bridge_state)) = store.load_bridge_state() {
-                state.bridge_state = stored_bridge_state;
+            // A bridge or registry row that does not decode is a database
+            // from another build, not an empty one. Starting with a fresh
+            // bridge state or registry over a chain whose blocks committed
+            // to the stored one would produce roots no peer accepts, so the
+            // node stops and says which row it could not read.
+            match store.load_bridge_state() {
+                Ok(Some(stored_bridge_state)) => state.bridge_state = stored_bridge_state,
+                Ok(None) => {}
+                Err(e) => {
+                    error!("CRITICAL ERROR: stored bridge state is unreadable: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Stored bridge state is unreadable: {e}");
+                }
             }
             if let Ok(Some(stored_universal_relayer)) = store.load_universal_relayer() {
                 universal_relayer = stored_universal_relayer;
             }
-            if let Ok(Some(stored_storage_registry)) = store.load_storage_registry() {
-                state.storage_registry = stored_storage_registry;
+            match store.load_storage_registry() {
+                Ok(Some(stored_storage_registry)) => {
+                    state.storage_registry = stored_storage_registry;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!("CRITICAL ERROR: stored storage registry is unreadable: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Stored storage registry is unreadable: {e}");
+                }
             }
             if let Ok(Some(stored_proof_claims)) = store.load_proof_claim_registry() {
                 proof_claims = stored_proof_claims;
@@ -1701,17 +1730,15 @@ impl Blockchain {
             }
         }
 
-        self.state
-            .bridge_state
-            .mint(&message, self.chain.len() as u64)
-            .map_err(|e| e.to_string())?;
-
-        // Q9: Deduct relayer fee from arriving asset if inbound to Budlum
+        // Amounts and the ceiling are settled before the bridge state moves:
+        // after `mint` the replay id is spent and the transfer reads as
+        // minted, so a refusal there would consume the lock and credit
+        // nothing, or only the recipient.
         let transfer = self
             .state
             .bridge_state
             .get_transfer(&message.message_id)
-            .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
+            .ok_or_else(|| "Unknown bridge transfer for mint".to_string())?
             .clone();
 
         // Fee comes out of the arriving asset, which is what lets a user
@@ -1736,6 +1763,17 @@ impl Blockchain {
         if fee > u64::MAX as u128 {
             return Err("Bridge fee exceeds maximum representable balance (u64 overflow)".into());
         }
+        let minted = (final_amount as u64)
+            .checked_add(fee as u64)
+            .ok_or_else(|| "Bridge amount exceeds maximum representable balance".to_string())?;
+        self.state
+            .ensure_mint_headroom(minted)
+            .map_err(|e| format!("Bridge mint: {e}"))?;
+
+        self.state
+            .bridge_state
+            .mint(&message, self.chain.len() as u64)
+            .map_err(|e| e.to_string())?;
 
         // Credit the recipient and the relayer
         // Using try_add_balance to prevent silent u64 overflow capping.
@@ -2031,9 +2069,10 @@ impl Blockchain {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
 
+        let settled_height = self.chain.len() as u64;
         self.state
             .bridge_state
-            .unlock(transfer_id, message.source_domain)
+            .unlock(transfer_id, message.source_domain, settled_height)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
@@ -2253,6 +2292,26 @@ impl Blockchain {
             return Err(format!(
                 "proof claims {spent} gas used against a declared limit of {declared_limit}"
             ));
+        }
+
+        // 1g. The committed root has to be the value the proof constrains.
+        //
+        // `final_state_root` becomes the domain's `last_committed_hash` below,
+        // and bridge verification reads it as the domain's root. The AIR does
+        // not derive that field from the trace: it binds it to itself
+        // (`plonky3_air.rs`, constraint (2)), so a prover may put any 32 bytes
+        // there and still hold a valid proof. The field the AIR does derive
+        // from the execution is `state_writes_digest` (constraint (2b), the
+        // SWrite chain). `build_public_inputs` sets the two equal; a submission
+        // where they differ was produced by something else and would commit a
+        // root nothing proved. Refused before the fee, like the other shape
+        // checks: the submitter has not asked the chain to verify anything yet.
+        let pi = &submission.public_inputs;
+        if pi.final_state_root != pi.state_writes_digest {
+            return Err(
+                "zk proof final_state_root is not the proven state_writes_digest; the committed root must be the value the circuit binds"
+                    .to_string(),
+            );
         }
 
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
@@ -2532,16 +2591,13 @@ impl Blockchain {
         // Integrate BridgeState transition
         match message.kind {
             MessageKind::BridgeLock => {
-                self.state
-                    .bridge_state
-                    .mint(&message, current_height)
-                    .map_err(|e| e.to_string())?;
-                // Deduct relayer fee (Decision 9: 1%)
+                // Same order as the verified-event path: amounts and ceiling
+                // first, bridge state second, credits last.
                 let transfer = self
                     .state
                     .bridge_state
                     .get_transfer(&message.message_id)
-                    .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
+                    .ok_or_else(|| "Unknown bridge transfer for mint".to_string())?
                     .clone();
 
                 let params = *self.state.registry.params();
@@ -2564,6 +2620,18 @@ impl Blockchain {
                         "Bridge fee {fee} exceeds maximum representable balance"
                     ));
                 }
+                let minted = (final_amount as u64)
+                    .checked_add(fee as u64)
+                    .ok_or_else(|| {
+                        "Bridge amount exceeds maximum representable balance".to_string()
+                    })?;
+                self.state
+                    .ensure_mint_headroom(minted)
+                    .map_err(|e| format!("Bridge relay mint: {e}"))?;
+                self.state
+                    .bridge_state
+                    .mint(&message, current_height)
+                    .map_err(|e| e.to_string())?;
 
                 // Try_add_balance for relay bridge mint
                 // The same supply creation, the second entry coming from the
@@ -2603,7 +2671,7 @@ impl Blockchain {
                 .map_err(|e| e.to_string())?;
                 self.state
                     .bridge_state
-                    .unlock(transfer_id, message.source_domain)
+                    .unlock(transfer_id, message.source_domain, current_height)
                     .map_err(|e| e.to_string())?;
                 let transfer = self
                     .state
@@ -5189,14 +5257,14 @@ impl Blockchain {
     pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         let epoch =
             checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
-        let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
         // The aggregator is always started for the current epoch, so the set
         // is known by construction; `build_validator_snapshot` is the same
         // value the lookup would return.
         let snapshot = self
             .validator_snapshot_for_epoch(epoch)
             .unwrap_or_else(|| self.build_validator_snapshot(epoch));
-        aggregator.set_validator_snapshot(snapshot);
+        let aggregator =
+            FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
     }

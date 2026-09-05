@@ -24,7 +24,6 @@ bud/src/bud_format.rs	const	HOT_TIER
 bud/src/bud_format.rs	const	ICE_TIER
 bud/src/bud_format.rs	const	IMAGE_REVOLUTIONARY
 bud/src/bud_format.rs	const	LOSSY_ALLOWED
-bud/src/bud_format.rs	const	MAX_CHUNK_BYTES
 bud/src/bud_format.rs	const	MAX_DECOMPRESSED_BYTES
 bud/src/bud_format.rs	const	MAX_RATIO
 bud/src/bud_format.rs	const	PDF_REVOLUTIONARY
@@ -477,10 +476,8 @@ bud/src/bud_format_ratioconsensus.rs	fn	holds_ceiling
 bud/src/bud_format_ratioconsensus.rs	fn	weighted_score
 bud/src/bud_format_ratioconsensus.rs	struct	RatioCandidateAgent
 bud/src/bud_format_ratioconsensus.rs	struct	RatioConsensus
-bud/src/bud_format_real.rs	const	ZSTD_MAX_DECOMPRESSED
 bud/src/bud_format_real.rs	fn	is_bud_hfm
 bud/src/bud_format_real.rs	fn	measured_ratios
-bud/src/bud_format_real.rs	fn	zstd_decompress_safe
 bud/src/bud_format_real.rs	struct	RealBench
 bud/src/bud_format_real.rs	struct	RealCompressor
 bud/src/bud_format_recipe.rs	const	RECIPE_BOUNTY_RATIO
@@ -744,7 +741,6 @@ bud/src/quantum_chain.rs	fn	from_bip39_seed
 bud/src/quantum_chain.rs	fn	handshake_ml_kem_ok
 bud/src/quantum_chain.rs	fn	has_dual
 bud/src/quantum_chain.rs	fn	hash_fields
-bud/src/quantum_chain.rs	fn	is_below_threshold
 bud/src/quantum_chain.rs	fn	is_online
 bud/src/quantum_chain.rs	fn	kq_block
 bud/src/quantum_chain.rs	fn	kq_feat
@@ -754,7 +750,6 @@ bud/src/quantum_chain.rs	fn	kq_media_device_only
 bud/src/quantum_chain.rs	fn	kq_p2p
 bud/src/quantum_chain.rs	fn	kq_stark
 bud/src/quantum_chain.rs	fn	kq_tx
-bud/src/quantum_chain.rs	fn	kq_vrf
 bud/src/quantum_chain.rs	fn	kq_wallet
 bud/src/quantum_chain.rs	fn	should_displace
 bud/src/quantum_chain.rs	fn	verify_quorum
@@ -763,9 +758,6 @@ bud/src/quantum_chain.rs	struct	FiatShamirTranscript
 bud/src/quantum_chain.rs	struct	HybridFinalityVote
 bud/src/quantum_chain.rs	struct	HybridTx
 bud/src/quantum_chain.rs	struct	MobileSelfProvider
-bud/src/quantum_chain.rs	struct	PqVrf
-bud/src/quantum_chain.rs	struct	PqVrfOutput
-bud/src/quantum_chain.rs	struct	PqVrfProof
 bud/src/quantum_chain.rs	struct	QuantumChainGates
 bud/src/quantum_chain.rs	struct	Sha3Hasher
 bud/src/quantum_chain.rs	struct	Sha3Sponge
@@ -808,7 +800,6 @@ budzero/bud-proof/src/bud_stark/verifier.rs	const	MAX_VERIFIER_DEGREE_BITS
 budzero/bud-proof/src/bud_stark/verifier.rs	enum	VerificationError
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	recompose_quotient_from_chunks
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	verify_constraints
-budzero/bud-proof/src/bud_stark/verifier.rs	fn	verify_with_preprocessed
 budzero/bud-proof/src/plonky3_air.rs	const	POSEIDON_HALF_FULL
 budzero/bud-proof/src/plonky3_air.rs	const	PREPROCESSED_WIDTH
 budzero/bud-proof/src/plonky3_prover.rs	fn	to_public_values
@@ -989,7 +980,6 @@ crates/ai-inference/crates/ai-tune/src/plan.rs	fn	full_sft
 crates/ai-inference/crates/ai-tune/src/schema.rs	const	MAX_RECORD_BYTES
 crates/ai-inference/crates/ai-tune/src/schema.rs	enum	SchemaError
 crates/note-packing/src/lib.rs	const	FIELD_BYTES
-crates/note-packing/src/lib.rs	fn	is_canonical_field
 crates/wallet-core/src/bip39_wordlist.rs	const	BIP39_WORDLIST
 crates/wallet-core/src/lib.rs	const	ADDRESS_VERSION_V2
 crates/wallet-core/src/lib.rs	const	MAX_MULTISIG_OWNERS
@@ -1172,7 +1162,6 @@ src/bin/budlum-relayer.rs	fn	get_block_number
 src/bin/budlum-relayer.rs	fn	get_deposit_logs
 src/bin/budlum-relayer.rs	fn	parse_args
 src/bin/budlum-relayer.rs	fn	run_relayer
-src/bin/budlum-relayer.rs	fn	submit_slashing_report_for_invalid_relay
 src/bin/budlum-relayer.rs	struct	BudlumBurnEvent
 src/bin/budlum-relayer.rs	struct	BudlumClient
 src/bin/budlum-relayer.rs	struct	EthClient
@@ -1269,8 +1258,6 @@ src/chain/genesis.rs	struct	BootstrapDomainConfig
 src/chain/genesis.rs	struct	GenesisConsensusKeys
 src/chain/snapshot.rs	enum	SnapshotAuthError
 src/chain/snapshot.rs	fn	calculate_digest
-src/chain/snapshot.rs	fn	load_latest_snapshot
-src/chain/snapshot.rs	fn	load_latest_snapshot_v2
 src/chain/snapshot.rs	fn	migration_report
 src/chain/snapshot.rs	fn	reseal_after_manual_edit
 src/chain/snapshot.rs	fn	save_snapshot
@@ -1326,7 +1313,6 @@ src/consensus/pow.rs	fn	difficulty_for_next_block
 src/consensus/pow.rs	fn	get_difficulty
 src/consensus/pow.rs	fn	saturating_to_u128
 src/consensus/pow.rs	struct	PoWConfig
-src/consensus/pow.rs	struct	U256
 src/consensus/qc.rs	const	CURRENT_VERSION
 src/consensus/qc.rs	enum	QcProofKind
 src/consensus/qc.rs	fn	compute_merkle_root
@@ -1377,8 +1363,6 @@ src/core/chain_config.rs	const	MAX_VOTES_PER_MSG
 src/core/chain_config.rs	const	PROTOCOL_VERSION
 src/core/chain_config.rs	const	SLOT_MS
 src/core/chain_config.rs	fn	finality_quorum
-src/core/chain_config.rs	fn	magic_bytes
-src/core/chain_config.rs	fn	mempool_config
 src/core/chain_config.rs	struct	ChainId
 src/core/chain_config.rs	struct	ConsensusParams
 src/core/constitution.rs	enum	ConstitutionParameterKey
@@ -1752,7 +1736,6 @@ src/network/peer_manager.rs	const	TIMEOUT_PENALTY
 src/network/peer_manager.rs	fn	ban_remaining
 src/network/peer_manager.rs	fn	consume_token
 src/network/peer_manager.rs	fn	consume_token_with_rate
-src/network/peer_manager.rs	fn	get_best_peers
 src/network/peer_manager.rs	fn	get_peer_info
 src/network/peer_manager.rs	fn	get_score
 src/network/peer_manager.rs	fn	max_tracked_peers
@@ -1907,7 +1890,6 @@ src/storage/assignment.rs	fn	displaced_shards
 src/storage/content_id.rs	const	DEFAULT_CHUNK_SIZE_BYTES
 src/storage/content_id.rs	fn	of_subrange
 src/storage/db.rs	fn	apply_migrations
-src/storage/db.rs	fn	load_validator_snapshots
 src/storage/db.rs	fn	put_content
 src/storage/db.rs	fn	recover_interrupted_commit
 src/storage/derived.rs	const	DERIVED_BLOCK_PIXELS
@@ -2021,7 +2003,6 @@ src/storage/provider.rs	fn	provider_challenge_id
 src/storage/provider.rs	struct	ProviderChallengeResult
 src/storage/provider.rs	struct	PutReceipt
 src/storage/provider.rs	struct	StorageProof
-src/storage/provider.rs	trait	StorageProvider
 src/storage/provider.rs	type	ChallengeId
 src/storage/provider.rs	type	DealId
 src/storage/pruning.rs	fn	archive_node_default

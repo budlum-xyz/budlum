@@ -101,7 +101,7 @@ pub use bud_fixed_point::{
 pub use bud_format::{
     BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus, BUD_MAGIC, BUD_VERSION,
 };
-pub use bud_format_bft::{BftRatioConsensus, RatioFinalityCert, RatioVote};
+pub use bud_format_bft::{BftRatioConsensus, RatioFinalityCert, RatioVote, ValidatorSet};
 pub use bud_format_block::{PactChallengeInBlock, RegenerationBlock, BLOCK_MAGIC};
 pub use bud_format_catalog::{by_name, catalog_detect, catalog_size, FormatCatalogEntry, CATALOG};
 pub use bud_format_checkpoint::Checkpoint;
@@ -110,9 +110,8 @@ pub use bud_format_columnar::{
     JsonColumnar, COLUMNAR_MAGIC,
 };
 pub use bud_format_container::{
-    content_id, expert_candidates, select_best_lossless, structural_chunks, structural_join,
-    structural_split, structural_split_compact, BudV2File, BudV2Header, ChunkCodec, FormatCodec,
-    MultiHash, StructuralKind,
+    content_id, structural_join, structural_split, structural_split_compact, BudV2File,
+    BudV2Header, ChunkCodec, FormatCodec, MultiHash, StructuralKind,
 };
 pub use bud_format_crop::{CropDerivation, CROP_MAGIC, MCU_SIZE};
 pub use bud_format_culling::{ClusterTier, CullingPlan, CULL_MAGIC};
@@ -192,7 +191,7 @@ pub use price::{Expansion, PriceError, PriceModel};
 pub use provider::{Provider, ProviderClass, ProviderError};
 pub use quantum::{QuantumError, QuantumSuite};
 pub use quantum_chain::{
-    DualWallet, FiatShamirTranscript, HybridFinalityVote, HybridTx, MobileSelfProvider, PqVrf,
+    DualWallet, FiatShamirTranscript, HybridFinalityVote, HybridTx, MobileSelfProvider,
     QuantumChainGates, Sha3Hasher, MAX_BLOCK_BYTES, PQ_SCHEME_ID_FINAL,
 };
 pub use ratio::{FormatClass, Pipe, RatioResult};

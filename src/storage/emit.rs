@@ -270,6 +270,9 @@ pub enum EmitError {
         /// Ceiling.
         limit: u16,
     },
+    /// The policy asked for zero-length blocks: nothing divides by it, and a
+    /// feed of empty blocks carries no body.
+    ZeroBlockLen,
     /// A drop's wire would not fit the frame header's bound.
     WireTooLarge {
         /// Wire length.
@@ -438,6 +441,7 @@ impl std::fmt::Display for EmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "empty body"),
+            Self::ZeroBlockLen => write!(f, "block_len must be at least 1"),
             Self::TooLarge { len, limit } => {
                 write!(f, "body of {len} bytes over emit cap {limit}")
             }
@@ -725,6 +729,12 @@ fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
         });
     }
     gate_codec(CodecKind::RawFrames)?;
+    // `div_ceil` by zero panics; a zero block length arrives from the RPC
+    // caller unchecked, so it is refused here, before the divide, as a
+    // request error rather than a worker panic.
+    if policy.block_len == 0 {
+        return Err(EmitError::ZeroBlockLen);
+    }
     let blok = usize::from(policy.block_len);
     let bloklar = len.saturating_add(THREE_PAYLOAD_HEADER_LEN).div_ceil(blok);
     let k = u16::try_from(bloklar).map_err(|_| EmitError::TooManyBlocks {
@@ -1427,6 +1437,20 @@ mod tests {
         assert!(matches!(
             qr_feed_preview(&[], &EmitPolicy::default(), None),
             Err(EmitError::Empty)
+        ));
+        // A zero block length used to reach `div_ceil` and panic the
+        // request; it is a caller error and is reported as one.
+        let zero_policy = EmitPolicy {
+            block_len: 0,
+            ..EmitPolicy::default()
+        };
+        assert!(matches!(
+            qr_feed_preview(&body(64), &zero_policy, None),
+            Err(EmitError::ZeroBlockLen)
+        ));
+        assert!(matches!(
+            qr_feed_frames_burst(&body(64), &zero_policy, 0, 1),
+            Err(EmitError::ZeroBlockLen)
         ));
     }
 

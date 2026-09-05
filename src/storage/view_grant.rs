@@ -253,6 +253,45 @@ pub fn social_delete_digest(content_id: &ContentId, caller: &Address, at_epoch: 
     ])
 }
 
+/// Digest a viewer signs to open a reveal session for one object.
+///
+/// The registry decides `may_view(content, viewer, key_id, owner)`, and until
+/// this existed `viewer` was a string the RPC caller typed: anyone could name
+/// a grantee and have the node build frames for content the caller holds no
+/// grant on. The claim binds the viewer address (derived from the signing key,
+/// never read from a field), the object, the key handle, the owner whose
+/// grant is authoritative, and the payload the frames will be built from, so
+/// a claim signed for one object, one key or one payload cannot open another.
+/// `issued_at` (unix seconds) enters so a captured claim expires with
+/// [`VIEW_CLAIM_MAX_AGE_SECS`] instead of living as long as the grant.
+#[must_use]
+pub fn view_claim_digest(
+    content_id: &ContentId,
+    viewer: &Address,
+    key_id: &[u8; 32],
+    owner: &Address,
+    payload_commitment: &[u8; 32],
+    issued_at: u64,
+) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_VIEW_CLAIM_V1",
+        content_id.as_bytes(),
+        viewer.as_bytes(),
+        key_id,
+        owner.as_bytes(),
+        payload_commitment,
+        &issued_at.to_le_bytes(),
+    ])
+}
+
+/// How long a signed view claim stays usable, in seconds.
+///
+/// A claim is a bearer credential for one session open; a captured one must
+/// not stay valid for the life of the grant. Five minutes matches the reveal
+/// session TTL: a client that opens a session and streams it never needs a
+/// claim older than the session it opened.
+pub const VIEW_CLAIM_MAX_AGE_SECS: u64 = 300;
+
 /// Digest a confidential body commit is signed over.
 ///
 /// The object, the owner deriving from the signing key, the cipher, the
@@ -346,6 +385,7 @@ pub struct ViewGrantRegistry {
     next_id: u64,
     grants: BTreeMap<u64, ViewGrant>,
     /// Live index: content → grant ids (includes revoked; filter at read).
+    #[serde(with = "crate::core::map_keys")]
     by_content: BTreeMap<ContentId, Vec<u64>>,
 }
 
@@ -652,6 +692,52 @@ mod tests {
 
     fn cid(b: u8) -> ContentId {
         ContentId([b; 32])
+    }
+
+    /// Every field of a view claim moves the digest.
+    ///
+    /// The claim is what stops a caller from naming somebody else as the
+    /// viewer; if any field failed to enter, a signature made for one object,
+    /// key, owner, payload or moment could be replayed under another.
+    #[test]
+    fn view_claim_digest_binds_every_field() {
+        let base = view_claim_digest(&cid(1), &addr(2), &[3u8; 32], &addr(4), &[5u8; 32], 6);
+        let variants = [
+            view_claim_digest(&cid(9), &addr(2), &[3u8; 32], &addr(4), &[5u8; 32], 6),
+            view_claim_digest(&cid(1), &addr(9), &[3u8; 32], &addr(4), &[5u8; 32], 6),
+            view_claim_digest(&cid(1), &addr(2), &[9u8; 32], &addr(4), &[5u8; 32], 6),
+            view_claim_digest(&cid(1), &addr(2), &[3u8; 32], &addr(9), &[5u8; 32], 6),
+            view_claim_digest(&cid(1), &addr(2), &[3u8; 32], &addr(4), &[9u8; 32], 6),
+            view_claim_digest(&cid(1), &addr(2), &[3u8; 32], &addr(4), &[5u8; 32], 7),
+        ];
+        for (i, v) in variants.iter().enumerate() {
+            assert_ne!(
+                &base, v,
+                "field {i} of the view claim did not enter the digest"
+            );
+        }
+        assert_ne!(
+            base,
+            grant_issue_digest(
+                &cid(1),
+                &addr(2),
+                None,
+                &[3u8; 32],
+                ViewPolicy::PublicKeyId,
+                6
+            ),
+            "a view claim must not collide with a grant issue over the same fields"
+        );
+    }
+
+    /// The claim's lifetime matches the session it opens.
+    #[test]
+    fn view_claim_max_age_matches_the_reveal_session_ttl() {
+        assert_eq!(
+            VIEW_CLAIM_MAX_AGE_SECS,
+            crate::storage::REVEAL_SESSION_TTL_SECS,
+            "a claim older than the session it could open is a captured credential"
+        );
     }
 
     #[test]

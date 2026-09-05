@@ -240,9 +240,17 @@ impl StateBackend for State {
     }
 
     fn commit(&mut self) -> Result<(), String> {
-        // Drop the innermost snapshot; parent frames stay intact.
+        // Drop the innermost snapshot; parent frames stay intact. Only the
+        // outermost commit reaches the disk: an inner commit that saved
+        // would leave values on disk that an outer rollback then discards in
+        // memory, and the next `load` would hand back a state nobody
+        // committed.
         self.backup_stack.pop();
-        self.save_atomic()
+        if self.backup_stack.is_empty() {
+            self.save_atomic()
+        } else {
+            Ok(())
+        }
     }
 
     fn rollback(&mut self) {
@@ -467,6 +475,7 @@ mod tests {
 
         // Nested commit: outer begin, inner begin+commit, outer rollback
         // Must restore pre-outer state (inner commit only drops its snapshot).
+        state.save_atomic().unwrap(); // the disk holds balance 100
         state.begin_transaction(); // outer
         state.set_account(
             1,
@@ -491,6 +500,14 @@ mod tests {
         assert_eq!(state.get_account(1).unwrap().balance, 600);
         state.rollback(); // restore outer snapshot (balance 100)
         assert_eq!(state.get_account(1).unwrap().balance, 100);
+        // The inner commit did not reach the disk: a fresh load sees the
+        // rolled-back value, not 600.
+        let reloaded = State::load(temp_file).unwrap();
+        assert_eq!(
+            reloaded.get_account(1).map(|a| a.balance),
+            Some(100),
+            "an inner commit must not persist what the outer rollback discards"
+        );
 
         let _ = fs::remove_file(temp_file);
         let _ = fs::remove_file(format!("{temp_file}.tmp"));

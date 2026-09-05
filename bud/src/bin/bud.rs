@@ -6,7 +6,7 @@
 //!   bud store   <in> <out> [--min-chunk 65536]                               write v2 container (K38)
 //!   bud restore <in> <out>                                                   read v2 container (verify)
 //!   bud bench   <file>                                                       speed + cost measurement
-//!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (2n/3)
+//!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (more than two thirds)
 //!   bud check   <file>                                                       integrity + gate check
 //!
 //! Error path: every command performs real file I/O; on error -> exit code 1 + message.
@@ -16,9 +16,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus};
-use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote};
+use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote, ValidatorSet};
 use bud_core::bud_format_checkpoint::Checkpoint;
-use bud_core::bud_format_container::BudV2File;
+use bud_core::bud_format_container::{BudV2File, BudV2Header, ChunkCodec, MultiHash};
 use bud_core::bud_format_pact::PactRecord;
 use bud_core::bud_format_production::BudProductionRecord;
 
@@ -94,7 +94,7 @@ enum Commands {
         #[arg(short, long)]
         file: PathBuf,
     },
-    /// BFT finality: n validators, a 2n/3 majority for the same pipe_id/ratio
+    /// BFT finality: n validators, more than two thirds voting the same pipe_id/ratio
     BftVote {
         #[arg(long)]
         pipe_id: u16,
@@ -341,7 +341,14 @@ fn run(cli: Cli) -> Result<String, String> {
             } else {
                 store(&data)
             }
-            .ok_or("v2 store failed (size/capacity limit - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)")?;
+            .ok_or_else(|| {
+                format!(
+                    "v2 store failed: a container holds at most {} chunks of {} bytes, {} bytes in total",
+                    BudV2File::MAX_CHUNK_COUNT,
+                    BudV2File::MAX_CHUNK_BYTES,
+                    BudV2File::MAX_TOTAL_BYTES
+                )
+            })?;
             write_file(&output, &enc)?;
             let cc = chunk_count(&enc).unwrap_or(0);
             Ok(format!(
@@ -387,32 +394,41 @@ fn run(cli: Cli) -> Result<String, String> {
             validator,
             n,
         } => {
-            if n < 1 {
-                return Err("BFT: n must be >= 1".into());
+            if !(1..=255).contains(&n) {
+                return Err(
+                    "BFT: n must be between 1 and 255 (one derived key per validator)".into(),
+                );
             }
-            // votes are REALLY signed (each validator with its own ed25519 key)
+            // A demonstration set of n validators with derived ed25519 keys;
+            // the votes are really signed, and the certificate is checked
+            // against that registered set, not against the keys it carries.
             use ed25519_dalek::SigningKey;
-            let votes: Vec<RatioVote> = (0..n)
-                .map(|i| {
-                    let sk = SigningKey::from_bytes(&[(i as u8).wrapping_add(1); 32]);
-                    let vk = sk.verifying_key().to_bytes();
-                    let v = RatioVote {
-                        validator_id: format!("{validator}-{i}"),
+            let keys: Vec<SigningKey> = (0..n)
+                .map(|i| SigningKey::from_bytes(&[(i as u8).wrapping_add(1); 32]))
+                .collect();
+            let validators =
+                ValidatorSet::new(keys.iter().map(|k| k.verifying_key().to_bytes()).collect())
+                    .map_err(|e| format!("BFT validators: {e}"))?;
+            let votes: Vec<RatioVote> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, sk)| {
+                    let id = format!("{validator}-{i}");
+                    RatioVote {
+                        signature: RatioVote::sign(sk, &id, pipe_id, ratio),
+                        validator_id: id,
                         pipe_id,
                         ratio,
-                        public_key: vk,
-                        signature: vec![],
-                    };
-                    let mut v = v;
-                    v.signature = RatioVote::sign(&sk, pipe_id, ratio);
-                    v
+                        public_key: sk.verifying_key().to_bytes(),
+                    }
                 })
                 .collect();
-            let cert = BftRatioConsensus::finalize_ratio(votes, n)
+            let cert = BftRatioConsensus::finalize_ratio(votes, &validators)
                 .map_err(|e| format!("BFT finalize: {e}"))?;
-            cert.verify(n).map_err(|e| format!("BFT verify: {e}"))?;
+            cert.verify(&validators)
+                .map_err(|e| format!("BFT verify: {e}"))?;
             Ok(format!(
-                "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (2n/3 majority)"
+                "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (supermajority)"
             ))
         }
         Commands::Pact {
@@ -523,7 +539,7 @@ fn run(cli: Cli) -> Result<String, String> {
             let ts = if ts == 0 { 1_768_000_000u64 } else { ts }; // deterministic test
             let rec = BudProductionRecord::new(
                 file.header.codec,
-                Box::leak(pipe.clone().into_boxed_str()),
+                &pipe,
                 &original,
                 bytes.len() as u64,
                 ts,
@@ -714,12 +730,20 @@ fn run(cli: Cli) -> Result<String, String> {
         }
         Commands::Check { input } => {
             let bytes = read_file(&input)?;
-            // v2 magic (\xB5 high-bit) -> container; otherwise v1
-            if bytes.first() == Some(&0xB5) {
-                let out = restore(&bytes).ok_or("v2 integrity failed")?;
+            // v2 magic (high bit set) -> container; otherwise v1
+            if bytes.first() == Some(&BudV2Header::MAGIC[0]) {
+                let file = BudV2File::decode(&bytes).ok_or("v2 integrity failed")?;
+                let out = file.restore_original().ok_or("v2 integrity failed")?;
+                let MultiHash { algo, digest } = file.header.content_id;
+                let chunks = match file.chunk_codec {
+                    ChunkCodec::Raw => "raw",
+                    ChunkCodec::Huffman => "huffman",
+                    ChunkCodec::Zstd => "zstd",
+                };
                 Ok(format!(
-                    "check v2: OK - {} bytes verified (magic+chunk content_id+root)",
-                    out.len()
+                    "check v2: OK - {} bytes verified (magic, chunk content_id, root {} algo 0x{algo:02x}, {chunks} chunks)",
+                    out.len(),
+                    hex8(&digest)
                 ))
             } else {
                 let file = BudFile::from_bytes(&bytes).map_err(|e| format!("v1 parse: {e}"))?;

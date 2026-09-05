@@ -17,14 +17,17 @@ jobs:
   budlum:
     name: Budlum Core
     runs-on: ubuntu-latest
-    # Badge self-commit (Q5, loop-guarded) needs write only in this job;
-    # all other jobs stay at the global minimum (contents: read).
+    # Read only. The badge used to be self-committed from this job, which is
+    # why it once held `contents: write` and a persisted token; the badge is
+    # now verified by `badges-are-current` and nothing here pushes. A job
+    # that compiles and runs code from a pull request must not hold a
+    # write-capable token in its git configuration.
     permissions:
-      contents: write
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1  # zizmor: ignore[artipacked] badge bot self-commit intentionally uses GITHUB_TOKEN
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: true
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
@@ -469,6 +472,20 @@ jobs:
       - name: Inventory matches code
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- domain-tags
 
+  serialize-map-keys-gate:
+    # A Serialize struct must not key a map by bytes or a tuple: serde_json
+    # refuses such keys at the first entry, and the V2 snapshot is JSON.
+    name: Serialize Map Keys Are Strings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gate self-test (canary)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings --self-test
+      - name: Every map key is a string, a number, or carries a serde with
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings
+
   poa-compliance-gate:
     # : MASAK/AML hooks are isolated to PoA domains only.
     name: PoA Compliance Isolation
@@ -637,6 +654,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: PoA isolation tests (7 tests, 5 leak scenarios)
         run: |
+          # pipefail: `tee` alone returns 0, and seven passing tests next to
+          # one failing test satisfied the count below. The filter must run
+          # green AND reach the expected count.
+          set -euo pipefail
           cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
           N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
           echo "PoA isolation test count: $N"
@@ -993,7 +1014,9 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
@@ -1008,7 +1031,9 @@ jobs:
           scanners: secret,misconfig
           severity: CRITICAL,HIGH
           exit-code: "1"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
 
   coverage:
     # : nextest + llvm-cov, ratchet gate (Q-7b1(a)).
@@ -1057,9 +1082,9 @@ jobs:
           cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
       - name: Module analysis canary (not vacuous)
-        run: python3 ./ops/scripts/check_module_coverage.py --self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)
-        run: python3 ./ops/scripts/check_module_coverage.py coverage/cov.json
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/cov.json
       - name: BudZero coverage measurement (llvm-cov nextest, budzero workspace)
         # `cd` was used without checking its exit code. If the directory is not found
         # the shell stays at the root, the next command measures the ROOT workspace and
@@ -1071,7 +1096,7 @@ jobs:
           cd budzero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
       - name: Module coverage report - budzero (report mode)
-        run: python3 ./ops/scripts/check_module_coverage.py coverage/budzero-cov.json
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/budzero-cov.json
       - name: Coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1123,8 +1148,8 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
-      - name: Rust gates clippy (pedantic, allow yok)
-        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets
+      - name: Rust gates clippy (pedantic, no allow)
+        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       # A typographic dash in a workflow `name:` silently unlists the job from
@@ -1422,6 +1447,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code
+      # The licence is named in LICENSE.md, budzero/LICENSE, every Cargo.toml,
+      # the README badge and docs/NOTICE. They once contradicted each other
+      # (MIT in one file, Apache-2.0 in the next) and the python check that
+      # was meant to notice ran in no workflow and skipped any manifest with
+      # no licence line at all. Every package now resolves to the one SPDX
+      # expression, inheritance included, and the upstream attributions stay.
+      - name: every licence declaration agrees + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- license-consistency --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- license-consistency
       # Two storage rules with the same failure mode: the data exists, the
       # tests pass, and nothing on the operator's path reads it. An operator
       # that misses a challenge sits out six hours, and a mobile operator may
@@ -1594,7 +1629,10 @@ jobs:
           else
             echo "SKIP (honest marker): main has no buf.yaml yet - the baseline is established by this wave."
           fi
+      # The scheduling keys (chain_id, epochs_per_year, slot_duration_secs,
+      # epoch_length_slots) must be strictly positive; the python version
+      # declared that set and never applied it, so a zero-slot epoch passed.
       - name: genesis schema gate + canary
         run: |
-          python3 ./ops/scripts/check_genesis_schema.py --self-test
-          python3 ./ops/scripts/check_genesis_schema.py config/mainnet-genesis.json
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema

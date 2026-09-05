@@ -512,11 +512,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 // ─── self-test ───────────────────────────────────────────────────────────────
 
 fn scratch_dir() -> Result<PathBuf, String> {
-    let base =
-        std::env::temp_dir().join(format!("budlum-metrics-are-written-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).map_err(|e| format!("scratch: {e}"))?;
-    Ok(base)
+    crate::gates::rust_literals::exclusive_scratch_dir("budlum-metrics-are-written")
 }
 
 fn write_tree(root: &Path, files: &[(&str, &str)]) -> Result<(), String> {

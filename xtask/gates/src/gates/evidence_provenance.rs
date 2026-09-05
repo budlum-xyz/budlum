@@ -351,14 +351,7 @@ fn build_fixture(
     caller_mode: &str,
     test_mode: &str,
 ) -> Result<std::path::PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-evidence-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-evidence")?;
     for sub in ["src/registry", "src/core", "src/execution", "src/rpc"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }

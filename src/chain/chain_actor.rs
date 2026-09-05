@@ -58,6 +58,8 @@ pub enum ChainCommand {
     GetBaseFee(oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
+    /// Whether the mempool still holds the transaction with this hash.
+    MempoolContains(String, oneshot::Sender<bool>),
     HandleFinalityCert(FinalityCert, oneshot::Sender<Result<(), String>>),
     HandlePrevote(Prevote, oneshot::Sender<Result<(), String>>),
     HandlePrecommit(
@@ -721,6 +723,19 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetMempoolSize(tx)).await;
         rx.await.unwrap_or(0)
+    }
+
+    /// Whether the mempool still holds `hash`.
+    ///
+    /// `add_transaction` confirms admission, not execution: the pool can
+    /// expire or evict the transaction afterwards. A submitter that must see
+    /// its transaction through to a block asks this to tell "still queued"
+    /// from "lost". An unreachable actor reads as `false`, the direction in
+    /// which the caller resubmits rather than waits forever.
+    pub async fn mempool_contains(&self, hash: String) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::MempoolContains(hash, tx)).await;
+        rx.await.unwrap_or(false)
     }
 
     pub async fn handle_finality_cert(&self, cert: FinalityCert) -> Result<(), String> {
@@ -2819,23 +2834,24 @@ impl ChainActor {
                 stake: validator.stake,
             })
             .collect();
-        if !placement_candidates.is_empty() {
+        let annotated = if placement_candidates.is_empty() {
+            0
+        } else {
             let entropy = crate::core::hash::hash_fields_bytes(&[
                 b"BDLM_MAINTENANCE_PLACEMENT_V1",
                 &self.blockchain.chain_id.to_le_bytes(),
                 self.blockchain.last_block().hash.as_bytes(),
                 &current_epoch.to_le_bytes(),
             ]);
-            let annotated = self
-                .blockchain
+            self.blockchain
                 .state
                 .storage_registry
-                .annotate_expected_holders(&entropy, &placement_candidates);
-            if annotated > 0 {
-                tracing::info!(
-                    "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
-                );
-            }
+                .annotate_expected_holders(&entropy, &placement_candidates)
+        };
+        if annotated > 0 {
+            tracing::info!(
+                "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
+            );
         }
         for (ticket_id, expected, actual) in self
             .blockchain
@@ -2877,8 +2893,26 @@ impl ChainActor {
             .state
             .storage_registry
             .mark_overdue_reallocations_under_replicated(current_epoch);
-        if under_replicated > 0 || !repair_band.is_empty() {
+        // The delete half of the ticket lifecycle. A ticket whose replacement
+        // deal opened long enough ago is a record, not an obligation; the map
+        // had no delete path and grew by one row per slash or expiry forever.
+        let swept = self
+            .blockchain
+            .state
+            .storage_registry
+            .sweep_settled_reallocations(current_epoch);
+        if swept > 0 {
+            tracing::info!("B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {current_epoch}");
+        }
+        if under_replicated > 0 {
             tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
+        }
+        // An advisory written into a pending ticket is registry state too: a
+        // tick that only annotated used to skip the write, and a crash before
+        // the next persisting tick dropped every advisory of this epoch.
+        let registry_changed =
+            annotated > 0 || under_replicated > 0 || swept > 0 || !repair_band.is_empty();
+        if registry_changed {
             if let Err(error) = self.blockchain.persist_storage_registry() {
                 tracing::error!("Failed to persist storage reallocation status: {error}");
             }
@@ -3037,6 +3071,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetMempoolSize(tx) => {
                     let _ = tx.send(self.blockchain.mempool.len());
+                }
+                ChainCommand::MempoolContains(hash, tx) => {
+                    let _ = tx.send(self.blockchain.mempool.get(&hash).is_some());
                 }
                 ChainCommand::GetValidatorAddress(tx) => {
                     let addr = self

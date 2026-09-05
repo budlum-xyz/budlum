@@ -174,7 +174,9 @@ pub struct NodeConfig {
     pub mobile_battery_pct: u8,
 
     /// Whether the device is on mains. Only read when `--mobile-mode` is set.
-    #[arg(long, default_value = "true")]
+    /// Takes a value (`--mobile-charging=false`): a bare flag with a `true`
+    /// default could never select the battery branch.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub mobile_charging: bool,
 
     #[arg(long)]
@@ -291,14 +293,16 @@ pub struct NodeConfig {
     #[arg(long)]
     pub features_verify_merkle: bool,
 
-    // Storage Node Config (B.U.D.)
-    #[arg(long, default_value = "true")]
+    // Storage Node Config (B.U.D.). Both booleans take a value
+    // (`--storage-enabled=false`); as bare flags with a `true` default
+    // neither could be switched off from the command line.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub storage_enabled: bool,
 
     #[arg(long, default_value = "3")]
     pub storage_replication_factor: usize,
 
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub storage_mandatory_sharding: bool,
 
     // --- Outbound bridge (relayer) ---
@@ -634,15 +638,7 @@ impl NodeConfig {
         if let Some(network) = fc.network {
             let profile_name = network.profile.or(network.name);
             if let Some(profile) = profile_name {
-                self.network = match profile.as_str() {
-                    "mainnet" => Network::Mainnet,
-                    "testnet" => Network::Testnet,
-                    "devnet" => Network::Devnet,
-                    other => {
-                        eprintln!("CRITICAL: Invalid network profile '{other}'");
-                        std::process::exit(1);
-                    }
-                };
+                self.network = network_named("[network] profile", &profile);
             }
             if self.chain_id.is_none() {
                 self.chain_id = network.chain_id;
@@ -748,7 +744,7 @@ impl NodeConfig {
             }
             if let Some(public_listener) = rpc.public_listener.or_else(|| {
                 if let (Some(h), Some(p)) = (&rpc.host, rpc.port) {
-                    Some(format!("{h}:{p}"))
+                    Some(listener_string(h, p))
                 } else {
                     None
                 }
@@ -922,12 +918,7 @@ impl NodeConfig {
 
     fn apply_legacy_config(&mut self, legacy: LegacyFileConfig) {
         if let Some(ref name) = legacy.network {
-            self.network = match name.as_str() {
-                "mainnet" => Network::Mainnet,
-                "testnet" => Network::Testnet,
-                "devnet" => Network::Devnet,
-                _ => self.network,
-            };
+            self.network = network_named("the legacy config file", name);
         }
         if self.consensus.is_none() {
             self.consensus = legacy.consensus.as_deref().and_then(|s| match s {
@@ -973,12 +964,7 @@ impl NodeConfig {
     // Env has higher precedence than file configuration, so we only apply if not already set by Env.
     fn load_from_env(&mut self) {
         if let Ok(net) = std::env::var("BUDLUM_NETWORK") {
-            self.network = match net.as_str() {
-                "mainnet" => Network::Mainnet,
-                "testnet" => Network::Testnet,
-                "devnet" => Network::Devnet,
-                _ => self.network,
-            };
+            self.network = network_named("BUDLUM_NETWORK", &net);
         }
         if let Ok(role) = std::env::var("BUDLUM_ROLE") {
             self.role = role;
@@ -1165,6 +1151,20 @@ impl NodeConfig {
         }
 
         if self.network == Network::Mainnet {
+            // A signing key on disk is refused on mainnet for every role and
+            // consensus type. `main` loads `validator_key_file` twice before
+            // the PoS engine's own refusal (for the producer address and for
+            // the PoA signer), so the policy has to hold here, before any load.
+            if self
+                .validator_key_file
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet refuses a signing key on disk (validator_key_file); use the PKCS#11 signer backend"
+                );
+                std::process::exit(1);
+            }
             // Rule 1 / H4.1: mainnet validators - pure policy (crypto::mainnet_policy).
             if self.role == "validator" {
                 use crate::crypto::mainnet_policy::{
@@ -1327,15 +1327,51 @@ fn canonical_signer_backend(value: &str) -> Result<String, String> {
     }
 }
 
+/// Split a listener string into host and port.
+///
+/// The port is whatever follows the last `:`; the host is the rest with its
+/// optional IPv6 brackets removed. `[::1]:9090` gives `::1` and `9090`;
+/// splitting on every `:` used to reject every IPv6 listener.
 fn parse_listener(listener: &str) -> Option<(String, u16)> {
-    let parts: Vec<&str> = listener.split(':').collect();
-    if parts.len() == 2 {
-        let host = parts[0].to_string();
-        if let Ok(port) = parts[1].parse::<u16>() {
-            return Some((host, port));
+    let (host, port) = listener.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port))
+}
+
+/// Resolve a network name from a file or the environment.
+///
+/// An unknown name is refused. Mapping it to the current profile (devnet by
+/// default) would start a node whose operator wrote `mainnnet` with devnet
+/// parameters and none of the mainnet rules.
+fn network_named(source: &str, name: &str) -> Network {
+    match name {
+        "mainnet" => Network::Mainnet,
+        "testnet" => Network::Testnet,
+        "devnet" => Network::Devnet,
+        other => {
+            eprintln!(
+                "CRITICAL: Invalid network '{other}' in {source}; expected mainnet, testnet or devnet"
+            );
+            std::process::exit(1);
         }
     }
-    None
+}
+
+/// Compose a bindable listener string from a host and a port, bracketing an
+/// IPv6 host so the result parses back through `parse_listener`.
+fn listener_string(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1350,6 +1386,49 @@ mod tests {
     fn test_consensus_type_parsing() {
         assert_eq!(ConsensusType::PoW as u8, 0);
     }
+
+    /// An IPv6 listener carries more than one `:`; the parser used to return
+    /// `None` for every one of them, leaving `rpc_host` at the loopback
+    /// default and the legacy alias composing an unbindable string.
+    #[test]
+    fn ipv6_listeners_parse_and_compose() {
+        assert_eq!(
+            parse_listener("[::1]:9090"),
+            Some(("::1".to_string(), 9090))
+        );
+        assert_eq!(
+            parse_listener("127.0.0.1:8545"),
+            Some(("127.0.0.1".to_string(), 8545))
+        );
+        assert_eq!(parse_listener(":8545"), None);
+        assert_eq!(parse_listener("host:notaport"), None);
+        assert_eq!(parse_listener("nohostport"), None);
+        assert_eq!(listener_string("::1", 8545), "[::1]:8545");
+        assert_eq!(listener_string("10.0.0.1", 8545), "10.0.0.1:8545");
+        assert_eq!(
+            parse_listener(&listener_string("fe80::1", 30303)),
+            Some(("fe80::1".to_string(), 30303))
+        );
+    }
+    /// `--storage-enabled=false` and `--mobile-charging=false` must reach the
+    /// config; as `SetTrue` flags the false value was rejected outright.
+    #[test]
+    fn boolean_options_can_be_switched_off() {
+        let cfg = NodeConfig::parse_from([
+            "budlum",
+            "--storage-enabled=false",
+            "--storage-mandatory-sharding=false",
+            "--mobile-charging=false",
+        ]);
+        assert!(!cfg.storage_enabled);
+        assert!(!cfg.storage_mandatory_sharding);
+        assert!(!cfg.mobile_charging);
+        let default = NodeConfig::parse_from(["budlum"]);
+        assert!(default.storage_enabled);
+        assert!(default.storage_mandatory_sharding);
+        assert!(default.mobile_charging);
+    }
+
     #[test]
     fn test_cli_migrate_v2_parsing() {
         let args = vec!["budlum", "--migrate-v2", "./test.db"];

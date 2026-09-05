@@ -225,6 +225,80 @@ pub fn touched_files(diff: &str) -> Vec<String> {
     out
 }
 
+/// Every hunk header's line counts against the lines that follow it.
+///
+/// `git apply` refuses a hunk whose `@@ -a,b +c,d @@` counts do not match
+/// its body ("corrupt patch"), so a patch that fails this check is a patch
+/// the build cannot apply. Four hunks of the protocol-handler patch carried
+/// counts from an earlier draft of the files they add; nothing read the
+/// headers, so the patch sat in the tree as if it applied.
+///
+/// A body line starting with `+` is new, `-` is old, a space or an empty
+/// line is context (both), `\` is a no-newline marker (neither). The body
+/// ends at the next hunk header, the next file header or the end of the
+/// text.
+fn hunk_count_errors(name: &str, diff: &str) -> Vec<String> {
+    let lines: Vec<&str> = diff.split('\n').collect();
+    let mut problems = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((declared_old, declared_new)) = parse_hunk_header(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let header_line = i + 1;
+        let (mut old, mut new) = (0usize, 0usize);
+        let mut j = i + 1;
+        while j < lines.len() {
+            let l = lines[j];
+            if parse_hunk_header(l).is_some()
+                || l.starts_with("--- ")
+                || l.starts_with("+++ ")
+                || l.starts_with("diff ")
+            {
+                break;
+            }
+            if l.is_empty() && j + 1 == lines.len() {
+                break; // the file's final newline, not a context line
+            }
+            if l.starts_with('+') {
+                new += 1;
+            } else if l.starts_with('-') {
+                old += 1;
+            } else if l.starts_with(' ') || l.is_empty() {
+                old += 1;
+                new += 1;
+            } else if !l.starts_with('\\') {
+                break;
+            }
+            j += 1;
+        }
+        if (old, new) != (declared_old, declared_new) {
+            problems.push(format!(
+                "{name}:{header_line}: the hunk header declares {declared_old} old and \
+                 {declared_new} new lines but the body has {old} and {new}; git apply \
+                 refuses this hunk as corrupt"
+            ));
+        }
+        i = j;
+    }
+    problems
+}
+
+/// `@@ -a[,b] +c[,d] @@ ...` to `(b, d)`, each defaulting to 1.
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(" +")?;
+    let (new_part, _) = rest.split_once(" @@")?;
+    let count = |part: &str| -> Option<usize> {
+        match part.split_once(',') {
+            Some((_, n)) => n.parse().ok(),
+            None => part.parse::<usize>().ok().map(|_| 1),
+        }
+    };
+    Some((count(old_part)?, count(new_part)?))
+}
+
 /// Is a patch's shape acceptable?
 ///
 /// Three conditions: it must touch at least one file, every file it touches
@@ -243,7 +317,7 @@ pub fn check_patch_shape(name: &str, diff: &str, allowed_roots: &[&str]) -> Verd
              with nothing to apply is a patch believed to be applied"
         ));
     }
-    let mut problems = Vec::new();
+    let mut problems = hunk_count_errors(name, diff);
     for path in &touched {
         if !allowed_roots.iter().any(|root| path.starts_with(root)) {
             problems.push(format!(
@@ -397,6 +471,29 @@ mod tests {
     fn a_deletion_target_is_not_counted_as_touched() {
         let diff = "--- a/x.js\n+++ /dev/null\n";
         assert!(touched_files(diff).is_empty());
+    }
+
+    /// A hunk whose declared counts disagree with its body is refused, and
+    /// one whose counts agree passes; the default count of 1 and the
+    /// no-newline marker are handled.
+    #[test]
+    fn a_hunk_with_wrong_counts_is_refused() {
+        let good = "--- /dev/null\n+++ b/browser/x.js\n@@ -0,0 +1,2 @@\n+a\n+b\n\\ No newline at end of file\n--- a/browser/y.js\n+++ b/browser/y.js\n@@ -1 +1,2 @@\n c\n+d\n";
+        assert!(hunk_count_errors("ok.patch", good).is_empty());
+        assert!(matches!(
+            check_patch_shape("ok.patch", good, &["browser/"]),
+            Verdict::Pass(_)
+        ));
+        let bad = good.replace("@@ -0,0 +1,2 @@", "@@ -0,0 +1,3 @@");
+        let errors = hunk_count_errors("bad.patch", &bad);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("declares 0 old and 3 new") && errors[0].contains("has 0 and 2")
+        );
+        match check_patch_shape("bad.patch", &bad, &["browser/"]) {
+            Verdict::Fail(problems) => assert!(problems[0].contains("corrupt")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -436,6 +436,15 @@ pub trait BudlumApi {
     /// refused here, not at the viewer. The returned session id is served by
     /// `bud_storageRevealFrames`; sessions are capped at
     /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
+    ///
+    /// The viewer is not a field: `viewer_claim` is
+    /// `{ownerPublicKey, signature, issuedAt}`, an ML-DSA-87 signature by the
+    /// viewer's own key over `view_claim_digest(content, viewer, key_id,
+    /// owner, payload_commitment(packed), issuedAt)`. The viewer address is
+    /// derived from the key, so a caller cannot name a grantee it is not; a
+    /// claim older than `VIEW_CLAIM_MAX_AGE_SECS` is refused. `owner` is
+    /// checked against the owner the chain recorded for `content_id` and a
+    /// mismatch is refused by name (`-32006`) before any grant is looked up.
     #[method(name = "bud_storageOpenReveal")]
     async fn storage_open_reveal(
         &self,
@@ -443,7 +452,7 @@ pub trait BudlumApi {
         recipe: serde_json::Value,
         full_public: Option<serde_json::Value>,
         packed: String,
-        viewer: String,
+        viewer_claim: serde_json::Value,
         owner: String,
         key_id: String,
         meter_budget: Option<u64>,
@@ -851,8 +860,6 @@ pub trait BudlumApi {
     #[method(name = "bud_aiGetModel")]
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a model registration transaction.
-    #[method(name = "bud_aiRegisterModel")]
     /// Prepare an AI model registration transaction template.
     ///
     /// The governance-tunable registration fee
@@ -860,12 +867,10 @@ pub trait BudlumApi {
     /// `tx.amount`; the template sets amount 0 - the caller signs the final
     /// amount. Below-fee registrations are rejected atomically by the
     /// executor (`ai_model_register_fee_insufficient`).
-    /// Register an AI model (template; the governance-tunable registration
-    /// fee must be attached as tx.amount - see `ai_model_register_fee`).
     ///
-    /// The modality bits (`ModalitySet`). Absent means the old behaviour
-    /// (`text_only`). 0 reads nothing (`none` - a deliberate refusal). 1 is
-    /// text.
+    /// `modalities` carries the modality bits (`ModalitySet`). Absent means
+    /// the old behaviour (`text_only`). 0 reads nothing (`none` - a
+    /// deliberate refusal). 1 is text.
     #[method(name = "bud_aiRegisterModel")]
     async fn ai_register_model(
         &self,

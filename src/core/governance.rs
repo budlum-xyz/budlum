@@ -2,7 +2,7 @@ use crate::core::address::Address;
 use crate::core::constitution::{ConstitutionParameter, ConstitutionRegistry};
 use crate::registry::params::RegistryParams;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Accepted parameter proposals activate after this delay.
 pub const GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS: u64 = 10;
@@ -83,6 +83,7 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "swap_fee_ppm",
     "bridge_fee_ppm",
     "ai_model_register_fee",
+    "liveness_slashing_enabled",
 ];
 
 pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
@@ -151,9 +152,33 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
                 .parse::<u64>()
                 .map_err(|e| format!("invalid malicious_slash_ratio_fixed: {e}"))?;
         }
-        _ => unreachable!("whitelist checked above"),
+        "ai_model_register_fee" => {
+            params.ai_model_register_fee = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid ai_model_register_fee: {e}"))?;
+        }
+        "liveness_slashing_enabled" => {
+            params.liveness_slashing_enabled = parse_governance_bool(key, value)?;
+        }
+        // The whitelist is checked above, but a name added there and not
+        // here must refuse the proposal rather than take the node down inside
+        // `create_proposal` (that is how `ai_model_register_fee` panicked).
+        other => return Err(format!("governance parameter has no validator: {other}")),
     }
     params.validate()
+}
+
+/// Governance parameter values travel as strings; a switch accepts exactly
+/// `true` or `false`. Any other spelling is refused rather than being read as
+/// off, so a mistyped activation cannot pass a vote as a no-op.
+pub fn parse_governance_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!(
+            "invalid {key}: expected true or false, got {other:?}"
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,10 +257,13 @@ pub struct Proposal {
     pub votes_for: u64,     // Total stake voting FOR
     pub votes_against: u64, // Total stake voting AGAINST
     pub status: ProposalStatus,
-    pub voters: HashMap<Address, bool>, // Address -> Vote (true = for)
+    /// Address -> vote (true = for). Ordered because `GovernanceState::root`
+    /// hashes the serialized proposals: a hash map would iterate in a
+    /// per-process order and two nodes would disagree on the state root.
+    pub voters: BTreeMap<Address, bool>,
     /// Vote-weight snapshot captured when each validator votes.
     #[serde(default)]
-    pub voter_weights: HashMap<Address, u64>,
+    pub voter_weights: BTreeMap<Address, u64>,
     /// Optional delayed activation epoch after a proposal passes.
     #[serde(default)]
     pub activation_epoch: Option<u64>,
@@ -264,8 +292,8 @@ impl Proposal {
             votes_for: 0,
             votes_against: 0,
             status: ProposalStatus::Active,
-            voters: HashMap::new(),
-            voter_weights: HashMap::new(),
+            voters: BTreeMap::new(),
+            voter_weights: BTreeMap::new(),
             activation_epoch: None,
         }
     }
@@ -597,10 +625,16 @@ impl GovernanceState {
     /// This method ONLY transitions status from Passed → Executed.
     /// The actual state mutations (whitelist/dewhitelist) are returned
     /// As GovernanceAction enums for the executor/blockchain to apply.
-    pub fn execute_passed_proposals(&mut self) -> Vec<GovernanceAction> {
+    ///
+    /// A passed proposal is executed only once its activation delay has
+    /// elapsed at `current_epoch`. The delay is the same one `advance_epoch`
+    /// honours, so no caller can turn a fresh vote into state early.
+    pub fn execute_passed_proposals(&mut self, current_epoch: u64) -> Vec<GovernanceAction> {
         let mut actions = Vec::new();
         for proposal in &mut self.proposals {
-            if proposal.status != ProposalStatus::Passed {
+            if proposal.status != ProposalStatus::Passed
+                || !proposal.activation_ready(current_epoch)
+            {
                 continue;
             }
             let action = match &proposal.p_type {
@@ -660,6 +694,72 @@ mod tests {
     use crate::core::address::Address;
     use crate::core::constitution::{ConstitutionParameterKey, ConstitutionValue};
 
+    /// Every whitelisted name must reach a real arm: a `u64` probe either
+    /// passes or fails on bounds, never on "no validator" and never by panic.
+    #[test]
+    fn every_whitelisted_parameter_has_a_validator_arm() {
+        for key in GOVERNANCE_PARAMETER_WHITELIST {
+            let err = validate_governance_parameter_update(key, "1000").err();
+            assert!(
+                !err.as_deref()
+                    .is_some_and(|e| e.contains("has no validator")),
+                "{key} is whitelisted but validate_governance_parameter_update \
+                 has no arm for it: {err:?}"
+            );
+        }
+        assert_eq!(
+            validate_governance_parameter_update("ai_model_register_fee", "25"),
+            Ok(())
+        );
+        assert!(validate_governance_parameter_update("ai_model_register_fee", "x").is_err());
+        // The liveness switch is a governance decision, not an operator
+        // config: it has to be reachable here, and only as an exact boolean.
+        assert_eq!(
+            validate_governance_parameter_update("liveness_slashing_enabled", "true"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_governance_parameter_update("liveness_slashing_enabled", "false"),
+            Ok(())
+        );
+        for bad in ["1", "yes", "True", ""] {
+            assert!(
+                validate_governance_parameter_update("liveness_slashing_enabled", bad).is_err(),
+                "{bad:?} must not switch liveness slashing"
+            );
+        }
+    }
+
+    /// The governance root is part of the state root, so it must not depend
+    /// on the order in which voters were inserted.
+    #[test]
+    fn governance_root_is_insertion_order_independent() {
+        let voters: Vec<Address> = (1u8..=12).map(|b| Address::from([b; 32])).collect();
+        let build = |order: &[Address]| {
+            let mut gov = GovernanceState::default();
+            let id = gov
+                .create_proposal(
+                    voters[0],
+                    ProposalType::ParameterUpdate("min_stake".into(), "2000".into()),
+                    0,
+                    10,
+                )
+                .unwrap();
+            let p = gov.find_proposal_mut(id).unwrap();
+            // Weight and side belong to the voter, not to the position in
+            // the insertion order; otherwise the two builds tally different
+            // totals and the comparison measures the test, not the map.
+            for v in order {
+                let b = v.as_bytes()[0];
+                p.add_vote(*v, 100 + u64::from(b), b % 2 == 0, 1).unwrap();
+            }
+            gov.root()
+        };
+        let mut reversed = voters.clone();
+        reversed.reverse();
+        assert_eq!(build(&voters), build(&reversed));
+    }
+
     #[test]
     fn governance_execute_passed_proposals_whitelist() {
         let mut gov = GovernanceState::default();
@@ -680,13 +780,63 @@ mod tests {
         proposal.add_vote(proposer, 100_000, true, 0).unwrap();
         proposal.status = ProposalStatus::Passed; // simulate passage
 
-        let actions = gov.execute_passed_proposals();
+        let actions = gov.execute_passed_proposals(u64::MAX);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], GovernanceAction::WhitelistVerifier(verifier));
 
         // Proposal should now be Executed
         let p = gov.find_proposal_mut(0).unwrap();
         assert_eq!(p.status, ProposalStatus::Executed);
+    }
+
+    #[test]
+    fn governance_execute_passed_proposals_waits_for_activation() {
+        let mut gov = GovernanceState::default();
+        let verifier = Address::from([0xAB; 32]);
+        let proposer = Address::from([0x01; 32]);
+
+        gov.create_proposal(
+            proposer,
+            ProposalType::WhitelistVerifier { address: verifier },
+            0,
+            10,
+        )
+        .unwrap();
+        let proposal = gov.find_proposal_mut(0).unwrap();
+        proposal.add_vote(proposer, 100_000, true, 0).unwrap();
+        proposal.status = ProposalStatus::Passed;
+        let activation = proposal.activation_epoch();
+        assert!(
+            activation > proposal.end_epoch,
+            "every type carries a delay"
+        );
+
+        // Voting closed, delay still running: nothing binds, status unchanged.
+        assert!(gov
+            .execute_passed_proposals(proposal_end_epoch(&gov, 0))
+            .is_empty());
+        assert!(gov.execute_passed_proposals(activation - 1).is_empty());
+        assert_eq!(
+            gov.find_proposal_mut(0).unwrap().status,
+            ProposalStatus::Passed
+        );
+
+        // The activation epoch executes it exactly once.
+        let actions = gov.execute_passed_proposals(activation);
+        assert_eq!(actions, vec![GovernanceAction::WhitelistVerifier(verifier)]);
+        assert_eq!(
+            gov.find_proposal_mut(0).unwrap().status,
+            ProposalStatus::Executed
+        );
+        assert!(gov.execute_passed_proposals(activation + 1).is_empty());
+    }
+
+    fn proposal_end_epoch(gov: &GovernanceState, id: u64) -> u64 {
+        gov.proposals
+            .iter()
+            .find(|p| p.id == id)
+            .expect("proposal exists")
+            .end_epoch
     }
 
     #[test]
@@ -707,7 +857,7 @@ mod tests {
         proposal.add_vote(proposer, 100_000, true, 0).unwrap();
         proposal.status = ProposalStatus::Passed;
 
-        let actions = gov.execute_passed_proposals();
+        let actions = gov.execute_passed_proposals(u64::MAX);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], GovernanceAction::DewhitelistVerifier(verifier));
     }
@@ -723,7 +873,7 @@ mod tests {
         let proposal = gov.find_proposal_mut(0).unwrap();
         proposal.status = ProposalStatus::Passed;
 
-        let actions = gov.execute_passed_proposals();
+        let actions = gov.execute_passed_proposals(u64::MAX);
         assert!(
             actions.is_empty(),
             "ChangeBaseFee should not produce governance actions"
@@ -770,7 +920,7 @@ mod tests {
         let proposal = gov.find_proposal_mut(0).unwrap();
         proposal.add_vote(proposer, 100_000, true, 0).unwrap();
         proposal.status = ProposalStatus::Passed;
-        let actions = gov.execute_passed_proposals();
+        let actions = gov.execute_passed_proposals(u64::MAX);
         assert_eq!(actions, vec![GovernanceAction::SetEncryptionPolicy(policy)]);
     }
 
@@ -815,7 +965,7 @@ mod tests {
         let proposal = gov.find_proposal_mut(0).unwrap();
         proposal.add_vote(proposer, 100_000, true, 0).unwrap();
         proposal.status = ProposalStatus::Passed;
-        let actions = gov.execute_passed_proposals();
+        let actions = gov.execute_passed_proposals(u64::MAX);
         assert_eq!(
             actions,
             vec![GovernanceAction::SetConstitutionParameter(update)]

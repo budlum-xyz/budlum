@@ -314,11 +314,13 @@ impl LightClient {
             .verify_against_snapshot(snapshot, None, None)
             .map_err(LightClientError::VerificationFailed)?;
 
-        let voted_stake: u64 = verified
+        // Summed exactly, like the threshold: a saturated partial sum met a
+        // saturated threshold once the stakes passed the `u64` range.
+        let voted_stake: u128 = verified
             .iter()
             .filter_map(|idx| snapshot.validators.get(*idx))
-            .map(|v| v.stake)
-            .fold(0u64, u64::saturating_add);
+            .map(|v| u128::from(v.stake))
+            .sum();
         if voted_stake < snapshot.quorum_stake() {
             return Err(LightClientError::VerificationFailed(format!(
                 "PQ quorum stake {} < required {}",
@@ -527,9 +529,12 @@ mod tests {
         signers: usize,
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
-        let mut agg =
-            FinalityAggregator::new(snapshot.epoch, header.index, checkpoint_hash.clone());
-        agg.set_validator_snapshot(snapshot.clone());
+        let mut agg = FinalityAggregator::new(
+            snapshot.epoch,
+            header.index,
+            checkpoint_hash.clone(),
+            snapshot.clone(),
+        );
 
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let vote = Prevote {

@@ -1770,6 +1770,10 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid ai_model_register_fee: {e}"))?;
             }
+            "liveness_slashing_enabled" => {
+                params.liveness_slashing_enabled =
+                    crate::core::governance::parse_governance_bool(key, value)?;
+            }
             other => return Err(format!("unknown registry parameter: {other}")),
         }
         params.validate()?;
@@ -1828,6 +1832,23 @@ impl AccountState {
     /// If the amount exceeds the remaining headroom under the cap, or if the
     /// balance would overflow a `u64`.
     pub fn try_mint_balance(&mut self, public_key: &Address, amount: u64) -> Result<(), String> {
+        self.ensure_mint_headroom(amount)?;
+        self.try_add_balance(public_key, amount)
+    }
+
+    /// Refuse a mint of `amount` before anything is touched.
+    ///
+    /// A bridge mint is one supply event paid out as two credits, the
+    /// recipient's share and the relayer's fee. Checking the ceiling credit by
+    /// credit let the first one land and the second one fail, with the
+    /// transfer already marked minted and the replay id already spent: the
+    /// lock on the other side was consumed and the fee was never paid. The
+    /// callers ask for the whole amount here, before the bridge state moves.
+    ///
+    /// # Errors
+    ///
+    /// If `amount` exceeds the remaining headroom under the cap.
+    pub fn ensure_mint_headroom(&self, amount: u64) -> Result<(), String> {
         let headroom = self.supply_capacity_remaining();
         if amount > headroom {
             return Err(format!(
@@ -1837,7 +1858,7 @@ impl AccountState {
                  a property of the chain and not of any one account."
             ));
         }
-        self.try_add_balance(public_key, amount)
+        Ok(())
     }
 
     /// Amount of `address`'s balance that is currently spendable, taking team
@@ -2661,10 +2682,15 @@ mod tests {
     fn every_whitelisted_governance_parameter_can_be_applied() {
         use crate::core::governance::GOVERNANCE_PARAMETER_WHITELIST;
 
-        // A value that parses for every currently whitelisted parameter. Each
-        // is a `u64`; `validate()` bounds are checked separately.
-        let probe = "1000";
+        // A value that parses for every currently whitelisted parameter:
+        // the switches take a boolean, the rest a `u64`. `validate()` bounds
+        // are checked separately.
         for key in GOVERNANCE_PARAMETER_WHITELIST {
+            let probe = if *key == "liveness_slashing_enabled" {
+                "true"
+            } else {
+                "1000"
+            };
             let mut state = AccountState::new();
             let err = state.apply_registry_parameter_update(key, probe).err();
             assert!(
@@ -2674,6 +2700,17 @@ mod tests {
                  apply_registry_parameter_update: {err:?}"
             );
         }
+        // The liveness switch is applied, not merely accepted.
+        let mut state = AccountState::new();
+        assert!(!state.registry.params().liveness_slashing_enabled);
+        state
+            .apply_registry_parameter_update("liveness_slashing_enabled", "true")
+            .unwrap();
+        assert!(state.registry.params().liveness_slashing_enabled);
+        assert!(state
+            .apply_registry_parameter_update("liveness_slashing_enabled", "on")
+            .is_err());
+        assert!(state.registry.params().liveness_slashing_enabled);
     }
 
     #[test]
@@ -2918,7 +2955,7 @@ mod tests {
         // applying it would be the second write of one vote.
         proposal.status = ProposalStatus::Passed;
         state.governance.proposals.push(proposal);
-        let actions = state.governance.execute_passed_proposals();
+        let actions = state.governance.execute_passed_proposals(u64::MAX);
         assert!(
             !actions.iter().any(|a| matches!(
                 a,

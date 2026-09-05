@@ -12,7 +12,7 @@ not ask which consensus produced a fact, only whether the finality proof for tha
 so value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-2703%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-2785%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -213,7 +213,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | `buf.yaml` | Protobuf workspace root, paired with `proto/` (Repo Lint gate runs `buf` from the root) |
 | `flake.nix` · `flake.lock` | Nix flake discovery is root-only |
 | `README.md` | GitHub renders the repo homepage from the root README |
-| `LICENSE.md` | GitHub license detection, `cargo-deny` and `.quality/check_license.py` read it from the root |
+| `LICENSE.md` | GitHub license detection, `cargo-deny` and the `license-consistency` gate read it from the root |
 | `.gitignore` · `.gitleaks.toml` | Git and gitleaks resolve configs from the root |
 
 Container and licence-notice files moved in-tree: `ops/Dockerfile`, `ops/docker-compose*.yml` (build context stays at the root), `docs/NOTICE`.
@@ -341,7 +341,7 @@ A minimal CLI client ships in the same tree:
 ```bash
 cargo run --bin bud -- query balance <address>
 cargo run --bin bud -- query block latest
-cargo run --bin bud -- tx send --to <address> --amount <n> --priv-key <hex-seed>
+BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- tx send --to <address> --amount <n>   # or --priv-key-file <path>
 ```
 
 ---
@@ -426,7 +426,7 @@ claim is made anywhere in this repository.
 finality · domain registry and finality adapters · cross-domain bridge lifecycle with forgery
 gates · permissionless stake registry with slashing and unbonding · in-tree BudZKVM with
 STARK proving · B.U.D. storage with deal and challenge economy · BNS `.bud` names · Pollen
-data marketplace · SocialFi primitives · AI inference layer AI inference layer · EVM chain adapter
+data marketplace · SocialFi primitives · AI inference layer · EVM chain adapter
 (RLP + MPT + receipt verification) · `$BUD` tokenomics · validator governance · snapshot V2
 with chunk-session binding.
 

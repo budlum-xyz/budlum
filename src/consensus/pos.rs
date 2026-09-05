@@ -100,6 +100,16 @@ pub struct PoSEngine {
     epoch_seed: RwLock<[u8; 32]>,
 }
 impl PoSEngine {
+    /// `PoSConfig::epoch_length` is a public field and nothing rejects zero
+    /// at construction; the division paths below must refuse it explicitly
+    /// instead of panicking on the first block.
+    fn epoch_length_checked(&self) -> Result<u64, ConsensusError> {
+        if self.config.epoch_length == 0 {
+            return Err(ConsensusError("PoS epoch length must be non-zero".into()));
+        }
+        Ok(self.config.epoch_length)
+    }
+
     pub fn new(config: PoSConfig, validator_keys: Option<ValidatorKeys>) -> Self {
         PoSEngine {
             config,
@@ -189,12 +199,6 @@ impl PoSEngine {
             timestamp: block.timestamp,
         };
 
-        let mut checkpoints = self
-            .checkpoints
-            .write()
-            .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
-        checkpoints.push(checkpoint.clone());
-
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
             // cosmetic loss. On restart the node would not know the block was
@@ -207,6 +211,15 @@ impl PoSEngine {
                 ))
             })?;
         }
+
+        // The durable write comes first. An in-memory checkpoint pushed
+        // before a failed write anchored this process to a height the disk
+        // never learned, and the two disagreed until the next restart.
+        let mut checkpoints = self
+            .checkpoints
+            .write()
+            .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
+        checkpoints.push(checkpoint);
         Ok(())
     }
     /// The last checkpoint this node has established, and its hash.
@@ -521,7 +534,7 @@ impl PoSEngine {
         chain: &[Block],
     ) -> Result<(), ConsensusError> {
         let slot = block.index;
-        let epoch = slot / self.config.epoch_length;
+        let epoch = slot / self.epoch_length_checked()?;
         block.epoch = epoch;
         block.slot = slot;
 
@@ -670,7 +683,7 @@ impl ConsensusEngine for PoSEngine {
             ));
         }
 
-        let expected_epoch = block.index / self.config.epoch_length;
+        let expected_epoch = block.index / self.epoch_length_checked()?;
         if block.epoch != expected_epoch {
             return Err(ConsensusError(format!(
                 "PoS epoch mismatch: expected {}, got {}",
@@ -863,6 +876,7 @@ impl ConsensusEngine for PoSEngine {
         block: &Block,
         storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
+        let epoch_length = self.epoch_length_checked()?;
         let producer = block
             .producer
             .as_ref()
@@ -899,16 +913,27 @@ impl ConsensusEngine for PoSEngine {
                 slashing_evidence.push(evidence);
             }
         } else {
-            seen_blocks.insert(key, (header, signature));
-            if block.index > 0 && block.index.is_multiple_of(self.config.epoch_length) {
-                let _ = self.add_checkpoint(block, storage);
+            if block.index > 0 && block.index.is_multiple_of(epoch_length) {
+                // `add_checkpoint` fails when the checkpoint cannot be
+                // persisted. Discarding that here reported the block as
+                // recorded with an anchor that lived only in memory; after a
+                // restart the node reloaded no checkpoint and would accept a
+                // reorganisation below it. The caller logs the error.
+                //
+                // The sighting is recorded only once the checkpoint is
+                // durable. Inserted first, a failed write left the block in
+                // `seen_blocks`, and the retry found it there, took the
+                // double-sign branch's "same hash" exit and never wrote the
+                // checkpoint at all.
+                self.add_checkpoint(block, storage)?;
             }
+            seen_blocks.insert(key, (header, signature));
 
             // Prune seen_blocks to prevent unbounded growth.
             // Keep entries from the last 2 epochs only, older double-sign evidence
             // Is no longer actionable (already slashed or epoch-finalized).
-            let current_epoch = block.index / self.config.epoch_length;
-            let min_slot = current_epoch.saturating_sub(2) * self.config.epoch_length;
+            let current_epoch = block.index / epoch_length;
+            let min_slot = current_epoch.saturating_sub(2) * epoch_length;
             let before = seen_blocks.len();
             seen_blocks.retain(|(_, slot), _| *slot >= min_slot);
             let pruned = before - seen_blocks.len();
@@ -1157,6 +1182,31 @@ mod tests {
             chain.push(block);
         }
         chain
+    }
+
+    /// A zero `epoch_length` is a configuration error, not a reason to divide
+    /// by zero on the first block that arrives.
+    #[test]
+    fn zero_epoch_length_is_refused_not_panicked() {
+        let engine = PoSEngine::new(
+            PoSConfig {
+                epoch_length: 0,
+                ..Default::default()
+            },
+            None,
+        );
+        let chain = synthetic_pos_chain(4, 1);
+        let state = AccountState::new();
+        let block = chain[1].clone();
+
+        let err = engine
+            .validate_block(&block, &chain[..1], &state)
+            .expect_err("validation must refuse a zero epoch length");
+        assert!(err.0.contains("epoch length"), "{err:?}");
+        let err = engine
+            .record_block(&block, None)
+            .expect_err("recording must refuse a zero epoch length");
+        assert!(err.0.contains("epoch length"), "{err:?}");
     }
 
     #[test]

@@ -119,24 +119,45 @@ jobs:
           sudo install -m 0755 /tmp/th/trufflehog /usr/local/bin/trufflehog
           trufflehog --version
 
-      # Canary: an invalid key MUST NOT be reported under --only-verified.
-      # If it is, verification is not working and this job becomes a repeat of
-      # gitleaks rather than a second layer.
+      # Canary in two halves. First: the scanner must SEE the planted pair at
+      # all (an unverified AWS finding, exit 183). The old canary planted a
+      # lone documentation key id, which the AWS detector never reports, so a
+      # scanner that found nothing passed it. Second: the same pair must NOT
+      # survive --only-verified; if it does, verification is not filtering
+      # and this job repeats gitleaks rather than being a second layer.
       - name: Canary (does verification really work)
         run: |
           set -euo pipefail
           mkdir -p /tmp/th-canary && cd /tmp/th-canary
           git init -q .
-          # A key with the right shape that is itself invalid.
-          printf 'aws_key = "AKIA%s"\n' "IOSFODNN7EXAMPLE" > fake.txt
+          # A key id and secret with the right shape, generated here so that
+          # they are not on any documentation allow-list and cannot be real.
+          # `head` reads a bounded slice first: an unbounded `tr </dev/urandom`
+          # feeding `head -c` dies of SIGPIPE when head closes the pipe, and
+          # under pipefail that killed this step before the scan ran.
+          id="AKIA$(head -c 4096 /dev/urandom | tr -dc 'A-Z2-7' | head -c 16)"
+          secret="$(head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9/+' | head -c 40)"
+          test "${#id}" -eq 20 && test "${#secret}" -eq 40
+          printf 'aws_access_key_id = %s\naws_secret_access_key = %s\n' "$id" "$secret" > fake.txt
           git add . && git -c user.email=ci@budlum.xyz -c user.name=ci commit -qm canary
+          set +e
+          trufflehog git file://. --fail --no-update --results=verified,unverified,unknown \
+            > /tmp/th-canary-all.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ] || ! grep -q "Found unverified result" /tmp/th-canary-all.log; then
+            echo "CANARY FAILED: the planted key pair was not detected at all (exit $status)," >&2
+            echo "so a green verified-only scan below would prove nothing." >&2
+            tail -20 /tmp/th-canary-all.log >&2
+            exit 1
+          fi
           if trufflehog git file://. --only-verified --fail --no-update 2>&1 \
-             | tee /tmp/th-canary.log | grep -q "Verified"; then
+             | tee /tmp/th-canary.log | grep -q "Found verified result"; then
             echo "CANARY FAILED: an invalid key was reported as verified," >&2
             echo "so --only-verified is not filtering and this job repeats gitleaks." >&2
             exit 1
           fi
-          echo "canary OK: the invalid key was not counted as verified."
+          echo "canary OK: the pair is detected, and the invalid pair is not counted as verified."
 
       - name: Full history, verified secrets only (a finding = fail)
         run: trufflehog git file://. --only-verified --fail --no-update

@@ -1033,8 +1033,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&addrs, &bls_keys);
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snapshot.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot.clone());
 
         // 3 out of 4 validators send BLS-signed prevotes (meets 2/3 quorum)
         for i in 0..3 {
@@ -1106,8 +1105,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 2000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snapshot);
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let state = agg.get_state();
         assert!(state.active);
@@ -1148,8 +1146,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snapshot);
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let vote1 = Prevote {
             epoch: 1,
@@ -1185,8 +1182,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snapshot);
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let pc = Precommit {
             epoch: 1,
@@ -1219,8 +1215,7 @@ mod integration_tests {
         }
         let snapshot = make_validator_snapshot(&addrs, &bls_keys);
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
-        agg.set_validator_snapshot(snapshot.clone());
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot.clone());
 
         for i in 0..3 {
             let vote = Prevote {

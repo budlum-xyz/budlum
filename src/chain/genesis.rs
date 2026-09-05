@@ -316,6 +316,14 @@ impl GenesisConfig {
                 network.chain_id()
             ));
         }
+        if let Some(params) = &self.bud_tokenomics {
+            if params.block_reward != self.block_reward {
+                return Err(format!(
+                    "Genesis block_reward {} disagrees with bud_tokenomics.block_reward {}",
+                    self.block_reward, params.block_reward
+                ));
+            }
+        }
         let validator_set = self
             .validators
             .iter()
@@ -516,18 +524,36 @@ impl GenesisConfig {
         // The on-chain burn-reserve address + team vesting so the timed burn and
         // Vesting enforcement operate on the real chain state.
         if let Some(params) = &self.bud_tokenomics {
-            let addrs = self
-                .tokenomics_addresses
-                .unwrap_or_else(crate::tokenomics::TokenomicsAddresses::reserved);
-            for (address, amount) in crate::tokenomics::genesis_allocations(params, &addrs) {
-                state.add_balance(&address, amount);
-            }
+            // The tokenomics struct is the committed economic parameter set,
+            // so it also decides `block_reward`; the top-level field only
+            // serves chains without `bud_tokenomics`. A disagreement between
+            // the two is rejected by `validate_consensus_ceremony`.
             state.tokenomics = *params;
-            state.burn_reserve_address = Some(addrs.burn_reserve);
-            state.team_vesting = Some((addrs.team, params.team_vesting(0)));
+            if let Some(addrs) = self.tokenomics_destinations() {
+                for (address, amount) in crate::tokenomics::genesis_allocations(params, &addrs) {
+                    state.add_balance(&address, amount);
+                }
+                state.burn_reserve_address = Some(addrs.burn_reserve);
+                state.team_vesting = Some((addrs.team, params.team_vesting(0)));
+            }
         }
 
         state
+    }
+
+    /// The $BUD distribution destinations this genesis seeds. Development
+    /// chains fall back to the reserved marker addresses. Mainnet accepts only
+    /// ceremony-controlled addresses, so a mainnet genesis without them seeds
+    /// no distribution at all instead of committing marker accounts into the
+    /// state root.
+    fn tokenomics_destinations(&self) -> Option<crate::tokenomics::TokenomicsAddresses> {
+        if self.tokenomics_addresses.is_some() {
+            return self.tokenomics_addresses;
+        }
+        if Network::from_chain_id(self.chain_id) == Some(Network::Mainnet) {
+            return None;
+        }
+        Some(crate::tokenomics::TokenomicsAddresses::reserved())
     }
 
     fn validator_stake(&self) -> u64 {
@@ -590,8 +616,10 @@ pub fn mainnet_genesis() -> GenesisConfig {
 
         // Stake yield: 5% APY
         validator_annual_yield_ratio_fixed: (FIXED_POINT_SCALE * 5) / 100,
-        slot_duration_secs: 10,
-        epoch_length_slots: 32,
+        // The tokenomics epoch is the consensus epoch: 6 s slots, 100 slots,
+        // 600 s, so `epochs_per_year` (52 560) is a calendar year.
+        slot_duration_secs: 6,
+        epoch_length_slots: 100,
     };
 
     GenesisConfig {
@@ -729,6 +757,65 @@ mod tests {
             .validate_consensus_ceremony(Network::Mainnet)
             .unwrap_err()
             .contains("unique non-reserved"));
+    }
+
+    #[test]
+    fn mainnet_state_never_seeds_reserved_marker_addresses() {
+        let reserved = crate::tokenomics::TokenomicsAddresses::reserved();
+
+        // The template has no ceremony addresses: nothing is credited and the
+        // marker accounts stay out of the state root.
+        let template = mainnet_genesis();
+        let state = template.build_state();
+        assert_eq!(state.get_balance(&reserved.community), 0);
+        assert_eq!(state.get_balance(&reserved.burn_reserve), 0);
+        assert_eq!(state.burn_reserve_address, None);
+        assert!(state.team_vesting.is_none());
+        assert_eq!(state.circulating_supply(), 0);
+        assert_eq!(
+            state.tokenomics,
+            template
+                .bud_tokenomics
+                .expect("mainnet template tokenomics")
+        );
+
+        // Ceremony addresses are seeded exactly as configured.
+        let mut ceremony = mainnet_genesis();
+        let addresses = ceremony_tokenomics_addresses();
+        ceremony.tokenomics_addresses = Some(addresses);
+        let seeded = ceremony.build_state();
+        assert_eq!(
+            seeded.circulating_supply(),
+            crate::tokenomics::BUD_TOTAL_SUPPLY as u128
+        );
+        assert_eq!(seeded.burn_reserve_address, Some(addresses.burn_reserve));
+        assert_eq!(seeded.get_balance(&reserved.community), 0);
+
+        // Development chains keep the reserved fallback.
+        let devnet = GenesisConfig::new(Network::Devnet.chain_id().value()).with_bud_tokenomics();
+        let dev_state = devnet.build_state();
+        assert_eq!(dev_state.burn_reserve_address, Some(reserved.burn_reserve));
+        assert_eq!(
+            dev_state.circulating_supply(),
+            crate::tokenomics::BUD_TOTAL_SUPPLY as u128
+        );
+    }
+
+    #[test]
+    fn ceremony_rejects_block_reward_disagreement() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        config.block_reward = config.bud_tokenomics.expect("tokenomics").block_reward + 1;
+        let error = config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .unwrap_err();
+        assert!(error.contains("disagrees with bud_tokenomics.block_reward"));
+
+        // The committed value is the tokenomics one, never the stray field.
+        assert_eq!(
+            config.build_state().tokenomics.block_reward,
+            config.bud_tokenomics.expect("tokenomics").block_reward
+        );
     }
 
     #[test]

@@ -143,6 +143,78 @@ impl EngineResult {
     }
 }
 
+/// The shard pack written when `erasure` is on: `k` (4), `p` (2), the exact
+/// container length as a `u64`, then six length-prefixed shards. The data
+/// shards are the container cut into four equal parts, the last one padded
+/// with zeros; the recorded length is what lets `open_shard_pack` cut that
+/// padding off without touching container bytes.
+///
+/// The three restore paths used to strip every trailing `0x00` instead. The
+/// container ends with the last chunk's zstd payload, and a zstd frame can end
+/// in zero bytes, so that loop ate real data and the container failed to
+/// decode: a stored file that could not be opened again.
+fn pack_shards(encoded: &[u8]) -> Option<Vec<u8>> {
+    let mds = CauchyMds::new(4, 2)?;
+    let shard_len = encoded.len().div_ceil(4);
+    let mut parts = Vec::with_capacity(4);
+    for i in 0..4 {
+        let start = (i * shard_len).min(encoded.len());
+        let end = (start + shard_len).min(encoded.len());
+        let mut part = encoded[start..end].to_vec();
+        part.resize(shard_len, 0);
+        parts.push(part);
+    }
+    let shards = mds.encode(&parts)?;
+    let mut out = Vec::new();
+    out.push(4u8);
+    out.push(2u8);
+    out.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+    for sh in &shards {
+        out.extend_from_slice(&(u32::try_from(sh.len()).ok()?).to_le_bytes());
+        out.extend_from_slice(sh);
+    }
+    Some(out)
+}
+
+/// Rebuild the container from a shard pack: the first four shards go through
+/// the (4,2) Cauchy decoder (any four would do) and the result is cut to the
+/// recorded length. A length the shards cannot cover is refused.
+fn open_shard_pack(pack: &[u8]) -> Option<Vec<u8>> {
+    const HDR: usize = 1 + 1 + 8;
+    if pack.len() < HDR || pack[0] != 4 || pack[1] != 2 {
+        return None;
+    }
+    let original_len = usize::try_from(u64::from_le_bytes(pack[2..HDR].try_into().ok()?)).ok()?;
+    let mut pos = HDR;
+    let mut shards: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
+    for _ in 0..6 {
+        if pack.len() < pos + 4 {
+            return None;
+        }
+        let len = u32::from_le_bytes(pack[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if pack.len() < pos + len {
+            return None;
+        }
+        shards.push((shards.len(), pack[pos..pos + len].to_vec()));
+        pos += len;
+    }
+    if pos != pack.len() {
+        return None;
+    }
+    let mds = CauchyMds::new(4, 2)?;
+    let recovered = mds.decode(&shards[..4])?;
+    let mut out = Vec::new();
+    for part in &recovered {
+        out.extend_from_slice(part);
+    }
+    if original_len > out.len() {
+        return None;
+    }
+    out.truncate(original_len);
+    Some(out)
+}
+
 /// THE REVERSE PIPELINE: the engine output (a blob) -> the ORIGINAL bytes (proof of losslessness).
 /// `erasure` = is the output shard-packed (k=4, p=2); it reconstructs from the first 4 shards.
 pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
@@ -161,35 +233,7 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
     let container = &result_blob[container_start..container_start + container_len];
     // 1) if erasure, rebuild from the shards (k=4: the first 4 shards)
     let bytes: Vec<u8> = if erasure {
-        if container.is_empty() || container[0] != 4 {
-            return None; // k=4 beklenir
-        }
-        let mut pos = 2usize; // the k,p bytes
-        let mut shards: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
-        for _ in 0..6 {
-            if container.len() < pos + 4 {
-                return None;
-            }
-            let len = u32::from_le_bytes(container[pos..pos + 4].try_into().ok()?) as usize;
-            pos += 4;
-            if container.len() < pos + len {
-                return None;
-            }
-            shards.push((shards.len(), container[pos..pos + len].to_vec()));
-            pos += len;
-        }
-        let mds = CauchyMds::new(4, 2)?;
-        let recovered = mds.decode(&shards[..4])?; // the first 4 shards (MDS: any 4 will do)
-                                                   // trim the padding (the last shard was 0-padded)
-        let mut out = Vec::new();
-        for part in &recovered {
-            out.extend_from_slice(part);
-        }
-        // trim the trailing zeros (padding) - the original .bud ends with 0xFF at EOI
-        while out.last() == Some(&0u8) {
-            out.pop();
-        }
-        out
+        open_shard_pack(container)?
     } else {
         container.to_vec()
     };
@@ -238,7 +282,7 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
             ) {
                 Some(col) => {
                     transform_kind = TransformKind::Columnar;
-                    crate::bud_format_columnar::columnar_to_blob(&col)
+                    crate::bud_format_columnar::columnar_to_blob(&col)?
                 }
                 None => data.to_vec(),
             }
@@ -279,27 +323,7 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     let encoded = file.encode();
     let container_final: Vec<u8> = if erasure {
         steps.push(PipeStep::Erasure);
-        let mds = CauchyMds::new(4, 2)?;
-        // split into 4 equal parts (padded - all shards the same size)
-        let shard_len = encoded.len().div_ceil(4);
-        let mut parts = Vec::with_capacity(4);
-        for i in 0..4 {
-            let start = i * shard_len;
-            let end = (start + shard_len).min(encoded.len());
-            let mut part = encoded[start..end].to_vec();
-            part.resize(shard_len, 0); // padding on the last part (deterministic)
-            parts.push(part);
-        }
-        let shards = mds.encode(&parts)?;
-        // pack the 6 shards (length-prefixed)
-        let mut out = Vec::new();
-        out.push(4u8); // k=4
-        out.push(2u8); // p=2
-        for sh in &shards {
-            out.extend_from_slice(&(sh.len() as u32).to_le_bytes());
-            out.extend_from_slice(sh);
-        }
-        out
+        pack_shards(&encoded)?
     } else {
         steps.push(PipeStep::Container);
         encoded
@@ -386,33 +410,7 @@ pub fn engine_restore_container(
 ) -> Option<Vec<u8>> {
     // 1) if erasure, rebuild from the shard packet (k=4, p=2)
     let bytes: Vec<u8> = if erasure {
-        if container.is_empty() || container[0] != 4 {
-            return None;
-        }
-        let mut pos = 2usize;
-        let mut shards: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
-        for _ in 0..6 {
-            if container.len() < pos + 4 {
-                return None;
-            }
-            let len = u32::from_le_bytes(container[pos..pos + 4].try_into().ok()?) as usize;
-            pos += 4;
-            if container.len() < pos + len {
-                return None;
-            }
-            shards.push((shards.len(), container[pos..pos + len].to_vec()));
-            pos += len;
-        }
-        let mds = CauchyMds::new(4, 2)?;
-        let recovered = mds.decode(&shards[..4])?;
-        let mut out = Vec::new();
-        for part in &recovered {
-            out.extend_from_slice(part);
-        }
-        while out.last() == Some(&0u8) {
-            out.pop();
-        }
-        out
+        open_shard_pack(container)?
     } else {
         container.to_vec()
     };
@@ -462,33 +460,7 @@ pub fn engine_restore_raw(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> 
     }
     let container = &result_blob[container_start..container_start + container_len];
     let bytes: Vec<u8> = if erasure {
-        if container.is_empty() || container[0] != 4 {
-            return None;
-        }
-        let mut pos = 2usize;
-        let mut shards: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
-        for _ in 0..6 {
-            if container.len() < pos + 4 {
-                return None;
-            }
-            let len = u32::from_le_bytes(container[pos..pos + 4].try_into().ok()?) as usize;
-            pos += 4;
-            if container.len() < pos + len {
-                return None;
-            }
-            shards.push((shards.len(), container[pos..pos + len].to_vec()));
-            pos += len;
-        }
-        let mds = CauchyMds::new(4, 2)?;
-        let recovered = mds.decode(&shards[..4])?;
-        let mut out = Vec::new();
-        for part in &recovered {
-            out.extend_from_slice(part);
-        }
-        while out.last() == Some(&0u8) {
-            out.pop();
-        }
-        out
+        open_shard_pack(container)?
     } else {
         container.to_vec()
     };
@@ -571,8 +543,12 @@ mod tests {
         // the erasure pack carries the k=4 marker
         assert_eq!(with_ec.container[0], 4u8, "k=4");
         assert_eq!(with_ec.container[1], 2u8, "p=2");
-        // reconstruct from the shards: the first 4 shards (length-prefixed) -> the original container
-        // (only the pack structure is verified here - the restore engine is a separate step)
+        let recorded = u64::from_le_bytes(with_ec.container[2..10].try_into().unwrap());
+        assert_eq!(
+            recorded,
+            without.container.len() as u64,
+            "the pack records the container length"
+        );
     }
 
     #[test]
@@ -618,6 +594,27 @@ mod tests {
         let back =
             engine_restore_full(&blob, res.transform_kind.to_u8(), true).expect("restore+erasure");
         assert_eq!(back, bin, "the erasure round trip is lossless");
+    }
+
+    /// A container whose last bytes are zeros: the old restore stripped them as
+    /// padding and the container no longer decoded. The recorded length keeps
+    /// them. A pack whose recorded length exceeds what the shards hold is
+    /// refused rather than padded.
+    #[test]
+    fn shard_pack_keeps_trailing_zero_bytes_of_the_container() {
+        let mut encoded: Vec<u8> = (1u8..=200).collect();
+        encoded.extend_from_slice(&[0, 0, 0, 0, 0]);
+        let pack = pack_shards(&encoded).expect("pack");
+        assert_eq!(open_shard_pack(&pack).expect("open"), encoded);
+        let short: Vec<u8> = vec![7, 0, 0];
+        let pack = pack_shards(&short).expect("pack");
+        assert_eq!(open_shard_pack(&pack).expect("open"), short);
+        let mut lying = pack_shards(&encoded).expect("pack");
+        lying[2..10].copy_from_slice(&(u64::MAX).to_le_bytes());
+        assert!(open_shard_pack(&lying).is_none());
+        let mut trailing = pack_shards(&encoded).expect("pack");
+        trailing.push(0);
+        assert!(open_shard_pack(&trailing).is_none());
     }
 
     #[test]

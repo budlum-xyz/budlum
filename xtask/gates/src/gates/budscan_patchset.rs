@@ -90,6 +90,76 @@ fn touched_files(diff: &str) -> Vec<String> {
         .collect()
 }
 
+/// Hunk headers whose line counts disagree with the body under them.
+///
+/// `git apply` refuses such a hunk as a corrupt patch, so a patch that fails
+/// here cannot be applied by the build. Four hunks of the protocol-handler
+/// patch carried counts from an earlier draft of the files they add, and
+/// nothing read the headers. The rules are those of unified diff: `+` is a
+/// new line, `-` an old one, a space or an empty line is context, `\\` is
+/// the no-newline marker; the body ends at the next hunk or file header.
+fn hunk_count_errors(rel: &str, diff: &str) -> Vec<String> {
+    let lines: Vec<&str> = diff.split('\n').collect();
+    let mut problems = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((declared_old, declared_new)) = parse_hunk_header(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let header_line = i + 1;
+        let (mut old, mut new) = (0usize, 0usize);
+        let mut j = i + 1;
+        while j < lines.len() {
+            let l = lines[j];
+            if parse_hunk_header(l).is_some()
+                || l.starts_with("--- ")
+                || l.starts_with("+++ ")
+                || l.starts_with("diff ")
+            {
+                break;
+            }
+            if l.is_empty() && j + 1 == lines.len() {
+                break;
+            }
+            if l.starts_with('+') {
+                new += 1;
+            } else if l.starts_with('-') {
+                old += 1;
+            } else if l.starts_with(' ') || l.is_empty() {
+                old += 1;
+                new += 1;
+            } else if !l.starts_with('\\') {
+                break;
+            }
+            j += 1;
+        }
+        if (old, new) != (declared_old, declared_new) {
+            problems.push(format!(
+                "{rel}:{header_line}: the hunk header declares {declared_old} old and \
+                 {declared_new} new lines but the body has {old} and {new}; git apply \
+                 refuses this hunk as corrupt"
+            ));
+        }
+        i = j;
+    }
+    problems
+}
+
+/// `@@ -a[,b] +c[,d] @@ ...` to `(b, d)`, each defaulting to 1.
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(" +")?;
+    let (new_part, _) = rest.split_once(" @@")?;
+    let count = |part: &str| -> Option<usize> {
+        match part.split_once(',') {
+            Some((_, n)) => n.parse().ok(),
+            None => part.parse::<usize>().ok().map(|_| 1),
+        }
+    };
+    Some((count(old_part)?, count(new_part)?))
+}
+
 /// # Errors
 ///
 /// When the list and the disk disagree, when a patch touches no file, or
@@ -174,6 +244,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                  A patch with nothing to apply is a patch believed to have been applied"
             ));
         }
+        problems.extend(hunk_count_errors(rel, &diff));
         for file in &touched {
             if !allowed_roots.iter().any(|r| file.starts_with(r)) {
                 problems.push(format!(
@@ -293,6 +364,20 @@ pub fn self_test() -> Result<String, String> {
         problems.push(String::from("the 'b/' prefix was not stripped"));
     }
 
+    // Canary 4b: a hunk whose header counts disagree with its body is a
+    // finding, and one whose counts agree (with a default count and a
+    // no-newline marker) is not.
+    let good = "--- /dev/null\n+++ b/browser/x.js\n@@ -0,0 +1,2 @@\n+a\n+b\n\\ No newline at end of file\n--- a/browser/y.js\n+++ b/browser/y.js\n@@ -1 +1,2 @@\n c\n+d\n";
+    if !hunk_count_errors("ok.patch", good).is_empty() {
+        problems.push(String::from("a well-formed hunk was reported as corrupt"));
+    }
+    let bad = good.replace("@@ -0,0 +1,2 @@", "@@ -0,0 +1,3 @@");
+    if hunk_count_errors("bad.patch", &bad).len() != 1 {
+        problems.push(String::from(
+            "VACUOUS: a hunk header with the wrong line count passed",
+        ));
+    }
+
     // Canary 5: the brand list must not be empty, otherwise the scan searches for nothing.
     // The same outcome arises if the syllables do not join; the joined form is what is measured.
     if forbidden_brand_tokens().iter().any(|t| t.len() < 5) {
@@ -317,7 +402,7 @@ pub fn self_test() -> Result<String, String> {
     }
     Ok(String::from(
         "budscan patchset self-test OK: duplicates are refused, a deletion target is not counted, \
-         the 'b/' prefix is stripped, the brand list is populated and the gate does not pass on a \
-         gecmiyor",
+         the 'b/' prefix is stripped, a miscounted hunk is refused, the brand list is populated \
+         and the gate does not pass on a tree it cannot read",
     ))
 }

@@ -85,6 +85,7 @@ mod gates {
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
+    pub mod genesis_schema;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
@@ -92,6 +93,7 @@ mod gates {
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
+    pub mod license_consistency;
     pub mod lock_failures;
     pub mod logup_multipliers;
     pub mod master_derivation;
@@ -99,6 +101,7 @@ mod gates {
     pub mod mermaid;
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
     pub mod network_hardening_gate;
@@ -129,6 +132,7 @@ mod gates {
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
+    pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
     pub mod slash_expression;
     pub mod source_reading;
@@ -493,6 +497,14 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "serialize-map-keys-are-strings",
+        replaces: None,
+        run: gates::serialize_map_keys_are_strings::run,
+        run_args: None,
+        self_test: gates::serialize_map_keys_are_strings::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "tree-is-english",
         replaces: None,
         run: gates::tree_is_english::run,
@@ -647,6 +659,34 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "genesis-schema",
+        replaces: None,
+        run: gates::genesis_schema::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::genesis_schema::self_test,
+    },
+    Gate {
+        name: "module-coverage",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "module-coverage reads a coverage report; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::module_coverage::run),
+        run_args: None,
+        self_test: gates::module_coverage::self_test,
+    },
+    Gate {
+        name: "license-consistency",
+        replaces: None,
+        run: gates::license_consistency::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::license_consistency::self_test,
     },
     Gate {
         name: "tree-pin",
@@ -1250,12 +1290,15 @@ fn main() {
             return;
         }
         // `--all` and a bare `--self-test` both mean every gate; the flag was
-        // already read above, so the two arms are one. Gates that take a log
-        // path or positional roots are left out: they cannot run without
-        // their argument, and their CI steps call them directly.
+        // already read above, so the two arms are one. On the run path the
+        // gates that take a log path or positional roots are left out: they
+        // cannot run without their argument, and their CI steps call them
+        // directly. A canary takes no argument, so the self-test path keeps
+        // them; filtered there too, `--all --self-test` reported success
+        // while about twenty gates had proven nothing.
         Some(&"--all" | &"--self-test") => GATES
             .iter()
-            .filter(|g| g.run_log.is_none() && g.run_args.is_none())
+            .filter(|g| self_test || (g.run_log.is_none() && g.run_args.is_none()))
             .collect(),
         Some(name) => {
             if let Some(g) = GATES.iter().find(|g| g.name == *name) {

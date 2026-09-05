@@ -12,7 +12,7 @@ ourselves keeps the origin at `bud://<name>`.
 
 --- a/netwerk/build/components.conf
 +++ b/netwerk/build/components.conf
-@@ -120,6 +120,13 @@ Classes = [
+@@ -120,6 +120,20 @@ Classes = [
          'constructor': 'nsViewSourceHandler::Create',
          'headers': ['/netwerk/protocol/viewsource/nsViewSourceHandler.h'],
      },
@@ -22,6 +22,13 @@ ourselves keeps the origin at `bud://<name>`.
 +        'type': 'mozilla::net::BudProtocolHandler',
 +        'headers': ['/netwerk/protocol/bud/BudProtocolHandler.h'],
 +        'processes': ProcessSelector.ALLOW_IN_SOCKET_PROCESS,
++        'protocol_config': {
++            'scheme': 'bud',
++            'flags': [
++                'URI_STD',
++                'URI_LOADABLE_BY_ANYONE',
++            ],
++        },
 +    },
      {
          'cid': '{9c7ec5d1-23f9-11d5-aea8-8fcc0793e97f}',
@@ -38,7 +45,7 @@ ourselves keeps the origin at `bud://<name>`.
      "viewsource",
 --- /dev/null
 +++ b/netwerk/protocol/bud/moz.build
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,23 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -64,7 +71,7 @@ ourselves keeps the origin at `bud://<name>`.
 +FINAL_LIBRARY = "xul"
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudProtocolHandler.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,61 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -86,16 +93,26 @@ ourselves keeps the origin at `bud://<name>`.
 + * deliberately holds no verification logic of its own. Two places deciding
 + * what counts as verified is worse than one place deciding badly.
 + *
-+ * Flags:
++ * Flags, declared in the components.conf entry's `protocol_config`. Gecko
++ * reads a scheme's flags from that static table, and every scheme has to
++ * carry exactly one loadability flag: with none declared,
++ * nsContentSecurityManager refuses the channel before this handler is
++ * asked, so an entry without `protocol_config` is a scheme that never
++ * loads. The list below is the whole of what the scheme carries:
 + *   URI_STD               - bud://<name>/<path> parses as a standard URL, so
 + *                           each name gets its own origin. Without this two
 + *                           different names would share one origin.
 + *   URI_LOADABLE_BY_ANYONE- an ordinary page may link to bud://.
-+ *   URI_IS_POTENTIALLY_TRUSTWORTHY - content is verified by hash before it
-+ *                           reaches the parser, which is a stronger guarantee
-+ *                           than TLS gives; secure-context APIs are allowed.
 + *
 + * Not set, on purpose:
++ *   URI_IS_POTENTIALLY_TRUSTWORTHY - the bytes are hash-verified, but the
++ *                           name is not: .bud resolution carries no state
++ *                           proof today (`claim only`), so a lying node can
++ *                           put any bytes under any name. A potentially
++ *                           trustworthy origin unlocks service workers,
++ *                           `crypto.subtle` and secure cookies for those
++ *                           bytes. Until the resolution is `verified` the
++ *                           scheme stays an ordinary, non-secure context.
 + *   URI_DANGEROUS_TO_LOAD - would make the scheme unusable from the address
 + *                           bar, which is the only place it is used.
 + *   URI_IS_LOCAL_RESOURCE - bud:// is not local; it is content-addressed.
@@ -118,7 +135,7 @@ ourselves keeps the origin at `bud://<name>`.
 +#endif  // mozilla_net_BudProtocolHandler_h
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudProtocolHandler.cpp
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,56 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -177,7 +194,7 @@ ourselves keeps the origin at `bud://<name>`.
 +}  // namespace mozilla
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudChannel.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,58 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -238,7 +255,7 @@ ourselves keeps the origin at `bud://<name>`.
 +#endif  // mozilla_net_BudChannel_h
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudChannel.cpp
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,54 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */

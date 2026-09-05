@@ -29,7 +29,7 @@ pub struct Executor;
 ///
 /// The gate is deliberately the same on every network (`_chain_id` is
 /// unread): an unproven execution is as worthless on devnet as on mainnet.
-pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3";
+pub const AI_EXECUTION_BACKEND_PLONKY3: &str = "Plonky3-Keccak-Goldilocks";
 
 fn ai_execution_backend_allowed(_chain_id: u64, backend: &str) -> bool {
     backend == AI_EXECUTION_BACKEND_PLONKY3
@@ -946,24 +946,19 @@ impl Executor {
                     if res.success {
                         match msg.kind {
                             crate::cross_domain::message::MessageKind::BridgeLock => {
-                                // Inbound lock from external chain -> Mint on Budlum
-                                state
-                                    .bridge_state
-                                    .mint(msg, state.current_block_height)
-                                    .map_err(|e| {
-                                        BudlumError::validation("bridge_mint_failed", e.0)
-                                    })?;
-                                // Previously a placeholder (nonce-based fee,
-                                // No recipient credit). Now uses the same logic as
-                                // Submit_relay_proof: fetch the transfer, deduct 1% relayer
-                                // Fee, credit recipient.
+                                // Inbound lock from external chain -> Mint on Budlum.
+                                // The amounts and the ceiling are settled before the
+                                // bridge state moves: once `mint` has run, the replay
+                                // id is spent and the transfer reads as minted, so a
+                                // refusal after it would leave a consumed lock with
+                                // nothing, or only part, credited.
                                 let transfer = state
                                     .bridge_state
                                     .get_transfer(&msg.message_id)
                                     .ok_or_else(|| {
                                         BudlumError::validation(
                                             "bridge_mint_failed",
-                                            "Failed to retrieve transfer after mint",
+                                            "Unknown bridge transfer for mint",
                                         )
                                     })?
                                     .clone();
@@ -989,9 +984,35 @@ impl Executor {
                                         "Bridge fee exceeds maximum representable balance",
                                     ));
                                 }
-                                // Use checked addition for bridge credits
+                                let minted = (final_amount as u64)
+                                    .checked_add(fee as u64)
+                                    .ok_or_else(|| {
+                                        BudlumError::validation(
+                                            "bridge_mint_failed",
+                                            "Bridge amount exceeds maximum representable balance",
+                                        )
+                                    })?;
+                                state.ensure_mint_headroom(minted).map_err(|e| {
+                                    BudlumError::validation("bridge_mint_overflow", &e)
+                                })?;
                                 state
-                                    .try_add_balance(&transfer.recipient, final_amount as u64)
+                                    .bridge_state
+                                    .mint(msg, state.current_block_height)
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_mint_failed", e.0)
+                                    })?;
+                                // This is the supply-creating path: the on-chain
+                                // counterpart of the asset arriving from the bridge
+                                // is minted here, the same as in
+                                // `Blockchain::mint_bridge_transfer_from_verified_event`.
+                                // `try_mint_balance` asks the fixed ceiling; a plain
+                                // `try_add_balance` only guarded `u64` overflow, so a
+                                // chain already at `BUD_TOTAL_SUPPLY` kept minting
+                                // through this entry point while the RPC entry point
+                                // refused. The relayer fee comes out of the same mint
+                                // and is subject to the same ceiling.
+                                state
+                                    .try_mint_balance(&transfer.recipient, final_amount as u64)
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_mint_overflow", &e)
                                     })?;
@@ -1000,7 +1021,7 @@ impl Executor {
                                 // Silently dropped - BUD lost to the void. The submit_relay_proof
                                 // Path correctly credits the relayer; this path should too.
                                 if fee > 0 {
-                                    state.try_add_balance(&tx.from, fee as u64).map_err(|e| {
+                                    state.try_mint_balance(&tx.from, fee as u64).map_err(|e| {
                                         BudlumError::validation("bridge_fee_overflow", &e)
                                     })?;
                                 }
@@ -1040,7 +1061,11 @@ impl Executor {
                                 })?;
                                 state
                                     .bridge_state
-                                    .unlock(transfer_id, msg.source_domain)
+                                    .unlock(
+                                        transfer_id,
+                                        msg.source_domain,
+                                        state.current_block_height,
+                                    )
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_unlock_failed", e.0)
                                     })?;
@@ -1800,6 +1825,14 @@ impl Executor {
                         "privacy note insertion is disabled on mainnet until full proof verification is wired",
                     ));
                 }
+                // The same boundary `PrivateTransferSubmit::validate_shape`
+                // holds: only a packed field element is a note.
+                if !crate::privacy::is_note_hash(commitment) {
+                    return Err(BudlumError::validation(
+                        "privacy_note_shape",
+                        "commitment is not a packed field element",
+                    ));
+                }
                 state
                     .note_registry
                     .insert_note(*commitment)
@@ -2207,7 +2240,7 @@ impl Executor {
 
         // Execute passed governance proposals
         // (e.g. whitelist/dewhitelist verifiers) and apply their actions.
-        let governance_actions = state.governance.execute_passed_proposals();
+        let governance_actions = state.governance.execute_passed_proposals(state.epoch_index);
         for action in governance_actions {
             match action {
                 crate::core::governance::GovernanceAction::WhitelistVerifier(addr) => {
@@ -2301,7 +2334,10 @@ mod tests {
 
         assert!(!ai_execution_backend_allowed(mainnet, "test"));
         assert!(!ai_execution_backend_allowed(mainnet, "test-backend"));
-        assert!(ai_execution_backend_allowed(mainnet, "Plonky3"));
+        assert!(ai_execution_backend_allowed(
+            mainnet,
+            "Plonky3-Keccak-Goldilocks"
+        ));
         assert!(!ai_execution_backend_allowed(devnet, "test"));
     }
 
@@ -2316,8 +2352,12 @@ mod tests {
         let devnet = crate::core::chain_config::Network::Devnet
             .chain_id()
             .value();
-        assert!(ai_execution_backend_allowed(devnet, "Plonky3"));
+        assert!(ai_execution_backend_allowed(
+            devnet,
+            "Plonky3-Keccak-Goldilocks"
+        ));
         for spoofed in [
+            "Plonky3",
             "Plonky3-nightly",
             "not-really-Plonky3-at-all",
             "Plonky3 with a local patch",

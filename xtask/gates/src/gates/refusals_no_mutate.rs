@@ -61,7 +61,11 @@ fn strip_test_mods(src: &str) -> String {
         let brace = m + brace_rel;
         let body = balanced(rest, brace);
         out.push_str(&rest[..m]);
-        rest = &rest[m + body.len()..];
+        // The block ends where its balanced body ends: at `brace`, not at
+        // the attribute. Advancing from `m` left the last `brace_rel` bytes
+        // of every test module in the scanned text, so a `remove(` or a
+        // `return Err(` in that tail was read as production code.
+        rest = &rest[brace + body.len()..];
     }
 }
 
@@ -338,14 +342,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-refusals-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-refusals")?;
     let _ = std::fs::create_dir_all(dir.join("src"));
     let _ = std::fs::create_dir_all(dir.join("budzero"));
     let _ = std::fs::create_dir_all(dir.join("wallet-core"));
@@ -366,8 +363,26 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: Err after remove passed"));
     }
 
+    // A test module is not production code, whatever it does to its own
+    // maps. The strip used to leave the tail of every `#[cfg(test)] mod`
+    // in the scanned text, so a partial write inside a test read as a
+    // finding against the file.
+    let test_only = format!(
+        "{good}#[cfg(test)]\nmod tests {{\n    {bad}}}\n",
+        good = good,
+        bad = bad.replace('\n', "\n    ")
+    );
+    std::fs::write(dir.join("src/lib.rs"), test_only).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a partial write that lives only in a test module was reported",
+        ));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "refusals canary OK (good PASSes, a partial write FAILs).",
+        "refusals canary OK (good PASSes, a partial write FAILs, one inside a test module \
+         PASSes).",
     ))
 }

@@ -71,8 +71,18 @@ fn checksum_url(lower: &str) -> bool {
         let end = token
             .find(|c: char| c.is_whitespace() || c == '\\')
             .unwrap_or(token.len());
-        let url = &token[..end];
-        if ends_with_checksum_ext(url) || ends_with_checksum_path(url) || has_checksum_query(url) {
+        // A quoted URL keeps its closing quote inside the token, and a URL at
+        // the end of a sentence keeps the full stop. Both hid the extension
+        // and the path word from the two suffix rules, so `"...tool.sha256"`
+        // passed as if it were not a checksum download.
+        let url = token[..end].trim_end_matches(['"', '\'', ')', ',', ';', '.']);
+        // The two suffix rules look at the path alone: a query string or a
+        // fragment after `tool.sha256` (`?cachebust=1`, `#latest`) hid the
+        // extension from both. The query rule keeps the whole URL.
+        let path_end = url.find(['?', '#']).unwrap_or(url.len());
+        let path = &url[..path_end];
+        if ends_with_checksum_ext(path) || ends_with_checksum_path(path) || has_checksum_query(url)
+        {
             return true;
         }
         idx = start + scheme_len;
@@ -164,11 +174,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-pin-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-pin")?;
     let _ = std::fs::create_dir_all(dir.join(".github/workflows"));
 
     // Fetched checksum must fail.
@@ -205,6 +211,25 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Pinned hash written in-repo must pass.
+    // The checksum URL inside quotes, as a shell author writes it: the
+    // closing quote is part of the whitespace-delimited token.
+    let quoted = "run: |\n  curl -sSfLO \"https://github.com/x/y/releases/download/v1/tool.sha256\"\n  curl -sSfLO 'https://example.com/release/checksums'\n";
+    std::fs::write(dir.join(".github/workflows/ci.yml"), quoted).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a quoted checksum URL passed; the closing quote hid the suffix",
+        ));
+    }
+    // A query string or fragment after the checksum path must not hide it.
+    let busted = "run: |\n  curl -sSfLO \"https://example.com/tool.sha256?cachebust=1\"\n  curl -sSfLO https://example.com/release/checksums#latest\n";
+    std::fs::write(dir.join(".github/workflows/ci.yml"), busted).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a checksum URL with a query string or fragment after the path passed",
+        ));
+    }
     let good = "run: |\n  curl -sSfL -o /tmp/tool.tar.gz https://github.com/x/y/releases/download/v1/tool.tar.gz\n  echo \"abc123  /tmp/tool.tar.gz\" | sha256sum -c -\n";
     std::fs::write(dir.join(".github/workflows/ci.yml"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
@@ -214,6 +239,7 @@ pub fn self_test() -> Result<String, String> {
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "pinned-downloads canary OK (network checksum FAILs, in-repo hash PASSes).",
+        "pinned-downloads canary OK (network checksum FAILs, also upper-cased, in a query \
+         string, inside quotes and behind a query or fragment; in-repo hash PASSes).",
     ))
 }

@@ -42,12 +42,30 @@ fn baseline(root: &Path) -> Result<u64, String> {
 }
 
 /// A `compiler-message` line carrying a `warning` level and a `clippy::`
-/// code counts as one pedantic/nursery warning.
+/// diagnostic code counts as one pedantic/nursery warning.
+///
+/// The line is parsed and the prefix is required on `message.code.code`
+/// itself. Searching the whole line for `clippy::` also matched the
+/// `rendered` text of a rustc warning that merely mentions a lint name, and
+/// such a warning then counted against the ratchet.
 fn is_clippy_warning(line: &str) -> bool {
-    line.contains("\"reason\":\"compiler-message\"")
-        || line.contains("\"reason\": \"compiler-message\"")
-            && (line.contains("\"level\":\"warning\"") || line.contains("\"level\": \"warning\""))
-            && line.contains("clippy::")
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if v.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
+        return false;
+    }
+    let Some(message) = v.get("message") else {
+        return false;
+    };
+    if message.get("level").and_then(|l| l.as_str()) != Some("warning") {
+        return false;
+    }
+    message
+        .get("code")
+        .and_then(|c| c.get("code"))
+        .and_then(|c| c.as_str())
+        .is_some_and(|code| code.starts_with("clippy::"))
 }
 
 fn count_json(path: &Path) -> Result<u64, String> {
@@ -93,15 +111,7 @@ pub fn run(root: &Path, json: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when the canary JSON does not behave.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-clippy-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-clippy")?;
     let _ = std::fs::create_dir_all(dir.join(".github"));
     std::fs::write(dir.join(".github/clippy-extra-baseline.txt"), "11\n")
         .map_err(|e| e.to_string())?;
@@ -110,6 +120,17 @@ pub fn self_test() -> Result<String, String> {
         let mut s = String::new();
         for _ in 0..n {
             s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"clippy::x\"},\"rendered\":\"\"}}\n");
+        }
+        // Lines that carry the reason but not the level or not the code:
+        // a rustc error, a rustc warning, a note. None of them is a
+        // pedantic/nursery warning, and none of them may count.
+        for _ in 0..n {
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"code\":{\"code\":\"E0308\"},\"rendered\":\"\"}}\n");
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"unused_variables\"},\"rendered\":\"\"}}\n");
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"note\",\"code\":null,\"rendered\":\"clippy::x\"}}\n");
+            // A rustc warning whose rendered text names a clippy lint: not a
+            // clippy warning, whatever the text says.
+            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"unused_variables\"},\"rendered\":\"warning: unused variable; see clippy::x\"}}\n");
         }
         std::fs::write(dir.join(name), s).map_err(|e| e.to_string())
     };

@@ -69,6 +69,15 @@ pub const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 /// is tight.
 pub const MAX_CONTROL_FILE_BYTES: u64 = 1024 * 1024;
 
+/// The ceiling for the relayer's pending-result store.
+///
+/// Each entry carries a receipt proof of a few kilobytes and the set grows
+/// with the relays awaiting finality, so the control-file ceiling is the
+/// wrong size for it. 16 MiB holds thousands of outstanding relays; a file
+/// past that is refused, and the worker starts with an empty set and logs
+/// why, rather than reading an unbounded file into memory.
+pub const MAX_RELAY_PENDING_BYTES: u64 = 16 * 1024 * 1024;
+
 /// The ceiling for the persisted ban list.
 ///
 /// This one grows with the peer set rather than being a fixed handful of
@@ -412,6 +421,8 @@ mod tests {
     #[test]
     fn the_ceilings_are_ordered_by_what_they_carry() {
         const { assert!(MAX_CONTROL_FILE_BYTES < MAX_BAN_LIST_BYTES) };
+        const { assert!(MAX_CONTROL_FILE_BYTES < MAX_RELAY_PENDING_BYTES) };
         const { assert!(MAX_BAN_LIST_BYTES < MAX_SNAPSHOT_BYTES) };
+        const { assert!(MAX_RELAY_PENDING_BYTES < MAX_SNAPSHOT_BYTES) };
     }
 }

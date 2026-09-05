@@ -1462,7 +1462,7 @@ mod settlement_prod_tests {
         let err = bc
             .state
             .bridge_state
-            .unlock(transfer.message_id, 1)
+            .unlock(transfer.message_id, 1, 0)
             .unwrap_err();
         assert!(err.to_string().contains("not burned"));
     }

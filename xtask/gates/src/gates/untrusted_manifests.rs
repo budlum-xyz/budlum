@@ -496,14 +496,7 @@ fn check_fixture(
     expect_ok: bool,
     label: &str,
 ) -> Result<(), String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-manifest-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-manifest")?;
     for sub in ["src/storage", "src/domain", "src/chain"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }
