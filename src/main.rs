@@ -1086,6 +1086,18 @@ async fn main() {
         bootstraps.extend(network.fallback_bootnodes());
     }
 
+    // Testnet has no public bootnodes yet and mDNS is refused outside devnet,
+    // so a node with neither a bootnode nor a DNS seed would come up and never
+    // meet a peer. Refuse instead of idling; mainnet is held to the stricter
+    // bootnode rule below.
+    if !budlum_core::core::chain_config::has_peer_source(network, &bootstraps, &config.dns_seeds) {
+        eprintln!("Refusing to start {network} without a peer source.");
+        eprintln!(
+            "Set p2p.bootnodes or p2p.dns_seeds in config/{network}.toml, or pass --bootstrap for a private mesh."
+        );
+        std::process::exit(1);
+    }
+
     if network == budlum_core::core::chain_config::Network::Mainnet {
         if bootstraps.is_empty() {
             eprintln!("Refusing to start mainnet without at least one configured bootnode.");
