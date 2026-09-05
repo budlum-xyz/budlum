@@ -35,5 +35,7 @@ jobs:
           # (low = warning only; high/critical is too late; moderate is the balance.)
           fail-on-severity: moderate
           # The license denial list is managed in .quality/deny.toml [licenses]; here
-          # the focus is advisories only. comment-summary-in-pr is optional.
-          comment-summary-in-pr: always
+          # the focus is advisories only; the job result is the signal. A
+          # summary comment would need `pull-requests: write`, which this
+          # workflow does not hold on purpose.
+          comment-summary-in-pr: never

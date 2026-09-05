@@ -92,6 +92,7 @@ mod gates {
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
+    pub mod license_consistency;
     pub mod lock_failures;
     pub mod logup_multipliers;
     pub mod master_derivation;
@@ -656,6 +657,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "license-consistency",
+        replaces: None,
+        run: gates::license_consistency::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::license_consistency::self_test,
     },
     Gate {
         name: "tree-pin",

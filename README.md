@@ -213,7 +213,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | `buf.yaml` | Protobuf workspace root, paired with `proto/` (Repo Lint gate runs `buf` from the root) |
 | `flake.nix` · `flake.lock` | Nix flake discovery is root-only |
 | `README.md` | GitHub renders the repo homepage from the root README |
-| `LICENSE.md` | GitHub license detection, `cargo-deny` and `.quality/check_license.py` read it from the root |
+| `LICENSE.md` | GitHub license detection, `cargo-deny` and the `license-consistency` gate read it from the root |
 | `.gitignore` · `.gitleaks.toml` | Git and gitleaks resolve configs from the root |
 
 Container and licence-notice files moved in-tree: `ops/Dockerfile`, `ops/docker-compose*.yml` (build context stays at the root), `docs/NOTICE`.
