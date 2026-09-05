@@ -1,9 +1,11 @@
-//! No product read for research is named in this tree.
+//! No product read for research is named in the code of this tree.
 //!
 //! Some of the architecture here was arrived at by reading other projects. That
 //! reading is legitimate and the resulting designs are our own: no code was
-//! copied and no dependency was added. What must not happen is the *name*
-//! travelling into the tree along with the idea.
+//! copied and no dependency was added. The studied projects are attributed
+//! where attribution belongs: `docs/NOTICE` and `docs/PROVENANCE_NOTES.md`,
+//! both on this gate's exemption list. What must not happen is the *name*
+//! travelling into the code along with the idea.
 //!
 //! The reason is not etiquette. A type called `ServeEngine::Colibri` looks like
 //! an integration. A reader concludes the tree depends on that project, checks
@@ -36,21 +38,21 @@ use std::path::{Path, PathBuf};
 const FORBIDDEN: &[(&str, &str)] = &[
     (
         "colibri",
-        "an on-device MoE engine. What we took was the idea of a placement \
-         hierarchy across VRAM, RAM and disk; that idea now lives in \
-         `ai-serve/src/residency.rs` under our own terms.",
+        "an on-device MoE engine read for research. The placement principle \
+         it states is attributed in `docs/NOTICE` and `docs/PROVENANCE_NOTES.md`; \
+         the in-tree planner is an independent implementation.",
     ),
     (
         "jcode",
         "a coding agent read for its memory discipline. The bounded-buffer and \
-         ceiling work it prompted is ours and is described in \
-         `docs/ARCHITECTURE.md`.",
+         ceiling behaviour it prompted is attributed in `docs/NOTICE` and \
+         `docs/PROVENANCE_NOTES.md` and described in `docs/ARCHITECTURE.md`.",
     ),
     (
         "system_prompts_leaks",
-        "a corpus of published system prompts, read while writing \
-         `ai-core/src/system_prompt.rs`. Our prompt states our own system's \
-         behaviour and is checked against the tree by `ai-inference-prompt-is-true`.",
+        "a corpus of published system prompts consulted during research. The \
+         consultation is attributed in `docs/NOTICE` and \
+         `docs/PROVENANCE_NOTES.md`; the in-tree prompt is original text.",
     ),
 ];
 
@@ -58,7 +60,13 @@ const FORBIDDEN: &[(&str, &str)] = &[
 ///
 /// A gate that forbade attribution would be worse than no gate: it would push a
 /// project toward a licence violation to stay green.
-const ATTRIBUTION_FILES: &[&str] = &["LICENSE.md", "NOTICE.md", "THIRD-PARTY.md"];
+const ATTRIBUTION_FILES: &[&str] = &[
+    "LICENSE.md",
+    "NOTICE.md",
+    "THIRD-PARTY.md",
+    "docs/NOTICE",
+    "docs/PROVENANCE_NOTES.md",
+];
 
 /// This gate names what it forbids, so it cannot scan itself.
 const SELF_PATH: &str = "xtask/gates/src/gates/no_upstream_brands.rs";
@@ -239,9 +247,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             let _ = writeln!(msg, "  ... and {} more", findings.len() - MAX_REPORTED);
         }
         msg.push_str(
-            "  Rename to what the thing does in our system rather than where the \
-             idea came from. If a dependency was genuinely added, the name belongs \
-             in LICENSE.md or NOTICE.md, which this gate does not scan.",
+            "  Name it where it belongs: the attribution files (LICENSE.md, \
+             NOTICE.md, THIRD-PARTY.md, docs/NOTICE, docs/PROVENANCE_NOTES.md) \
+             are not scanned by this gate. A studied project is recorded there, \
+             and the in-tree name describes what the thing does in our system.",
         );
         return Err(msg);
     }
@@ -300,7 +309,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // 7. This file names what it forbids and must exempt itself.
-    if !findings_in(SELF_PATH, "    (\"colibri\", \"an on-device MoE engine\"),").is_empty() {
+    if !findings_in(SELF_PATH, "        \"colibri\",").is_empty() {
         return Err(String::from("canary 7: the gate reported its own list"));
     }
 
