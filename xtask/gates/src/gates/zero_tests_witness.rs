@@ -57,30 +57,45 @@ fn strip_comments(text: &str) -> String {
         .join("\n")
 }
 
-/// The statements of a source fragment, comments gone and every run of
-/// whitespace collapsed, so that a chain rustfmt spread over several lines is
-/// one string again. Matching per line was a hole: a long builder chain is
+/// The statements of a source fragment, comments gone, every run of
+/// whitespace collapsed and the whitespace around punctuation removed, so
+/// that a chain rustfmt spread over several lines is one string again and
+/// `builder . when (is_assert) . assert_one(rs1_val)` reads the same as the
+/// compact spelling. Matching per line was a hole: a long builder chain is
 /// formatted as `builder\n    .when(..)\n    .assert_one(..);`, and no single
-/// line of that carried all three tokens, so the direct form passed.
+/// line of that carried all three tokens, so the direct form passed; spaces
+/// kept around `.` and `(` were the same hole one token wide.
 fn statements(text: &str) -> Vec<String> {
     strip_comments(text)
         .split(';')
-        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|s| {
+            let mut out = String::with_capacity(s.len());
+            for word in s.split_whitespace() {
+                let glue = out.is_empty()
+                    || out.ends_with(['.', '(', ')', ',', '=', '!', '{', '}'])
+                    || word.starts_with(['.', '(', ')', ',', '=', '!', '{', '}']);
+                if !glue {
+                    out.push(' ');
+                }
+                out.push_str(word);
+            }
+            out
+        })
         .collect()
 }
 
-/// `reg (==|!=) 0` in the body.
+/// `reg (==|!=) 0` in the body, however it was spaced.
 fn tests_zero(body: &str, reg: &str) -> bool {
     statements(body)
         .iter()
-        .any(|s| s.contains(&format!("{reg} == 0")) || s.contains(&format!("{reg} != 0")))
+        .any(|s| s.contains(&format!("{reg}==0")) || s.contains(&format!("{reg}!=0")))
 }
 
 /// The AIR constrains the register directly with `assert_one`, bypassing the
 /// witness: `.when(is_<snake>)...assert_one(<air_reg>)`.
 fn has_direct_assert(air_code: &str, snake: &str, air_reg: &str) -> bool {
     statements(air_code).iter().any(|s| {
-        s.contains(&format!("when(is_{snake}")) && s.contains("assert_one") && s.contains(air_reg)
+        s.contains(&format!("when(is_{snake}")) && s.contains("assert_one(") && s.contains(air_reg)
     })
 }
 
@@ -202,6 +217,17 @@ pub fn self_test() -> Result<String, String> {
             "canary: a direct assert_one split across lines passed",
         ));
     }
+    // The same bypass with spaces around the punctuation, which is still
+    // valid Rust and read the same by the compiler.
+    let spaced_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder . when (is_assert . clone ()) . assert_one (rs1_val . clone ());\n";
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), spaced_air)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a direct assert_one with spaces around its punctuation passed",
+        ));
+    }
     // A zero test the VM writes across lines is still a zero test.
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good_air)
         .map_err(|e| e.to_string())?;
@@ -218,7 +244,8 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "zero-test canary OK: the witness form PASSes, the direct form FAILs on one line and \
-         across lines, and a multi-line zero test is still recognised.",
+        "zero-test canary OK: the witness form PASSes, the direct form FAILs on one line, \
+         across lines and with spaced punctuation, and a multi-line zero test is still \
+         recognised.",
     ))
 }

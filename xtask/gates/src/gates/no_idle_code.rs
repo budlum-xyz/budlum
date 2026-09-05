@@ -383,23 +383,45 @@ fn strip_use_statements(src: &str) -> String {
 }
 
 /// Byte offset of the `use` keyword (or the `pub` that introduces it) that
-/// begins a `use` item in `segment`, if the segment ends with one.
+/// begins a `use` item in `segment`, if the segment ends with one. The
+/// visibility is read the way `imports_in` reads it: a bare `pub` or a
+/// `pub(..)` with any restriction, `crate`, `super`, `self` or `in path`,
+/// so no spelling of a re-export stays in the text as a caller.
 fn use_start(segment: &str) -> Option<usize> {
     let b = segment.as_bytes();
     let mut i = 0usize;
     while i < b.len() {
         let rest = &segment[i..];
         let starts_item = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
-        if starts_item {
-            for head in ["use ", "pub use ", "pub(crate) use ", "pub(super) use "] {
-                if rest.starts_with(head) {
-                    return Some(i);
-                }
-            }
+        if starts_item && is_use_head(rest) {
+            return Some(i);
         }
         i += rest.chars().next().map_or(1, char::len_utf8);
     }
     None
+}
+
+/// Does `rest` begin with a `use` item, with or without a visibility?
+fn is_use_head(rest: &str) -> bool {
+    if rest.starts_with("use ") {
+        return true;
+    }
+    let Some(after_pub) = rest.strip_prefix("pub") else {
+        return false;
+    };
+    if let Some(after_space) = after_pub.strip_prefix(' ') {
+        return after_space.trim_start().starts_with("use ");
+    }
+    after_pub
+        .strip_prefix('(')
+        .and_then(|r| r.split_once(')'))
+        .is_some_and(|(restriction, tail)| {
+            !restriction.is_empty()
+                && restriction
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == ' ')
+                && tail.trim_start().starts_with("use ")
+        })
 }
 
 /// What one file's `use` statements say, kept after the statements themselves
@@ -989,6 +1011,29 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "canary: a use inside a nested module or after an item body counted as a caller",
+        ));
+    }
+
+    // A `pub(in path) use` is a re-export like any other: matched by neither
+    // of the fixed heads, it stayed in the scrubbed text and rescued the item.
+    if accepts_with(
+        clean,
+        tmp,
+        "restricted_reexport",
+        &[
+            (
+                "src/idle.rs",
+                "pub fn only_reexported_inward() -> u32 { 4 }\n",
+            ),
+            (
+                "src/reexport.rs",
+                "pub(in crate::reexport) use crate::idle::only_reexported_inward;\n",
+            ),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a pub(in path) use re-export counted as a caller",
         ));
     }
 

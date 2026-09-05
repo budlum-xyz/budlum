@@ -61,22 +61,41 @@ fn slash_body(code: &str) -> Option<String> {
     Some(code[open..i].to_string())
 }
 
-/// Normalized body: comments stripped, whitespace collapsed.
 /// Whether a normalized `slash_penalty` body clamps its result to the bond:
-/// it compares the wide quotient against `u64::MAX` and, on the wide side,
-/// yields `stake`. The yield is matched as an operation in any of the forms
-/// Rust writes it: an early `return stake`, a block whose tail is `stake`,
-/// or a `.min(stake)`. Matching the `return` keyword alone accepted exactly
-/// one of those spellings and refused a correct clamp written as a tail
-/// expression, while a body that returned `stake` for some other reason and
-/// never compared anything would have passed.
+/// it compares the wide quotient against `u64::MAX` and the block that the
+/// comparison opens yields `stake` in a form whose value is kept. Two forms
+/// are the operation: an early `return stake;` inside that block, or a
+/// `{ stake } else { .. }` whose else block closes the function body, so the
+/// conditional is the tail expression. A `{ stake }` block followed by
+/// anything else (`if r > MAX { stake }; r as u64`) is a discarded value with
+/// the truncating cast still live, and a `.min(stake)` on the narrow side does
+/// not help once `as u64` has wrapped, so neither counts as the clamp.
 fn clamps_to_stake(normalized_body: &str) -> bool {
-    let compares_wide = normalized_body.contains(">u128::from(u64::MAX)");
-    let yields_stake = normalized_body.contains("returnstake")
-        || normalized_body.contains("{stake}")
-        || normalized_body.contains(".min(stake)")
-        || normalized_body.contains("stake.min(");
-    compares_wide && yields_stake
+    const COMPARE: &str = ">u128::from(u64::MAX){";
+    let Some(at) = normalized_body.find(COMPARE) else {
+        return false;
+    };
+    let after = &normalized_body[at + COMPARE.len()..];
+    if after.starts_with("returnstake;") || after.starts_with("returnstake}") {
+        return true;
+    }
+    let Some(rest) = after.strip_prefix("stake}else{") else {
+        return false;
+    };
+    let mut depth = 1usize;
+    for (i, b) in rest.bytes().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[i + 1..].is_empty();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn normalized(body: &str) -> String {
@@ -234,19 +253,21 @@ pub fn self_test() -> Result<String, String> {
             ));
         }
     }
-    // Both homes agree, and neither clamps: identical copies of the bug.
+    // Both homes agree, and neither clamps: identical copies of the bug. The
+    // second fixture names `stake` in the block the comparison opens, then
+    // throws that value away and keeps the truncating cast.
     let unclamped = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return 0;\n    }\n    r as u64\n}\n";
-    std::fs::write(dir.join("src/core/chain_config.rs"), unclamped).unwrap();
-    std::fs::write(
-        dir.join("budzero/verifier-registry/src/params.rs"),
-        unclamped,
-    )
-    .unwrap();
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: two agreeing homes that never yield the stake passed",
-        ));
+    let discarded = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    };\n    r as u64\n}\n";
+    for (tag, bug) in [
+        ("never yield the stake", unclamped),
+        ("discard the stake", discarded),
+    ] {
+        std::fs::write(dir.join("src/core/chain_config.rs"), bug).unwrap();
+        std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), bug).unwrap();
+        if run(&dir).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: two agreeing homes that {tag} passed"));
+        }
     }
     std::fs::write(dir.join("src/core/chain_config.rs"), body).unwrap();
     std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), body).unwrap();
@@ -260,6 +281,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
         "slash canary OK (an early-return clamp and a tail-expression clamp PASS, two \
-         agreeing unclamped homes FAIL, a diverging home FAILs).",
+         agreeing unclamped homes FAIL, a discarded `{ stake }` block FAILs, a \
+         diverging home FAILs).",
     ))
 }
