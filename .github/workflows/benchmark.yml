@@ -35,6 +35,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Run the Criterion benchmarks
         run: |
+          # pipefail: without it the step reports tee's exit status and a
+          # failed bench uploads an artifact under a green check.
+          set -euo pipefail
           cargo bench --bench micro -- --output-format bencher 2>&1 | tee /tmp/bench-micro.txt
           cargo bench --bench single_node -- --output-format bencher 2>&1 | tee /tmp/bench-single.txt
           echo "Benchmark runs completed."
@@ -44,6 +47,7 @@ jobs:
       # timeout; the JSON lines are recorded as artifacts.
       - name: Run the BudZero canonical benches
         run: |
+          set -euo pipefail
           (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
           (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
           echo "BudZero bench runs completed."

@@ -654,6 +654,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: PoA isolation tests (7 tests, 5 leak scenarios)
         run: |
+          # pipefail: `tee` alone returns 0, and seven passing tests next to
+          # one failing test satisfied the count below. The filter must run
+          # green AND reach the expected count.
+          set -euo pipefail
           cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
           N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
           echo "PoA isolation test count: $N"
@@ -1010,7 +1014,9 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
@@ -1025,7 +1031,9 @@ jobs:
           scanners: secret,misconfig
           severity: CRITICAL,HIGH
           exit-code: "1"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
 
   coverage:
     # : nextest + llvm-cov, ratchet gate (Q-7b1(a)).
@@ -1140,8 +1148,8 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
-      - name: Rust gates clippy (pedantic, allow yok)
-        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets
+      - name: Rust gates clippy (pedantic, no allow)
+        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       # A typographic dash in a workflow `name:` silently unlists the job from
@@ -1439,6 +1447,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code
+      # The licence is named in LICENSE.md, budzero/LICENSE, every Cargo.toml,
+      # the README badge and docs/NOTICE. They once contradicted each other
+      # (MIT in one file, Apache-2.0 in the next) and the python check that
+      # was meant to notice ran in no workflow and skipped any manifest with
+      # no licence line at all. Every package now resolves to the one SPDX
+      # expression, inheritance included, and the upstream attributions stay.
+      - name: every licence declaration agrees + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- license-consistency --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- license-consistency
       # Two storage rules with the same failure mode: the data exists, the
       # tests pass, and nothing on the operator's path reads it. An operator
       # that misses a challenge sits out six hours, and a mobile operator may

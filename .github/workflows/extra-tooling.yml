@@ -428,6 +428,10 @@ jobs:
   # PR yet does not vanish silently either.
   kani-slow-proofs:
     name: Kani Proofs (slow set, scheduled)
+    # The header above promises the slow set runs on the schedule only; without
+    # this guard it ran on every push and pull request with a six-hour cap and
+    # was cancelled by the next push before finishing.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:

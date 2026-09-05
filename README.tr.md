@@ -215,7 +215,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 | `buf.yaml` | Protobuf çalışma alanı kökü, `proto/` ile eşleşir (Repo Lint kapısı `buf`u kökten çalıştırır) |
 | `flake.nix` · `flake.lock` | Nix flake keşfi yalnızca kökte olur |
 | `README.md` | GitHub depo ana sayfasını kökteki README'den oluşturur |
-| `LICENSE.md` | GitHub lisans tespiti, `cargo-deny` ve `.quality/check_license.py` dosyayı kökten okur |
+| `LICENSE.md` | GitHub lisans tespiti, `cargo-deny` ve `license-consistency` kapısı dosyayı kökten okur |
 | `.gitignore` · `.gitleaks.toml` | Git ve gitleaks yapılandırmaları kökten çözer |
 
 Konteyner ve lisans bildirim dosyaları ağaç içine taşındı: `ops/Dockerfile`,

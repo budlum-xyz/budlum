@@ -68,7 +68,9 @@ jobs:
           format: sarif
           output: trivy-image.sarif
           exit-code: "0"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
       - name: Trivy IMAGE SARIF yukle (Security sekmesi)
         if: always()
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
@@ -83,7 +85,9 @@ jobs:
           scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
           exit-code: "1"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
       - name: Run RPC smoke (devnet)
         run: |
           chmod +x ops/scripts/smoke_rpc.sh
