@@ -246,25 +246,24 @@ fn compare(current: &Path, baseline: &Path, exc: &Path) -> Verdict {
     // `Cargo.lock` (see the module doc for the measured reason). A build
     // failure is reported through the same classifier as before, so it is
     // an infrastructure error that no exception can mask.
-    let current_json = match rustdoc_json(current) {
+    // Each side documents into its own target directory. Two checkouts that
+    // shared one (`CARGO_TARGET_DIR` in the environment, or a
+    // `build.target-dir` both read) wrote the same `doc/<package>.json`: the
+    // baseline build overwrote the current file and the tool compared the
+    // baseline with itself, so every removal passed. The same root passed
+    // twice is the identity canary and must still work, so the split is by
+    // role, not by path.
+    let current_json = match rustdoc_json(current, "semver-current") {
         Ok(path) => path,
         Err(report) => return classify_report(&report, exc),
     };
-    let baseline_json = match rustdoc_json(baseline) {
+    let baseline_json = match rustdoc_json(baseline, "semver-baseline") {
         Ok(path) => path,
         Err(report) => return classify_report(&report, exc),
     };
-    // Two checkouts that share a target directory (`CARGO_TARGET_DIR`, or a
-    // `build.target-dir` in a config both read) write the same
-    // `doc/<package>.json`: the baseline build overwrites the current one and
-    // the tool compares the baseline with itself, so every removal passes.
-    // That is an infrastructure error, not a verdict.
     if current_json == baseline_json {
         return Err(format!(
-            "error: running cargo-doc wrote both rustdoc files to one path ({}); the \
-             current and baseline checkouts share a target directory, so the comparison \
-             would be of the baseline with itself. Give each checkout its own target \
-             directory.",
+            "error: running cargo-doc wrote both rustdoc files to one path ({})",
             current_json.display()
         ));
     }
@@ -353,11 +352,17 @@ fn package_name(root: &Path) -> Result<String, String> {
 /// Returns the build's combined output, prefixed with the same
 /// `error: running cargo-doc` line cargo-semver-checks prints for its own
 /// build failures, so `classify_report` files it as infrastructure.
-fn rustdoc_json(root: &Path) -> Result<PathBuf, String> {
+fn rustdoc_json(root: &Path, role: &str) -> Result<PathBuf, String> {
     let package = package_name(root)?;
+    // The role names a sub-directory of the checkout's own target directory,
+    // so the two builds never share a `doc/` and a `CARGO_TARGET_DIR` set
+    // for both cannot merge them either: the flag wins over the variable.
+    let target = target_dir(root)?.join(role);
     let output = Command::new("cargo")
         .arg("rustdoc")
         .arg("--locked")
+        .arg("--target-dir")
+        .arg(&target)
         .arg("-p")
         .arg(&package)
         .arg("--lib")
@@ -380,7 +385,7 @@ fn rustdoc_json(root: &Path) -> Result<PathBuf, String> {
             output.status.code().unwrap_or(1)
         ));
     }
-    let json = target_dir(root)?
+    let json = target
         .join("doc")
         .join(format!("{}.json", package.replace('-', "_")));
     if !json.is_file() {
@@ -525,7 +530,8 @@ pub fn self_test() -> Result<String, String> {
             let _ = fs::remove_dir_all(&tmp);
             return Err(e);
         }
-        "; live: a removed pub fn FAILs, an identical crate PASSes, a stale lock is infra"
+        "; live: a removed pub fn FAILs, an identical crate PASSes, a stale lock is infra, \
+         a shared target directory still finds the removal"
     } else {
         "; live pair skipped (cargo-semver-checks not installed here)"
     };
@@ -593,10 +599,36 @@ fn live_canaries(tmp: &Path, empty_exc: &Path) -> Result<(), String> {
         ));
     }
     match compare(&stale, &base, empty_exc) {
-        Ok(msg) => Err(format!("live canary: a stale lock file passed: {msg}")),
-        Err(report) if report.contains("INFRASTRUCTURE") => Ok(()),
+        Ok(msg) => return Err(format!("live canary: a stale lock file passed: {msg}")),
+        Err(report) if report.contains("INFRASTRUCTURE") => {}
+        Err(report) => {
+            return Err(format!(
+                "live canary: a stale lock file was refused for the wrong reason: {report}"
+            ))
+        }
+    }
+    // Both checkouts told to share one target directory: the removed pub fn
+    // must still be found. Before the per-role split the baseline build
+    // overwrote the current rustdoc file here and the tool compared the
+    // baseline with itself.
+    let shared = tmp.join("shared-target");
+    for dir in [&broken, &base] {
+        fs::create_dir_all(dir.join(".cargo")).map_err(|e| e.to_string())?;
+        fs::write(
+            dir.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = \"{}\"\n", shared.display()),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    match compare(&broken, &base, empty_exc) {
+        Ok(msg) => Err(format!(
+            "live canary: a removed pub fn passed when both checkouts shared a target \
+             directory: {msg}"
+        )),
+        Err(report) if report.contains("public API breakage with no exception") => Ok(()),
         Err(report) => Err(format!(
-            "live canary: a stale lock file was refused for the wrong reason: {report}"
+            "live canary: a removed pub fn under a shared target directory was refused for \
+             the wrong reason: {report}"
         )),
     }
 }
