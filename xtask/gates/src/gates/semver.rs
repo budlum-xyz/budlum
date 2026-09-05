@@ -254,6 +254,20 @@ fn compare(current: &Path, baseline: &Path, exc: &Path) -> Verdict {
         Ok(path) => path,
         Err(report) => return classify_report(&report, exc),
     };
+    // Two checkouts that share a target directory (`CARGO_TARGET_DIR`, or a
+    // `build.target-dir` in a config both read) write the same
+    // `doc/<package>.json`: the baseline build overwrites the current one and
+    // the tool compares the baseline with itself, so every removal passes.
+    // That is an infrastructure error, not a verdict.
+    if current_json == baseline_json {
+        return Err(format!(
+            "error: running cargo-doc wrote both rustdoc files to one path ({}); the \
+             current and baseline checkouts share a target directory, so the comparison \
+             would be of the baseline with itself. Give each checkout its own target \
+             directory.",
+            current_json.display()
+        ));
+    }
 
     // The shell ran `CARGO_TERM_COLOR=never cargo semver-checks
     // check-release -p budlum-core --baseline-root "$baseline"
