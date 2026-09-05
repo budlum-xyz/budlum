@@ -52,13 +52,40 @@ pub struct RelayerWorker {
     /// so that a block held back by one retried request does not have its
     /// other requests relayed again on the next pass.
     settled: std::collections::HashSet<String>,
-    /// Verified external observations of the block under the cursor whose
-    /// result the chain has not taken yet, by request hash. A retry submits
-    /// the stored result again instead of repeating the external action:
-    /// the chain's replay guard refuses a second result, it does not undo a
-    /// second transfer on the other chain. Cleared with `settled`.
-    observed: std::collections::HashMap<String, crate::core::transaction::RelayerExternalResult>,
+    /// Verified external observations whose result has not yet been seen
+    /// in a finalized Budlum block, by request hash. A retry submits the
+    /// stored result again instead of repeating the external action: the
+    /// chain's replay guard refuses a second result, it does not undo a
+    /// second transfer on the other chain.
+    ///
+    /// An entry outlives the block cursor. `add_transaction` confirms local
+    /// acceptance into the mempool, not execution: the mempool can still
+    /// drop the result (expiry, eviction, a restart before the next block),
+    /// and a result dropped there is a paid request nobody acts on again.
+    /// The entry is removed only when [`Self::reap_finalized`] finds the
+    /// result transaction in a block at or below the finalized height, and
+    /// the map is written to disk next to the cursor so a restart between
+    /// the external action and that finality resumes the same submission.
+    observed: std::collections::HashMap<String, PendingResult>,
 }
+
+/// A verified external result together with the hash of the result
+/// transaction last submitted for it, when one has been accepted locally.
+///
+/// The transaction hash is what the finality check asks the chain about. A
+/// resubmission after the mempool dropped the first copy signs a fresh
+/// transaction (new nonce, new hash), and the hash is replaced with it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct PendingResult {
+    /// The observation the adapter verified.
+    result: crate::core::transaction::RelayerExternalResult,
+    /// The hash of the signed result transaction the chain handle took last,
+    /// or `None` when no submission has been accepted yet.
+    submitted_tx: Option<String>,
+}
+
+/// The file name of the pending-result store, next to the cursor file.
+const PENDING_FILE_NAME: &str = "relayer-pending.json";
 
 impl RelayerWorker {
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
@@ -126,6 +153,227 @@ impl RelayerWorker {
     pub fn with_cursor_path(mut self, path: Option<std::path::PathBuf>) -> Self {
         self.cursor_path = path;
         self
+    }
+
+    /// Where the pending results live: next to the cursor, under the same
+    /// directory, so the operator's choice of a durable path covers both.
+    fn pending_path(&self) -> Option<std::path::PathBuf> {
+        let cursor = self.cursor_path.as_ref()?;
+        Some(cursor.with_file_name(PENDING_FILE_NAME))
+    }
+
+    /// Read the pending results persisted by an earlier run.
+    ///
+    /// A malformed file is logged and treated as empty, like the cursor:
+    /// the requests it named are still under or behind the cursor, and the
+    /// worst case is a repeated external action for them, which is the same
+    /// state a worker without persistence was always in. An unreadable file
+    /// must not turn into an outage.
+    fn load_pending(&self) -> std::collections::HashMap<String, PendingResult> {
+        let Some(path) = self.pending_path() else {
+            return std::collections::HashMap::new();
+        };
+        match crate::core::bounded_read::read_to_string_bounded(
+            &path,
+            crate::core::bounded_read::MAX_RELAY_PENDING_BYTES,
+        ) {
+            Ok(text) => {
+                match serde_json::from_str::<std::collections::HashMap<String, PendingResult>>(
+                    &text,
+                ) {
+                    Ok(map) => {
+                        if !map.is_empty() {
+                            info!(
+                                pending = map.len(),
+                                path = %path.display(),
+                                "Relayer: resuming pending relay results"
+                            );
+                        }
+                        map
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(),
+                          "Relayer: pending-result file is unreadable; starting with none");
+                        std::collections::HashMap::new()
+                    }
+                }
+            }
+            Err(e) if e.is_not_found() => std::collections::HashMap::new(),
+            Err(e) => {
+                warn!(error = %e, path = %path.display(),
+                      "Relayer: pending-result file unreadable; starting with none");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
+    /// Write the pending results after every change to them.
+    ///
+    /// Written before the cursor moves past the block that holds the
+    /// request, so a crash between the two leaves either the request under
+    /// the cursor (relayed again from the stored observation) or the stored
+    /// observation itself; never a request nothing knows about.
+    fn save_pending(&self) {
+        let Some(path) = self.pending_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(error = %e, path = %path.display(), "Relayer: cannot create pending directory");
+                return;
+            }
+        }
+        let body = match serde_json::to_string(&self.observed) {
+            Ok(body) => body,
+            Err(e) => {
+                warn!(error = %e, "Relayer: cannot encode pending results");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&path, body) {
+            warn!(error = %e, path = %path.display(),
+                  "Relayer: failed to persist pending results; a restart may repeat an external action");
+        }
+    }
+
+    /// Drop every pending result whose transaction sits in a finalized block,
+    /// and put back on the submission path every one the mempool lost.
+    ///
+    /// A result transaction the chain handle accepted can still vanish: the
+    /// mempool expires it after `tx_ttl_secs`, evicts it under pressure, or
+    /// forgets it across a restart. Finality is the only state that cannot
+    /// be undone, so it is the only state that releases the observation. A
+    /// submitted result that is neither in the mempool nor in a block has
+    /// its transaction hash forgotten, and the next pass signs and submits
+    /// the stored observation again; the external action is not repeated.
+    async fn reap_finalized(&mut self, finalized: u64) {
+        let submitted: Vec<(String, String)> = self
+            .observed
+            .iter()
+            .filter_map(|(request, p)| p.submitted_tx.clone().map(|h| (request.clone(), h)))
+            .collect();
+        let mut changed = false;
+        for (request, tx_hash) in submitted {
+            match self.included_height(&tx_hash).await {
+                Some(height) if height <= finalized => {
+                    info!(request, tx = %tx_hash, height, "Relayer: relay result finalized");
+                    self.observed.remove(&request);
+                    changed = true;
+                }
+                Some(_) => {}
+                None => {
+                    if !self.chain.mempool_contains(tx_hash.clone()).await {
+                        warn!(
+                            request,
+                            tx = %tx_hash,
+                            "Relayer: the chain lost the submitted relay result before a block \
+                             took it; the stored observation will be submitted again"
+                        );
+                        if let Some(pending) = self.observed.get_mut(&request) {
+                            pending.submitted_tx = None;
+                        }
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.save_pending();
+        }
+    }
+
+    /// The height of the block that holds `tx_hash`, if any block does.
+    async fn included_height(&self, tx_hash: &str) -> Option<u64> {
+        let receipt = self.chain.get_tx_receipt(tx_hash.to_string()).await?;
+        let hex = receipt.get("blockNumber")?.as_str()?;
+        u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
+    }
+
+    /// Submit the stored observation of every pending request whose
+    /// submission the chain lost. Only the local signing and submission run
+    /// again; the external action does not.
+    async fn resubmit_lost(&mut self) {
+        let lost: Vec<String> = self
+            .observed
+            .iter()
+            .filter(|(_, p)| p.submitted_tx.is_none())
+            .map(|(request, _)| request.clone())
+            .collect();
+        if lost.is_empty() {
+            return;
+        }
+        let Some(kp) = self.relayer_keypair.clone() else {
+            return;
+        };
+        for request in lost {
+            let Some(result) = self.observed.get(&request).map(|p| p.result.clone()) else {
+                continue;
+            };
+            let Some(user) = self.requester_of(&request).await else {
+                warn!(
+                    request,
+                    "Relayer: cannot find the requester of a pending result"
+                );
+                continue;
+            };
+            let _ = self.submit_result(&request, user, &result, &kp).await;
+        }
+    }
+
+    /// The account that paid for a relay request, read back from its
+    /// transaction on chain.
+    async fn requester_of(&self, request: &str) -> Option<Address> {
+        self.chain
+            .get_transaction_by_hash(request.to_string())
+            .await
+            .map(|tx| tx.from)
+    }
+
+    /// Sign the verified result and hand it to the chain. On acceptance the
+    /// transaction hash is recorded against the request; the observation
+    /// itself stays until [`Self::reap_finalized`] sees the result in a
+    /// finalized block.
+    async fn submit_result(
+        &mut self,
+        request: &str,
+        user: Address,
+        result: &crate::core::transaction::RelayerExternalResult,
+        kp: &KeyPair,
+    ) -> RelayOutcome {
+        let mut result_tx = Transaction::new_with_chain_id(
+            self.relayer_address,
+            user, // to: original UniversalRelay caller
+            0,
+            100, // Fee
+            self.chain.get_nonce(&self.relayer_address).await,
+            Vec::new(),
+            self.chain.get_chain_id().await,
+            TransactionType::RelayerResult(result.clone()),
+        );
+        result_tx.sign(kp);
+        let tx_hash = result_tx.hash.clone();
+        match self.chain.add_transaction(result_tx).await {
+            Ok(()) => {
+                if let Some(pending) = self.observed.get_mut(request) {
+                    pending.submitted_tx = Some(tx_hash);
+                }
+                self.save_pending();
+                RelayOutcome::Submitted
+            }
+            Err(e) => {
+                // Not accepted by the chain handle: mempool full, actor
+                // gone, nonce raced. The external action has happened and
+                // its result is kept under the request hash, so the retry
+                // signs and submits that result again; the chain's replay
+                // protection refuses a second result if one did land.
+                warn!(
+                    error = %e,
+                    "Relayer: chain did not accept the signed relay result; \
+                     holding the request for retry"
+                );
+                RelayOutcome::Retry
+            }
+        }
     }
 
     /// Read the persisted cursor, or `None` when there is nothing to resume.
@@ -217,11 +465,16 @@ impl RelayerWorker {
             Some(persisted) => persisted,
             None => self.chain.get_finalized_height().await,
         };
+        self.observed = self.load_pending();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
             let finalized = self.chain.get_finalized_height().await;
+            // Results submitted on earlier passes are released only once a
+            // finalized block holds them; ones the mempool lost go back out.
+            self.reap_finalized(finalized).await;
+            self.resubmit_lost().await;
             if finalized <= relayed_through {
                 continue;
             }
@@ -280,9 +533,9 @@ impl RelayerWorker {
                 }
                 relayed_through = h;
                 self.save_cursor(relayed_through);
-                // Everything in this block is behind the cursor now.
+                // Everything in this block is behind the cursor now. The
+                // pending results are not: they stay until finality.
                 self.settled.clear();
-                self.observed.clear();
             }
         }
     }
@@ -366,16 +619,28 @@ impl RelayerWorker {
         };
 
         let result = if let Some(kept) = self.observed.get(request) {
+            if kept.submitted_tx.is_some() {
+                // Accepted on an earlier pass and not yet finalized: nothing
+                // to do until `reap_finalized` says otherwise.
+                return RelayOutcome::Submitted;
+            }
             info!(
                 request,
                 "Relayer: resubmitting the verified result of an earlier pass; the external \
                  action is not repeated"
             );
-            kept.clone()
+            kept.result.clone()
         } else {
             match Self::build_verified_result(&self.adapters, &ext_tx).await {
                 Ok(result) => {
-                    self.observed.insert(request.to_string(), result.clone());
+                    self.observed.insert(
+                        request.to_string(),
+                        PendingResult {
+                            result: result.clone(),
+                            submitted_tx: None,
+                        },
+                    );
+                    self.save_pending();
                     result
                 }
                 Err(e) => {
@@ -398,36 +663,7 @@ impl RelayerWorker {
         // Submit result back to Budlum. The relayer signs with its own key
         // via the Node's signer; the transaction is injected through the
         // chain handle for inclusion in the next block.
-        let mut result_tx = Transaction::new_with_chain_id(
-            self.relayer_address,
-            user, // to: original UniversalRelay caller
-            0,
-            100, // Fee
-            self.chain.get_nonce(&self.relayer_address).await,
-            Vec::new(),
-            self.chain.get_chain_id().await,
-            TransactionType::RelayerResult(result),
-        );
-        result_tx.sign(&kp);
-        match self.chain.add_transaction(result_tx).await {
-            Ok(()) => {
-                self.observed.remove(request);
-                RelayOutcome::Submitted
-            }
-            Err(e) => {
-                // Not accepted by the chain handle: mempool full, actor
-                // gone, nonce raced. The external action has happened and
-                // its result is kept under the request hash, so the retry
-                // signs and submits that result again; the chain's replay
-                // protection refuses a second result if one did land.
-                warn!(
-                    error = %e,
-                    "Relayer: chain did not accept the signed relay result; \
-                     holding the request for retry"
-                );
-                RelayOutcome::Retry
-            }
-        }
+        self.submit_result(request, user, &result, &kp).await
     }
 }
 
@@ -815,8 +1051,207 @@ mod relay_outcomes {
         );
         assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(
-            !worker.observed.contains_key("req-2"),
-            "a delivered result is not kept"
+            worker
+                .observed
+                .get("req-2")
+                .is_some_and(|p| p.submitted_tx.is_some()),
+            "an accepted result stays pending, with its transaction hash, until finality"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pending_results {
+    use super::*;
+    use crate::core::transaction::{ExternalChain, RelayerExternalResult};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn observation(tag: u8) -> RelayerExternalResult {
+        RelayerExternalResult {
+            chain: ExternalChain::Ethereum,
+            tx_hash: format!("0x{tag:02x}"),
+            success: true,
+            message: None,
+            receipt_proof: vec![tag; 4],
+            external_state_root: [tag; 32],
+        }
+    }
+
+    /// An actor stub that answers the relay loop's finality questions from
+    /// two tables: which hashes sit in which block, and which hashes the
+    /// mempool still holds. Every `AddTransaction` is accepted and counted.
+    fn actor(
+        included: std::collections::HashMap<String, u64>,
+        queued: std::collections::HashSet<String>,
+        accepted: Arc<AtomicUsize>,
+    ) -> ChainHandle {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    crate::chain::chain_actor::ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(0);
+                    }
+                    crate::chain::chain_actor::ChainCommand::GetChainId(reply) => {
+                        let _ = reply.send(1);
+                    }
+                    crate::chain::chain_actor::ChainCommand::GetTxReceipt(hash, reply) => {
+                        let _ = reply.send(
+                            included
+                                .get(&hash)
+                                .map(|h| serde_json::json!({ "blockNumber": format!("0x{h:x}") })),
+                        );
+                    }
+                    crate::chain::chain_actor::ChainCommand::MempoolContains(hash, reply) => {
+                        let _ = reply.send(queued.contains(&hash));
+                    }
+                    crate::chain::chain_actor::ChainCommand::GetTransactionByHash(_, reply) => {
+                        let _ = reply.send(None);
+                    }
+                    crate::chain::chain_actor::ChainCommand::AddTransaction(_, reply) => {
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        ChainHandle::new(tx)
+    }
+
+    /// The pending map survives a restart: what one worker wrote, the next
+    /// reads back, so an external action done before a crash is not done
+    /// again and its result is still delivered.
+    #[test]
+    fn pending_results_are_read_back_by_the_next_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path.clone()));
+        w.observed.insert(
+            "req-a".to_string(),
+            PendingResult {
+                result: observation(1),
+                submitted_tx: Some("tx-a".to_string()),
+            },
+        );
+        w.observed.insert(
+            "req-b".to_string(),
+            PendingResult {
+                result: observation(2),
+                submitted_tx: None,
+            },
+        );
+        w.save_pending();
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
+        let again = RelayerWorker::new(ChainHandle::new(tx2), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path));
+        assert_eq!(again.load_pending(), w.observed);
+    }
+
+    /// A worker without a cursor path keeps everything in memory, as before.
+    #[test]
+    fn no_path_means_no_pending_file() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]));
+        w.observed.insert(
+            "req".to_string(),
+            PendingResult {
+                result: observation(3),
+                submitted_tx: None,
+            },
+        );
+        w.save_pending();
+        assert!(w.load_pending().is_empty());
+    }
+
+    /// A result whose transaction sits in a finalized block is released; one
+    /// in a block above the finalized height is kept; one that is in neither
+    /// a block nor the mempool loses its hash and goes back to submission.
+    #[tokio::test]
+    async fn only_finality_releases_a_pending_result() {
+        let included = std::collections::HashMap::from([
+            ("tx-final".to_string(), 10u64),
+            ("tx-young".to_string(), 12u64),
+        ]);
+        let queued = std::collections::HashSet::from(["tx-queued".to_string()]);
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let handle = actor(included, queued, accepted);
+        let mut w = RelayerWorker::new(handle, Address::from([7u8; 32]));
+        for (request, hash) in [
+            ("req-final", "tx-final"),
+            ("req-young", "tx-young"),
+            ("req-queued", "tx-queued"),
+            ("req-lost", "tx-lost"),
+        ] {
+            w.observed.insert(
+                request.to_string(),
+                PendingResult {
+                    result: observation(9),
+                    submitted_tx: Some(hash.to_string()),
+                },
+            );
+        }
+
+        w.reap_finalized(11).await;
+
+        assert!(
+            !w.observed.contains_key("req-final"),
+            "a result in a finalized block is done"
+        );
+        assert_eq!(
+            w.observed["req-young"].submitted_tx.as_deref(),
+            Some("tx-young"),
+            "a result in a block above the finalized height waits"
+        );
+        assert_eq!(
+            w.observed["req-queued"].submitted_tx.as_deref(),
+            Some("tx-queued"),
+            "a result still in the mempool waits"
+        );
+        assert!(
+            w.observed["req-lost"].submitted_tx.is_none(),
+            "a result the mempool lost goes back to submission"
+        );
+    }
+
+    /// A lost submission is signed and submitted again from the stored
+    /// observation; the adapter is not consulted, so the external action
+    /// cannot run twice.
+    #[tokio::test]
+    async fn a_lost_submission_is_resubmitted_without_the_adapter() {
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let handle = actor(
+            std::collections::HashMap::new(),
+            std::collections::HashSet::new(),
+            accepted.clone(),
+        );
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+        let mut w = RelayerWorker::new(handle, Address::from([7u8; 32])).with_signing_key(key);
+        w.observed.insert(
+            "req-lost".to_string(),
+            PendingResult {
+                result: observation(5),
+                submitted_tx: None,
+            },
+        );
+
+        let user = Address::from([8u8; 32]);
+        let kp = w.relayer_keypair.clone().expect("key bound");
+        let result = observation(5);
+        let outcome = w.submit_result("req-lost", user, &result, &kp).await;
+
+        assert_eq!(outcome, RelayOutcome::Submitted);
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert!(
+            w.observed["req-lost"].submitted_tx.is_some(),
+            "the fresh transaction hash is recorded for the finality check"
+        );
+        assert!(
+            w.adapters.supported_chains().is_empty(),
+            "no adapter was needed: the stored observation is what gets signed"
         );
     }
 }
