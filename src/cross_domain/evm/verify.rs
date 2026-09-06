@@ -20,6 +20,11 @@
 //!
 //! On success the result is a `VerifiedDeposit`, carrying every proven field
 //! the mint needs.
+//!
+//! The relayer carries the proof to the adapter as a [`DepositProofPackage`]
+//! inside `RelayerExternalResult::receipt_proof`; the adapter borrows it as an
+//! [`EvmDepositProof`], adding its own bridge address, deposit topic and
+//! confirmation window, and runs it through here before the result is signed.
 
 use crate::cross_domain::evm::header::{verify_chain, EthHeader};
 use crate::cross_domain::evm::mpt::{self, MptError};
@@ -27,6 +32,7 @@ use crate::cross_domain::evm::receipt::{self, EthReceipt, ReceiptError};
 use crate::cross_domain::evm::sync_committee::{
     verify_sync_aggregate, SyncAggregate, SyncCommitteeError, SyncCommitteeState,
 };
+use serde::{Deserialize, Serialize};
 /// A `verify_evm_receipt` failure; every sub-step's error is wrapped here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
@@ -95,6 +101,11 @@ pub struct VerifiedDeposit {
     pub deposit_log_data: Vec<u8>,
     /// Number of the block holding the proven receipt.
     pub block_number: u64,
+    /// `receiptsRoot` of the target header, the root the MPT proof was
+    /// checked against. Returned so a caller holding a separately declared
+    /// root (`RelayerExternalResult::external_state_root`) can compare the
+    /// two instead of decoding the header a second time.
+    pub receipts_root: [u8; 32],
 }
 
 /// The Ethereum deposit proof the relayer produces, in wire format.
@@ -140,6 +151,32 @@ pub struct EvmDepositProof<'a> {
     /// The `signing_message` is the caller's, because the Altair signing
     /// domain is a chain parameter this module has no business inventing.
     pub sync_attestation: Option<SyncAttestation<'a>>,
+}
+
+/// The wire form of an Ethereum deposit proof: what the relayer's RPC side
+/// assembles and `EvmChainAdapter::verify_observation` reads back out of
+/// `RelayerExternalResult::receipt_proof` before the result is signed.
+///
+/// Owned, because it crosses a byte field. Deliberately without the emitter
+/// address, the deposit topic and the confirmation window: those three are
+/// the adapter's configuration, and a package that named its own would be
+/// choosing which contract's log to match and how deep a reorg to survive.
+/// The adapter supplies them when it borrows the package as an
+/// [`EvmDepositProof`]. No sync-committee attestation either: the committee
+/// state it needs is around 100 KB of light-client state that the node
+/// holds, not something a proof carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositProofPackage {
+    /// RLP-encoded header of the block holding the deposit.
+    pub target_header: Vec<u8>,
+    /// Confirmation headers stacked above the target, oldest first.
+    pub confirmation_headers: Vec<Vec<u8>>,
+    /// MPT proof nodes from `receiptsRoot` down to the receipt.
+    pub proof_nodes: Vec<Vec<u8>>,
+    /// Trie key of the receipt: `RLP(tx_index)`.
+    pub receipt_key: Vec<u8>,
+    /// Ethereum transaction hash the receipt belongs to.
+    pub tx_hash: String,
 }
 
 /// A sync-committee attestation bundled with the state that validates it.
@@ -223,6 +260,7 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
         tx_hash: proof.tx_hash.to_string(),
         deposit_log_data: log.data.clone(),
         block_number: target.number,
+        receipts_root: target.receipts_root,
     })
 }
 
@@ -231,14 +269,15 @@ fn decode_header_or_err(raw: &[u8]) -> Result<EthHeader, VerifyError> {
         .map_err(|e| VerifyError::Header(e.to_string()))
 }
 
+/// Proof fixtures shared by this module's tests and the adapter's: one
+/// receipt in a single-leaf trie under a header chain of `n_conf`
+/// confirmations. Test-only, and crate-visible so the adapter tests can hand
+/// the relayer a package that really verifies instead of one that is
+/// accepted for being well-formed.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
+pub(crate) mod fixtures {
     use crate::cross_domain::evm::mpt::{keccak256, to_nibbles};
     use crate::cross_domain::evm::rlp::{encode, Item};
-
-    // ---- Test fixture builder ----
 
     fn trim_u64(n: u64) -> Vec<u8> {
         if n == 0 {
@@ -249,7 +288,7 @@ mod tests {
         be[start..].to_vec()
     }
 
-    fn header_rlp(parent: [u8; 32], number: u64, receipts_root: [u8; 32]) -> Vec<u8> {
+    pub(crate) fn header_rlp(parent: [u8; 32], number: u64, receipts_root: [u8; 32]) -> Vec<u8> {
         encode(&Item::List(vec![
             Item::String(parent.to_vec()),
             Item::String(vec![0u8; 32]),
@@ -287,15 +326,15 @@ mod tests {
     /// Builds a complete proof fixture: target header, N confirmations,
     /// receipt proof and deposit log, from
     /// `(emitter, topic0, log_data, success, n_conf)`.
-    struct Fixture {
-        target_header: Vec<u8>,
-        conf_headers: Vec<Vec<u8>>,
-        receipts_root: [u8; 32],
-        proof_nodes: Vec<Vec<u8>>,
-        receipt_key: Vec<u8>,
+    pub(crate) struct Fixture {
+        pub(crate) target_header: Vec<u8>,
+        pub(crate) conf_headers: Vec<Vec<u8>>,
+        pub(crate) receipts_root: [u8; 32],
+        pub(crate) proof_nodes: Vec<Vec<u8>>,
+        pub(crate) receipt_key: Vec<u8>,
     }
 
-    fn build_fixture(
+    pub(crate) fn build_fixture(
         emitter: &[u8],
         topic0: [u8; 32],
         log_data: &[u8],
@@ -339,9 +378,16 @@ mod tests {
         }
     }
 
-    fn conf_refs(f: &Fixture) -> Vec<&[u8]> {
+    pub(crate) fn conf_refs(f: &Fixture) -> Vec<&[u8]> {
         f.conf_headers.iter().map(|v| v.as_slice()).collect()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{build_fixture, conf_refs, header_rlp, Fixture};
+    use super::*;
+    use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
     // ---- Pozitif: tam happy-path ----
 
@@ -367,6 +413,7 @@ mod tests {
         assert_eq!(verified.tx_hash, "0xabc123");
         assert_eq!(verified.deposit_log_data, data);
         assert_eq!(verified.block_number, 100);
+        assert_eq!(verified.receipts_root, f.receipts_root);
     }
 
     // ---- Negative: the transaction failed ----

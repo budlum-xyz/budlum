@@ -140,11 +140,16 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     let mut offset = 0u32;
     for (name, data) in &entries {
         let nb = name.as_bytes();
+        // The flags leave bit 3 clear, so there is no data descriptor and
+        // the CRC has to be right here: a zero CRC made every reader report
+        // a mismatch on extraction, and the same value is written into the
+        // central record below.
+        let crc = crc32(data);
         local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
-        local.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // version(2)+flags(2)
+        local.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]); // version(2)+flags(2)
         local.extend_from_slice(&0u16.to_le_bytes()); // method STORE
         local.extend_from_slice(&0u32.to_le_bytes()); // time(2)+date(2)
-        local.extend_from_slice(&0u32.to_le_bytes()); // crc
+        local.extend_from_slice(&crc.to_le_bytes()); // crc
         local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
         local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
         local.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
@@ -165,7 +170,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         central.extend_from_slice(&0u16.to_le_bytes()); // method STORE
         central.extend_from_slice(&0u16.to_le_bytes()); // time
         central.extend_from_slice(&0u16.to_le_bytes()); // date
-        central.extend_from_slice(&0u32.to_le_bytes()); // crc
+        central.extend_from_slice(&crc.to_le_bytes()); // crc
         central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
         central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
         central.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
@@ -190,6 +195,22 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&cd_start.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     Some(out)
+}
+
+/// CRC-32 as ZIP records it (IEEE 802.3, reflected polynomial `0xEDB88320`,
+/// initial and final XOR `0xFFFF_FFFF`). Bit by bit, without a table: the
+/// entries a restore writes are small XML parts, and a wrong table entry
+/// would be invisible until a reader refused the archive.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 pub fn office_digest(transformed: &[u8]) -> [u8; 32] {
@@ -231,11 +252,12 @@ mod tests {
         let mut offset = 0u32;
         for (name, data) in &entries {
             let nb = name.as_bytes();
+            let crc = crc32(data);
             local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
-            local.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // version(2) plus flags(2)
+            local.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]); // version(2) plus flags(2)
             local.extend_from_slice(&0u16.to_le_bytes()); // method=STORE
             local.extend_from_slice(&0u32.to_le_bytes()); // time(2) plus date(2)
-            local.extend_from_slice(&0u32.to_le_bytes()); // crc
+            local.extend_from_slice(&crc.to_le_bytes()); // crc
             local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
             local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
             local.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
@@ -243,7 +265,8 @@ mod tests {
             local.extend_from_slice(nb);
             central.extend_from_slice(&ZIP_CENTRAL.to_le_bytes());
             central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]);
-            central.extend_from_slice(&[0u8; 12]); // flags, method, time, date, crc
+            central.extend_from_slice(&[0u8; 8]); // flags, method, time, date
+            central.extend_from_slice(&crc.to_le_bytes()); // crc
             central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
             central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
             central.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
@@ -313,6 +336,38 @@ mod tests {
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.name, y.name);
             assert_eq!(x.data, y.data, "the content is identical: {}", x.name);
+        }
+    }
+
+    /// The CRC the restore writes is the ZIP CRC-32: the check value of the
+    /// IEEE polynomial over `123456789`, and per entry the value a reader
+    /// computes over the extracted bytes, in the local header and in the
+    /// central record alike.
+    #[test]
+    fn restored_entries_carry_their_crc32() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
+        let z = sample_opc();
+        let r = office_restore(&office_transform(&z).unwrap()).unwrap();
+        let n = u16::from_le_bytes(r[r.len() - 12..r.len() - 10].try_into().unwrap()) as usize;
+        let cd = u32::from_le_bytes(r[r.len() - 6..r.len() - 2].try_into().unwrap()) as usize;
+        let mut p = cd;
+        for _ in 0..n {
+            let central_crc = u32::from_le_bytes(r[p + 16..p + 20].try_into().unwrap());
+            let size = u32::from_le_bytes(r[p + 24..p + 28].try_into().unwrap()) as usize;
+            let name_len = u16::from_le_bytes(r[p + 28..p + 30].try_into().unwrap()) as usize;
+            let off = u32::from_le_bytes(r[p + 42..p + 46].try_into().unwrap()) as usize;
+            let local_flags = u16::from_le_bytes(r[off + 6..off + 8].try_into().unwrap());
+            let local_crc = u32::from_le_bytes(r[off + 14..off + 18].try_into().unwrap());
+            let data = &r[off + 30 + name_len..off + 30 + name_len + size];
+            assert_eq!(
+                local_flags & 0b1000,
+                0,
+                "no data descriptor: the CRC is in the header"
+            );
+            assert_eq!(local_crc, crc32(data));
+            assert_eq!(central_crc, local_crc);
+            p += 46 + name_len;
         }
     }
 

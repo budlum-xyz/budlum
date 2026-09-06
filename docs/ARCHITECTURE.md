@@ -3986,3 +3986,47 @@ carrying such proofs. The alternative, deriving `final_state_root` inside the ci
 the initial root and the digest, was considered and set aside: it changes the meaning of a field the
 chain and the bridge already read, and the equality gives the same guarantee without a migration.
 
+## 90. The relayer verifies the deposit, not a path
+
+Section 68 fixed what `EvmChainAdapter::verify_deposit` returned; section 69 fixed what the trait
+path `verify_receipt_proof` accepted. Neither changed which of the two the relayer ran. The worker
+decoded a bare `MerkleProof` out of every observation and called `verify_receipt_proof`: a Merkle
+path against a receipts root the observation itself declared, with a leaf bound to the transaction
+hash and the bridge address. No header chain, no confirmation window, no receipt status, no deposit
+log. `verify_deposit` did all of that and had no caller; a test in `adapter.rs` pinned the gap by
+name and the unwired-guards baseline carried it with a note that wiring it was "a bridge-design
+question, not a call site".
+
+It became a call site the moment `--evm-bridge-address` let an operator register the adapter. From
+then on a configured node ran the weaker check on real deposits and the file's own header went on
+calling the other one the real safe path.
+
+### What changed
+
+`ChainAdapter` gained `verify_observation(&RelayerExternalResult)`. The default is the old
+behaviour, a bincode `MerkleProof` through `verify_receipt_proof`, so the test adapters that model a
+chain as a single Merkle tree keep working. The EVM adapter overrides it:
+
+- `receipt_proof` must decode as a `DepositProofPackage`: target header, confirmation headers, MPT
+  nodes, receipt key, transaction hash. A bare `MerkleProof` is refused with a message that names
+  what is missing.
+- The package is borrowed as an `EvmDepositProof` with the **adapter's** bridge address, deposit
+  topic and confirmation floor. The package does not carry those three, so a relayer cannot choose
+  which contract's log to match or how deep a reorg to survive.
+- `verify_deposit` runs, and three bindings follow it: the package's transaction hash is the
+  observation's, the `receiptsRoot` the header chain proves is the `external_state_root` the
+  observation declares (the root the executor will look up in `external_roots`), and `success`
+  agrees with the receipt status the verifier already required to be true.
+
+The worker calls `verify_observation` and no longer decodes a proof itself. The unwired-guards
+baseline went from four to three, and the test that pinned the gap was replaced by one that pins
+the wiring: the worker must not go back to reading a Merkle path, and the override must keep
+delegating to the one verifier.
+
+### What did not change
+
+The offline adapter still cannot produce an observation; `generate_receipt_proof` refuses, so a
+node with the bridge configured and no RPC-backed proof assembler signs nothing, as before. The
+executor's own gate is untouched: a `RelayerResult` still needs its root in the finalized
+`external_roots` registry, which no relayer can write. `verify_observation` is the relayer refusing
+to sign a lie; it is not the chain accepting a truth.

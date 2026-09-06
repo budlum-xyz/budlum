@@ -12,7 +12,7 @@ not ask which consensus produced a fact, only whether the finality proof for tha
 so value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-2785%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-2792%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -297,9 +297,11 @@ ceremony file.
 
 ### Node roles
 
-`--role` selects the profile a node runs under: `validator`, `sentry`, `seed`, `rpc` or
-`archive`. Each has a different exposure surface and a different set of required guarantees,
-see [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md).
+`--role` selects the profile a node runs under: `validator`, `sentry`, `seed`, `rpc`,
+`archive` or `relayer`. Each has a different exposure surface and a different set of required
+guarantees, see [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md). A `relayer` runs the
+in-node cross-chain relay worker (validators run it too), keeps full storage and opens no
+public listener.
 
 > [!IMPORTANT]
 > **Mainnet validators must sign through PKCS#11.** Disk-backed `ValidatorKeys`, BLS and

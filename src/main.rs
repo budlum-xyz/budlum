@@ -925,17 +925,22 @@ async fn main() {
         // Basic quorum-based finality via BftFinalityAdapter. If the BFT
         // Engine is not yet wired for a specific domain, it will operate
         // In fail-closed mode (blocks require valid BFT commit signatures).
+        // The status a domain boots with is consensus state: this process
+        // and the next restart must read the same one. The write goes first
+        // and the in-memory change follows it; when the write fails the node
+        // stops instead of running on a status the disk does not hold.
         if domain.kind == ConsensusKind::Bft {
             if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
+                let previous = existing.status;
                 existing.status = DomainStatus::Active;
                 if let Some(store) = blockchain.storage.as_ref() {
-                    // A dropped error here would log the domain as active
-                    // while a restart reads the previous status back.
                     if let Err(e) = store.save_consensus_domain(existing) {
-                        tracing::error!(
-                            "BFT bootstrap domain {}: status change not persisted: {e}",
+                        existing.status = previous;
+                        eprintln!(
+                            "CRITICAL: BFT bootstrap domain {}: status change not persisted, refusing to start on a status the store does not hold: {e}",
                             domain.id
                         );
+                        std::process::exit(1);
                     }
                 }
             }
@@ -947,13 +952,16 @@ async fn main() {
         }
         if domain.kind == ConsensusKind::PoA {
             if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
+                let previous = existing.status;
                 existing.status = DomainStatus::Frozen;
                 if let Some(store) = blockchain.storage.as_ref() {
                     if let Err(e) = store.save_consensus_domain(existing) {
-                        tracing::error!(
-                            "PoA bootstrap domain {}: status change not persisted: {e}",
+                        existing.status = previous;
+                        eprintln!(
+                            "CRITICAL: PoA bootstrap domain {}: status change not persisted, refusing to start on a status the store does not hold: {e}",
                             domain.id
                         );
+                        std::process::exit(1);
                     }
                 }
             }
@@ -1317,11 +1325,23 @@ async fn main() {
             );
         }
 
-        // Public RPC listener
-        let public_addr = config
-            .rpc_public_listener
-            .clone()
-            .unwrap_or_else(|| format!("{}:{}", config.rpc_host, config.rpc_port));
+        // Public RPC listener. Composed and normalized through one path so
+        // an IPv6 host is bracketed and a malformed listener stops the node
+        // here, with the string in the message, instead of at bind time.
+        let public_addr = match config.rpc_public_listener.clone() {
+            Some(listener) => budlum_core::cli::commands::normalize_listener(&listener),
+            None => budlum_core::cli::commands::normalize_listener(&format!(
+                "{}:{}",
+                config.rpc_host, config.rpc_port
+            )),
+        };
+        let Some(public_addr) = public_addr else {
+            eprintln!(
+                "Public RPC listener is not a host:port or [ipv6]:port address: {:?} (rpc_host {:?}, rpc_port {})",
+                config.rpc_public_listener, config.rpc_host, config.rpc_port
+            );
+            std::process::exit(1);
+        };
         let pub_server = RpcServer::with_security_and_mode(
             chain.clone(),
             node.get_client(),
@@ -1344,11 +1364,23 @@ async fn main() {
         // Fail-closed: if a non-loopback address is configured, the node does
         // not start.
         if let Some(operator_addr) = config.rpc_operator_listener.as_ref() {
-            let host = operator_addr.split(':').next().unwrap_or("");
-            let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+            // Parsed as the socket address it will be bound as: the old
+            // split at the first `:` read `[` out of `[::1]:8546` and
+            // refused the loopback IPv6 form, and would have passed a
+            // `localhost` that resolves wherever /etc/hosts says.
+            let Some(operator_addr) = budlum_core::cli::commands::normalize_listener(operator_addr)
+            else {
+                eprintln!(
+                    "Operator RPC listener is not a host:port or [ipv6]:port address: {operator_addr}"
+                );
+                std::process::exit(1);
+            };
+            let is_loopback = operator_addr
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|addr| addr.ip().is_loopback());
             if !is_loopback {
                 eprintln!(
-                    "Operator RPC listener must bind loopback only (no auth): {operator_addr}"
+                    "Operator RPC listener must bind a loopback IP address only (no auth): {operator_addr}"
                 );
                 std::process::exit(1);
             }

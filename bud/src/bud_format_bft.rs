@@ -186,9 +186,15 @@ impl RatioFinalityCert {
 pub struct BftRatioConsensus;
 
 impl BftRatioConsensus {
-    /// Group the votes by pipe, take the pipe with the most votes, and issue
-    /// a certificate if that group reaches quorum. The certificate is what
-    /// `verify` checks; a vote from outside the set never reaches the count.
+    /// Group the votes by pipe and by the ratio bits they signed, take the
+    /// largest group, and issue a certificate if that group reaches quorum.
+    /// The certificate is what `verify` checks, and it is built under the
+    /// same rules `verify` applies: one vote per key, one pipe, one ratio bit
+    /// for bit, every signature over a message naming its voter. Grouping by
+    /// pipe alone used to put validators who signed different measurements
+    /// of one pipe into one group; the certificate took the first vote's
+    /// ratio and `verify` refused it with a ratio mismatch. A repeated key
+    /// counted twice towards quorum here and was caught only in `verify`.
     pub fn finalize_ratio(
         votes: Vec<RatioVote>,
         validators: &ValidatorSet,
@@ -199,13 +205,25 @@ impl BftRatioConsensus {
         if votes.iter().any(|v| !validators.contains(&v.public_key)) {
             return Err("K-BUD-BFT: vote from a key outside the validator set");
         }
-        // The pipe_id with the most votes
-        use std::collections::HashMap;
-        let mut counts: HashMap<u16, Vec<RatioVote>> = HashMap::new();
-        for v in votes {
-            counts.entry(v.pipe_id).or_default().push(v);
+        let mut keys: Vec<&[u8; 32]> = votes.iter().map(|v| &v.public_key).collect();
+        keys.sort_unstable();
+        if keys.windows(2).any(|w| w[0] == w[1]) {
+            return Err("K-BUD-BFT: duplicate validator");
         }
-        let (best_pipe, best_votes) = counts
+        for v in &votes {
+            v.verify_signature()?;
+        }
+        // The (pipe_id, ratio bits) group with the most votes. Ties are
+        // broken on the key so the result does not depend on hash order.
+        use std::collections::BTreeMap;
+        let mut counts: BTreeMap<(u16, u64), Vec<RatioVote>> = BTreeMap::new();
+        for v in votes {
+            counts
+                .entry((v.pipe_id, v.ratio.to_bits()))
+                .or_default()
+                .push(v);
+        }
+        let ((best_pipe, _), best_votes) = counts
             .into_iter()
             .max_by_key(|(_, vs)| vs.len())
             .ok_or("K-BUD-BFT: no best")?;
@@ -214,12 +232,15 @@ impl BftRatioConsensus {
             return Err("K-BUD-BFT: no quorum");
         }
         let ratio = best_votes[0].ratio;
-        Ok(RatioFinalityCert {
+        let cert = RatioFinalityCert {
             pipe_id: best_pipe,
             ratio,
             votes: best_votes,
             quorum,
-        })
+        };
+        // The certificate that leaves here is one `verify` accepts.
+        cert.verify(validators)?;
+        Ok(cert)
     }
 }
 
@@ -269,7 +290,16 @@ mod tests {
             .map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68))
             .collect();
         votes[0].signature = RatioVote::sign(&sk(9), "val-0", 7, 16.68); // signed with a different key
-        let cert = BftRatioConsensus::finalize_ratio(votes, &validators).unwrap();
+        assert!(
+            BftRatioConsensus::finalize_ratio(votes.clone(), &validators).is_err(),
+            "a forged signature must not be finalised"
+        );
+        let cert = RatioFinalityCert {
+            pipe_id: 7,
+            ratio: 16.68,
+            votes,
+            quorum: validators.quorum(),
+        };
         assert!(
             cert.verify(&validators).is_err(),
             "a forged signature must be refused"
@@ -287,11 +317,18 @@ mod tests {
         let v2 = vote("val-0", &sks[0], 7, 16.68); // the same validator!
         let v3 = vote("val-2", &sks[2], 7, 16.68);
         let v4 = vote("val-3", &sks[3], 7, 16.68);
-        let cert = BftRatioConsensus::finalize_ratio(
-            vec![v1.clone(), v2, v3.clone(), v4.clone()],
-            &validators,
-        )
-        .unwrap();
+        let repeated = vec![v1.clone(), v2, v3.clone(), v4.clone()];
+        assert_eq!(
+            BftRatioConsensus::finalize_ratio(repeated.clone(), &validators).err(),
+            Some("K-BUD-BFT: duplicate validator"),
+            "a repeated validator must not reach the count"
+        );
+        let cert = RatioFinalityCert {
+            pipe_id: 7,
+            ratio: 16.68,
+            votes: repeated,
+            quorum: validators.quorum(),
+        };
         assert!(
             cert.verify(&validators).is_err(),
             "a repeated validator must be refused"
@@ -348,6 +385,40 @@ mod tests {
             quorum: validators.quorum(),
         };
         assert!(cert.verify(&validators).is_err());
+    }
+
+    /// Four validators of five, all on pipe 7, two of them with their own
+    /// measurement: grouped by pipe alone they made one group of four whose
+    /// certificate carried the first ratio, and `verify` refused it. Grouped
+    /// by pipe and ratio, the three that agree are below the quorum of four,
+    /// so nothing is finalised; with a fourth agreeing vote the certificate
+    /// is issued and verifies.
+    #[test]
+    fn a_split_measurement_is_not_finalised_under_the_majority_ratio() {
+        let sks = [sk(1), sk(2), sk(3), sk(4), sk(5)];
+        let validators = set(&sks);
+        let split = vec![
+            vote("val-0", &sks[0], 7, 16.68),
+            vote("val-1", &sks[1], 7, 16.68),
+            vote("val-2", &sks[2], 7, 16.68),
+            vote("val-3", &sks[3], 7, 16.69),
+        ];
+        assert_eq!(
+            BftRatioConsensus::finalize_ratio(split, &validators).err(),
+            Some("K-BUD-BFT: no quorum"),
+            "three agreeing votes of five validators are below quorum"
+        );
+        let agreed = vec![
+            vote("val-0", &sks[0], 7, 16.68),
+            vote("val-1", &sks[1], 7, 16.68),
+            vote("val-2", &sks[2], 7, 16.68),
+            vote("val-3", &sks[3], 7, 16.69),
+            vote("val-4", &sks[4], 7, 16.68),
+        ];
+        let cert = BftRatioConsensus::finalize_ratio(agreed, &validators).unwrap();
+        assert_eq!(cert.ratio.to_bits(), 16.68f64.to_bits());
+        assert_eq!(cert.votes.len(), 4);
+        assert!(cert.verify(&validators).is_ok());
     }
 
     #[test]

@@ -27,8 +27,14 @@ use libp2p::PeerId;
 pub struct ShardingConfig {
     /// Number of replicas required per shard (default: 3).
     pub replication_factor: usize,
-    /// Maximum distance (XOR) allowed for opportunistic caching.
-    pub max_xor_distance: u128,
+    /// Maximum distance (XOR) allowed for opportunistic caching, in the
+    /// DHT's own 256-bit key space: a CID is cached when the Kademlia
+    /// distance between the node's bucket key and the CID's record key is at
+    /// or below this value. The field used to be a `u128` compared against
+    /// that 256-bit distance, which is below `2^128` for one CID in `2^128`,
+    /// so no threshold the type could hold admitted anything and active
+    /// sharding cached nothing.
+    pub max_xor_distance: U256,
     /// Whether sharding responsibility is strictly enforced.
     /// (User Decision 5: mandatory_sharding).
     pub mandatory: bool,
@@ -40,7 +46,7 @@ impl Default for ShardingConfig {
     fn default() -> Self {
         Self {
             replication_factor: 3,
-            max_xor_distance: u128::MAX / 1000, // 0.1% of the keyspace
+            max_xor_distance: U256::MAX / 1000u64, // 0.1% of the key space
             mandatory: true,
             mobile_mode: false,
         }
@@ -50,8 +56,8 @@ impl Default for ShardingConfig {
 impl ShardingConfig {
     pub fn mobile_default() -> Self {
         Self {
-            replication_factor: 2,                 // Balance energy and availability
-            max_xor_distance: u128::MAX / 100_000, // 0.001% of the keyspace
+            replication_factor: 2,                    // Balance energy and availability
+            max_xor_distance: U256::MAX / 100_000u64, // 0.001% of the key space
             mandatory: true,
             mobile_mode: true,
         }
@@ -82,13 +88,12 @@ impl ShardManager {
         if self.config.mobile_mode && !self.is_resource_buffer_sufficient() {
             return false; // Skip caching on mobile if low on battery/budget
         }
-        // The threshold is a `u128`, the distance is 256 bits wide. A
-        // distance with any of its upper 128 bits set is farther than every
-        // threshold this type can express, so it is never "close". Truncating
-        // to the low half first (`low_u128`) used to let such a distance pass
-        // whenever its low half happened to be small, including as an exact
-        // match under a zero threshold.
-        self.xor_distance(cid).0 <= U256::from(self.config.max_xor_distance)
+        // Threshold and distance live in the same 256-bit key space, so the
+        // whole distance is compared. Truncating the distance to its low half
+        // first (`low_u128`) used to let a far CID pass whenever that half
+        // happened to be small, including as an exact match under a zero
+        // threshold.
+        self.xor_distance(cid).0 <= self.config.max_xor_distance
     }
 
     /// Resource budget check for mobile devices (Mock/Placeholder).
@@ -157,36 +162,70 @@ mod tests {
         assert_ne!(manager.xor_distance(&cid).0, U256::from_big_endian(&raw));
     }
 
-    /// The threshold is compared against the whole 256-bit distance. With
-    /// the widest threshold a `u128` can hold, only a CID whose distance has
-    /// no upper bit set is close; that is one CID in 2^128. Truncating to
-    /// the low half used to make this threshold admit every CID.
+    fn fixed_peer_id() -> PeerId {
+        identity::Keypair::ed25519_from_bytes([7u8; 32])
+            .expect("32 secret bytes")
+            .public()
+            .to_peer_id()
+    }
+
+    fn cids(n: u32) -> impl Iterator<Item = ContentId> {
+        (0..n).map(|i| {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&i.to_le_bytes());
+            ContentId(bytes)
+        })
+    }
+
+    /// The threshold is a share of the 256-bit key space and admits that
+    /// share of CIDs: an eighth of the space takes in about an eighth of
+    /// 2048 CIDs (256 expected, the bounds are more than ten standard
+    /// deviations wide), and the default tenth of a percent takes in a
+    /// handful. The old `u128` threshold, however wide, admitted none of
+    /// them: the distance has upper bits for every CID here.
     #[test]
-    fn the_widest_u128_threshold_does_not_admit_every_cid() {
-        let peer = random_peer_id();
-        let manager = ShardManager::new(
+    fn the_threshold_admits_its_share_of_the_key_space() {
+        let peer = fixed_peer_id();
+        let eighth = ShardManager::new(
             peer,
             ShardingConfig {
-                max_xor_distance: u128::MAX,
+                max_xor_distance: U256::MAX / 8u64,
                 ..Default::default()
             },
         );
-        let admitted = (0u8..32)
-            .filter(|i| manager.should_cache(&ContentId([*i; 32])))
-            .count();
-        assert_eq!(
-            admitted, 0,
-            "a 256-bit distance above u128::MAX was called close"
+        let admitted = cids(2048).filter(|c| eighth.should_cache(c)).count();
+        assert!(
+            (100..=410).contains(&admitted),
+            "an eighth of the key space admitted {admitted} of 2048 CIDs"
         );
-        // The full distance really does carry upper bits for these CIDs.
-        assert!(manager.xor_distance(&ContentId([7u8; 32])).0 > U256::from(u128::MAX));
+        let default = ShardManager::new(peer, ShardingConfig::default());
+        let admitted = cids(2048).filter(|c| default.should_cache(c)).count();
+        assert!(
+            admitted <= 20,
+            "a tenth of a percent of the key space admitted {admitted} of 2048 CIDs"
+        );
+        assert!(cids(2048).all(|c| default.xor_distance(&c).0 > U256::from(u128::MAX)));
+    }
+
+    /// The whole key space as the threshold is every CID; nothing else in
+    /// the comparison can refuse one.
+    #[test]
+    fn the_widest_threshold_admits_every_cid() {
+        let manager = ShardManager::new(
+            fixed_peer_id(),
+            ShardingConfig {
+                max_xor_distance: U256::MAX,
+                ..Default::default()
+            },
+        );
+        assert!(cids(256).all(|c| manager.should_cache(&c)));
     }
 
     #[test]
     fn test_should_cache_respects_threshold() {
         let peer = random_peer_id();
         let config = ShardingConfig {
-            max_xor_distance: 0, // Only exact match
+            max_xor_distance: U256::zero(), // Only exact match
             ..Default::default()
         };
 

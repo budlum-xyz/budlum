@@ -36,9 +36,15 @@ use crate::cross_domain::chain_adapter::{AdapterError, ChainAdapter};
 use crate::cross_domain::event_tree::MerkleProof;
 use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 use crate::cross_domain::evm::verify::{
-    verify_evm_receipt, EvmDepositProof, VerifiedDeposit, VerifyError,
+    verify_evm_receipt, DepositProofPackage, EvmDepositProof, VerifiedDeposit, VerifyError,
 };
 use crate::domain::types::Hash32;
+use bincode::Options;
+
+/// Ceiling on a serialised [`DepositProofPackage`]: sixty-four confirmation
+/// headers of a few hundred bytes plus an MPT path of a dozen nodes fit in a
+/// small fraction of this; an observation larger than it is not a proof.
+const MAX_DEPOSIT_PACKAGE_BYTES: u64 = 1024 * 1024;
 
 /// The Ethereum bridge contract deposit event signature (topic0).
 /// Keccak256("Deposit(address,uint256,bytes32,uint256)") - the real value is
@@ -181,6 +187,78 @@ impl ChainAdapter for EvmChainAdapter {
         EvmChainAdapter::check_fit_for_relay(self).map_err(AdapterError::ProofVerificationFailed)
     }
 
+    /// The observation the relayer signs must carry the full deposit
+    /// package, and the package must pass `verify_deposit`.
+    ///
+    /// The trait default reads a bare `MerkleProof` and runs
+    /// `verify_receipt_proof`, which takes the receipts root on the
+    /// relayer's word and never walks a header chain. That was the only
+    /// check on the production path while `verify_deposit`, the one this
+    /// file has always called the real safe path, had no caller. An
+    /// operator who registered this adapter got the weaker check without
+    /// being told.
+    ///
+    /// The override refuses a bare `MerkleProof` outright, decodes the
+    /// `receipt_proof` bytes as a [`DepositProofPackage`], borrows it with
+    /// this adapter's bridge address, deposit topic and confirmation floor,
+    /// and runs the full verifier. Three bindings on top of that: the
+    /// package's transaction hash is the result's, the proven receipts root
+    /// is the root the result declares, and the result's `success` is the
+    /// receipt's status, which `verify_evm_receipt` has already required to
+    /// be true.
+    fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+        let package: DepositProofPackage = bincode::options()
+            .with_fixint_encoding()
+            .with_limit(MAX_DEPOSIT_PACKAGE_BYTES)
+            .deserialize(&result.receipt_proof)
+            .map_err(|e| {
+                AdapterError::ProofVerificationFailed(format!(
+                    "EVM observation does not carry a deposit package (header chain, MPT \
+                     nodes, receipt key): {e}. A bare Merkle path is not accepted on this \
+                     chain"
+                ))
+            })?;
+        if package.tx_hash != result.tx_hash {
+            return Err(AdapterError::ProofVerificationFailed(format!(
+                "deposit package is for {} but the observation names {}",
+                package.tx_hash, result.tx_hash
+            )));
+        }
+        let confirmation_headers: Vec<&[u8]> = package
+            .confirmation_headers
+            .iter()
+            .map(Vec::as_slice)
+            .collect();
+        let proof = EvmDepositProof {
+            target_header: &package.target_header,
+            confirmation_headers: &confirmation_headers,
+            required_confirmations: self.required_confirmations,
+            proof_nodes: &package.proof_nodes,
+            receipt_key: &package.receipt_key,
+            tx_hash: &package.tx_hash,
+            emitter_address: &self.bridge_address,
+            deposit_topic0: &self.deposit_topic0,
+            sync_attestation: None,
+        };
+        let verified = self
+            .verify_deposit(&proof)
+            .map_err(|e| AdapterError::ProofVerificationFailed(e.to_string()))?;
+        if verified.receipts_root != result.external_state_root {
+            return Err(AdapterError::ProofVerificationFailed(
+                "the receipts root the header chain proves is not the external state root \
+                 the observation declares"
+                    .into(),
+            ));
+        }
+        if !result.success {
+            return Err(AdapterError::ProofVerificationFailed(
+                "the receipt proves a successful deposit but the observation reports failure"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn verify_receipt_proof(
         &self,
         proof: &MerkleProof,
@@ -319,6 +397,7 @@ fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_domain::evm::verify::fixtures;
 
     #[test]
     fn adapter_chain_type_ethereum() {
@@ -599,101 +678,197 @@ mod tests {
         );
     }
 
-    /// The stronger of the two verification paths has no caller.
+    /// The full deposit verification is the production path.
     ///
-    /// This file documents `verify_deposit` as the real
-    /// safe path - and it is: it runs the full `verify_evm_receipt`
-    /// orchestrator (header chain with N confirmations, MPT inclusion, receipt
-    /// status, deposit-log match). The trait method `verify_receipt_proof`
-    /// checks a Merkle proof against a declared root plus a leaf binding, and
-    /// takes the receipts root on the relayer's word.
+    /// This file used to carry a test named
+    /// `the_full_receipt_verification_path_is_still_unreachable_from_production`,
+    /// pinning that the relayer called `verify_receipt_proof` and nothing
+    /// called `verify_deposit`. That was true from the day both were
+    /// written until this override: `--evm-bridge-address` let an operator
+    /// register this adapter, and then the weaker check was what ran on a
+    /// deposit.
     ///
-    /// Production calls the second one. `relayer/worker.rs:263` invokes
-    /// `adapter.verify_receipt_proof(...)`; nothing anywhere invokes
-    /// `verify_deposit`, and until this test existed nothing referenced it
-    /// outside its own definition - not even a test.
-    ///
-    /// That was survivable while the adapter registry was empty in production,
-    /// because every chain answered `UnsupportedChain` and the outbound path
-    /// refused rather than accepting a weakly-verified deposit. It is no
-    /// longer empty by construction: `--evm-bridge-address` and
-    /// `--evm-deposit-topic0` let an operator register this adapter, and then
-    /// the trait path is what runs. The gap below is now reachable on a node
-    /// whose operator configured the bridge, which is exactly the ordering
-    /// this test warned about. `relayer_worker_locks.rs` pins the
-    /// configuration half.
-    ///
-    /// The danger is the order of events when someone wires the registry up:
-    /// the code compiles, the tests pass, the comment says the safe path
-    /// exists, and the weak path is what actually runs. This test makes the
-    /// gap explicit and breaks when either half of it changes.
-    ///
-    /// What has since been added is not a fix for that gap but a floor under
-    /// it. `AdapterRegistry::register` now asks each adapter whether it is
-    /// fit to relay, and the EVM one refuses a zero bridge address or zero
-    /// confirmations. That stops the worst version of the wiring mistake, an
-    /// adapter that verifies nothing because it points nowhere, without
-    /// pretending the trait path checks what `verify_deposit` checks. It
-    /// still does not.
+    /// The worker now calls `verify_observation` on every observation, and
+    /// this adapter's override runs `verify_deposit`. The pin is inverted:
+    /// the worker must not go back to reading a bare `MerkleProof` itself,
+    /// and the override must keep delegating to the one verifier.
     #[test]
-    fn the_full_receipt_verification_path_is_still_unreachable_from_production() {
+    fn the_relayer_reaches_verify_deposit() {
         let adapter_src = include_str!("adapter.rs");
         let worker_src = include_str!("../../relayer/worker.rs");
-
-        // Measure the production half only.
-        //
-        // `include_str!` reads this test module too, and both strings below
-        // appear once in production and once in the assertion that searches
-        // for them. Searched whole-file, deleting `verify_deposit` outright
-        // would leave these assertions passing on the strength of their own
-        // text: the pin would survive the very change it exists to catch.
         let adapter_prod = adapter_src
             .split_once("#[cfg(test)]")
             .map(|(before, _)| before)
             .expect("this file keeps its tests behind #[cfg(test)]");
-        assert!(
-            adapter_prod.len() < adapter_src.len(),
-            "the #[cfg(test)] split matched nothing, so the assertions below \
-             are reading their own source again"
-        );
+        let worker_prod = worker_src
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("worker.rs keeps its tests behind #[cfg(test)]");
+        let worker_code: Vec<&str> = worker_prod
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .collect();
 
-        // `verify_deposit` exists and still wraps the full orchestrator.
         assert!(
-            adapter_prod.contains("pub fn verify_deposit("),
-            "verify_deposit was removed or renamed; update this pin"
+            worker_code
+                .iter()
+                .any(|l| l.contains("verify_observation(&result)")),
+            "the worker must hand the whole observation to the adapter"
         );
         assert!(
-            adapter_prod.contains("verify_evm_receipt(proof)"),
-            "verify_deposit no longer runs the full verify_evm_receipt \
-             orchestrator - the 'real safe path' claim in this file's header \
-             needs rewriting"
+            !worker_code
+                .iter()
+                .any(|l| l.contains("verify_receipt_proof(")),
+            "the worker is verifying a Merkle path itself again, which bypasses the \
+             EVM adapter's full deposit check"
         );
-        // And it returns what that orchestrator proved. Returning a bare
-        // `EthReceipt` would hand the caller a value that does not carry the
-        // status check or the deposit-log match `verify_evm_receipt` made,
-        // from a function named `verify`. See ARCHITECTURE.md section 68.
+        assert!(
+            adapter_prod.contains("fn verify_observation(")
+                && adapter_prod.contains(".verify_deposit(&proof)"),
+            "the EVM override must run verify_deposit over the decoded package"
+        );
         assert!(
             adapter_prod.contains("Result<VerifiedDeposit, VerifyError>"),
             "verify_deposit must return the proven deposit, not a raw receipt"
         );
-        // One verification, not two. A second header/MPT decode in this file
-        // would be a second copy of the same check, and an attacker picks
-        // which copy applies (section 65).
         assert!(
             !adapter_prod.contains("mpt::verify("),
             "verify_deposit is decoding the MPT again instead of delegating"
         );
+    }
 
-        // The relayer reaches the adapter through the trait method only.
-        assert!(
-            worker_src.contains("verify_receipt_proof("),
-            "the relayer no longer calls verify_receipt_proof; re-derive which \
-             verification actually runs before touching this test"
+    /// One observation the relayer would sign: a real header chain, a real
+    /// receipt proof, the root it declares equal to the proven receiptsRoot.
+    fn observation_for(adapter: &EvmChainAdapter, n_conf: u32) -> RelayerExternalResult {
+        let f = fixtures::build_fixture(
+            &adapter.bridge_address,
+            adapter.deposit_topic0,
+            b"deposit-payload",
+            true,
+            n_conf,
         );
+        let package = DepositProofPackage {
+            target_header: f.target_header.clone(),
+            confirmation_headers: f.conf_headers.clone(),
+            proof_nodes: f.proof_nodes.clone(),
+            receipt_key: f.receipt_key.clone(),
+            tx_hash: "0xabc123".to_string(),
+        };
+        RelayerExternalResult {
+            chain: ExternalChain::Ethereum,
+            tx_hash: "0xabc123".to_string(),
+            success: true,
+            message: None,
+            receipt_proof: bincode::serialize(&package).expect("package serialises"),
+            external_state_root: f.receipts_root,
+        }
+    }
+
+    fn floor_three() -> EvmChainAdapter {
+        let mut adapter = EvmChainAdapter::new(vec![0xcc; 20], [0xab; 32]);
+        adapter.required_confirmations = 3;
+        adapter
+    }
+
+    /// The positive half: a package that proves the deposit is accepted.
+    #[test]
+    fn a_full_deposit_package_is_accepted() {
+        let adapter = floor_three();
+        let observation = observation_for(&adapter, 3);
+        adapter
+            .verify_observation(&observation)
+            .expect("a proven deposit at the floor verifies");
+    }
+
+    /// A bare Merkle path, the shape the trait default accepts and the
+    /// worker used to verify by itself, is refused on this chain.
+    #[test]
+    fn a_bare_merkle_path_is_refused_as_an_observation() {
+        let adapter = floor_three();
+        let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
+        let (proof, root) = proof_with_sibling(leaf);
+        let observation = RelayerExternalResult {
+            chain: ExternalChain::Ethereum,
+            tx_hash: "0xabc".to_string(),
+            success: true,
+            message: None,
+            receipt_proof: bincode::serialize(&proof).expect("proof serialises"),
+            external_state_root: root,
+        };
+        let err = adapter
+            .verify_observation(&observation)
+            .expect_err("a Merkle path without header chain and receipt proves no deposit");
         assert!(
-            !worker_src.contains("verify_deposit"),
-            "the relayer now calls verify_deposit - the stronger path is live. \
-             Delete this test and pin the new behaviour instead"
+            format!("{err}").contains("deposit package"),
+            "the refusal must say what is missing: {err}"
         );
+    }
+
+    /// The confirmation window is the operator's. A package with fewer
+    /// confirmation headers than the floor is refused by the header chain
+    /// walk, whatever the relayer would have liked to declare.
+    #[test]
+    fn an_observation_below_the_confirmation_floor_is_refused() {
+        let adapter = floor_three();
+        let observation = observation_for(&adapter, 2);
+        let err = adapter
+            .verify_observation(&observation)
+            .expect_err("two confirmations under a floor of three");
+        assert!(format!("{err}").contains("header chain"), "got: {err}");
+    }
+
+    /// The root the observation declares has to be the root the header
+    /// chain proves, or the executor would anchor the wrong value.
+    #[test]
+    fn an_observation_declaring_another_root_is_refused() {
+        let adapter = floor_three();
+        let mut observation = observation_for(&adapter, 3);
+        observation.external_state_root = [0x77; 32];
+        let err = adapter
+            .verify_observation(&observation)
+            .expect_err("declared root differs from the proven receiptsRoot");
+        assert!(format!("{err}").contains("receipts root"), "got: {err}");
+    }
+
+    /// The package is bound to the transaction the observation names.
+    #[test]
+    fn an_observation_naming_another_transaction_is_refused() {
+        let adapter = floor_three();
+        let mut observation = observation_for(&adapter, 3);
+        observation.tx_hash = "0xother".to_string();
+        let err = adapter
+            .verify_observation(&observation)
+            .expect_err("package tx_hash and observation tx_hash differ");
+        assert!(format!("{err}").contains("0xother"), "got: {err}");
+    }
+
+    /// A bridge address other than this adapter's finds no deposit log.
+    #[test]
+    fn an_observation_from_another_bridge_is_refused() {
+        let adapter = floor_three();
+        let mut other = EvmChainAdapter::new(vec![0xdd; 20], [0xab; 32]);
+        other.required_confirmations = 3;
+        let observation = observation_for(&other, 3);
+        let err = adapter
+            .verify_observation(&observation)
+            .expect_err("the log was emitted by another contract");
+        assert!(
+            format!("{err}").contains("deposit log not found"),
+            "got: {err}"
+        );
+    }
+
+    /// Reported failure over a receipt that proves success is a
+    /// contradiction, and a contradiction is not signed.
+    #[test]
+    fn an_observation_contradicting_its_receipt_is_refused() {
+        let adapter = floor_three();
+        let mut observation = observation_for(&adapter, 3);
+        observation.success = false;
+        let err = adapter
+            .verify_observation(&observation)
+            .expect_err("success=false over a status=true receipt");
+        assert!(format!("{err}").contains("reports failure"), "got: {err}");
     }
 }

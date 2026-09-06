@@ -154,7 +154,7 @@ pub struct NodeConfig {
 
     // Strict Config V2 Fields
     #[arg(long, default_value = "rpc")]
-    pub role: String, // validator | sentry | seed | rpc | archive
+    pub role: String, // validator | sentry | seed | rpc | archive | relayer
 
     #[arg(long)]
     pub genesis_file: Option<String>,
@@ -462,7 +462,7 @@ pub struct NetworkSection {
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSection {
-    pub role: Option<String>, // validator | sentry | seed | rpc | archive
+    pub role: Option<String>, // validator | sentry | seed | rpc | archive | relayer
     /// Alias: full | archive. `archive` normalizes to role=archive;
     /// `full` is compatible with validator/sentry/seed/rpc but not archive.
     pub mode: Option<String>,
@@ -654,7 +654,12 @@ impl NodeConfig {
         if let Some(node) = fc.node {
             if let Some(role) = node.role {
                 match role.as_str() {
-                    "validator" | "sentry" | "seed" | "rpc" | "archive" => {
+                    // `relayer` is the in-node cross-chain relay worker
+                    // (`main.rs` starts it for this role and for validators).
+                    // It was accepted on the command line and refused here,
+                    // so a TOML `role = "relayer"` exited before the worker
+                    // could start.
+                    "validator" | "sentry" | "seed" | "rpc" | "archive" | "relayer" => {
                         self.role = role;
                     }
                     other => {
@@ -1249,8 +1254,10 @@ impl NodeConfig {
     // Node role based rules to avoid opening unnecessary listeners.
     fn apply_role_rules(&mut self) {
         match self.role.as_str() {
-            "validator" | "sentry" | "seed" => {
-                // Disabled public listeners for non-public-facing nodes
+            "validator" | "sentry" | "seed" | "relayer" => {
+                // Disabled public listeners for non-public-facing nodes. A
+                // relayer submits proofs and signs settlements; it serves no
+                // one, so it opens nothing.
                 self.rpc_enabled = false;
                 println!(
                     "Node started as '{}' role. Disabling public JSON-RPC listeners for safety.",
@@ -1331,18 +1338,31 @@ fn canonical_signer_backend(value: &str) -> Result<String, String> {
 ///
 /// The port is whatever follows the last `:`; the host is the rest with its
 /// optional IPv6 brackets removed. `[::1]:9090` gives `::1` and `9090`;
-/// splitting on every `:` used to reject every IPv6 listener.
+/// splitting on every `:` used to reject every IPv6 listener. A bare IPv6
+/// host with a port glued on (`::1:8545`) is refused: it parsed here, was
+/// kept verbatim as the bind address, and `SocketAddr` refuses it at bind
+/// time, so the node came up without the listener the operator wrote.
 fn parse_listener(listener: &str) -> Option<(String, u16)> {
     let (host, port) = listener.rsplit_once(':')?;
     let port = port.parse::<u16>().ok()?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.strip_suffix(']')?,
+        None if host.contains(':') => return None,
+        None => host,
+    };
     if host.is_empty() {
         return None;
     }
     Some((host.to_string(), port))
+}
+
+/// A listener string in the form the socket layer binds: the host from
+/// `parse_listener`, an IPv6 host bracketed, the port after it. `None` for
+/// anything `parse_listener` refuses. Every listener the node opens goes
+/// through here so the string that is logged is the string that is bound.
+pub fn normalize_listener(listener: &str) -> Option<String> {
+    let (host, port) = parse_listener(listener)?;
+    Some(listener_string(&host, port))
 }
 
 /// Resolve a network name from a file or the environment.
@@ -1403,6 +1423,19 @@ mod tests {
         assert_eq!(parse_listener(":8545"), None);
         assert_eq!(parse_listener("host:notaport"), None);
         assert_eq!(parse_listener("nohostport"), None);
+        // Bare IPv6 with a glued port is ambiguous and unbindable; refused
+        // rather than carried to the bind call.
+        assert_eq!(parse_listener("::1:8545"), None);
+        assert_eq!(parse_listener("[::1:8545"), None);
+        assert_eq!(normalize_listener("::1:8545"), None);
+        assert_eq!(
+            normalize_listener("[::1]:8545").as_deref(),
+            Some("[::1]:8545")
+        );
+        assert_eq!(
+            normalize_listener("127.0.0.1:8545").as_deref(),
+            Some("127.0.0.1:8545")
+        );
         assert_eq!(listener_string("::1", 8545), "[::1]:8545");
         assert_eq!(listener_string("10.0.0.1", 8545), "10.0.0.1:8545");
         assert_eq!(

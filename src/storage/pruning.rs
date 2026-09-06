@@ -23,7 +23,7 @@ impl NodeMode {
     pub fn from_role(role: &str) -> Option<Self> {
         match role {
             "archive" => Some(Self::Archive),
-            "validator" | "sentry" | "seed" | "rpc" | "full" => Some(Self::Full),
+            "validator" | "sentry" | "seed" | "rpc" | "relayer" | "full" => Some(Self::Full),
             _ => None,
         }
     }

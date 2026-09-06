@@ -20,9 +20,13 @@ use tracing::{error, info, warn};
 ///   broadcast it, never from a constant;
 /// - the receipt proof comes from an adapter that read the external chain,
 ///   never from a locally invented single-leaf tree;
-/// - the adapter re-verifies its own proof (`verify_receipt_proof`) before
-///   the result is signed, so a broken or dishonest adapter is caught here
-///   rather than by consensus after the signature exists.
+/// - the adapter re-verifies its own observation (`verify_observation`)
+///   before the result is signed, so a broken or dishonest adapter is caught
+///   here rather than by consensus after the signature exists. The EVM
+///   adapter's check is `verify_deposit`: the header chain with the
+///   operator's confirmation window, MPT inclusion under the declared
+///   receipts root, receipt status and the bridge's deposit log. A bare
+///   Merkle path is refused on that chain.
 ///
 /// If any of those cannot be satisfied, the worker submits nothing. A relayer
 /// that stays silent stalls a transfer; a relayer that signs an unverified
@@ -563,14 +567,11 @@ impl RelayerWorker {
             .await?;
 
         // An adapter is not trusted to be correct, only to be the source. Its
-        // own verifier runs against its own output before anything is signed.
-        let proof: crate::cross_domain::event_tree::MerkleProof =
-            bincode::deserialize(&result.receipt_proof).map_err(|e| {
-                AdapterError::ProofVerificationFailed(format!(
-                    "adapter returned a receipt proof that does not decode: {e}"
-                ))
-            })?;
-        adapter.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)?;
+        // own verifier runs against its own output before anything is signed:
+        // the whole observation, not a Merkle path cut out of it. For the EVM
+        // adapter that is `verify_deposit` over the full deposit package
+        // (header chain, MPT inclusion, receipt status, deposit log).
+        adapter.verify_observation(&result)?;
 
         if result.chain != ext_tx.chain {
             return Err(AdapterError::ProofVerificationFailed(format!(

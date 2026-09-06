@@ -61,23 +61,34 @@ fn slash_body(code: &str) -> Option<String> {
     Some(code[open..i].to_string())
 }
 
-/// Whether a normalized `slash_penalty` body clamps its result to the bond:
-/// it compares the wide quotient against `u64::MAX` and the block that the
-/// comparison opens yields `stake` in a form whose value is kept. Two forms
-/// are the operation: an early `return stake;` inside that block, or a
-/// `{ stake } else { .. }` whose else block closes the function body, so the
-/// conditional is the tail expression. A `{ stake }` block followed by
-/// anything else (`if r > MAX { stake }; r as u64`) is a discarded value with
-/// the truncating cast still live, and a `.min(stake)` on the narrow side does
-/// not help once `as u64` has wrapped, so neither counts as the clamp.
+/// Whether a normalized `slash_penalty` body clamps its result to the bond.
+/// Two halves, both required.
+///
+/// The wide half: the body compares the `u128` quotient against `u64::MAX`
+/// and the block that comparison opens yields `stake` in a form whose value
+/// is kept. Two forms are the operation: an early `return stake;` inside
+/// that block, or a `{ stake } else { .. }` whose else block closes the
+/// function body, so the conditional is the tail expression. A `{ stake }`
+/// block followed by anything else (`if r > MAX { stake }; r as u64`) is a
+/// discarded value with the truncating cast still live.
+///
+/// The narrow half: what runs when the quotient fits a `u64` caps the cast
+/// value to `stake` as well (see [`caps_narrow_to_stake`]). A ratio above
+/// `FIXED_POINT_SCALE` can leave the quotient between the stake and
+/// `u64::MAX`, where the wide guard does not fire and the bare cast returns
+/// more than the bond. The gate used to accept `return stake;` alone and
+/// never read past it.
 fn clamps_to_stake(normalized_body: &str) -> bool {
     const COMPARE: &str = ">u128::from(u64::MAX){";
     let Some(at) = normalized_body.find(COMPARE) else {
         return false;
     };
     let after = &normalized_body[at + COMPARE.len()..];
-    if after.starts_with("returnstake;") || after.starts_with("returnstake}") {
-        return true;
+    if let Some(narrow) = after
+        .strip_prefix("returnstake;}")
+        .or_else(|| after.strip_prefix("returnstake}"))
+    {
+        return caps_narrow_to_stake(narrow);
     }
     let Some(rest) = after.strip_prefix("stake}else{") else {
         return false;
@@ -89,13 +100,40 @@ fn clamps_to_stake(normalized_body: &str) -> bool {
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return rest[i + 1..].is_empty();
+                    return rest[i + 1..].is_empty() && caps_narrow_to_stake(&rest[..i]);
                 }
             }
             _ => {}
         }
     }
     false
+}
+
+/// Whether the narrow side of a normalized body keeps the `as u64` value
+/// only up to `stake`. Accepted caps: `.min(stake)` on the cast value,
+/// `stake.min(..)`, `min(.., stake)` or `min(stake, ..)`, or an `if` that
+/// compares against `stake` and yields `stake` in one of its two branches
+/// (`if narrow > stake { stake } else { narrow }`). A narrow side without an
+/// `as u64` is not the operation this gate guards and is refused too.
+fn caps_narrow_to_stake(narrow: &str) -> bool {
+    if !narrow.contains("asu64") {
+        return false;
+    }
+    if narrow.contains(".min(stake)") || narrow.contains("stake.min(") {
+        return true;
+    }
+    if narrow.contains("min(") && (narrow.contains("min(stake,") || narrow.contains(",stake)")) {
+        return true;
+    }
+    narrow.match_indices("if").any(|(i, _)| {
+        let Some(brace) = narrow[i..].find('{') else {
+            return false;
+        };
+        let cond = &narrow[i + 2..i + brace];
+        let rest = &narrow[i + brace + 1..];
+        let compares = cond.contains("stake") && cond.contains(['<', '>']);
+        compares && (rest.starts_with("stake}else{") || rest.contains("}else{stake}"))
+    })
 }
 
 fn normalized(body: &str) -> String {
@@ -239,11 +277,17 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::create_dir_all(dir.join("src/core"));
     let _ = std::fs::create_dir_all(dir.join("budzero/verifier-registry/src"));
-    // A clamp written with an early return, and the same clamp written as a
-    // tail expression: both are the operation, and both must pass.
+    // A clamp written with an early return, the same clamp written as a
+    // tail expression, and the in-tree shape that caps the narrow value with
+    // an `if`: all three are the operation, and all three must pass.
     let body = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    (r as u64).min(stake)\n}\n";
     let tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        (r as u64).min(stake)\n    }\n}\n";
-    for (tag, clamp) in [("early return", body), ("tail expression", tail)] {
+    let branch = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    if narrow > stake {\n        stake\n    } else {\n        narrow\n    }\n}\n";
+    for (tag, clamp) in [
+        ("early return", body),
+        ("tail expression", tail),
+        ("if/else cap", branch),
+    ] {
         std::fs::write(dir.join("src/core/chain_config.rs"), clamp).unwrap();
         std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), clamp).unwrap();
         if let Err(e) = run(&dir) {
@@ -255,12 +299,18 @@ pub fn self_test() -> Result<String, String> {
     }
     // Both homes agree, and neither clamps: identical copies of the bug. The
     // second fixture names `stake` in the block the comparison opens, then
-    // throws that value away and keeps the truncating cast.
+    // throws that value away and keeps the truncating cast. The third and
+    // fourth guard the overflow and return the bare cast on the other side,
+    // which pays out more than the bond for any ratio above the scale.
     let unclamped = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return 0;\n    }\n    r as u64\n}\n";
     let discarded = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    };\n    r as u64\n}\n";
+    let uncapped_return = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    r as u64\n}\n";
+    let uncapped_tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        r as u64\n    }\n}\n";
     for (tag, bug) in [
         ("never yield the stake", unclamped),
         ("discard the stake", discarded),
+        ("return the bare cast after the guard", uncapped_return),
+        ("return the bare cast in the else block", uncapped_tail),
     ] {
         std::fs::write(dir.join("src/core/chain_config.rs"), bug).unwrap();
         std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), bug).unwrap();
@@ -280,8 +330,8 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "slash canary OK (an early-return clamp and a tail-expression clamp PASS, two \
-         agreeing unclamped homes FAIL, a discarded `{ stake }` block FAILs, a \
-         diverging home FAILs).",
+        "slash canary OK (an early-return clamp, a tail-expression clamp and an if/else \
+         cap PASS, two agreeing unclamped homes FAIL, a discarded `{ stake }` block FAILs, \
+         a bare cast after the guard FAILs on both shapes, a diverging home FAILs).",
     ))
 }

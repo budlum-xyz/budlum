@@ -143,16 +143,37 @@ impl EngineResult {
     }
 }
 
+/// Domain tag of a shard digest inside the pack.
+const SHARD_DIGEST_DOMAIN: &[u8] = b"BDLM_BUD_SHARD_V1";
+
+/// SHA3-256 over one shard, domain-tagged and length-prefixed, so a shard
+/// that rotted in storage is told apart from one that survived before any
+/// decoding is attempted.
+fn shard_digest(index: usize, shard: &[u8]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(SHARD_DIGEST_DOMAIN);
+    h.update([index as u8]);
+    h.update((shard.len() as u64).to_le_bytes());
+    h.update(shard);
+    h.finalize().into()
+}
+
 /// The shard pack written when `erasure` is on: `k` (4), `p` (2), the exact
-/// container length as a `u64`, then six length-prefixed shards. The data
-/// shards are the container cut into four equal parts, the last one padded
-/// with zeros; the recorded length is what lets `open_shard_pack` cut that
-/// padding off without touching container bytes.
+/// container length as a `u64`, then six records of `digest(32) + len(4) +
+/// shard`. The data shards are the container cut into four equal parts, the
+/// last one padded with zeros; the recorded length is what lets
+/// `open_shard_pack` cut that padding off without touching container bytes.
 ///
 /// The three restore paths used to strip every trailing `0x00` instead. The
 /// container ends with the last chunk's zstd payload, and a zstd frame can end
 /// in zero bytes, so that loop ate real data and the container failed to
 /// decode: a stored file that could not be opened again.
+///
+/// The digest per shard is what makes the parity worth writing. Without it
+/// the restore had no way to tell a rotten data shard from a good one, so it
+/// always fed the four data shards to the decoder and the two parity shards
+/// were dead weight: a `(4,2)` code that could not survive the loss of one
+/// data shard.
 fn pack_shards(encoded: &[u8]) -> Option<Vec<u8>> {
     let mds = CauchyMds::new(4, 2)?;
     let shard_len = encoded.len().div_ceil(4);
@@ -169,41 +190,52 @@ fn pack_shards(encoded: &[u8]) -> Option<Vec<u8>> {
     out.push(4u8);
     out.push(2u8);
     out.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
-    for sh in &shards {
+    for (index, sh) in shards.iter().enumerate() {
+        out.extend_from_slice(&shard_digest(index, sh));
         out.extend_from_slice(&(u32::try_from(sh.len()).ok()?).to_le_bytes());
         out.extend_from_slice(sh);
     }
     Some(out)
 }
 
-/// Rebuild the container from a shard pack: the first four shards go through
-/// the (4,2) Cauchy decoder (any four would do) and the result is cut to the
-/// recorded length. A length the shards cannot cover is refused.
+/// Rebuild the container from a shard pack. Every record whose digest still
+/// matches its bytes and whose length is the one the recorded container
+/// length implies is a survivor; a record that fails either test is a lost
+/// shard, whether it was overwritten, truncated to nothing or corrupted in
+/// place. Any four survivors, data or parity, go through the (4,2) Cauchy
+/// decoder and the result is cut to the recorded length. Fewer than four,
+/// or a length the shards cannot cover, is refused.
 fn open_shard_pack(pack: &[u8]) -> Option<Vec<u8>> {
     const HDR: usize = 1 + 1 + 8;
     if pack.len() < HDR || pack[0] != 4 || pack[1] != 2 {
         return None;
     }
     let original_len = usize::try_from(u64::from_le_bytes(pack[2..HDR].try_into().ok()?)).ok()?;
+    let shard_len = original_len.div_ceil(4);
     let mut pos = HDR;
-    let mut shards: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
-    for _ in 0..6 {
-        if pack.len() < pos + 4 {
+    let mut survivors: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
+    for index in 0..6 {
+        if pack.len() < pos + 32 + 4 {
             return None;
         }
+        let digest: [u8; 32] = pack[pos..pos + 32].try_into().ok()?;
+        pos += 32;
         let len = u32::from_le_bytes(pack[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
         if pack.len() < pos + len {
             return None;
         }
-        shards.push((shards.len(), pack[pos..pos + len].to_vec()));
+        let shard = &pack[pos..pos + len];
         pos += len;
+        if len == shard_len && shard_digest(index, shard) == digest {
+            survivors.push((index, shard.to_vec()));
+        }
     }
-    if pos != pack.len() {
+    if pos != pack.len() || survivors.len() < 4 {
         return None;
     }
     let mds = CauchyMds::new(4, 2)?;
-    let recovered = mds.decode(&shards[..4])?;
+    let recovered = mds.decode(&survivors[..4])?;
     let mut out = Vec::new();
     for part in &recovered {
         out.extend_from_slice(part);
@@ -216,7 +248,7 @@ fn open_shard_pack(pack: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// THE REVERSE PIPELINE: the engine output (a blob) -> the ORIGINAL bytes (proof of losslessness).
-/// `erasure` = is the output shard-packed (k=4, p=2); it reconstructs from the first 4 shards.
+/// `erasure` = is the output shard-packed (k=4, p=2); it reconstructs from any four intact shards.
 pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
     // blob layout: magic(8) + version(1) + chunk_mode(1) + container_len(4) + container
     //              + steps_hash(32) + ratio(8) + pact(32) + prod(32)
@@ -231,7 +263,7 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
         return None;
     }
     let container = &result_blob[container_start..container_start + container_len];
-    // 1) if erasure, rebuild from the shards (k=4: the first 4 shards)
+    // 1) if erasure, rebuild from the shards (k=4: any four intact shards)
     let bytes: Vec<u8> = if erasure {
         open_shard_pack(container)?
     } else {
@@ -318,8 +350,8 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     // 4) a zstd-compressed container (ChunkCodec::Zstd)
     steps.push(PipeStep::Zstd);
     let file = BudV2File::new_zstd(codec, chunks)?;
-    // 5) erasure (optional): split the container into 4 equal parts -> (4,2) Cauchy MDS -> 6 shards.
-    //    MDS: any 4 shards reconstruct the container (resilient to a single-part loss).
+    // 5) erasure (optional): split the container into 4 equal parts -> (4,2) Cauchy MDS -> 6 shards,
+    //    each with its digest. MDS: any 4 intact shards reconstruct the container (two losses).
     let encoded = file.encode();
     let container_final: Vec<u8> = if erasure {
         steps.push(PipeStep::Erasure);
@@ -615,6 +647,86 @@ mod tests {
         let mut trailing = pack_shards(&encoded).expect("pack");
         trailing.push(0);
         assert!(open_shard_pack(&trailing).is_none());
+    }
+
+    /// Byte offset of shard `index`'s record inside a pack: header, then
+    /// `digest(32) + len(4) + shard_len` per earlier record.
+    fn shard_record(pack: &[u8], index: usize) -> (usize, usize) {
+        let original_len = u64::from_le_bytes(pack[2..10].try_into().unwrap()) as usize;
+        let shard_len = original_len.div_ceil(4);
+        let start = 10 + index * (32 + 4 + shard_len);
+        (start, shard_len)
+    }
+
+    /// The `(4,2)` claim, measured: with any one shard corrupted in place,
+    /// any one shard emptied, or any two shards lost together, the container
+    /// comes back byte for byte. The parity shards used to be dead weight:
+    /// the restore always read the four data shards, so one rotten data
+    /// shard made the container unrecoverable. Three losses are beyond the
+    /// code and are refused, not guessed.
+    #[test]
+    fn any_four_intact_shards_recover_the_container() {
+        let encoded: Vec<u8> = (0u8..=255).cycle().take(4_001).collect();
+        let pack = pack_shards(&encoded).expect("pack");
+        for lost in 0..6 {
+            let (start, shard_len) = shard_record(&pack, lost);
+            // Corrupted in place: the digest no longer matches.
+            let mut rotten = pack.clone();
+            rotten[start + 36 + shard_len / 2] ^= 0x5a;
+            assert_eq!(
+                open_shard_pack(&rotten).expect("one rotten shard is within the code"),
+                encoded,
+                "shard {lost} corrupted in place"
+            );
+            // Emptied: the record keeps its slot with a zero length.
+            let mut emptied = pack.clone();
+            emptied[start + 32..start + 36].copy_from_slice(&0u32.to_le_bytes());
+            emptied.drain(start + 36..start + 36 + shard_len);
+            assert_eq!(
+                open_shard_pack(&emptied).expect("one emptied shard is within the code"),
+                encoded,
+                "shard {lost} emptied"
+            );
+        }
+        for a in 0..6 {
+            for b in (a + 1)..6 {
+                let mut two = pack.clone();
+                for lost in [a, b] {
+                    let (start, shard_len) = shard_record(&pack, lost);
+                    two[start + 36 + shard_len - 1] ^= 0xff;
+                }
+                assert_eq!(
+                    open_shard_pack(&two).expect("two lost shards are within the code"),
+                    encoded,
+                    "shards {a} and {b} lost"
+                );
+            }
+        }
+        let mut three = pack.clone();
+        for lost in [0, 2, 4] {
+            let (start, _) = shard_record(&pack, lost);
+            three[start + 36] ^= 0x01;
+        }
+        assert!(
+            open_shard_pack(&three).is_none(),
+            "three lost shards exceed a (4,2) code and must be refused"
+        );
+    }
+
+    /// The same recovery through the public restore path: a stored engine
+    /// blob whose data shard 1 rotted in storage still yields the original.
+    #[test]
+    fn engine_erasure_restore_survives_a_rotten_data_shard() {
+        let bin: Vec<u8> = b"erasure recovery corpus ".repeat(300);
+        let res = engine_store(&bin, true, 1).expect("store+erasure");
+        let mut blob = res.to_blob();
+        const HDR: usize = 8 + 1 + 1 + 4;
+        let pack = &blob[HDR..HDR + res.container.len()];
+        let (start, shard_len) = shard_record(pack, 1);
+        blob[HDR + start + 36 + shard_len / 3] ^= 0x80;
+        let back = engine_restore_full(&blob, res.transform_kind.to_u8(), true)
+            .expect("restore with one rotten data shard");
+        assert_eq!(back, bin);
     }
 
     #[test]

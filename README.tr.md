@@ -302,8 +302,10 @@ bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
 ### Düğüm rolleri
 
 `--role` bir düğümün hangi profille çalışacağını seçer: `validator`, `sentry`, `seed`,
-`rpc` veya `archive`. Her birinin maruz kalma yüzeyi ve gerekli garanti kümesi farklıdır;
-bkz. [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md).
+`rpc`, `archive` veya `relayer`. Her birinin maruz kalma yüzeyi ve gerekli garanti kümesi
+farklıdır; bkz. [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md). `relayer` düğüm içi
+zincirler arası aktarım işçisini çalıştırır (doğrulayıcılar da çalıştırır), tam depolama
+tutar ve hiçbir açık dinleyici açmaz.
 
 > [!IMPORTANT]
 > **Ana ağ doğrulayıcıları PKCS#11 üzerinden imzalamak zorundadır.** Diske dayalı

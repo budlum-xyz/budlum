@@ -199,7 +199,14 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
         }
-        let file = path.strip_prefix(&root).unwrap().display().to_string();
+        // Forward slashes whatever the host separator: `SHIPPED` is written
+        // with them, and `display()` gives the host's.
+        let file = path
+            .strip_prefix(&root)
+            .unwrap()
+            .display()
+            .to_string()
+            .replace('\\', "/");
         let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file}: {e}"));
         let parsed: toml::Value =
             toml::from_str(&raw).unwrap_or_else(|e| panic!("{file} is valid TOML: {e}"));

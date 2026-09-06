@@ -94,6 +94,29 @@ pub trait ChainAdapter: Send + Sync {
         expected_tx_hash: &str,
     ) -> Result<(), AdapterError>;
 
+    /// Verify the whole observation this adapter handed back, before the
+    /// relayer signs it.
+    ///
+    /// The default reads `receipt_proof` as a bincode `MerkleProof` and runs
+    /// `verify_receipt_proof` over it, which is what every adapter's
+    /// observation held until the EVM one grew a stronger check. An adapter
+    /// whose observation carries more than a Merkle path overrides this and
+    /// verifies all of it: the EVM adapter refuses the bare path here and
+    /// demands the full deposit package, header chain and receipt included.
+    ///
+    /// # Errors
+    ///
+    /// `ProofVerificationFailed` when the proof does not decode or does not
+    /// verify against the declared root and transaction hash.
+    fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+        let proof: MerkleProof = bincode::deserialize(&result.receipt_proof).map_err(|e| {
+            AdapterError::ProofVerificationFailed(format!(
+                "adapter returned a receipt proof that does not decode: {e}"
+            ))
+        })?;
+        self.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)
+    }
+
     /// Is this adapter configured well enough to be trusted with real value?
     ///
     /// Asked once, when the adapter is registered, rather than at each

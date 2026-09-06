@@ -1,8 +1,8 @@
-4
+3
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
-# refuse/deny/guard is a refusal by its own naming. Four of them are
+# refuse/deny/guard is a refusal by its own naming. Three of them are
 # reachable only from tests, which means they protect the tests.
 #
 # The number may only go down. Wiring one up, or moving it into a module that
@@ -18,7 +18,7 @@
 # gets paid down; a number driven to zero by wiring refusals that exist to
 # stay unwired is worse than the number it replaced.
 #
-# The four, and why each one is still here rather than wired:
+# The three, and why each one is still here rather than wired:
 #
 #   src/ai/execution/verify.rs   verify_execution_proof_structural
 #   src/ai_inference/verify.rs          verify_inference_stark
@@ -30,14 +30,6 @@
 #       which is the opposite of what the gate is for. They move when the
 #       audit lands, not before.
 #
-#   src/cross_domain/evm/adapter.rs  verify_deposit
-#       The richer sibling of `verify_receipt_proof`: it takes a full relayer
-#       proof package (header chain, MPT nodes, receipt) where the wired path
-#       takes a receipt proof alone. The module's own safety invariant is that
-#       the on-chain verifier never touches the network, so wiring this one
-#       means first deciding who assembles the package and how its freshness
-#       is bounded. That is a bridge-design question, not a call site.
-#
 #   src/domain/storage_deal.rs   verify_answer_challenge_zk_proof
 #       Returns `Err` unconditionally, on purpose. A Merkle proof not bound to
 #       its deal and challenge context is replayable across storage deals and
@@ -47,6 +39,16 @@
 #
 # Two call sites closed since this file was last written, and the number is
 # still five because the five listed below are different guards.
+#
+#   src/cross_domain/evm/adapter.rs  verify_deposit
+#       Wired into `ChainAdapter::verify_observation`, the check the relayer
+#       worker runs over every observation before it signs. The EVM override
+#       decodes the `DepositProofPackage` the observation carries and runs
+#       the full verifier with the adapter's own bridge address, topic and
+#       confirmation floor; a bare Merkle path is refused on that chain. The
+#       question this note used to ask, who assembles the package, has its
+#       answer: the adapter's RPC side, and until one exists the offline
+#       adapter refuses to produce an observation at all.
 #
 #   src/storage/qr_reemit.rs   verify_stream_id
 #       Called by `RevealSession::open` against a fold recomputed from the
