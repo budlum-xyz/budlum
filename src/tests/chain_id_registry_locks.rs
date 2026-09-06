@@ -213,8 +213,15 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
         seen.push(file.clone());
 
         let rpc = parsed.get("rpc");
-        let is_loopback =
-            |listener: &str| listener.starts_with("127.") || listener.starts_with("[::1]");
+        // Parsed, not prefix-matched: `127.attacker.example:8545` starts
+        // with `127.` and is a hostname the node would resolve and bind, so
+        // a listener passes only when it is a socket address whose IP is a
+        // loopback address.
+        let is_loopback = |listener: &str| {
+            listener
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|addr| addr.ip().is_loopback())
+        };
         let listener = rpc
             .and_then(|r| r.get("public_listener"))
             .and_then(toml::Value::as_str)

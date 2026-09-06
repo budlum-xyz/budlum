@@ -438,7 +438,7 @@ pub trait BudlumApi {
     /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
     ///
     /// The viewer is not a field: `viewer_claim` is
-    /// `{ownerPublicKey, signature, issuedAt}`, an ML-DSA-87 signature by the
+    /// `{viewerPublicKey, signature, issuedAt}`, an ML-DSA-87 signature by the
     /// viewer's own key over `view_claim_digest(content, viewer, key_id,
     /// owner, payload_commitment(packed), issuedAt)`. The viewer address is
     /// derived from the key, so a caller cannot name a grantee it is not; a
@@ -868,8 +868,8 @@ pub trait BudlumApi {
     /// amount. Below-fee registrations are rejected atomically by the
     /// executor (`ai_model_register_fee_insufficient`).
     ///
-    /// `modalities` carries the modality bits (`ModalitySet`). Absent means
-    /// the old behaviour (`text_only`). 0 reads nothing (`none` - a
+    /// `modality_bits` carries the modality bits (`ModalitySet`). Absent
+    /// means the old behaviour (`text_only`). 0 reads nothing (`none` - a
     /// deliberate refusal). 1 is text.
     #[method(name = "bud_aiRegisterModel")]
     async fn ai_register_model(

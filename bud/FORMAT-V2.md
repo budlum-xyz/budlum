@@ -107,6 +107,13 @@ with what a downstream caller has to do.
   `from_blob` already refused such offsets, so a split that came off the wire cannot reach `None`.
   Callers that previously wrote `split.decode()` now handle the `None` arm the same way they handle
   a `from_blob` refusal: refuse the blob, do not pad or guess.
+- `TenantMultifileStore` deltas open with a framing version byte (`DELTA_VERSION`, `0x10`), and a
+  changed block is framed as `0x01 || len (u32 LE) || block`. `apply_delta` refuses a delta whose
+  first byte is not that version. A delta written by the earlier framing (`0x01 || block`, the
+  length implied by the chunk size, no version byte) starts with a block marker and is refused
+  rather than decoded under the new rule; no such delta was ever stored on chain (the multifile
+  blob carries chunks and chunk lists, deltas were only ever a return value), so no reader for it
+  is kept. A caller holding one recomputes it with `add_delta` from the two versions.
 - The engine shard pack (`engine_store(.., erasure = true)`) carries a SHA3-256 digest in front of
   every shard (`BDLM_BUD_SHARD_V1`, 32 bytes, before the 4-byte length). `open_shard_pack` reads any
   four shards whose digest still matches and refuses a pack with fewer than four; a pack written

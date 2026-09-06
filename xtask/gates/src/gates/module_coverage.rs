@@ -162,6 +162,16 @@ fn floors(path: &Path) -> Result<BTreeMap<String, f64>, String> {
             let pct = f
                 .as_f64()
                 .ok_or_else(|| format!("{}: floor of {k} is not a number", path.display()))?;
+            // A floor is a percentage. Below zero every measurement clears
+            // it and the ratchet for that module is a number nobody can
+            // fail; above a hundred nothing clears it; NaN compares false
+            // both ways. None of the three is a floor, so none is accepted.
+            if !pct.is_finite() || !(0.0..=100.0).contains(&pct) {
+                return Err(format!(
+                    "{}: floor of {k} is {pct}, which is not a percentage in 0..=100",
+                    path.display()
+                ));
+            }
             out.insert(k.clone(), pct);
         }
     }
@@ -257,11 +267,49 @@ pub fn self_test() -> Result<String, String> {
     let dir = super::rust_literals::exclusive_scratch_dir("module-coverage-canary")?;
     let report = dir.join("cov.json");
     std::fs::write(&report, fake.to_string()).map_err(|e| e.to_string())?;
+    // A floor outside 0..=100 is refused when the baselines are read: a
+    // negative one would make the module's ratchet a number nobody fails.
+    let baselines = dir.join(BASELINES);
+    if let Some(parent) = baselines.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    for bad in ["-1.0", "100.5"] {
+        std::fs::write(
+            &baselines,
+            format!("{{\"module_line_floors\": {{\"budlum:consensus\": {bad}}}}}"),
+        )
+        .map_err(|e| e.to_string())?;
+        if evaluate(&dir, &report).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: a floor of {bad} was accepted"));
+        }
+    }
+    std::fs::write(
+        &baselines,
+        "{\"module_line_floors\": {\"budlum:consensus\": 0.0, \"budlum:crypto\": 100.0}}",
+    )
+    .map_err(|e| e.to_string())?;
+    match evaluate(&dir, &report) {
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(String::from(
+                "canary: a floor of 100 above 90% measured passed",
+            ));
+        }
+        Err(e) if !e.contains("budlum:crypto") => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!(
+                "canary: the edge floors 0 and 100 were not read as floors: {e}"
+            ));
+        }
+        Err(_) => {}
+    }
+    std::fs::remove_file(&baselines).map_err(|e| e.to_string())?;
     let verdict = evaluate(&dir, &report);
     let _ = std::fs::remove_dir_all(&dir);
     match verdict {
         Ok(msg) if msg.contains("SKIP:") => Ok(String::from(
-            "module coverage canary OK: the aggregation is right, a floor below passes, a floor above fails, an unreported module fails, no baselines file means SKIP",
+            "module coverage canary OK: the aggregation is right, a floor below passes, a floor above fails, an unreported module fails, a floor outside 0..=100 is refused, no baselines file means SKIP",
         )),
         Ok(msg) => Err(format!("canary: no baselines file did not SKIP:\n{msg}")),
         Err(e) => Err(format!("canary: no baselines file failed instead of SKIP:\n{e}")),

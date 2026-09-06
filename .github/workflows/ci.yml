@@ -1009,7 +1009,12 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-          scanners: secret,misconfig
+          # `vuln` is what `ignore-unfixed: false` below is about: without it
+          # the step never reads a lockfile and the unfixed-advisory setting
+          # governs nothing. The root and workspace Cargo.lock files are the
+          # inputs; osv-scanner and cargo-deny read the same files, and a
+          # finding needs a fix or a written, scoped exception in each tool.
+          scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
           format: sarif
           output: trivy-fs.sarif
@@ -1023,12 +1028,12 @@ jobs:
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
-      - name: Trivy fs gate (secret + misconfig; CRITICAL/HIGH = fail)
+      - name: Trivy fs gate (vuln + secret + misconfig; CRITICAL/HIGH = fail)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
-          scanners: secret,misconfig
+          scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
           exit-code: "1"
           # Unfixed advisories are reported too: hiding them keeps a known

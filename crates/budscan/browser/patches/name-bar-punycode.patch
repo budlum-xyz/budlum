@@ -16,9 +16,34 @@ produces `xn--yaz-5cd`; Python's `str.encode("idna")` reference gives the same
 result. The `xn--yaz-hlc` written in the architecture document was wrong and
 has been corrected.
 
+`BudScan.sys.mjs` is registered in the urlbar `moz.build` so that
+`resource:///modules/BudScan.sys.mjs` resolves, and every module that reads
+`lazy.BudScan` declares the getter on its own `lazy` object: a lazy getter
+belongs to the object it was defined on, so a getter in `UrlbarUtils` does
+nothing for `UrlbarInput` or `UrlbarTokenizer`, and a missing one throws in
+the middle of tokenizing what the user typed.
+
+--- a/browser/components/urlbar/moz.build
++++ b/browser/components/urlbar/moz.build
+@@ -15,6 +15,7 @@ EXTRA_JS_MODULES += [
+     "ActionsProvider.sys.mjs",
+     "ActionsProviderContextualSearch.sys.mjs",
+     "ActionsProviderQuickActions.sys.mjs",
++    "BudScan.sys.mjs",
+     "MerinoClient.sys.mjs",
+     "QuickActionsLoaderDefault.sys.mjs",
+     "QuickSuggest.sys.mjs",
 --- a/browser/components/urlbar/UrlbarInput.sys.mjs
 +++ b/browser/components/urlbar/UrlbarInput.sys.mjs
-@@ -1892,6 +1892,21 @@ export class UrlbarInput {
+@@ -12,6 +12,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   BrowserSearchTelemetry: "resource:///modules/BrowserSearchTelemetry.sys.mjs",
+   BrowserUIUtils: "resource:///modules/BrowserUIUtils.sys.mjs",
+   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
++  BudScan: "resource:///modules/BudScan.sys.mjs",
+   ExtensionSearchHandler:
+     "resource://gre/modules/ExtensionSearchHandler.sys.mjs",
+   ObjectUtils: "resource://gre/modules/ObjectUtils.sys.mjs",
+@@ -1892,6 +1893,21 @@ export class UrlbarInput {
        return uri.spec;
      }
  
@@ -119,7 +144,15 @@ has been corrected.
 +};
 --- a/browser/components/urlbar/UrlbarTokenizer.sys.mjs
 +++ b/browser/components/urlbar/UrlbarTokenizer.sys.mjs
-@@ -318,6 +318,17 @@ export var UrlbarTokenizer = {
+@@ -10,6 +10,7 @@
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
++  BudScan: "resource:///modules/BudScan.sys.mjs",
+   UrlbarUtils: "resource:///modules/UrlbarUtils.sys.mjs",
+   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+ });
+@@ -318,6 +319,17 @@ export var UrlbarTokenizer = {
    },
  
    _getTokenType(token) {

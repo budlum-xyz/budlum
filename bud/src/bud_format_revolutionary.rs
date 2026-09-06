@@ -417,12 +417,25 @@ impl RevolutionaryGates {
     /// nor as the body left after its prefix. The check used to look for the
     /// four bytes `AKIA` only, so a redaction that stripped the marker and
     /// kept the key body passed it.
+    ///
+    /// A secret survived when it, or its body without the vendor prefix, is
+    /// still a whole token of the redacted text. Whole tokens, not
+    /// substrings: `classify` marks any value after a secret key name as a
+    /// secret with no length floor, so `api_key=a` makes `a` the needle, and
+    /// a substring search finds it inside the kept `api_key` label and
+    /// reports leakage for a correct redaction. The tokens are cut the way
+    /// the redactor cuts them, so `[REDACTED]IOSFODNN7EXAMPLE` still yields
+    /// `IOSFODNN7EXAMPLE` and a kept body is still caught.
     pub fn k_bud_secret_redact(original: &str, redacted: &str) -> Result<(), &'static str> {
+        let left: Vec<&str> = redacted
+            .split(|c: char| !SecretRedactor::is_token_char(c))
+            .filter(|t| !t.is_empty())
+            .collect();
         let survived = SecretRedactor::secret_tokens(original)
             .iter()
             .any(|secret| {
-                redacted.contains(secret.as_str())
-                    || redacted.contains(SecretRedactor::token_body(secret))
+                let body = SecretRedactor::token_body(secret);
+                left.iter().any(|t| *t == secret.as_str() || *t == body)
             });
         if survived {
             return Err("K-BUD-SECRET-REDACT: secret not stripped");
@@ -512,6 +525,30 @@ mod tests {
         // The gate sees the body of a fine-grained token that lost only its prefix.
         let body_kept = text.replace("github_pat_", "[REDACTED]");
         assert!(RevolutionaryGates::k_bud_secret_redact(&text, &body_kept).is_err());
+    }
+
+    /// A short key-assigned value is a secret, and its redaction is correct
+    /// even when the value happens to be a substring of the text that stays:
+    /// `a` sits inside the kept `api_key` label and `ACT` inside the
+    /// `[REDACTED]` marker. The gate compares whole tokens, so a correct
+    /// redaction passes and the same short value left in place still fails.
+    #[test]
+    fn secret_redact_gate_compares_whole_tokens() {
+        for text in ["api_key=a", "password=ACT", "api_key=\"a\" rest"] {
+            let (redacted, _) = SecretRedactor::redact(text);
+            assert!(
+                !redacted.contains("=a") && !redacted.contains("=ACT"),
+                "{redacted}"
+            );
+            assert!(
+                RevolutionaryGates::k_bud_secret_redact(text, &redacted).is_ok(),
+                "{text} -> {redacted}"
+            );
+            assert!(
+                RevolutionaryGates::k_bud_secret_redact(text, text).is_err(),
+                "an unredacted {text} must fail"
+            );
+        }
     }
 
     /// The gate refuses the redaction the first version produced: marker

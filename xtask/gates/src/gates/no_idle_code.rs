@@ -169,6 +169,16 @@ fn cfg_test_end(src: &str, from: usize) -> usize {
     let mut k = from;
     let mut depth = 0usize;
     while k < b.len() {
+        // A raw string (`r"..."`, `r#"..."#`, `br##"..."##`) is one literal
+        // up to its matching terminator. Read as a plain string, the quote
+        // that opens it is closed by the first `"` inside it, and the rest
+        // of the literal is scanned as code: a `{` in it opens a block that
+        // never closes here, and the scan runs on into the file, dropping
+        // the definitions and calls it swallows.
+        if let Some(end) = raw_string_end(b, k) {
+            k = end;
+            continue;
+        }
         match b[k] {
             b'/' if k + 1 < b.len() && b[k + 1] == b'/' => {
                 while k < b.len() && b[k] != b'\n' {
@@ -240,6 +250,48 @@ fn cfg_test_end(src: &str, from: usize) -> usize {
     src.len()
 }
 
+/// The byte offset just past the raw string literal that starts at `at`,
+/// or `None` when no raw string starts there.
+///
+/// `r"..."`, `r#"..."#` and the byte forms `br"..."`, `br#"..."#`, with
+/// the hash count matched on the closing side. The `r` has to sit at an
+/// identifier boundary: the `r` inside `for` or `user"` is not a prefix.
+/// An unterminated raw string runs to the end of the source.
+fn raw_string_end(b: &[u8], at: usize) -> Option<usize> {
+    let prefix = match (b.get(at)?, b.get(at + 1)) {
+        (b'r', Some(b'"' | b'#')) => 1,
+        (b'b', Some(b'r')) if matches!(b.get(at + 2), Some(b'"' | b'#')) => 2,
+        _ => return None,
+    };
+    if at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_') {
+        return None;
+    }
+    let mut j = at + prefix;
+    let mut hashes = 0usize;
+    while j < b.len() && b[j] == b'#' {
+        hashes += 1;
+        j += 1;
+    }
+    if b.get(j) != Some(&b'"') {
+        return None;
+    }
+    let mut k = j + 1;
+    while k < b.len() {
+        if b[k] == b'"'
+            && b[k + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|c| **c == b'#')
+                .count()
+                == hashes
+        {
+            return Some(k + 1 + hashes);
+        }
+        k += 1;
+    }
+    Some(b.len())
+}
+
 /// Replace comments and string literals with spaces, preserving byte length
 /// where it is cheap to do so. Rust block comments nest, so a depth counter is
 /// required; a flat scan stops at the first `*/`.
@@ -248,24 +300,10 @@ fn strip_comments_and_strings(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
     while i < b.len() {
-        // Raw string: r"..." or r#"..."#
-        if b[i] == b'r' && i + 1 < b.len() && (b[i + 1] == b'"' || b[i + 1] == b'#') {
-            let mut hashes = 0usize;
-            let mut j = i + 1;
-            while j < b.len() && b[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < b.len() && b[j] == b'"' {
-                let close = format!("\"{}", "#".repeat(hashes));
-                let rest = &src[j + 1..];
-                let end = rest
-                    .find(&close)
-                    .map_or(b.len(), |p| j + 1 + p + close.len());
-                out.push(' ');
-                i = end;
-                continue;
-            }
+        if let Some(end) = raw_string_end(b, i) {
+            out.push(' ');
+            i = end;
+            continue;
         }
         match b[i] {
             b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
@@ -1261,6 +1299,32 @@ fn cfg_test_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "canary: a call made only from a cfg(test) module with a braced string was taken as wiring",
+        ));
+    }
+
+    // A raw string in the decorated item is one literal. Read as a plain
+    // string, `r#"a " b { "#` closed at its inner quote, the `{` after it
+    // opened a block, and the scan ran on past the caller that followed,
+    // so the callee was reported idle on valid code.
+    if !accepts_with(
+        clean,
+        tmp,
+        "cfg_test_raw_string",
+        &[
+            (
+                "src/idle.rs",
+                "pub fn called_after_a_raw_string() -> u32 { 5 }\n",
+            ),
+            (
+                "src/caller.rs",
+                "#[cfg(test)]\nconst S: &str = r#\"a \" b { \"#;\n\
+                 fn c() -> u32 { crate::idle::called_after_a_raw_string() }\n",
+            ),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a cfg(test) raw string with an unpaired quote hid the caller after it",
         ));
     }
     Ok(())

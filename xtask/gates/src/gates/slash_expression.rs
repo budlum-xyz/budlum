@@ -110,30 +110,178 @@ fn clamps_to_stake(normalized_body: &str) -> bool {
 }
 
 /// Whether the narrow side of a normalized body keeps the `as u64` value
-/// only up to `stake`. Accepted caps: `.min(stake)` on the cast value,
-/// `stake.min(..)`, `min(.., stake)` or `min(stake, ..)`, or an `if` that
-/// compares against `stake` and yields `stake` in one of its two branches
-/// (`if narrow > stake { stake } else { narrow }`). A narrow side without an
-/// `as u64` is not the operation this gate guards and is refused too.
+/// only up to `stake`. The cap has to be on the value the narrow side
+/// returns: its tail expression (or `return` operand) is `.min(stake)` on
+/// the narrowed value, `stake.min(..)`, `min(.., stake)` or `min(stake, ..)`
+/// of it, or an `if` that compares against `stake` and yields `stake` in one
+/// branch and the narrowed value in the other. The narrowed value is an
+/// `as u64` cast written in place or a `let` binding of one, and a binding
+/// of a capped expression is followed to the expression. A cap written in an
+/// earlier statement and thrown away (`let _ = 0u64.min(stake); r as u64`)
+/// caps nothing that is returned, and is refused; the gate used to accept
+/// `.min(stake)` anywhere in the text. A narrow side without an `as u64` is
+/// not the operation this gate guards and is refused too.
 fn caps_narrow_to_stake(narrow: &str) -> bool {
     if !narrow.contains("asu64") {
         return false;
     }
-    if narrow.contains(".min(stake)") || narrow.contains("stake.min(") {
-        return true;
+    let statements = top_level_statements(narrow);
+    let Some(&tail) = statements.last() else {
+        return false;
+    };
+    let bindings: Vec<(&str, &str)> = statements.iter().copied().filter_map(binding_of).collect();
+    let tail = resolve(tail.strip_prefix("return").unwrap_or(tail), &bindings);
+    let narrowed = |v: &str| resolve(v, &bindings).contains("asu64");
+    if let Some(receiver) = tail.strip_suffix(".min(stake)") {
+        return narrowed(receiver);
     }
-    if narrow.contains("min(") && (narrow.contains("min(stake,") || narrow.contains(",stake)")) {
-        return true;
+    if let Some(arg) = tail
+        .strip_prefix("stake.min(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return narrowed(arg);
     }
-    narrow.match_indices("if").any(|(i, _)| {
-        let Some(brace) = narrow[i..].find('{') else {
-            return false;
+    if let Some((a, b)) = min_call_args(tail) {
+        return (a == "stake" && narrowed(b)) || (b == "stake" && narrowed(a));
+    }
+    let Some((cond, yes, no)) = if_else_parts(tail) else {
+        return false;
+    };
+    let compares = cond.contains("stake") && cond.contains(['<', '>']);
+    compares && ((yes == "stake" && narrowed(no)) || (no == "stake" && narrowed(yes)))
+}
+
+/// The statements of a normalized fragment, split at the `;` that sit
+/// outside every bracket; a trailing expression is the last entry.
+fn top_level_statements(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, b) in text.bytes().enumerate() {
+        match b {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => {
+                if i > start {
+                    out.push(&text[start..i]);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// `let [mut] name[: T] = expr` as `(name, expr)`; anything else is `None`.
+fn binding_of(statement: &str) -> Option<(&str, &str)> {
+    let rest = statement.strip_prefix("let")?;
+    let rest = rest.strip_prefix("mut").unwrap_or(rest);
+    let name_end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    let eq = rest[name_end..].find('=')?;
+    Some((name, &rest[name_end + eq + 1..]))
+}
+
+/// A bare identifier is followed to what it was bound to, a few hops at
+/// most; anything that is not a bound identifier is returned as written,
+/// less a pair of parentheses around the whole of it.
+fn resolve<'a>(value: &'a str, bindings: &[(&'a str, &'a str)]) -> &'a str {
+    let mut current = without_outer_parens(value);
+    for _ in 0..4 {
+        let Some((_, expr)) = bindings.iter().find(|(name, _)| *name == current) else {
+            break;
         };
-        let cond = &narrow[i + 2..i + brace];
-        let rest = &narrow[i + brace + 1..];
-        let compares = cond.contains("stake") && cond.contains(['<', '>']);
-        compares && (rest.starts_with("stake}else{") || rest.contains("}else{stake}"))
-    })
+        current = without_outer_parens(expr);
+    }
+    current
+}
+
+/// `(expr)` as `expr`, only when the opening parenthesis is closed by the
+/// last character; `(a).min(b)` is left alone.
+fn without_outer_parens(value: &str) -> &str {
+    let mut current = value;
+    while let Some(inner) = current.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        let mut depth = 0usize;
+        let mut closes_early = false;
+        for b in inner.bytes() {
+            match b {
+                b'(' => depth += 1,
+                b')' if depth == 0 => {
+                    closes_early = true;
+                    break;
+                }
+                b')' => depth -= 1,
+                _ => {}
+            }
+        }
+        if closes_early {
+            break;
+        }
+        current = inner;
+    }
+    current
+}
+
+/// The two arguments of a `min(a, b)` call that is the whole expression,
+/// with or without a path in front of it (`u64::min`, `std::cmp::min`).
+fn min_call_args(expr: &str) -> Option<(&str, &str)> {
+    let at = expr.find("min(")?;
+    let head = &expr[..at];
+    if !(head.is_empty() || head.ends_with("::")) {
+        return None;
+    }
+    let inner = expr[at + 4..].strip_suffix(')')?;
+    let mut depth = 0usize;
+    for (i, b) in inner.bytes().enumerate() {
+        match b {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => return Some((&inner[..i], &inner[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `if cond { yes } else { no }` that is the whole expression, as its three
+/// parts; `None` for any other shape.
+fn if_else_parts(expr: &str) -> Option<(&str, &str, &str)> {
+    let body = expr.strip_prefix("if")?;
+    let open = body.find('{')?;
+    let cond = &body[..open];
+    let yes_end = open + matching_brace(&body[open..])?;
+    let yes = &body[open + 1..yes_end];
+    let after = body[yes_end + 1..].strip_prefix("else{")?;
+    let no_end = matching_brace(&body[yes_end + 1 + 4..])?;
+    let no = &after[..no_end - 1];
+    if !after[no_end..].is_empty() {
+        return None;
+    }
+    Some((cond, yes, no))
+}
+
+/// The offset of the `}` that closes the `{` at the start of `text`.
+fn matching_brace(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, b) in text.bytes().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn normalized(body: &str) -> String {
@@ -283,10 +431,12 @@ pub fn self_test() -> Result<String, String> {
     let body = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    (r as u64).min(stake)\n}\n";
     let tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        (r as u64).min(stake)\n    }\n}\n";
     let branch = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    if narrow > stake {\n        stake\n    } else {\n        narrow\n    }\n}\n";
+    let bound = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let capped = u64::min(r as u64, stake);\n    capped\n}\n";
     for (tag, clamp) in [
         ("early return", body),
         ("tail expression", tail),
         ("if/else cap", branch),
+        ("cap bound to a name", bound),
     ] {
         std::fs::write(dir.join("src/core/chain_config.rs"), clamp).unwrap();
         std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), clamp).unwrap();
@@ -306,11 +456,21 @@ pub fn self_test() -> Result<String, String> {
     let discarded = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    };\n    r as u64\n}\n";
     let uncapped_return = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    r as u64\n}\n";
     let uncapped_tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        r as u64\n    }\n}\n";
+    let discarded_cap = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let _ = 0u64.min(stake);\n    r as u64\n}\n";
+    let capped_other = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    let _ = narrow.min(stake);\n    narrow\n}\n";
     for (tag, bug) in [
         ("never yield the stake", unclamped),
         ("discard the stake", discarded),
         ("return the bare cast after the guard", uncapped_return),
         ("return the bare cast in the else block", uncapped_tail),
+        (
+            "cap an unrelated value and return the bare cast",
+            discarded_cap,
+        ),
+        (
+            "cap the narrowed value in a statement and return it uncapped",
+            capped_other,
+        ),
     ] {
         std::fs::write(dir.join("src/core/chain_config.rs"), bug).unwrap();
         std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), bug).unwrap();
@@ -330,8 +490,9 @@ pub fn self_test() -> Result<String, String> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "slash canary OK (an early-return clamp, a tail-expression clamp and an if/else \
-         cap PASS, two agreeing unclamped homes FAIL, a discarded `{ stake }` block FAILs, \
-         a bare cast after the guard FAILs on both shapes, a diverging home FAILs).",
+        "slash canary OK (an early-return clamp, a tail-expression clamp, an if/else \
+         cap and a cap bound to a name PASS, two agreeing unclamped homes FAIL, a \
+         discarded `{ stake }` block FAILs, a bare cast after the guard FAILs on both \
+         shapes, a cap on a value that is not returned FAILs, a diverging home FAILs).",
     ))
 }

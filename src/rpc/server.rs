@@ -989,10 +989,32 @@ fn grant_auth_error(e: crate::storage::GrantAuthError) -> ErrorObjectOwned {
 fn parse_grant_auth(
     v: Option<&serde_json::Value>,
 ) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
-    let Some(v) = v else {
+    parse_signed_key_object(v, "authorization", "ownerPublicKey")
+}
+
+/// Parses a viewer's reveal claim: `{"viewerPublicKey": "0x…", "signature":
+/// "0x…", "issuedAt": n}`. The same shape as a grant authorisation, under the
+/// name of the role that signs it: the key is the viewer's, and a client that
+/// sends the owner's key under `ownerPublicKey` here is told which field is
+/// missing instead of getting a signature refusal it cannot explain.
+fn parse_view_claim(
+    claim: &serde_json::Value,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    parse_signed_key_object(Some(claim), "viewerClaim", "viewerPublicKey")
+}
+
+/// The shared reader behind [`parse_grant_auth`] and [`parse_view_claim`]: a
+/// JSON object carrying an ML-DSA-87 public key under `key_field` and a
+/// `signature`, both hex. `label` names the object in every refusal.
+fn parse_signed_key_object(
+    v: Option<&serde_json::Value>,
+    label: &str,
+    key_field: &str,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    let Some(v) = v.filter(|v| v.is_object()) else {
         return Err(ErrorObjectOwned::owned(
             -32602,
-            "authorization object required: ownerPublicKey + signature",
+            format!("{label} object required: {key_field} + signature"),
             None::<()>,
         ));
     };
@@ -1003,20 +1025,19 @@ fn parse_grant_auth(
             .ok_or_else(|| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("authorization.{k} must be a hex string"),
+                    format!("{label}.{k} must be a hex string"),
                     None::<()>,
                 )
             })?;
-        hex::decode(ham.strip_prefix("0x").unwrap_or(ham)).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("authorization.{k}: {e}"), None::<()>)
-        })
+        hex::decode(ham.strip_prefix("0x").unwrap_or(ham))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("{label}.{k}: {e}"), None::<()>))
     };
     let owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN] =
-        al("ownerPublicKey")?.try_into().map_err(|_| {
+        al(key_field)?.try_into().map_err(|_| {
             ErrorObjectOwned::owned(
                 -32602,
                 format!(
-                    "authorization.ownerPublicKey must be {} bytes",
+                    "{label}.{key_field} must be {} bytes",
                     crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN
                 ),
                 None::<()>,
@@ -1032,7 +1053,7 @@ fn parse_grant_auth(
 /// Check a viewer's signed claim to open a reveal session and return the
 /// address it speaks for.
 ///
-/// The claim is `{ownerPublicKey, signature, issuedAt}` in the same shape as
+/// The claim is `{viewerPublicKey, signature, issuedAt}` in the same shape as
 /// a grant authorisation (the viewer signs with its own wallet key). The
 /// address is derived from the key, the signature is checked over
 /// [`crate::storage::view_claim_digest`] of this exact request, and a claim
@@ -1065,9 +1086,7 @@ fn verify_view_claim(
     packed: &[u8],
     now: u64,
 ) -> Result<Address, ErrorObjectOwned> {
-    let auth = parse_grant_auth(Some(claim)).map_err(|e| {
-        ErrorObjectOwned::owned(-32602, format!("viewerClaim: {}", e.message()), None::<()>)
-    })?;
+    let auth = parse_view_claim(claim)?;
     let issued_at = claim
         .get("issuedAt")
         .and_then(serde_json::Value::as_u64)
@@ -5783,7 +5802,7 @@ mod render_format_tests {
 
 #[cfg(test)]
 mod view_claim_tests {
-    use super::{check_claimed_owner, verify_view_claim};
+    use super::{check_claimed_owner, parse_grant_auth, verify_view_claim};
     use crate::core::address::Address;
     use crate::storage::ContentId;
 
@@ -5824,6 +5843,34 @@ mod view_claim_tests {
         assert!(err.message().contains("viewerClaim"), "{err:?}");
     }
 
+    /// The claim's key field is the viewer's, by name. A claim that carries
+    /// the grant field `ownerPublicKey` instead is refused with the field the
+    /// viewer has to send, not with a signature error.
+    #[test]
+    fn a_view_claim_names_the_viewer_key_field() {
+        let (content, key, owner, packed) = parts();
+        let claim = serde_json::json!({
+            "ownerPublicKey": "0x00",
+            "signature": "0x00",
+            "issuedAt": NOW,
+        });
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+        assert!(
+            err.message().contains("viewerClaim.viewerPublicKey"),
+            "{err:?}"
+        );
+        let grant_err = parse_grant_auth(Some(&serde_json::json!({
+            "viewerPublicKey": "0x00",
+            "signature": "0x00",
+        })))
+        .unwrap_err();
+        assert!(
+            grant_err.message().contains("authorization.ownerPublicKey"),
+            "{grant_err:?}"
+        );
+    }
+
     #[cfg(feature = "wallet-ml-dsa")]
     fn signed_claim(
         kp: &crate::crypto::primitives::WalletKeyPair,
@@ -5842,7 +5889,7 @@ mod view_claim_tests {
             issued_at,
         );
         serde_json::json!({
-            "ownerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
+            "viewerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
             "signature": format!("0x{}", hex::encode(kp.sign(&digest))),
             "issuedAt": issued_at,
         })
@@ -5905,7 +5952,7 @@ mod view_claim_tests {
             NOW,
         );
         let claim = serde_json::json!({
-            "ownerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
+            "viewerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
             "signature": format!("0x{}", hex::encode(stranger.sign(&digest))),
             "issuedAt": NOW,
         });

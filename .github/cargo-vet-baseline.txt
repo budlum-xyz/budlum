@@ -1,4 +1,4 @@
-434
+433
 # ---------------------------------------------------------------------------
 # cargo-vet ratchet baseline: the number of unvetted dependencies.
 # The FIRST bare-number line of this file is the baseline
@@ -9,8 +9,9 @@
 # invented keys so the tool fell over with a parse error; the file's existence
 # gave the impression of auditing, but not a single dependency had been audited.
 # The bare number above is the current baseline and has been lowered since
-# (434 as of 2026-09-04, CI measuring 433 with the libp2p-connection-limits
-# audit); the history below keeps the 437 figures as the measurements they were.
+# (434 on 2026-09-04, then 433 on 2026-09-06 once CI measured 433 with the
+# libp2p-connection-limits audit); the history below keeps the 437 figures as
+# the measurements they were.
 #
 # Rule: this number MUST NOT RISE. Lowering it is free and encouraged - when it
 # drops, this file is lowered in a deliberate PR (the ratchet tightens). Raising

@@ -86,10 +86,30 @@ struct PendingResult {
     /// The hash of the signed result transaction the chain handle took last,
     /// or `None` when no submission has been accepted yet.
     submitted_tx: Option<String>,
+    /// How many resubmission passes failed to find the request's transaction
+    /// on chain. Persisted with the entry, so a restart does not reset it;
+    /// at [`MAX_REQUESTER_LOOKUP_FAILURES`] the entry is dropped and logged.
+    #[serde(default)]
+    requester_lookups_failed: u32,
 }
 
 /// The file name of the pending-result store, next to the cursor file.
 const PENDING_FILE_NAME: &str = "relayer-pending.json";
+
+/// How many passes a pending result whose request cannot be read back from
+/// the chain is kept before it is dropped.
+///
+/// A result waits for resubmission with its requester looked up from the
+/// request transaction. When that lookup keeps failing (the request was
+/// reorged away before the cursor was persisted, or the store behind
+/// `get_transaction_by_hash` lost it), nothing can ever submit the result:
+/// `reap_finalized` skips entries without a submission and `load_pending`
+/// brings them back after every restart, so without a budget they live in
+/// the pending store for good and grow it. The budget is per entry and
+/// counts passes, not time: passes are five seconds apart, so this is about
+/// two hours of a request staying unreadable, well past any reorg depth.
+/// `UniversalRelay` has no chain-side deadline to lean on.
+const MAX_REQUESTER_LOOKUP_FAILURES: u32 = 1440;
 
 impl RelayerWorker {
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
@@ -234,6 +254,26 @@ impl RelayerWorker {
                 return;
             }
         };
+        // `load_pending` reads at most `MAX_RELAY_PENDING_BYTES` and treats a
+        // longer file as unreadable, which empties the whole set on the next
+        // start. Writing past that ceiling would therefore turn every pending
+        // result into a repeated external action at the next restart. The
+        // file on disk is left as it was: it still holds the last state that
+        // fits, and the operator is told which entry count did not.
+        let limit = crate::core::bounded_read::MAX_RELAY_PENDING_BYTES;
+        if body.len() as u64 > limit {
+            error!(
+                bytes = body.len(),
+                limit,
+                pending = self.observed.len(),
+                path = %path.display(),
+                "Relayer: the pending-result set no longer fits its file ceiling; the \
+                 previous file is kept and this state is not persisted. Results the \
+                 chain has not finalized are at risk of a repeated external action \
+                 after a restart until the set shrinks"
+            );
+            return;
+        }
         if let Err(e) = std::fs::write(&path, body) {
             warn!(error = %e, path = %path.display(),
                   "Relayer: failed to persist pending results; a restart may repeat an external action");
@@ -309,19 +349,56 @@ impl RelayerWorker {
         let Some(kp) = self.relayer_keypair.clone() else {
             return;
         };
+        // A failed lookup moves an entry's counter, and a spent budget removes
+        // the entry; both are written, so a restart neither resets the count
+        // nor brings a dropped entry back.
+        let mut changed = false;
         for request in lost {
             let Some(result) = self.observed.get(&request).map(|p| p.result.clone()) else {
                 continue;
             };
             let Some(user) = self.requester_of(&request).await else {
-                warn!(
-                    request,
-                    "Relayer: cannot find the requester of a pending result"
-                );
+                self.note_requester_lookup_failure(&request);
+                changed = true;
                 continue;
             };
             let _ = self.submit_result(&request, user, &result, &kp).await;
         }
+        if changed {
+            self.save_pending();
+        }
+    }
+
+    /// Count one failed requester lookup against a pending entry, and drop
+    /// the entry once it has spent [`MAX_REQUESTER_LOOKUP_FAILURES`] of them.
+    /// Returns whether the entry was dropped.
+    fn note_requester_lookup_failure(&mut self, request: &str) -> bool {
+        let Some(pending) = self.observed.get_mut(request) else {
+            return false;
+        };
+        pending.requester_lookups_failed = pending.requester_lookups_failed.saturating_add(1);
+        let failed = pending.requester_lookups_failed;
+        if failed < MAX_REQUESTER_LOOKUP_FAILURES {
+            warn!(
+                request,
+                failed,
+                budget = MAX_REQUESTER_LOOKUP_FAILURES,
+                "Relayer: cannot find the requester of a pending result; the result is kept \
+                 for another pass"
+            );
+            return false;
+        }
+        error!(
+            request,
+            external_tx = %pending.result.tx_hash,
+            chain = ?pending.result.chain,
+            "Relayer: the request behind a verified external result could not be read \
+             back from the chain for the whole failure budget; the result is dropped \
+             from the pending store. The external action happened and its result was \
+             never delivered: this needs an operator"
+        );
+        self.observed.remove(request);
+        true
     }
 
     /// The account that paid for a relay request, read back from its
@@ -639,6 +716,7 @@ impl RelayerWorker {
                         PendingResult {
                             result: result.clone(),
                             submitted_tx: None,
+                            requester_lookups_failed: 0,
                         },
                     );
                     self.save_pending();
@@ -1135,6 +1213,7 @@ mod pending_results {
             PendingResult {
                 result: observation(1),
                 submitted_tx: Some("tx-a".to_string()),
+                requester_lookups_failed: 0,
             },
         );
         w.observed.insert(
@@ -1142,6 +1221,7 @@ mod pending_results {
             PendingResult {
                 result: observation(2),
                 submitted_tx: None,
+                requester_lookups_failed: 3,
             },
         );
         w.save_pending();
@@ -1150,6 +1230,145 @@ mod pending_results {
         let again = RelayerWorker::new(ChainHandle::new(tx2), Address::from([7u8; 32]))
             .with_cursor_path(Some(path));
         assert_eq!(again.load_pending(), w.observed);
+    }
+
+    /// A pending file written before the lookup counter existed still
+    /// loads: the counter defaults to zero.
+    #[test]
+    fn a_pending_file_without_the_counter_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path.clone()));
+        let old = serde_json::json!({
+            "req": {
+                "result": observation(4),
+                "submitted_tx": null,
+            }
+        });
+        std::fs::write(w.pending_path().expect("path"), old.to_string()).expect("write");
+        let loaded = w.load_pending();
+        assert_eq!(loaded["req"].requester_lookups_failed, 0);
+        assert_eq!(loaded["req"].result, observation(4));
+    }
+
+    /// A pending set whose encoding no longer fits the read ceiling is not
+    /// written: the file keeps the last state that fit, instead of becoming
+    /// a file the next start refuses and replaces with nothing.
+    #[test]
+    fn an_oversized_pending_set_keeps_the_previous_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path));
+        w.observed.insert(
+            "req-small".to_string(),
+            PendingResult {
+                result: observation(1),
+                submitted_tx: None,
+                requester_lookups_failed: 0,
+            },
+        );
+        w.save_pending();
+        let before = w.load_pending();
+        assert_eq!(before.len(), 1);
+
+        let mut huge = observation(2);
+        huge.receipt_proof =
+            vec![0xAB; crate::core::bounded_read::MAX_RELAY_PENDING_BYTES as usize];
+        w.observed.insert(
+            "req-huge".to_string(),
+            PendingResult {
+                result: huge,
+                submitted_tx: None,
+                requester_lookups_failed: 0,
+            },
+        );
+        w.save_pending();
+        assert_eq!(
+            w.load_pending(),
+            before,
+            "the previous file is what the next start reads"
+        );
+    }
+
+    /// A pending result whose request cannot be read back is kept for the
+    /// failure budget and dropped at the end of it, with the store written.
+    #[test]
+    fn an_unreadable_request_is_dropped_after_its_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path));
+        w.observed.insert(
+            "req-orphan".to_string(),
+            PendingResult {
+                result: observation(6),
+                submitted_tx: None,
+                requester_lookups_failed: 0,
+            },
+        );
+        for pass in 1..MAX_REQUESTER_LOOKUP_FAILURES {
+            assert!(
+                !w.note_requester_lookup_failure("req-orphan"),
+                "pass {pass} is inside the budget"
+            );
+            assert_eq!(w.observed["req-orphan"].requester_lookups_failed, pass);
+        }
+        assert!(w.note_requester_lookup_failure("req-orphan"));
+        assert!(w.observed.is_empty(), "the entry is gone at the budget");
+        assert!(!w.note_requester_lookup_failure("req-orphan"));
+        // `resubmit_lost` writes the store after a drop; the persisted set
+        // is what a restart would read, so the drop has to reach it.
+        w.save_pending();
+        assert!(w.load_pending().is_empty());
+    }
+
+    /// The whole pass: a lost submission whose request the chain cannot
+    /// return counts one failure and stays; the counter is persisted.
+    #[tokio::test]
+    async fn resubmit_counts_a_failed_lookup_and_persists_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let handle = actor(
+            std::collections::HashMap::new(),
+            std::collections::HashSet::new(),
+            accepted.clone(),
+        );
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+        let mut w = RelayerWorker::new(handle, Address::from([7u8; 32]))
+            .with_signing_key(key)
+            .with_cursor_path(Some(path));
+        w.observed.insert(
+            "req-orphan".to_string(),
+            PendingResult {
+                result: observation(6),
+                submitted_tx: None,
+                requester_lookups_failed: MAX_REQUESTER_LOOKUP_FAILURES - 2,
+            },
+        );
+        w.save_pending();
+        w.resubmit_lost().await;
+        assert_eq!(accepted.load(Ordering::SeqCst), 0, "nothing was submitted");
+        assert_eq!(
+            w.observed["req-orphan"].requester_lookups_failed,
+            MAX_REQUESTER_LOOKUP_FAILURES - 1
+        );
+        assert_eq!(
+            w.load_pending()["req-orphan"].requester_lookups_failed,
+            MAX_REQUESTER_LOOKUP_FAILURES - 1,
+            "the count survives a restart"
+        );
+        w.resubmit_lost().await;
+        assert!(w.observed.is_empty(), "the budget is spent");
+        assert!(
+            w.load_pending().is_empty(),
+            "the drop was written to the pending file"
+        );
     }
 
     /// A worker without a cursor path keeps everything in memory, as before.
@@ -1162,6 +1381,7 @@ mod pending_results {
             PendingResult {
                 result: observation(3),
                 submitted_tx: None,
+                requester_lookups_failed: 0,
             },
         );
         w.save_pending();
@@ -1192,6 +1412,7 @@ mod pending_results {
                 PendingResult {
                     result: observation(9),
                     submitted_tx: Some(hash.to_string()),
+                    requester_lookups_failed: 0,
                 },
             );
         }
@@ -1236,6 +1457,7 @@ mod pending_results {
             PendingResult {
                 result: observation(5),
                 submitted_tx: None,
+                requester_lookups_failed: 0,
             },
         );
 

@@ -90,7 +90,8 @@ fn touched_files(diff: &str) -> Vec<String> {
         .collect()
 }
 
-/// Hunk headers whose line counts disagree with the body under them.
+/// Hunk headers whose line counts disagree with the body under them, and
+/// hunk bodies holding a line that is not a diff record.
 ///
 /// `git apply` refuses such a hunk as a corrupt patch, so a patch that fails
 /// here cannot be applied by the build. Four hunks of the protocol-handler
@@ -98,6 +99,10 @@ fn touched_files(diff: &str) -> Vec<String> {
 /// nothing read the headers. The rules are those of unified diff: `+` is a
 /// new line, `-` an old one, a space or an empty line is context, `\\` is
 /// the no-newline marker; the body ends at the next hunk or file header.
+/// A line with none of those prefixes inside a hunk is an error of that
+/// hunk. It used to end the hunk instead, so a body that had already met
+/// its declared counts could carry stray text after them and pass: `git
+/// apply` reads the same text as a corrupt patch.
 fn hunk_count_errors(rel: &str, diff: &str) -> Vec<String> {
     let lines: Vec<&str> = diff.split('\n').collect();
     let mut problems = Vec::new();
@@ -130,7 +135,12 @@ fn hunk_count_errors(rel: &str, diff: &str) -> Vec<String> {
                 old += 1;
                 new += 1;
             } else if !l.starts_with('\\') {
-                break;
+                problems.push(format!(
+                    "{rel}:{}: a line inside the hunk at line {header_line} carries no \
+                     diff prefix (`+`, `-`, space or `\\`); git apply refuses this hunk \
+                     as corrupt",
+                    j + 1
+                ));
             }
             j += 1;
         }
@@ -375,6 +385,16 @@ pub fn self_test() -> Result<String, String> {
     if hunk_count_errors("bad.patch", &bad).len() != 1 {
         problems.push(String::from(
             "VACUOUS: a hunk header with the wrong line count passed",
+        ));
+    }
+    // Canary 4c: a line without a diff prefix inside a hunk is a finding
+    // even when the lines before it already satisfy the header. Read as
+    // the end of the hunk, it let stray text ride in a patch that git apply
+    // refuses.
+    let stray = "--- a/browser/y.js\n+++ b/browser/y.js\n@@ -1 +1 @@\n x\nnot a diff record\n";
+    if hunk_count_errors("stray.patch", stray).is_empty() {
+        problems.push(String::from(
+            "VACUOUS: a hunk carrying a line without a diff prefix passed",
         ));
     }
 

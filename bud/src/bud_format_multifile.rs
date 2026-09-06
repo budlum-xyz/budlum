@@ -28,6 +28,16 @@ use sha3::{Digest, Sha3_256};
 pub const MAX_MULTIFILE_CHUNKS: usize = 1 << 20;
 pub const MULTI_MAGIC: [u8; 8] = *b"\xB5MFLE\0\0\0";
 pub const MULTI_VERSION: u8 = 1;
+/// The first byte of every delta: the framing version. Version 1 frames a
+/// changed block as `0x01 || len (u32 LE) || block`. The version byte is
+/// there so that a delta is never read under a framing other than the one
+/// it was written with: before it existed the changed-block frame was
+/// `0x01 || block` with an implied length, and a delta of that framing fed
+/// to the reader of this one would have decoded the wrong bytes without
+/// any refusal. `0x00` and `0x01` are the block markers, so a delta from
+/// before the version byte starts with one of those and is refused here
+/// as an unknown version rather than decoded.
+const DELTA_VERSION: u8 = 0x10;
 pub const MAX_FILES: usize = 100_000;
 pub const MAX_CHUNK: usize = 64 * 1024 * 1024;
 pub const DEFAULT_CHUNK: usize = 16 * 1024; // V7: a 16KB chunk (the 66x scenario)
@@ -107,13 +117,15 @@ impl TenantMultifileStore {
     /// A changed block is written with its own length (u32 LE) so that a
     /// trailing partial block round-trips; the reader used to assume every
     /// changed block was a full `chunk_size`, and a changed tail made
-    /// `apply_delta` fail. `None` when `chunk_size` is zero or above
-    /// `MAX_CHUNK` (`slice::chunks` panics on zero).
+    /// `apply_delta` fail. The delta opens with `DELTA_VERSION`, so the
+    /// framing a delta was written with is the framing it is read with.
+    /// `None` when `chunk_size` is zero or above `MAX_CHUNK`
+    /// (`slice::chunks` panics on zero).
     pub fn add_delta(&mut self, prev: &[u8], next: &[u8], chunk_size: usize) -> Option<Vec<u8>> {
         if chunk_size == 0 || chunk_size > MAX_CHUNK {
             return None;
         }
-        let mut delta = Vec::new();
+        let mut delta = vec![DELTA_VERSION];
         let prev_chunks: Vec<&[u8]> = prev.chunks(chunk_size).collect();
         let next_chunks: Vec<&[u8]> = next.chunks(chunk_size).collect();
         for (i, nc) in next_chunks.iter().enumerate() {
@@ -132,8 +144,15 @@ impl TenantMultifileStore {
     }
 
     /// Apply a delta: base + delta = the new version (the losslessness proof).
+    ///
+    /// `None` for a delta whose first byte is not `DELTA_VERSION`: a delta
+    /// written under another framing is refused, not guessed at.
     pub fn apply_delta(&self, prev: &[u8], delta: &[u8], chunk_size: usize) -> Option<Vec<u8>> {
         if chunk_size == 0 || chunk_size > MAX_CHUNK {
+            return None;
+        }
+        let (version, delta) = delta.split_first()?;
+        if *version != DELTA_VERSION {
             return None;
         }
         let prev_chunks: Vec<&[u8]> = prev.chunks(chunk_size).collect();
@@ -309,8 +328,8 @@ mod tests {
         let delta = store
             .add_delta(&base, &next, DEFAULT_CHUNK)
             .expect("chunk size");
-        // delta = a 1 byte marker per block plus the changed blocks, each with
-        // its 4 byte length
+        // delta = the version byte, a 1 byte marker per block plus the
+        // changed blocks, each with its 4 byte length
         let blocks = base.len().div_ceil(DEFAULT_CHUNK);
         assert!(
             delta.len() < base.len() / 50,
@@ -320,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             delta.len(),
-            blocks + 5 * (4 + DEFAULT_CHUNK),
+            1 + blocks + 5 * (4 + DEFAULT_CHUNK),
             "5 changed blocks in full"
         );
         // apply: base + delta = next (lossless)
@@ -361,19 +380,75 @@ mod tests {
     fn a_short_block_before_another_frame_is_refused() {
         let store = TenantMultifileStore::new();
         let prev = b"abcdefgh";
-        let short_then_reference = [0x01, 0x01, 0, 0, 0, b'X', 0x00];
+        let short_then_reference = [DELTA_VERSION, 0x01, 0x01, 0, 0, 0, b'X', 0x00];
         assert!(store.apply_delta(prev, &short_then_reference, 4).is_none());
         let short_then_changed = [
-            0x01, 0x01, 0, 0, 0, b'X', 0x01, 0x04, 0, 0, 0, b'w', b'x', b'y', b'z',
+            DELTA_VERSION,
+            0x01,
+            0x01,
+            0,
+            0,
+            0,
+            b'X',
+            0x01,
+            0x04,
+            0,
+            0,
+            0,
+            b'w',
+            b'x',
+            b'y',
+            b'z',
         ];
         assert!(store.apply_delta(prev, &short_then_changed, 4).is_none());
         // The same short block at the end is a legitimate final chunk.
-        let reference_then_short = [0x00, 0x01, 0x01, 0, 0, 0, b'X'];
+        let reference_then_short = [DELTA_VERSION, 0x00, 0x01, 0x01, 0, 0, 0, b'X'];
         assert_eq!(
             store
                 .apply_delta(prev, &reference_then_short, 4)
                 .expect("valid tail"),
             b"abcdX"
+        );
+    }
+
+    /// A delta is read only under the framing it was written with. One from
+    /// before the version byte starts with a block marker and is refused;
+    /// so is an unknown version and an empty delta. Neither is decoded into
+    /// bytes the writer never meant.
+    #[test]
+    fn a_delta_of_another_framing_is_refused() {
+        let store = TenantMultifileStore::new();
+        let prev = b"abcdefgh";
+        // The old framing of "second block changed to wxyz": marker, block.
+        let old_framing = [0x00, 0x01, b'w', b'x', b'y', b'z'];
+        assert!(store.apply_delta(prev, &old_framing, 4).is_none());
+        // The same change in the current framing, under a version nobody wrote.
+        let unknown = [0x11, 0x00, 0x01, 0x04, 0, 0, 0, b'w', b'x', b'y', b'z'];
+        assert!(store.apply_delta(prev, &unknown, 4).is_none());
+        assert!(store.apply_delta(prev, &[], 4).is_none());
+        let current = [
+            DELTA_VERSION,
+            0x00,
+            0x01,
+            0x04,
+            0,
+            0,
+            0,
+            b'w',
+            b'x',
+            b'y',
+            b'z',
+        ];
+        assert_eq!(
+            store
+                .apply_delta(prev, &current, 4)
+                .expect("current framing"),
+            b"abcdwxyz"
+        );
+        // A version byte alone is an empty delta: the new version is empty.
+        assert_eq!(
+            store.apply_delta(prev, &[DELTA_VERSION], 4).expect("empty"),
+            b""
         );
     }
 

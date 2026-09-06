@@ -47,14 +47,15 @@ fn vm_body(vm_src: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Comments and literals gone, through the shared
+/// [`rust_literals::scrub`](crate::gates::rust_literals::scrub): string and
+/// char literals first (so a `//` or `/*` inside one is data), then nested
+/// block comments, then line comments. This gate used to cut at `//` only,
+/// so `builder.when /* note */ (is_assert).assert_one(rs1_val)` kept the
+/// comment in the statement, `when(is_assert` never matched, and the
+/// direct assertion passed.
 fn strip_comments(text: &str) -> String {
-    text.lines()
-        .map(|l| {
-            let idx = l.find("//").unwrap_or(l.len());
-            l[..idx].to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::gates::rust_literals::scrub(text)
 }
 
 /// The statements of a source fragment, comments gone, every run of
@@ -228,6 +229,34 @@ pub fn self_test() -> Result<String, String> {
             "canary: a direct assert_one with spaces around its punctuation passed",
         ));
     }
+    // The same bypass with a block comment inside the chain. A scanner that
+    // removes only `//` comments leaves the comment between `when` and its
+    // argument, so `when(is_assert` is never seen and the bypass passes.
+    let commented_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder.when /* witness? no */ (is_assert).assert_one(rs1_val.clone());\n";
+    std::fs::write(
+        dir.join("budzero/bud-proof/src/plonky3_air.rs"),
+        commented_air,
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a direct assert_one with a block comment inside the chain passed",
+        ));
+    }
+    // A nested block comment holding the direct form is a comment, not an
+    // assertion: the witness form next to it still passes.
+    let nested_air = format!(
+        "{good_air}        /* builder.when(is_assert).assert_one(rs1_val); /* nested */ still a comment */\n"
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), nested_air)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = run(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "canary: the direct form inside a nested block comment was taken as code: {e}"
+        ));
+    }
     // A zero test the VM writes across lines is still a zero test.
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good_air)
         .map_err(|e| e.to_string())?;
@@ -245,7 +274,8 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
         "zero-test canary OK: the witness form PASSes, the direct form FAILs on one line, \
-         across lines and with spaced punctuation, and a multi-line zero test is still \
+         across lines, with spaced punctuation and with a block comment in the chain, a \
+         commented-out direct form is not code, and a multi-line zero test is still \
          recognised.",
     ))
 }

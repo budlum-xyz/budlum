@@ -99,65 +99,16 @@ fn body_of(blob: &str, name: &str) -> Option<String> {
 /// Drop comments, string literals and char literals, so an assertion named
 /// in a message or a comment does not count as an assertion made.
 ///
-/// A `'` opens a char literal only when one closes it within a few bytes
-/// (`'x'`, `'\n'`); otherwise it is a lifetime or an apostrophe in a
-/// comment. Taking every `'` as a quote let the apostrophe in a comment
-/// such as `the row's successor` swallow the code that followed it, up to
-/// the next apostrophe, and with it the `is_err()` the check was looking
-/// for.
+/// The scrub is the shared [`rust_literals::scrub`](crate::gates::rust_literals::scrub):
+/// ordinary, byte and raw strings (`r#"..."#`, hash count matched), char
+/// literals against lifetimes, nested block comments, then line comments.
+/// This gate carried its own scanner that knew only quoted strings and
+/// `//`, so a raw string `r#"x" is_err() "x"#` left `is_err()` in the code
+/// it read, and a test whose executable assertion was `is_ok()` passed as a
+/// refusal test; an apostrophe in a comment once swallowed the code after
+/// it the same way. One scanner, with those cases as its tests, is the fix.
 fn strip_strings(text: &str) -> String {
-    let mut out = String::new();
-    let b = text.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
-            }
-        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-            // A block comment, nested as Rust nests them. Left in place, a
-            // `/* is_err() */` next to `assert!(tamper().is_ok())` gave the
-            // refusal check the token it wanted while the executable
-            // assertion accepted the forgery.
-            let mut depth = 1usize;
-            i += 2;
-            while i < b.len() && depth > 0 {
-                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-                    depth += 1;
-                    i += 2;
-                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            out.push(' ');
-        } else if b[i] == b'"' {
-            out.push('"');
-            i += 1;
-            while i < b.len() {
-                if b[i] == b'\\' && i + 1 < b.len() {
-                    i += 2;
-                    continue;
-                }
-                if b[i] == b'"' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-        } else if b[i] == b'\'' {
-            let close = (i + 2..=(i + 4).min(b.len().saturating_sub(1)))
-                .find(|&j| b[j] == b'\'' && !(b[j - 1] == b'\\' && j == i + 2));
-            out.push('\'');
-            i = close.map_or(i + 1, |j| j + 1);
-        } else {
-            out.push(b[i] as char);
-            i += 1;
-        }
-    }
-    out
+    crate::gates::rust_literals::scrub(text)
 }
 
 /// # Errors
@@ -169,6 +120,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(format!("no .rs sources under {}/budzero", root.display()));
     }
     let mut problems: Vec<String> = Vec::new();
+    // Literals and comments go first, over the whole blob: a `}` inside a
+    // string would otherwise close a body early, and the assertion tokens
+    // are matched against code only.
+    let blob = strip_strings(&blob);
 
     for name in REQUIRED {
         // `#[test] fn <name>(`
@@ -196,7 +151,6 @@ pub fn run(root: &Path) -> Result<String, String> {
         let Some(body) = body_of(&blob, name) else {
             continue;
         };
-        let body = strip_strings(&body);
         let delegates = body.contains(helper);
         let asserts_failure = body.contains("is_err()")
             || body.contains("expect_err")
@@ -309,9 +263,41 @@ pub fn self_test() -> Result<String, String> {
             "canary: a refusal token inside a block comment passed as an assertion",
         ));
     }
+    // A refusal token inside a raw string is data. The literal carries a
+    // quote of its own, so a scanner that knows only `"` strings ends the
+    // literal early and reads the token as code.
+    let raw = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    let r = tamper();\n    \
+         let _ = r#\"x\" is_err() \"x\"#;\n    assert!(r.is_ok());\n}",
+    );
+    assert_ne!(raw, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), raw).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a refusal token inside a raw string passed as an assertion",
+        ));
+    }
+    // A brace inside a string does not end the body: the assertion after
+    // it is still read, so a real refusal test with such a string passes.
+    let braced = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    let label = \"}\";\n    let r = tamper();\n    \
+         assert!(r.is_err(), \"{label}\");\n}",
+    );
+    assert_ne!(braced, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), braced).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a brace inside a string cut the body before its refusal assertion",
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "forgery-tests canary OK: with a test it PASSes, without one it FAILs, and a test \
-         asserting success after tampering FAILs.",
+        "forgery-tests canary OK: with a test it PASSes, without one it FAILs, a test \
+         asserting success after tampering FAILs, refusal tokens in a block comment or a \
+         raw string FAIL, and a brace inside a string does not cut a body.",
     ))
 }

@@ -12,6 +12,18 @@
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
 use crate::cross_domain::event_tree::MerkleProof;
 use crate::domain::types::Hash32;
+use bincode::Options;
+
+/// The most bytes the default `verify_observation` reads as a `MerkleProof`.
+///
+/// The proof is relayer-provided input and its `siblings` is a
+/// length-prefixed vector, so an unbounded decode lets a length word ask for
+/// memory before any verification. A path is one sibling per tree level and
+/// the leaf index is a `usize`, so a valid proof has at most 64 siblings:
+/// 32 bytes of leaf, 8 of index, 8 of length and 64 * 32 of siblings is
+/// 2096 bytes. Four KiB holds every valid proof with room and nothing an
+/// attacker would want.
+const MAX_RECEIPT_PROOF_BYTES: u64 = 4 * 1024;
 
 /// Errors from chain adapter operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,14 +118,22 @@ pub trait ChainAdapter: Send + Sync {
     ///
     /// # Errors
     ///
-    /// `ProofVerificationFailed` when the proof does not decode or does not
-    /// verify against the declared root and transaction hash.
+    /// `ProofVerificationFailed` when the proof does not decode within
+    /// `MAX_RECEIPT_PROOF_BYTES` or does not verify against the declared
+    /// root and transaction hash. The decoder is the fixed-integer one that
+    /// `bincode::serialize` writes, with a byte limit, so a length word in
+    /// the input cannot ask for memory before the proof is checked.
     fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
-        let proof: MerkleProof = bincode::deserialize(&result.receipt_proof).map_err(|e| {
-            AdapterError::ProofVerificationFailed(format!(
-                "adapter returned a receipt proof that does not decode: {e}"
-            ))
-        })?;
+        let proof: MerkleProof = bincode::options()
+            .with_fixint_encoding()
+            .with_limit(MAX_RECEIPT_PROOF_BYTES)
+            .deserialize(&result.receipt_proof)
+            .map_err(|e| {
+                AdapterError::ProofVerificationFailed(format!(
+                    "adapter returned a receipt proof that does not decode within \
+                     {MAX_RECEIPT_PROOF_BYTES} bytes: {e}"
+                ))
+            })?;
         self.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)
     }
 
@@ -293,6 +313,48 @@ pub mod test_adapter {
         let result = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
         assert!(result.success);
         assert_eq!(result.chain, ExternalChain::Ethereum);
+        assert!(adapter.verify_observation(&result).is_ok());
+    }
+
+    /// The default observation check decodes the proof under a byte limit.
+    /// A proof at the ceiling of a valid path still decodes; a `siblings`
+    /// length word asking for more than the limit is refused as a decode
+    /// error before any allocation, and so is a proof padded past the limit.
+    #[tokio::test]
+    async fn the_default_observation_decode_is_bounded() {
+        let adapter = StubAdapter::new(ExternalChain::Ethereum);
+        let mut result = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
+
+        let deep = MerkleProof {
+            leaf: [7u8; 32],
+            index: 0,
+            siblings: vec![[9u8; 32]; 64],
+        };
+        let encoded = bincode::serialize(&deep).unwrap();
+        assert!(
+            (encoded.len() as u64) < MAX_RECEIPT_PROOF_BYTES,
+            "a 64-level path ({} bytes) must fit under the ceiling",
+            encoded.len()
+        );
+        result.receipt_proof = encoded;
+        let err = adapter.verify_observation(&result).unwrap_err();
+        assert!(
+            !err.to_string().contains("does not decode"),
+            "a deep but valid encoding is refused by verification, not by the decoder: {err}"
+        );
+
+        // 32-byte leaf, 8-byte index, then a length word claiming 2^40 siblings.
+        let mut hostile = vec![7u8; 40];
+        hostile.extend_from_slice(&(1u64 << 40).to_le_bytes());
+        result.receipt_proof = hostile;
+        let err = adapter.verify_observation(&result).unwrap_err();
+        assert!(err.to_string().contains("does not decode"), "{err}");
+
+        let mut padded = bincode::serialize(&deep).unwrap();
+        padded.resize(MAX_RECEIPT_PROOF_BYTES as usize + 1, 0);
+        result.receipt_proof = padded;
+        let err = adapter.verify_observation(&result).unwrap_err();
+        assert!(err.to_string().contains("does not decode"), "{err}");
     }
 
     #[test]
