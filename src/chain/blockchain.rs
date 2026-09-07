@@ -6641,9 +6641,9 @@ mod tests {
             team: Address::from([0xC4; 32]),
             burn_reserve: Address::from([0xC5; 32]),
         });
-        let mut params = config.bud_tokenomics.expect("tokenomics");
-        params.community += 1;
-        config.bud_tokenomics = Some(params);
+        // Supply stays balanced (that gate runs first and panics on its
+        // own message); the skeleton's validator roster is what the
+        // ceremony refuses once the addresses are declared.
         let consensus = Arc::new(PoWEngine::new(0));
         let _ = Blockchain::new_with_genesis(
             consensus,
