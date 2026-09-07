@@ -216,11 +216,14 @@ impl RegenerationBudgetMeter {
     /// # Errors
     ///
     /// [`MeterError::BudgetExceeded`] at the recursion-depth cap.
+    // The two u32->u64 casts keep this fn const: `From<u32> for u64` is not
+    // const-callable yet, and the widening cast cannot lose information.
+    #[allow(clippy::cast_lossless)]
     pub const fn enter_recursion(&mut self) -> Result<(), MeterError> {
         if self.current_depth >= self.max_recursion_depth {
             return Err(MeterError::BudgetExceeded {
-                used: u64::from(self.current_depth) + 1,
-                budget: u64::from(self.max_recursion_depth),
+                used: (self.current_depth as u64) + 1,
+                budget: self.max_recursion_depth as u64,
             });
         }
         self.current_depth += 1;
