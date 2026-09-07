@@ -1,6 +1,6 @@
 {
   "chain_id": 45260,
-  "pq_scheme": "dilithium5",
+  "pq_scheme": "ml-dsa-65",
   "allocations": [],
   "validators": [],
   "block_reward": 50,

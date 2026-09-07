@@ -180,7 +180,15 @@ mod tests {
             let at = src
                 .find(name)
                 .unwrap_or_else(|| panic!("{name} must still exist"));
-            let body = &src[at..(at + 4000).min(src.len())];
+            // The window is the function itself: from its signature to the
+            // next `pub fn` (or the end of the file), on byte offsets that
+            // `find` returns, so no fixed width can split a multi-byte
+            // character or reach into the next function.
+            let rest = &src[at + name.len()..];
+            let end = rest
+                .find("\n    pub fn ")
+                .map_or(src.len(), |off| at + name.len() + off);
+            let body = &src[at..end];
             assert!(
                 body.contains("self.persist_storage_economics_state()?"),
                 "{name} must propagate a failed persist, not drop it"

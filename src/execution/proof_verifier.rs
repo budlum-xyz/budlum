@@ -203,7 +203,8 @@ impl ProofVerifier {
     /// Verify a proof envelope against expected public inputs.
     ///
     /// Steps:
-    /// 1. Validate envelope bounds (size, degree, format version)
+    /// 1. Validate the envelope structure (the one shared check: size,
+    ///    degree, format version, backend allowlist, metadata presence)
     /// 2. Verify public_inputs_hash matches
     /// 3. Verify the STARK proof (when STARK backend is linked)
     /// 4. Return verified proof with state transition info
@@ -213,29 +214,12 @@ impl ProofVerifier {
         program: &[u64],
         gas_limit: u64,
     ) -> Result<VerifiedProof, ProofVerifyError> {
-        // 1. Size bounds
-        if envelope.proof_bytes.len() > MAX_PROOF_BYTES {
-            return Err(ProofVerifyError::ProofTooLarge {
-                size: envelope.proof_bytes.len(),
-                max: MAX_PROOF_BYTES,
-            });
-        }
-
-        // 2. Degree bounds
-        if envelope.degree_bits > MAX_DEGREE_BITS {
-            return Err(ProofVerifyError::DegreeTooLarge {
-                degree_bits: envelope.degree_bits,
-                max: MAX_DEGREE_BITS,
-            });
-        }
-
-        // 3. Format version
-        if envelope.proof_format_version < MIN_PROOF_FORMAT_VERSION {
-            return Err(ProofVerifyError::FormatVersionTooOld {
-                version: envelope.proof_format_version,
-                min: MIN_PROOF_FORMAT_VERSION,
-            });
-        }
+        // 1-3. Structure. One definition of a well-formed envelope, not a
+        // copy of three of its five checks: the copy this replaced let an
+        // envelope with an empty or foreign backend and no `p3_version` or
+        // `fri_params_id` through to the adapter, and `VerifiedProof` carries
+        // neither field, so nothing downstream could refuse it.
+        Self::validate_envelope_structure(envelope)?;
 
         // 4. Gas check
         let verification_gas = (envelope.degree_bits as u64) * GAS_PER_DEGREE_BIT;
@@ -496,6 +480,29 @@ mod tests {
         let mut inputs2 = inputs1.clone();
         inputs2.chain_id = 9999;
         assert_ne!(inputs1.hash(), inputs2.hash());
+    }
+
+    /// `verify` refuses what `validate_envelope_structure` refuses: the
+    /// backend allowlist and the metadata presence are not optional on the
+    /// full path either.
+    #[test]
+    fn verify_applies_every_structural_check() {
+        let inputs = make_inputs();
+        let edits: [(fn(&mut ProofEnvelope), &str); 3] = [
+            (|e| e.backend = String::new(), "empty backend"),
+            (|e| e.backend = "Plonky3".into(), "foreign backend"),
+            (|e| e.p3_version = String::new(), "missing p3_version"),
+        ];
+        for (edit, what) in edits {
+            let mut envelope = make_envelope(&inputs);
+            edit(&mut envelope);
+            let structural = ProofVerifier::validate_envelope_structure(&envelope).unwrap_err();
+            let full = ProofVerifier::verify(&envelope, &inputs, &[], 1_000_000).unwrap_err();
+            assert_eq!(
+                structural, full,
+                "{what}: verify must refuse with the structural error"
+            );
+        }
     }
 
     #[test]

@@ -97,8 +97,15 @@ impl PruningPolicy {
         Ok(())
     }
 
+    /// Whether the hard-prune worker may delete historical state under this
+    /// policy.
+    ///
+    /// Fails closed: a policy that `validate` refuses (pruning without
+    /// finalized snapshot retention, or with `retention_blocks == 0`) never
+    /// prunes, however its flags read. `PruningPolicy` deserializes with
+    /// every field public, so the flags alone are not the answer.
     pub fn should_prune_historical_state(&self) -> bool {
-        self.mode == NodeMode::Full && self.pruning_enabled
+        self.validate().is_ok() && self.mode == NodeMode::Full && self.pruning_enabled
     }
 }
 
@@ -137,6 +144,22 @@ mod tests {
         let mut policy = PruningPolicy::full_node_default();
         policy.pruning_enabled = false;
         assert!(!policy.should_prune_historical_state());
+    }
+
+    /// A policy that `validate` refuses must not prune, whatever its flags
+    /// say: pruning without a finalized snapshot, or with no retention
+    /// window at all, is the configuration that deletes the last copy.
+    #[test]
+    fn an_invalid_policy_never_prunes() {
+        let mut no_snapshot = PruningPolicy::full_node_default();
+        no_snapshot.finalized_snapshot_retention = false;
+        assert!(no_snapshot.validate().is_err());
+        assert!(!no_snapshot.should_prune_historical_state());
+
+        let mut no_window = PruningPolicy::full_node_default();
+        no_window.retention_blocks = 0;
+        assert!(no_window.validate().is_err());
+        assert!(!no_window.should_prune_historical_state());
     }
 
     #[test]

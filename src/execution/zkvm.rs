@@ -178,7 +178,14 @@ fn prove_bytecode_inner_with_memory(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
             .map_err(|_| "BudZKVM execution failed".to_string())?;
     if !receipt.success {
-        return Err("BudZKVM execution failed".into());
+        // The VM's own error, as `execute_bytecode_inner` reports it: an
+        // activation refusal reaching this branch through
+        // `prove_bytecode_mainnet` was flattened to one string, so the caller
+        // could not tell a gated opcode from an out-of-gas.
+        return Err(match receipt.error {
+            Some(e) => format!("BudZKVM execution failed: {e:?}"),
+            None => "BudZKVM execution failed".to_string(),
+        });
     }
     let public_inputs = build_public_inputs(&program, &vm, &receipt);
     let proof = Prover::prove(&vm.trace, &public_inputs, &program)
@@ -377,6 +384,15 @@ mod tests {
             assert!(
                 err.contains("activation") || err.contains("Activation"),
                 "{opcode:?} was refused for the wrong reason: {err}"
+            );
+            // The proving path names the same reason. It used to flatten every
+            // failure to "BudZKVM execution failed", so this assertion could
+            // not be written against it.
+            let proving_err = prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+                .expect_err(&format!("{opcode:?} must be refused on the proving path too"));
+            assert!(
+                proving_err.contains("activation") || proving_err.contains("Activation"),
+                "{opcode:?} was refused by the prover for the wrong reason: {proving_err}"
             );
         }
     }

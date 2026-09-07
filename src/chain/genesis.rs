@@ -14,6 +14,18 @@ pub const GENESIS_ALLOCATION: u64 = 1_000_000_000;
 
 pub const GENESIS_TIMESTAMP: u128 = 0;
 
+/// Post-quantum signature scheme the shipped networks launched with.
+///
+/// Fixed here rather than read from `crate::crypto::primitives::PQ_SCHEME_ID`:
+/// that constant names whatever backend this binary was compiled with, so a
+/// genesis built from it follows the build instead of the chain, and the
+/// startup comparison in `GenesisConfig::validate_pq_scheme` passes for every
+/// build. The shipped `config/*-genesis.json` files declare this same word,
+/// and `Blockchain::new_with_genesis` refuses to start a binary built for any
+/// other scheme. Custom chains (`GenesisConfig::new`) still record the scheme
+/// of the build that created them.
+const LAUNCHED_PQ_SCHEME: &str = "ml-dsa-65";
+
 /// The domain configuration bootstrapped at genesis.
 /// Serialisation-safe (serde); it starts with placeholder addresses and the
 /// launch ceremony replaces them.
@@ -648,7 +660,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
         // 4 domain bootstrap (PoW/PoS/BFT/PoA).
         // PoA: placeholder authorities (the launch ceremony turns these into
         // real addresses).
-        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
+        pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
     }
 }
@@ -668,7 +680,7 @@ pub fn testnet_genesis() -> GenesisConfig {
         timestamp: 1_735_689_600_000,
         bud_tokenomics: None,
         tokenomics_addresses: None,
-        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
+        pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
     }
 }
@@ -685,7 +697,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         timestamp: GENESIS_TIMESTAMP,
         bud_tokenomics: None,
         tokenomics_addresses: None,
-        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
+        pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
     }
 }
@@ -1033,6 +1045,10 @@ mod tests {
         assert_eq!(from_json.gas_schedule, from_code.gas_schedule);
         assert_eq!(from_json.timestamp, from_code.timestamp);
         assert_eq!(from_json.bud_tokenomics, from_code.bud_tokenomics);
+        // The scheme is the launched one, fixed, not whichever backend this
+        // test binary was built with; and the file says the same word.
+        assert_eq!(from_code.pq_scheme.as_deref(), Some(LAUNCHED_PQ_SCHEME));
+        assert_eq!(from_json.pq_scheme, from_code.pq_scheme);
 
         let code_block = from_code.build_genesis_block();
         let json_block = from_json.build_genesis_block();
@@ -1058,6 +1074,12 @@ mod tests {
             assert_eq!(from_json.block_reward, from_code.block_reward, "{path}");
             assert_eq!(from_json.gas_schedule, from_code.gas_schedule, "{path}");
             assert_eq!(from_json.timestamp, from_code.timestamp, "{path}");
+            assert_eq!(
+                from_code.pq_scheme.as_deref(),
+                Some(LAUNCHED_PQ_SCHEME),
+                "{path}"
+            );
+            assert_eq!(from_json.pq_scheme, from_code.pq_scheme, "{path}");
             assert_eq!(
                 from_code.build_genesis_block().hash,
                 from_json.build_genesis_block().hash,

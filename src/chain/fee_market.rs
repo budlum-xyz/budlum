@@ -73,11 +73,21 @@ pub enum FeeError {
 /// The return value is clamped to `min_base_fee`; invalid zero-valued params are
 /// Treated fail-closed by returning the parent fee unchanged but not below the
 /// Minimum.
+///
+/// `parent_gas_used` is clamped to the elastic gas limit
+/// (`target_gas * elasticity_multiplier`) first. The 1/denominator bound on
+/// the per-block change holds only for blocks within that limit; an over-limit
+/// figure, which a block should never carry, would otherwise move the fee by
+/// more than the bound in one step.
 pub fn next_base_fee(parent_base_fee: u64, parent_gas_used: u64, params: FeeMarketParams) -> u64 {
     if params.target_gas == 0 || params.base_fee_max_change_denominator == 0 {
         return parent_base_fee.max(params.min_base_fee);
     }
 
+    let gas_limit = params
+        .target_gas
+        .saturating_mul(params.elasticity_multiplier.max(1));
+    let parent_gas_used = parent_gas_used.min(gas_limit);
     let parent = parent_base_fee as i128;
     let gas_delta = parent_gas_used as i128 - params.target_gas as i128;
     let denom = params.target_gas as i128 * params.base_fee_max_change_denominator as i128;
@@ -185,6 +195,21 @@ mod tests {
         let params = FeeMarketParams::default();
         let next = next_base_fee(800, params.target_gas * 2, params);
         assert_eq!(next, 900, "full block raises by 12.5%");
+    }
+
+    /// A gas figure above the elastic limit does not move the fee past the
+    /// per-block bound: it is clamped to the limit and raises by the same
+    /// 12.5% a full block does.
+    #[test]
+    fn an_over_limit_gas_figure_is_clamped_to_the_elastic_limit() {
+        let params = FeeMarketParams::default();
+        let limit = params.target_gas * params.elasticity_multiplier;
+        assert_eq!(next_base_fee(800, limit * 10, params), 900);
+        assert_eq!(next_base_fee(800, u64::MAX, params), 900);
+        assert_eq!(
+            next_base_fee(800, u64::MAX, params),
+            next_base_fee(800, limit, params)
+        );
     }
 
     #[test]

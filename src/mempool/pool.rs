@@ -97,6 +97,11 @@ pub enum MempoolError {
 struct PendingTx {
     tx: Transaction,
     added_at: u128,
+    /// The bytes this entry was admitted against, computed once. The size is
+    /// fixed for the life of the entry, and re-encoding it on every eviction
+    /// scan let one refused submission drive a protobuf encode over every
+    /// cheaper entry in the pool.
+    charged: usize,
 }
 
 #[derive(Clone)]
@@ -245,7 +250,7 @@ impl Mempool {
         let freed = existing_hash
             .as_ref()
             .and_then(|h| self.transactions.get(h))
-            .map_or(0, |entry| charged_bytes(&entry.tx));
+            .map_or(0, |entry| entry.charged);
         let projected = self
             .resident_bytes
             .saturating_sub(freed)
@@ -275,17 +280,21 @@ impl Mempool {
             .insert(tx.hash.clone());
 
         self.resident_bytes = self.resident_bytes.saturating_add(incoming);
-        self.transactions
-            .insert(tx.hash.clone(), PendingTx { tx, added_at: now });
+        self.transactions.insert(
+            tx.hash.clone(),
+            PendingTx {
+                tx,
+                added_at: now,
+                charged: incoming,
+            },
+        );
 
         Ok(())
     }
 
     pub fn remove_transaction(&mut self, hash: &str) -> Option<Transaction> {
         if let Some(pending) = self.transactions.remove(hash) {
-            self.resident_bytes = self
-                .resident_bytes
-                .saturating_sub(charged_bytes(&pending.tx));
+            self.resident_bytes = self.resident_bytes.saturating_sub(pending.charged);
             if let Some(sender_txs) = self.by_sender.get_mut(&pending.tx.from) {
                 sender_txs.remove(&pending.tx.nonce);
                 if sender_txs.is_empty() {
@@ -467,7 +476,7 @@ impl Mempool {
                 if entry.tx.from == new_tx.from {
                     continue;
                 }
-                freed = freed.saturating_add(charged_bytes(&entry.tx));
+                freed = freed.saturating_add(entry.charged);
                 victims.push(hash.clone());
                 if freed >= needed {
                     break 'outer;

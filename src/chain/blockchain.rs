@@ -361,6 +361,18 @@ impl Blockchain {
                 #[cfg(test)]
                 panic!("Invalid genesis bootstrap domain configuration: {e}");
             });
+        // The genesis names the PQ scheme the chain launched with; a binary
+        // built for the other one would join and then reject every peer's
+        // validator registration as a malformed key. Checked here, on every
+        // path that builds a chain, not only when a genesis file is passed
+        // on the command line.
+        if let Err(e) = resolved_genesis_config.validate_pq_scheme() {
+            error!("CRITICAL ERROR: {e}");
+            #[cfg(not(test))]
+            std::process::exit(1);
+            #[cfg(test)]
+            panic!("Genesis PQ scheme mismatch: {e}");
+        }
 
         let mut state = resolved_genesis_config.build_state();
 
