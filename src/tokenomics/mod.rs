@@ -247,33 +247,32 @@ impl TokenomicsParams {
         }
         // Per-epoch reward formula.
         //
-        // The parametric test `calculate_epoch_reward_parametric_behavior`
-        // Pins down three monotonic invariants on this function:
-        //   (1) shorter `slot_duration_secs` -> HIGHER per-epoch reward,
-        //   (2) longer `epoch_length_slots`   -> HIGHER per-epoch reward,
-        //   (3) doubled `validator_annual_yield_ratio_fixed` -> ~2x reward.
+        // The annual yield is spread across the CONFIGURED number of epochs
+        // per year:
         //
-        // We satisfy all three with:
+        //   Epoch_yield = (stake * APY) / epochs_per_year
         //
-        //   Epoch_yield = (stake * APY) * epoch_length_slots
-        //                 / (slot_duration_secs * SEC_PER_YEAR / 10)
+        // `epochs_per_year` is part of the genesis parameters and must match
+        // the chain's actual epoch cadence (mainnet: 6 s slots, 100 slots
+        // per epoch -> 600 s epochs -> 52 560 epochs per calendar year).
+        // The previous formula derived the share from
+        // `slot_duration_secs * SEC_PER_YEAR / 10` instead and never read
+        // `epochs_per_year`; with the mainnet parameters it paid only about
+        // 27.8 percent of the promised annual yield, and the conservation
+        // held for no configuration except a 10 s slot. The pin
+        // `mainnet_parameters_pay_the_configured_annual_yield` locks the
+        // aggregate payout to the promised yield.
         //
-        // I.e. the per-epoch reward is INVERSELY proportional to
-        // `slot_duration_secs` (shorter slot = more epochs per unit time
-        // For the same annual budget, so each epoch claims a larger slice
-        // Of that budget's per-second rate), and DIRECTLY proportional to
-        // `epoch_length_slots` and the APY ratio. The `/ 10` factor
-        // Normalizes the default `slot_duration_secs = 10` to a unitless
-        // Multiplier so the legacy test values stay close to the prior
-        // Implementation's magnitudes.
+        // Slot and epoch geometry still determine how many epochs a year
+        // has; operators express that through `epochs_per_year` rather than
+        // through this function re-deriving it. Devnet keeps its own
+        // deterministic (faster) payout cadence through its own
+        // `epochs_per_year` value.
         let annual_yield = (validator_stake as u128
             * self.validator_annual_yield_ratio_fixed as u128)
             / FIXED_POINT_SCALE as u128;
-        let slot_secs = self.slot_duration_secs.max(1) as u128;
-        let epoch_slots = self.epoch_length_slots.max(1) as u128;
-        let seconds_per_year: u128 = 365 * 24 * 60 * 60;
-        let denom = slot_secs * seconds_per_year / 10;
-        let epoch_yield = (annual_yield * epoch_slots) / denom.max(1);
+        let epochs_per_year = self.epochs_per_year.max(1) as u128;
+        let epoch_yield = annual_yield / epochs_per_year;
         u64::try_from(epoch_yield).unwrap_or(u64::MAX)
     }
 
@@ -505,28 +504,59 @@ mod tests {
 
     // === MANDATORY TESTS ===
 
-    /// The default parameters (slot 10 s, epoch 32 slots, 5 percent a year)
-    /// give exactly these rewards. Pinned as values rather than as "not
-    /// zero": the old assertion was satisfied by the floor this function
-    /// no longer has.
+    /// The default parameters (5 percent a year over the configured
+    /// `epochs_per_year` = 1000) give exactly these rewards. Pinned as
+    /// values rather than as "not zero": the old assertion was satisfied by
+    /// the floor this function no longer has.
     #[test]
     fn calculate_epoch_reward_regression_equivalence() {
         let params = TokenomicsParams::default();
-        // annual yield = stake / 20; epoch share = 32 / (10 * 31_536_000 / 10)
-        //              = stake / 20 * 32 / 31_536_000
+        // annual yield = stake / 20; epoch share = annual yield / 1000.
         assert_eq!(params.calculate_epoch_reward(0), 0);
         assert_eq!(
             params.calculate_epoch_reward(1_000_000),
-            0,
-            "1 BUD: 0.05 base units"
+            50,
+            "1 BUD: 50 000 / 1000"
         );
         assert_eq!(
             params.calculate_epoch_reward(bud(1_000)),
-            50,
-            "1 000 BUD: 50.7"
+            50_000,
+            "1 000 BUD: 50 000 000 / 1000"
         );
-        assert_eq!(params.calculate_epoch_reward(50_000_000_000), 2_536);
-        assert_eq!(params.calculate_epoch_reward(bud(100_000_000)), 5_073_566);
+        assert_eq!(params.calculate_epoch_reward(50_000_000_000), 2_500_000);
+        assert_eq!(params.calculate_epoch_reward(bud(100_000_000)), 5_000_000_000);
+    }
+
+    /// The mainnet configuration (6 s slots, 100 slots per epoch, 52 560
+    /// epochs per year, 5 percent APY) must pay the configured annual yield
+    /// over a year of epochs - not more, and not the 27.8 percent the old
+    /// slot-derived formula paid.
+    #[test]
+    fn mainnet_parameters_pay_the_configured_annual_yield() {
+        use crate::core::chain_config::FIXED_POINT_SCALE;
+        let params = TokenomicsParams {
+            epochs_per_year: 52_560,
+            slot_duration_secs: 6,
+            epoch_length_slots: 100,
+            ..TokenomicsParams::default()
+        };
+        let stake = bud(1_000_000);
+        let annual_yield = (stake as u128 * params.validator_annual_yield_ratio_fixed as u128)
+            / FIXED_POINT_SCALE as u128;
+        let reward = params.calculate_epoch_reward(stake);
+        assert!(reward > 0, "a 1M BUD stake earns a visible epoch reward");
+        let paid = reward as u128 * params.epochs_per_year as u128;
+        // Rounding floors each epoch share, so the aggregate stays at or
+        // below the promise and misses it by less than one unit per epoch.
+        assert!(
+            paid <= annual_yield,
+            "a year of epochs ({paid}) pays more than the annual yield ({annual_yield})"
+        );
+        assert!(
+            annual_yield - paid < params.epochs_per_year as u128,
+            "a year of epochs ({paid}) loses more than rounding against the \
+             annual yield ({annual_yield})"
+        );
     }
 
     /// No stake earns nothing, and a stake whose yield rounds to zero earns
@@ -590,21 +620,29 @@ mod tests {
         let base_stake: u64 = 10_000_000_000; // 10B stake
         let base_reward = params.calculate_epoch_reward(base_stake);
 
-        // 1. Change slot_duration_secs.
-        params.slot_duration_secs = 5; // halve it
-        let faster_slot_reward = params.calculate_epoch_reward(base_stake);
+        // 1. Double epochs_per_year: twice as many epochs share the same
+        //    annual budget, so each one claims half.
+        params.epochs_per_year *= 2;
+        let denser_cadence_reward = params.calculate_epoch_reward(base_stake);
         assert!(
-            faster_slot_reward > base_reward,
-            "a shorter slot duration has to give a higher reward"
+            denser_cadence_reward <= base_reward / 2 + 1
+                && denser_cadence_reward >= base_reward / 2 - 1,
+            "twice the epochs per year has to give half the per-epoch reward \
+             ({denser_cadence_reward} vs {})",
+            base_reward / 2
         );
 
-        // 2. Change epoch_length_slots.
+        // 2. Slot and epoch geometry alone do not change the per-epoch
+        //    share: the cadence is carried by `epochs_per_year`, which the
+        //    genesis parameters must keep consistent with the geometry.
         params = TokenomicsParams::default();
-        params.epoch_length_slots = 64; // double it
-        let longer_epoch_reward = params.calculate_epoch_reward(base_stake);
-        assert!(
-            longer_epoch_reward > base_reward,
-            "a longer epoch has to give a higher reward"
+        params.slot_duration_secs = 5;
+        params.epoch_length_slots = 64;
+        let geometry_changed_reward = params.calculate_epoch_reward(base_stake);
+        assert_eq!(
+            geometry_changed_reward, base_reward,
+            "slot/epoch geometry without a matching epochs_per_year change \
+             must not move the per-epoch reward"
         );
 
         // 3. Double validator_annual_yield_ratio_fixed.
@@ -612,8 +650,9 @@ mod tests {
         params.validator_annual_yield_ratio_fixed *= 2;
         let double_yield_reward = params.calculate_epoch_reward(base_stake);
         assert!(
-            double_yield_reward >= base_reward * 2 - 10,
-            "2x APY has to give roughly 2x the reward"
+            double_yield_reward >= base_reward * 2 - 2
+                && double_yield_reward <= base_reward * 2 + 2,
+            "2x APY has to give 2x the reward up to rounding"
         );
     }
 
@@ -627,18 +666,20 @@ mod tests {
             validator_annual_yield_ratio_fixed: FIXED_POINT_SCALE,
             ..TokenomicsParams::default()
         };
-        // The formula, written out: the annual yield on the stake times the
-        // epoch's share of a year, rounded down once at the end.
+        // The formula, written out: the annual yield on the stake divided
+        // by the configured number of epochs per year, rounded down once.
         let expected = |params: &TokenomicsParams, stake: u64| -> u64 {
             let annual = stake as u128 * params.validator_annual_yield_ratio_fixed as u128
                 / FIXED_POINT_SCALE as u128;
-            let per_year = params.slot_duration_secs as u128 * 31_536_000 / 10;
-            (annual * params.epoch_length_slots as u128 / per_year) as u64
+            (annual / params.epochs_per_year.max(1) as u128) as u64
         };
         let stake = bud(1_000);
         let full = params.calculate_epoch_reward(stake);
         assert_eq!(full, expected(&params, stake));
-        assert_eq!(full, 1_014, "100 percent a year on 1000 BUD, per epoch");
+        assert_eq!(
+            full, 1_000_000,
+            "100 percent a year on 1000 BUD over 1000 epochs"
+        );
         params.validator_annual_yield_ratio_fixed /= 2;
         let half = params.calculate_epoch_reward(stake);
         assert_eq!(half, expected(&params, stake));

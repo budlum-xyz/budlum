@@ -12,6 +12,13 @@ pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
 pub const BAN_THRESHOLD: i32 = -100;
 pub const BAN_DURATION: Duration = Duration::from_secs(3600);
+/// How long an unbanned negative-score record survives without activity:
+/// one ban-length. A misbehaving id keeps refreshing `last_seen` while it
+/// keeps misbehaving, so its score stays; an id that goes quiet for a whole
+/// ban-length is reclaimed by `prune_spent_records`, so ids an attacker
+/// mints for one burst of malformed handshakes cannot fill the tracked
+/// table forever and refuse every peer the node has never seen.
+pub const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
 pub const MAX_MSG_BURST: f64 = 20.0;
@@ -331,17 +338,38 @@ impl PeerManager {
     ///
     /// What makes this safe against being turned into a ban-clearing
     /// primitive is what it refuses to touch: a record whose ban is still
-    /// running is kept, and a record still carrying a penalty is kept. The
-    /// entries an attacker mints through `report_invalid_handshake` and
-    /// friends are negative-scored the moment they exist and stay. A
-    /// connected peer is kept whatever its score, so a live session does not
-    /// lose its handshake to a table full of strangers.
+    /// running is kept, and a penalty-bearing record is kept while it is
+    /// fresh. The entries an attacker mints through
+    /// `report_invalid_handshake` and friends are negative-scored the moment
+    /// they exist; a fresh one stays, but an unbanned negative record whose
+    /// `last_seen` is older than [`NEGATIVE_RECORD_TTL`] is reclaimed. The
+    /// earlier rule kept every negative record forever, so minted garbage
+    /// filled the ceiling once and every unseen peer was refused for the
+    /// rest of the node's uptime - the denial of service this very bound
+    /// exists to prevent. The trade is deliberate: a penalised id that stays
+    /// quiet for a whole ban-length earns a clean record; one that keeps
+    /// misbehaving refreshes `last_seen` and keeps its score, and any id
+    /// whose misbehaviour reached the ban threshold carries a ban, which
+    /// this predicate never reclaims. A connected peer is kept whatever its
+    /// score, so a live session does not lose its handshake to a table full
+    /// of strangers.
     pub fn prune_spent_records(&mut self) -> usize {
         let before = self.peers.len();
         let connected = &self.connected_peers;
-        self.peers
-            .retain(|id, s| s.is_banned() || s.score < 0 || connected.contains(id));
+        self.peers.retain(|id, s| {
+            s.is_banned()
+                || connected.contains(id)
+                || (s.score < 0 && negative_record_is_fresh(s))
+        });
         before - self.peers.len()
+    }
+
+    /// An unbanned negative record stays while its misbehaviour is recent.
+    /// A record with no `last_seen` at all has no observed activity worth
+    /// protecting and is treated as stale.
+    fn negative_record_is_fresh(s: &PeerScore) -> bool {
+        s.last_seen
+            .is_some_and(|seen| seen.elapsed() < NEGATIVE_RECORD_TTL)
     }
 
     /// Score entry for a peer whose entry is known to exist, or a refusal.
@@ -355,6 +383,7 @@ impl PeerManager {
         };
         if !score.consume_token_with_rate(refill) {
             score.score = (score.score + RATE_LIMIT_PENALTY).max(MIN_SCORE);
+            score.last_seen = Some(Instant::now());
             if score.score <= BAN_THRESHOLD {
                 let until = Instant::now() + BAN_DURATION;
                 score.banned_until = Some(until);
@@ -376,6 +405,7 @@ impl PeerManager {
             true
         } else {
             score.score = (score.score - 1).max(MIN_SCORE);
+            score.last_seen = Some(Instant::now());
             false
         }
     }
@@ -390,6 +420,7 @@ impl PeerManager {
             true
         } else {
             score.score = (score.score - 5).max(MIN_SCORE);
+            score.last_seen = Some(Instant::now());
             false
         }
     }
@@ -1345,6 +1376,64 @@ mod tests {
             manager.get_score(&known),
             before + INVALID_TX_PENALTY,
             "an already-tracked peer must keep accruing penalties when the map is full"
+        );
+    }
+
+    /// Minted garbage must not fill the ceiling forever.
+    ///
+    /// An attacker mints peer ids for free and each malformed handshake
+    /// leaves an unbanned negative record. The old predicate kept every
+    /// negative record for the rest of the node's uptime, so one burst
+    /// filled `max_tracked_peers` and every peer the node had never seen
+    /// was refused - the denial of service the bound exists to prevent.
+    /// Stale unbanned negative records expire by `last_seen`; bans and
+    /// fresh penalties do not.
+    #[test]
+    fn stale_unbanned_negative_records_are_reclaimed() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+
+        // Fill the table with minted ids whose misbehaviour is a whole
+        // ban-length in the past.
+        for _ in 0..4 {
+            let id = test_peer_id();
+            manager.report_invalid_handshake(&id);
+            manager.peers.get_mut(&id).unwrap().last_seen =
+                Some(Instant::now() - NEGATIVE_RECORD_TTL - Duration::from_secs(1));
+        }
+        assert_eq!(manager.peers.len(), manager.max_tracked_peers);
+
+        // The stale garbage goes; nothing else exists yet.
+        assert_eq!(
+            manager.prune_spent_records(),
+            4,
+            "the stale minted records are reclaimed"
+        );
+
+        // A fresh negative record and a running ban survive the reclaim.
+        let fresh = test_peer_id();
+        manager.report_invalid_handshake(&fresh);
+        let banned = test_peer_id();
+        manager.ban_peer(&banned);
+        assert_eq!(manager.prune_spent_records(), 0, "fresh records stay");
+        assert!(
+            manager.get_score(&fresh) < 0,
+            "a fresh penalty survives the reclaim"
+        );
+        assert!(manager.is_banned(&banned), "a running ban survives the reclaim");
+
+        // Fill to the ceiling again with stale garbage, then show the
+        // reclaim path inside `get_or_create` admits an unseen peer.
+        while manager.peers.len() < manager.max_tracked_peers {
+            let id = test_peer_id();
+            manager.report_invalid_handshake(&id);
+            manager.peers.get_mut(&id).unwrap().last_seen =
+                Some(Instant::now() - NEGATIVE_RECORD_TTL - Duration::from_secs(1));
+        }
+        let newcomer = test_peer_id();
+        assert!(
+            manager.check_rate_limit(&newcomer),
+            "the table admits a new peer once the stale garbage is reclaimed"
         );
     }
 }

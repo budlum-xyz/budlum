@@ -121,6 +121,11 @@ impl LivenessTracker {
         let mut hasher = Sha256::new();
         // V3: each map carries its count, so an entry cannot slide from
         // one map into the next.
+        //
+        // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
+        // for the shared rule - the V-bumped roots activate with the USL
+        // genesis, there is no pre-launch mainnet state to migrate, and a
+        // post-launch bump needs its migration recorded in the same commit.
         hasher.update(b"BDLM_LIVENESS_TRACKER_V3");
         hasher.update((self.missed.len() as u64).to_le_bytes());
         for (addr, count) in &self.missed {

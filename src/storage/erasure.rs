@@ -676,17 +676,21 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
         })?;
     let rs = ReedSolomon::for_scheme(&scheme)?;
     let k = rs.data_shards();
-    // Fewer bytes than data shards would leave whole stripes empty. Every
-    // empty stripe hashes to the same `ContentId`, and the manifest and the
-    // shard store both key shards by id, so index-distinct shards collapsed
-    // into one. Refused: the object is too small for the scheme it asked for.
-    if data.len() < k {
+    // Every data shard needs a real byte. `data.len() >= k` alone does not
+    // establish that: with `stripe = ceil(len / k)` shard `i` starts at
+    // `i * stripe`, and the start can overshoot the data even when
+    // `len >= k` (k = 5, len = 6: stripe = 2, shards 3 and 4 both start at
+    // or past byte 6). Every empty stripe hashes to the same `ContentId`,
+    // and the manifest and the shard store both key shards by id, so
+    // index-distinct shards collapse into one. Refused: the object is too
+    // small for the scheme it asked for.
+    let stripe = data.len().div_ceil(k);
+    if data.len() < k || (k - 1) * stripe >= data.len() {
         return Err(ErasureError::ShardMismatch(format!(
             "object of {} bytes is too small for k={k}: every data shard needs a byte",
             data.len()
         )));
     }
-    let stripe = data.len().div_ceil(k);
 
     let mut shards: Vec<Vec<u8>> = Vec::with_capacity(rs.total_shards());
     for i in 0..k {
@@ -1009,9 +1013,13 @@ mod tests {
         ) {
             let n = k + parity;
             let scheme = ErasureScheme { k: k as u32, n: n as u32 };
-            // Fewer bytes than data shards is refused (an empty stripe has
-            // no id of its own), so those draws check the refusal instead.
-            if data.len() < k {
+            // A payload that cannot fill every data shard with a real byte
+            // is refused (an empty stripe has no id of its own), so those
+            // draws check the refusal instead. The guard mirrors
+            // `encode_object`: with stripe = ceil(len/k) the last shard
+            // start (k-1)*stripe must still land inside the data.
+            let stripe = data.len().div_ceil(k);
+            if data.len() < k || (k - 1) * stripe >= data.len() {
                 proptest::prop_assert!(
                     encode_object(&data, scheme).is_err(),
                     "k={} must refuse an object of {} bytes", k, data.len()
@@ -1399,6 +1407,34 @@ mod tests {
         let scheme = ErasureScheme { k: 4, n: 6 };
         assert!(encode_object(&[1, 2, 3], scheme).is_err());
         let enc = encode_object(&[1, 2, 3, 4], scheme).unwrap();
+        let ids: std::collections::BTreeSet<_> = enc
+            .to_manifest()
+            .unwrap()
+            .shards
+            .iter()
+            .map(|s| s.shard_id)
+            .collect();
+        assert_eq!(ids.len(), 6, "every shard has its own id");
+    }
+
+    /// `data.len() >= k` alone does not prove every shard holds a byte:
+    /// with `stripe = ceil(len/k)` a trailing shard can start at or past
+    /// the end of the data (k = 5, len = 6: stripe = 2, shards 3 and 4
+    /// start at 6 and 8). Those empty shards would share one `ContentId`.
+    #[test]
+    fn encode_object_refuses_sizes_that_leave_trailing_shards_empty() {
+        // k = 5, len = 6: shards 3 and 4 would be empty.
+        assert!(
+            encode_object(&[1, 2, 3, 4, 5, 6], ErasureScheme { k: 5, n: 7 }).is_err(),
+            "k=5 len=6 leaves two trailing shards empty"
+        );
+        // k = 4, len = 6: shard 3 starts exactly at the end of the data.
+        assert!(
+            encode_object(&[1, 2, 3, 4, 5, 6], ErasureScheme { k: 4, n: 6 }).is_err(),
+            "k=4 len=6 leaves the last shard empty"
+        );
+        // k = 4, len = 7: every shard holds a real byte again.
+        let enc = encode_object(&[1, 2, 3, 4, 5, 6, 7], ErasureScheme { k: 4, n: 6 }).unwrap();
         let ids: std::collections::BTreeSet<_> = enc
             .to_manifest()
             .unwrap()

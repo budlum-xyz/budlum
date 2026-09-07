@@ -1,5 +1,22 @@
 //! F10.3 Ethereum PoS sync committee light client, Altair-and-later finality.
 //!
+//! **BLS variant warning (read before touching this module).** This module
+//! follows the Altair *structure* - 512 keys, sync periods, two-thirds
+//! threshold, fork-domain signing root - but its BLS instantiation is the
+//! minimal-signature-size variant: public keys are compressed G2 points
+//! (96 bytes) and signatures compressed G1 points (48 bytes), hashed with
+//! Budlum's G1 suite. Ethereum mainnet runs the minimal-pubkey-size variant
+//! (48-byte G1 public keys, 96-byte G2 signatures, the G2 suite
+//! `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`), so a genuine mainnet
+//! `SyncCommitteeState` or sync aggregate cannot verify here as-is. The
+//! aggregates this verifier accepts today are produced by Budlum-side
+//! relayers in the internal variant. Before this bridge is pointed at real
+//! Ethereum, the groups must be swapped (pubkeys to G1/48, signatures to
+//! G2/96, hash-to-curve to the G2 suite) and the result locked with a
+//! known-answer test from a published mainnet sync aggregate; that work is
+//! tracked in the workspace AR-GE queue. Until then the module is correct
+//! for what it verifies - it is just not Ethereum-interoperable.
+//!
 //! This strengthens N-confirmation finality: the sync committee, 512 validators
 //! over a period of about 27 hours, gives real PoS finality through a BLS12-381
 //! aggregate signature. N-confirmation remains as the fallback, for when there
@@ -109,12 +126,15 @@ pub const SYNC_COMMITTEE_SIZE: usize = 512;
 /// 512 * 2 / 3 = 341.33, rounded up to 342.
 pub const PARTICIPATION_THRESHOLD: usize = (SYNC_COMMITTEE_SIZE * 2) / 3 + 1;
 
-/// The BLS public key size, G2 compressed on BLS12-381.
+/// The BLS public key size, G2 compressed on BLS12-381. This is the
+/// internal minimal-signature-size variant; Ethereum mainnet uses 48-byte
+/// G1 public keys (see the module-level warning).
 pub const BLS_PUBKEY_LEN: usize = 96;
 
-/// The BLS signature size, G1 compressed. Ethereum's minimal-pubkey-size
-/// scheme puts signatures in G1, and a compressed G1 point is 48 bytes; the
-/// earlier value of 96 could not have been decoded by any verifier.
+/// The BLS signature size, G1 compressed. This module's internal variant
+/// puts signatures in G1 (a compressed G1 point is 48 bytes); the earlier
+/// value of 96 could not have been decoded by any verifier. Ethereum
+/// mainnet is the other way around: 96-byte G2 signatures.
 pub const BLS_SIGNATURE_LEN: usize = 48;
 
 /// The Ethereum sync committee light client state, for a single period.

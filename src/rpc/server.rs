@@ -2406,6 +2406,18 @@ impl BudlumApiServer for RpcServer {
         // event is filed under, so a sink sees who spoke rather than a caller's
         // claim about it.
         let actor = auth.derived_owner().map_err(grant_auth_error)?;
+        // Bump the revoke generation BEFORE the chain mutation: a frame or
+        // open call whose grant question is in flight right now would
+        // otherwise apply a stale `true` after this revoke commits. The
+        // bump invalidates every in-flight answer; the reveal paths refuse
+        // and retry against the new state. A revoke that fails below keeps
+        // the bump - one harmless retry is the price of closing the race.
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.bump_revoke_generation();
+        }
         let revoked = self
             .chain
             .revoke_view_grant(grant_id, auth, at_epoch)
@@ -2563,6 +2575,16 @@ impl BudlumApiServer for RpcServer {
 
         // The grant decision is the chain's; the gateway re-enforces it on the
         // sealed path, but the authority that owns the registry answers it.
+        // Read the revoke generation first: a revoke that starts while this
+        // question is in flight invalidates the answer, and the comparison
+        // under the gateway lock below refuses the open instead of admitting
+        // a session on a pre-revoke `true`.
+        let generation = {
+            let gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.revoke_generation()
+        };
         let grant_allows = self
             .chain
             .may_view_content(content_id, viewer, key_id, owner)
@@ -2582,6 +2604,13 @@ impl BudlumApiServer for RpcServer {
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        if gw.revoke_generation() != generation {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                "reveal: a revoke started while the grant was being checked; retry the call",
+                None::<()>,
+            ));
+        }
         // Reclaim TTL-dead rows before admission so a burst of opens cannot
         // be wedged by corpses, then refuse fast at the cap with its own
         // code instead of paying for an open that admission would refuse.
@@ -2640,12 +2669,14 @@ impl BudlumApiServer for RpcServer {
         // read under the lock, the chain is asked without it, and the answer
         // is applied under the lock again; a session closed in between is
         // reported as unknown, which is what it is.
-        let scope: Option<crate::storage::GrantScope> = {
+        let (scope, generation): (Option<crate::storage::GrantScope>, u64) = {
             let gw = self.reveal_gateway.lock().map_err(|_| {
                 ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
             })?;
-            gw.grant_scope(session_id)
-                .map_err(reveal_gateway_rpc_error)?
+            let scope = gw
+                .grant_scope(session_id)
+                .map_err(reveal_gateway_rpc_error)?;
+            (scope, gw.revoke_generation())
         };
         let grant_allows = match scope {
             None => true,
@@ -2658,6 +2689,18 @@ impl BudlumApiServer for RpcServer {
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        // A revoke that started while the chain was being asked invalidates
+        // the answer above: the session may already be dropped and the grant
+        // it reports may be the pre-revoke one. Refuse the stale answer and
+        // make the caller retry against the new state instead of emitting
+        // frames on it.
+        if gw.revoke_generation() != generation {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                "reveal: a revoke started while the grant was being checked; retry the call",
+                None::<()>,
+            ));
+        }
         let (frames, fold) = gw
             .emit_frames(session_id, seq_start, count, now, grant_allows)
             .map_err(reveal_gateway_rpc_error)?;

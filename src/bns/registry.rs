@@ -305,6 +305,18 @@ impl BnsRegistry {
         // collection its count. V1 wrote names and subdomain labels back to
         // back, so two registries with different name boundaries could
         // share a root.
+        //
+        // Migration policy (shared by all four V-bumped registry roots,
+        // BNS V2 / liveness V3 / invalid-vote V2 / NFT V6): the new tags
+        // activate with the USL genesis. Mainnet has no committed state
+        // before that genesis (launch timestamp is still TBD), so there is
+        // no old-format root in existence to carry over, and no activation
+        // height or compatibility path is needed. Devnet and testnet state
+        // is disposable and resets with its genesis; a node that still
+        // holds pre-USL devnet data must resync from the new genesis
+        // instead of migrating. Any future tag bump after launch needs a
+        // recorded migration (activation height or state rewrite) in the
+        // same commit as the bump.
         hasher.update(b"BDLM_BNS_REGISTRY_V2");
         hasher.update(self.base_cost.to_le_bytes());
         hasher.update((self.names.len() as u64).to_le_bytes());

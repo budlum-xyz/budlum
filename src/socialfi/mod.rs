@@ -140,6 +140,11 @@ impl NftRegistry {
         // V6: collections carry their counts, the record commits its own
         // id next to the map key, and the tag list is counted, so the
         // stream has one parse.
+        //
+        // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
+        // for the shared rule - the V-bumped roots activate with the USL
+        // genesis, there is no pre-launch mainnet state to migrate, and a
+        // post-launch bump needs its migration recorded in the same commit.
         hasher.update(b"BDLM_NFT_REGISTRY_V6");
         hasher.update(self.next_id.to_le_bytes());
         hasher.update((self.nfts.len() as u64).to_le_bytes());

@@ -106,6 +106,11 @@ impl InvalidVoteTracker {
         let mut hasher = Sha256::new();
         // V2: each map carries its count, so an entry cannot slide from
         // the counts into the reported set.
+        //
+        // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
+        // for the shared rule - the V-bumped roots activate with the USL
+        // genesis, there is no pre-launch mainnet state to migrate, and a
+        // post-launch bump needs its migration recorded in the same commit.
         hasher.update(b"BDLM_INVALID_VOTE_TRACKER_V2");
         hasher.update(self.current_epoch.to_le_bytes());
         hasher.update((self.counts.len() as u64).to_le_bytes());

@@ -76,6 +76,14 @@ impl GlobalBlockHeader {
         // used to fold into the same 32 zero bytes, so two distinct headers
         // hashed identically; the tag byte keeps them apart and the domain
         // tag moved to V4 so no V3 hash can be replayed as a V4 one.
+        //
+        // Hash-format activation policy: see
+        // `BlockHeader::calculate_hash_bytes` (src/core/block.rs) - V4 is
+        // the only hash domain from the USL genesis onward; there is no
+        // pre-launch global-chain state to migrate. `version` below is the
+        // settlement protocol version, NOT a hash-format discriminator; a
+        // post-launch hash change must introduce its own persisted format
+        // version and activation height rather than overloading it.
         let storage_root_bytes = presence_tagged(self.storage_root);
         let ai_root_bytes = presence_tagged(self.ai_root);
 

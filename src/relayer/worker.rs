@@ -730,11 +730,16 @@ impl RelayerWorker {
     /// run refuses to act on again: it reports the request instead, because
     /// only the operator can tell whether the external transaction went out.
     ///
-    /// What this does not cover: an adapter failure after the broadcast
-    /// (confirmation timeout, undecodable proof) inside one run is mapped to
-    /// a retry of the whole request, and the next attempt broadcasts again.
-    /// Closing that needs the adapter to make a repeated broadcast
-    /// idempotent through `ExternalTransaction::external_nonce`.
+    /// An adapter failure inside one run is treated the same way whenever
+    /// the broadcast may already have happened (confirmation timeout,
+    /// undecodable proof, a lost connection after submission): the
+    /// reservation is kept, so the next pass reports the request instead of
+    /// broadcasting it again. Only failures that prove nothing was sent (no
+    /// adapter for the chain, the adapter refused the submission) release
+    /// the reservation and allow a retry of the whole request. Making a
+    /// repeated broadcast idempotent through
+    /// `ExternalTransaction::external_nonce` remains the adapter's job for
+    /// the day an operator clears a held reservation and re-relays.
     async fn process_relay(
         &mut self,
         request: &str,
@@ -813,11 +818,30 @@ impl RelayerWorker {
                     // Refuse, loudly. Submitting an unverified success here
                     // would be worse than submitting nothing: the relayer's
                     // signature would make a fabricated external outcome
-                    // look authentic. The reservation is released: a
-                    // failure the adapter reported inside this run is not a
-                    // lost broadcast, and the outcome below decides whether
-                    // the request is retried.
-                    self.observed.remove(request);
+                    // look authentic.
+                    //
+                    // The reservation is released only when the error proves
+                    // no broadcast went out: the registry had no adapter for
+                    // the chain, or the adapter itself refused the
+                    // submission. Every other failure can occur AFTER
+                    // `submit_transaction` already sent the transaction
+                    // (confirmation timeout, undecodable proof, a dropped
+                    // connection mid-wait), so the reservation stays: the
+                    // next pass finds `result: None`, refuses to broadcast
+                    // again, and names the request for the operator instead.
+                    if broadcast_certainly_did_not_happen(&e) {
+                        self.observed.remove(request);
+                    } else {
+                        error!(
+                            request,
+                            chain = ?ext_tx.chain,
+                            external_nonce = ext_tx.external_nonce,
+                            error = %e,
+                            "Relayer: the adapter failed after the broadcast may have gone \
+                             out; the reservation is kept so the next pass reports the \
+                             request instead of broadcasting it again"
+                        );
+                    }
                     self.save_pending();
                     warn!(
                         chain = ?ext_tx.chain,
@@ -868,6 +892,19 @@ fn write_atomically(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> 
     let tmp = path.with_file_name(format!("{file_name}.tmp"));
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Whether an adapter failure proves the external chain was never written to.
+///
+/// Only these two do: the registry had no adapter for the chain (nothing
+/// could be sent), or the adapter itself refused the broadcast. Every other
+/// variant can surface after `submit_transaction` already went out, so the
+/// caller must keep the request's reservation on them.
+fn broadcast_certainly_did_not_happen(error: &AdapterError) -> bool {
+    matches!(
+        error,
+        AdapterError::UnsupportedChain(_) | AdapterError::SubmissionFailed(_)
+    )
 }
 
 /// Sort an adapter failure into "try again" and "never".

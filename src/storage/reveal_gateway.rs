@@ -169,6 +169,14 @@ pub struct RevealGateway {
     /// Internal uniqueness counter; never issued raw (see [`IdNonce`]).
     next_id: u64,
     id_nonce: IdNonce,
+    /// Bumped when a revoke flow starts, BEFORE the chain mutation commits.
+    /// Reveal paths ask the chain for a grant decision without holding the
+    /// gateway lock and apply the answer under it; a revoke that lands
+    /// between the question and the answer would otherwise be served once
+    /// on the stale `true`. Callers read the counter before asking the chain
+    /// and refuse the call when it changed, so the racing ask is retried
+    /// against the new state instead of emitted.
+    revoke_generation: u64,
 }
 
 impl Default for RevealGateway {
@@ -188,7 +196,24 @@ impl RevealGateway {
             sessions: BTreeMap::new(),
             next_id: 0,
             id_nonce: IdNonce(nonce),
+            revoke_generation: 0,
         }
+    }
+
+    /// The current revoke generation; reveal paths compare it before and
+    /// after asking the chain for a grant decision.
+    #[must_use]
+    pub fn revoke_generation(&self) -> u64 {
+        self.revoke_generation
+    }
+
+    /// Start a revoke flow: call this BEFORE the chain mutation is
+    /// submitted, so every grant decision already in flight is stale by the
+    /// time the mutation can land. A revoke that fails keeps the bump; the
+    /// only cost is one retry of the racing reveal call, and its next chain
+    /// question gets the truthful answer.
+    pub fn bump_revoke_generation(&mut self) {
+        self.revoke_generation = self.revoke_generation.wrapping_add(1);
     }
 
     /// Derive the public id for an internal counter value: a keyed hash, so

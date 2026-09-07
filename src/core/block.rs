@@ -109,6 +109,20 @@ impl BlockHeader {
         // (and signed) identically. The tag byte keeps them apart, the way
         // `shards_root` below already is; the domain tag moved to V4 so no
         // V3 hash can be replayed as a V4 one.
+        //
+        // Hash-format activation policy (this header hash, the full-block
+        // hash below, and the settlement global header alike):
+        // `BDLM_BLOCK_V4` is the only hash domain from the USL genesis
+        // onward. There is no V3-imaged chain state to carry over - mainnet
+        // has not launched (its genesis timestamp is still TBD) and
+        // devnet/testnet data resets with its genesis - so no dual-path
+        // verification, persisted hash-format version or activation height
+        // exists or is needed. The cost is deliberate: any node holding
+        // pre-USL blocks must resync from the new genesis. A format change
+        // AFTER launch is a different matter: it needs an explicit
+        // activation height, a persisted format version, and verification
+        // routed through the preimage of the block's own format, recorded
+        // in the same commit as the new tag.
         let storage_root_bytes = presence_tagged(self.storage_root);
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_BLOCK_V4",
@@ -352,7 +366,9 @@ impl Block {
         // fold into the same 32 zero bytes, so two distinct headers hashed
         // (and signed) identically. The tag byte keeps them apart, the way
         // `shards_root` below already is; the domain tag moved to V4 so no
-        // V3 hash can be replayed as a V4 one.
+        // V3 hash can be replayed as a V4 one. Hash-format activation
+        // policy: see `BlockHeader::calculate_hash_bytes` - V4 is the only
+        // domain from the USL genesis onward.
         let storage_root_bytes = presence_tagged(self.storage_root);
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_BLOCK_V4",

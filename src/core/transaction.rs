@@ -1198,6 +1198,9 @@ mod tests {
     /// A V4 (Ed25519) signature verifies only against `from` read as an
     /// Ed25519 public key; a V5 account's `from` is a key hash, so no V4
     /// signature spends it.
+    // `WalletKeyPair` only exists with the (default-on) `wallet-ml-dsa`
+    // feature; without it this test does not compile.
+    #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_v4_signature_cannot_spend_a_v5_account() {
         let wallet = crate::crypto::primitives::WalletKeyPair::generate();

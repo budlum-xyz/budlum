@@ -200,8 +200,13 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a correct tree was refused"));
     }
-    // Direct assert_one bypass.
-    let direct_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder.when(is_assert).assert_one(rs1_val.clone());\n";
+    // Direct assert_one bypass. Prefixed with `good_air` so every witness
+    // constant the gate looks for is present: the refusal must come from the
+    // direct-assertion check alone, not from a missing witness column that
+    // would have failed `run` earlier anyway.
+    let direct_air = format!(
+        "{good_air}        builder.when(is_assert).assert_one(rs1_val.clone());\n"
+    );
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), direct_air)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
@@ -209,7 +214,9 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: a direct assert_one passed"));
     }
     // The same bypass as rustfmt writes it, one call per line.
-    let split_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder\n            .when(is_assert.clone())\n            .assert_one(rs1_val.clone());\n";
+    let split_air = format!(
+        "{good_air}        builder\n            .when(is_assert.clone())\n            .assert_one(rs1_val.clone());\n"
+    );
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), split_air)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
@@ -220,7 +227,9 @@ pub fn self_test() -> Result<String, String> {
     }
     // The same bypass with spaces around the punctuation, which is still
     // valid Rust and read the same by the compiler.
-    let spaced_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder . when (is_assert . clone ()) . assert_one (rs1_val . clone ());\n";
+    let spaced_air = format!(
+        "{good_air}        builder . when (is_assert . clone ()) . assert_one (rs1_val . clone ());\n"
+    );
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), spaced_air)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
@@ -232,7 +241,9 @@ pub fn self_test() -> Result<String, String> {
     // The same bypass with a block comment inside the chain. A scanner that
     // removes only `//` comments leaves the comment between `when` and its
     // argument, so `when(is_assert` is never seen and the bypass passes.
-    let commented_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder.when /* witness? no */ (is_assert).assert_one(rs1_val.clone());\n";
+    let commented_air = format!(
+        "{good_air}        builder.when /* witness? no */ (is_assert).assert_one(rs1_val.clone());\n"
+    );
     std::fs::write(
         dir.join("budzero/bud-proof/src/plonky3_air.rs"),
         commented_air,

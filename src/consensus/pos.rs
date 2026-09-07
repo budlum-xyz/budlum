@@ -897,21 +897,6 @@ impl ConsensusEngine for PoSEngine {
         let signature = block.signature.clone().unwrap_or_default();
         let key = (*producer, header.index);
 
-        if let Some(store) = storage {
-            // Not `let _ =`: the seen-block record is the double-sign
-            // evidence. A record that fails to persist means a restart
-            // forgets the first signature and the second one is never
-            // caught, so the failure has to surface.
-            store
-                .save_seen_block(&header, &signature)
-                .map_err(|error| {
-                    ConsensusError(format!(
-                        "failed to persist seen block at height {}: {error}",
-                        header.index
-                    ))
-                })?;
-        }
-
         let mut seen_blocks = self
             .seen_blocks
             .write()
@@ -923,6 +908,16 @@ impl ConsensusEngine for PoSEngine {
                     "DOUBLE-SIGN: {} signed two blocks for slot {}!",
                     producer, header.index
                 );
+                // The persisted seen-block record is the double-sign
+                // evidence across restarts, so the FIRST header must stay
+                // the durable one. Persisting unconditionally here would
+                // overwrite `SEEN:{producer}:{height}` with the second,
+                // conflicting signature before this comparison runs; after
+                // a restart only the second signature would survive and the
+                // equivocation could never be proven. `load_state` refills
+                // `seen_blocks` from storage at startup, so the in-memory
+                // view is authoritative and the write is skipped on a
+                // conflict.
                 let evidence = SlashingEvidence::new(
                     existing.0.clone(),
                     header,
@@ -936,6 +931,20 @@ impl ConsensusEngine for PoSEngine {
                 slashing_evidence.push(evidence);
             }
         } else {
+            if let Some(store) = storage {
+                // Not `let _ =`: the seen-block record is the double-sign
+                // evidence. A record that fails to persist means a restart
+                // forgets the first signature and the second one is never
+                // caught, so the failure has to surface.
+                store
+                    .save_seen_block(&header, &signature)
+                    .map_err(|error| {
+                        ConsensusError(format!(
+                            "failed to persist seen block at height {}: {error}",
+                            header.index
+                        ))
+                    })?;
+            }
             if block.index > 0 && block.index.is_multiple_of(epoch_length) {
                 // `add_checkpoint` fails when the checkpoint cannot be
                 // persisted. Discarding that here reported the block as

@@ -604,10 +604,20 @@ impl AiRegistry {
         // and the version bump does not help because the request does not
         // carry the version. The terms stay fixed until every request on
         // the model has settled or been retired.
+        //
+        // Cancelled and reclaimed requests are terminal too: their escrow
+        // already went back and `submit_result` refuses further results for
+        // them. Counting them as pending kept the spec pinned until
+        // `prune_expired` retired the row a full retention window later.
         let pending = self
             .requests
             .iter()
-            .filter(|(id, req)| req.model_id == *model_id && !self.outcomes.contains_key(*id))
+            .filter(|(id, req)| {
+                req.model_id == *model_id
+                    && !self.outcomes.contains_key(*id)
+                    && !self.cancelled_requests.contains(*id)
+                    && !self.reclaimed_fees.contains(*id)
+            })
             .count();
         if pending > 0 {
             return Err(format!(

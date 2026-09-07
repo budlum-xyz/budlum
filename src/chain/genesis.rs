@@ -1019,6 +1019,22 @@ mod tests {
         assert_eq!(genesis1.timestamp, GENESIS_TIMESTAMP);
     }
 
+    /// `ops/scripts/docker-smoke-mainnet.sh` pins the devnet genesis hash and
+    /// refuses to boot when the image disagrees with it. The pin has to move
+    /// with `devnet_genesis()`: when this test fails, update
+    /// `DEVNET_GENESIS_HASH` in that script in the same change. The pinned
+    /// value is the hash the docker-smoke job itself printed at head
+    /// `25f0583` (run 34156887325).
+    #[test]
+    fn devnet_genesis_hash_matches_the_docker_smoke_pin() {
+        let block = devnet_genesis().build_genesis_block();
+        assert_eq!(
+            block.hash.to_string(),
+            "87d93624975213bbdf7879ba8af973935e21f52d3436cc736b8df586774879ba",
+            "the docker-smoke-mainnet.sh pin must move with devnet_genesis()"
+        );
+    }
+
     #[test]
     fn test_network_genesis_configs_are_distinct() {
         let mainnet = GenesisConfig::for_network(Network::Mainnet);
