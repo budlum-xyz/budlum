@@ -852,7 +852,6 @@ pub trait BudlumApi {
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a model registration transaction.
-    #[method(name = "bud_aiRegisterModel")]
     /// Prepare an AI model registration transaction template.
     ///
     /// The governance-tunable registration fee

@@ -16,9 +16,18 @@ The root `README.md` is only a dashboard; maturity and risk warnings live here.
   `execution/guest.rs` 39, `execution/verify.rs` 16, `execution/model_class.rs`
   3). Counted, not estimated; `registry.rs` and `types.rs` carry no test of
   their own and are exercised through `mod.rs`.
-- **RPC endpoints (6):** `bud_aiGetModel`, `bud_aiRegisterModel`,
+- **RPC surface (22 methods, measured `bud_ai*` in `src/rpc/api.rs`):**
+  model: `bud_aiGetModel`, `bud_aiRegisterModel`; inference:
   `bud_aiSubmitRequest`, `bud_aiSubmitResult`, `bud_aiGetOutcome`,
-  `bud_aiGetActiveVerifiers`.
+  `bud_aiGetActiveVerifiers`; lifecycle: `bud_aiReclaimFee`,
+  `bud_aiCancelStatus`; dispute/slashing: `bud_aiDisputeSlash`,
+  `bud_aiEquivocationStatus`, `bud_aiSlashingStatus`; verifier/agent
+  metadata: `bud_aiVerifierStake`, `bud_aiVerifierQos`,
+  `bud_aiVerifierRanking`, `bud_aiVerifierWhitelist`, `bud_aiAgentRanking`,
+  `bud_aiAgentReputation`, `bud_aiAgentPayment`, `bud_aiAgentPayments`,
+  `bud_aiCallbackQueue`, `bud_aiExecutionProof`, `bud_aiInferenceStats`.
+  The education-report surface (7) is the Lubot reading set; the calls above
+  are the chain-facing superset the node actually serves.
 - **ZKVM host call:** `Syscall imm=6` -> a `0x00A1_00A1` event -> automatic
   `AiInferenceRequest` creation (`budzero/bud-vm/src/lib.rs`).
 
