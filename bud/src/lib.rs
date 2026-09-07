@@ -84,6 +84,7 @@ pub mod bud_format_videopipe;
 pub mod bud_format_view;
 pub mod bud_format_wal;
 pub mod bud_format_zkbridge;
+pub mod bud_format_zkproof;
 pub mod churn;
 pub mod cli;
 pub mod fidelity;
