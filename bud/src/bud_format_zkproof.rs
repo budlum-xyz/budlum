@@ -26,13 +26,13 @@ use std::path::Path;
 use std::process::Command;
 
 /// File magic for a saved STARK field trace.
-pub const ZK_PROOF_MAGIC: [u8; 8] = *b"\xB5ZKPR\0\0\0";
+const ZK_PROOF_MAGIC: [u8; 8] = *b"\xB5ZKPR\0\0\0";
 /// File version for a saved STARK field trace.
-pub const ZK_PROOF_VERSION: u8 = 1;
+const ZK_PROOF_VERSION: u8 = 1;
 /// The environment variable naming the external prover binary.
 pub const ZK_PROVER_ENV: &str = "BUD_ZK_PROVER";
 /// Hard cap on trace rows so a corrupt header cannot ask for a huge buffer.
-pub const ZK_MAX_ROWS: u64 = 1_000_000;
+const ZK_MAX_ROWS: u64 = 1_000_000;
 /// Bytes per trace row (10 field elements, u64 LE each).
 const ROW_BYTES: usize = 80;
 /// Header size: magic (8) + version (1) + row count (8) + root (32).
@@ -163,12 +163,6 @@ pub fn load_field_trace(path: &Path) -> Result<(Vec<[u64; 10]>, [u8; 32]), Strin
     Ok((rows, root))
 }
 
-/// The trace root digest for on-chain settlement (stable across runs).
-#[must_use]
-pub fn trace_root(rows: &[[u64; 10]]) -> [u8; 32] {
-    field_trace_meta(rows).1
-}
-
 fn hex8(bytes: &[u8; 32]) -> String {
     bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -258,7 +252,7 @@ mod tests {
     fn the_trace_roundtrips_and_binds_to_its_root() {
         let witness = witness_for(&b"trace roundtrip ".repeat(60));
         let rows = witness_to_field_trace(&witness);
-        let root = trace_root(&rows);
+        let (_, root) = field_trace_meta(&rows);
         let path = std::env::temp_dir().join(format!("budzk-{}.trace", hex8(&root)));
         save_field_trace(&path, &rows, &root).expect("saves");
         let (loaded, loaded_root) = load_field_trace(&path).expect("loads");

@@ -694,12 +694,8 @@ bud/src/bud_format_wire.rs	struct	GoldenVector
 bud/src/bud_format_wire.rs	struct	WireField
 bud/src/bud_format_zkbridge.rs	const	ZK_MAGIC
 bud/src/bud_format_zkbridge.rs	const	ZK_VERSION
-bud/src/bud_format_zkbridge.rs	fn	engine_to_witness
-bud/src/bud_format_zkbridge.rs	fn	field_trace_meta
 bud/src/bud_format_zkbridge.rs	fn	verify_witness
 bud/src/bud_format_zkbridge.rs	fn	witness_root
-bud/src/bud_format_zkbridge.rs	fn	witness_to_field_trace
-bud/src/bud_format_zkbridge.rs	struct	WitnessStep
 bud/src/churn.rs	enum	FixtureKind
 bud/src/churn.rs	fn	repair_one_missing
 bud/src/churn.rs	struct	ChurnFixture
