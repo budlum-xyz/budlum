@@ -23,7 +23,7 @@ fn genesis_state() -> (AccountState, TokenomicsAddresses) {
     let params = TokenomicsParams::default();
     let addrs = TokenomicsAddresses::reserved();
     let mut state = AccountState::new();
-    for (addr, amount) in genesis_allocations(&params, &addrs) {
+    for (addr, amount) in genesis_allocations(&params, &addrs).unwrap() {
         state.add_balance(&addr, amount);
     }
     (state, addrs)

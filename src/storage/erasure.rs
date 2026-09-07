@@ -1009,6 +1009,15 @@ mod tests {
         ) {
             let n = k + parity;
             let scheme = ErasureScheme { k: k as u32, n: n as u32 };
+            // Fewer bytes than data shards is refused (an empty stripe has
+            // no id of its own), so those draws check the refusal instead.
+            if data.len() < k {
+                proptest::prop_assert!(
+                    encode_object(&data, scheme).is_err(),
+                    "k={} must refuse an object of {} bytes", k, data.len()
+                );
+                return Ok(());
+            }
             let enc = encode_object(&data, scheme).expect("generated scheme is valid");
             let manifest = enc.to_manifest().expect("manifest");
 

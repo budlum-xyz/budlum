@@ -371,6 +371,84 @@ async fn a_zero_external_root_is_refused_before_signing() {
     assert!(msg.contains("zero external state root"), "msg: {msg}");
 }
 
+/// An adapter whose observation is internally valid but about a different
+/// transaction than the one it broadcast. Everything verifies; only the hash
+/// binding can catch it.
+struct SubstitutingAdapter;
+
+#[async_trait::async_trait]
+impl ChainAdapter for SubstitutingAdapter {
+    fn chain_type(&self) -> ExternalChain {
+        ExternalChain::Ethereum
+    }
+
+    async fn generate_receipt_proof(
+        &self,
+        tx_hash: &str,
+    ) -> Result<(MerkleProof, Hash32, String), AdapterError> {
+        HonestAdapter {
+            chain: ExternalChain::Ethereum,
+        }
+        .generate_receipt_proof(tx_hash)
+        .await
+    }
+
+    fn verify_receipt_proof(
+        &self,
+        proof: &MerkleProof,
+        external_state_root: &Hash32,
+        expected_tx_hash: &str,
+    ) -> Result<(), AdapterError> {
+        HonestAdapter {
+            chain: ExternalChain::Ethereum,
+        }
+        .verify_receipt_proof(proof, external_state_root, expected_tx_hash)
+    }
+
+    async fn submit_transaction(
+        &self,
+        _ext_tx: &ExternalTransaction,
+    ) -> Result<String, AdapterError> {
+        Ok("0xbroadcast".to_string())
+    }
+
+    async fn wait_for_confirmation(
+        &self,
+        _tx_hash: &str,
+        _confirmations: u32,
+    ) -> Result<RelayerExternalResult, AdapterError> {
+        // A valid observation of some other confirmed transaction.
+        let (proof, root, hash) = self.generate_receipt_proof("0xsomeone-elses").await?;
+        Ok(RelayerExternalResult {
+            chain: ExternalChain::Ethereum,
+            tx_hash: hash,
+            success: true,
+            message: None,
+            receipt_proof: bincode::serialize(&proof).expect("proof serialize"),
+            external_state_root: root,
+        })
+    }
+}
+
+/// The observation must be about the transaction the worker broadcast: a
+/// valid proof for another confirmed transaction is refused before signing.
+#[tokio::test]
+async fn an_observation_of_a_different_transaction_than_the_broadcast_is_refused() {
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Box::new(SubstitutingAdapter))
+        .expect("test adapter must be fit to relay");
+    let err =
+        RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
+            .await
+            .expect_err("an observation of another transaction must be refused");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("broadcast 0xbroadcast") && msg.contains("0xsomeone-elses"),
+        "msg: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn a_result_tagged_for_a_different_chain_is_refused() {
     let mut registry = AdapterRegistry::new();

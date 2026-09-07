@@ -56,6 +56,13 @@ pub struct RelayerWorker {
     /// so that a block held back by one retried request does not have its
     /// other requests relayed again on the next pass.
     settled: std::collections::HashSet<String>,
+    /// The nonce the next result transaction is signed with, when this pass
+    /// has already submitted one. The chain's account nonce does not move
+    /// until a result is included in a block, so two results signed in one
+    /// pass from the chain nonce alone would collide and the second would be
+    /// refused. Reset at the start of every pass from the chain nonce, then
+    /// advanced locally per accepted submission.
+    next_nonce: Option<u64>,
     /// Verified external observations whose result has not yet been seen
     /// in a finalized Budlum block, by request hash. A retry submits the
     /// stored result again instead of repeating the external action: the
@@ -79,10 +86,18 @@ pub struct RelayerWorker {
 /// The transaction hash is what the finality check asks the chain about. A
 /// resubmission after the mempool dropped the first copy signs a fresh
 /// transaction (new nonce, new hash), and the hash is replaced with it.
+///
+/// An entry is written before the external action starts, with `result`
+/// still `None`, and filled in once the adapter's observation verified. A
+/// worker that restarts and finds such a reservation knows the action may
+/// have run and refuses to run it again; the operator is told which request
+/// needs the external transaction looked up by hand.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct PendingResult {
-    /// The observation the adapter verified.
-    result: crate::core::transaction::RelayerExternalResult,
+    /// The observation the adapter verified, or `None` while the external
+    /// action is in flight (or was in flight when a previous run stopped).
+    #[serde(default)]
+    result: Option<crate::core::transaction::RelayerExternalResult>,
     /// The hash of the signed result transaction the chain handle took last,
     /// or `None` when no submission has been accepted yet.
     submitted_tx: Option<String>,
@@ -120,6 +135,7 @@ impl RelayerWorker {
             adapters: Arc::new(AdapterRegistry::new()),
             cursor_path: None,
             settled: std::collections::HashSet::new(),
+            next_nonce: None,
             observed: std::collections::HashMap::new(),
         }
     }
@@ -274,7 +290,7 @@ impl RelayerWorker {
             );
             return;
         }
-        if let Err(e) = std::fs::write(&path, body) {
+        if let Err(e) = write_atomically(&path, body.as_bytes()) {
             warn!(error = %e, path = %path.display(),
                   "Relayer: failed to persist pending results; a restart may repeat an external action");
         }
@@ -354,7 +370,10 @@ impl RelayerWorker {
         // nor brings a dropped entry back.
         let mut changed = false;
         for request in lost {
-            let Some(result) = self.observed.get(&request).map(|p| p.result.clone()) else {
+            let Some(result) = self.observed.get(&request).and_then(|p| p.result.clone()) else {
+                // A reservation without a result: the external action was
+                // in flight when a run stopped. Nothing to resubmit, and
+                // nothing to repeat either; `process_relay` reports it.
                 continue;
             };
             let Some(user) = self.requester_of(&request).await else {
@@ -390,8 +409,8 @@ impl RelayerWorker {
         }
         error!(
             request,
-            external_tx = %pending.result.tx_hash,
-            chain = ?pending.result.chain,
+            external_tx = pending.result.as_ref().map(|r| r.tx_hash.as_str()).unwrap_or("unknown"),
+            chain = ?pending.result.as_ref().map(|r| r.chain),
             "Relayer: the request behind a verified external result could not be read \
              back from the chain for the whole failure budget; the result is dropped \
              from the pending store. The external action happened and its result was \
@@ -421,12 +440,20 @@ impl RelayerWorker {
         result: &crate::core::transaction::RelayerExternalResult,
         kp: &KeyPair,
     ) -> RelayOutcome {
+        // The first result of a pass takes the chain's nonce; every later
+        // one in the same pass takes the next number, because the chain
+        // nonce only moves once a result is in a block and the mempool
+        // refuses a second transaction at the same nonce.
+        let nonce = match self.next_nonce {
+            Some(n) => n,
+            None => self.chain.get_nonce(&self.relayer_address).await,
+        };
         let mut result_tx = Transaction::new_with_chain_id(
             self.relayer_address,
             user, // to: original UniversalRelay caller
             0,
             100, // Fee
-            self.chain.get_nonce(&self.relayer_address).await,
+            nonce,
             Vec::new(),
             self.chain.get_chain_id().await,
             TransactionType::RelayerResult(result.clone()),
@@ -435,10 +462,12 @@ impl RelayerWorker {
         let tx_hash = result_tx.hash.clone();
         match self.chain.add_transaction(result_tx).await {
             Ok(()) => {
+                self.next_nonce = Some(nonce.saturating_add(1));
                 if let Some(pending) = self.observed.get_mut(request) {
-                    pending.submitted_tx = Some(tx_hash);
+                    pending.submitted_tx = Some(tx_hash.clone());
                 }
                 self.save_pending();
+                info!(request, tx = %tx_hash, nonce, "Relayer: relay result accepted by the chain");
                 RelayOutcome::Submitted
             }
             Err(e) => {
@@ -446,8 +475,13 @@ impl RelayerWorker {
                 // gone, nonce raced. The external action has happened and
                 // its result is kept under the request hash, so the retry
                 // signs and submits that result again; the chain's replay
-                // protection refuses a second result if one did land.
+                // protection refuses a second result if one did land. The
+                // local nonce is dropped so the retry re-reads the chain's.
+                self.next_nonce = None;
                 warn!(
+                    request,
+                    nonce,
+                    external_tx = %result.tx_hash,
                     error = %e,
                     "Relayer: chain did not accept the signed relay result; \
                      holding the request for retry"
@@ -506,7 +540,7 @@ impl RelayerWorker {
                 return;
             }
         }
-        if let Err(e) = std::fs::write(path, height.to_string()) {
+        if let Err(e) = write_atomically(path, height.to_string().as_bytes()) {
             warn!(error = %e, path = %path.display(), height,
                   "Relayer: failed to persist cursor; a restart will skip relayed heights");
         }
@@ -552,6 +586,9 @@ impl RelayerWorker {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
             let finalized = self.chain.get_finalized_height().await;
+            // Every pass starts from the chain's view of the nonce; the
+            // local counter only bridges the submissions within one pass.
+            self.next_nonce = None;
             // Results submitted on earlier passes are released only once a
             // finalized block holds them; ones the mempool lost go back out.
             self.reap_finalized(finalized).await;
@@ -643,6 +680,17 @@ impl RelayerWorker {
             .wait_for_confirmation(&tx_hash, CONFIRMATION_DEPTH)
             .await?;
 
+        // The observation must be about the transaction this worker
+        // broadcast. An adapter that hands back a valid proof for some other
+        // confirmed transaction would otherwise have the relayer sign a
+        // result about a transfer it never made.
+        if result.tx_hash != tx_hash {
+            return Err(AdapterError::ProofVerificationFailed(format!(
+                "adapter broadcast {tx_hash} but returned an observation of {}",
+                result.tx_hash
+            )));
+        }
+
         // An adapter is not trusted to be correct, only to be the source. Its
         // own verifier runs against its own output before anything is signed:
         // the whole observation, not a Merkle path cut out of it. For the EVM
@@ -672,10 +720,21 @@ impl RelayerWorker {
     /// left a paid request behind for good. The caller now holds the cursor
     /// on [`RelayOutcome::Retry`] and comes back to the request.
     ///
-    /// The external action runs once per request. Its verified result is
-    /// kept under the request hash until the chain takes the signed result
-    /// transaction, so a retry after a full mempool or a raced nonce repeats
-    /// the local submission and not the transfer on the other chain.
+    /// The external action runs at most once per request. Before it starts,
+    /// the request is reserved in the pending store; once the adapter's
+    /// observation verifies, the result is kept under the same entry until
+    /// the chain takes the signed result transaction. A retry after a full
+    /// mempool or a raced nonce therefore repeats the local submission and
+    /// not the transfer on the other chain, and a run that stops between the
+    /// broadcast and the verified result leaves a reservation that the next
+    /// run refuses to act on again: it reports the request instead, because
+    /// only the operator can tell whether the external transaction went out.
+    ///
+    /// What this does not cover: an adapter failure after the broadcast
+    /// (confirmation timeout, undecodable proof) inside one run is mapped to
+    /// a retry of the whole request, and the next attempt broadcasts again.
+    /// Closing that needs the adapter to make a repeated broadcast
+    /// idempotent through `ExternalTransaction::external_nonce`.
     async fn process_relay(
         &mut self,
         request: &str,
@@ -702,23 +761,51 @@ impl RelayerWorker {
                 // to do until `reap_finalized` says otherwise.
                 return RelayOutcome::Submitted;
             }
-            info!(
-                request,
-                "Relayer: resubmitting the verified result of an earlier pass; the external \
-                 action is not repeated"
-            );
-            kept.result.clone()
+            match &kept.result {
+                Some(result) => {
+                    info!(
+                        request,
+                        "Relayer: resubmitting the verified result of an earlier pass; the \
+                         external action is not repeated"
+                    );
+                    result.clone()
+                }
+                None => {
+                    // A reservation from a run that stopped between the
+                    // broadcast and the verified result. The external
+                    // transaction may or may not have gone out; repeating it
+                    // would risk a second transfer, so the request is held
+                    // and named until the operator resolves it.
+                    error!(
+                        request,
+                        chain = ?ext_tx.chain,
+                        target = %ext_tx.target_address,
+                        external_nonce = ext_tx.external_nonce,
+                        "Relayer: a previous run stopped with this request's external action \
+                         in flight; refusing to broadcast it again. Look the transaction up \
+                         on the external chain by its nonce, then clear or complete the \
+                         entry in the pending store"
+                    );
+                    return RelayOutcome::Retry;
+                }
+            }
         } else {
+            // Reserve first, act second: if the process dies during the
+            // external action, the next run finds the reservation.
+            self.observed.insert(
+                request.to_string(),
+                PendingResult {
+                    result: None,
+                    submitted_tx: None,
+                    requester_lookups_failed: 0,
+                },
+            );
+            self.save_pending();
             match Self::build_verified_result(&self.adapters, &ext_tx).await {
                 Ok(result) => {
-                    self.observed.insert(
-                        request.to_string(),
-                        PendingResult {
-                            result: result.clone(),
-                            submitted_tx: None,
-                            requester_lookups_failed: 0,
-                        },
-                    );
+                    if let Some(pending) = self.observed.get_mut(request) {
+                        pending.result = Some(result.clone());
+                    }
                     self.save_pending();
                     result
                 }
@@ -726,7 +813,12 @@ impl RelayerWorker {
                     // Refuse, loudly. Submitting an unverified success here
                     // would be worse than submitting nothing: the relayer's
                     // signature would make a fabricated external outcome
-                    // look authentic.
+                    // look authentic. The reservation is released: a
+                    // failure the adapter reported inside this run is not a
+                    // lost broadcast, and the outcome below decides whether
+                    // the request is retried.
+                    self.observed.remove(request);
+                    self.save_pending();
                     warn!(
                         chain = ?ext_tx.chain,
                         target = %ext_tx.target_address,
@@ -760,6 +852,22 @@ enum RelayOutcome {
     /// handle did not take the result. The cursor is held and the request is
     /// attempted again on the next pass.
     Retry,
+}
+
+/// Write `body` to `path` through a temporary file in the same directory
+/// and a rename, so a stop mid-write leaves the previous file intact.
+///
+/// `std::fs::write` truncates first and writes second; a process stopped in
+/// between leaves an empty file, which `load_cursor` and `load_pending`
+/// read as absent. For the cursor that skips every request finalized while
+/// the worker was down; for the pending store it repeats external actions.
+fn write_atomically(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
+    let tmp = path.with_file_name(format!("{file_name}.tmp"));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Sort an adapter failure into "try again" and "never".
@@ -1017,7 +1125,7 @@ mod relay_outcomes {
 
     /// An adapter that counts its submissions: the external action is the
     /// thing a retry must not repeat.
-    struct CountingAdapter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    pub(super) struct CountingAdapter(pub(super) std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
     #[async_trait::async_trait]
     impl ChainAdapter for CountingAdapter {
@@ -1211,7 +1319,7 @@ mod pending_results {
         w.observed.insert(
             "req-a".to_string(),
             PendingResult {
-                result: observation(1),
+                result: Some(observation(1)),
                 submitted_tx: Some("tx-a".to_string()),
                 requester_lookups_failed: 0,
             },
@@ -1219,7 +1327,7 @@ mod pending_results {
         w.observed.insert(
             "req-b".to_string(),
             PendingResult {
-                result: observation(2),
+                result: Some(observation(2)),
                 submitted_tx: None,
                 requester_lookups_failed: 3,
             },
@@ -1250,7 +1358,123 @@ mod pending_results {
         std::fs::write(w.pending_path().expect("path"), old.to_string()).expect("write");
         let loaded = w.load_pending();
         assert_eq!(loaded["req"].requester_lookups_failed, 0);
-        assert_eq!(loaded["req"].result, observation(4));
+        assert_eq!(loaded["req"].result, Some(observation(4)));
+    }
+
+    /// A reservation left by a run that stopped with the external action in
+    /// flight is honoured by the next run: the worker built over the same
+    /// store does not broadcast again, and says so.
+    #[tokio::test]
+    async fn a_restart_over_an_in_flight_reservation_does_not_broadcast_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(Box::new(super::relay_outcomes::CountingAdapter(
+                submissions.clone(),
+            )))
+            .expect("a counting adapter registers");
+        let registry = Arc::new(registry);
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+
+        // Run one: reserve the request and stop before the action finished.
+        let mut first = RelayerWorker::new(
+            actor(Default::default(), Default::default(), accepted.clone()),
+            Address::from([7u8; 32]),
+        )
+        .with_cursor_path(Some(path.clone()));
+        first.observed.insert(
+            "req-restart".to_string(),
+            PendingResult {
+                result: None,
+                submitted_tx: None,
+                requester_lookups_failed: 0,
+            },
+        );
+        first.save_pending();
+        drop(first);
+
+        // Run two: same store, live adapter, same request comes back.
+        let mut second = RelayerWorker::new(
+            actor(Default::default(), Default::default(), accepted.clone()),
+            Address::from([7u8; 32]),
+        )
+        .with_cursor_path(Some(path))
+        .with_adapters(registry)
+        .with_signing_key(key);
+        second.observed = second.load_pending();
+        let request = crate::core::transaction::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: 7,
+        };
+        let outcome = second
+            .process_relay("req-restart", Address::from([8u8; 32]), request)
+            .await;
+        assert_eq!(outcome, RelayOutcome::Retry, "held for the operator");
+        assert_eq!(
+            submissions.load(Ordering::SeqCst),
+            0,
+            "the external transaction must not be broadcast a second time"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            0,
+            "nothing was signed either"
+        );
+        assert!(second.observed.contains_key("req-restart"));
+    }
+
+    /// Two results in one pass take consecutive nonces: the chain nonce
+    /// does not move until inclusion, so the second must be counted locally.
+    #[tokio::test]
+    async fn two_results_in_one_pass_take_consecutive_nonces() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let nonces = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = nonces.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    crate::chain::chain_actor::ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(41);
+                    }
+                    crate::chain::chain_actor::ChainCommand::GetChainId(reply) => {
+                        let _ = reply.send(1);
+                    }
+                    crate::chain::chain_actor::ChainCommand::AddTransaction(tx, reply) => {
+                        seen.lock().expect("lock").push(tx.nonce);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(Box::new(super::relay_outcomes::CountingAdapter(Arc::new(
+                AtomicUsize::new(0),
+            ))))
+            .expect("a counting adapter registers");
+        let mut worker = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_adapters(Arc::new(registry))
+            .with_signing_key(Arc::new(KeyPair::generate().expect("keypair")));
+        let request = |nonce: u64| crate::core::transaction::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: nonce,
+        };
+        let a = worker
+            .process_relay("req-a", Address::from([8u8; 32]), request(1))
+            .await;
+        let b = worker
+            .process_relay("req-b", Address::from([8u8; 32]), request(2))
+            .await;
+        assert_eq!((a, b), (RelayOutcome::Submitted, RelayOutcome::Submitted));
+        assert_eq!(*nonces.lock().expect("lock"), vec![41, 42]);
     }
 
     /// A pending set whose encoding no longer fits the read ceiling is not
@@ -1266,7 +1490,7 @@ mod pending_results {
         w.observed.insert(
             "req-small".to_string(),
             PendingResult {
-                result: observation(1),
+                result: Some(observation(1)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
             },
@@ -1281,7 +1505,7 @@ mod pending_results {
         w.observed.insert(
             "req-huge".to_string(),
             PendingResult {
-                result: huge,
+                result: Some(huge),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
             },
@@ -1306,7 +1530,7 @@ mod pending_results {
         w.observed.insert(
             "req-orphan".to_string(),
             PendingResult {
-                result: observation(6),
+                result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
             },
@@ -1346,7 +1570,7 @@ mod pending_results {
         w.observed.insert(
             "req-orphan".to_string(),
             PendingResult {
-                result: observation(6),
+                result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: MAX_REQUESTER_LOOKUP_FAILURES - 2,
             },
@@ -1379,7 +1603,7 @@ mod pending_results {
         w.observed.insert(
             "req".to_string(),
             PendingResult {
-                result: observation(3),
+                result: Some(observation(3)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
             },
@@ -1410,7 +1634,7 @@ mod pending_results {
             w.observed.insert(
                 request.to_string(),
                 PendingResult {
-                    result: observation(9),
+                    result: Some(observation(9)),
                     submitted_tx: Some(hash.to_string()),
                     requester_lookups_failed: 0,
                 },
@@ -1455,7 +1679,7 @@ mod pending_results {
         w.observed.insert(
             "req-lost".to_string(),
             PendingResult {
-                result: observation(5),
+                result: Some(observation(5)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
             },

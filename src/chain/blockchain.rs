@@ -373,6 +373,17 @@ impl Blockchain {
             #[cfg(test)]
             panic!("Genesis PQ scheme mismatch: {e}");
         }
+        // Same treatment for the token distribution: a genesis whose
+        // allocations do not sum to the fixed supply seeds no distribution
+        // at all, and a chain built on it would look healthy while every
+        // account it should have funded stays empty.
+        if let Err(e) = resolved_genesis_config.validate_tokenomics_supply() {
+            error!("CRITICAL ERROR: {e}");
+            #[cfg(not(test))]
+            std::process::exit(1);
+            #[cfg(test)]
+            panic!("Genesis tokenomics supply mismatch: {e}");
+        }
 
         let mut state = resolved_genesis_config.build_state();
 

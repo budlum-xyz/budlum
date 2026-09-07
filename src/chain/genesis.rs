@@ -318,6 +318,43 @@ impl GenesisConfig {
         Ok(())
     }
 
+    /// The `bud_tokenomics` distribution, if present, sums to the fixed
+    /// supply, and its team vesting is at least as long as its cliff.
+    ///
+    /// `build_state` seeds nothing for a genesis that fails the supply check,
+    /// so a chain built on one would run with an empty distribution; every
+    /// path that builds a chain checks it first, next to the PQ scheme check.
+    ///
+    /// # Errors
+    ///
+    /// Names the sum and the supply it should have been, or the vesting and
+    /// the cliff it falls short of.
+    pub fn validate_tokenomics_supply(&self) -> Result<(), String> {
+        if let Some(params) = &self.bud_tokenomics {
+            if !params.is_balanced() {
+                return Err(format!(
+                    "Genesis bud_tokenomics allocations sum to {} base units, not the fixed supply of {}",
+                    params.total(),
+                    crate::tokenomics::BUD_TOTAL_SUPPLY
+                ));
+            }
+            // The team schedule unlocks linearly from genesis over
+            // `team_vesting_epochs` and pays nothing before the cliff. A
+            // duration shorter than the cliff would unlock the whole
+            // allocation the moment the cliff ends, which is a cliff without
+            // a schedule; it is refused rather than read as one.
+            if params.team_vesting_epochs != 0
+                && params.team_vesting_epochs < params.team_cliff_epochs
+            {
+                return Err(format!(
+                    "Genesis bud_tokenomics team vesting of {} epochs is shorter than its cliff of {} epochs",
+                    params.team_vesting_epochs, params.team_cliff_epochs
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_pq_scheme()?;
         if self.chain_id != network.chain_id().value() {
@@ -336,6 +373,7 @@ impl GenesisConfig {
                 ));
             }
         }
+        self.validate_tokenomics_supply()?;
         let validator_set = self
             .validators
             .iter()
@@ -542,11 +580,17 @@ impl GenesisConfig {
             // the two is rejected by `validate_consensus_ceremony`.
             state.tokenomics = *params;
             if let Some(addrs) = self.tokenomics_destinations() {
-                for (address, amount) in crate::tokenomics::genesis_allocations(params, &addrs) {
-                    state.add_balance(&address, amount);
+                // An unbalanced distribution is refused by
+                // `validate_consensus_ceremony` before any chain is built on
+                // this genesis; a configuration that reaches this point
+                // unchecked seeds nothing rather than a wrong supply.
+                if let Ok(allocations) = crate::tokenomics::genesis_allocations(params, &addrs) {
+                    for (address, amount) in allocations {
+                        state.add_balance(&address, amount);
+                    }
+                    state.burn_reserve_address = Some(addrs.burn_reserve);
+                    state.team_vesting = Some((addrs.team, params.team_vesting(0)));
                 }
-                state.burn_reserve_address = Some(addrs.burn_reserve);
-                state.team_vesting = Some((addrs.team, params.team_vesting(0)));
             }
         }
 
@@ -811,6 +855,47 @@ mod tests {
             dev_state.circulating_supply(),
             crate::tokenomics::BUD_TOTAL_SUPPLY as u128
         );
+    }
+
+    /// An unbalanced distribution is refused by the ceremony check and seeds
+    /// nothing in `build_state`, so it can never become a chain with a
+    /// supply other than the fixed one.
+    #[test]
+    fn an_unbalanced_tokenomics_is_refused_and_seeds_nothing() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.community += 1;
+        config.bud_tokenomics = Some(params);
+        let error = config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .expect_err("an unbalanced distribution must be refused");
+        assert!(error.contains("not the fixed supply"), "{error}");
+        assert!(config.validate_tokenomics_supply().is_err());
+        assert_eq!(config.build_state().circulating_supply(), 0);
+        assert_eq!(config.build_state().burn_reserve_address, None);
+    }
+
+    /// A team vesting shorter than its cliff is a cliff without a schedule:
+    /// the ceremony refuses it instead of unlocking the allocation at once.
+    #[test]
+    fn a_team_vesting_shorter_than_its_cliff_is_refused() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.team_vesting_epochs = params.team_cliff_epochs - 1;
+        config.bud_tokenomics = Some(params);
+        let error = config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .expect_err("a vesting shorter than its cliff must be refused");
+        assert!(error.contains("shorter than its cliff"), "{error}");
+        assert!(config.validate_tokenomics_supply().is_err());
+
+        // Zero duration is the no-schedule case and still unlocks at the
+        // cliff, so it stays accepted.
+        params.team_vesting_epochs = 0;
+        config.bud_tokenomics = Some(params);
+        assert!(config.validate_tokenomics_supply().is_ok());
     }
 
     #[test]

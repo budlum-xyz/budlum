@@ -297,9 +297,11 @@ impl ErasureScheme {
 impl Default for ErasureScheme {
     fn default() -> Self {
         // A manifest written before erasure coding has no scheme field. The
-        // serde default cannot see the shard list, so it stands for "absent";
-        // `ContentManifest::fill_legacy_erasure` turns it into replication
-        // over the shards actually listed.
+        // serde default cannot see the shard list, so it stands for "absent":
+        // `ContentManifest`'s wire form turns it into replication over the
+        // shards actually listed. For a single shard it already is that
+        // scheme, and against several shards it was never valid (`n` must
+        // equal the shard count), so nothing legitimate is rewritten.
         Self { k: 1, n: 1 }
     }
 }
@@ -456,11 +458,17 @@ pub struct ContentManifest {
     pub encryption: ContentEncryption,
 }
 
-/// The serde form of [`ContentManifest`]: identical fields, no legacy repair.
-/// `From` fills a missing `erasure` with replication over the listed shard
-/// count, so a pre-erasure manifest with several shards comes back as what it
-/// was instead of the field default `{k: 1, n: 1}`, which `validate_untrusted`
-/// refused against any multi-shard list.
+/// The serde form of [`ContentManifest`]: the same fields in the same shape,
+/// no legacy repair. `From` turns the `erasure` sentinel (the field default
+/// `{k: 1, n: 1}`, which a self-describing format supplies when the field is
+/// absent) into replication over the listed shard count, so a pre-erasure
+/// manifest with several shards comes back as what it was instead of a
+/// scheme `validate_untrusted` refuses against any multi-shard list.
+///
+/// The field is typed exactly as on `ContentManifest`, not as an `Option`:
+/// bincode has no notion of an absent field and reads whatever shape the
+/// struct declares, so a wire type with a different shape would decode the
+/// first byte of `k` as an `Option` tag and refuse every stored registry row.
 #[derive(Deserialize)]
 struct ContentManifestWire {
     manifest_id: ContentId,
@@ -472,7 +480,7 @@ struct ContentManifestWire {
     shard_count: u32,
     shards: Vec<ShardRef>,
     #[serde(default)]
-    erasure: Option<ErasureScheme>,
+    erasure: ErasureScheme,
     #[serde(default)]
     source: crate::storage::generated::ContentSource,
     #[serde(default)]
@@ -493,9 +501,11 @@ impl From<ContentManifestWire> for ContentManifest {
             total_size: w.total_size,
             shard_count,
             shards: w.shards,
-            erasure: w
-                .erasure
-                .unwrap_or_else(|| Self::fill_legacy_erasure(shard_count)),
+            erasure: if w.erasure == ErasureScheme::default() && shard_count != 1 {
+                Self::fill_legacy_erasure(shard_count)
+            } else {
+                w.erasure
+            },
             source: w.source,
             edition: w.edition,
             content_size: w.content_size,
@@ -507,7 +517,7 @@ impl From<ContentManifestWire> for ContentManifest {
 impl ContentManifest {
     /// The scheme a manifest written before erasure coding meant: plain
     /// replication over the shards it lists. Applied on deserialization when
-    /// the `erasure` field is absent.
+    /// the `erasure` field carries the absent sentinel.
     const fn fill_legacy_erasure(shard_count: u32) -> ErasureScheme {
         ErasureScheme::replication(shard_count)
     }
@@ -1349,5 +1359,31 @@ mod tests {
         let coded = serde_json::to_string(&m).unwrap();
         let same: ContentManifest = serde_json::from_str(&coded).unwrap();
         assert_eq!(same, m);
+    }
+
+    /// The registry stores manifests with bincode, which has no absent
+    /// fields: the wire form must read exactly the bytes the manifest
+    /// writes. An erasure-coded manifest (k below n) and a replicated one
+    /// both round-trip byte for byte.
+    #[test]
+    fn a_manifest_round_trips_through_bincode() {
+        let replicated =
+            ContentManifest::from_bytes_sliced(b"bincode-round-trip-replicated", 8).unwrap();
+        let bytes = bincode::serialize(&replicated).unwrap();
+        let back: ContentManifest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, replicated);
+
+        let mut coded = replicated.clone();
+        coded.erasure = ErasureScheme {
+            k: 2,
+            n: coded.shard_count,
+        };
+        let bytes = bincode::serialize(&coded).unwrap();
+        let back: ContentManifest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(
+            back.erasure, coded.erasure,
+            "a named scheme is kept as written"
+        );
+        assert_eq!(back, coded);
     }
 }

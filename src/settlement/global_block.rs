@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize};
 /// As all other roots, guaranteeing that storage attestation history is
 /// Tamper-evident at the global settlement layer.
 ///
-/// **Backward compatibility:** The domain-separation tag was bumped from
-/// `BDLM_GLOBAL_BLOCK_V1` to `BDLM_GLOBAL_BLOCK_V2` to prevent hash
-/// Collisions between pre- and post-storage-root headers. Old serialized
-/// Headers (without the field) will deserialize with `storage_root: None`
-/// Thanks to `#[serde(default)]`.
+/// **Backward compatibility:** the domain-separation tag is
+/// `BDLM_GLOBAL_BLOCK_V4`. V2 separated pre- and post-storage-root headers,
+/// V3 added `ai_root`, and V4 encodes each optional root behind a presence
+/// byte so `None` and `Some([0; 32])` hash differently. Old serialized
+/// headers (without the fields) still deserialize with `storage_root: None`
+/// and `ai_root: None` thanks to `#[serde(default)]`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalBlockHeader {
     pub version: u16,

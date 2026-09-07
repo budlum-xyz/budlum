@@ -81,12 +81,17 @@ pub struct VestingSchedule {
 impl VestingSchedule {
     /// Amount unlocked (cumulative) by `epoch`. Zero before the cliff; linear
     /// Afterwards; fully unlocked at/after `start_epoch + duration_epochs`.
+    ///
+    /// The cliff is checked first. A schedule with `duration_epochs: 0` and a
+    /// nonzero cliff unlocks everything at the cliff, not at genesis: the
+    /// zero-duration shortcut is for the no-schedule case, and it used to
+    /// bypass the cliff.
     pub fn unlocked_at(&self, epoch: u64) -> u64 {
-        if self.duration_epochs == 0 {
-            return self.total;
-        }
         if epoch < self.start_epoch.saturating_add(self.cliff_epochs) {
             return 0;
+        }
+        if self.duration_epochs == 0 {
+            return self.total;
         }
         let elapsed = epoch.saturating_sub(self.start_epoch);
         if elapsed >= self.duration_epochs {
@@ -227,13 +232,16 @@ impl TokenomicsParams {
         }
     }
 
-    /// The per-year burn amount (of the original reserve), in base units.
+    /// The per-epoch validator reward for `validator_stake`, in base units:
+    /// the annual yield on the stake, spread over the epochs in a year.
+    ///
+    /// There is no per-epoch floor. A stake so small that its yield rounds to
+    /// zero earns zero; a floor of one base unit per epoch paid every account
+    /// holding a single unit more than its share of the annual budget, and
+    /// with enough such accounts the sum exceeded the yield the parameters
+    /// promise.
     pub fn calculate_epoch_reward(&self, validator_stake: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        // Nothing staked, nothing earned. This has to come before the `.max(1)`
-        // Floor below: that floor is there to keep a *real* stake from being
-        // Rounded to zero by the integer division, and applying it to an
-        // Account that holds nothing turns a rounding guard into a mint.
         if validator_stake == 0 {
             return 0;
         }
@@ -266,7 +274,7 @@ impl TokenomicsParams {
         let seconds_per_year: u128 = 365 * 24 * 60 * 60;
         let denom = slot_secs * seconds_per_year / 10;
         let epoch_yield = (annual_yield * epoch_slots) / denom.max(1);
-        epoch_yield.max(1) as u64
+        u64::try_from(epoch_yield).unwrap_or(u64::MAX)
     }
 
     pub fn annual_burn_amount(&self) -> u64 {
@@ -338,17 +346,30 @@ impl TokenomicsAddresses {
 ///   (see [`TokenomicsParams::team_vesting`]); consumers enforce vesting when
 ///   Moving funds.
 /// - BurnReserve: held in the reserve account, consumed by the timed burn.
+///
+/// # Errors
+///
+/// Refuses a configuration whose allocations do not sum to
+/// [`BUD_TOTAL_SUPPLY`]: seeding it would mint a supply other than the one
+/// every other tokenomics rule assumes.
 pub fn genesis_allocations(
     params: &TokenomicsParams,
     addrs: &TokenomicsAddresses,
-) -> Vec<(Address, u64)> {
-    vec![
+) -> Result<Vec<(Address, u64)>, String> {
+    if !params.is_balanced() {
+        return Err(format!(
+            "tokenomics allocations sum to {} base units, not the fixed supply of {}",
+            params.total(),
+            BUD_TOTAL_SUPPLY
+        ));
+    }
+    Ok(vec![
         (addrs.community, params.community),
         (addrs.liquidity, params.liquidity),
         (addrs.ecosystem, params.ecosystem),
         (addrs.team, params.team),
         (addrs.burn_reserve, params.burn_reserve),
-    ]
+    ])
 }
 
 /// Tracks the timed (time-triggered, NOT usage-triggered) reserve burn.
@@ -484,41 +505,81 @@ mod tests {
 
     // === MANDATORY TESTS ===
 
+    /// The default parameters (slot 10 s, epoch 32 slots, 5 percent a year)
+    /// give exactly these rewards. Pinned as values rather than as "not
+    /// zero": the old assertion was satisfied by the floor this function
+    /// no longer has.
     #[test]
     fn calculate_epoch_reward_regression_equivalence() {
         let params = TokenomicsParams::default();
-
-        // It has to produce exactly the same result as the old hardcoded
-        // values (slot=10s, epoch=32, 5 percent APY).
-        let test_stakes = [0u64, 1_000_000, 50_000_000_000];
-
-        for stake in test_stakes {
-            let result = params.calculate_epoch_reward(stake);
-            // With the default parameters it has to match the old logic.
-            assert!(
-                result > 0 || stake == 0,
-                "the reward for stake {} must not be 0",
-                stake
-            );
-        }
+        // annual yield = stake / 20; epoch share = 32 / (10 * 31_536_000 / 10)
+        //              = stake / 20 * 32 / 31_536_000
+        assert_eq!(params.calculate_epoch_reward(0), 0);
+        assert_eq!(
+            params.calculate_epoch_reward(1_000_000),
+            0,
+            "1 BUD: 0.05 base units"
+        );
+        assert_eq!(
+            params.calculate_epoch_reward(bud(1_000)),
+            50,
+            "1 000 BUD: 50.7"
+        );
+        assert_eq!(params.calculate_epoch_reward(50_000_000_000), 2_536);
+        assert_eq!(params.calculate_epoch_reward(bud(100_000_000)), 5_073_566);
     }
 
-    /// The `.max(1)` floor exists so that a small but real stake is not
-    /// rounded away to nothing by the integer division. It is not a licence to
-    /// pay a stake that does not exist: an account holding nothing is not a
-    /// validator with a rounding problem, and every epoch that pays it mints.
+    /// No stake earns nothing, and a stake whose yield rounds to zero earns
+    /// zero as well. The old floor of one base unit per epoch paid every
+    /// one-unit account more than its share of the annual budget.
     #[test]
-    fn a_zero_stake_earns_nothing() {
+    fn a_dust_stake_earns_nothing() {
         let params = TokenomicsParams::default();
+        assert_eq!(params.calculate_epoch_reward(0), 0);
         assert_eq!(
-            params.calculate_epoch_reward(0),
+            params.calculate_epoch_reward(1),
             0,
-            "the floor is for rounding real stakes, not for minting to an empty account"
+            "one base unit at 5 percent a year is far below one unit per epoch"
         );
-        // The floor itself has to survive for the smallest stake there is.
+        // A year of epochs on any stake stays within the promised yield.
+        let stake = 1_000_000u64;
+        let annual_yield = (stake as u128 * params.validator_annual_yield_ratio_fixed as u128)
+            / crate::core::chain_config::FIXED_POINT_SCALE as u128;
+        let epochs_per_year = params.epochs_per_year as u128;
+        let paid = params.calculate_epoch_reward(stake) as u128 * epochs_per_year;
         assert!(
-            params.calculate_epoch_reward(1) > 0,
-            "a real stake must still not be rounded away to nothing"
+            paid <= annual_yield,
+            "a year of epoch rewards ({paid}) exceeds the annual yield ({annual_yield})"
+        );
+    }
+
+    /// A zero-duration schedule still waits for its cliff.
+    #[test]
+    fn a_zero_duration_schedule_honours_the_cliff() {
+        let v = VestingSchedule {
+            total: bud(1_000),
+            start_epoch: 10,
+            cliff_epochs: 5,
+            duration_epochs: 0,
+        };
+        assert_eq!(v.unlocked_at(0), 0);
+        assert_eq!(v.unlocked_at(14), 0, "one epoch before the cliff");
+        assert_eq!(v.unlocked_at(15), bud(1_000), "everything at the cliff");
+    }
+
+    /// An unbalanced configuration is refused before it seeds anything.
+    #[test]
+    fn genesis_allocations_refuse_an_unbalanced_configuration() {
+        let mut params = TokenomicsParams::default();
+        params.community += 1;
+        let addrs = TokenomicsAddresses::reserved();
+        let err = genesis_allocations(&params, &addrs).unwrap_err();
+        assert!(err.contains("not the fixed supply"), "{err}");
+        assert_eq!(
+            genesis_allocations(&TokenomicsParams::default(), &addrs)
+                .unwrap()
+                .len(),
+            5
         );
     }
 
@@ -556,20 +617,43 @@ mod tests {
         );
     }
 
+    /// The yield ratio is read through `FIXED_POINT_SCALE`: a ratio of one
+    /// whole scale is 100 percent a year, and the reward grows linearly in
+    /// the stake with no floor and no overflow up to the full supply.
     #[test]
     fn calculate_epoch_reward_uses_fixed_point_scale() {
-        // A check that FIXED_POINT_SCALE really is being used.
-        // This is a smoke test: the function must not panic for any positive
-        // stake and must respect the fixed-point scale.
-        let params = TokenomicsParams::default();
-        for stake in [0u64, 1, 1_000, 1_000_000, 1_000_000_000] {
-            let reward = params.calculate_epoch_reward(stake);
-            if stake == 0 {
-                assert!(reward <= 1, "zero-stake reward should be trivial");
-            } else {
-                assert!(reward > 0, "positive stake must produce a reward");
-            }
-        }
+        use crate::core::chain_config::FIXED_POINT_SCALE;
+        let mut params = TokenomicsParams {
+            validator_annual_yield_ratio_fixed: FIXED_POINT_SCALE,
+            ..TokenomicsParams::default()
+        };
+        // The formula, written out: the annual yield on the stake times the
+        // epoch's share of a year, rounded down once at the end.
+        let expected = |params: &TokenomicsParams, stake: u64| -> u64 {
+            let annual = stake as u128 * params.validator_annual_yield_ratio_fixed as u128
+                / FIXED_POINT_SCALE as u128;
+            let per_year = params.slot_duration_secs as u128 * 31_536_000 / 10;
+            (annual * params.epoch_length_slots as u128 / per_year) as u64
+        };
+        let stake = bud(1_000);
+        let full = params.calculate_epoch_reward(stake);
+        assert_eq!(full, expected(&params, stake));
+        assert_eq!(full, 1_014, "100 percent a year on 1000 BUD, per epoch");
+        params.validator_annual_yield_ratio_fixed /= 2;
+        let half = params.calculate_epoch_reward(stake);
+        assert_eq!(half, expected(&params, stake));
+        assert!(
+            full / 2 <= half && half <= full.div_ceil(2),
+            "half the ratio, half the reward: {half} vs {full}"
+        );
+        let tenfold = params.calculate_epoch_reward(stake * 10);
+        assert_eq!(tenfold, expected(&params, stake * 10));
+        assert!(
+            half * 10 <= tenfold && tenfold < half * 10 + 10,
+            "linear in stake up to rounding: {tenfold} vs {half}"
+        );
+        let cap = params.calculate_epoch_reward(BUD_TOTAL_SUPPLY);
+        assert!(cap > 0 && cap < BUD_TOTAL_SUPPLY / 1000, "{cap}");
     }
 
     #[test]

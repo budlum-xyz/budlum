@@ -2013,7 +2013,6 @@ src/tokenomics/mod.rs	fn	address_of
 src/tokenomics/mod.rs	fn	amount_of
 src/tokenomics/mod.rs	fn	calculate_epoch_reward
 src/tokenomics/mod.rs	fn	epoch_at_timestamp
-src/tokenomics/mod.rs	fn	is_balanced
 src/tokenomics/mod.rs	fn	seconds_per_epoch
 src/tokenomics/mod.rs	fn	unlocked_at
 src/tokenomics/reward_pool.rs	const	DEFAULT_TREASURY_POOL
