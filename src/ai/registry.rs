@@ -244,6 +244,13 @@ impl AiRegistry {
     /// Submit an inference request with deadline enforcement.
     /// `current_block` is provided by the executor layer (defense-in-depth:
     /// Both registry and executor check deadlines independently).
+    ///
+    /// The read declaration is checked here, not only in the executor:
+    /// `verify_id` proves the fields are self-consistent, and a request that
+    /// is consistent with itself can still carry no perception declaration
+    /// or a non-canonical `input_commitment`. Every caller of this method
+    /// passes the same gate as the transaction path, so there is no second
+    /// door into the request table.
     pub fn submit_request(
         &mut self,
         request: AiInferenceRequest,
@@ -252,6 +259,7 @@ impl AiRegistry {
         if !request.verify_id() {
             return Err("Request ID does not match canonical preimage".into());
         }
+        crate::ai_inference::admit_inference_request(self, &request)?;
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s,
             None => {
@@ -332,6 +340,17 @@ impl AiRegistry {
                 ))
             }
         };
+        // The result's block is the chain's block. The executor already
+        // overwrites the payload field with the consensus height, but this
+        // method is also reached by callers that do not; a verifier-chosen
+        // value fed the QoS clock and `finalized_at_block`, and a value of
+        // `u64::MAX` kept the outcome out of `prune_expired` forever.
+        if result.submitted_at_block != current_block {
+            return Err(format!(
+                "Result submitted_at_block {} is not the current block {current_block}",
+                result.submitted_at_block
+            ));
+        }
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s.clone(),
             None => return Err("Associated model for request not found".into()),
@@ -397,6 +416,15 @@ impl AiRegistry {
         if self.cancelled_requests.contains(&result.request_id) {
             return Err(format!(
                 "Request {} has been cancelled - results not accepted",
+                result.request_id.to_hex()
+            ));
+        }
+        // A reclaimed fee is terminal too. The deadline check above already
+        // refuses a result this late; this names the state instead of
+        // relying on the order of the two windows.
+        if self.reclaimed_fees.contains(&result.request_id) {
+            return Err(format!(
+                "Request {} fee was reclaimed - results not accepted",
                 result.request_id.to_hex()
             ));
         }
@@ -556,17 +584,41 @@ impl AiRegistry {
         request_deadline_blocks: u64,
         result_deadline_blocks: u64,
     ) -> Result<(), String> {
-        let spec = self
+        let owner = self
             .models
-            .get_mut(model_id)
+            .get(model_id)
+            .map(|spec| spec.owner)
             .ok_or_else(|| format!("Model ID {} not found", model_id.to_hex()))?;
 
-        if spec.owner != *caller {
+        if owner != *caller {
             return Err(format!(
                 "Only the model owner can update model {}",
                 model_id.to_hex()
             ));
         }
+
+        // A pending request binds only `model_id`; `submit_result` and
+        // `reclaim_fee` read the thresholds, the output limit and the
+        // deadline window from the current spec. An update while requests
+        // are open would change the terms after the requester signed them,
+        // and the version bump does not help because the request does not
+        // carry the version. The terms stay fixed until every request on
+        // the model has settled or been retired.
+        let pending = self
+            .requests
+            .iter()
+            .filter(|(id, req)| req.model_id == *model_id && !self.outcomes.contains_key(*id))
+            .count();
+        if pending > 0 {
+            return Err(format!(
+                "Model {} has {pending} pending request(s); its terms cannot change until they settle",
+                model_id.to_hex()
+            ));
+        }
+        let spec = self
+            .models
+            .get_mut(model_id)
+            .ok_or_else(|| format!("Model ID {} not found", model_id.to_hex()))?;
 
         // Validate the candidate through the same `AiModelSpec::validate` that
         // registration uses, so an update cannot reach a state registration
@@ -701,6 +753,23 @@ impl AiRegistry {
             self.requests.remove(id);
             pruned += 1;
         }
+
+        // A callback event outlives its outcome only for a consumer that
+        // never collects it. The per-address cap bounds one queue; it does
+        // not bound how many addresses hold one, and every distinct
+        // `callback` address in a request opened a new key that nothing
+        // removed. An event retires on the same schedule as its outcome,
+        // and an empty queue goes with it.
+        let mut retired = 0usize;
+        self.callback_queue.retain(|_, events| {
+            let kept = events.len();
+            events.retain(|event| {
+                current_block <= event.finalized_at_block.saturating_add(retention_blocks)
+            });
+            retired += kept - events.len();
+            !events.is_empty()
+        });
+        pruned += retired;
 
         // An execution proof is keyed by its request. Once the request is
         // gone (expired unfinalized, or its outcome retired) the proof has no
@@ -1244,6 +1313,14 @@ impl AiRegistry {
                 request_id.to_hex()
             ));
         }
+        // So is a reclaimed fee: the escrow went back to the requester, and
+        // an outcome after that would pay verifiers from money that is gone.
+        if self.reclaimed_fees.contains(request_id) {
+            return Err(format!(
+                "Request {} fee was reclaimed - proofs not accepted",
+                request_id.to_hex()
+            ));
+        }
         // Verify that a result exists for this verifier
         let results = self
             .results
@@ -1302,7 +1379,10 @@ impl AiRegistry {
         &mut self,
         request_id: &AiRequestId,
     ) -> Option<AiInferenceOutcome> {
-        if self.outcomes.contains_key(request_id) || self.cancelled_requests.contains(request_id) {
+        if self.outcomes.contains_key(request_id)
+            || self.cancelled_requests.contains(request_id)
+            || self.reclaimed_fees.contains(request_id)
+        {
             return None;
         }
         let request = self.requests.get(request_id)?.clone();

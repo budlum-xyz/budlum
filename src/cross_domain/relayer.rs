@@ -2,7 +2,10 @@
 //!
 //! Architecture:
 //! - Any account with the RELAYER role (staked via PermissionlessRegistry) can
-//!   Relay cross-domain messages.
+//!   relay cross-domain messages. That check is the chain's
+//!   (`Blockchain::submit_relay` calls `ensure_active_relayer` before this
+//!   module sees the submission); `process_relay` itself does not know the
+//!   registry and does not re-check the caller.
 //! - The relayer watches for bridge lock/burn events on the source domain and
 //!   Submits proofs to the target domain.
 //! - Slashing: if a relayer submits an invalid proof or fails to relay within
@@ -135,6 +138,20 @@ impl RelayLedger {
         self.relayed.get(message_id)
     }
 
+    /// Drop records of relays that completed at or before `cutoff`.
+    ///
+    /// The ledger is replay protection for `process_relay`, and a relay can
+    /// only be replayed while its pending entry exists. A pending entry is
+    /// gone once the relay completed (removed on success) or once it was
+    /// swept as expired, so a record older than the longest expiry window
+    /// plus the finality depth protects nothing and only makes
+    /// [`Self::root`] hash one more leaf per block for the life of the
+    /// chain. Called from the same deterministic sweep on every node, so
+    /// the root stays consensus-equal.
+    fn drop_records_through(&mut self, cutoff: u64) {
+        self.relayed.retain(|_, rec| rec.relay_height > cutoff);
+    }
+
     /// Merkle root of all relay records (for on-chain commitment).
     pub fn root(&self) -> Hash32 {
         let leaves: Vec<Hash32> = self
@@ -153,6 +170,11 @@ impl RelayLedger {
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 }
+
+/// How long an expired pending relay and a completed relay record are kept
+/// past the point they stopped mattering. Ten finality depths, the same
+/// window the bridge uses for its settled rows.
+const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
 
 /// Configuration for the Universal Relayer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,19 +258,25 @@ impl UniversalRelayer {
 
     /// Process a relay submission from a relayer.
     ///
-    /// Validates:
-    /// 1. Message hasn't been relayed already (replay protection)
-    /// 2. Relay hasn't expired
-    /// 3. Source domain matches
-    /// 4. Merkle proof is valid against the source event tree root
+    /// Checks, in this order:
+    /// 1. the message has not been relayed already (replay protection);
+    /// 2. a pending relay exists for it;
+    /// 3. the relay has not expired;
+    /// 4. `source_domain`, the domain whose committed event root the caller
+    ///    looked up, is the domain the pending relay was enqueued from;
+    /// 5. the Merkle proof verifies against `event_tree_root` and its leaf
+    ///    is the pending source event's hash;
+    /// 6. the message inside the event still hashes to its own id.
     ///
-    /// On success, records the relay and returns the verified cross-domain
-    /// Message for the target domain's bridge to process (mint/unlock).
+    /// The caller's identity is not checked here; see the module docs. On
+    /// success the relay is recorded and the verified cross-domain message is
+    /// returned for the target domain's bridge to process (mint/unlock).
     pub fn process_relay(
         &mut self,
         message_id: MessageId,
         relayer: Address,
         proof: &MerkleProof,
+        source_domain: DomainId,
         event_tree_root: Hash32,
         current_height: u64,
     ) -> Result<CrossDomainMessage, RelayerError> {
@@ -277,7 +305,18 @@ impl UniversalRelayer {
             });
         }
 
-        // 3. Proof verification
+        // 3. Source domain. The event root the caller hands in was looked up
+        //    for `source_domain`; a root from another domain's commitment is
+        //    a real root over the wrong tree, and the leaf check below would
+        //    only catch it if the trees happened to differ at that leaf.
+        if pending.source_domain != source_domain {
+            return Err(RelayerError::SourceDomainMismatch {
+                expected: pending.source_domain,
+                got: source_domain,
+            });
+        }
+
+        // 4. Proof verification
         if !proof.verify(event_tree_root) {
             return Err(RelayerError::InvalidProof(
                 "Merkle proof does not verify against event tree root".into(),
@@ -292,7 +331,7 @@ impl UniversalRelayer {
             ));
         }
 
-        // 4. Record the relay
+        // 5. Record the relay
         // Use checked serialization - if proof cannot
         // Serialize, reject the relay rather than recording a bogus proof_hash.
         let proof_bytes = bincode::serialize(proof)
@@ -301,7 +340,7 @@ impl UniversalRelayer {
         self.ledger
             .record(message_id, relayer, current_height, proof_hash)?;
 
-        // 5. Extract the cross-domain message from the source event
+        // Extract the cross-domain message from the source event
         let message = pending.source_event.message.clone().ok_or_else(|| {
             RelayerError::Other("source event has no cross-domain message".into())
         })?;
@@ -340,6 +379,39 @@ impl UniversalRelayer {
             .values()
             .filter(|r| r.expiry_height > 0 && current_height > r.expiry_height)
             .collect()
+    }
+
+    /// Height-keyed retention for both maps, run once per applied block.
+    ///
+    /// Before this, `pending` lost an entry only on a successful relay, so
+    /// an expired relay (which `process_relay` refuses for good) stayed
+    /// forever; `relayed` had no removal path at all, and [`Self::ledger_root`]
+    /// hashed every record ever written on every call. The bridge already
+    /// sweeps its own rows on a height key; this is the same discipline.
+    ///
+    /// Two windows, both measured in blocks past the point at which the
+    /// entry stopped mattering:
+    ///
+    /// * a pending relay whose expiry is more than
+    ///   `RELAY_RETENTION_BLOCKS` behind `current_height` is dropped. It
+    ///   was refused as expired the whole time, and the window leaves the
+    ///   slashing path [`Self::expired_relays`] time to observe it;
+    /// * a ledger record older than `RELAY_RETENTION_BLOCKS` is dropped.
+    ///   Replay of that relay needs its pending entry, which is long gone.
+    ///
+    /// Relays without an expiry (`expiry_height == 0`) are kept: nothing
+    /// says they stopped mattering.
+    ///
+    /// Deterministic in `current_height` and the maps' contents, so every
+    /// node drops the same entries at the same block and the ledger root
+    /// stays consensus-equal. Returns how many entries were dropped.
+    pub fn sweep_retired(&mut self, current_height: u64) -> usize {
+        let cutoff = current_height.saturating_sub(RELAY_RETENTION_BLOCKS);
+        let before = self.pending.len() + self.ledger.relayed.len();
+        self.pending
+            .retain(|_, r| r.expiry_height == 0 || r.expiry_height > cutoff);
+        self.ledger.drop_records_through(cutoff);
+        before - (self.pending.len() + self.ledger.relayed.len())
     }
 
     /// Merkle root of the relay ledger (for on-chain commitment).
@@ -401,7 +473,14 @@ mod tests {
 
         // Process relay
         let relayer_addr = Address::from([0xAA; 32]);
-        let result = relayer.process_relay(message.message_id, relayer_addr, &proof, root, 15);
+        let result = relayer.process_relay(
+            message.message_id,
+            relayer_addr,
+            &proof,
+            message.source_domain,
+            root,
+            15,
+        );
         assert!(result.is_ok());
         let relayed_msg = result.unwrap();
         assert_eq!(relayed_msg.message_id, message.message_id);
@@ -424,12 +503,26 @@ mod tests {
 
         // First relay succeeds
         relayer
-            .process_relay(message.message_id, relayer_addr, &proof, root, 15)
+            .process_relay(
+                message.message_id,
+                relayer_addr,
+                &proof,
+                message.source_domain,
+                root,
+                15,
+            )
             .unwrap();
 
         // Replay rejected
         let err = relayer
-            .process_relay(message.message_id, relayer_addr, &proof, root, 16)
+            .process_relay(
+                message.message_id,
+                relayer_addr,
+                &proof,
+                message.source_domain,
+                root,
+                16,
+            )
             .unwrap_err();
         assert!(matches!(err, RelayerError::AlreadyRelayed(_)));
     }
@@ -449,7 +542,14 @@ mod tests {
 
         // Relay after expiry (expiry = 10 + 100 = 110)
         let err = relayer
-            .process_relay(message.message_id, relayer_addr, &proof, root, 111)
+            .process_relay(
+                message.message_id,
+                relayer_addr,
+                &proof,
+                message.source_domain,
+                root,
+                111,
+            )
             .unwrap_err();
         assert!(matches!(err, RelayerError::Expired { .. }));
     }
@@ -470,7 +570,14 @@ mod tests {
         let root = hash(b"bad root");
 
         let err = relayer
-            .process_relay(message.message_id, relayer_addr, &bad_proof, root, 15)
+            .process_relay(
+                message.message_id,
+                relayer_addr,
+                &bad_proof,
+                message.source_domain,
+                root,
+                15,
+            )
             .unwrap_err();
         assert!(matches!(err, RelayerError::InvalidProof(_)));
     }
@@ -572,10 +679,96 @@ mod tests {
                 hash(b"unknown"),
                 Address::from([0xAA; 32]),
                 &proof,
+                1,
                 hash(b"root"),
                 100,
             )
             .unwrap_err();
         assert!(matches!(err, RelayerError::Other(_)));
+    }
+
+    /// The event root the caller looked up has to be the pending relay's
+    /// source domain. A valid root over another domain's tree is refused by
+    /// name, before the proof is walked.
+    #[test]
+    fn relay_rejects_a_root_from_another_source_domain() {
+        let mut relayer = UniversalRelayer::new(RelayerConfig::default());
+        let (event, message) = make_event_and_message(1, 2, 10);
+        let mut tree = DomainEventTree::default();
+        tree.push(event.clone());
+        let root = tree.root();
+        let proof = tree.proof(0).unwrap();
+        relayer.enqueue_relay(event, &message, 10);
+
+        let err = relayer
+            .process_relay(
+                message.message_id,
+                Address::from([0xAA; 32]),
+                &proof,
+                3,
+                root,
+                15,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RelayerError::SourceDomainMismatch {
+                expected: 1,
+                got: 3
+            }
+        );
+        assert!(!relayer.is_relayed(&message.message_id));
+    }
+
+    /// Retention: an expired pending relay and an old ledger record are
+    /// dropped once they are `RELAY_RETENTION_BLOCKS` past mattering, and
+    /// not one block sooner. A relay without an expiry stays.
+    #[test]
+    fn sweep_retired_drops_expired_pending_and_old_records_on_a_height_key() {
+        let mut relayer = UniversalRelayer::new(RelayerConfig::default());
+        let relayer_addr = Address::from([0xAA; 32]);
+
+        // One relay that completes at height 15.
+        let (event_a, message_a) = make_event_and_message(1, 2, 10);
+        let mut tree = DomainEventTree::default();
+        tree.push(event_a.clone());
+        let root = tree.root();
+        let proof = tree.proof(0).unwrap();
+        relayer.enqueue_relay(event_a, &message_a, 10);
+        relayer
+            .process_relay(message_a.message_id, relayer_addr, &proof, 1, root, 15)
+            .unwrap();
+        assert!(relayer.is_relayed(&message_a.message_id));
+
+        // One relay that is never relayed and expires at 120 (a different
+        // height, so a different message id from the first).
+        let (event_b, message_b) = make_event_and_message(1, 2, 20);
+        relayer.enqueue_relay(event_b, &message_b, 20);
+        // One relay with no expiry at all.
+        let (event_c, mut message_c) = make_event_and_message(1, 2, 30);
+        message_c.expiry_height = 0;
+        relayer.enqueue_relay(event_c, &message_c, 30);
+        assert_ne!(message_a.message_id, message_b.message_id);
+        assert_eq!(relayer.pending_count(), 2);
+        let root_before = relayer.ledger_root();
+
+        // One block short of the record's cutoff: nothing moves.
+        assert_eq!(relayer.sweep_retired(14 + RELAY_RETENTION_BLOCKS), 0);
+        assert_eq!(relayer.pending_count(), 2);
+        assert_eq!(relayer.ledger_root(), root_before);
+        assert!(relayer.is_relayed(&message_a.message_id));
+
+        // The record retires first (relayed at 15, so exactly the retention
+        // window later), the expired relay a full window after its expiry.
+        assert_eq!(relayer.sweep_retired(15 + RELAY_RETENTION_BLOCKS), 1);
+        assert!(!relayer.is_relayed(&message_a.message_id));
+        assert_ne!(relayer.ledger_root(), root_before);
+        assert_eq!(relayer.pending_count(), 2);
+
+        assert_eq!(relayer.sweep_retired(119 + RELAY_RETENTION_BLOCKS), 0);
+        assert_eq!(relayer.sweep_retired(120 + RELAY_RETENTION_BLOCKS), 1);
+        assert_eq!(relayer.pending_count(), 1, "the relay with no expiry stays");
+        assert!(relayer.pending_relay(&message_c.message_id).is_some());
+        assert!(relayer.pending_relay(&message_b.message_id).is_none());
     }
 }

@@ -33,7 +33,19 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::types::canonical_input_commitment;
     use crate::core::address::Address;
+
+    /// The read declaration every test request carries: a small text read
+    /// of a fixed asset. `submit_request` refuses a request without one.
+    fn text_perception() -> crate::ai_inference::perception::PerceptionRequest {
+        crate::ai_inference::perception::PerceptionRequest {
+            asset_id: crate::pollen::AssetId([0xAB; 32]),
+            content_id: crate::storage::content_id::ContentId([0xBC; 32]),
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
+            declared_units: 4,
+        }
+    }
 
     /// Test helper: when the verifier stake is below MIN_VERIFIER_STAKE
     /// stakes, then calls submit_result (the #359 auth check
@@ -120,14 +132,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"prompt: hello ai"),
             input_ref: BoundedBytes::try_new(b"prompt: hello ai".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
 
@@ -204,14 +216,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -314,14 +326,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
 
@@ -369,14 +381,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -443,14 +455,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -518,14 +530,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -606,14 +618,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -694,14 +706,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 50,
             deadline_block: 150,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
 
@@ -749,14 +761,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 500,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -825,14 +837,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 500,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -888,14 +900,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 500,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -974,14 +986,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 500,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1034,14 +1046,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1106,14 +1118,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 250,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1163,14 +1175,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 5);
@@ -1257,14 +1269,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         assert!(registry.submit_request(req, 5).is_ok());
@@ -1313,14 +1325,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: Some(callback_addr),
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1402,14 +1414,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1612,14 +1624,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1671,14 +1683,14 @@ mod tests {
                 request_id: AiRequestId::default(),
                 requester: owner,
                 model_id,
-                input_commitment: [2u8; 32],
+                input_commitment: canonical_input_commitment(input),
                 input_ref: BoundedBytes::try_new(input.to_vec()).unwrap(),
                 max_fee: 100,
                 callback: None,
                 submitted_at_block: 10,
                 deadline_block: 110,
                 effort: crate::ai_inference::effort::EffortTier::default(),
-                perception: None,
+                perception: Some(text_perception()),
             };
             req.request_id = req.calculate_id();
             req
@@ -1741,14 +1753,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 0, // Zero fee
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 5);
@@ -1802,14 +1814,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100, // 100 / 3 = 33 remainder 1
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -2048,14 +2060,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee,
             callback: None,
             submitted_at_block: current_block,
             deadline_block,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         registry.submit_request(req, current_block).unwrap()
@@ -2075,14 +2087,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee,
             callback,
             submitted_at_block: current_block,
             deadline_block,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         registry.submit_request(req, current_block).unwrap()
@@ -2139,14 +2151,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 111,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 111);
@@ -2167,14 +2179,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         // Override result_deadline_blocks to 200 so result_deadline=210 > deadline_block=110
@@ -2238,14 +2250,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 200, // Must be >= result_deadline so check #1 doesn't fire,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 10).unwrap();
@@ -2271,14 +2283,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 55,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 10).unwrap();
@@ -2634,14 +2646,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 10);
@@ -2844,14 +2856,14 @@ mod tests {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(&[0u8; 2048]),
             input_ref: BoundedBytes::try_new(vec![0u8; 2048]).unwrap(), // exceeds 1024
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(text_perception()),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 10);
@@ -3126,6 +3138,198 @@ mod tests {
         assert!(result.unwrap_err().contains("already reclaimed"));
     }
 
+    /// The registry admits a request through the same read-declaration
+    /// gate as the executor: a request without a perception declaration,
+    /// or with a commitment that is not the canonical one over `input_ref`,
+    /// is refused at `submit_request` itself.
+    #[test]
+    fn a_request_without_a_read_declaration_is_refused_by_the_registry() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut undeclared = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: None,
+        };
+        undeclared.request_id = undeclared.calculate_id();
+        let err = registry.submit_request(undeclared, 10).unwrap_err();
+        assert!(err.contains("perception declaration"), "{err}");
+
+        let mut arbitrary = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: [2u8; 32],
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        arbitrary.request_id = arbitrary.calculate_id();
+        let err = registry.submit_request(arbitrary, 10).unwrap_err();
+        assert!(err.contains("canonical preimage"), "{err}");
+        assert!(registry.requests.is_empty(), "nothing was admitted");
+    }
+
+    /// A result's block is the chain's block: a verifier cannot post-date
+    /// its own submission to push the outcome past the retention window.
+    #[test]
+    fn a_result_dated_by_the_verifier_is_refused() {
+        let (mut registry, model_id, owner) = setup_ai_registry(1, 1);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let err = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: u64::MAX,
+            },
+            15,
+        )
+        .unwrap_err();
+        assert!(err.contains("not the current block"), "{err}");
+        assert!(registry.outcomes.is_empty());
+        let outcome = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15)
+            .unwrap()
+            .expect("the threshold of one finalizes");
+        assert_eq!(outcome.finalized_at_block, 15);
+    }
+
+    /// A model's terms are frozen while it has pending requests: the
+    /// thresholds and windows a requester signed against cannot move under
+    /// them. Once the request settles, the owner may update again.
+    #[test]
+    fn model_terms_do_not_change_while_requests_are_pending() {
+        let (mut registry, model_id, owner) = setup_ai_registry(1, 1);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let before = registry.models.get(&model_id).unwrap().clone();
+        let err = registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .unwrap_err();
+        assert!(err.contains("pending request"), "{err}");
+        assert_eq!(
+            registry.models.get(&model_id).unwrap(),
+            &before,
+            "a refused update changes nothing"
+        );
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15)
+            .unwrap()
+            .expect("finalized");
+        registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .expect("no request is pending any more");
+        assert_eq!(
+            registry.models.get(&model_id).unwrap().version,
+            before.version + 1
+        );
+    }
+
+    /// A reclaimed fee is terminal on the proof path too: a proof attached
+    /// after the refund must not reopen the request, and the re-evaluation
+    /// must not emit an outcome for it.
+    #[test]
+    fn a_reclaimed_request_takes_no_proof_and_no_late_outcome() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let (requester, max_fee) = registry.reclaim_fee(&req_id, 200).unwrap();
+        assert_eq!((requester, max_fee), (owner, 100));
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let err = registry
+            .attach_execution_proof(&req_id, &v1, proof)
+            .unwrap_err();
+        assert!(err.contains("reclaimed"), "{err}");
+        assert!(!registry.has_execution_proof(&req_id, &v1));
+
+        let second = AiInferenceResult {
+            request_id: req_id,
+            verifier: v2,
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+            result_nonce: 2,
+            signature: vec![1],
+            submitted_at_block: 25,
+        };
+        registry.results.entry(req_id).or_default().push(second);
+        assert!(registry.try_finalize_with_proofs(&req_id).is_none());
+        assert!(!registry.outcomes.contains_key(&req_id));
+    }
+
+    /// Callback events retire with their outcome. The per-address cap
+    /// bounds one queue; distinct callback addresses used to open keys that
+    /// nothing removed.
+    #[test]
+    fn callback_events_retire_with_their_outcome() {
+        let (mut registry, model_id, owner) = setup_ai_registry(1, 1);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        for i in 1..=5u8 {
+            let cb = Address::from([i; 32]);
+            let req_id = submit_request_with_callback(
+                &mut registry,
+                model_id,
+                owner,
+                10,
+                110,
+                100,
+                Some(cb),
+            );
+            submit_ai_result(&mut registry, req_id, v1, [9u8; 32], u64::from(i), 15)
+                .unwrap()
+                .expect("finalized");
+        }
+        assert_eq!(registry.callback_queue.len(), 5);
+
+        // Inside the retention window nothing moves.
+        assert_eq!(registry.prune_expired(100, 100), 0);
+        assert_eq!(registry.callback_queue.len(), 5);
+
+        // Past it the outcomes retire, and so do their events and keys.
+        let pruned = registry.prune_expired(200, 100);
+        assert!(pruned >= 10, "5 outcomes and 5 events retire: {pruned}");
+        assert!(registry.callback_queue.is_empty());
+        assert!(registry.outcomes.is_empty());
+    }
+
     #[test]
     fn test_reclaim_cancelled_request_rejected() {
         // The refund goes out on cancel; the same escrow must not be paid a
@@ -3179,7 +3383,7 @@ mod tests {
 
         let proof = AiExecutionProof {
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             output_commitment: [9u8; 32],
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3, 4],
@@ -3863,7 +4067,7 @@ mod tests {
 
         let proof = AiExecutionProof {
             model_id,
-            input_commitment: [2u8; 32], // matches request's input_commitment
+            input_commitment: canonical_input_commitment(b"test"), // the request's
             output_commitment: [9u8; 32], // matches result's output_commitment
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3, 4],
@@ -3896,7 +4100,7 @@ mod tests {
 
         let proof = AiExecutionProof {
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             output_commitment: [0xFF; 32], // WRONG - doesn't match result
             program_hash: [0xAA; 32],
             proof_bytes: vec![],
@@ -3923,7 +4127,7 @@ mod tests {
 
         let proof = AiExecutionProof {
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             output_commitment: [9u8; 32],
             program_hash: [0xAA; 32],
             proof_bytes: vec![],
@@ -4025,7 +4229,7 @@ mod tests {
 
         let proof = AiExecutionProof {
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: canonical_input_commitment(b"test"),
             output_commitment: [9u8; 32],
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3],

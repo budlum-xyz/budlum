@@ -51,6 +51,16 @@ pub struct BootstrapDomainConfig {
 impl BootstrapDomainConfig {
     /// The four-domain bootstrap list for mainnet (PoW, PoS, BFT and PoA
     /// placeholders).
+    ///
+    /// The PoS and BFT entries are declared bridge-enabled but carry no
+    /// validator set (only a PoA entry can name one here), so they register
+    /// with a zero `validator_set_hash`. A set-bound finality adapter refuses
+    /// every proof for a bridge-enabled domain in that state (see
+    /// `reject_unregistered_set_for_bridge`), so until a launch ceremony
+    /// registers their sets these two domains finalize nothing. That is the
+    /// intended shape of a bridge with no one behind it; the alternative,
+    /// letting the proof name its own validator set, would let anyone
+    /// finalize a commitment and mint against it.
     pub fn mainnet_defaults() -> Vec<Self> {
         vec![
             Self {
@@ -1114,6 +1124,73 @@ mod tests {
         let poa = registry.get(4).expect("poa bootstrap domain");
         assert!(!poa.bridge_enabled);
         assert_ne!(poa.validator_set_hash, [0u8; 32]);
+
+        // The PoS and BFT placeholders ship bridge-enabled with no validator
+        // set. Until a ceremony registers one, a proof that names its own
+        // set must not finalize on them: the adapter refuses before it
+        // looks at the certificate.
+        use crate::domain::{DomainFinalityAdapter, FinalityProof, FinalityStatus};
+        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(0, vec![]);
+        for (id, kind) in [(2u32, "PoS"), (3u32, "BFT")] {
+            let domain = registry.get(id).expect("bootstrap domain");
+            assert!(domain.bridge_enabled);
+            assert_eq!(domain.validator_set_hash, [0u8; 32]);
+            let commitment = crate::domain::DomainCommitment {
+                domain_id: domain.id,
+                domain_height: 1,
+                domain_block_hash: [9u8; 32],
+                parent_domain_block_hash: [0u8; 32],
+                state_root: [1u8; 32],
+                tx_root: [2u8; 32],
+                event_root: [3u8; 32],
+                finality_proof_hash: [0u8; 32],
+                consensus_kind: domain.kind.clone(),
+                validator_set_hash: [0u8; 32],
+                timestamp_ms: 0,
+                sequence: 0,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            };
+            let cert = crate::chain::finality::FinalityCert {
+                epoch: 0,
+                checkpoint_height: 1,
+                checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                agg_sig_bls: vec![],
+                bitmap: vec![],
+                set_hash: snapshot.set_hash.clone(),
+            };
+            let status = if kind == "PoS" {
+                crate::domain::PoSFinalityAdapter.verify_finality(
+                    domain,
+                    &commitment,
+                    &FinalityProof::PoS {
+                        cert,
+                        validator_snapshot: snapshot.clone(),
+                    },
+                )
+            } else {
+                crate::domain::BftFinalityAdapter::default().verify_finality(
+                    domain,
+                    &commitment,
+                    &FinalityProof::Bft {
+                        round: 0,
+                        commit_hash: commitment.domain_block_hash,
+                        cert,
+                        validator_snapshot: snapshot.clone(),
+                    },
+                )
+            }
+            .expect("verification runs");
+            match status {
+                FinalityStatus::Rejected(reason) => {
+                    assert!(
+                        reason.contains("no registered validator set"),
+                        "{kind}: {reason}"
+                    )
+                }
+                other => panic!("{kind} placeholder must refuse, got {other:?}"),
+            }
+        }
     }
 
     #[test]

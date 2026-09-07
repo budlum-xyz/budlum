@@ -1238,7 +1238,6 @@ src/chain/fee_market.rs	struct	FeeMarketParams
 src/chain/finality.rs	const	BLS_RFC9380_ACTIVATION_EPOCH
 src/chain/finality.rs	fn	find_validator
 src/chain/finality.rs	fn	hash_pop_to_g1
-src/chain/finality.rs	fn	hash_to_g1
 src/chain/finality.rs	fn	is_checkpoint_height
 src/chain/finality.rs	fn	signer_count
 src/chain/genesis.rs	const	BASE_FEE

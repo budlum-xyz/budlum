@@ -306,12 +306,22 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (relayer binary): signed EVM tx → Ethereum RPC broadcast.
     ///
-    /// Offline-test stub. Production: RLP encode signed tx + eth_sendRawTransaction.
+    /// This adapter does not speak to Ethereum, so it refuses, the same way
+    /// `generate_receipt_proof` and `wait_for_confirmation` do. It used to
+    /// answer with a constant hash, so a caller recorded a broadcast that
+    /// never happened under a transaction hash that identified nothing; the
+    /// worker then reserved a nonce and waited for a confirmation that could
+    /// not come. A refusal keeps the request in `Retry` until an RPC-backed
+    /// adapter is wired.
     async fn submit_transaction(
         &self,
         _ext_tx: &ExternalTransaction,
     ) -> Result<String, AdapterError> {
-        Ok(format!("0x{}", hex::encode([0xEE; 32])))
+        Err(AdapterError::SubmissionFailed(
+            "EVM adapter cannot broadcast: it does not speak to Ethereum. Wire an \
+             RPC-backed submitter before relaying value"
+                .into(),
+        ))
     }
 
     /// Off-chain (relayer binary): k confirmation poll → receipt proof.
@@ -452,8 +462,11 @@ mod tests {
         );
     }
 
+    /// Broadcasting refuses too: an adapter with no Ethereum connection must
+    /// not hand back a transaction hash, because the worker treats a hash as
+    /// a broadcast that happened.
     #[tokio::test]
-    async fn offline_stub_submit_transaction() {
+    async fn submitting_a_transaction_refuses_without_a_connection() {
         let adapter = EvmChainAdapter::test_default();
         let tx = ExternalTransaction {
             chain: ExternalChain::Ethereum,
@@ -461,8 +474,14 @@ mod tests {
             payload: vec![],
             external_nonce: 0,
         };
-        let hash = adapter.submit_transaction(&tx).await.unwrap();
-        assert!(hash.starts_with("0x"));
+        let err = adapter
+            .submit_transaction(&tx)
+            .await
+            .expect_err("no connection, no broadcast");
+        assert!(
+            matches!(err, AdapterError::SubmissionFailed(_)),
+            "the refusal names the broadcast, got {err:?}"
+        );
     }
 
     /// Waiting for confirmation also refuses, because it cannot produce a proof.

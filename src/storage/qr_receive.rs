@@ -28,7 +28,8 @@ pub enum ReceiveError {
         /// Missing source blocks.
         missing: usize,
     },
-    /// More distinct sequence numbers than [`MAX_SEEN_SEQS`] were offered.
+    /// More distinct sequence numbers than the receiver's ceiling (twice
+    /// [`MAX_K`]) were offered.
     TooManySeqs {
         /// The ceiling.
         max: usize,
@@ -110,8 +111,8 @@ impl ProgressiveReceiver {
     /// Frame authentication / carousel push failures. Duplicate identical
     /// frames are ignored (not an error). A same-seq frame with a different
     /// body is refused and counted; the first body stays in the decoder
-    /// (first writer wins). [`ReceiveError::TooManySeqs`] once
-    /// [`MAX_SEEN_SEQS`] distinct sequence numbers have been seen.
+    /// (first writer wins). [`ReceiveError::TooManySeqs`] once twice
+    /// [`MAX_K`] distinct sequence numbers have been seen.
     pub fn push_frame(&mut self, frame: &[u8]) -> Result<(), ReceiveError> {
         let drop = match unpack_frame(&self.stream_commitment, frame) {
             Ok(d) => d,

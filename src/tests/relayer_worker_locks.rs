@@ -953,9 +953,10 @@ fn a_bridge_address_of_the_wrong_length_is_refused() {
 /// single-leaf tree that happened to fail the leaf binding; the refusal was
 /// real but incidental, and the same stub passed the Merkle check itself
 /// because a tree with no siblings verifies `leaf == root` (see
-/// ARCHITECTURE.md section 69). The assembler now returns an error outright:
-/// this adapter does not read Ethereum, so it cannot produce a receipt
-/// proof. The worker submits nothing.
+/// ARCHITECTURE.md section 69). The assembler then returned an error
+/// outright, and now the broadcast does too: this adapter neither writes to
+/// nor reads Ethereum, so `submit_transaction` refuses before any receipt
+/// proof is asked for. The worker submits nothing.
 ///
 /// That is the property worth pinning: turning the bridge on gets a stalled
 /// transfer, never a signed claim about an Ethereum transaction that was
@@ -982,9 +983,11 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
              adapter is willing to verify",
             );
 
+    // The refusal is the adapter's own, not the registry saying the chain
+    // is unsupported: the chain was registered above.
     assert!(
-        matches!(err, AdapterError::ProofVerificationFailed(_)),
-        "the refusal must come from verification, not from the chain being \
+        !matches!(err, AdapterError::UnsupportedChain(_)),
+        "the refusal must come from the adapter, not from the chain being \
          unsupported: got {err:?}"
     );
 
@@ -994,14 +997,22 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
     // whose leaf did not match `hash(tag || tx_hash || bridge_address)`. That
     // refusal was real but incidental, and the same stub sailed through the
     // Merkle check because a tree with no siblings verifies `leaf == root`
-    // (ARCHITECTURE.md section 69). The assembler now refuses outright, so
-    // the message names the actual gap: this adapter does not read Ethereum.
+    // (ARCHITECTURE.md section 69). Then the assembler refused outright.
+    // Now the broadcast itself refuses, one step earlier again: an adapter
+    // that cannot read Ethereum cannot claim to have written to it, so
+    // `submit_transaction` returns `SubmissionFailed` and no constant hash
+    // ever reaches the confirmation step. The message names the gap.
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("does not read Ethereum")
+        msg.contains("does not speak to Ethereum")
+            || msg.contains("does not read Ethereum")
             || msg.contains("Merkle")
             || msg.contains("leaf")
             || msg.contains("forgery"),
         "the refusal must name what is missing, got: {msg}"
+    );
+    assert!(
+        matches!(err, AdapterError::SubmissionFailed(_)),
+        "the stubbed adapter refuses at broadcast, before any observation: got {err:?}"
     );
 }

@@ -119,15 +119,20 @@ impl LivenessTracker {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_LIVENESS_TRACKER_V2");
+        // V3: each map carries its count, so an entry cannot slide from
+        // one map into the next.
+        hasher.update(b"BDLM_LIVENESS_TRACKER_V3");
+        hasher.update((self.missed.len() as u64).to_le_bytes());
         for (addr, count) in &self.missed {
             hasher.update(addr.0);
             hasher.update(count.to_le_bytes());
         }
+        hasher.update((self.streak_start_epoch.len() as u64).to_le_bytes());
         for (addr, epoch) in &self.streak_start_epoch {
             hasher.update(addr.0);
             hasher.update(epoch.to_le_bytes());
         }
+        hasher.update((self.reported.len() as u64).to_le_bytes());
         for addr in self.reported.keys() {
             hasher.update(addr.0);
         }
@@ -149,6 +154,25 @@ mod tests {
             liveness_max_missed_epochs: threshold,
             ..RegistryParams::default()
         }
+    }
+
+    /// Each map is counted, so a row cannot slide from `missed` into
+    /// `streak_start_epoch`: the same (address, u64) pairs placed in
+    /// different maps give different roots.
+    #[test]
+    fn root_commits_each_map_count() {
+        let mut a = LivenessTracker::new();
+        a.missed.insert(addr(1), 5);
+        let mut b = LivenessTracker::new();
+        b.streak_start_epoch.insert(addr(1), 5);
+        assert_ne!(a.root(), b.root());
+        let mut c = LivenessTracker::new();
+        c.reported.insert(addr(1), ());
+        let mut d = LivenessTracker::new();
+        d.reported.insert(addr(1), ());
+        d.reported.insert(addr(2), ());
+        assert_ne!(c.root(), d.root());
+        assert_ne!(LivenessTracker::new().root(), c.root());
     }
 
     #[test]

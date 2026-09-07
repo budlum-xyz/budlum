@@ -137,10 +137,15 @@ impl NftRegistry {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_NFT_REGISTRY_V5");
+        // V6: collections carry their counts, the record commits its own
+        // id next to the map key, and the tag list is counted, so the
+        // stream has one parse.
+        hasher.update(b"BDLM_NFT_REGISTRY_V6");
         hasher.update(self.next_id.to_le_bytes());
+        hasher.update((self.nfts.len() as u64).to_le_bytes());
         for (id, nft) in &self.nfts {
             hasher.update(id.to_le_bytes());
+            hasher.update(nft.id.to_le_bytes());
             hasher.update(nft.owner.0);
             hasher.update(nft.content_id.0);
             hasher.update(nft.luminance.to_le_bytes());
@@ -158,14 +163,17 @@ impl NftRegistry {
                 }
                 None => hasher.update(b"noname"),
             }
+            hasher.update((nft.tags.len() as u64).to_le_bytes());
             for tag in &nft.tags {
                 hasher.update(b"tag:");
                 hasher.update(tag.len().to_le_bytes());
                 hasher.update(tag.as_bytes());
             }
         }
+        hasher.update((self.ownership.len() as u64).to_le_bytes());
         for (owner, ids) in &self.ownership {
             hasher.update(owner.0);
+            hasher.update((ids.len() as u64).to_le_bytes());
             for id in ids {
                 hasher.update(id.to_le_bytes());
             }
@@ -211,6 +219,30 @@ mod tests {
         let root_before = reg.root();
         reg.transfer(id, &owner, new_owner).unwrap();
         assert_ne!(root_before, reg.root());
+    }
+
+    /// The ownership section commits each owner's id count, so ids cannot
+    /// move between two owners without moving the root; and a record's own
+    /// `id` is committed next to its map key.
+    #[test]
+    fn root_distinguishes_ownership_boundaries() {
+        let alice = Address::from([1u8; 32]);
+        let bob = Address::from([2u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let mut a = NftRegistry::new();
+        let first = a.mint(alice, cid, 0, None).unwrap();
+        let second = a.mint(alice, cid, 0, None).unwrap();
+        a.mint(bob, cid, 0, None).unwrap();
+        let mut b = a.clone();
+        // Same ids, same owners in the map, but the ownership vectors are
+        // rearranged so the concatenated id bytes stay identical.
+        b.ownership.insert(alice, vec![first]);
+        b.ownership.insert(bob, vec![second, 2]);
+        assert_ne!(a.root(), b.root(), "id counts per owner are committed");
+
+        let mut c = a.clone();
+        c.nfts.get_mut(&first).unwrap().id = 99;
+        assert_ne!(a.root(), c.root(), "the record's own id is committed");
     }
 
     /// A counter that disagrees with the map must not overwrite an NFT.

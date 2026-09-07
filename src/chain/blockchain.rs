@@ -1431,7 +1431,7 @@ impl Blockchain {
         proof: &FinalityProof,
     ) -> Result<(), String> {
         let domain = self.validate_domain_commitment_metadata(commitment)?;
-        let expected_proof_hash = hash_finality_proof(proof);
+        let expected_proof_hash = hash_finality_proof(proof).map_err(|e| e.to_string())?;
         if commitment.finality_proof_hash != expected_proof_hash {
             return Err(format!(
                 "Finality proof hash mismatch for domain {} height {}",
@@ -2603,7 +2603,14 @@ impl Blockchain {
         // Process the relay through the Universal Relayer
         let message = self
             .universal_relayer
-            .process_relay(message_id, relayer, proof, event_tree_root, current_height)
+            .process_relay(
+                message_id,
+                relayer,
+                proof,
+                source_domain,
+                event_tree_root,
+                current_height,
+            )
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_universal_relayer(&self.universal_relayer) {
@@ -2752,6 +2759,22 @@ impl Blockchain {
     /// Get the number of pending relays.
     pub fn pending_relay_count(&self) -> usize {
         self.universal_relayer.pending_count()
+    }
+
+    /// Height-keyed retention for the universal relayer, run once per
+    /// applied block from both commit paths. The relayer is persisted
+    /// separately from the account state, so the sweep writes it back when
+    /// something was dropped; a node that skipped the write would reload
+    /// the old maps and sweep them to the same result on its next block.
+    fn sweep_retired_relays(&mut self, current_height: u64) {
+        if self.universal_relayer.sweep_retired(current_height) == 0 {
+            return;
+        }
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_universal_relayer(&self.universal_relayer) {
+                tracing::error!(error = %e, "Failed to persist swept universal relayer state");
+            }
+        }
     }
 
     /// Get expired relays for slashing.
@@ -4016,6 +4039,7 @@ impl Blockchain {
         self.state = committed_state;
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
+        self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
 
@@ -4325,6 +4349,7 @@ impl Blockchain {
         self.state = commit_state;
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
+        self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
         self.mempool.set_min_fee(self.state.base_fee);

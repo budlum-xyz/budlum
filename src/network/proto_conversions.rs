@@ -2296,7 +2296,8 @@ mod tests {
             event_root: [5u8; 32],
             finality_proof_hash: crate::domain::hash_finality_proof(
                 &crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] },
-            ),
+            )
+            .unwrap(),
             consensus_kind: crate::domain::ConsensusKind::PoW,
             validator_set_hash: [7u8; 32],
             timestamp_ms: 123,

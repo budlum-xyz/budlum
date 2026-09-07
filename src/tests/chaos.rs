@@ -492,7 +492,7 @@ mod chaos_tests {
             block.hash = block.calculate_hash();
             let mut commitment =
                 DomainCommitment::from_block(domain, &block, [1u8; 32], [2u8; 32], 0).unwrap();
-            commitment.finality_proof_hash = hash_finality_proof(proof);
+            commitment.finality_proof_hash = hash_finality_proof(proof).unwrap();
             commitment
         };
 
@@ -589,7 +589,7 @@ mod chaos_tests {
                 DomainCommitment::from_block(&pow_domain, &block_pow, [1u8; 32], [2u8; 32], i)
                     .unwrap();
             let pow_proof = FinalityProof::PoWHeaderChain { headers: vec![] };
-            pow_com.finality_proof_hash = hash_finality_proof(&pow_proof);
+            pow_com.finality_proof_hash = hash_finality_proof(&pow_proof).unwrap();
             prev_pow = block_pow.hash.clone();
             commitments_to_submit.push((pow_com, pow_proof));
 
@@ -617,7 +617,7 @@ mod chaos_tests {
                     total_stake: 100,
                 },
             };
-            pos_com.finality_proof_hash = hash_finality_proof(&pos_proof);
+            pos_com.finality_proof_hash = hash_finality_proof(&pos_proof).unwrap();
             prev_pos = block_pos.hash.clone();
             commitments_to_submit.push((pos_com, pos_proof));
 
@@ -632,7 +632,7 @@ mod chaos_tests {
                 authorities: vec![],
                 signatures: vec![],
             };
-            poa_com.finality_proof_hash = hash_finality_proof(&poa_proof);
+            poa_com.finality_proof_hash = hash_finality_proof(&poa_proof).unwrap();
             prev_poa = block_poa.hash.clone();
             commitments_to_submit.push((poa_com, poa_proof));
 

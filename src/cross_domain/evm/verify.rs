@@ -15,8 +15,11 @@
 //! 4. `status == true`, meaning the transaction succeeded.
 //! 5. Deposit log match: `find_log(emitter, topic0)` against the expected
 //!    payload.
-//! 6. Replay protection: has `(tx_hash, log_index)` been processed before, in
-//!    the caller's domain.
+//! 6. Replay protection, in the caller's domain, keyed by the proven
+//!    identity of the receipt: the target block's hash and the receipt's
+//!    trie key (`RLP(tx_index)`). The transaction hash is not part of what
+//!    the proof proves (a receipt does not contain it), so it is carried for
+//!    logging and for matching the relayer's own broadcast, not as a key.
 //!
 //! On success the result is a `VerifiedDeposit`, carrying every proven field
 //! the mint needs.
@@ -30,7 +33,8 @@ use crate::cross_domain::evm::header::{verify_chain, EthHeader};
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::receipt::{self, EthReceipt, ReceiptError};
 use crate::cross_domain::evm::sync_committee::{
-    verify_sync_aggregate, SyncAggregate, SyncCommitteeError, SyncCommitteeState,
+    verify_execution_block_finality, BeaconBinding, BeaconChainParams, SyncAggregate,
+    SyncCommitteeError, SyncCommitteeState,
 };
 use serde::{Deserialize, Serialize};
 /// A `verify_evm_receipt` failure; every sub-step's error is wrapped here.
@@ -93,9 +97,19 @@ impl From<SyncCommitteeError> for VerifyError {
 /// A proven Ethereum deposit: every field the mint needs has been verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedDeposit {
-    /// Ethereum transaction hash, the replay-protection key. The caller
-    /// combines it with the log index.
+    /// Ethereum transaction hash as the relayer reported it. Not proven:
+    /// the MPT proof commits to the receipt's position, not to the
+    /// transaction hash, so the same proof would verify under any string
+    /// here. Kept for logging and for the worker's broadcast match; a
+    /// replay key built from it could be rotated by the relayer.
     pub tx_hash: String,
+    /// The proven identity of the receipt, first half: the hash of the
+    /// target block, which the confirmation chain links to.
+    pub block_hash: [u8; 32],
+    /// The proven identity of the receipt, second half: its key in the
+    /// receipts trie, `RLP(tx_index)`. `(block_hash, receipt_key)` names one
+    /// receipt on one chain; it is the replay key.
+    pub receipt_key: Vec<u8>,
     /// The log extracted from the bridge contract; its data field is the
     /// deposit payload.
     pub deposit_log_data: Vec<u8>,
@@ -125,9 +139,11 @@ pub struct EvmDepositProof<'a> {
     pub required_confirmations: u32,
     /// MPT proof nodes, from `receiptsRoot` down to the target receipt.
     pub proof_nodes: &'a [Vec<u8>],
-    /// Key in the trie: `RLP(tx_index)`, the receipt's position.
+    /// Key in the trie: `RLP(tx_index)`, the receipt's position. With the
+    /// target block hash it is the proven identity of the receipt.
     pub receipt_key: &'a [u8],
-    /// Ethereum transaction hash, used for replay protection and log lookup.
+    /// Ethereum transaction hash, relayer-supplied and not verified against
+    /// the receipt. Informative only; not a replay key.
     pub tx_hash: &'a str,
     /// Bridge contract address, the deposit event emitter.
     pub emitter_address: &'a [u8],
@@ -148,8 +164,10 @@ pub struct EvmDepositProof<'a> {
     /// bridge whose documentation claims PoS finality and whose code counts
     /// confirmations is claiming a guarantee it does not have.
     ///
-    /// The `signing_message` is the caller's, because the Altair signing
-    /// domain is a chain parameter this module has no business inventing.
+    /// The signed message is not the caller's. It is rebuilt from the beacon
+    /// header the attestation names and the adapter's chain parameters, and
+    /// that header must commit to `target_header`'s hash; see
+    /// [`SyncAttestation`].
     pub sync_attestation: Option<SyncAttestation<'a>>,
 }
 
@@ -181,24 +199,36 @@ pub struct DepositProofPackage {
 
 /// A sync-committee attestation bundled with the state that validates it.
 ///
-/// Grouped rather than added as three loose `Option` fields, so it is
-/// impossible to supply an aggregate without the committee it must verify
-/// against, or a signing message without either.
+/// Grouped rather than added as loose `Option` fields, so it is impossible
+/// to supply an aggregate without the committee it must verify against, or
+/// a beacon header without either.
+///
+/// An earlier shape carried a caller-supplied `signing_message`. That
+/// verified only that the committee had signed *some* bytes the relayer
+/// chose, which is not a statement about the deposit's block at all: a
+/// genuine attestation over any beacon header would have passed for any
+/// target header. The message is now derived. The relayer supplies the
+/// beacon header fields and the SSZ branch from the execution block hash to
+/// that header's `body_root`; the verifier rebuilds the signing root from
+/// those fields and the adapter's fork parameters, and refuses the
+/// attestation unless the branch lands `keccak256(target_header)` inside
+/// the signed header and the header's slot inside the committee's period.
+///
 /// `PartialEq`/`Eq` because `EvmDepositProof` derives them and an
-/// `Option<SyncAttestation>` field makes that requirement transitive. Both
-/// referents already satisfy it, so the comparison is the structural one a
-/// caller would expect: two attestations are equal when they name the same
-/// committee, the same aggregate and the same signing message.
+/// `Option<SyncAttestation>` field makes that requirement transitive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncAttestation<'a> {
     /// Light-client state holding the 512 pubkeys for this period.
     pub state: &'a SyncCommitteeState,
     /// The bitmap and aggregate signature the relayer observed.
     pub aggregate: &'a SyncAggregate,
-    /// Altair signing domain combined with the header hash. Caller-derived,
-    /// because the domain depends on the fork and the genesis validators
-    /// root, neither of which is knowable here.
-    pub signing_message: &'a [u8],
+    /// The beacon header the committee signed and the branch that places
+    /// the target execution block inside it.
+    pub beacon: &'a BeaconBinding,
+    /// Fork version and genesis validators root. The adapter's, never the
+    /// proof's: a proof choosing its own domain chooses which chain it is
+    /// finalized on.
+    pub chain: &'a BeaconChainParams,
 }
 
 /// Verifies an Ethereum deposit proof end to end. Deterministic, no network.
@@ -247,17 +277,22 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
     // that a proof which *claims* PoS finality has that claim checked rather
     // than trusted.
     if let Some(ref attestation) = proof.sync_attestation {
-        verify_sync_aggregate(
+        verify_execution_block_finality(
             attestation.state,
             attestation.aggregate,
-            attestation.signing_message,
+            attestation.beacon,
+            attestation.chain,
+            &target.hash,
         )?;
     }
 
-    // 6. Replay protection lives in the caller's domain; the tx hash is
-    //    returned for it.
+    // 6. Replay protection lives in the caller's domain. What is returned
+    //    for it is the proven identity, block hash plus receipt key; the tx
+    //    hash rides along unverified.
     Ok(VerifiedDeposit {
         tx_hash: proof.tx_hash.to_string(),
+        block_hash: target.hash,
+        receipt_key: proof.receipt_key.to_vec(),
         deposit_log_data: log.data.clone(),
         block_number: target.number,
         receipts_root: target.receipts_root,
@@ -414,6 +449,42 @@ mod tests {
         assert_eq!(verified.deposit_log_data, data);
         assert_eq!(verified.block_number, 100);
         assert_eq!(verified.receipts_root, f.receipts_root);
+        assert_eq!(verified.receipt_key, f.receipt_key);
+        assert_eq!(
+            verified.block_hash,
+            crate::cross_domain::evm::mpt::keccak256(&f.target_header)
+        );
+    }
+
+    /// The transaction hash is not proven: the same proof verifies under
+    /// any string, which is why the proven identity `(block_hash,
+    /// receipt_key)` is what a replay set must key on. Two proofs that
+    /// differ only in the reported hash name the same receipt.
+    #[test]
+    fn the_tx_hash_is_not_bound_and_the_receipt_identity_is() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        let f = build_fixture(&emitter, topic0, b"deposit-payload", true, 3);
+        let confs = conf_refs(&f);
+        let under = |tx_hash: &'static str| EvmDepositProof {
+            target_header: &f.target_header,
+            confirmation_headers: &confs,
+            required_confirmations: 3,
+            proof_nodes: &f.proof_nodes,
+            receipt_key: &f.receipt_key,
+            tx_hash,
+            emitter_address: &emitter,
+            deposit_topic0: &topic0,
+            sync_attestation: None,
+        };
+        let first = verify_evm_receipt(&under("0xaaaa")).unwrap();
+        let second = verify_evm_receipt(&under("0xbbbb")).unwrap();
+        assert_ne!(first.tx_hash, second.tx_hash);
+        assert_eq!(
+            (first.block_hash, first.receipt_key.clone()),
+            (second.block_hash, second.receipt_key.clone()),
+            "the proven identity does not move with the reported hash"
+        );
     }
 
     // ---- Negative: the transaction failed ----
@@ -588,6 +659,15 @@ mod tests {
         BLS_PUBKEY_LEN, BLS_SIGNATURE_LEN, PARTICIPATION_THRESHOLD, SYNC_COMMITTEE_SIZE,
     };
 
+    use crate::cross_domain::evm::sync_committee::fixtures::{
+        binding_committing_to as beacon_for, first_slot_of_period,
+    };
+
+    const TEST_CHAIN: BeaconChainParams = BeaconChainParams {
+        fork_version: [0x04, 0, 0, 0],
+        genesis_validators_root: [0x42; 32],
+    };
+
     fn empty_committee() -> SyncCommitteeState {
         SyncCommitteeState {
             current_period: 0,
@@ -665,6 +745,10 @@ mod tests {
 
         let state = empty_committee();
         let aggregate = aggregate_with_participation(false);
+        let beacon = beacon_for(
+            crate::cross_domain::evm::mpt::keccak256(&f.target_header),
+            0,
+        );
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -673,7 +757,8 @@ mod tests {
             Some(SyncAttestation {
                 state: &state,
                 aggregate: &aggregate,
-                signing_message: b"altair-domain-and-header-hash",
+                beacon: &beacon,
+                chain: &TEST_CHAIN,
             }),
         );
 
@@ -711,6 +796,10 @@ mod tests {
             "the fixture only means something if the bitmap claims everyone signed"
         );
 
+        let beacon = beacon_for(
+            crate::cross_domain::evm::mpt::keccak256(&f.target_header),
+            0,
+        );
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -719,7 +808,8 @@ mod tests {
             Some(SyncAttestation {
                 state: &state,
                 aggregate: &aggregate,
-                signing_message: b"altair-domain-and-header-hash",
+                beacon: &beacon,
+                chain: &TEST_CHAIN,
             }),
         );
 
@@ -748,6 +838,10 @@ mod tests {
 
         let state = empty_committee();
         let aggregate = aggregate_with_participation(false);
+        let beacon = beacon_for(
+            crate::cross_domain::evm::mpt::keccak256(&f.target_header),
+            0,
+        );
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -756,7 +850,8 @@ mod tests {
             Some(SyncAttestation {
                 state: &state,
                 aggregate: &aggregate,
-                signing_message: b"altair-domain-and-header-hash",
+                beacon: &beacon,
+                chain: &TEST_CHAIN,
             }),
         );
 
@@ -766,6 +861,86 @@ mod tests {
             VerifyError::TxFailed,
             "the cheap structural refusal must win, so a malformed proof cannot \
              make a node verify 342 BLS signatures before saying no"
+        );
+    }
+
+    /// The attestation is about the deposit's block or it is nothing. A
+    /// beacon header that commits to some other execution block is refused
+    /// before any signature is looked at, and a header from another period
+    /// than the committee state's is refused too. A header that does commit
+    /// to the target gets as far as the signature check, which is where an
+    /// unsigned fixture fails.
+    #[test]
+    fn an_attestation_over_another_block_is_rejected_before_the_signatures() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        let f = build_fixture(&emitter, topic0, b"payload", true, 3);
+        let confs = conf_refs(&f);
+        let state = empty_committee();
+        // Full participation, so the only thing standing between this
+        // aggregate and the pairing is the binding.
+        let aggregate = aggregate_with_participation(true);
+
+        let other_block = beacon_for([0xEE; 32], 0);
+        let proof = proof_with_attestation(
+            &f,
+            &confs,
+            &emitter,
+            &topic0,
+            Some(SyncAttestation {
+                state: &state,
+                aggregate: &aggregate,
+                beacon: &other_block,
+                chain: &TEST_CHAIN,
+            }),
+        );
+        assert_eq!(
+            verify_evm_receipt(&proof).unwrap_err(),
+            VerifyError::SyncCommittee(SyncCommitteeError::ExecutionBlockNotInBeaconBody),
+            "a committee signature over a header that does not contain the \
+             target block says nothing about the target block"
+        );
+
+        let target_hash = crate::cross_domain::evm::mpt::keccak256(&f.target_header);
+        let wrong_period = beacon_for(target_hash, first_slot_of_period(3));
+        let proof = proof_with_attestation(
+            &f,
+            &confs,
+            &emitter,
+            &topic0,
+            Some(SyncAttestation {
+                state: &state,
+                aggregate: &aggregate,
+                beacon: &wrong_period,
+                chain: &TEST_CHAIN,
+            }),
+        );
+        assert_eq!(
+            verify_evm_receipt(&proof).unwrap_err(),
+            VerifyError::SyncCommittee(SyncCommitteeError::PeriodMismatch {
+                slot_period: 3,
+                state_period: 0,
+            }),
+            "the 512 keys in the state are the period's committee, not another's"
+        );
+
+        let bound = beacon_for(target_hash, 0);
+        let proof = proof_with_attestation(
+            &f,
+            &confs,
+            &emitter,
+            &topic0,
+            Some(SyncAttestation {
+                state: &state,
+                aggregate: &aggregate,
+                beacon: &bound,
+                chain: &TEST_CHAIN,
+            }),
+        );
+        assert_eq!(
+            verify_evm_receipt(&proof).unwrap_err(),
+            VerifyError::SyncCommittee(SyncCommitteeError::InvalidPubkey),
+            "a header that does commit to the target reaches the key checks"
         );
     }
 }

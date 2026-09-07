@@ -104,12 +104,16 @@ impl InvalidVoteTracker {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_INVALID_VOTE_TRACKER_V1");
+        // V2: each map carries its count, so an entry cannot slide from
+        // the counts into the reported set.
+        hasher.update(b"BDLM_INVALID_VOTE_TRACKER_V2");
         hasher.update(self.current_epoch.to_le_bytes());
+        hasher.update((self.counts.len() as u64).to_le_bytes());
         for (addr, count) in &self.counts {
             hasher.update(addr.0);
             hasher.update(count.to_le_bytes());
         }
+        hasher.update((self.reported.len() as u64).to_le_bytes());
         for addr in self.reported.keys() {
             hasher.update(addr.0);
         }
@@ -131,6 +135,21 @@ mod tests {
             max_invalid_votes_per_epoch: threshold,
             ..RegistryParams::default()
         }
+    }
+
+    /// The counts map and the reported set are counted, so an address
+    /// cannot slide from one into the other without moving the root.
+    #[test]
+    fn root_commits_each_map_count() {
+        let mut a = InvalidVoteTracker::new();
+        a.counts.insert(addr(1), 1);
+        let mut b = InvalidVoteTracker::new();
+        b.reported.insert(addr(1), ());
+        assert_ne!(a.root(), b.root());
+        let mut c = a.clone();
+        c.reported.insert(addr(1), ());
+        assert_ne!(a.root(), c.root());
+        assert_ne!(InvalidVoteTracker::new().root(), a.root());
     }
 
     #[test]

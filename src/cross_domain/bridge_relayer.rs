@@ -134,6 +134,14 @@ impl BridgeRelayerPipeline {
     ) -> Result<DomainEvent, PipelineError> {
         let event_index = self.get_or_create_tree(source_domain).events().len() as u32;
 
+        // The bridge is mutated before the registry is consulted, because
+        // the message id is derived inside `lock` (it consumes the replay
+        // nonce). If the registry then refuses the message, nothing after
+        // this point may stand: the transfer row, the asset location and
+        // the nonce are all rolled back, so a refused lock leaves the state
+        // as it found it rather than a locked asset that no relay will ever
+        // move.
+        let before = self.bridge.clone();
         let (_transfer, event) = self.bridge.lock(
             source_domain,
             target_domain,
@@ -147,12 +155,19 @@ impl BridgeRelayerPipeline {
         )?;
 
         // Register the cross-domain message
-        let message = event.message.clone().ok_or_else(|| {
-            PipelineError::Relayer(RelayerError::Other("lock event missing message".into()))
-        })?;
-        self.messages
-            .insert(message.clone())
-            .map_err(PipelineError::MessageRegistry)?;
+        let message = match event.message.clone() {
+            Some(message) => message,
+            None => {
+                self.bridge = before;
+                return Err(PipelineError::Relayer(RelayerError::Other(
+                    "lock event missing message".into(),
+                )));
+            }
+        };
+        if let Err(e) = self.messages.insert(message.clone()) {
+            self.bridge = before;
+            return Err(PipelineError::MessageRegistry(e));
+        }
 
         // Enqueue relay
         self.relayer
@@ -185,9 +200,14 @@ impl BridgeRelayerPipeline {
             .ok_or(PipelineError::NoEventTree(source_domain))?;
         let root = tree.root();
 
-        let message =
-            self.relayer
-                .process_relay(message_id, relayer, proof, root, current_height)?;
+        let message = self.relayer.process_relay(
+            message_id,
+            relayer,
+            proof,
+            source_domain,
+            root,
+            current_height,
+        )?;
 
         Ok(message)
     }
@@ -203,7 +223,7 @@ impl BridgeRelayerPipeline {
         if !matches!(message.kind, MessageKind::BridgeLock) {
             return Err(PipelineError::UnexpectedMessageKind {
                 expected: "BridgeLock",
-                got: "other",
+                got: message.kind.name(),
             });
         }
         self.bridge.mint(message, current_height)?;
@@ -223,6 +243,11 @@ impl BridgeRelayerPipeline {
     ) -> Result<DomainEvent, PipelineError> {
         let event_index = self.get_or_create_tree(domain).events().len() as u32;
 
+        // Same shape as `lock`: the burn moves the transfer to `Burned`
+        // before the message can be registered, so a registry refusal
+        // restores the bridge instead of leaving a burned transfer whose
+        // unlock message nobody holds.
+        let before = self.bridge.clone();
         let event = self.bridge.burn_with_event(
             message_id,
             domain,
@@ -233,9 +258,10 @@ impl BridgeRelayerPipeline {
 
         // Register the burn message
         if let Some(ref message) = event.message {
-            self.messages
-                .insert(message.clone())
-                .map_err(PipelineError::MessageRegistry)?;
+            if let Err(e) = self.messages.insert(message.clone()) {
+                self.bridge = before;
+                return Err(PipelineError::MessageRegistry(e));
+            }
 
             // Enqueue relay back to source
             self.relayer
@@ -261,7 +287,7 @@ impl BridgeRelayerPipeline {
         if !matches!(message.kind, MessageKind::BridgeBurn) {
             return Err(PipelineError::UnexpectedMessageKind {
                 expected: "BridgeBurn",
-                got: "other",
+                got: message.kind.name(),
             });
         }
         // A burn message carries its own id, but the bridge transfer is keyed
@@ -482,6 +508,116 @@ mod tests {
 
     fn recipient() -> Address {
         Address::from([0xBB; 32])
+    }
+
+    /// A message the registry already holds cannot be registered twice, and
+    /// the bridge must not be left holding the lock that produced it. The
+    /// duplicate is manufactured by pre-registering the exact message the
+    /// next lock will derive (same nonce, same fields), so the registry
+    /// refuses it and the lock has to undo itself.
+    #[test]
+    fn a_lock_whose_message_is_refused_leaves_the_bridge_untouched() {
+        let mut p = pipeline();
+        let a = asset(7);
+        p.register_asset(a, 1).unwrap();
+        let root_before = p.bridge_state().root();
+
+        // Derive the message the lock is about to create and register it
+        // first. `lock` consumes nonce 0 for (1, 2, owner), so the derived
+        // message uses nonce 0 as well.
+        let dry = {
+            let mut scratch = pipeline();
+            scratch.register_asset(a, 1).unwrap();
+            scratch
+                .lock(1, 2, 100, a, owner(), recipient(), 1000, 1000)
+                .unwrap()
+                .message
+                .unwrap()
+        };
+        p.messages.insert(dry.clone()).unwrap();
+
+        let err = p
+            .lock(1, 2, 100, a, owner(), recipient(), 1000, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, PipelineError::MessageRegistry(ref m) if m.contains("already registered")),
+            "got: {err}"
+        );
+        assert!(
+            p.bridge_state().get_transfer(&dry.message_id).is_none(),
+            "a refused lock must not leave a transfer row"
+        );
+        assert_eq!(
+            p.bridge_state().root(),
+            root_before,
+            "the bridge state must be exactly what it was before the refused lock"
+        );
+        assert_eq!(p.relayer().pending_count(), 0);
+        assert!(p.event_proof(1, 0).is_none(), "no event was appended");
+
+        // The asset is still lockable: nothing was consumed.
+        p.lock(1, 2, 101, a, owner(), recipient(), 1000, 1000)
+            .expect("the asset is still Active on domain 1");
+    }
+
+    /// The burn side has the same shape: a refused burn message leaves the
+    /// transfer `Minted`, so it can still be burned once the conflict clears.
+    #[test]
+    fn a_burn_whose_message_is_refused_leaves_the_transfer_minted() {
+        let mut p = pipeline();
+        let a = asset(8);
+        p.register_asset(a, 1).unwrap();
+        let lock_event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 500, 1000)
+            .unwrap();
+        let lock_msg_id = lock_event.message.as_ref().unwrap().message_id;
+        let lock_proof = p.event_proof(1, 0).unwrap();
+        let mint_msg = p
+            .relay(lock_msg_id, relayer_addr(), &lock_proof, 1, 150)
+            .unwrap();
+        p.mint(&mint_msg, 0).unwrap();
+
+        // Pre-register the burn message the next burn will derive.
+        let dry_burn = {
+            let mut scratch = p.bridge.clone();
+            scratch
+                .burn_with_event(lock_msg_id, 2, 200, 0, 1000)
+                .unwrap()
+                .message
+                .unwrap()
+        };
+        p.messages.insert(dry_burn.clone()).unwrap();
+        let root_before = p.bridge_state().root();
+
+        let err = p.burn(lock_msg_id, 2, 200, 1000).unwrap_err();
+        assert!(
+            matches!(err, PipelineError::MessageRegistry(_)),
+            "got: {err}"
+        );
+        assert_eq!(
+            p.bridge_state().get_transfer(&lock_msg_id).unwrap().status,
+            crate::cross_domain::bridge::BridgeStatus::Minted { domain: 2 },
+            "a refused burn must not leave the transfer burned"
+        );
+        assert_eq!(p.bridge_state().root(), root_before);
+        assert_eq!(p.relayer().pending_count(), 0);
+    }
+
+    /// The error names the kind that arrived, not a placeholder.
+    #[test]
+    fn an_unexpected_kind_is_reported_by_name() {
+        let mut p = pipeline();
+        let a = asset(9);
+        p.register_asset(a, 1).unwrap();
+        let lock_event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 500, 1000)
+            .unwrap();
+        let lock_msg = lock_event.message.unwrap();
+        let err = p.unlock(&lock_msg, 2, 250).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "expected message kind BridgeBurn, got BridgeLock"
+        );
     }
 
     #[test]

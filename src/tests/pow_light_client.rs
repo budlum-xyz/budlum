@@ -140,7 +140,7 @@ fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
     let proof = FinalityProof::PoWHeaderChain {
         headers: vec![first, second, third],
     };
-    commitment.finality_proof_hash = hash_finality_proof(&proof);
+    commitment.finality_proof_hash = hash_finality_proof(&proof).unwrap();
 
     chain
         .submit_verified_domain_commitment(commitment.clone(), proof)

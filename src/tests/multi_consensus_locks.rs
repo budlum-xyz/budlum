@@ -301,6 +301,71 @@ mod poa_authority_binding {
         );
     }
 
+    /// The zero-set convention stops at the bridge. A domain that mints
+    /// bridged value with no registered set would accept whatever set the
+    /// proof names for itself, so a bridge-enabled domain with a zero
+    /// `validator_set_hash` finalizes nothing until a set is registered.
+    #[test]
+    fn a_bridge_enabled_domain_without_a_registered_set_finalizes_nothing() {
+        let keys: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate().unwrap()).collect();
+        let addrs: Vec<_> = keys.iter().map(kp_address).collect();
+
+        let mut domain = domain_with(ConsensusKind::PoA, "poa-authority-quorum", [0u8; 32]);
+        domain.bridge_enabled = true;
+        let commitment = commitment_for(&domain);
+        let proof = poa_proof(&domain, &commitment, &[&keys[0], &keys[1]], &addrs);
+        match PoAFinalityAdapter::default()
+            .verify_finality(&domain, &commitment, &proof)
+            .expect("verification runs")
+        {
+            FinalityStatus::Rejected(reason) => {
+                assert!(reason.contains("no registered validator set"), "{reason}");
+            }
+            other => panic!("a bridge domain with no set must refuse, got {other:?}"),
+        }
+
+        // Registering the set opens the door again.
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &addrs).unwrap();
+        assert_eq!(
+            PoAFinalityAdapter::default()
+                .verify_finality(&domain, &commitment, &proof)
+                .expect("verification runs"),
+            FinalityStatus::Finalized
+        );
+
+        // The stake-weighted adapters refuse at the same point, before the
+        // certificate is looked at: a snapshot the proof names for itself
+        // does not get as far as `cert.verify`.
+        let mut pos = domain_with(ConsensusKind::PoS, "pos-qc-finality", [0u8; 32]);
+        pos.bridge_enabled = true;
+        let pos_commitment = commitment_for(&pos);
+        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(0, vec![]);
+        let cert = crate::chain::finality::FinalityCert {
+            epoch: 0,
+            checkpoint_height: pos_commitment.domain_height,
+            checkpoint_hash: hex::encode(pos_commitment.domain_block_hash),
+            agg_sig_bls: vec![],
+            bitmap: vec![],
+            set_hash: snapshot.set_hash.clone(),
+        };
+        match crate::domain::finality_adapter::PoSFinalityAdapter
+            .verify_finality(
+                &pos,
+                &pos_commitment,
+                &FinalityProof::PoS {
+                    cert,
+                    validator_snapshot: snapshot,
+                },
+            )
+            .expect("verification runs")
+        {
+            FinalityStatus::Rejected(reason) => {
+                assert!(reason.contains("no registered validator set"), "{reason}");
+            }
+            other => panic!("a bridge PoS domain with no set must refuse, got {other:?}"),
+        }
+    }
+
     #[test]
     fn storage_attestation_binds_its_authorities_too() {
         // The same branch exists twice. Fixing one and not the other would

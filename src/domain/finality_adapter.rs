@@ -356,6 +356,12 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
             return Err(FinalityError("Expected PoS finality proof".into()));
         };
 
+        // Before the certificate is read: a bridge-enabled domain with no
+        // registered set has nothing a certificate could be checked against.
+        if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "PoS") {
+            return Ok(rejected);
+        }
+
         if cert.checkpoint_height != commitment.domain_height {
             return Ok(FinalityStatus::Rejected(
                 "PoS cert height does not match commitment".into(),
@@ -478,6 +484,34 @@ pub fn poa_authority_set_hash(
     ))
 }
 
+/// A bridge-enabled domain must have a registered validator set before any
+/// set-bound proof can finalize on it.
+///
+/// Every adapter that binds a proof to `domain.validator_set_hash` skips the
+/// binding when the hash is zero, because a domain with no registered set
+/// has nothing to compare against. For a domain that only settles its own
+/// commitments that is a documented convention. For a domain that mints
+/// bridged value it is the whole guarantee: with the binding skipped, the
+/// validator snapshot, the stakes and the keys are all the submitter's, the
+/// certificate verifies against the set it names for itself, and a forged
+/// finality settles a bridge mint. The shipped mainnet bootstrap list has
+/// exactly this shape for its PoS and BFT domains (bridge on, no set), so
+/// until a launch ceremony registers their validator sets those two
+/// domains finalize nothing, which is the honest state of a bridge with no
+/// one behind it.
+fn reject_unregistered_set_for_bridge(
+    domain: &ConsensusDomain,
+    label: &str,
+) -> Option<FinalityStatus> {
+    if domain.bridge_enabled && domain.validator_set_hash == [0u8; 32] {
+        return Some(FinalityStatus::Rejected(format!(
+            "{label} finality refused: bridge-enabled domain {} has no registered validator set",
+            domain.id
+        )));
+    }
+    None
+}
+
 /// Check a proof's authority set against the one the domain was registered
 /// with, returning a rejection reason when they disagree.
 ///
@@ -491,14 +525,15 @@ pub fn poa_authority_set_hash(
 ///
 /// A domain with a zero `validator_set_hash` has no registered set to compare
 /// against, the same convention the stake-weighted adapters use, and is left
-/// to the quorum check alone.
+/// to the quorum check alone, unless the domain is bridge-enabled: see
+/// [`reject_unregistered_set_for_bridge`].
 fn reject_unregistered_poa_authorities(
     domain: &ConsensusDomain,
     authority_set: &std::collections::BTreeSet<crate::core::address::Address>,
     label: &str,
 ) -> Result<Option<FinalityStatus>, FinalityError> {
     if domain.validator_set_hash == [0u8; 32] {
-        return Ok(None);
+        return Ok(reject_unregistered_set_for_bridge(domain, label));
     }
     let declared: Vec<crate::core::address::Address> = authority_set.iter().copied().collect();
     let derived = poa_authority_set_hash(domain, &declared)?;
@@ -641,6 +676,12 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
         else {
             return Err(FinalityError("Expected BFT finality proof".into()));
         };
+
+        // Before the certificate is read: a bridge-enabled domain with no
+        // registered set has nothing a certificate could be checked against.
+        if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "BFT") {
+            return Ok(rejected);
+        }
 
         if validator_snapshot.validators.is_empty() {
             return Ok(FinalityStatus::Rejected(
@@ -901,6 +942,11 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 // PosFinalityAdapter (lines 470-525). Previously this branch only
                 // Checked agg_sig_bls.is_empty and height/hash match, which
                 // Allowed a fake agg_sig_bls to pass if height/hash matched.
+                if let Some(rejected) =
+                    reject_unregistered_set_for_bridge(domain, "Storage attestation PoS")
+                {
+                    return Ok(rejected);
+                }
                 if validator_snapshot.validators.is_empty() {
                     return Ok(FinalityStatus::Rejected(
                         "Storage attestation PoS validator set is empty".into(),
@@ -968,6 +1014,11 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 // Real BFT verification - same checks as
                 // BftFinalityAdapter (lines 665-730). Previously this branch only
                 // Checked agg_sig_bls.is_empty and height/hash match.
+                if let Some(rejected) =
+                    reject_unregistered_set_for_bridge(domain, "Storage attestation BFT")
+                {
+                    return Ok(rejected);
+                }
                 if validator_snapshot.validators.is_empty() {
                     return Ok(FinalityStatus::Rejected(
                         "Storage attestation BFT validator set is empty".into(),
@@ -1092,13 +1143,25 @@ impl DomainFinalityAdapter for AiInferenceFinalityAdapter {
     }
 }
 
-pub fn hash_finality_proof(proof: &FinalityProof) -> [u8; 32] {
-    // SECURITY: must not silently hash empty bytes on serialize failure
-    // Two distinct proofs could collide. Fail-fast on the (deterministic,
-    // Non-attacker-triggerable) programming error instead.
+/// The commitment-side digest of a finality proof.
+///
+/// # Errors
+///
+/// When the proof cannot be serialized. The earlier body substituted a
+/// constant for the encoding in that case, so every unserializable proof
+/// hashed to one value and a commitment carrying that value matched all of
+/// them; the comment above it said "fail fast" while the code did the
+/// opposite. `bincode` cannot fail on any of the shapes `FinalityProof`
+/// holds today, so the `Err` arm is unreachable in practice, but a hash
+/// function that returns a value for an input it could not read is not one
+/// a commitment should be built on.
+pub fn hash_finality_proof(proof: &FinalityProof) -> Result<[u8; 32], FinalityError> {
     let encoded = bincode::serialize(proof)
-        .unwrap_or_else(|_| b"budlum/serialize-failed/finality-proof".to_vec());
-    crate::core::hash::hash_fields_bytes(&[b"BDLM_FINALITY_PROOF_V1", &encoded])
+        .map_err(|e| FinalityError(format!("finality proof cannot be serialized: {e}")))?;
+    Ok(crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_FINALITY_PROOF_V1",
+        &encoded,
+    ]))
 }
 
 pub fn empty_event_root() -> [u8; 32] {
@@ -1303,7 +1366,7 @@ mod tests {
     #[test]
     fn poa_finality_enforces_quorum_and_empty_validator_set_rejection() {
         use crate::crypto::primitives::KeyPair;
-        let domain = default_domain(2, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
+        let mut domain = default_domain(2, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
         let commitment = commitment(ConsensusKind::PoA);
         let adapter = PoAFinalityAdapter::default();
 
@@ -1317,6 +1380,9 @@ mod tests {
             authorities.push(crate::core::address::Address::from(kp.public_key_bytes()));
             kps.push(kp);
         }
+        // `default_domain` is bridge-enabled with no registered set, which
+        // finalizes nothing by design; register the set this test signs with.
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
         let msg = poa_commit_signing_message(
             domain.id,
             commitment.domain_height,
@@ -1384,7 +1450,12 @@ mod tests {
     /// that cannot be checked is a refusal, not a step to fall through.
     #[test]
     fn pos_finality_refuses_a_set_hash_it_cannot_decode() {
-        let domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
+        // Bridge off: a bridge-enabled domain with no registered set is
+        // refused before the proof is read at all (see
+        // `reject_unregistered_set_for_bridge`). The decode refusal has to
+        // hold on its own, on a domain that gate does not cover.
+        let mut domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
+        domain.bridge_enabled = false;
         let commitment = commitment(ConsensusKind::PoS);
         let adapter = PoSFinalityAdapter;
 
@@ -1425,7 +1496,9 @@ mod tests {
     /// its own validator set. It has to be refused before the certificate.
     #[test]
     fn bft_finality_refuses_a_set_hash_it_cannot_decode() {
-        let domain = default_domain(3, ConsensusKind::Bft, 45262, "bft-finality", 0);
+        // Bridge off, for the same reason as the PoS twin above.
+        let mut domain = default_domain(3, ConsensusKind::Bft, 45262, "bft-finality", 0);
+        domain.bridge_enabled = false;
         let commitment = commitment(ConsensusKind::Bft);
         let adapter = BftFinalityAdapter::default();
 
@@ -1532,13 +1605,15 @@ mod tests {
         use crate::crypto::primitives::KeyPair;
 
         let adapter = StorageAttestationFinalityAdapter;
-        let domain = default_domain(
+        // Bridge off, for the same reason as the PoS twin above.
+        let mut domain = default_domain(
             5,
             ConsensusKind::StorageAttestation(crate::domain::StorageDomainParams::default()),
             45262,
             crate::domain::types::STORAGE_ATTESTATION_ADAPTER,
             0,
         );
+        domain.bridge_enabled = false;
         let mut commitment = commitment(ConsensusKind::StorageAttestation(
             crate::domain::StorageDomainParams::default(),
         ));
@@ -1606,7 +1681,7 @@ mod tests {
     fn test_storage_attestation_finality_enforces_cryptographic_signatures_and_quorum() {
         use crate::crypto::primitives::KeyPair;
         let adapter = StorageAttestationFinalityAdapter;
-        let domain = default_domain(
+        let mut domain = default_domain(
             5,
             crate::domain::ConsensusKind::StorageAttestation(crate::domain::StorageDomainParams {
                 min_operator_bond: 100,
@@ -1632,6 +1707,9 @@ mod tests {
 
         let kp = KeyPair::generate().unwrap();
         let auth_addr = crate::core::address::Address::from(kp.public_key_bytes());
+        // Register the attesting set: a bridge-enabled domain with no set
+        // would refuse before the signature is even looked at.
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &[auth_addr]).unwrap();
         let fake_proof = FinalityProof::PoA {
             authorities: vec![auth_addr],
             signatures: vec![PoAAuthoritySignature {

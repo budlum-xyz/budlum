@@ -194,8 +194,12 @@ impl BudlumxyzRegistry {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_HUB_REGISTRY_V2");
+        // V3: the app map and the governor set carry their counts and a
+        // boundary between the two sections, so an app row cannot be read
+        // as a governor entry or the other way round.
+        hasher.update(b"BDLM_HUB_REGISTRY_V3");
         hasher.update(self.next_app_id.to_le_bytes());
+        hasher.update((self.apps.len() as u64).to_le_bytes());
         for (id, app) in &self.apps {
             hasher.update(id.to_le_bytes());
             hasher.update(app.developer.0);
@@ -230,6 +234,8 @@ impl BudlumxyzRegistry {
         }
         let mut governors: Vec<_> = self.authorized_governors.iter().copied().collect();
         governors.sort();
+        hasher.update(b"governors:");
+        hasher.update((governors.len() as u64).to_le_bytes());
         for governor in governors {
             hasher.update(governor.0);
         }
@@ -415,6 +421,42 @@ mod tests {
         let root_before = reg.root();
         reg.authorized_governors.insert(Address::from([8u8; 32]));
         assert_ne!(root_before, reg.root());
+    }
+
+    /// The app section and the governor section are counted and separated,
+    /// so bytes cannot move from one into the other. An empty registry with
+    /// one governor and a registry whose app row happens to end in the same
+    /// 32 bytes hash differently, and the counts are committed on their own.
+    #[test]
+    fn root_separates_apps_from_governors() {
+        let mut only_governor = BudlumxyzRegistry::new();
+        only_governor
+            .authorized_governors
+            .insert(Address::from([8u8; 32]));
+        let mut only_app = BudlumxyzRegistry::new();
+        only_app
+            .register_app(
+                "app".into(),
+                Address::from([8u8; 32]),
+                AppCategory::Other,
+                "https://example.invalid".into(),
+                None,
+                1,
+            )
+            .unwrap();
+        assert_ne!(only_governor.root(), only_app.root());
+        let mut both = only_app.clone();
+        both.authorized_governors.insert(Address::from([8u8; 32]));
+        assert_ne!(
+            only_app.root(),
+            both.root(),
+            "the governor count is committed"
+        );
+        assert_ne!(
+            only_governor.root(),
+            both.root(),
+            "the app count is committed"
+        );
     }
 
     /// An unconfigured governor set must deny, not admit.

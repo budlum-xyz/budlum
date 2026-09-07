@@ -450,7 +450,7 @@ mod rpc_tests {
         pow_hash[1] = 0x0f;
         new_commitment.domain_block_hash = pow_hash;
         let proof2 = crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] };
-        new_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof2);
+        new_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof2).unwrap();
         let result = server
             .submit_verified_domain_commitment(crate::domain::VerifiedDomainCommitment {
                 commitment: new_commitment.clone(),
@@ -475,7 +475,8 @@ mod rpc_tests {
         pow_hash2[1] = 0x0f;
         verified_commitment.domain_block_hash = pow_hash2;
         let proof = crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] };
-        verified_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof);
+        verified_commitment.finality_proof_hash =
+            crate::domain::hash_finality_proof(&proof).unwrap();
         let verified_payload = crate::domain::VerifiedDomainCommitment {
             commitment: verified_commitment.clone(),
             proof,
@@ -495,7 +496,8 @@ mod rpc_tests {
         let mut weak_commitment =
             crate::domain::DomainCommitment::from_block(&domain, &block4, [8u8; 32], [9u8; 32], 3)
                 .unwrap();
-        weak_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&weak_proof);
+        weak_commitment.finality_proof_hash =
+            crate::domain::hash_finality_proof(&weak_proof).unwrap();
         let weak_payload = crate::domain::VerifiedDomainCommitment {
             commitment: weak_commitment,
             proof: weak_proof,
