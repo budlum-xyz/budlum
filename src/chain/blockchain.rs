@@ -6631,26 +6631,38 @@ mod tests {
     /// A known-network genesis that DECLARES the ceremony accounts but
     /// drifts from them is refused at the chain boundary, fail-closed.
     #[test]
-    #[should_panic(expected = "Genesis ceremony validation failed")]
     fn declared_ceremony_that_fails_validation_is_refused_at_startup() {
-        let mut config = crate::chain::genesis::mainnet_genesis();
-        config.tokenomics_addresses = Some(crate::tokenomics::TokenomicsAddresses {
-            community: Address::from([0xC1; 32]),
-            liquidity: Address::from([0xC2; 32]),
-            ecosystem: Address::from([0xC3; 32]),
-            team: Address::from([0xC4; 32]),
-            burn_reserve: Address::from([0xC5; 32]),
-        });
-        // Supply stays balanced (that gate runs first and panics on its
-        // own message); the skeleton's validator roster is what the
-        // ceremony refuses once the addresses are declared.
-        let consensus = Arc::new(PoWEngine::new(0));
-        let _ = Blockchain::new_with_genesis(
-            consensus,
-            None,
-            Network::Mainnet.chain_id().value(),
-            None,
-            Some(config),
+        let build = || {
+            let mut config = crate::chain::genesis::mainnet_genesis();
+            config.tokenomics_addresses = Some(crate::tokenomics::TokenomicsAddresses {
+                community: Address::from([0xC1; 32]),
+                liquidity: Address::from([0xC2; 32]),
+                ecosystem: Address::from([0xC3; 32]),
+                team: Address::from([0xC4; 32]),
+                burn_reserve: Address::from([0xC5; 32]),
+            });
+            // Supply stays balanced (that gate runs first and panics on its
+            // own message); the skeleton's validator roster is what the
+            // ceremony refuses once the addresses are declared.
+            let consensus = Arc::new(PoWEngine::new(0));
+            let _ = Blockchain::new_with_genesis(
+                consensus,
+                None,
+                Network::Mainnet.chain_id().value(),
+                None,
+                Some(config),
+            );
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(build));
+        let err = outcome.expect_err("a declared-but-broken ceremony must be refused at startup");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("Genesis ceremony validation failed"),
+            "the refusal must carry the ceremony banner, got: {msg}"
         );
     }
 

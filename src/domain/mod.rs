@@ -1,4 +1,5 @@
 pub mod commitment_registry;
+pub mod custom_plugin_guard;
 pub mod finality_adapter;
 pub mod fork_choice;
 pub mod plugin;
@@ -10,6 +11,7 @@ pub mod storage_params;
 pub mod types;
 
 pub use commitment_registry::DomainCommitmentRegistry;
+pub use custom_plugin_guard::validate_custom_plugin_hash;
 pub use finality_adapter::{
     hash_finality_proof, hash_pow_header, poa_authority_set_hash, AiInferenceFinalityAdapter,
     BftFinalityAdapter, DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,

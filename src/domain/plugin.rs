@@ -282,33 +282,3 @@ pub fn default_domain(
         last_committed_hash: [0u8; 32],
     }
 }
-
-/// E2: Validate that a Custom domain's plugin code hash matches the registered hash.
-///
-/// # Errors
-///
-/// A string finding when the domain is Custom but declares no hash, the
-/// plugin bytes are empty, or the computed hash disagrees with the
-/// registered one.
-pub fn validate_custom_plugin_hash(
-    domain: &ConsensusDomain,
-    plugin_bytes: &[u8],
-) -> Result<(), String> {
-    use sha3::{Digest, Sha3_256};
-    if let ConsensusKind::Custom(_) = &domain.kind {
-        let expected = domain.plugin_code_hash.ok_or_else(|| {
-            format!(
-                "Custom domain {} must declare a plugin_code_hash",
-                domain.id
-            )
-        })?;
-        let computed: crate::domain::types::Hash32 = Sha3_256::digest(plugin_bytes).into();
-        if expected != computed {
-            return Err(format!(
-                "Custom domain {} plugin code hash mismatch: expected {:?}, computed {:?}",
-                domain.id, expected, computed
-            ));
-        }
-    }
-    Ok(())
-}
