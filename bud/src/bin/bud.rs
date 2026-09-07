@@ -8,6 +8,9 @@
 //!   bud bench   <file>                                                       speed + cost measurement
 //!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (more than two thirds)
 //!   bud check   <file>                                                       integrity + gate check
+//!   bud zk witness <in> <out>                                                  STARK field trace + root
+//!   bud zk prove   <in> [--prover p]                                            external proof attempt (fail-closed)
+//!   bud zk verify  --trace t [--proof p]                                         trace binding; a proof is refused
 //!
 //! Error path: every command performs real file I/O; on error -> exit code 1 + message.
 
@@ -23,6 +26,11 @@ use bud_core::bud_format_pact::PactRecord;
 use bud_core::bud_format_production::BudProductionRecord;
 
 use bud_core::bud_format_engine::{engine_restore_container, engine_store, TransformKind};
+use bud_core::bud_format_zkbridge::{engine_to_witness, field_trace_meta, witness_to_field_trace};
+use bud_core::bud_format_zkproof::{
+    attempt_proof, in_tree_verification_possible, load_field_trace, save_field_trace,
+    zk_verify_refusal, ZK_PROVER_ENV,
+};
 use bud_core::bud_format_multifile::TenantMultifileStore;
 use bud_core::bud_format_segment::SegmentLedger;
 use bud_core::bud_format_videopipe::run_video_pipeline;
@@ -109,6 +117,29 @@ enum Commands {
     Check {
         #[arg(short, long)]
         input: PathBuf,
+    },
+    /// zk witness: any file -> STARK field trace + binding root (deterministic)
+    ZkWitness {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+    },
+    /// zk prove: attempt an EXTERNAL prover on the witness trace (fail-closed:
+    /// no prover, a broken prover or an empty proof is a typed refusal)
+    ZkProve {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(long)]
+        prover: Option<PathBuf>,
+    },
+    /// zk verify: bind a saved trace to its root; a zk PROOF is refused here
+    /// (in-tree STARK verification is not implemented)
+    ZkVerify {
+        #[arg(short, long)]
+        trace: PathBuf,
+        #[arg(long)]
+        proof: Option<PathBuf>,
     },
     /// Production ratio proof: produce a root-anchored record with the measured ratio + pipeline from a .bud
     ProduceProof {
@@ -728,6 +759,57 @@ fn run(cli: Cli) -> Result<String, String> {
                 hex8(&root)
             ))
         }
+        Commands::ZkWitness { input, out } => {
+            let data = read_file(&input)?;
+            let res =
+                engine_store(&data, false, 42).ok_or("zk witness: invalid input (empty or >512MB)")?;
+            let witness = engine_to_witness(&res);
+            let rows = witness_to_field_trace(&witness);
+            let (n, root) = field_trace_meta(&rows);
+            save_field_trace(&out, &rows, &root)?;
+            Ok(format!(
+                "zk-witness: rows={} root={} bound={} (deterministic; the trace is the SPEC the circuit proves)",
+                n,
+                hex8(&root),
+                out.display()
+            ))
+        }
+
+        Commands::ZkProve { input, prover } => {
+            let data = read_file(&input)?;
+            let res =
+                engine_store(&data, false, 42).ok_or("zk prove: invalid input (empty or >512MB)")?;
+            let witness = engine_to_witness(&res);
+            let prover = prover.or_else(|| std::env::var_os(ZK_PROVER_ENV).map(PathBuf::from));
+            match attempt_proof(&witness, prover.as_deref())? {
+                bud_core::bud_format_zkproof::ZkTrust::Unproduced { reason } => {
+                    Err(format!("zk prove REFUSED: {reason}"))
+                }
+                bud_core::bud_format_zkproof::ZkTrust::ProvenExternally {
+                    rows,
+                    proof_bytes,
+                } => Ok(format!(
+                    "zk prove: external prover produced {proof_bytes} bytes for {rows} rows; \
+                     the tree RECORDS the proof and does not verify it in-tree ({})",
+                    zk_verify_refusal()
+                )),
+            }
+        }
+
+        Commands::ZkVerify { trace, proof } => {
+            if proof.is_some() {
+                return Err(format!("zk verify REFUSED: {}", zk_verify_refusal()));
+            }
+            let (rows, root) = load_field_trace(&trace)?;
+            let _ = in_tree_verification_possible(); // the hard false is tested in-tree
+            Ok(format!(
+                "zk verify: {} rows bind to root {} (trace-binding only; {})",
+                rows.len(),
+                hex8(&root),
+                zk_verify_refusal()
+            ))
+        }
+
         Commands::Check { input } => {
             let bytes = read_file(&input)?;
             // v2 magic (high bit set) -> container; otherwise v1
