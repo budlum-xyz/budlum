@@ -904,10 +904,12 @@ mod tests {
         params.community += 1;
         config.bud_tokenomics = Some(params);
         let error = config
-            .validate_consensus_ceremony(Network::Mainnet)
+            .validate_tokenomics_supply()
             .expect_err("an unbalanced distribution must be refused");
         assert!(error.contains("not the fixed supply"), "{error}");
-        assert!(config.validate_tokenomics_supply().is_err());
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
         assert_eq!(config.build_state().circulating_supply(), 0);
         assert_eq!(config.build_state().burn_reserve_address, None);
     }
@@ -922,10 +924,12 @@ mod tests {
         params.team_vesting_epochs = params.team_cliff_epochs - 1;
         config.bud_tokenomics = Some(params);
         let error = config
-            .validate_consensus_ceremony(Network::Mainnet)
+            .validate_tokenomics_supply()
             .expect_err("a vesting shorter than its cliff must be refused");
         assert!(error.contains("shorter than its cliff"), "{error}");
-        assert!(config.validate_tokenomics_supply().is_err());
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
 
         // Zero duration is the no-schedule case and still unlocks at the
         // cliff, so it stays accepted.
