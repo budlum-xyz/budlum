@@ -29,10 +29,18 @@ pub struct ProducerRegistry {
 }
 
 impl ProducerRegistry {
-    pub fn new() -> Self {
-        Self::default()
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            producers: BTreeMap::new(),
+            total_producer_bond: 0,
+        }
     }
 
+    /// # Errors
+    ///
+    /// A string finding when the bond is below [`MIN_PRODUCER_BOND`] or the
+    /// producer is already registered.
     pub fn register(
         &mut self,
         producer: Address,
@@ -41,10 +49,7 @@ impl ProducerRegistry {
         endpoint: String,
     ) -> Result<(), String> {
         if bond < MIN_PRODUCER_BOND {
-            return Err(format!(
-                "Insufficient bond: {} < {}",
-                bond, MIN_PRODUCER_BOND
-            ));
+            return Err(format!("Insufficient bond: {bond} < {MIN_PRODUCER_BOND}"));
         }
         if self.producers.contains_key(&producer) {
             return Err("Producer already registered".to_string());
@@ -75,6 +80,7 @@ impl ProducerRegistry {
         false
     }
 
+    #[must_use]
     pub fn select_producer(&self, seed: &Hash32) -> Option<Address> {
         let active_producers: Vec<&ProducerEntry> =
             self.producers.values().filter(|p| p.active).collect();
@@ -83,7 +89,7 @@ impl ProducerRegistry {
         }
         let mut seed_num = 0u64;
         for &b in &seed[0..8] {
-            seed_num = (seed_num << 8) | (b as u64);
+            seed_num = (seed_num << 8) | u64::from(b);
         }
         let target = seed_num % self.total_producer_bond;
         let mut acc = 0u64;
@@ -96,6 +102,7 @@ impl ProducerRegistry {
         self.producers.keys().next().copied()
     }
 
+    #[must_use]
     pub fn root_hash(&self) -> Hash32 {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_PRODUCER_REGISTRY_V1");
@@ -103,7 +110,7 @@ impl ProducerRegistry {
             hasher.update(addr.0);
             hasher.update(p.bond.to_le_bytes());
             hasher.update(p.blocks_produced.to_le_bytes());
-            hasher.update([p.active as u8]);
+            hasher.update([u8::from(p.active)]);
         }
         hasher.finalize().into()
     }

@@ -151,10 +151,11 @@ mod tests {
     }
 }
 
-/// E6: CPU/Step Budget Meter for Data Regeneration.
+/// `E6`: CPU/Step Budget Meter for Data Regeneration.
 ///
-/// Prevents decompression bombs, unbounded loop execution, and algorithmic complexity DoS
-/// during recursive recipe expansion and data regeneration.
+/// Prevents decompression bombs, unbounded loop execution, and algorithmic
+/// complexity attacks during recursive recipe expansion and data
+/// regeneration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegenerationBudgetMeter {
     pub max_cpu_steps: u64,
@@ -166,7 +167,12 @@ pub struct RegenerationBudgetMeter {
 }
 
 impl RegenerationBudgetMeter {
-    pub fn new(max_cpu_steps: u64, max_memory_bytes: usize, max_recursion_depth: u32) -> Self {
+    #[must_use]
+    pub const fn new(
+        max_cpu_steps: u64,
+        max_memory_bytes: usize,
+        max_recursion_depth: u32,
+    ) -> Self {
         Self {
             max_cpu_steps,
             max_memory_bytes,
@@ -177,7 +183,10 @@ impl RegenerationBudgetMeter {
         }
     }
 
-    pub fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
+    /// # Errors
+    ///
+    /// [`MeterError::BudgetExceeded`] when the steps would pass the budget.
+    pub const fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
         let used = self.cpu_steps_used.saturating_add(steps);
         if used > self.max_cpu_steps {
             return Err(MeterError::BudgetExceeded {
@@ -189,7 +198,10 @@ impl RegenerationBudgetMeter {
         Ok(())
     }
 
-    pub fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
+    /// # Errors
+    ///
+    /// [`MeterError::BudgetExceeded`] when the allocation would pass the cap.
+    pub const fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
         let used = self.memory_used.saturating_add(bytes);
         if used > self.max_memory_bytes {
             return Err(MeterError::BudgetExceeded {
@@ -201,18 +213,21 @@ impl RegenerationBudgetMeter {
         Ok(())
     }
 
-    pub fn enter_recursion(&mut self) -> Result<(), MeterError> {
+    /// # Errors
+    ///
+    /// [`MeterError::BudgetExceeded`] at the recursion-depth cap.
+    pub const fn enter_recursion(&mut self) -> Result<(), MeterError> {
         if self.current_depth >= self.max_recursion_depth {
             return Err(MeterError::BudgetExceeded {
-                used: (self.current_depth + 1) as u64,
-                budget: self.max_recursion_depth as u64,
+                used: u64::from(self.current_depth) + 1,
+                budget: u64::from(self.max_recursion_depth),
             });
         }
         self.current_depth += 1;
         Ok(())
     }
 
-    pub fn exit_recursion(&mut self) {
+    pub const fn exit_recursion(&mut self) {
         self.current_depth = self.current_depth.saturating_sub(1);
     }
 }

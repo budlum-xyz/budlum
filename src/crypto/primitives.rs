@@ -850,6 +850,10 @@ impl WalletKeyPair {
         out
     }
 
+    /// # Errors
+    ///
+    /// [`CryptoError`] when the encoded public key does not yield a valid
+    /// wallet address (malformed key material).
     pub fn try_address(&self) -> Result<crate::core::address::Address, CryptoError> {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
     }

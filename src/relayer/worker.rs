@@ -976,7 +976,7 @@ fn write_atomically(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> 
 /// could be sent), or the adapter itself refused the broadcast. Every other
 /// variant can surface after `submit_transaction` already went out, so the
 /// caller must keep the request's reservation on them.
-fn broadcast_certainly_did_not_happen(error: &AdapterError) -> bool {
+const fn broadcast_certainly_did_not_happen(error: &AdapterError) -> bool {
     matches!(
         error,
         AdapterError::UnsupportedChain(_) | AdapterError::SubmissionFailed(_)
@@ -990,7 +990,7 @@ fn broadcast_certainly_did_not_happen(error: &AdapterError) -> bool {
 /// different configuration, and a proof the adapter itself rejects is not
 /// going to verify on the next pass either. Everything else is the network
 /// or the remote node having a bad minute.
-fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
+const fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
     match error {
         AdapterError::UnsupportedChain(_) | AdapterError::ProofVerificationFailed(_) => {
             RelayOutcome::Refused

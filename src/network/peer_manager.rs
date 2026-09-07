@@ -12,8 +12,9 @@ pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
 pub const BAN_THRESHOLD: i32 = -100;
 pub const BAN_DURATION: Duration = Duration::from_secs(3600);
-/// How long an unbanned negative-score record survives without activity:
-/// one ban-length. A misbehaving id keeps refreshing `last_seen` while it
+/// How long an unbanned negative-score record survives without activity.
+///
+/// One ban-length. A misbehaving id keeps refreshing `last_seen` while it
 /// keeps misbehaving, so its score stays; an id that goes quiet for a whole
 /// ban-length is reclaimed by `prune_spent_records`, so ids an attacker
 /// mints for one burst of malformed handshakes cannot fill the tracked
@@ -1267,10 +1268,13 @@ mod tests {
         assert_eq!(manager.get_score(&stale[0]), 0);
 
         // The bans run out and no penalty is left on any of the records.
-        let past = Instant::now() - Duration::from_secs(1);
+        // `checked_sub` stands in for an expired deadline: when the runner
+        // has not been up long enough to represent "one second ago", an
+        // absent deadline reads exactly like an expired one.
+        let past = Instant::now().checked_sub(Duration::from_secs(1));
         for p in &stale {
             let entry = manager.peers.get_mut(p).expect("record");
-            entry.banned_until = Some(past);
+            entry.banned_until = past;
             entry.ban_expires_unix = Some(0);
             entry.score = 0;
         }
@@ -1399,7 +1403,7 @@ mod tests {
             let id = test_peer_id();
             manager.report_invalid_handshake(&id);
             manager.peers.get_mut(&id).unwrap().last_seen =
-                Some(Instant::now() - NEGATIVE_RECORD_TTL - Duration::from_secs(1));
+                Instant::now().checked_sub(NEGATIVE_RECORD_TTL + Duration::from_secs(1));
         }
         assert_eq!(manager.peers.len(), manager.max_tracked_peers);
 
@@ -1431,7 +1435,7 @@ mod tests {
             let id = test_peer_id();
             manager.report_invalid_handshake(&id);
             manager.peers.get_mut(&id).unwrap().last_seen =
-                Some(Instant::now() - NEGATIVE_RECORD_TTL - Duration::from_secs(1));
+                Instant::now().checked_sub(NEGATIVE_RECORD_TTL + Duration::from_secs(1));
         }
         let newcomer = test_peer_id();
         assert!(

@@ -51,8 +51,12 @@ pub struct QuarantineLedger {
 }
 
 impl QuarantineLedger {
-    pub fn new() -> Self {
-        Self::default()
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            quarantined_entities: BTreeMap::new(),
+            alarms: BTreeMap::new(),
+        }
     }
 
     pub fn quarantine_entity(
@@ -75,6 +79,7 @@ impl QuarantineLedger {
         );
     }
 
+    #[must_use]
     pub fn is_quarantined(&self, target_id: &Hash32) -> bool {
         self.quarantined_entities.contains_key(target_id)
     }
@@ -115,6 +120,7 @@ impl QuarantineLedger {
     }
 
     /// Compute state root commitment for quarantine and alarm state.
+    #[must_use]
     pub fn root_hash(&self) -> Hash32 {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_BUDZERO_QUARANTINE_V1");
@@ -148,13 +154,18 @@ mod tests {
             target,
             QuarantineReason::DoubleSigning("equivocation on height 100".into()),
             100,
-            1725700000,
+            1_725_700_000,
             reporter,
         );
         assert!(ledger.is_quarantined(&target));
 
-        let alarm_id =
-            ledger.record_alarm("C1_DETECTED", "Validator set forgery", 100, 1725700000, 4);
+        let alarm_id = ledger.record_alarm(
+            "C1_DETECTED",
+            "Validator set forgery",
+            100,
+            1_725_700_000,
+            4,
+        );
         assert_ne!(alarm_id, [0u8; 32]);
 
         let root = ledger.root_hash();

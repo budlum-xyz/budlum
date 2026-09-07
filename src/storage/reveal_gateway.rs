@@ -203,7 +203,7 @@ impl RevealGateway {
     /// The current revoke generation; reveal paths compare it before and
     /// after asking the chain for a grant decision.
     #[must_use]
-    pub fn revoke_generation(&self) -> u64 {
+    pub const fn revoke_generation(&self) -> u64 {
         self.revoke_generation
     }
 
@@ -212,7 +212,7 @@ impl RevealGateway {
     /// time the mutation can land. A revoke that fails keeps the bump; the
     /// only cost is one retry of the racing reveal call, and its next chain
     /// question gets the truthful answer.
-    pub fn bump_revoke_generation(&mut self) {
+    pub const fn bump_revoke_generation(&mut self) {
         self.revoke_generation = self.revoke_generation.wrapping_add(1);
     }
 
@@ -261,7 +261,7 @@ impl RevealGateway {
     /// "uncapped" is not a remote option on either of them. The registry
     /// path used to pass `None` straight through, so an in-process caller
     /// that omitted the budget opened an unmetered session.
-    fn with_default_budget(mut req: RevealRequest) -> RevealRequest {
+    const fn with_default_budget(mut req: RevealRequest) -> RevealRequest {
         if req.meter_budget.is_none() {
             req.meter_budget = Some(DEFAULT_REVEAL_BUDGET_FRAMES);
         }

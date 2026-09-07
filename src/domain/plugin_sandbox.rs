@@ -57,7 +57,8 @@ pub struct PluginSandbox {
 }
 
 impl PluginSandbox {
-    pub fn new(config: PluginSandboxConfig) -> Self {
+    #[must_use]
+    pub const fn new(config: PluginSandboxConfig) -> Self {
         Self {
             config,
             gas_used: 0,
@@ -65,7 +66,10 @@ impl PluginSandbox {
         }
     }
 
-    pub fn charge_gas(&mut self, amount: u64) -> Result<(), SandboxError> {
+    /// # Errors
+    ///
+    /// [`SandboxError::GasExhausted`] when the charge would pass the gas limit.
+    pub const fn charge_gas(&mut self, amount: u64) -> Result<(), SandboxError> {
         let new_gas = self.gas_used.saturating_add(amount);
         if new_gas > self.config.gas_limit {
             return Err(SandboxError::GasExhausted {
@@ -77,7 +81,11 @@ impl PluginSandbox {
         Ok(())
     }
 
-    pub fn allocate(&mut self, bytes: usize) -> Result<(), SandboxError> {
+    /// # Errors
+    ///
+    /// [`SandboxError::MemoryLimitExceeded`] when the allocation would pass
+    /// the memory cap.
+    pub const fn allocate(&mut self, bytes: usize) -> Result<(), SandboxError> {
         let new_mem = self.memory_allocated.saturating_add(bytes);
         if new_mem > self.config.max_memory_bytes {
             return Err(SandboxError::MemoryLimitExceeded {
@@ -90,18 +98,21 @@ impl PluginSandbox {
     }
 
     /// Execute a pure closure within safe panic and resource boundaries.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxError::ExecutionPanicked`] when the closure panics, or the
+    /// closure's own [`SandboxError`] when it returns one.
     pub fn run_isolated<F, R>(&mut self, f: F) -> Result<R, SandboxError>
     where
         F: FnOnce(&mut Self) -> Result<R, SandboxError> + std::panic::UnwindSafe,
     {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))).map_err(|e| {
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
             SandboxError::ExecutionPanicked(msg)
         })?
     }

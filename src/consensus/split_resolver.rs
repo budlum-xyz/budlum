@@ -27,6 +27,7 @@ pub enum SplitDecision {
 }
 
 /// Deterministically resolve a 2-2 split between two equally weighted fork candidates.
+#[must_use]
 pub fn resolve_split_tie(
     left: &SplitCandidate,
     right: &SplitCandidate,

@@ -82,7 +82,7 @@ impl LivenessTracker {
         self.missed.retain(|v, _| expected_set.contains(v));
         self.streak_start_epoch
             .retain(|v, _| expected_set.contains(v));
-        self.reported.retain(|v, _| expected_set.contains(v));
+        self.reported.retain(|v, ()| expected_set.contains(v));
 
         for validator in &expected_set {
             if participated(validator) {

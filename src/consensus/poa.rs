@@ -414,8 +414,8 @@ impl ConsensusEngine for PoAEngine {
     }
     fn info(&self) -> String {
         format!(
-            "PoA (validators: in-state, quorum: {:.0}%)",
-            self.config.quorum_numerator as f64 / self.config.quorum_denominator as f64 * 100.0
+            "PoA (validators: in-state, quorum: {}%)",
+            self.config.quorum_numerator * 100 / self.config.quorum_denominator.max(1)
         )
     }
 

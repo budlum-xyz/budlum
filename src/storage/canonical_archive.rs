@@ -51,8 +51,11 @@ pub struct CanonicalArchiveManager {
 }
 
 impl CanonicalArchiveManager {
-    pub fn new() -> Self {
-        Self::default()
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            manifests: BTreeMap::new(),
+        }
     }
 
     pub fn register_manifest(
@@ -88,10 +91,12 @@ impl CanonicalArchiveManager {
         manifest_id
     }
 
+    #[must_use]
     pub fn get_manifest(&self, id: &Hash32) -> Option<&CanonicalManifest> {
         self.manifests.get(id)
     }
 
+    #[must_use]
     pub fn has_min_replicas(&self, id: &Hash32, min_replicas: u32) -> bool {
         if let Some(m) = self.manifests.get(id) {
             let total_replicas: u32 = m.pins.iter().map(|p| p.replica_count).sum();

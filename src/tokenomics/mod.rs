@@ -271,7 +271,7 @@ impl TokenomicsParams {
         let annual_yield = (validator_stake as u128
             * self.validator_annual_yield_ratio_fixed as u128)
             / FIXED_POINT_SCALE as u128;
-        let epochs_per_year = self.epochs_per_year.max(1) as u128;
+        let epochs_per_year = u128::from(self.epochs_per_year.max(1));
         let epoch_yield = annual_yield / epochs_per_year;
         u64::try_from(epoch_yield).unwrap_or(u64::MAX)
     }
@@ -544,11 +544,12 @@ mod tests {
             ..TokenomicsParams::default()
         };
         let stake = bud(1_000_000);
-        let annual_yield = (stake as u128 * params.validator_annual_yield_ratio_fixed as u128)
-            / FIXED_POINT_SCALE as u128;
+        let annual_yield = (u128::from(stake)
+            * u128::from(params.validator_annual_yield_ratio_fixed))
+            / u128::from(FIXED_POINT_SCALE);
         let reward = params.calculate_epoch_reward(stake);
         assert!(reward > 0, "a 1M BUD stake earns a visible epoch reward");
-        let paid = reward as u128 * params.epochs_per_year as u128;
+        let paid = u128::from(reward) * u128::from(params.epochs_per_year);
         // Rounding floors each epoch share, so the aggregate stays at or
         // below the promise and misses it by less than one unit per epoch.
         assert!(
@@ -556,7 +557,7 @@ mod tests {
             "a year of epochs ({paid}) pays more than the annual yield ({annual_yield})"
         );
         assert!(
-            annual_yield - paid < params.epochs_per_year as u128,
+            annual_yield - paid < u128::from(params.epochs_per_year),
             "a year of epochs ({paid}) loses more than rounding against the \
              annual yield ({annual_yield})"
         );
@@ -576,10 +577,11 @@ mod tests {
         );
         // A year of epochs on any stake stays within the promised yield.
         let stake = 1_000_000u64;
-        let annual_yield = (stake as u128 * params.validator_annual_yield_ratio_fixed as u128)
-            / crate::core::chain_config::FIXED_POINT_SCALE as u128;
-        let epochs_per_year = params.epochs_per_year as u128;
-        let paid = params.calculate_epoch_reward(stake) as u128 * epochs_per_year;
+        let annual_yield = (u128::from(stake)
+            * u128::from(params.validator_annual_yield_ratio_fixed))
+            / u128::from(crate::core::chain_config::FIXED_POINT_SCALE);
+        let epochs_per_year = u128::from(params.epochs_per_year);
+        let paid = u128::from(params.calculate_epoch_reward(stake)) * epochs_per_year;
         assert!(
             paid <= annual_yield,
             "a year of epoch rewards ({paid}) exceeds the annual yield ({annual_yield})"
@@ -672,9 +674,9 @@ mod tests {
         // The formula, written out: the annual yield on the stake divided
         // by the configured number of epochs per year, rounded down once.
         let expected = |params: &TokenomicsParams, stake: u64| -> u64 {
-            let annual = stake as u128 * params.validator_annual_yield_ratio_fixed as u128
-                / FIXED_POINT_SCALE as u128;
-            (annual / params.epochs_per_year.max(1) as u128) as u64
+            let annual = u128::from(stake) * u128::from(params.validator_annual_yield_ratio_fixed)
+                / u128::from(FIXED_POINT_SCALE);
+            u64::try_from(annual / u128::from(params.epochs_per_year.max(1))).unwrap_or(u64::MAX)
         };
         let stake = bud(1_000);
         let full = params.calculate_epoch_reward(stake);

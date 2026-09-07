@@ -284,6 +284,12 @@ pub fn default_domain(
 }
 
 /// E2: Validate that a Custom domain's plugin code hash matches the registered hash.
+///
+/// # Errors
+///
+/// A string finding when the domain is Custom but declares no hash, the
+/// plugin bytes are empty, or the computed hash disagrees with the
+/// registered one.
 pub fn validate_custom_plugin_hash(
     domain: &ConsensusDomain,
     plugin_bytes: &[u8],

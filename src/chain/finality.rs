@@ -247,10 +247,11 @@ pub const BLS_RFC9380_ACTIVATION_EPOCH: u64 = 0;
 
 const BLS_SIGNATURE_DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 const BLS_POP_DST: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
-/// Ethereum's BLS suite (EIP-2537 / consensus spec): signatures live in G2,
-/// hashed with the G2 SSWU_RO map. Used by the Ethereum sync-committee
-/// interop path in `cross_domain::evm::sync_committee`, where public keys
-/// are 48-byte G1 points and signatures are 96-byte G2 points.
+/// Ethereum's BLS suite (`EIP-2537` / consensus spec) hashes signatures in G2.
+///
+/// The G2 `SSWU_RO` map is used by the Ethereum sync-committee interop path
+/// in `cross_domain::evm::sync_committee`, where public keys are 48-byte G1
+/// points and signatures are 96-byte G2 points.
 pub const BLS_SIGNATURE_G2_DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 pub fn hash_to_g1(msg: &[u8]) -> G1Affine {
@@ -262,8 +263,11 @@ pub fn hash_to_g1(msg: &[u8]) -> G1Affine {
     )
 }
 
-/// Hash to G2 under Ethereum's signature DST. Same RFC 9380 construction as
-/// [`hash_to_g1`], on the G2 group: `H(m)` for a 96-byte G2 signature.
+/// Hash to G2 under Ethereum's signature DST.
+///
+/// Same RFC 9380 construction as [`hash_to_g1`], on the G2 group: `H(m)` for
+/// a 96-byte G2 signature.
+#[must_use]
 pub fn hash_to_g2(msg: &[u8]) -> G2Affine {
     G2Affine::from(
         <G2Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(
