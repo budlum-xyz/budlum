@@ -357,9 +357,7 @@ impl PeerManager {
         let before = self.peers.len();
         let connected = &self.connected_peers;
         self.peers.retain(|id, s| {
-            s.is_banned()
-                || connected.contains(id)
-                || (s.score < 0 && negative_record_is_fresh(s))
+            s.is_banned() || connected.contains(id) || (s.score < 0 && negative_record_is_fresh(s))
         });
         before - self.peers.len()
     }
@@ -1420,7 +1418,10 @@ mod tests {
             manager.get_score(&fresh) < 0,
             "a fresh penalty survives the reclaim"
         );
-        assert!(manager.is_banned(&banned), "a running ban survives the reclaim");
+        assert!(
+            manager.is_banned(&banned),
+            "a running ban survives the reclaim"
+        );
 
         // Fill to the ceiling again with stale garbage, then show the
         // reclaim path inside `get_or_create` admits an unseen peer.

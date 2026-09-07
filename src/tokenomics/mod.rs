@@ -524,7 +524,10 @@ mod tests {
             "1 000 BUD: 50 000 000 / 1000"
         );
         assert_eq!(params.calculate_epoch_reward(50_000_000_000), 2_500_000);
-        assert_eq!(params.calculate_epoch_reward(bud(100_000_000)), 5_000_000_000);
+        assert_eq!(
+            params.calculate_epoch_reward(bud(100_000_000)),
+            5_000_000_000
+        );
     }
 
     /// The mainnet configuration (6 s slots, 100 slots per epoch, 52 560

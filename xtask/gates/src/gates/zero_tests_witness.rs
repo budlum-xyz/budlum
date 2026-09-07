@@ -204,9 +204,8 @@ pub fn self_test() -> Result<String, String> {
     // constant the gate looks for is present: the refusal must come from the
     // direct-assertion check alone, not from a missing witness column that
     // would have failed `run` earlier anyway.
-    let direct_air = format!(
-        "{good_air}        builder.when(is_assert).assert_one(rs1_val.clone());\n"
-    );
+    let direct_air =
+        format!("{good_air}        builder.when(is_assert).assert_one(rs1_val.clone());\n");
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), direct_air)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {

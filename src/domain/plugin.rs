@@ -291,7 +291,10 @@ pub fn validate_custom_plugin_hash(
     use sha3::{Digest, Sha3_256};
     if let ConsensusKind::Custom(_) = &domain.kind {
         let expected = domain.plugin_code_hash.ok_or_else(|| {
-            format!("Custom domain {} must declare a plugin_code_hash", domain.id)
+            format!(
+                "Custom domain {} must declare a plugin_code_hash",
+                domain.id
+            )
         })?;
         let computed: crate::domain::types::Hash32 = Sha3_256::digest(plugin_bytes).into();
         if expected != computed {

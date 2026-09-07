@@ -178,7 +178,9 @@ impl LightClient {
     /// export could lower `total_stake` and make a minority certificate pass
     /// the light-client quorum check.
     fn validate_snapshot_metadata(snapshot: &ValidatorSetSnapshot) -> Result<(), LightClientError> {
-        snapshot.validate_metadata().map_err(LightClientError::TrustBinding)
+        snapshot
+            .validate_metadata()
+            .map_err(LightClientError::TrustBinding)
     }
 
     /// Verify a BLS finality certificate checkpoint against the trusted set.
