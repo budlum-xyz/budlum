@@ -26,14 +26,14 @@ use bud_core::bud_format_pact::PactRecord;
 use bud_core::bud_format_production::BudProductionRecord;
 
 use bud_core::bud_format_engine::{engine_restore_container, engine_store, TransformKind};
+use bud_core::bud_format_multifile::TenantMultifileStore;
+use bud_core::bud_format_segment::SegmentLedger;
+use bud_core::bud_format_videopipe::run_video_pipeline;
 use bud_core::bud_format_zkbridge::{engine_to_witness, field_trace_meta, witness_to_field_trace};
 use bud_core::bud_format_zkproof::{
     attempt_proof, in_tree_verification_possible, load_field_trace, save_field_trace,
     zk_verify_refusal, ZK_PROVER_ENV,
 };
-use bud_core::bud_format_multifile::TenantMultifileStore;
-use bud_core::bud_format_segment::SegmentLedger;
-use bud_core::bud_format_videopipe::run_video_pipeline;
 
 use bud_core::bud_format_block::{PactChallengeInBlock, RegenerationBlock};
 use bud_core::bud_format_catalog::CATALOG;
@@ -761,8 +761,8 @@ fn run(cli: Cli) -> Result<String, String> {
         }
         Commands::ZkWitness { input, out } => {
             let data = read_file(&input)?;
-            let res =
-                engine_store(&data, false, 42).ok_or("zk witness: invalid input (empty or >512MB)")?;
+            let res = engine_store(&data, false, 42)
+                .ok_or("zk witness: invalid input (empty or >512MB)")?;
             let witness = engine_to_witness(&res);
             let rows = witness_to_field_trace(&witness);
             let (n, root) = field_trace_meta(&rows);
@@ -777,22 +777,21 @@ fn run(cli: Cli) -> Result<String, String> {
 
         Commands::ZkProve { input, prover } => {
             let data = read_file(&input)?;
-            let res =
-                engine_store(&data, false, 42).ok_or("zk prove: invalid input (empty or >512MB)")?;
+            let res = engine_store(&data, false, 42)
+                .ok_or("zk prove: invalid input (empty or >512MB)")?;
             let witness = engine_to_witness(&res);
             let prover = prover.or_else(|| std::env::var_os(ZK_PROVER_ENV).map(PathBuf::from));
             match attempt_proof(&witness, prover.as_deref())? {
                 bud_core::bud_format_zkproof::ZkTrust::Unproduced { reason } => {
                     Err(format!("zk prove REFUSED: {reason}"))
                 }
-                bud_core::bud_format_zkproof::ZkTrust::ProvenExternally {
-                    rows,
-                    proof_bytes,
-                } => Ok(format!(
-                    "zk prove: external prover produced {proof_bytes} bytes for {rows} rows; \
+                bud_core::bud_format_zkproof::ZkTrust::ProvenExternally { rows, proof_bytes } => {
+                    Ok(format!(
+                        "zk prove: external prover produced {proof_bytes} bytes for {rows} rows; \
                      the tree RECORDS the proof and does not verify it in-tree ({})",
-                    zk_verify_refusal()
-                )),
+                        zk_verify_refusal()
+                    ))
+                }
             }
         }
 

@@ -157,7 +157,22 @@ fuzz_target!(|data: &[u8]| {
                         }
                     };
                     let relayer_addr = addr(take(data, &mut i));
-                    let _ = relayer.process_relay(mid, relayer_addr, &proof, root, height);
+                    // The source domain is fuzzed too: the relay was enqueued
+                    // from `lock_dom`, so any other value must be refused by
+                    // name and neither path may panic.
+                    let source_dom = if take(data, &mut i) & 1 == 1 {
+                        last_lock_domains.map(|(lock_dom, _)| lock_dom).unwrap_or(1)
+                    } else {
+                        take(data, &mut i) as u32
+                    };
+                    let _ = relayer.process_relay(
+                        mid,
+                        relayer_addr,
+                        &proof,
+                        source_dom,
+                        root,
+                        height,
+                    );
                 }
             }
             _ => {

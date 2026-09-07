@@ -126,13 +126,15 @@ pub fn save_field_trace(path: &Path, rows: &[[u64; 10]], root: &[u8; 32]) -> Res
 pub fn load_field_trace(path: &Path) -> Result<(Vec<[u64; 10]>, [u8; 32]), String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("trace read error {}: {e}", path.display()))?;
-    if bytes.len() < HEAD_BYTES || &bytes[0..8] != &ZK_PROOF_MAGIC {
+    if bytes.len() < HEAD_BYTES || bytes[0..8] != ZK_PROOF_MAGIC {
         return Err("not a BUD zk field trace".to_string());
     }
     if bytes[8] != ZK_PROOF_VERSION {
         return Err("unsupported zk trace version".to_string());
     }
-    let count = u64::from_le_bytes(bytes[9..17].try_into().expect("fixed slice"));
+    let mut count_word = [0u8; 8];
+    count_word.copy_from_slice(&bytes[9..17]);
+    let count = u64::from_le_bytes(count_word);
     if count > ZK_MAX_ROWS {
         return Err(format!("trace row count {count} exceeds the cap"));
     }
@@ -194,7 +196,11 @@ mod tests {
             ZkTrust::ProvenExternally { .. } => panic!("no prover must never produce"),
         }
         assert!(!in_tree_verification_possible());
-        assert!(zk_verify_refusal().contains("I9"), "{}", zk_verify_refusal());
+        assert!(
+            zk_verify_refusal().contains("I9"),
+            "{}",
+            zk_verify_refusal()
+        );
     }
 
     #[test]
@@ -263,7 +269,10 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         std::fs::write(&path, &bytes).expect("writes tampered");
-        assert!(load_field_trace(&path).is_err(), "a tampered trace must be refused");
+        assert!(
+            load_field_trace(&path).is_err(),
+            "a tampered trace must be refused"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
