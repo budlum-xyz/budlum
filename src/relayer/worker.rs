@@ -1545,7 +1545,7 @@ mod pending_results {
         let outcome = second
             .process_relay("req-restart", Address::from([8u8; 32]), request)
             .await;
-        assert_eq!(outcome, RelayOutcome::Retry, "held for the operator");
+        assert_eq!(outcome, RelayOutcome::Held, "held for the operator");
         assert_eq!(
             submissions.load(Ordering::SeqCst),
             0,

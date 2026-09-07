@@ -47,6 +47,7 @@ pub struct CanonicalManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct CanonicalArchiveManager {
+    #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<Hash32, CanonicalManifest>,
 }
 

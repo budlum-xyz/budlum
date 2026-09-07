@@ -1311,9 +1311,10 @@ mod tests {
     #[test]
     fn object_not_divisible_by_k_round_trips() {
         // The tail stripe is padded; total_size has to trim it back.
-        // Lengths below `k` are refused now (an empty stripe has no id of
-        // its own), so the sweep starts at `k`.
-        for len in [4usize, 5, 7, 13, 101, 1023] {
+        // Lengths whose ceil-stripe leaves a data shard empty are refused
+        // (an empty stripe has no bytes of its own): with k=4 that rules
+        // out 5 and 6, so the sweep carries the accepted neighbours.
+        for len in [4usize, 7, 13, 101, 1023] {
             let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             let enc = encode_object(&data, ErasureScheme { k: 4, n: 7 }).unwrap();
             let manifest = enc.to_manifest().unwrap();

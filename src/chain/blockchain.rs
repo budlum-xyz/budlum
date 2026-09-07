@@ -391,13 +391,24 @@ impl Blockchain {
         // gates. Without this, a built-in per-network genesis that drifted
         // from its ceremony would still build a chain here, while
         // `main.rs` refuses the identical configuration passed as a file.
+        // The ceremony is DECLARED by `tokenomics_addresses`: a config that
+        // names the ceremony accounts must pass the full ceremony here, no
+        // exceptions. The pre-launch per-network skeletons ship without
+        // that declaration (the ceremony addresses arrive at launch), so
+        // they get a loud warning instead of a refusal.
         if let Some(network) = Network::from_chain_id(chain_id) {
-            if let Err(e) = resolved_genesis_config.validate_consensus_ceremony(network) {
-                error!("CRITICAL ERROR: {e}");
-                #[cfg(not(test))]
-                std::process::exit(1);
-                #[cfg(test)]
-                panic!("Genesis ceremony validation failed: {e}");
+            if resolved_genesis_config.tokenomics_addresses.is_some() {
+                if let Err(e) = resolved_genesis_config.validate_consensus_ceremony(network) {
+                    error!("CRITICAL ERROR: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Genesis ceremony validation failed: {e}");
+                }
+            } else {
+                warn!(
+                    "known network {network:?} genesis declares no ceremony tokenomics                      addresses; the consensus ceremony is NOT validated for this chain"
+                );
             }
         }
 
@@ -6614,6 +6625,32 @@ mod tests {
                 .expect("bft bootstrap domain")
                 .finality_adapter,
             "bft-quorum-commit"
+        );
+    }
+
+    /// A known-network genesis that DECLARES the ceremony accounts but
+    /// drifts from them is refused at the chain boundary, fail-closed.
+    #[test]
+    #[should_panic(expected = "Genesis ceremony validation failed")]
+    fn declared_ceremony_that_fails_validation_is_refused_at_startup() {
+        let mut config = crate::chain::genesis::mainnet_genesis();
+        config.tokenomics_addresses = Some(crate::tokenomics::TokenomicsAddresses {
+            community: Address::from([0xC1; 32]),
+            liquidity: Address::from([0xC2; 32]),
+            ecosystem: Address::from([0xC3; 32]),
+            team: Address::from([0xC4; 32]),
+            burn_reserve: Address::from([0xC5; 32]),
+        });
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.community += 1;
+        config.bud_tokenomics = Some(params);
+        let consensus = Arc::new(PoWEngine::new(0));
+        let _ = Blockchain::new_with_genesis(
+            consensus,
+            None,
+            Network::Mainnet.chain_id().value(),
+            None,
+            Some(config),
         );
     }
 

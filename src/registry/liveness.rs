@@ -73,16 +73,10 @@ impl LivenessTracker {
 
         // Normalize the expected set: a validator named twice in one epoch
         // would otherwise have the same duty counted twice against them.
+        // Miss STATE survives duty-free epochs on purpose: a slashed or
+        // jailed validator drops out of the expected set, and its accrued
+        // streak must stay exactly where it was, frozen, not vanish.
         let expected_set: std::collections::BTreeSet<Address> = expected.iter().copied().collect();
-
-        // A streak counts consecutive missed DUTIES. A validator absent
-        // from this epoch's expected set had no duty, so their miss state
-        // is dropped and a later return starts fresh; keeping it turned an
-        // `[v], [], [v]` sequence into a two-epoch streak.
-        self.missed.retain(|v, _| expected_set.contains(v));
-        self.streak_start_epoch
-            .retain(|v, _| expected_set.contains(v));
-        self.reported.retain(|v, ()| expected_set.contains(v));
 
         for validator in &expected_set {
             if participated(validator) {
@@ -174,13 +168,13 @@ mod tests {
         }
     }
 
-    /// A duplicate in the expected set is one duty, not two, and an epoch
-    /// without the validator carries no miss: `[v, v]` missing is one
-    /// strike, and `[v], [], [v]` missing is a fresh streak, not two.
+    /// A duplicate in the expected set is one duty, not two; a duty-free
+    /// epoch FROZES the miss state instead of extending or clearing it, so
+    /// a jailed validator's streak survives the jail term unchanged.
     #[test]
-    fn duplicates_and_duty_free_epochs_do_not_extend_streaks() {
+    fn duplicates_count_once_and_duty_free_epochs_freeze_the_streak() {
         let mut t = LivenessTracker::new();
-        let p = params(3);
+        let p = params(5);
         let v = addr(1);
 
         // Named twice, missed once: one strike, not two.
@@ -188,13 +182,13 @@ mod tests {
         assert!(reports.is_empty());
         assert_eq!(t.missed_count(&v), 1);
 
-        // No duty at epoch 2: the strike does not survive the gap.
+        // No duty at epoch 2: the strike is frozen, not cleared...
         t.record_epoch(2, &[], |_| false, &p);
-        assert_eq!(t.missed_count(&v), 0);
+        assert_eq!(t.missed_count(&v), 1);
 
-        // Two consecutive misses now stay under the threshold of three.
-        t.record_epoch(3, &[v], |_| false, &p);
-        let reports = t.record_epoch(4, &[v], |_| false, &p);
+        // ...and not double-counted either: one missed duty after the gap
+        // is strike two, not three.
+        let reports = t.record_epoch(3, &[v], |_| false, &p);
         assert!(reports.is_empty());
         assert_eq!(t.missed_count(&v), 2);
     }

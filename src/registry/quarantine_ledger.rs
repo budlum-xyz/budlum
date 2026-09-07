@@ -46,7 +46,9 @@ pub struct AlarmEntry {
 /// Persistent K3/K4 Alarm & Quarantine Ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct QuarantineLedger {
+    #[serde(with = "crate::core::map_keys")]
     pub quarantined_entities: BTreeMap<Hash32, QuarantineEntry>,
+    #[serde(with = "crate::core::map_keys")]
     pub alarms: BTreeMap<Hash32, AlarmEntry>,
 }
 
