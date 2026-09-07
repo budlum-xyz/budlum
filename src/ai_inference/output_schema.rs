@@ -140,9 +140,7 @@ pub fn validate_markdown_output(bytes: &[u8]) -> Result<(), OutputSchemaError> {
             }
             // Any fence line ends a pending table block.
             if !table_buffer.is_empty() {
-                if let Err(e) = check_table(&table_buffer) {
-                    return Err(e);
-                }
+                check_table(&table_buffer)?;
                 table_buffer.clear();
             }
             continue;
@@ -167,9 +165,7 @@ pub fn validate_markdown_output(bytes: &[u8]) -> Result<(), OutputSchemaError> {
             seen_heading = true;
             level = new_level;
             if !table_buffer.is_empty() {
-                if let Err(e) = check_table(&table_buffer) {
-                    return Err(e);
-                }
+                check_table(&table_buffer)?;
                 table_buffer.clear();
             }
             continue;
@@ -184,9 +180,7 @@ pub fn validate_markdown_output(bytes: &[u8]) -> Result<(), OutputSchemaError> {
             continue;
         }
         if !table_buffer.is_empty() {
-            if let Err(e) = check_table(&table_buffer) {
-                return Err(e);
-            }
+            check_table(&table_buffer)?;
             table_buffer.clear();
         }
     }
@@ -195,9 +189,7 @@ pub fn validate_markdown_output(bytes: &[u8]) -> Result<(), OutputSchemaError> {
         return Err(OutputSchemaError::UnbalancedFence { line: fence_open_line });
     }
     if !table_buffer.is_empty() {
-        if let Err(e) = check_table(&table_buffer) {
-            return Err(e);
-        }
+        check_table(&table_buffer)?;
     }
     Ok(())
 }
