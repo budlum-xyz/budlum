@@ -2732,42 +2732,48 @@ impl Node {
                                                let payload_clone = payload.clone();
                                                let chain = self.chain.clone();
                                                let swarm_cmd_tx = self.command_tx.clone();
+                                               let pm_arc = self.peer_manager.clone();
                                                tokio::spawn(async move {
                                                    match chain.submit_verified_domain_commitment(payload_clone.clone()).await {
                                                        Ok(_) => {
+                                                           if let Ok(mut pm) = pm_arc.lock() {
+                                                               pm.report_good_behavior(&peer_id);
+                                                           }
                                                            let msg = NetworkMessage::VerifiedDomainCommitment(payload_clone);
                                                            let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
                                                        }
                                                        Err(e) => {
                                                            warn!("Failed to process VerifiedDomainCommitment from {peer_id}: {e}");
+                                                           if let Ok(mut pm) = pm_arc.lock() {
+                                                               pm.report_invalid_block(&peer_id);
+                                                           }
                                                        }
                                                    }
                                                });
-                                               {
-                                                   let mut pm = self.peer_manager_lock();
-                                                   pm.report_good_behavior(&peer_id);
-                                               }
                                            }
                                            NetworkMessage::CrossDomainMessage(msg_obj) => {
                                                info!("Received CrossDomainMessage from {peer_id} for bridge");
                                                let msg_clone = msg_obj.clone();
                                                let chain = self.chain.clone();
                                                let swarm_cmd_tx = self.command_tx.clone();
+                                               let pm_arc = self.peer_manager.clone();
                                                tokio::spawn(async move {
                                                    match chain.submit_relayed_cross_domain_message(msg_clone.clone()).await {
                                                        Ok(_) => {
+                                                           if let Ok(mut pm) = pm_arc.lock() {
+                                                               pm.report_good_behavior(&peer_id);
+                                                           }
                                                            let msg = NetworkMessage::CrossDomainMessage(msg_clone);
                                                            let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
                                                        }
                                                        Err(e) => {
                                                            warn!("Failed to process CrossDomainMessage from {peer_id}: {e}");
+                                                           if let Ok(mut pm) = pm_arc.lock() {
+                                                               pm.report_invalid_tx(&peer_id);
+                                                           }
                                                        }
                                                    }
                                                });
-                                               {
-                                                   let mut pm = self.peer_manager_lock();
-                                                   pm.report_good_behavior(&peer_id);
-                                               }
                                            }
                                            NetworkMessage::GlobalHeader(header) => {
                                                info!(

@@ -239,6 +239,8 @@ impl ConsensusDomain {
     }
 }
 
+pub const MAX_STATE_UPDATES: usize = 1_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainCommitment {
     pub domain_id: DomainId,

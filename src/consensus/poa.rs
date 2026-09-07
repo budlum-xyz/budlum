@@ -29,7 +29,8 @@ fn leader_entropy(hash: &str) -> Vec<u8> {
 pub struct PoAConfig {
     pub block_period: u64,
     pub epoch_length: u64,
-    pub quorum_ratio: f64,
+    pub quorum_numerator: u64,
+    pub quorum_denominator: u64,
     pub validators_file: Option<String>,
     /// Which permissioned domain this engine gates on.
     ///
@@ -45,7 +46,8 @@ impl Default for PoAConfig {
         PoAConfig {
             block_period: 5,
             epoch_length: 30000,
-            quorum_ratio: 0.67,
+            quorum_numerator: 2,
+            quorum_denominator: 3,
             validators_file: None,
             domain: 0,
         }
@@ -413,7 +415,7 @@ impl ConsensusEngine for PoAEngine {
     fn info(&self) -> String {
         format!(
             "PoA (validators: in-state, quorum: {:.0}%)",
-            self.config.quorum_ratio * 100.0
+            self.config.quorum_numerator as f64 / self.config.quorum_denominator as f64 * 100.0
         )
     }
 

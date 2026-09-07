@@ -333,7 +333,8 @@ mod integration_tests {
         state.validators.get_mut(&pubkey2).unwrap().active = true;
 
         let config = PoAConfig {
-            quorum_ratio: 0.66,
+            quorum_numerator: 2,
+            quorum_denominator: 3,
             block_period: 5,
             ..PoAConfig::default()
         };

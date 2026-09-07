@@ -1359,11 +1359,25 @@ impl Blockchain {
         &self,
         commitment: &DomainCommitment,
     ) -> Result<(), String> {
+        if commitment.state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
+            return Err(format!(
+                "Too many state updates in domain commitment: {} > {}",
+                commitment.state_updates.len(),
+                crate::domain::types::MAX_STATE_UPDATES
+            ));
+        }
         for (addr, new_nonce) in &commitment.state_updates {
-            if *new_nonce <= self.state.get_nonce(addr) {
+            let current = self.state.get_nonce(addr);
+            if *new_nonce <= current {
                 return Err(format!(
                     "Commitment nonce invariant violation for domain {} height {}",
                     commitment.domain_id, commitment.domain_height
+                ));
+            }
+            if *new_nonce >= u64::MAX - 1000 {
+                return Err(format!(
+                    "Commitment nonce suspiciously near u64::MAX for domain {} addr {}",
+                    commitment.domain_id, addr
                 ));
             }
         }
