@@ -86,6 +86,7 @@ impl From<LegacyConsensusDomainV1> for ConsensusDomain {
             // Allow = no allowance: the list is left empty, and the domain cannot
             // be advanced by zk until a program list is given.
             zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
         }
     }
 }

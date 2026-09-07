@@ -273,6 +273,7 @@ pub fn default_domain(
         // A domain created by a plugin is also born closed to zk proofs.
         // Programs are added later, explicitly.
         zk_program_allowlist: Vec::new(),
+        plugin_code_hash: None,
         bridge_enabled: true,
         block_hash_scheme: RootScheme::BudlumBlockV2,
         state_root_scheme: RootScheme::BudlumBlockV2,
@@ -280,4 +281,25 @@ pub fn default_domain(
         last_committed_height: 0,
         last_committed_hash: [0u8; 32],
     }
+}
+
+/// E2: Validate that a Custom domain's plugin code hash matches the registered hash.
+pub fn validate_custom_plugin_hash(
+    domain: &ConsensusDomain,
+    plugin_bytes: &[u8],
+) -> Result<(), String> {
+    use sha3::{Digest, Sha3_256};
+    if let ConsensusKind::Custom(_) = &domain.kind {
+        let expected = domain.plugin_code_hash.ok_or_else(|| {
+            format!("Custom domain {} must declare a plugin_code_hash", domain.id)
+        })?;
+        let computed: crate::domain::types::Hash32 = Sha3_256::digest(plugin_bytes).into();
+        if expected != computed {
+            return Err(format!(
+                "Custom domain {} plugin code hash mismatch: expected {:?}, computed {:?}",
+                domain.id, expected, computed
+            ));
+        }
+    }
+    Ok(())
 }
