@@ -3554,6 +3554,7 @@ impl Blockchain {
         temp_state.current_block_height = self.chain.len() as u64;
         let mut included = std::collections::HashSet::new();
         let mut progress = true;
+        let mut contract_calls: u64 = 0;
 
         while progress && valid_txs.len() < crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
             progress = false;
@@ -3567,7 +3568,17 @@ impl Blockchain {
                 if temp_state.validate_transaction(tx).is_err() {
                     continue;
                 }
+                // The producer keeps to the block's contract gas budget, so
+                // the block it builds passes the check every validator runs
+                // in `apply_block_checked`; a call past the budget waits.
+                let is_call = tx.tx_type == crate::core::transaction::TransactionType::ContractCall;
+                if is_call && Executor::check_contract_call_count(contract_calls + 1).is_err() {
+                    continue;
+                }
                 if Executor::apply_transaction_checked(&mut temp_state, tx).is_ok() {
+                    if is_call {
+                        contract_calls += 1;
+                    }
                     valid_txs.push(tx.clone());
                     included.insert(tx.hash.clone());
                     progress = true;

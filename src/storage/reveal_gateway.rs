@@ -226,8 +226,21 @@ impl RevealGateway {
         req: RevealRequest,
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
+        let req = Self::with_default_budget(req);
         let handle = open_reveal_session(registry, recorded_owner, &req)?;
         self.admit(handle, GrantScope::of(&req), now)
+    }
+
+    /// A request that names no budget gets the default cap. Both open paths
+    /// go through here: the gateway is a network-facing table, and
+    /// "uncapped" is not a remote option on either of them. The registry
+    /// path used to pass `None` straight through, so an in-process caller
+    /// that omitted the budget opened an unmetered session.
+    fn with_default_budget(mut req: RevealRequest) -> RevealRequest {
+        if req.meter_budget.is_none() {
+            req.meter_budget = Some(DEFAULT_REVEAL_BUDGET_FRAMES);
+        }
+        req
     }
 
     /// Open a session with a grant decision the chain actor already made.
@@ -238,15 +251,11 @@ impl RevealGateway {
     /// refuses; [`RevealGatewayError::SessionLimit`] at the cap.
     pub fn open_prechecked(
         &mut self,
-        mut req: RevealRequest,
+        req: RevealRequest,
         grant_allows: bool,
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
-        // A remote caller that passes no budget still gets a cap: the gateway
-        // is a network-facing table, and "uncapped" is not a remote option.
-        if req.meter_budget.is_none() {
-            req.meter_budget = Some(DEFAULT_REVEAL_BUDGET_FRAMES);
-        }
+        let req = Self::with_default_budget(req);
         let handle = open_reveal_session_prechecked(&req, grant_allows)?;
         self.admit(handle, GrantScope::of(&req), now)
     }
@@ -376,6 +385,26 @@ impl RevealGateway {
     #[must_use]
     pub fn close(&mut self, id: u64) -> bool {
         self.sessions.remove(&id).is_some()
+    }
+
+    /// Drop every grant-backed session over `content_id`. Returns how many
+    /// were dropped.
+    ///
+    /// The revocation path calls this once the chain has revoked a grant on
+    /// the content. The frame path asks the chain again before every emit,
+    /// but it asks without the table lock and applies the answer under it;
+    /// a revocation that landed between the two steps would otherwise be
+    /// served once more on a stale `true`. Dropping the sessions here closes
+    /// that window: a frame call that raced the revoke finds no session to
+    /// emit from. Public sessions rest on no grant and are left alone.
+    pub fn drop_sessions_for_content(&mut self, content_id: &ContentId) -> usize {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, s| {
+            s.grant
+                .as_ref()
+                .is_none_or(|scope| scope.content_id != *content_id)
+        });
+        before - self.sessions.len()
     }
 
     /// Drop every session whose TTL has run out. Returns how many were
@@ -774,6 +803,118 @@ mod gateway_tests {
                 max: MAX_FRAMES_PER_CALL
             })
         );
+    }
+
+    /// The registry path applies the default budget too: a session opened
+    /// with no budget runs out at `DEFAULT_REVEAL_BUDGET_FRAMES`, it does not
+    /// serve without bound.
+    #[test]
+    fn the_registry_path_caps_a_missing_budget() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let key_id = [7u8; 32];
+        let reg = ViewGrantRegistry::new();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open(
+                &reg,
+                &owner,
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    viewer,
+                    owner,
+                    key_id,
+                    None,
+                ),
+                100,
+            )
+            .unwrap();
+        let mut served = 0u64;
+        let mut refused = false;
+        // Well past the default cap if nothing stopped it.
+        for _ in 0..(DEFAULT_REVEAL_BUDGET_FRAMES / u64::from(MAX_FRAMES_PER_CALL) + 2) {
+            match gw.emit_frames(id, 0, MAX_FRAMES_PER_CALL, 100, true) {
+                Ok(_) => served += u64::from(MAX_FRAMES_PER_CALL),
+                Err(RevealGatewayError::Reveal(_)) => {
+                    refused = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+        assert!(refused, "an unbudgeted registry session was never metered");
+        assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
+    }
+
+    /// A revocation drops the grant-backed sessions of that content and
+    /// nothing else: a frame call that raced the revoke finds no session.
+    #[test]
+    fn a_revocation_drops_the_sessions_of_that_content() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let key_id = [7u8; 32];
+        let revoked_content = ContentId([9u8; 32]);
+        let other_content = ContentId([10u8; 32]);
+        let mut reg = ViewGrantRegistry::new();
+        let mut gw = RevealGateway::new();
+        for content in [revoked_content, other_content] {
+            reg.issue(
+                content,
+                owner,
+                Some(viewer),
+                key_id,
+                ViewPolicy::NamedGrantee,
+                0,
+            )
+            .unwrap();
+        }
+        let sealed = ThreeRecipe::Sealed(full.clone().seal());
+        let mut open_for = |content: ContentId| {
+            let mut r = req(
+                sealed.clone(),
+                Some(full.clone()),
+                packed.clone(),
+                viewer,
+                owner,
+                key_id,
+                None,
+            );
+            r.content_id = content;
+            gw.open(&reg, &owner, r, 100).unwrap()
+        };
+        let revoked_session = open_for(revoked_content);
+        let other_session = open_for(other_content);
+        let public_session = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full.clone()),
+                    None,
+                    packed.clone(),
+                    viewer,
+                    owner,
+                    key_id,
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+        assert_eq!(gw.session_count(), 3);
+
+        // The stale answer a racing frame call would still be holding.
+        let stale_true = true;
+        assert_eq!(gw.drop_sessions_for_content(&revoked_content), 1);
+        assert!(matches!(
+            gw.emit_frames(revoked_session, 0, 1, 101, stale_true),
+            Err(RevealGatewayError::UnknownSession(_))
+        ));
+        assert!(gw.emit_frames(other_session, 0, 1, 101, true).is_ok());
+        assert!(gw.emit_frames(public_session, 0, 1, 101, false).is_ok());
+        assert_eq!(gw.drop_sessions_for_content(&revoked_content), 0);
     }
 
     /// Closing removes the session; unknown ids refuse rather than serving

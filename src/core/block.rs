@@ -1,5 +1,5 @@
 use crate::core::address::Address;
-use crate::core::hash::hash_fields_bytes;
+use crate::core::hash::{hash_fields_bytes, presence_tagged};
 use crate::core::transaction::Transaction;
 
 /// Decode a hex string that must represent exactly 32 bytes.
@@ -104,9 +104,14 @@ impl BlockHeader {
         let chain_id_bytes = self.chain_id.to_le_bytes();
         let epoch_bytes = self.epoch.to_le_bytes();
         let slot_bytes = self.slot.to_le_bytes();
-        let storage_root_bytes = self.storage_root.unwrap_or([0u8; 32]);
+        // Presence-tagged: an absent root and a present all-zero root used to
+        // fold into the same 32 zero bytes, so two distinct headers hashed
+        // (and signed) identically. The tag byte keeps them apart, the way
+        // `shards_root` below already is; the domain tag moved to V4 so no
+        // V3 hash can be replayed as a V4 one.
+        let storage_root_bytes = presence_tagged(self.storage_root);
         let mut fields: Vec<&[u8]> = vec![
-            b"BDLM_BLOCK_V3",
+            b"BDLM_BLOCK_V4",
             &index_bytes,
             &timestamp_bytes,
             self.previous_hash.as_bytes(),
@@ -255,8 +260,16 @@ impl Block {
                 match hex_32(&tx.hash) {
                     Some(bytes) => leaf.extend_from_slice(&bytes),
                     None => {
-                        leaf[0] = 0x01; // domain tag: malformed-hash sentinel
-                        leaf.extend_from_slice(&[0u8; 32]);
+                        // Domain tag 0x01: malformed hash. The leaf commits to
+                        // a digest of the string itself, not to a constant:
+                        // with a constant every malformed hash produced the
+                        // same leaf, so two different transaction lists
+                        // shared one `tx_root`, and PoW/PoS validation does
+                        // not recompute the root from `Transaction::verify`.
+                        leaf[0] = 0x01;
+                        leaf.extend_from_slice(&crate::core::hash::calculate_hash_bytes(
+                            tx.hash.as_bytes(),
+                        ));
                     }
                 }
                 crate::core::hash::calculate_hash_bytes(&leaf)
@@ -335,9 +348,14 @@ impl Block {
         let chain_id_bytes = self.chain_id.to_le_bytes();
         let epoch_bytes = self.epoch.to_le_bytes();
         let slot_bytes = self.slot.to_le_bytes();
-        let storage_root_bytes = self.storage_root.unwrap_or([0u8; 32]);
+        // Presence-tagged: an absent root and a present all-zero root used to
+        // fold into the same 32 zero bytes, so two distinct headers hashed
+        // (and signed) identically. The tag byte keeps them apart, the way
+        // `shards_root` below already is; the domain tag moved to V4 so no
+        // V3 hash can be replayed as a V4 one.
+        let storage_root_bytes = presence_tagged(self.storage_root);
         let mut fields: Vec<&[u8]> = vec![
-            b"BDLM_BLOCK_V3",
+            b"BDLM_BLOCK_V4",
             &index_bytes,
             &timestamp_bytes,
             self.previous_hash.as_bytes(),
@@ -549,7 +567,7 @@ mod tests {
     /// Malformed hash must fold to the SAME leaf, and that leaf must differ
     /// From any well-formed hash's leaf.
     #[test]
-    fn tx_root_folds_malformed_hash_to_a_stable_distinct_leaf() {
+    fn tx_root_binds_a_malformed_hash_to_its_own_distinct_leaf() {
         let mk = |h: &str| {
             let mut tx = Transaction::new(Address::zero(), Address::zero(), 1, vec![]);
             tx.hash = h.to_string();
@@ -558,24 +576,26 @@ mod tests {
             b.tx_root
         };
 
-        // Two different malformed hashes must land on the same root: the
-        // Fold is deterministic, so every node agrees.
+        // Deterministic: the same malformed hash folds to the same root on
+        // every node.
         let bad_a = mk("not-hex-at-all");
-        let bad_b = mk("zzzz");
-        assert_eq!(
-            bad_a, bad_b,
-            "malformed hashes must fold to one deterministic leaf"
-        );
+        assert_eq!(bad_a, mk("not-hex-at-all"));
 
-        // Odd length and wrong length are malformed too (hex::decode accepts
-        // Neither an odd digit count nor a 31-byte value as a 32-byte hash).
-        assert_eq!(
+        // Distinct: two different malformed hashes are two different
+        // transaction lists and must not share a root. With a constant
+        // sentinel leaf they did, and PoW/PoS validation does not recompute
+        // the root from `Transaction::verify`, so the collision was live.
+        assert_ne!(
             bad_a,
-            mk(&"ab".repeat(31)),
-            "31-byte hex is not a 32-byte hash"
+            mk("zzzz"),
+            "different malformed hashes must not fold to one leaf"
         );
+        // Odd length and wrong length are malformed too (hex::decode accepts
+        // neither an odd digit count nor a 31-byte value as a 32-byte hash),
+        // and each is its own leaf.
+        assert_ne!(bad_a, mk(&"ab".repeat(31)));
 
-        // A well-formed hash must NOT collide with the malformed sentinel.
+        // A well-formed hash must NOT collide with any malformed leaf.
         let good = mk(&"ab".repeat(32));
         assert_ne!(
             good, bad_a,
@@ -583,7 +603,7 @@ mod tests {
         );
 
         // And the all-zero hash - the value the raw-bytes fallback was most
-        // Likely to alias onto - stays distinct as well.
+        // likely to alias onto - stays distinct as well.
         assert_ne!(mk(&"00".repeat(32)), bad_a);
     }
     #[test]
@@ -649,6 +669,23 @@ mod tests {
         let mut block = Block::new(1, "0".repeat(64), vec![]);
         let hash_none = block.calculate_hash();
 
+        // An absent root and a present all-zero root are different headers
+        // and must not share a hash (or a producer signature).
+        block.storage_root = Some([0u8; 32]);
+        assert_ne!(
+            hash_none,
+            block.calculate_hash(),
+            "None and Some(zeros) storage_root must not collide"
+        );
+        assert_ne!(
+            BlockHeader::from_block(&block).calculate_hash_bytes(),
+            {
+                block.storage_root = None;
+                BlockHeader::from_block(&block).calculate_hash_bytes()
+            },
+            "the header preimage keeps the presence tag too"
+        );
+
         block.storage_root = Some([42u8; 32]);
         let hash_some = block.calculate_hash();
 
@@ -687,6 +724,18 @@ mod merkle_duplicate_leaf_locks {
 
     fn root(hashes: &[&str]) -> String {
         block_with_tx_hashes(hashes).calculate_tx_root()
+    }
+
+    /// Two malformed `tx.hash` strings are two different leaves. They used to
+    /// fold into one constant sentinel, so any two lists of malformed
+    /// transactions shared a `tx_root`.
+    #[test]
+    fn malformed_tx_hashes_do_not_share_a_leaf() {
+        let well_formed = "ab".repeat(32);
+        assert_ne!(root(&["not-hex-1"]), root(&["not-hex-2"]));
+        assert_ne!(root(&["not-hex-1"]), root(&[&well_formed]));
+        // Still deterministic.
+        assert_eq!(root(&["not-hex-1"]), root(&["not-hex-1"]));
     }
 
     /// CVE-2012-2459: appending a copy of the last transaction must change the

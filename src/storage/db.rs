@@ -432,7 +432,16 @@ impl Storage {
         if let Some(height_bytes) = self.db.get(b"IN_PROGRESS_HEIGHT")? {
             let height_str = from_utf8(&height_bytes)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let height: u64 = height_str.parse().unwrap_or(0);
+            // A present but unreadable marker is not "height 0": 0 is the
+            // value that rolls back genesis and deletes `LAST`,
+            // `CANONICAL_HEIGHT` and the bridge state, so a corrupt marker
+            // has to stop the open instead of being read as that.
+            let height: u64 = height_str.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("IN_PROGRESS_HEIGHT holds {height_str:?}, not a height: {e}"),
+                )
+            })?;
             tracing::warn!(
                 "Interrupted commit detected at height {height}. Initiating rollback..."
             );
@@ -564,13 +573,19 @@ impl Storage {
             );
         }
 
-        // 9. Bridge state
+        // 9. Bridge state. Every durable height gets a snapshot: a commit
+        // that carries no new bridge state carries the live one forward, so
+        // that a rollback from the next height finds the state that was
+        // valid here. Without it, an interrupted commit at H+1 read the
+        // missing `BRIDGE_STATE_AT:H` as "no bridge state" and deleted the
+        // live `BRIDGE_STATE` that a commit at H had never touched.
+        let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
         if let Some(ref bridge_state) = batch.bridge_state {
             let val = encode(bridge_state)?;
             b.insert(b"BRIDGE_STATE", val.as_slice());
-            // Height-indexed durable bridge snapshot for crash recovery.
-            let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
             b.insert(at.as_bytes(), val.as_slice());
+        } else if let Some(live) = self.db.get(b"BRIDGE_STATE")? {
+            b.insert(at.as_bytes(), live);
         }
 
         // 10. Accounts
@@ -625,7 +640,14 @@ impl Storage {
         if let Some(val) = self.db.get("CANONICAL_HEIGHT")? {
             let s = from_utf8(&val)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(s.parse().unwrap_or(0))
+            // Missing means 0; present and unparsable is a different fact and
+            // is reported, the same rule `schema_version` follows.
+            s.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("CANONICAL_HEIGHT holds {s:?}, not a height: {e}"),
+                )
+            })
         } else {
             Ok(0)
         }
@@ -1206,7 +1228,10 @@ impl Storage {
     pub fn load_chain(&self) -> std::io::Result<Vec<Block>> {
         let mut chain = Vec::new();
         if let Some(mut current_hash) = self.get_last_hash()? {
-            while let Ok(Some(block)) = self.get_block(&current_hash) {
+            // A read error is not the end of the chain. `while let Ok(Some)`
+            // ended the walk on `Err` the same way as on `Ok(None)`, so one
+            // unreadable record brought the node up on a silently short chain.
+            while let Some(block) = self.get_block(&current_hash)? {
                 chain.push(block.clone());
                 if block.previous_hash == "0".repeat(64) {
                     break;
@@ -1372,11 +1397,19 @@ impl Storage {
         header: &crate::core::block::BlockHeader,
         sig: &[u8],
     ) -> std::io::Result<()> {
-        let producer_str = header
-            .producer
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let key = format!("SEEN:{}:{}", producer_str, header.index);
+        // A header with no producer has no key the loader can read back:
+        // `load_all_seen_blocks` parses the middle segment as an address and
+        // a literal "unknown" there stopped the whole scan. Refused here.
+        let producer = header.producer.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "seen block at height {} has no producer; nothing to record it under",
+                    header.index
+                ),
+            )
+        })?;
+        let key = format!("SEEN:{}:{}", producer, header.index);
         let val = encode(&(header, sig))?;
         self.db.insert(key.as_bytes(), val)?;
         Ok(())
@@ -1449,7 +1482,7 @@ impl Storage {
                     errors.push(format!("Block {i}: missing in index"));
                 }
                 Err(e) => {
-                    errors.push(format!("Block i: read error: {e}"));
+                    errors.push(format!("Block {i}: read error: {e}"));
                 }
             }
         }
@@ -1906,6 +1939,85 @@ mod tests {
             "bridge must roll back to tip-1 after interrupted H=2"
         );
         assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
+    }
+
+    /// A commit that carries no bridge state still leaves a snapshot at its
+    /// height, so a rollback from the next height restores the live state
+    /// instead of deleting it. Measured before the fix: commit H=1 with
+    /// bridge state, commit H=2 with `None`, interrupt at H=3, and the
+    /// recovery removed `BRIDGE_STATE` outright.
+    #[test]
+    fn a_commit_without_bridge_state_carries_the_live_snapshot_forward() {
+        use crate::cross_domain::{AssetId, BridgeState};
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+
+        let mut block1 = Block::new(1, "0".repeat(64), vec![]);
+        block1.hash = block1.calculate_hash();
+        let mut bridge = BridgeState::new();
+        bridge.register_asset(AssetId([0x22u8; 32]), 1).unwrap();
+        let root = bridge.root();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block1.clone(),
+                state_root: "s1".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: Some(bridge),
+                accounts: vec![],
+            })
+            .unwrap();
+
+        let mut block2 = Block::new(2, block1.hash.clone(), vec![]);
+        block2.hash = block2.calculate_hash();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block2.clone(),
+                state_root: "s2".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: None,
+                accounts: vec![],
+            })
+            .unwrap();
+        assert!(
+            storage.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_some(),
+            "height 2 carries the live snapshot forward"
+        );
+
+        // Interrupt at height 3 with nothing else written.
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"3").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+
+        let storage2 = Storage::new(path).unwrap();
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("the bridge state valid at height 2 survives the rollback");
+        assert_eq!(restored.root(), root);
+        assert_eq!(storage2.get_canonical_height().unwrap(), 2);
+    }
+
+    /// Present-but-unreadable height markers are errors, not height 0.
+    #[test]
+    fn corrupt_height_markers_are_reported_not_read_as_zero() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+        storage.db.insert(b"CANONICAL_HEIGHT", b"forty").unwrap();
+        assert!(storage.get_canonical_height().is_err());
+        storage.db.insert(b"CANONICAL_HEIGHT", b"40").unwrap();
+        assert_eq!(storage.get_canonical_height().unwrap(), 40);
+
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"x").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+        assert!(
+            Storage::new(path).is_err(),
+            "a corrupt in-progress marker must stop the open, not roll back genesis"
+        );
     }
 
     #[test]

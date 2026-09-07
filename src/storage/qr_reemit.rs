@@ -133,9 +133,12 @@ impl RecipeEmitter {
     }
 
     /// Optical frame at `seq`.
-    #[must_use]
-    pub fn frame_at(&self, seq: u32) -> Vec<u8> {
-        pack_frame(&self.stream_commitment, &self.drop_at(seq))
+    ///
+    /// # Errors
+    ///
+    /// A drop that does not fit one frame (`FrameError::BadDropLen`).
+    pub fn frame_at(&self, seq: u32) -> Result<Vec<u8>, ReemitError> {
+        Ok(pack_frame(&self.stream_commitment, &self.drop_at(seq))?)
     }
 
     /// Emit `count` frames starting at `seq_start`; return frames and fold id.
@@ -156,7 +159,7 @@ impl RecipeEmitter {
         for i in 0..count {
             let seq = seq_start.wrapping_add(i);
             let drop = self.drop_at(seq);
-            let frame = pack_frame(&self.stream_commitment, &drop);
+            let frame = pack_frame(&self.stream_commitment, &drop)?;
             digests.push(frame_digest(&self.stream_commitment, seq, &drop.to_bytes()));
             frames.push(frame);
         }
@@ -207,8 +210,8 @@ mod tests {
         for seq in 0..20 {
             assert_eq!(emitter.drop_at(seq), enc.drop_at(seq));
             assert_eq!(
-                emitter.frame_at(seq),
-                pack_frame(&stream, &enc.drop_at(seq))
+                emitter.frame_at(seq).unwrap(),
+                pack_frame(&stream, &enc.drop_at(seq)).unwrap()
             );
         }
     }

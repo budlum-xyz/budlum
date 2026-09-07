@@ -618,13 +618,16 @@ impl GovernanceState {
         Ok(())
     }
 
-    /// Execute all passed-but-not-yet-executed
-    /// Proposals. Returns a list of executed proposal IDs and their actions
-    /// For the caller to apply state changes.
+    /// Emit the actions of the passed proposals this module hands to the
+    /// executor, and mark those proposals `Executed`.
     ///
-    /// This method ONLY transitions status from Passed → Executed.
-    /// The actual state mutations (whitelist/dewhitelist) are returned
-    /// As GovernanceAction enums for the executor/blockchain to apply.
+    /// Only the proposal kinds with an arm below are executed here. The
+    /// others (`ChangeBaseFee`, `ChangeBlockReward`, `SlashValidator`,
+    /// `ParameterUpdate`, `VerifyHubApp`) are applied by
+    /// `AccountState::execute_proposal` from `advance_epoch`, which is also
+    /// what writes their `Executed`; they are left `Passed` here on purpose so
+    /// that path still finds them. Each proposal kind has exactly one writer
+    /// (pinned by `proposals_the_account_state_applies_stay_passed_here`).
     ///
     /// A passed proposal is executed only once its activation delay has
     /// elapsed at `current_epoch`. The delay is the same one `advance_epoch`
@@ -659,7 +662,13 @@ impl GovernanceState {
                     expected_validator_set_hash: *expected_validator_set_hash,
                     justification_hash: *justification_hash,
                 }),
-                _ => None, // Other proposal types: no auto-execution yet
+                // Applied (and marked Executed) by the account state at the
+                // epoch boundary, see the doc comment.
+                ProposalType::ChangeBaseFee(_)
+                | ProposalType::ChangeBlockReward(_)
+                | ProposalType::SlashValidator { .. }
+                | ProposalType::ParameterUpdate(_, _)
+                | ProposalType::VerifyHubApp { .. } => None,
             };
             if let Some(a) = action {
                 proposal.status = ProposalStatus::Executed;
@@ -758,6 +767,37 @@ mod tests {
         let mut reversed = voters.clone();
         reversed.reverse();
         assert_eq!(build(&voters), build(&reversed));
+    }
+
+    /// The proposal kinds the account state applies itself are not touched
+    /// here: they stay `Passed` so `advance_epoch` can find and execute them,
+    /// and they yield no action, so the executor cannot apply them a second
+    /// time.
+    #[test]
+    fn proposals_the_account_state_applies_stay_passed_here() {
+        let proposer = Address::from([1u8; 32]);
+        let kinds = [
+            ProposalType::ChangeBaseFee(5),
+            ProposalType::ChangeBlockReward(0),
+            ProposalType::ParameterUpdate("min_stake".into(), "5000".into()),
+        ];
+        let mut gov = GovernanceState::default();
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let mut proposal = Proposal::new(i as u64 + 1, proposer, kind, 0, 10);
+            proposal.status = ProposalStatus::Passed;
+            gov.proposals.push(proposal);
+        }
+        let actions = gov.execute_passed_proposals(u64::MAX);
+        assert!(
+            actions.is_empty(),
+            "no action: the account state applies these"
+        );
+        assert!(
+            gov.proposals
+                .iter()
+                .all(|p| p.status == ProposalStatus::Passed),
+            "left Passed for advance_epoch, which writes Executed"
+        );
     }
 
     #[test]

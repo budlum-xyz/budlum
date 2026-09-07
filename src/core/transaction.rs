@@ -18,11 +18,20 @@ use tracing::debug;
 /// Was 1337, which is Geth Testnet in the public `chainid.network` registry.
 /// See `Network::chain_id` for why the three ids moved.
 pub const DEFAULT_CHAIN_ID: u64 = 45262;
-/// Strict signing format; all non-genesis transaction admission requires V5.
+/// The three signing formats admission accepts, each in its own signing
+/// domain (`BDLM_TX_V4` / `_V5` / `_V6`) with its own address derivation.
 ///
-/// V5 transactions carry an ML-DSA-87 (FIPS 204) public key and signature.
-/// V4 was the retired Ed25519 format and is rejected to prevent a downgrade
-/// path from the post-quantum wallet format.
+/// V4 is the Ed25519 format: `from` is the 32-byte Ed25519 public key
+/// itself. It is what the validator and relayer tooling signs with
+/// ([`Transaction::sign`], consensus-key registration, relay results), so it
+/// stays admissible. V5 is the wallet format: `from` is the hash of an
+/// ML-DSA-87 (FIPS 204) public key, which `verify` recomputes from the
+/// carried key. V6 is the multisig form.
+///
+/// There is no downgrade between them: a V4 signature verifies only against
+/// `from` read as an Ed25519 public key, and a V5 account's `from` is a hash
+/// no Ed25519 secret key is known for, so a V4 signature cannot spend a V5
+/// account (pinned by `a_v4_signature_cannot_spend_a_v5_account`).
 pub const SIGNATURE_VERSION_V4: u32 = 4;
 pub const SIGNATURE_VERSION_V5: u32 = 5;
 /// The transaction form that carries multisig authorization.
@@ -765,16 +774,12 @@ impl Transaction {
     }
 
     pub fn verify(&self) -> bool {
-        let canonical_genesis = self.from == Address::zero()
-            && self.to == Address::zero()
-            && self.amount == 0
-            && self.fee == 0
-            && self.nonce == 0
-            && self.timestamp == 0
-            && self.chain_id == DEFAULT_CHAIN_ID
-            && self.tx_type == TransactionType::Transfer
-            && self.data == b"BUDLUM_GENESIS_TX"
-            && self.signature.is_none();
+        // The canonical genesis transaction is the one `Transaction::genesis`
+        // builds, field for field. A predicate that named some fields left
+        // `max_fee`, `priority_fee`, `signer_public_key` and `authorization`
+        // free, so a crafted zero-address transaction with a recomputed hash
+        // passed here with no signature at all.
+        let canonical_genesis = self.from == Address::zero() && *self == Self::genesis();
         if self.signature_version != SIGNATURE_VERSION_V6
             && self.signature_version != SIGNATURE_VERSION_V5
             && self.signature_version != SIGNATURE_VERSION_V4
@@ -1159,6 +1164,53 @@ mod tests {
         let genesis = Transaction::genesis();
         assert!(genesis.verify());
         assert!(genesis.is_valid());
+    }
+
+    /// Every field of the genesis transaction is pinned: a zero-address
+    /// transaction that differs in a field the old predicate did not name
+    /// is not genesis and has no signature to fall back on.
+    #[test]
+    fn a_zero_address_transaction_off_genesis_by_any_field_is_refused() {
+        type Edit = Box<dyn Fn(&mut Transaction)>;
+        let variants: Vec<Edit> = vec![
+            Box::new(|tx| tx.max_fee = 1),
+            Box::new(|tx| tx.priority_fee = 1),
+            Box::new(|tx| tx.signer_public_key = vec![1u8; 32]),
+            Box::new(|tx| {
+                tx.authorization = Some(MultisigAuthorizationV6 {
+                    owners: vec![vec![1u8; 32]],
+                    threshold: 1,
+                    signatures: Vec::new(),
+                });
+            }),
+            Box::new(|tx| tx.signature_version = SIGNATURE_VERSION_V4),
+            Box::new(|tx| tx.amount = 1),
+        ];
+        for (i, mutate) in variants.iter().enumerate() {
+            let mut tx = Transaction::genesis();
+            mutate(&mut tx);
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "variant {i} must not pass as genesis");
+            assert!(!tx.is_valid(), "variant {i} must not be valid");
+        }
+    }
+
+    /// A V4 (Ed25519) signature verifies only against `from` read as an
+    /// Ed25519 public key; a V5 account's `from` is a key hash, so no V4
+    /// signature spends it.
+    #[test]
+    fn a_v4_signature_cannot_spend_a_v5_account() {
+        let wallet = crate::crypto::primitives::WalletKeyPair::generate();
+        let ed = KeyPair::generate().unwrap();
+        let mut tx =
+            Transaction::new_with_fee(wallet.address(), test_addr_from_byte(7u8), 5, 1, 0, vec![]);
+        tx.sign(&ed);
+        assert_eq!(tx.signature_version, SIGNATURE_VERSION_V4);
+        assert_eq!(tx.from, wallet.address(), "the account under attack");
+        assert!(
+            !tx.verify(),
+            "an Ed25519 key cannot sign for a key-hash address"
+        );
     }
     #[test]
     fn test_stake_transaction() {

@@ -193,6 +193,19 @@ impl InMemoryStorageProvider {
     pub fn contains(&self, content_id: &ContentId) -> bool {
         self.chunks.contains_key(content_id)
     }
+
+    /// Close a challenge that can never settle again and hand back the
+    /// refusal that says why. The only path in `settle` that changes the map
+    /// on failure, kept apart so the rule "refuse first, then remove" stays
+    /// visible in `settle` itself.
+    fn drop_challenge(
+        &mut self,
+        challenge_id: ChallengeId,
+        why: StorageProviderError,
+    ) -> StorageProviderError {
+        self.challenges.remove(&challenge_id);
+        why
+    }
 }
 
 impl StorageProvider for InMemoryStorageProvider {
@@ -327,13 +340,15 @@ impl StorageProvider for InMemoryStorageProvider {
         // Past the deadline nothing settles, whatever the proof says: the
         // chain's `answer_challenge` refuses the same answer and its sweep
         // records the challenge as missed. The entry is dropped because no
-        // later answer can revive it.
+        // later answer can revive it. Every refusal is decided before the
+        // one `remove` at the end, so no failing path leaves the map changed
+        // except this one, which is the decision itself.
         if now_epoch > challenge.deadline_epoch {
-            self.challenges.remove(&challenge_id);
-            return Err(StorageProviderError::DeadlineElapsed {
+            let elapsed = StorageProviderError::DeadlineElapsed {
                 deadline_epoch: challenge.deadline_epoch,
                 now_epoch,
-            });
+            };
+            return Err(self.drop_challenge(challenge_id, elapsed));
         }
         if proof.deal_id != deal_id || proof.challenge_id != challenge_id {
             return Err(StorageProviderError::ProofChallengeMismatch);

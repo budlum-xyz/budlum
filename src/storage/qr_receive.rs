@@ -10,7 +10,7 @@
 //! - Video demux (A4).
 //! - Automatic sealed-body decrypt (caller supplies key after finish).
 
-use crate::storage::qr_carousel::{CarouselDecoder, CarouselError, Drop};
+use crate::storage::qr_carousel::{CarouselDecoder, CarouselError, Drop, MAX_K};
 use crate::storage::qr_frame::{unpack_frame, FrameError};
 use crate::storage::qr_payload::{unpack_payload, PayloadError, PayloadKind};
 
@@ -28,6 +28,11 @@ pub enum ReceiveError {
         /// Missing source blocks.
         missing: usize,
     },
+    /// More distinct sequence numbers than [`MAX_SEEN_SEQS`] were offered.
+    TooManySeqs {
+        /// The ceiling.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for ReceiveError {
@@ -38,6 +43,9 @@ impl std::fmt::Display for ReceiveError {
             Self::Payload(e) => write!(f, "receive payload: {e}"),
             Self::Incomplete { missing } => {
                 write!(f, "receive incomplete, {missing} blocks missing")
+            }
+            Self::TooManySeqs { max } => {
+                write!(f, "receive refused more than {max} distinct frame seqs")
             }
         }
     }
@@ -63,12 +71,20 @@ impl From<PayloadError> for ReceiveError {
     }
 }
 
+/// Ceiling on the dedup map of one receiver. A carousel cycle is `2k` drops
+/// and `k` is at most `MAX_K`, so an honest stream never needs more
+/// distinct sequence numbers than this; a frame source that keeps inventing
+/// new `seq` values past it is refused instead of growing the map.
+const MAX_SEEN_SEQS: usize = 2 * MAX_K as usize;
+
 /// Progressive Three-pipe receiver.
 #[derive(Debug, Clone)]
 pub struct ProgressiveReceiver {
     stream_commitment: [u8; 32],
     decoder: CarouselDecoder,
-    /// Dedup map: seq → body hash; conflicting payload for same seq drops both.
+    /// Dedup map: seq → body hash. First writer wins: the first body seen
+    /// for a `seq` is the one the decoder keeps, and a later body that
+    /// differs is refused and counted. Bounded by [`MAX_SEEN_SEQS`].
     seen: std::collections::BTreeMap<u32, u32>,
     frames_accepted: u32,
     frames_rejected: u32,
@@ -92,8 +108,10 @@ impl ProgressiveReceiver {
     /// # Errors
     ///
     /// Frame authentication / carousel push failures. Duplicate identical
-    /// frames are ignored (not an error). Conflicting same-seq different body
-    /// rejects the new frame (counted) without poisoning the decoder.
+    /// frames are ignored (not an error). A same-seq frame with a different
+    /// body is refused and counted; the first body stays in the decoder
+    /// (first writer wins). [`ReceiveError::TooManySeqs`] once
+    /// [`MAX_SEEN_SEQS`] distinct sequence numbers have been seen.
     pub fn push_frame(&mut self, frame: &[u8]) -> Result<(), ReceiveError> {
         let drop = match unpack_frame(&self.stream_commitment, frame) {
             Ok(d) => d,
@@ -117,12 +135,19 @@ impl ProgressiveReceiver {
                 // exact duplicate - ignore
                 return Ok(());
             }
-            // conflict: drop both (do not push)
+            // Conflict: the first body for this seq is already in the
+            // decoder and stays there; the new one is refused and counted.
             self.frames_rejected = self.frames_rejected.saturating_add(1);
             return Ok(());
         }
-        self.seen.insert(drop.seq, body_tag);
+        if self.seen.len() >= MAX_SEEN_SEQS {
+            self.frames_rejected = self.frames_rejected.saturating_add(1);
+            return Err(ReceiveError::TooManySeqs { max: MAX_SEEN_SEQS });
+        }
+        // Validate before remembering: a drop the decoder refuses must not
+        // occupy a dedup slot, or a stream of bad frames could fill the map.
         self.decoder.push(&drop)?;
+        self.seen.insert(drop.seq, body_tag);
         self.frames_accepted = self.frames_accepted.saturating_add(1);
         Ok(())
     }
@@ -207,7 +232,7 @@ mod tests {
         // Feed first 10% systematic drops
         let first = (k / 10).max(1);
         for seq in 0..first {
-            rx.push_frame(&pack_frame(&stream, &enc.drop_at(seq)))
+            rx.push_frame(&pack_frame(&stream, &enc.drop_at(seq)).unwrap())
                 .unwrap();
         }
         let prefix = rx.progressive_prefix_blocks();
@@ -229,7 +254,7 @@ mod tests {
         let mut rx = ProgressiveReceiver::new(stream);
         let n = planned_drop_count(enc.params().k, 0);
         for seq in 0..n {
-            rx.push_frame(&emitter.frame_at(seq)).unwrap();
+            rx.push_frame(&emitter.frame_at(seq).unwrap()).unwrap();
             if rx.is_complete() {
                 break;
             }
@@ -247,11 +272,61 @@ mod tests {
         let enc = CarouselEncoder::new(&packed, 32).unwrap();
         let stream = enc.params().stream_commitment(&commit);
         let mut rx = ProgressiveReceiver::new(stream);
-        let f = pack_frame(&stream, &enc.drop_at(0));
+        let f = pack_frame(&stream, &enc.drop_at(0)).unwrap();
         rx.push_frame(&f).unwrap();
         rx.push_frame(&f).unwrap();
         let (ok, bad) = rx.stats();
         assert_eq!(ok, 1);
         assert_eq!(bad, 0);
+    }
+
+    /// A same-seq frame with a different body is refused and the first body
+    /// stays decodable: first writer wins.
+    #[test]
+    fn a_conflicting_body_is_counted_and_the_first_one_stays() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"first-writer-wins-body").unwrap();
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, 32).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        let mut rx = ProgressiveReceiver::new(stream);
+        let first = enc.drop_at(0);
+        let mut other = first.clone();
+        other.body[0] ^= 0xff;
+        rx.push_drop(first).unwrap();
+        // The conflict is counted, not returned: the stream keeps going and
+        // the decoder keeps the body it already holds.
+        rx.push_drop(other).unwrap();
+        assert_eq!(rx.stats(), (1, 1), "one accepted, one counted as rejected");
+        for seq in 1..u32::from(enc.params().k) {
+            rx.push_drop(enc.drop_at(seq)).unwrap();
+        }
+        assert_eq!(rx.finish_packed().unwrap(), packed);
+    }
+
+    /// The dedup map is bounded, and a drop the decoder refuses takes no
+    /// slot in it.
+    #[test]
+    fn the_dedup_map_is_bounded_and_rejects_do_not_fill_it() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"bounded-seen-map").unwrap();
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, 32).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        let mut rx = ProgressiveReceiver::new(stream);
+        // Drops the decoder refuses (wrong k) must not occupy dedup slots.
+        for seq in 0..10u32 {
+            let mut bad = enc.drop_at(seq);
+            bad.params.k = 0;
+            assert!(rx.push_drop(bad).is_err());
+        }
+        assert!(rx.seen.is_empty());
+        // Distinct seqs up to the ceiling are accepted, the next is refused.
+        for seq in 0..MAX_SEEN_SEQS as u32 {
+            rx.push_drop(enc.drop_at(seq)).unwrap();
+        }
+        assert_eq!(
+            rx.push_drop(enc.drop_at(MAX_SEEN_SEQS as u32)),
+            Err(ReceiveError::TooManySeqs { max: MAX_SEEN_SEQS })
+        );
+        assert!(rx.is_complete());
     }
 }

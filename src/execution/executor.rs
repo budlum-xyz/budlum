@@ -66,6 +66,34 @@ impl Executor {
         Self::apply_transaction_checked(state, tx).map_err(|e| e.message().to_string())
     }
 
+    /// Refuse a block whose `ContractCall`s exceed the proving budget.
+    ///
+    /// Counted before anything executes, at the per-call limit each, so the
+    /// refusal costs no proving work. See
+    /// [`crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS`] for the number.
+    fn check_block_contract_gas(transactions: &[Transaction]) -> BudlumResult<()> {
+        let calls = transactions
+            .iter()
+            .filter(|tx| tx.tx_type == TransactionType::ContractCall)
+            .count() as u64;
+        Self::check_contract_call_count(calls)
+    }
+
+    /// The same budget, for a producer counting calls as it packs a block.
+    pub fn check_contract_call_count(calls: u64) -> BudlumResult<()> {
+        let asked = calls.saturating_mul(DEFAULT_CONTRACT_GAS_LIMIT);
+        if asked > crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS {
+            return Err(BudlumError::validation(
+                "block_contract_gas_exceeded",
+                format!(
+                    "block asks {asked} contract gas over {calls} calls; the block budget is {}",
+                    crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn apply_transaction_checked(
         state: &mut AccountState,
         tx: &Transaction,
@@ -475,8 +503,13 @@ impl Executor {
                 }
             }
             TransactionType::ContractCall => {
-                let receipt = ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT)
-                    .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
+                // The VM runs for this transaction: its sender, nonce and the
+                // block height go into the context the syscalls read and the
+                // public inputs repeat, instead of the zeros a fresh VM holds.
+                let ctx = crate::execution::zkvm::TxContext::of(tx, state.current_block_height);
+                let receipt =
+                    ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT, ctx)
+                        .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
 
                 if !receipt.events.is_empty()
                     && receipt.events[0] == 0x00A1_00A1
@@ -2215,6 +2248,7 @@ impl Executor {
         transactions: &[Transaction],
         block_producer: Option<&Address>,
     ) -> BudlumResult<()> {
+        Self::check_block_contract_gas(transactions)?;
         for tx in transactions {
             Self::apply_transaction_checked(state, tx)?;
         }

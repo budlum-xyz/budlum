@@ -315,27 +315,32 @@ impl PeerManager {
 
     /// Reclaim records that carry nothing worth keeping.
     ///
-    /// A record is spent when its ban, if it ever had one, has expired, and no
-    /// penalty is left on the score. Without this the ceiling is a one-way
-    /// door: a peer id is a public key hash, so an attacker mints ten thousand
-    /// of them for free, fills the table once, and every peer the node has
-    /// never seen is refused for the rest of its uptime.
+    /// A record is spent when its ban, if it ever had one, has expired, no
+    /// penalty is left on the score, and the peer is not connected. Without
+    /// this the ceiling is a one-way door: a peer id is a public key hash, so
+    /// an attacker mints ten thousand of them for free, fills the table once,
+    /// and every peer the node has never seen is refused for the rest of its
+    /// uptime.
+    ///
+    /// The predicate used to require `ban_expires_unix` to be set as well, so
+    /// a record that never carried a ban (one message through
+    /// `check_rate_limit` is enough to create one at score 0) could never be
+    /// reclaimed, and `cleanup_expired_bans` clears the field before this
+    /// runs, so a served ban could not be either. The table filled once and
+    /// stayed full.
     ///
     /// What makes this safe against being turned into a ban-clearing
     /// primitive is what it refuses to touch: a record whose ban is still
     /// running is kept, and a record still carrying a penalty is kept. The
-    /// entries an attacker mints arrive through `report_invalid_handshake` and
-    /// friends, so they are negative-scored the moment they exist and stay.
-    /// Only a peer that has served its time and owes nothing can be dropped,
-    /// and dropping that one costs nothing the node still needs.
+    /// entries an attacker mints through `report_invalid_handshake` and
+    /// friends are negative-scored the moment they exist and stay. A
+    /// connected peer is kept whatever its score, so a live session does not
+    /// lose its handshake to a table full of strangers.
     pub fn prune_spent_records(&mut self) -> usize {
         let before = self.peers.len();
-        self.peers.retain(|_, s| {
-            if s.is_banned() {
-                return true;
-            }
-            !(s.ban_expires_unix.is_some() && s.score >= 0)
-        });
+        let connected = &self.connected_peers;
+        self.peers
+            .retain(|id, s| s.is_banned() || s.score < 0 || connected.contains(id));
         before - self.peers.len()
     }
 
@@ -754,19 +759,23 @@ mod tests {
     }
 
     /// Tracked peer map has a hard ceiling (memory DoS guard).
+    ///
+    /// The ceiling is on the map size, not on admissions: a new peer is
+    /// admitted by reclaiming a spent record, and refused when every record
+    /// is unspent. Either way the map never exceeds the ceiling.
     #[test]
     fn peer_manager_tracked_peer_ceiling() {
         let mut manager = PeerManager::new();
         manager.max_tracked_peers = 8;
 
-        // Fill with 8 synthetic peers via check_rate_limit.
+        // Fill with 8 penalised peers: unspent records nothing may reclaim.
         for i in 0..8u8 {
-            // PeerId from random-ish bytes - use libp2p Keypair for uniqueness.
             let keypair = libp2p::identity::Keypair::generate_ed25519();
             let peer = keypair.public().to_peer_id();
+            manager.report_invalid_tx(&peer);
             assert!(
-                manager.check_rate_limit(&peer),
-                "first 8 peers must be admitted (i={i})"
+                manager.get_score(&peer) < 0,
+                "penalised peers must be tracked (i={i})"
             );
         }
         assert_eq!(manager.tracked_peer_count(), 8);
@@ -776,9 +785,22 @@ mod tests {
             .to_peer_id();
         assert!(
             !manager.check_rate_limit(&overflow),
-            "9th distinct peer must be rejected at ceiling"
+            "9th distinct peer must be rejected while every record is unspent"
         );
         assert_eq!(manager.tracked_peer_count(), 8);
+
+        // Spent records are reclaimed for the newcomer; the ceiling holds.
+        let mut spent = PeerManager::new();
+        spent.max_tracked_peers = 8;
+        for _ in 0..8 {
+            assert!(spent.check_rate_limit(&test_peer_id()));
+        }
+        assert!(spent.check_rate_limit(&overflow));
+        assert!(
+            spent.tracked_peer_count() <= 8,
+            "the ceiling is never exceeded"
+        );
+        assert!(spent.peers.contains_key(&overflow));
     }
 
     /// Burst exhaustion then rejection (token bucket).
@@ -1227,6 +1249,46 @@ mod tests {
         assert!(
             manager.check_rate_limit(&fresh),
             "expired, penalty-free records were never reclaimed: a full table refuses every new peer for the rest of the uptime"
+        );
+    }
+
+    /// A table filled by records that never carried a ban is reclaimed too:
+    /// one rate-limited message per minted id used to leave a score-0 record
+    /// that no predicate could drop, and the node refused every new peer for
+    /// the rest of its uptime.
+    #[test]
+    fn h5_never_banned_score_zero_records_are_reclaimed() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 3;
+        for _ in 0..3 {
+            assert!(manager.check_rate_limit(&test_peer_id()));
+        }
+        assert_eq!(manager.tracked_peer_count(), 3, "table must be full");
+
+        let fresh = test_peer_id();
+        assert!(
+            manager.check_rate_limit(&fresh),
+            "score-0 records without a ban must be reclaimable"
+        );
+        assert!(manager.peers.contains_key(&fresh));
+    }
+
+    /// A connected peer keeps its record through a reclaim, whatever its
+    /// score: a live session must not lose its handshake to strangers.
+    #[test]
+    fn h5_reclaim_keeps_connected_peers() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 2;
+        let live = test_peer_id();
+        assert!(manager.note_connected(live, None));
+        manager.set_handshaked(&live, true);
+        assert!(manager.check_rate_limit(&test_peer_id()));
+        assert_eq!(manager.tracked_peer_count(), 2);
+
+        assert!(manager.check_rate_limit(&test_peer_id()));
+        assert!(
+            manager.is_handshaked(&live),
+            "the connected peer's record was reclaimed"
         );
     }
 

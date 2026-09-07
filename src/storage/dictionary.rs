@@ -109,6 +109,13 @@ pub enum DictionaryError {
     /// A zero-length dictionary. It would compress nothing and still cost a
     /// fetch, so it is a mistake rather than a choice.
     Empty,
+    /// A dictionary was registered again with a different size than the one
+    /// on record.
+    SizeConflict {
+        dictionary_id: ContentId,
+        recorded: u64,
+        claimed: u64,
+    },
     /// The dictionary is inside its grace window after losing its last
     /// reference, and cannot take new ones.
     ///
@@ -148,6 +155,15 @@ impl std::fmt::Display for DictionaryError {
                 )
             }
             Self::Empty => write!(f, "a dictionary cannot be empty"),
+            Self::SizeConflict {
+                dictionary_id,
+                recorded,
+                claimed,
+            } => write!(
+                f,
+                "dictionary {dictionary_id} is recorded at {recorded} bytes, \
+                 re-registration claims {claimed}"
+            ),
             Self::Retiring {
                 dictionary_id,
                 deletable_at_epoch,
@@ -214,11 +230,15 @@ impl DictionaryRegistry {
     ///
     /// Idempotent: registering an existing dictionary at the same size is
     /// accepted and changes nothing, so a replayed transaction is not an
-    /// error.
+    /// error. A re-registration that claims a different size is refused:
+    /// the size is what a reference is checked against without fetching the
+    /// dictionary, and quietly keeping the first value while answering `Ok`
+    /// would tell the second registrant its size was recorded.
     ///
     /// # Errors
     ///
-    /// [`DictionaryError::Empty`] and [`DictionaryError::TooLarge`].
+    /// [`DictionaryError::Empty`], [`DictionaryError::TooLarge`] and
+    /// [`DictionaryError::SizeConflict`].
     pub fn register_dictionary(&mut self, id: ContentId, size: u64) -> Result<(), DictionaryError> {
         if size == 0 {
             return Err(DictionaryError::Empty);
@@ -229,12 +249,25 @@ impl DictionaryRegistry {
                 max: MAX_DICTIONARY_BYTES,
             });
         }
-        self.entries.entry(id).or_insert(DictionaryEntry {
-            size,
-            refs: 0,
-            deletable_at_epoch: None,
-        });
-        Ok(())
+        match self.entries.get(&id) {
+            Some(existing) if existing.size != size => Err(DictionaryError::SizeConflict {
+                dictionary_id: id,
+                recorded: existing.size,
+                claimed: size,
+            }),
+            Some(_) => Ok(()),
+            None => {
+                self.entries.insert(
+                    id,
+                    DictionaryEntry {
+                        size,
+                        refs: 0,
+                        deletable_at_epoch: None,
+                    },
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Whether a dictionary is registered and usable.
@@ -444,6 +477,25 @@ mod tests {
             matches!(err, DictionaryError::DictionaryChain { .. }),
             "got {err:?}"
         );
+    }
+
+    /// Same size again is a replay and changes nothing; a different size is
+    /// a conflict and is refused with the recorded value.
+    #[test]
+    fn a_re_registration_with_another_size_is_refused() {
+        let mut reg = DictionaryRegistry::empty_registry();
+        let id = ContentId([3u8; 32]);
+        reg.register_dictionary(id, 100).unwrap();
+        reg.register_dictionary(id, 100).unwrap();
+        assert_eq!(
+            reg.register_dictionary(id, 101),
+            Err(DictionaryError::SizeConflict {
+                dictionary_id: id,
+                recorded: 100,
+                claimed: 101,
+            })
+        );
+        assert_eq!(reg.entries[&id].size, 100);
     }
 
     #[test]

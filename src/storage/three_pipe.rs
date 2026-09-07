@@ -193,7 +193,7 @@ fn encode_payload(
     for seq in 0..n {
         let drop = enc.drop_at(seq);
         digests.push(frame_digest(&stream_commitment, seq, &drop.to_bytes()));
-        frames.push(pack_frame(&stream_commitment, &drop));
+        frames.push(pack_frame(&stream_commitment, &drop)?);
     }
     let fold = fold_frame_digests(&digests)?;
     let recipe = ThreeRecipePublic::new(commit, enc.params(), fold);

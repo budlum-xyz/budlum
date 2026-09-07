@@ -145,6 +145,34 @@ mod pos_checkpoint_is_a_limit_not_a_score {
     }
 
     #[test]
+    fn a_suffix_that_carries_the_checkpoint_honours_it() {
+        // Fork choice is handed slices that need not start at genesis. The
+        // checkpoint used to be looked up by slice position, so an honest
+        // suffix read as a violation (its block at position 32 is not the
+        // block at height 32) and scored zero.
+        let engine = engine();
+        let honest = chain_of(40, "aa");
+        engine
+            .add_checkpoint(&honest[32], None)
+            .expect("checkpoint records");
+
+        let suffix = &honest[20..];
+        assert!(
+            engine.chain_honours_checkpoint(suffix),
+            "the suffix contains the checkpointed block at its height"
+        );
+        assert_eq!(engine.fork_choice_score(suffix), suffix.len() as u128);
+
+        let below = &honest[..30];
+        assert!(!engine.chain_honours_checkpoint(below));
+        let above = &honest[33..];
+        assert!(
+            !engine.chain_honours_checkpoint(above),
+            "a slice that starts after the checkpoint cannot show it"
+        );
+    }
+
+    #[test]
     fn with_no_checkpoint_established_length_decides() {
         // A node that has seen no checkpoint has nothing to anchor to; it must
         // not behave as though anchored at genesis, nor refuse everything.

@@ -2411,6 +2411,19 @@ impl BudlumApiServer for RpcServer {
             .revoke_view_grant(grant_id, auth, at_epoch)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        // The frame path asks the chain again before every emit, but it asks
+        // without the gateway lock and applies the answer under it. A revoke
+        // that landed between those two steps was served once more on the
+        // stale `true`. Dropping this content's grant-backed sessions here,
+        // once the chain has revoked, leaves a racing frame call nothing to
+        // emit from. After the revoke, not before: an unauthorised revoke
+        // attempt must not be able to close other viewers' sessions.
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.drop_sessions_for_content(&revoked.content_id);
+        }
         // A revoke that only reaches the ledger leaves every product surface
         // holding the session key it was promised. The hook is where that word is
         // passed on: a headless node discards it, a gateway installs its own

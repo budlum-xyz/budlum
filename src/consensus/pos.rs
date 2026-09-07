@@ -249,10 +249,22 @@ impl PoSEngine {
             // Nothing established yet: nothing to violate.
             return true;
         };
-        let Ok(index) = usize::try_from(height) else {
+        // Locate the block by its height, not by its slice position: the
+        // slices handed to fork choice are not required to start at genesis,
+        // and on a suffix `chain[height]` names the wrong block (or none),
+        // which read as a violation for an honest chain.
+        let Some(first) = chain.first() else {
             return false;
         };
-        chain.get(index).is_some_and(|block| block.hash == hash)
+        let Some(offset) = height
+            .checked_sub(first.index)
+            .and_then(|o| usize::try_from(o).ok())
+        else {
+            return false;
+        };
+        chain
+            .get(offset)
+            .is_some_and(|block| block.index == height && block.hash == hash)
     }
 
     pub fn is_before_checkpoint(&self, block: &Block) -> bool {
@@ -886,7 +898,18 @@ impl ConsensusEngine for PoSEngine {
         let key = (*producer, header.index);
 
         if let Some(store) = storage {
-            let _ = store.save_seen_block(&header, &signature);
+            // Not `let _ =`: the seen-block record is the double-sign
+            // evidence. A record that fails to persist means a restart
+            // forgets the first signature and the second one is never
+            // caught, so the failure has to surface.
+            store
+                .save_seen_block(&header, &signature)
+                .map_err(|error| {
+                    ConsensusError(format!(
+                        "failed to persist seen block at height {}: {error}",
+                        header.index
+                    ))
+                })?;
         }
 
         let mut seen_blocks = self

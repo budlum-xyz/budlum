@@ -13,7 +13,7 @@ mod zkvm_tests {
         crate::core::address::Address::from(b)
     }
     use crate::execution::executor::Executor;
-    use crate::execution::zkvm::{ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
+    use crate::execution::zkvm::{TxContext, ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
     use crate::network::proto_conversions::pb;
     use bud_isa::{Instruction, Opcode};
     use std::sync::Arc;
@@ -57,9 +57,12 @@ mod zkvm_tests {
 
     #[test]
     fn zkvm_executor_returns_receipt_for_valid_bytecode() {
-        let receipt =
-            ZkVmExecutor::execute_bytecode(&logging_program(42), DEFAULT_CONTRACT_GAS_LIMIT)
-                .unwrap();
+        let receipt = ZkVmExecutor::execute_bytecode(
+            &logging_program(42),
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .unwrap();
 
         assert_eq!(receipt.events, vec![42]);
         assert_eq!(receipt.steps, 3);
@@ -67,17 +70,60 @@ mod zkvm_tests {
         assert!(receipt.proof_bytes > 0);
     }
 
+    /// A program that logs what syscall 1 (sender) and syscall 3 (nonce)
+    /// return sees the transaction's values, not the zeros of a fresh VM.
+    #[test]
+    fn contract_execution_sees_the_transaction_context() {
+        let program = bytecode(vec![
+            inst(Opcode::Syscall, 1, 0, 0, 1),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Syscall, 2, 0, 0, 3),
+            inst(Opcode::Log, 0, 2, 0, 0),
+            inst(Opcode::Syscall, 3, 0, 0, 2),
+            inst(Opcode::Log, 0, 3, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ]);
+        let keypair = KeyPair::generate().unwrap();
+        let tx = signed_contract_tx(&keypair, 1, 9, program.clone());
+        let ctx = TxContext::of(&tx, 1234);
+        assert_eq!(ctx.nonce, 9);
+        assert_eq!(ctx.block_height, 1234);
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&tx.from.as_bytes()[..8]);
+        assert_eq!(ctx.sender, u64::from_le_bytes(word));
+
+        let with_ctx =
+            ZkVmExecutor::execute_bytecode(&program, DEFAULT_CONTRACT_GAS_LIMIT, ctx).unwrap();
+        assert_eq!(with_ctx.events, vec![ctx.sender, 9, 1234]);
+
+        let without = ZkVmExecutor::execute_bytecode(
+            &program,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            without.events,
+            vec![0, 0, 0],
+            "a bare run carries no transaction"
+        );
+    }
+
     #[test]
     fn zkvm_executor_rejects_malformed_bytecode() {
-        let err = ZkVmExecutor::execute_bytecode(&[1, 2, 3], DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect_err("malformed bytecode must be rejected");
+        let err = ZkVmExecutor::execute_bytecode(
+            &[1, 2, 3],
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect_err("malformed bytecode must be rejected");
 
         assert!(err.contains("multiple of 8"));
     }
 
     #[test]
     fn zkvm_executor_maps_out_of_gas_to_error() {
-        let err = ZkVmExecutor::execute_bytecode(&infinite_loop_program(), 3)
+        let err = ZkVmExecutor::execute_bytecode(&infinite_loop_program(), 3, TxContext::default())
             .expect_err("gas exhaustion must abort execution");
 
         // The reason is part of the contract now. It used to be flattened into
@@ -102,6 +148,26 @@ mod zkvm_tests {
             .validate_transaction(&tx)
             .expect_err("invalid contract bytecode must fail state validation");
         assert!(err.contains("bytecode"));
+    }
+
+    /// A block may carry at most `MAX_BLOCK_CONTRACT_GAS /
+    /// DEFAULT_CONTRACT_GAS_LIMIT` contract calls; one more is refused before
+    /// any of them executes.
+    #[test]
+    fn a_block_over_the_contract_gas_budget_is_refused_before_execution() {
+        use crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS;
+        let keypair = KeyPair::generate().unwrap();
+        let allowed = (MAX_BLOCK_CONTRACT_GAS / DEFAULT_CONTRACT_GAS_LIMIT) as usize;
+        let calls: Vec<Transaction> = (0..=allowed)
+            .map(|nonce| signed_contract_tx(&keypair, 1, nonce as u64, logging_program(1)))
+            .collect();
+        assert!(Executor::check_contract_call_count(allowed as u64).is_ok());
+        let err = Executor::check_contract_call_count(allowed as u64 + 1).unwrap_err();
+        assert!(err.message().contains("block budget"), "{}", err.message());
+
+        let mut state = AccountState::new();
+        let err = Executor::apply_block_checked(&mut state, &calls, None).unwrap_err();
+        assert!(err.message().contains("block budget"), "{}", err.message());
     }
 
     #[test]

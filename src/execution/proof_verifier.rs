@@ -488,7 +488,8 @@ mod tests {
     #[test]
     fn verify_applies_every_structural_check() {
         let inputs = make_inputs();
-        let edits: [(fn(&mut ProofEnvelope), &str); 3] = [
+        type Edit = fn(&mut ProofEnvelope);
+        let edits: [(Edit, &str); 3] = [
             (|e| e.backend = String::new(), "empty backend"),
             (|e| e.backend = "Plonky3".into(), "foreign backend"),
             (|e| e.p3_version = String::new(), "missing p3_version"),

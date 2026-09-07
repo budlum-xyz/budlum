@@ -676,6 +676,16 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
         })?;
     let rs = ReedSolomon::for_scheme(&scheme)?;
     let k = rs.data_shards();
+    // Fewer bytes than data shards would leave whole stripes empty. Every
+    // empty stripe hashes to the same `ContentId`, and the manifest and the
+    // shard store both key shards by id, so index-distinct shards collapsed
+    // into one. Refused: the object is too small for the scheme it asked for.
+    if data.len() < k {
+        return Err(ErasureError::ShardMismatch(format!(
+            "object of {} bytes is too small for k={k}: every data shard needs a byte",
+            data.len()
+        )));
+    }
     let stripe = data.len().div_ceil(k);
 
     let mut shards: Vec<Vec<u8>> = Vec::with_capacity(rs.total_shards());
@@ -720,10 +730,17 @@ pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<
         .map_err(ErasureError::InvalidScheme)?;
     let encoded = encode_object(data, claimed.erasure)?;
     let honest = encoded.to_manifest().map_err(ErasureError::InvalidScheme)?;
-    if honest.manifest_id != claimed.manifest_id {
+    // Not the manifest id: the id also commits to the provenance the
+    // uploader declared (encryption, source, edition, dictionary), which
+    // `to_manifest` does not know and fills with defaults, so an honest
+    // manifest carrying any non-default claim failed here before its shards
+    // were even compared. What the re-encode can vouch for is the bytes:
+    // their length and the shard list, checked below one by one.
+    if honest.content_size() != claimed.content_size() {
         return Err(ErasureError::ShardMismatch(format!(
-            "re-encode produced manifest {} but the claim was {}",
-            honest.manifest_id, claimed.manifest_id
+            "re-encode measured {} content bytes but the claim says {}",
+            honest.content_size(),
+            claimed.content_size()
         )));
     }
     if honest.shards.len() != claimed.shards.len() {
@@ -1277,7 +1294,9 @@ mod tests {
     #[test]
     fn object_not_divisible_by_k_round_trips() {
         // The tail stripe is padded; total_size has to trim it back.
-        for len in [1usize, 2, 3, 5, 7, 13, 101, 1023] {
+        // Lengths below `k` are refused now (an empty stripe has no id of
+        // its own), so the sweep starts at `k`.
+        for len in [4usize, 5, 7, 13, 101, 1023] {
             let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             let enc = encode_object(&data, ErasureScheme { k: 4, n: 7 }).unwrap();
             let manifest = enc.to_manifest().unwrap();
@@ -1346,6 +1365,39 @@ mod tests {
         let enc = encode_object(&data, scheme).unwrap();
         let manifest = enc.to_manifest().unwrap();
         verify_object_encoding(&data, &manifest).expect("honest encoding must verify");
+    }
+
+    /// A manifest that declares client-side encryption carries a different
+    /// id than the default re-encode, and is still an honest description of
+    /// its shards. The shard comparison is what decides.
+    #[test]
+    fn verify_object_encoding_accepts_a_manifest_with_declared_provenance() {
+        use crate::storage::manifest::{ContentCipher, ContentEncryption};
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let plain = encode_object(&data, scheme).unwrap().to_manifest().unwrap();
+        let declared = plain
+            .clone()
+            .with_encryption(ContentEncryption::ClientSide(ContentCipher::Aes256Gcm));
+        assert_ne!(declared.manifest_id, plain.manifest_id);
+        verify_object_encoding(&data, &declared).expect("the shards are the same shards");
+    }
+
+    /// An object shorter than `k` bytes cannot fill every data shard, and
+    /// the empty shards it would produce all share one id.
+    #[test]
+    fn encode_object_refuses_fewer_bytes_than_data_shards() {
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        assert!(encode_object(&[1, 2, 3], scheme).is_err());
+        let enc = encode_object(&[1, 2, 3, 4], scheme).unwrap();
+        let ids: std::collections::BTreeSet<_> = enc
+            .to_manifest()
+            .unwrap()
+            .shards
+            .iter()
+            .map(|s| s.shard_id)
+            .collect();
+        assert_eq!(ids.len(), 6, "every shard has its own id");
     }
 
     #[test]

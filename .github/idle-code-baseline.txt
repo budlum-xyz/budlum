@@ -1249,7 +1249,6 @@ src/chain/genesis.rs	fn	devnet_genesis
 src/chain/genesis.rs	fn	mainnet_defaults
 src/chain/genesis.rs	fn	mainnet_genesis
 src/chain/genesis.rs	fn	testnet_genesis
-src/chain/genesis.rs	fn	validate_pq_scheme
 src/chain/genesis.rs	fn	with_allocation
 src/chain/genesis.rs	fn	with_bud_tokenomics
 src/chain/genesis.rs	fn	with_bud_tokenomics_params
@@ -1481,7 +1480,6 @@ src/deed/mod.rs	const	INDUSTRY_SPONSOR
 src/deed/mod.rs	const	RESEARCH_CONTRIBUTOR
 src/deed/mod.rs	enum	ArtifactKind
 src/deed/mod.rs	enum	Visibility
-src/deed/mod.rs	struct	Manifest
 src/developer_os.rs	enum	DeveloperOsError
 src/developer_os.rs	enum	DevnetTopology
 src/developer_os.rs	enum	SdkFeature
@@ -1977,8 +1975,6 @@ src/storage/manifest.rs	fn	manifest_id_from_parts_stored
 src/storage/manifest.rs	fn	manifest_id_from_shards
 src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
-src/storage/manifest.rs	fn	with_encryption
-src/storage/manifest.rs	fn	with_owner
 src/storage/merkle_trie.rs	fn	bulk_insert
 src/storage/merkle_trie.rs	fn	root_ref
 src/storage/mobile_self.rs	enum	MobileAvailabilityClass

@@ -134,7 +134,7 @@ pub use payload_crypt::{
 pub use qr_carousel::{
     oneshot_drop_count, planned_drop_count, CarouselDecoder, CarouselEncoder, CarouselError,
     CarouselParams, Drop, DEFAULT_BLOCK_LEN, DROP_HEADER_LEN, DROP_MAGIC, DROP_VERSION,
-    MAX_CAROUSEL_BYTES, MAX_K, ONESHOT_REPAIR_PERMILLAGE,
+    MAX_BLOCK_LEN, MAX_CAROUSEL_BYTES, MAX_K, ONESHOT_REPAIR_PERMILLAGE,
 };
 pub use qr_frame::{
     fold_frame_digests, frame_digest, pack_frame, stream_id_prefix, unpack_frame, FrameError,

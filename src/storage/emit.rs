@@ -1031,7 +1031,7 @@ pub fn qr_feed_preview(
     if !rx2.is_complete() || rx2.finish_packed()? != pipe.packed {
         return Err(EmitError::ReassemblyMismatch);
     }
-    let frame0 = emitter.frame_at(0);
+    let frame0 = emitter.frame_at(0)?;
     if Some(&frame0) != pipe.frames.first() {
         return Err(EmitError::ReemitMismatch);
     }

@@ -106,7 +106,7 @@ mod tests {
             refuse_durable_derivative(&drop).unwrap_err(),
             ThreeBlobKind::CarouselDrop
         );
-        let frame = pack_frame(&stream, &enc.drop_at(0));
+        let frame = pack_frame(&stream, &enc.drop_at(0)).unwrap();
         assert_eq!(
             refuse_durable_derivative(&frame).unwrap_err(),
             ThreeBlobKind::OpticalFrame

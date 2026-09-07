@@ -150,7 +150,7 @@ impl Prevote {
     /// The obvious cross-chain replay question, could a prevote signed on
     /// Testnet be replayed on mainnet? - is closed, but indirectly:
     /// `checkpoint_hash` is a block hash, and `Block::calculate_hash_bytes`
-    /// Folds `chain_id` into the `BDLM_BLOCK_V3` preimage. Two networks cannot
+    /// Folds `chain_id` into the `BDLM_BLOCK_V4` preimage. Two networks cannot
     /// Produce the same checkpoint hash at the same height, so the signature
     /// Does not verify against any other chain's checkpoint.
     ///

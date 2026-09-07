@@ -5,6 +5,34 @@ use libp2p::StreamProtocol;
 #[derive(Debug, Clone, Default)]
 pub struct SyncCodec;
 
+/// Largest `/sync` request accepted. Control requests are kilobyte sized.
+const MAX_SYNC_REQUEST_BYTES: usize = 1024 * 1024;
+/// Largest `/sync` response accepted.
+const MAX_SYNC_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Read a whole frame of at most `limit` bytes, refusing a longer one.
+///
+/// `take(limit)` followed by `read_to_end` returned `Ok` for an oversize
+/// frame and dropped the rest, so the caller decoded a truncated payload.
+/// Protobuf reads absent fields as defaults, so a truncated frame decodes
+/// into a different, valid-looking message instead of being refused. One
+/// byte past the limit is read; if it is there, the frame is too long.
+async fn read_bounded<T>(io: &mut T, limit: usize) -> std::io::Result<Vec<u8>>
+where
+    T: AsyncRead + Unpin + Send,
+{
+    let mut buf = Vec::new();
+    let mut limited = io.take(limit as u64 + 1);
+    limited.read_to_end(&mut buf).await?;
+    if buf.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sync frame exceeds {limit} bytes"),
+        ));
+    }
+    Ok(buf)
+}
+
 // `request_response::Codec` used to be an `#[async_trait]` trait; upstream
 // moved it to native `-> impl Future + Send` methods, so the attribute now
 // conflicts with the declaration (E0195: lifetime bounds do not match).
@@ -21,15 +49,11 @@ impl request_response::Codec for SyncCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        // HIGH (CWE-400, 2026-08-17): /sync requests are buffered BEFORE the
-        // handshake/ban/rate-limit checks. A 10 MiB ceiling let a remote peer
-        // connect and send small control requests (GetHeaders, GetBlocksRange)
-        // to force large allocations.
-        // Control requests are kilobyte sized; the ceiling was lowered to 1 MiB.
-        let mut buf = Vec::new();
-        let mut limited = io.take(1024 * 1024);
-        limited.read_to_end(&mut buf).await?;
-        Ok(buf)
+        // `/sync` requests are buffered before the handshake, ban and
+        // rate-limit checks, so the ceiling is the only thing between a
+        // stranger and a large allocation. Control requests are kilobyte
+        // sized; the ceiling is 1 MiB.
+        read_bounded(io, MAX_SYNC_REQUEST_BYTES).await
     }
 
     async fn read_response<T>(
@@ -40,10 +64,7 @@ impl request_response::Codec for SyncCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut buf = Vec::new();
-        let mut limited = io.take(10 * 1024 * 1024);
-        limited.read_to_end(&mut buf).await?;
-        Ok(buf)
+        read_bounded(io, MAX_SYNC_RESPONSE_BYTES).await
     }
 
     async fn write_request<T>(
@@ -72,5 +93,29 @@ impl request_response::Codec for SyncCodec {
         io.write_all(&resp).await?;
         io.close().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use futures::io::Cursor;
+
+    #[test]
+    fn a_frame_at_the_limit_is_read_whole() {
+        let frame = vec![7u8; 16];
+        let mut io = Cursor::new(frame.clone());
+        let got = block_on(read_bounded(&mut io, 16)).unwrap();
+        assert_eq!(got, frame);
+    }
+
+    /// An oversize frame is refused, not truncated into a shorter message
+    /// that still decodes.
+    #[test]
+    fn a_frame_past_the_limit_is_refused_not_truncated() {
+        let mut io = Cursor::new(vec![7u8; 17]);
+        let err = block_on(read_bounded(&mut io, 16)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

@@ -213,10 +213,14 @@ impl BudGateway {
         if let Some(manifest) = self.chain.get_storage_manifest(cid).await {
             // Generation outside the lock: a slow recipe must not stall the whole gateway.
             if let Some(bytes) = render_from_recipe(&manifest)? {
+                // Size is checked before the insert: an oversize object is
+                // refused, and refusing it must not leave it in a cache whose
+                // bound is stated as 64 entries of at most this size.
+                let bytes = checked_gateway_content("on-demand generation", bytes)?;
                 if let Ok(mut cache) = self.generation_cache.lock() {
                     cache.insert(cid, bytes.clone());
                 }
-                return checked_gateway_content("on-demand generation", bytes);
+                return Ok(bytes);
             }
         }
 
@@ -308,10 +312,9 @@ impl BudGateway {
                 return Err("sealed recipe cannot be rendered without a view-granted seed".into());
             }
             _ => {
-                return Err(
-                    "only recipe-born content can be rendered into a requested format;                      stored bytes already are their format"
-                        .into(),
-                );
+                return Err("only recipe-born content can be rendered into a requested \
+                            format; stored bytes already are their format"
+                    .into());
             }
         };
 

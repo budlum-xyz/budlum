@@ -1,5 +1,5 @@
 use crate::core::address::Address;
-use crate::core::hash::hash_fields_bytes;
+use crate::core::hash::{hash_fields_bytes, presence_tagged};
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 
@@ -71,19 +71,15 @@ impl GlobalBlockHeader {
             .map(|address| address.as_bytes().to_vec())
             .unwrap_or_default();
 
-        // B.U.D.: storage_root is included in the hash chain.
-        // When None, we use 32 zero bytes - this is safe because
-        // The domain-separation tag (V2) prevents collision with
-        // V1 headers that never had this field.
-        let storage_root_bytes: [u8; 32] = self.storage_root.unwrap_or([0u8; 32]);
-
-        // Ai_root is included in the hash chain.
-        // When None, 32 zero bytes. Domain tag V3 prevents collision
-        // With V2 headers (pre-ai_root) and V1 headers (pre-storage_root).
-        let ai_root_bytes: [u8; 32] = self.ai_root.unwrap_or([0u8; 32]);
+        // Both optional roots are presence-tagged. `None` and `Some(zeros)`
+        // used to fold into the same 32 zero bytes, so two distinct headers
+        // hashed identically; the tag byte keeps them apart and the domain
+        // tag moved to V4 so no V3 hash can be replayed as a V4 one.
+        let storage_root_bytes = presence_tagged(self.storage_root);
+        let ai_root_bytes = presence_tagged(self.ai_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V3",
+            b"BDLM_GLOBAL_BLOCK_V4",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -223,14 +219,22 @@ mod tests {
     }
 
     #[test]
-    fn v3_tag_prevents_collision_with_v2_headers() {
-        // V3 header with ai_root=None must hash differently than a
-        // Hypothetical V2 header with the same other fields, because
-        // The domain tag changed.
-        let h = sample_header();
-        let hash = h.calculate_hash_bytes();
-        // Just verify it produces a non-zero hash, the tag change
-        // Is the critical security property.
-        assert_ne!(hash, [0u8; 32], "V3 header must produce non-zero hash");
+    fn absent_and_zero_roots_do_not_collide() {
+        // `None` and `Some([0; 32])` are different headers and must not
+        // share a hash, for either optional root.
+        let none = sample_header();
+        let mut zero_storage = sample_header();
+        zero_storage.storage_root = Some([0u8; 32]);
+        let mut zero_ai = sample_header();
+        zero_ai.ai_root = Some([0u8; 32]);
+        assert_ne!(
+            none.calculate_hash_bytes(),
+            zero_storage.calculate_hash_bytes()
+        );
+        assert_ne!(none.calculate_hash_bytes(), zero_ai.calculate_hash_bytes());
+        assert_ne!(
+            zero_storage.calculate_hash_bytes(),
+            zero_ai.calculate_hash_bytes()
+        );
     }
 }

@@ -34,7 +34,7 @@
 //! - Catalogue `render_qr_stream_frame` is a different address space.
 
 use crate::core::hash::hash_fields_bytes;
-use crate::storage::qr_carousel::Drop;
+use crate::storage::qr_carousel::{Drop, DROP_HEADER_LEN, MAX_BLOCK_LEN};
 
 /// Two-byte magic: answers "is this our Three frame?" before version.
 pub const THREE_FRAME_MAGIC: [u8; 2] = [0xBD, 0x3A];
@@ -86,17 +86,28 @@ impl std::fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-/// Lab hard cap on nested drop wire size (header + one `block_len` body, with margin).
-pub const MAX_DROP_WIRE: u16 = 8 * 1024;
+/// Lab hard cap on nested drop wire size: the drop header plus the largest
+/// body `from_payload` admits, so the two ends agree by construction.
+pub const MAX_DROP_WIRE: u16 = DROP_HEADER_LEN as u16 + MAX_BLOCK_LEN;
 
 /// Pack a carousel drop into a Three optical frame.
 ///
 /// `stream_commitment` is the 32-byte carousel stream id (A2); only its first
 /// four bytes go on the wire as a fast reject, while the full 32 bind the digest.
-#[must_use]
-pub fn pack_frame(stream_commitment: &[u8; 32], drop: &Drop) -> Vec<u8> {
+///
+/// # Errors
+///
+/// [`FrameError::BadDropLen`] when the drop's wire form is empty or longer
+/// than [`MAX_DROP_WIRE`]: every receiver refuses such a frame, so the packer
+/// refuses to build it instead of returning bytes nobody can decode. (Above
+/// `u16::MAX` the length field used to be clamped while the digest covered
+/// the whole wire, which decoded as a digest mismatch.)
+pub fn pack_frame(stream_commitment: &[u8; 32], drop: &Drop) -> Result<Vec<u8>, FrameError> {
     let drop_wire = drop.to_bytes();
     let drop_len = u16::try_from(drop_wire.len()).unwrap_or(u16::MAX);
+    if drop_len == 0 || drop_len > MAX_DROP_WIRE {
+        return Err(FrameError::BadDropLen(drop_len));
+    }
     let digest = frame_digest(stream_commitment, drop.seq, &drop_wire);
     let mut out = Vec::with_capacity(THREE_FRAME_HEADER_LEN + drop_wire.len());
     out.extend_from_slice(&THREE_FRAME_MAGIC);
@@ -108,7 +119,7 @@ pub fn pack_frame(stream_commitment: &[u8; 32], drop: &Drop) -> Vec<u8> {
     out.extend_from_slice(&drop_len.to_le_bytes());
     out.extend_from_slice(&digest);
     out.extend_from_slice(&drop_wire);
-    out
+    Ok(out)
 }
 
 /// Parse and verify a frame against an expected stream commitment.
@@ -239,7 +250,7 @@ mod tests {
         let packed = pack_payload(PayloadKind::ContentBytes, content).unwrap();
         let (stream, enc) = stream_for(&packed);
         let drop = enc.drop_at(0);
-        let frame = pack_frame(&stream, &drop);
+        let frame = pack_frame(&stream, &drop).unwrap();
         assert_eq!(&frame[0..2], &THREE_FRAME_MAGIC);
         let parsed = unpack_frame(&stream, &frame).unwrap();
         assert_eq!(parsed, drop);
@@ -249,7 +260,7 @@ mod tests {
     fn foreign_stream_rejected() {
         let packed = pack_payload(PayloadKind::ContentBytes, b"abc-def-ghi-jkl").unwrap();
         let (stream, enc) = stream_for(&packed);
-        let frame = pack_frame(&stream, &enc.drop_at(1));
+        let frame = pack_frame(&stream, &enc.drop_at(1)).unwrap();
         let mut other = stream;
         other[0] ^= 0xff;
         assert_eq!(
@@ -262,7 +273,7 @@ mod tests {
     fn tampered_drop_fails_digest() {
         let packed = pack_payload(PayloadKind::ContentBytes, b"digest-guard-payload").unwrap();
         let (stream, enc) = stream_for(&packed);
-        let mut frame = pack_frame(&stream, &enc.drop_at(0));
+        let mut frame = pack_frame(&stream, &enc.drop_at(0)).unwrap();
         let last = frame.len() - 1;
         frame[last] ^= 0xff;
         assert_eq!(
@@ -283,7 +294,7 @@ mod tests {
         let mut digests = Vec::new();
         for seq in 0..n {
             let drop = enc.drop_at(seq);
-            let frame = pack_frame(&stream, &drop);
+            let frame = pack_frame(&stream, &drop).unwrap();
             let got = unpack_frame(&stream, &frame).unwrap();
             digests.push(frame_digest(&stream, seq, &got.to_bytes()));
             dec.push(&got).unwrap();
@@ -305,7 +316,7 @@ mod tests {
     fn bad_magic_refused() {
         let packed = pack_payload(PayloadKind::ContentBytes, b"magic-check").unwrap();
         let (stream, enc) = stream_for(&packed);
-        let mut frame = pack_frame(&stream, &enc.drop_at(0));
+        let mut frame = pack_frame(&stream, &enc.drop_at(0)).unwrap();
         frame[0] = 0x00;
         assert_eq!(
             unpack_frame(&stream, &frame).unwrap_err(),
@@ -338,10 +349,10 @@ mod tests {
         let mut empty = enc.drop_at(0);
         empty.body = Vec::new();
         assert_eq!(
-            unpack_frame(&stream, &pack_frame(&stream, &empty)).unwrap_err(),
+            unpack_frame(&stream, &pack_frame(&stream, &empty).unwrap()).unwrap_err(),
             FrameError::BadDrop
         );
-        let frame = pack_frame(&stream, &enc.drop_at(0));
+        let frame = pack_frame(&stream, &enc.drop_at(0)).unwrap();
         for declared in [0u16, MAX_DROP_WIRE + 1] {
             let mut bad = frame.clone();
             bad[12..14].copy_from_slice(&declared.to_le_bytes());
@@ -354,6 +365,36 @@ mod tests {
         assert_eq!(
             unpack_frame(&stream, short).unwrap_err(),
             FrameError::Truncated
+        );
+    }
+
+    /// The packer refuses what no receiver can decode: a drop whose wire form
+    /// is over the cap is an error at pack time, not undecodable bytes. The
+    /// carousel's `block_len` bound keeps an honest encoder under the cap.
+    #[test]
+    fn pack_frame_refuses_a_drop_over_the_wire_cap() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"oversize-drop").unwrap();
+        let (stream, enc) = stream_for(&packed);
+        let mut fat = enc.drop_at(0);
+        fat.body = vec![0u8; usize::from(MAX_DROP_WIRE)];
+        assert!(matches!(
+            pack_frame(&stream, &fat),
+            Err(FrameError::BadDropLen(_))
+        ));
+        // Largest block the carousel admits still packs, and round-trips.
+        let big = vec![7u8; 3 * usize::from(MAX_BLOCK_LEN)];
+        let big_packed = pack_payload(PayloadKind::ContentBytes, &big).unwrap();
+        let enc = CarouselEncoder::new(&big_packed, MAX_BLOCK_LEN).unwrap();
+        let stream = enc
+            .params()
+            .stream_commitment(&payload_commitment(&big_packed));
+        let frame = pack_frame(&stream, &enc.drop_at(0)).unwrap();
+        assert!(unpack_frame(&stream, &frame).is_ok());
+        assert!(CarouselEncoder::new(&big_packed, MAX_BLOCK_LEN + 1).is_err());
+        assert_eq!(
+            DROP_HEADER_LEN + usize::from(MAX_BLOCK_LEN),
+            usize::from(MAX_DROP_WIRE),
+            "one drop at the largest block fills the wire cap exactly"
         );
     }
 }

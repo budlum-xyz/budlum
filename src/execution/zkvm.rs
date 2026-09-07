@@ -5,12 +5,53 @@ use sha3::{Digest, Keccak256};
 
 pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
 
+/// Contract gas one block may carry, summed over its `ContractCall`
+/// transactions at [`DEFAULT_CONTRACT_GAS_LIMIT`] each.
+///
+/// The per-call limit bounds one execution and its proof; nothing bounded how
+/// many such executions a block could ask a validator to run and prove, so a
+/// block of near-limit calls repeated the heaviest work
+/// `MAX_TRANSACTIONS_PER_BLOCK` times. The budget is counted at the limit,
+/// not at `gas_used`: proving cost is committed when the call starts, and a
+/// call that runs out of gas at the limit costs the same trace as one that
+/// halts just under it. Sixty-four full calls per block.
+pub const MAX_BLOCK_CONTRACT_GAS: u64 = 64 * DEFAULT_CONTRACT_GAS_LIMIT;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZkVmReceipt {
     pub gas_used: u64,
     pub steps: usize,
     pub events: Vec<u64>,
     pub proof_bytes: usize,
+}
+
+/// The transaction the bytecode runs for, as the VM sees it.
+///
+/// Syscalls 1, 2 and 3 read `sender`, `block_height` and `nonce`, and the
+/// public inputs carry the same three words, so a program that branches on
+/// its caller or its nonce is proved against the values the chain agreed to,
+/// not the zeros a fresh `Vm` starts with. `sender` is the first eight bytes
+/// of the address, little endian: the VM word is 64 bits wide and the public
+/// input carries the same word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TxContext {
+    pub sender: u64,
+    pub nonce: u64,
+    pub block_height: u64,
+}
+
+impl TxContext {
+    /// The context of `tx` executing in the block at `block_height`.
+    #[must_use]
+    pub fn of(tx: &crate::core::transaction::Transaction, block_height: u64) -> Self {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&tx.from.as_bytes()[..8]);
+        Self {
+            sender: u64::from_le_bytes(word),
+            nonce: tx.nonce,
+            block_height,
+        }
+    }
 }
 
 pub struct ZkVmExecutor;
@@ -29,8 +70,17 @@ impl ZkVmExecutor {
     /// behind an opcode is finished, and it is not finished on any network. So
     /// the gated decode is unconditional here rather than keyed off a chain id
     /// the executor does not have.
-    pub fn execute_bytecode(bytecode: &[u8], gas_limit: u64) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, true)
+    ///
+    /// `ctx` is the transaction the bytecode runs for: the VM context carries
+    /// its sender, nonce and block height, so the syscalls that read them and
+    /// the public inputs that repeat them describe this transaction rather
+    /// than a zeroed one. The executor's `ContractCall` path is the caller.
+    pub fn execute_bytecode(
+        bytecode: &[u8],
+        gas_limit: u64,
+        ctx: TxContext,
+    ) -> Result<ZkVmReceipt, String> {
+        Self::execute_bytecode_inner(bytecode, gas_limit, true, ctx)
     }
 
     /// Explicitly gated execution. Same behaviour as `execute_bytecode`; kept
@@ -40,7 +90,7 @@ impl ZkVmExecutor {
         bytecode: &[u8],
         gas_limit: u64,
     ) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, true)
+        Self::execute_bytecode_inner(bytecode, gas_limit, true, TxContext::default())
     }
 
     /// Ungated execution for local tooling and tests.
@@ -52,13 +102,14 @@ impl ZkVmExecutor {
         bytecode: &[u8],
         gas_limit: u64,
     ) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, false)
+        Self::execute_bytecode_inner(bytecode, gas_limit, false, TxContext::default())
     }
 
     fn execute_bytecode_inner(
         bytecode: &[u8],
         gas_limit: u64,
         mainnet: bool,
+        ctx: TxContext,
     ) -> Result<ZkVmReceipt, String> {
         if bytecode.is_empty() {
             return Err("Empty BudZKVM bytecode".into());
@@ -69,9 +120,20 @@ impl ZkVmExecutor {
 
         let program = decode_program(bytecode)?;
         let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
+        vm.context.sender = ctx.sender;
+        vm.context.nonce = ctx.nonce;
+        vm.context.block_height = ctx.block_height;
 
         // Use run_receipt so the trace matches prover/AIR assumptions
         // (including terminal Halt row semantics).
+        //
+        // `catch_unwind` is not the safety net here. The release profile
+        // builds with `panic = "abort"`, so a panic inside `run_receipt`
+        // would take the validating node down before this frame saw it. The
+        // property the node relies on is that `run_receipt` returns for every
+        // program, which the `vm_execute` fuzz target asserts directly on
+        // bytecode the compiler never wrote; this wrapper only turns a panic
+        // into an error in the dev and test profiles, where unwinding exists.
         let receipt =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
                 .map_err(|_| "BudZKVM execution failed".to_string())?;
@@ -329,8 +391,12 @@ mod tests {
             .flat_map(|instruction| instruction.to_le_bytes())
             .collect();
 
-        let receipt =
-            ZkVmExecutor::execute_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).unwrap();
+        let receipt = ZkVmExecutor::execute_bytecode(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .unwrap();
 
         assert_eq!(receipt.events, vec![7]);
         assert!(receipt.steps > 0);
@@ -376,11 +442,15 @@ mod tests {
                 .flat_map(|instruction| instruction.to_le_bytes())
                 .collect();
 
-            let err = ZkVmExecutor::execute_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-                .expect_err(&format!(
-                    "{opcode:?} decoded on the ContractCall path; the staged-rollout \
+            let err = ZkVmExecutor::execute_bytecode(
+                &bytecode,
+                DEFAULT_CONTRACT_GAS_LIMIT,
+                TxContext::default(),
+            )
+            .expect_err(&format!(
+                "{opcode:?} decoded on the ContractCall path; the staged-rollout \
                      gate is not applied to user bytecode"
-                ));
+            ));
             assert!(
                 err.contains("activation") || err.contains("Activation"),
                 "{opcode:?} was refused for the wrong reason: {err}"
@@ -389,7 +459,9 @@ mod tests {
             // failure to "BudZKVM execution failed", so this assertion could
             // not be written against it.
             let proving_err = prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-                .expect_err(&format!("{opcode:?} must be refused on the proving path too"));
+                .expect_err(&format!(
+                    "{opcode:?} must be refused on the proving path too"
+                ));
             assert!(
                 proving_err.contains("activation") || proving_err.contains("Activation"),
                 "{opcode:?} was refused by the prover for the wrong reason: {proving_err}"
@@ -520,8 +592,12 @@ mod tests {
             .into_iter()
             .flat_map(|instruction| instruction.to_le_bytes())
             .collect();
-        let receipt = ZkVmExecutor::execute_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect("prove/verify against BudZero main");
+        let receipt = ZkVmExecutor::execute_bytecode(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect("prove/verify against BudZero main");
         assert_eq!(receipt.events, vec![7]);
         assert!(receipt.proof_bytes > 0);
     }

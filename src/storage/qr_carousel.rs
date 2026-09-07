@@ -39,6 +39,12 @@ pub const DEFAULT_BLOCK_LEN: u16 = 200;
 pub const MAX_K: u16 = 4096;
 /// Maximum original payload accepted by one carousel segment (not consensus).
 pub const MAX_CAROUSEL_BYTES: usize = 64 * 1024 * 1024;
+/// Largest `block_len` a carousel accepts: header plus body of one drop must
+/// fit the optical frame's drop-wire cap (`qr_frame::MAX_DROP_WIRE`, 8 KiB),
+/// so `DROP_HEADER_LEN + MAX_BLOCK_LEN` is exactly that cap. `from_payload`
+/// used to accept any non-zero `u16` here, and a drop packed above the cap
+/// was refused by every receiver as `BadDropLen`.
+pub const MAX_BLOCK_LEN: u16 = 8 * 1024 - DROP_HEADER_LEN as u16;
 
 /// Repair margin for a one-shot encode, in permillage of `k`.
 ///
@@ -159,7 +165,7 @@ impl CarouselParams {
         if payload.is_empty() {
             return Err(CarouselError::Empty);
         }
-        if block_len == 0 {
+        if block_len == 0 || block_len > MAX_BLOCK_LEN {
             return Err(CarouselError::BadBlockLen);
         }
         if payload.len() > MAX_CAROUSEL_BYTES {
@@ -258,7 +264,7 @@ impl Drop {
         let body = bytes
             .get(DROP_HEADER_LEN..)
             .ok_or(CarouselError::Truncated)?;
-        if block_len == 0 {
+        if block_len == 0 || block_len > MAX_BLOCK_LEN {
             return Err(CarouselError::BadBlockLen);
         }
         if k == 0 || k > MAX_K {

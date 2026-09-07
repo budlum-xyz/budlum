@@ -199,16 +199,19 @@ pub trait ConsensusEngine: Send + Sync {
         let ancestor_pos = current_chain
             .iter()
             .rposition(|b| new_chain.iter().any(|nb| nb.hash == b.hash));
-        if let Some(pos) = ancestor_pos {
-            let reorg_depth = current_chain.len() - pos - 1;
-            if reorg_depth > MAX_REORG_DEPTH {
-                tracing::warn!(
-                    "Rejecting deep reorg: {} blocks (max: {})",
-                    reorg_depth,
-                    MAX_REORG_DEPTH
-                );
-                return false;
-            }
+        // No shared block means the candidate replaces the whole slice: that
+        // is a reorg of depth `len`, not a reorg of depth zero. Left as
+        // `None`, this path skipped the depth check and admitted any longer
+        // chain with no ancestor at all.
+        let reorg_depth =
+            ancestor_pos.map_or(current_chain.len(), |pos| current_chain.len() - pos - 1);
+        if reorg_depth > MAX_REORG_DEPTH {
+            tracing::warn!(
+                "Rejecting deep reorg: {} blocks (max: {})",
+                reorg_depth,
+                MAX_REORG_DEPTH
+            );
+            return false;
         }
         true
     }
@@ -296,5 +299,37 @@ mod tests {
             deep_new.push(block(h, &format!("{prev}-fork")));
         }
         assert!(!engine.can_reorg(&deep_current, &deep_new));
+    }
+
+    /// A longer candidate that shares no block with the current slice is a
+    /// reorg of the whole slice. Under the cap it is admitted; over the cap
+    /// it is refused, the same as a fork from a known ancestor. This used to
+    /// skip the depth check when no ancestor was found.
+    #[test]
+    fn can_reorg_treats_no_ancestor_as_a_whole_slice_reorg() {
+        fn block(height: u64, prev: &str) -> Block {
+            let mut b = Block::new_with_chain_id(height, prev.to_string(), vec![], 1);
+            b.hash = b.calculate_hash();
+            b
+        }
+        let engine = crate::consensus::pow::PoWEngine::new(0);
+        let build = |len: usize, tag: &str| {
+            let mut chain = vec![block(1000, tag)];
+            for h in 1001..(1000 + len as u64) {
+                let prev = chain.last().unwrap().hash.clone();
+                chain.push(block(h, &prev));
+            }
+            chain
+        };
+        let short_current = build(3, "root-a");
+        let short_new = build(4, "root-b");
+        assert!(engine.can_reorg(&short_current, &short_new));
+
+        let deep_current = build(MAX_REORG_DEPTH + 1, "root-a");
+        let deep_new = build(MAX_REORG_DEPTH + 2, "root-b");
+        assert!(
+            !engine.can_reorg(&deep_current, &deep_new),
+            "a candidate with no shared block replaces the whole slice"
+        );
     }
 }

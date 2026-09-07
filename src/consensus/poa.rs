@@ -193,11 +193,8 @@ impl PoAEngine {
         active_validators: &'a [&Validator],
         entropy: &[u8],
     ) -> Option<&'a Validator> {
-        if active_validators.is_empty() {
-            return None;
-        }
-        let slot = Self::leader_slot_with_entropy(block_index, active_validators, entropy);
-        Some(active_validators[slot])
+        let slot = Self::leader_slot_with_entropy(block_index, active_validators, entropy)?;
+        active_validators.get(slot).copied()
     }
 
     /// VRF-like leader slot selection in `[0, n)`.
@@ -206,7 +203,7 @@ impl PoAEngine {
     /// Public inputs (block_index + validator set), allowing DoS/bribery
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
-    pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> usize {
+    pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
         Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32])
     }
 
@@ -215,10 +212,15 @@ impl PoAEngine {
         block_index: u64,
         active_validators: &[&Validator],
         entropy: &[u8],
-    ) -> usize {
+    ) -> Option<usize> {
         use sha2::{Digest, Sha256};
         let n = active_validators.len();
-        debug_assert!(n > 0);
+        // No validators, no leader. `pick % n` below divides by zero on an
+        // empty set; the guard used to be a `debug_assert!`, which release
+        // builds remove, so both public entry points panicked there.
+        if n == 0 {
+            return None;
+        }
         let mut hasher = Sha256::new();
         hasher.update(b"BUDLUM_POA_LEADER_V2");
         hasher.update(block_index.to_le_bytes());
@@ -236,7 +238,7 @@ impl PoAEngine {
         let mut seed = [0u8; 8];
         seed.copy_from_slice(&digest[..8]);
         let pick = u64::from_le_bytes(seed);
-        (pick % n as u64) as usize
+        Some((pick % n as u64) as usize)
     }
 
     pub fn active_validator_count(&self, state: &AccountState) -> usize {
@@ -501,10 +503,14 @@ mod tests {
         );
         // Explicit slot helper matches expected_proposer.
         for h in 0..8u64 {
-            let slot = PoAEngine::leader_slot(h, &active_refs);
+            let slot = PoAEngine::leader_slot(h, &active_refs).expect("non-empty set");
             let p = engine.expected_proposer(h, &active_refs).unwrap();
             assert_eq!(p.address, active_refs[slot].address);
         }
+        // An empty set has no leader slot, on both entry points, in every
+        // build profile.
+        assert_eq!(PoAEngine::leader_slot(0, &[]), None);
+        assert_eq!(PoAEngine::leader_slot_with_entropy(0, &[], b"x"), None);
     }
 
     #[test]
