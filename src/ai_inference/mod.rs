@@ -205,7 +205,7 @@ pub fn validate_inference_grant(
 
 /// Bulk data access authority for training (epoch bounded). Different from a Pollen
 /// inference grant: training reads a corpus over and over (epochs).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TrainingDataGrant {
     pub asset_id_bytes: [u8; 32],
     pub owner: Address,
@@ -216,7 +216,54 @@ pub struct TrainingDataGrant {
     pub epochs_used: u32,
 }
 
+/// Protocol ceiling for `max_epochs` of a training-data grant (defense in depth:
+/// a corpus can be trained forever only if the protocol says so; this is the
+/// cap the publisher's `max_epochs` cannot exceed).
+pub const MAX_TRAINING_GRANT_EPOCHS: u32 = 4096;
+
 impl TrainingDataGrant {
+    /// Canonical on-chain identity. Domain-separated preimage so a training
+    /// grant id can never collide with an access grant id or any other pollen
+    /// record that uses a plain field hash.
+    #[must_use]
+    pub fn derive_grant_id(&self) -> crate::pollen::GrantId {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_TRAINING_DATA_GRANT_V1");
+        hasher.update(self.asset_id_bytes);
+        hasher.update(self.owner.as_bytes());
+        hasher.update(self.grantee.as_bytes());
+        hasher.update(self.issued_at_block.to_le_bytes());
+        hasher.update(self.expires_at_block.to_le_bytes());
+        hasher.update(self.max_epochs.to_le_bytes());
+        crate::pollen::AssetId(hasher.finalize().into())
+    }
+
+    /// Shape rule applied at issuance (and only there: the fields it checks
+    /// are issuance fields, never mutated later).
+    pub fn validate_shape(&self) -> Result<(), String> {
+        if self.max_epochs == 0 {
+            return Err("AI inference layer: training-data grant needs at least one epoch".into());
+        }
+        if self.max_epochs > MAX_TRAINING_GRANT_EPOCHS {
+            return Err(format!(
+                "AI inference layer: training-data grant max_epochs exceeds {}",
+                MAX_TRAINING_GRANT_EPOCHS
+            ));
+        }
+        if self.expires_at_block <= self.issued_at_block {
+            return Err(
+                "AI inference layer: training-data grant expires before it starts".into(),
+            );
+        }
+        if self.epochs_used != 0 {
+            return Err(
+                "AI inference layer: a new training-data grant cannot start used".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Consume one training epoch (fail-closed: errors once the limit is reached).
     pub fn consume_epoch(&mut self) -> Result<(), String> {
         if self.epochs_used >= self.max_epochs {

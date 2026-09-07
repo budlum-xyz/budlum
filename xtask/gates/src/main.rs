@@ -45,6 +45,7 @@ mod gates {
     pub mod ai_inference_prompt_is_true;
     pub mod ai_inference_reads;
     pub mod ai_inference_zk;
+    pub mod training_data_grant_issued_on_chain;
     pub mod air_selectors;
     pub mod ast_security_gates;
     pub mod badges_current;
@@ -911,6 +912,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::storage_penalties::self_test,
+    },
+    Gate {
+        name: "training-data-grant-issued-on-chain",
+        replaces: None,
+        run: gates::training_data_grant_issued_on_chain::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::training_data_grant_issued_on_chain::self_test,
     },
     Gate {
         name: "a-derivation-cannot-outlive-its-master",

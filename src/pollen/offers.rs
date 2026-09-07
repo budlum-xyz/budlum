@@ -207,6 +207,11 @@ pub struct MarketplaceRegistry {
     /// Pollen: owner-signed access grants. Strict AI gate consumes these.
     #[serde(default)]
     pub access_grants: BTreeMap<GrantId, AccessGrant>,
+    /// Pollen: owner-issued training-data grants (epoch-bounded bulk reads).
+    /// Issued on-chain like an access grant; consumed epoch-by-epoch by the
+    /// training pipeline through the fail-closed epoch ledger.
+    #[serde(default)]
+    pub training_grants: BTreeMap<GrantId, crate::ai_inference::TrainingDataGrant>,
     /// Pollen: seller/owner signed sale authorizations. These define the
     /// Bounded pollen sale terms without transferring DataAsset ownership.
     #[serde(default)]
@@ -388,6 +393,38 @@ impl MarketplaceRegistry {
         let id = grant.grant_id;
         self.access_grants.insert(id, grant);
         Ok(id)
+    }
+
+    pub fn create_training_grant(
+        &mut self,
+        grant: crate::ai_inference::TrainingDataGrant,
+    ) -> Result<GrantId, String> {
+        grant.validate_shape()?;
+        let asset = self
+            .data_assets
+            .get(&AssetId(grant.asset_id_bytes))
+            .ok_or("TrainingDataGrant references unknown DataAsset")?;
+        if !asset.is_active() {
+            return Err("TrainingDataGrant references inactive DataAsset".into());
+        }
+        if grant.owner != asset.owner {
+            return Err("TrainingDataGrant owner must match DataAsset owner".into());
+        }
+        // The same DAO ceiling as access grants: a corpus pass is a bulk read,
+        // and the duration the DAO sets for one read applies to the whole run.
+        self.check_dao_grant_duration_ceiling(grant.issued_at_block, grant.expires_at_block)?;
+        let id = grant.derive_grant_id();
+        if self.training_grants.contains_key(&id) {
+            return Err("TrainingDataGrant already registered".into());
+        }
+        self.training_grants.insert(id, grant);
+        Ok(id)
+    }
+
+    /// Canonical training-data grant by id.
+    #[must_use]
+    pub fn training_grant_by_id(&self, id: &GrantId) -> Option<&crate::ai_inference::TrainingDataGrant> {
+        self.training_grants.get(id)
     }
 
     /// The grant duration ceiling the DAO declares.

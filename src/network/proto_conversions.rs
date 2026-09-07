@@ -328,6 +328,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::PollenGrantTrainingData(grant) => (
+                pb::ProtoTransactionType::PollenGrantTrainingData as i32,
+                Some(pb::proto_transaction::TypePayload::PollenGrantTrainingData(
+                    pb::ProtoPollenTrainingDataGrant {
+                        data: bincode::serialize(grant).unwrap_or_default(),
+                    },
+                )),
+            ),
             TransactionType::PollenRevokeGrant(grant_id) => (
                 pb::ProtoTransactionType::PollenRevokeGrant as i32,
                 Some(pb::proto_transaction::TypePayload::PollenRevokeGrant(
@@ -1264,6 +1272,16 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 TransactionType::PollenGrantAccess(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid AccessGrant payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::PollenGrantTrainingData => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PollenGrantTrainingData(p)) => p,
+                    _ => return Err("Missing or mismatched PollenGrantTrainingData payload".into()),
+                };
+                TransactionType::PollenGrantTrainingData(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid TrainingDataGrant payload: {e}"))?,
                 )
             }
             pb::ProtoTransactionType::PollenRevokeGrant => {

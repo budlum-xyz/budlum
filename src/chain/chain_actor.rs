@@ -557,6 +557,9 @@ pub enum ChainCommand {
     PollenGetAccessGrants {
         response: oneshot::Sender<Vec<crate::pollen::AccessGrant>>,
     },
+    PollenGetTrainingGrants {
+        response: oneshot::Sender<Vec<crate::ai_inference::TrainingDataGrant>>,
+    },
     PollenGetSaleAuthorizations {
         response: oneshot::Sender<Vec<crate::pollen::SaleAuthorization>>,
     },
@@ -2491,6 +2494,15 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn pollen_get_training_grants(&self) -> Vec<crate::ai_inference::TrainingDataGrant> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetTrainingGrants { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn pollen_get_sale_authorizations(&self) -> Vec<crate::pollen::SaleAuthorization> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -4401,6 +4413,17 @@ impl ChainActor {
                         .state
                         .marketplace
                         .access_grants
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(grants);
+                }
+                ChainCommand::PollenGetTrainingGrants { response } => {
+                    let grants: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .training_grants
                         .values()
                         .cloned()
                         .collect();

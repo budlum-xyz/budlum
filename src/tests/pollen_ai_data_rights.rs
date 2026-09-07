@@ -343,3 +343,126 @@ fn tx_backed_pollen_sale_authorization_registers_and_roundtrips_proto() {
         .get_sale_authorization(&authorization.authorization_id)
         .is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Training-data grant (epoch-bounded bulk reads)
+// ---------------------------------------------------------------------------
+
+fn training_grant(owner: Address, grantee: Address, epochs: u32) -> crate::ai_inference::TrainingDataGrant {
+    crate::ai_inference::TrainingDataGrant {
+        asset_id_bytes: [0x77; 32],
+        owner,
+        grantee,
+        issued_at_block: 10,
+        expires_at_block: 10_000,
+        max_epochs: epochs,
+        epochs_used: 0,
+    }
+}
+
+#[test]
+fn training_data_grant_is_issued_on_chain() {
+    let owner = addr(11);
+    let grantee = addr(12);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    let asset = DataAsset::new(owner, ContentId::of(b"corpus"), [0x77; 32], true);
+    state.marketplace.register_data_asset(asset.clone()).unwrap();
+
+    let mut grant = training_grant(owner, grantee, 3);
+    grant.asset_id_bytes = asset.asset_id.0;
+    let tx = pollen_tx(owner, TransactionType::PollenGrantTrainingData(grant.clone()), 0);
+    Executor::apply_transaction_checked(&mut state, &tx).unwrap();
+
+    let id = grant.derive_grant_id();
+    let stored = state.marketplace.training_grant_by_id(&id).expect("grant stored");
+    assert_eq!(stored.grantee, grantee);
+    assert_eq!(stored.max_epochs, 3);
+    assert_eq!(stored.epochs_used, 0);
+}
+
+#[test]
+fn training_data_grant_owner_mismatch_is_refused() {
+    let owner = addr(11);
+    let stranger = addr(13);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    let asset = DataAsset::new(owner, ContentId::of(b"corpus"), [0x77; 32], true);
+    state.marketplace.register_data_asset(asset).unwrap();
+
+    // The stranger needs balance for fee deduction before the arm's owner
+    // check can be reached.
+    state.add_balance(&stranger, 100);
+    let grant = training_grant(owner, stranger, 3);
+    let tx = pollen_tx(stranger, TransactionType::PollenGrantTrainingData(grant), 0);
+    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+    assert!(err.to_string().contains("pollen_training_grant_owner_mismatch"));
+}
+
+#[test]
+fn training_data_grant_unknown_asset_is_refused() {
+    let owner = addr(11);
+    let grantee = addr(12);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    // No asset registered.
+    let grant = training_grant(owner, grantee, 3);
+    let tx = pollen_tx(owner, TransactionType::PollenGrantTrainingData(grant), 0);
+    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+    assert!(err.to_string().contains("pollen_training_grant_failed"));
+}
+
+#[test]
+fn training_data_grant_zero_epochs_is_refused() {
+    let owner = addr(11);
+    let grantee = addr(12);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    let asset = DataAsset::new(owner, ContentId::of(b"corpus"), [0x77; 32], true);
+    state.marketplace.register_data_asset(asset).unwrap();
+
+    let grant = training_grant(owner, grantee, 0);
+    let tx = pollen_tx(owner, TransactionType::PollenGrantTrainingData(grant), 0);
+    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+    assert!(err.to_string().contains("pollen_training_grant_failed"));
+}
+
+#[test]
+fn training_data_grant_wire_roundtrip_preserves_payload() {
+    let owner = addr(11);
+    let grantee = addr(12);
+    let grant = training_grant(owner, grantee, 7);
+    let tx = pollen_tx(owner, TransactionType::PollenGrantTrainingData(grant.clone()), 0);
+
+    let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(&tx);
+    let back = Transaction::try_from(proto).unwrap();
+    assert_eq!(back.tx_type, tx.tx_type);
+}
+
+#[test]
+fn training_data_grant_epoch_consumption_is_fail_closed() {
+    let owner = addr(11);
+    let grantee = addr(12);
+    let mut grant = training_grant(owner, grantee, 2);
+    assert!(grant.is_valid(50));
+    grant.consume_epoch().unwrap();
+    grant.consume_epoch().unwrap();
+    let err = grant.consume_epoch().unwrap_err();
+    assert!(err.contains("epochs exhausted"));
+    assert!(!grant.is_valid(50));
+    // Time expiry refuses independently of epochs.
+    let mut timed = training_grant(owner, grantee, 5);
+    assert!(!timed.is_valid(10_001));
+    assert!(timed.is_valid(10_000));
+    // Shape rules refusals.
+    let mut bad = training_grant(owner, grantee, 0);
+    assert!(bad.validate_shape().is_err());
+    bad.max_epochs = crate::ai_inference::MAX_TRAINING_GRANT_EPOCHS + 1;
+    assert!(bad.validate_shape().is_err());
+    bad.max_epochs = 2;
+    bad.expires_at_block = bad.issued_at_block;
+    assert!(bad.validate_shape().is_err());
+    bad.expires_at_block = 100;
+    bad.epochs_used = 1;
+    assert!(bad.validate_shape().is_err());
+}

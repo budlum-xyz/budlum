@@ -49,6 +49,8 @@ enum ProtoTransactionType {
     // The developer's own claim that an app record is theirs. Distinct from
     // HUB_VERIFY_APP below: this proves ownership, not audit.
     HUB_ATTEST_APP = 43;
+    // Training-data grant (epoch-bounded bulk reads for corpus training).
+    POLLEN_GRANT_TRAINING_DATA = 44;
 }
 
 message ProtoTransaction {
@@ -94,6 +96,7 @@ message ProtoTransaction {
         ProtoPollenAccessGrant pollen_grant_access = 41;
         ProtoPollenId pollen_revoke_grant = 42;
         ProtoPollenId pollen_revoke_data_asset = 43;
+        ProtoPollenTrainingDataGrant pollen_grant_training_data = 51;
         ProtoPrivateTransferSubmit private_transfer_submit = 44;
         ProtoPrivacyNoteInsert privacy_note_insert = 45;
         ProtoAiAttachExecutionProof ai_attach_execution_proof = 46;
@@ -385,6 +388,10 @@ message ProtoPollenDataAsset {
 }
 
 message ProtoPollenSaleAuthorization {
+    bytes data = 1;
+}
+
+message ProtoPollenTrainingDataGrant {
     bytes data = 1;
 }
 

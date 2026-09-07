@@ -3572,6 +3572,70 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn market_prepare_training_grant(
+        &self,
+        owner: String,
+        asset_id_hex: String,
+        grantee: String,
+        expires_at_block: u64,
+        max_epochs: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+        let clean_grantee = grantee.strip_prefix("0x").unwrap_or(&grantee);
+        let grantee_addr = Address::from_hex(clean_grantee).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid grantee address: {e}"), None::<()>)
+        })?;
+        let asset_id = parse_pollen_asset_id(&asset_id_hex)?;
+
+        let grant = crate::ai_inference::TrainingDataGrant {
+            asset_id_bytes: asset_id.0,
+            owner: owner_addr,
+            grantee: grantee_addr,
+            issued_at_block: self.chain.get_height().await,
+            expires_at_block,
+            max_epochs,
+            epochs_used: 0,
+        };
+        grant.validate_shape().map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid grant shape: {e}"), None::<()>)
+        })?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data: bincode::serialize(&grant)
+                .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::PollenGrantTrainingData(grant),
+        };
+
+        Ok(serde_json::json!({
+            "owner": owner,
+            "assetId": asset_id_hex,
+            "grantee": grantee,
+            "expiresAtBlock": expires_at_block,
+            "maxEpochs": max_epochs,
+            "tx_template": tx,
+        }))
+    }
+
     async fn market_prepare_purchase(
         &self,
         buyer: String,
@@ -3621,6 +3685,11 @@ impl BudlumApiServer for RpcServer {
 
     async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let grants = self.chain.pollen_get_access_grants().await;
+        Ok(serde_json::json!(grants))
+    }
+
+    async fn pollen_get_training_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let grants = self.chain.pollen_get_training_grants().await;
         Ok(serde_json::json!(grants))
     }
 

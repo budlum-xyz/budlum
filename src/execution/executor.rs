@@ -1595,6 +1595,31 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::PollenGrantTrainingData(grant) => {
+                let grant = grant.clone();
+                // Same conservative rule as PollenGrantAccess: the issuer is
+                // the transaction signer. The grant owner is the DataAsset
+                // owner (create_training_grant re-checks it against the
+                // registered asset), and a grant for an asset somebody else
+                // owns cannot be issued through this arm.
+                if grant.owner != tx.from {
+                    return Err(BudlumError::validation(
+                        "pollen_training_grant_owner_mismatch",
+                        "TrainingDataGrant owner must equal tx.from",
+                    ));
+                }
+                state
+                    .marketplace
+                    .create_training_grant(grant)
+                    .map_err(|e| {
+                        BudlumError::validation("pollen_training_grant_failed", e)
+                    })?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::PollenRevokeGrant(grant_id) => {
                 state
                     .marketplace

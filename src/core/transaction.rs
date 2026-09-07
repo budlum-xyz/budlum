@@ -310,6 +310,8 @@ pub enum TransactionType {
     PollenAuthorizeSale(crate::pollen::SaleAuthorization),
     /// Register an owner-submitted AccessGrant.
     PollenGrantAccess(crate::pollen::AccessGrant),
+    /// Issue a training-data grant (epoch-bounded bulk corpus reads).
+    PollenGrantTrainingData(crate::ai_inference::TrainingDataGrant),
     /// Revoke a Pollen AccessGrant by id (owner-only in executor).
     PollenRevokeGrant(crate::pollen::GrantId),
     /// Revoke a Pollen DataAsset by id (owner-only in executor).
@@ -1105,6 +1107,7 @@ impl Transaction {
             TransactionType::PollenRegisterDataAsset(_)
             | TransactionType::PollenAuthorizeSale(_)
             | TransactionType::PollenGrantAccess(_)
+            | TransactionType::PollenGrantTrainingData(_)
             | TransactionType::PollenRevokeGrant(_)
             | TransactionType::PollenRevokeDataAsset(_) => schedule.contract_call_gas * 2,
             TransactionType::AiDisputeSlash { .. } => schedule.contract_call_gas,
@@ -1281,6 +1284,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::PollenRegisterDataAsset(_) => 31,
         TransactionType::PollenAuthorizeSale(_) => 32,
         TransactionType::PollenGrantAccess(_) => 33,
+        TransactionType::PollenGrantTrainingData(_) => 44,
         TransactionType::PollenRevokeGrant(_) => 34,
         TransactionType::PollenRevokeDataAsset(_) => 35,
         TransactionType::PrivateTransferSubmit(_) => 36,
@@ -1370,6 +1374,16 @@ fn encode_pollen_grant(grant: &crate::pollen::AccessGrant, out: &mut Vec<u8>) {
         },
     );
     put_fixed(out, grant.owner_signature.as_bytes());
+}
+
+fn encode_training_grant(grant: &crate::ai_inference::TrainingDataGrant, out: &mut Vec<u8>) {
+    put_fixed(out, &grant.asset_id_bytes);
+    put_fixed(out, grant.owner.as_bytes());
+    put_fixed(out, grant.grantee.as_bytes());
+    put_u64(out, grant.issued_at_block);
+    put_u64(out, grant.expires_at_block);
+    put_u32(out, grant.max_epochs);
+    put_u32(out, grant.epochs_used);
 }
 
 fn encode_pollen_sale_authorization(
@@ -1579,6 +1593,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             encode_pollen_sale_authorization(authorization, out);
         }
         TransactionType::PollenGrantAccess(grant) => encode_pollen_grant(grant, out),
+        TransactionType::PollenGrantTrainingData(grant) => encode_training_grant(grant, out),
         TransactionType::PollenRevokeGrant(grant_id) => put_fixed(out, &grant_id.0),
         TransactionType::PollenRevokeDataAsset(asset_id) => put_fixed(out, &asset_id.0),
         TransactionType::AiDisputeSlash {

@@ -757,6 +757,21 @@ pub trait BudlumApi {
     #[method(name = "bud_pollenGetAccessGrants")]
     async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// List training-data grants visible in chain state.
+    #[method(name = "bud_pollenGetTrainingGrants")]
+    async fn pollen_get_training_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a training-data grant transaction (epoch-bounded corpus reads).
+    #[method(name = "bud_marketPrepareTrainingGrant")]
+    async fn market_prepare_training_grant(
+        &self,
+        owner: String,
+        asset_id_hex: String,
+        grantee: String,
+        expires_at_block: u64,
+        max_epochs: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// List Pollen SaleAuthorization records visible in chain state.
     #[method(name = "bud_pollenGetSaleAuthorizations")]
     async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
