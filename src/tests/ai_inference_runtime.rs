@@ -68,7 +68,7 @@ fn result_transaction_with_commitment(
         request_id,
         verifier: operator,
         output_commitment,
-        output_ref: BoundedBytes::empty(),
+        output_ref: BoundedBytes::try_new(b"## inference result\n\nok\n".to_vec()).expect("test output"),
         result_nonce,
         signature: vec![1],
         submitted_at_block: 0,

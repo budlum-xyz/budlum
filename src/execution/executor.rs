@@ -1353,6 +1353,16 @@ impl Executor {
                 // The dispute clock is consensus block time, never a
                 // Submitter-controlled payload field.
                 res.submitted_at_block = current_block;
+                // Output schema rule (binding education report, stage 9): every
+                // AI inference layer output is Markdown. A result whose output fails
+                // the schema is refused at submission - the operator regenerates it.
+                // The output is never downgraded to a near-miss format, and an invalid
+                // output never reaches the NFT bridge or the DataAsset record that
+                // follow finalization.
+                crate::ai_inference::output_schema::validate_markdown_output(
+                    res.output_ref.as_slice(),
+                )
+                .map_err(|e| BudlumError::validation("ai_output_schema_invalid", e.to_string()))?;
                 let outcome = match state.ai_registry.submit_result(res.clone(), current_block) {
                     Ok(outcome) => outcome,
                     Err(error) if crate::ai::registry::is_equivocation_error(&error) => {

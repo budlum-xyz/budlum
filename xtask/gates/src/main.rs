@@ -45,6 +45,7 @@ mod gates {
     pub mod ai_inference_prompt_is_true;
     pub mod ai_inference_reads;
     pub mod ai_inference_zk;
+    pub mod ai_output_is_markdown_validated;
     pub mod air_selectors;
     pub mod ast_security_gates;
     pub mod badges_current;
@@ -911,6 +912,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::storage_penalties::self_test,
+    },
+    Gate {
+        name: "ai-output-is-markdown-validated",
+        replaces: None,
+        run: gates::ai_output_is_markdown_validated::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::ai_output_is_markdown_validated::self_test,
     },
     Gate {
         name: "a-derivation-cannot-outlive-its-master",

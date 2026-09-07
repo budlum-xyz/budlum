@@ -25,6 +25,7 @@ pub mod effort;
 pub mod executor;
 pub mod inference;
 pub mod metrics;
+pub mod output_schema;
 // What a model may read, and in what form. Reading only: AI inference layer does not
 // generate images or video. Written as a plain comment rather than `///`:
 // a doc comment here makes rustdoc resolve the module's own `//!` header in
