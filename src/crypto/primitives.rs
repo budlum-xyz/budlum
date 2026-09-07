@@ -854,6 +854,12 @@ impl WalletKeyPair {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
     }
 
+    /// # Panics
+    /// Only if the derived address is invalid, which cannot happen: the
+    /// public key comes from a generated ML-DSA-87 keypair, and address
+    /// derivation only rejects malformed keys. The panic is allowed here
+    /// deliberately rather than by the workspace default.
+    #[allow(clippy::expect_used)]
     pub fn address(&self) -> crate::core::address::Address {
         self.try_address()
             .expect("Valid ML-DSA-87 public key must yield a valid address")

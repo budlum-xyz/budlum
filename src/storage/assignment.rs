@@ -289,7 +289,7 @@ mod tests {
         // candidates are free: a single departure would take several shards
         // of the same object with it.
         let c = candidates(20);
-        let ids: Vec<ContentId> = (1..=12).map(|i| shard(i)).collect();
+        let ids: Vec<ContentId> = (1..=12).map(shard).collect();
         let holders = assign_object(&ids, &[7u8; 32], &c).unwrap();
         let distinct: std::collections::BTreeSet<Address> = holders.iter().copied().collect();
         assert_eq!(distinct.len(), 12, "every shard gets its own validator");
