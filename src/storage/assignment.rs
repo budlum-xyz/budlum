@@ -215,13 +215,34 @@ pub fn assign_object(
     candidates: &[ShardCandidate],
 ) -> Result<Vec<Address>, AssignmentError> {
     let mut holders = Vec::with_capacity(shard_ids.len());
+    let mut used: std::collections::BTreeSet<Address> = std::collections::BTreeSet::new();
     for shard_id in shard_ids {
         // One holder per shard: the code word's redundancy is the erasure
         // scheme's job, not this function's. Asking for more here would
         // store `n * replicas` copies and quietly multiply the cost the
         // scheme was chosen to control.
-        let placed = assign_shard(shard_id, entropy, candidates, 1)?;
+        //
+        // Within one object, a validator that already holds a shard steps
+        // aside for the next shard while any eligible candidate remains:
+        // each shard is scored against the full pool on its own, so one
+        // high-scoring address can otherwise win many shards of the same
+        // object, and its departure loses all of them at once. When every
+        // candidate already holds a shard of this object, the pool falls
+        // back to the full set - spreading is best-effort once the
+        // validator set is smaller than the code word.
+        let unused: Vec<ShardCandidate> = candidates
+            .iter()
+            .filter(|c| !used.contains(&c.address))
+            .copied()
+            .collect();
+        let pool: &[ShardCandidate] = if unused.is_empty() {
+            candidates
+        } else {
+            &unused
+        };
+        let placed = assign_shard(shard_id, entropy, pool, 1)?;
         holders.push(placed[0]);
+        used.insert(placed[0]);
     }
     Ok(holders)
 }
@@ -260,6 +281,24 @@ mod tests {
 
     fn shard(tag: u8) -> ContentId {
         ContentId([tag; 32])
+    }
+
+    #[test]
+    fn shards_of_one_object_spread_across_validators() {
+        // One object's shards must not pile onto one address while other
+        // candidates are free: a single departure would take several shards
+        // of the same object with it.
+        let c = candidates(20);
+        let ids: Vec<ContentId> = (1..=12).map(|i| shard(i)).collect();
+        let holders = assign_object(&ids, &[7u8; 32], &c).unwrap();
+        let distinct: std::collections::BTreeSet<Address> = holders.iter().copied().collect();
+        assert_eq!(distinct.len(), 12, "every shard gets its own validator");
+
+        // Fewer validators than shards: spreading degrades to best-effort
+        // and still produces a placement for every shard.
+        let small = candidates(2);
+        let holders = assign_object(&ids, &[7u8; 32], &small).unwrap();
+        assert_eq!(holders.len(), 12);
     }
 
     #[test]

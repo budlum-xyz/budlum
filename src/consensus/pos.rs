@@ -219,6 +219,15 @@ impl PoSEngine {
             .checkpoints
             .write()
             .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
+        // Idempotent at one height: `record_block` persists the checkpoint
+        // before the seen-block record, and a crash in that window replays
+        // this whole path for the same block. Without the check the replay
+        // would push a second copy of the same checkpoint.
+        if checkpoints.last().is_some_and(|c| {
+            c.block_index == checkpoint.block_index && c.block_hash == checkpoint.block_hash
+        }) {
+            return Ok(());
+        }
         checkpoints.push(checkpoint);
         Ok(())
     }
@@ -931,6 +940,18 @@ impl ConsensusEngine for PoSEngine {
                 slashing_evidence.push(evidence);
             }
         } else {
+            if block.index > 0 && block.index.is_multiple_of(epoch_length) {
+                // The checkpoint is persisted BEFORE the seen-block record,
+                // and the pair converges across a crash in the window: the
+                // retry takes this same new-entry branch again because the
+                // SEEN record never landed, and `add_checkpoint` is
+                // idempotent for a checkpoint it already holds. The old
+                // order persisted SEEN first; a crash in the window left
+                // the SEEN entry without its checkpoint forever, because
+                // the retry then took the existing-hash branch and never
+                // returned here.
+                self.add_checkpoint(block, storage)?;
+            }
             if let Some(store) = storage {
                 // Not `let _ =`: the seen-block record is the double-sign
                 // evidence. A record that fails to persist means a restart
@@ -944,20 +965,6 @@ impl ConsensusEngine for PoSEngine {
                             header.index
                         ))
                     })?;
-            }
-            if block.index > 0 && block.index.is_multiple_of(epoch_length) {
-                // `add_checkpoint` fails when the checkpoint cannot be
-                // persisted. Discarding that here reported the block as
-                // recorded with an anchor that lived only in memory; after a
-                // restart the node reloaded no checkpoint and would accept a
-                // reorganisation below it. The caller logs the error.
-                //
-                // The sighting is recorded only once the checkpoint is
-                // durable. Inserted first, a failed write left the block in
-                // `seen_blocks`, and the retry found it there, took the
-                // double-sign branch's "same hash" exit and never wrote the
-                // checkpoint at all.
-                self.add_checkpoint(block, storage)?;
             }
             seen_blocks.insert(key, (header, signature));
 

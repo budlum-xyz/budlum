@@ -165,14 +165,8 @@ fuzz_target!(|data: &[u8]| {
                     } else {
                         take(data, &mut i) as u32
                     };
-                    let _ = relayer.process_relay(
-                        mid,
-                        relayer_addr,
-                        &proof,
-                        source_dom,
-                        root,
-                        height,
-                    );
+                    let _ =
+                        relayer.process_relay(mid, relayer_addr, &proof, source_dom, root, height);
                 }
             }
             _ => {

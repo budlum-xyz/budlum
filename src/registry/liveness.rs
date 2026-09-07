@@ -71,7 +71,20 @@ impl LivenessTracker {
         let mut reports = Vec::new();
         let threshold = params.liveness_max_missed_epochs;
 
-        for validator in expected {
+        // Normalize the expected set: a validator named twice in one epoch
+        // would otherwise have the same duty counted twice against them.
+        let expected_set: std::collections::BTreeSet<Address> = expected.iter().copied().collect();
+
+        // A streak counts consecutive missed DUTIES. A validator absent
+        // from this epoch's expected set had no duty, so their miss state
+        // is dropped and a later return starts fresh; keeping it turned an
+        // `[v], [], [v]` sequence into a two-epoch streak.
+        self.missed.retain(|v, _| expected_set.contains(v));
+        self.streak_start_epoch
+            .retain(|v, _| expected_set.contains(v));
+        self.reported.retain(|v, _| expected_set.contains(v));
+
+        for validator in &expected_set {
             if participated(validator) {
                 // Reset on participation (consecutive, not cumulative).
                 self.missed.remove(validator);
@@ -159,6 +172,31 @@ mod tests {
             liveness_max_missed_epochs: threshold,
             ..RegistryParams::default()
         }
+    }
+
+    /// A duplicate in the expected set is one duty, not two, and an epoch
+    /// without the validator carries no miss: `[v, v]` missing is one
+    /// strike, and `[v], [], [v]` missing is a fresh streak, not two.
+    #[test]
+    fn duplicates_and_duty_free_epochs_do_not_extend_streaks() {
+        let mut t = LivenessTracker::new();
+        let p = params(3);
+        let v = addr(1);
+
+        // Named twice, missed once: one strike, not two.
+        let reports = t.record_epoch(1, &[v, v], |_| false, &p);
+        assert!(reports.is_empty());
+        assert_eq!(t.missed_count(&v), 1);
+
+        // No duty at epoch 2: the strike does not survive the gap.
+        t.record_epoch(2, &[], |_| false, &p);
+        assert_eq!(t.missed_count(&v), 0);
+
+        // Two consecutive misses now stay under the threshold of three.
+        t.record_epoch(3, &[v], |_| false, &p);
+        let reports = t.record_epoch(4, &[v], |_| false, &p);
+        assert!(reports.is_empty());
+        assert_eq!(t.missed_count(&v), 2);
     }
 
     /// Each map is counted, so a row cannot slide from `missed` into

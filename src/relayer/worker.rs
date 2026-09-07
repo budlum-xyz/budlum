@@ -209,9 +209,15 @@ impl RelayerWorker {
     /// worst case is a repeated external action for them, which is the same
     /// state a worker without persistence was always in. An unreadable file
     /// must not turn into an outage.
-    fn load_pending(&self) -> std::collections::HashMap<String, PendingResult> {
+    /// The persisted reservations, or the reason they cannot be trusted.
+    ///
+    /// A missing file is an empty set. A file that exists but cannot be
+    /// read or parsed is an ERROR, not an empty set: those reservations
+    /// exist somewhere, and relaying without them can broadcast an external
+    /// action a second time. The caller must fail closed on `Err`.
+    fn load_pending(&self) -> Result<std::collections::HashMap<String, PendingResult>, String> {
         let Some(path) = self.pending_path() else {
-            return std::collections::HashMap::new();
+            return Ok(std::collections::HashMap::new());
         };
         match crate::core::bounded_read::read_to_string_bounded(
             &path,
@@ -229,21 +235,19 @@ impl RelayerWorker {
                                 "Relayer: resuming pending relay results"
                             );
                         }
-                        map
+                        Ok(map)
                     }
-                    Err(e) => {
-                        warn!(error = %e, path = %path.display(),
-                          "Relayer: pending-result file is unreadable; starting with none");
-                        std::collections::HashMap::new()
-                    }
+                    Err(e) => Err(format!(
+                        "pending-result file at {} is corrupt: {e}",
+                        path.display()
+                    )),
                 }
             }
-            Err(e) if e.is_not_found() => std::collections::HashMap::new(),
-            Err(e) => {
-                warn!(error = %e, path = %path.display(),
-                      "Relayer: pending-result file unreadable; starting with none");
-                std::collections::HashMap::new()
-            }
+            Err(e) if e.is_not_found() => Ok(std::collections::HashMap::new()),
+            Err(e) => Err(format!(
+                "pending-result file at {} is unreadable: {e}",
+                path.display()
+            )),
         }
     }
 
@@ -374,6 +378,23 @@ impl RelayerWorker {
                 // A reservation without a result: the external action was
                 // in flight when a run stopped. Nothing to resubmit, and
                 // nothing to repeat either; `process_relay` reports it.
+                // The entry is not exempt from the failure budget, though:
+                // if the request transaction can no longer be read back
+                // from the chain, no submission can ever resolve it, and
+                // holding it forever would exhaust the bounded pending
+                // store. Count the lookup and drop it when the budget is
+                // spent, exactly like a result entry.
+                if self.requester_of(&request).await.is_none() {
+                    self.note_requester_lookup_failure(&request);
+                    changed = true;
+                } else {
+                    error!(
+                        request,
+                        "Relayer: reservation still held with the external action in flight; \
+                         an operator must look the external transaction up by its nonce and \
+                         clear or complete the pending entry"
+                    );
+                }
                 continue;
             };
             let Some(user) = self.requester_of(&request).await else {
@@ -448,11 +469,18 @@ impl RelayerWorker {
             Some(n) => n,
             None => self.chain.get_nonce(&self.relayer_address).await,
         };
+        // The fee follows the market: the fixed 100 was refused (and the
+        // request stalled in retries) whenever the base fee climbed past
+        // it. Pay the current base fee plus headroom so a small rise
+        // between the read and inclusion does not bounce the result; the
+        // handle reports 1 when no actor answers, which keeps the old
+        // behaviour in tests.
+        let fee = self.chain.get_base_fee().await.saturating_add(100);
         let mut result_tx = Transaction::new_with_chain_id(
             self.relayer_address,
             user, // to: original UniversalRelay caller
             0,
-            100, // Fee
+            fee,
             nonce,
             Vec::new(),
             self.chain.get_chain_id().await,
@@ -476,8 +504,13 @@ impl RelayerWorker {
                 // its result is kept under the request hash, so the retry
                 // signs and submits that result again; the chain's replay
                 // protection refuses a second result if one did land. The
-                // local nonce is dropped so the retry re-reads the chain's.
-                self.next_nonce = None;
+                // local nonce is KEPT: a refused transaction consumed
+                // nothing, so the next submission in this pass reuses it.
+                // Dropping the counter here made the next request re-read
+                // the chain nonce, which has not moved for submissions
+                // still in the mempool - the new transaction collided with
+                // one accepted earlier in the same pass. The pass start
+                // re-reads the chain either way.
                 warn!(
                     request,
                     nonce,
@@ -580,7 +613,16 @@ impl RelayerWorker {
             Some(persisted) => persisted,
             None => self.chain.get_finalized_height().await,
         };
-        self.observed = self.load_pending();
+        self.observed = match self.load_pending() {
+            Ok(map) => map,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Relayer: refusing to run; the persisted reservations cannot be                      loaded, and relaying without them could repeat an external                      action. Repair or remove the pending-result file and restart."
+                );
+                return;
+            }
+        };
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -645,6 +687,19 @@ impl RelayerWorker {
                                     "Relayer: result not accepted yet; holding the cursor and retrying"
                                 );
                                 break 'heights;
+                            }
+                            RelayOutcome::Held => {
+                                // The request stays reserved in the pending
+                                // store and is never broadcast again by
+                                // itself; the cursor advances so every later
+                                // request is not held hostage by one case an
+                                // operator must resolve by hand.
+                                warn!(
+                                    height = h,
+                                    request = %tx.hash,
+                                    "Relayer: request held on an in-flight reservation; the cursor \
+                                     moves on and the reservation stays until an operator resolves it"
+                                );
                             }
                         }
                     }
@@ -791,7 +846,7 @@ impl RelayerWorker {
                          on the external chain by its nonce, then clear or complete the \
                          entry in the pending store"
                     );
-                    return RelayOutcome::Retry;
+                    return RelayOutcome::Held;
                 }
             }
         } else {
@@ -876,6 +931,11 @@ enum RelayOutcome {
     /// handle did not take the result. The cursor is held and the request is
     /// attempted again on the next pass.
     Retry,
+    /// The request is held on a reservation whose external action was in
+    /// flight when an earlier run stopped. It is not settled and is never
+    /// relayed again automatically; the cursor may move past it so later
+    /// requests are not blocked behind one manual-resolution case.
+    Held,
 }
 
 /// Write `body` to `path` through a temporary file in the same directory
@@ -891,7 +951,23 @@ fn write_atomically(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> 
     })?;
     let tmp = path.with_file_name(format!("{file_name}.tmp"));
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)
+    // Flush the file contents before the rename: `std::fs::write` does not,
+    // and a crash right after the rename can leave a zero-length or stale
+    // file at the final path. `load_pending` would then forget every
+    // reservation and the relay loop could broadcast an external action
+    // again. Sync the containing directory afterwards so the rename itself
+    // is durable, not only the data.
+    {
+        let file = std::fs::File::open(&tmp)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 /// Whether an adapter failure proves the external chain was never written to.
@@ -1374,7 +1450,7 @@ mod pending_results {
         let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
         let again = RelayerWorker::new(ChainHandle::new(tx2), Address::from([7u8; 32]))
             .with_cursor_path(Some(path));
-        assert_eq!(again.load_pending(), w.observed);
+        assert_eq!(again.load_pending().expect("load"), w.observed);
     }
 
     /// A pending file written before the lookup counter existed still
@@ -1393,9 +1469,27 @@ mod pending_results {
             }
         });
         std::fs::write(w.pending_path().expect("path"), old.to_string()).expect("write");
-        let loaded = w.load_pending();
+        let loaded = w.load_pending().expect("load");
         assert_eq!(loaded["req"].requester_lookups_failed, 0);
         assert_eq!(loaded["req"].result, Some(observation(4)));
+    }
+
+    /// A pending file that exists but cannot be parsed is refused, not read
+    /// as empty: the reservations it held exist somewhere, and relaying
+    /// without them could broadcast an external action a second time. The
+    /// loop fails closed instead (`run` returns on the `Err`).
+    #[test]
+    fn a_corrupt_pending_file_fails_closed_instead_of_loading_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path));
+        std::fs::write(w.pending_path().expect("path"), "not json").expect("write");
+        let err = w
+            .load_pending()
+            .expect_err("a corrupt pending file must not load as empty");
+        assert!(err.contains("corrupt"), "{err}");
     }
 
     /// A reservation left by a run that stopped with the external action in
@@ -1441,7 +1535,7 @@ mod pending_results {
         .with_cursor_path(Some(path))
         .with_adapters(registry)
         .with_signing_key(key);
-        second.observed = second.load_pending();
+        second.observed = second.load_pending().expect("load");
         let request = crate::core::transaction::ExternalTransaction {
             chain: ExternalChain::Ethereum,
             target_address: "0x00000000000000000000000000000000000000aa".to_string(),
@@ -1533,7 +1627,7 @@ mod pending_results {
             },
         );
         w.save_pending();
-        let before = w.load_pending();
+        let before = w.load_pending().expect("load");
         assert_eq!(before.len(), 1);
 
         let mut huge = observation(2);
@@ -1549,7 +1643,7 @@ mod pending_results {
         );
         w.save_pending();
         assert_eq!(
-            w.load_pending(),
+            w.load_pending().expect("load"),
             before,
             "the previous file is what the next start reads"
         );
@@ -1585,7 +1679,7 @@ mod pending_results {
         // `resubmit_lost` writes the store after a drop; the persisted set
         // is what a restart would read, so the drop has to reach it.
         w.save_pending();
-        assert!(w.load_pending().is_empty());
+        assert!(w.load_pending().expect("load").is_empty());
     }
 
     /// The whole pass: a lost submission whose request the chain cannot
@@ -1620,14 +1714,14 @@ mod pending_results {
             MAX_REQUESTER_LOOKUP_FAILURES - 1
         );
         assert_eq!(
-            w.load_pending()["req-orphan"].requester_lookups_failed,
+            w.load_pending().expect("load")["req-orphan"].requester_lookups_failed,
             MAX_REQUESTER_LOOKUP_FAILURES - 1,
             "the count survives a restart"
         );
         w.resubmit_lost().await;
         assert!(w.observed.is_empty(), "the budget is spent");
         assert!(
-            w.load_pending().is_empty(),
+            w.load_pending().expect("load").is_empty(),
             "the drop was written to the pending file"
         );
     }
@@ -1646,7 +1740,7 @@ mod pending_results {
             },
         );
         w.save_pending();
-        assert!(w.load_pending().is_empty());
+        assert!(w.load_pending().expect("load").is_empty());
     }
 
     /// A result whose transaction sits in a finalized block is released; one

@@ -64,7 +64,13 @@ impl NftRegistry {
         };
         self.nfts.insert(id, nft);
         self.ownership.entry(owner).or_default().push(id);
-        self.next_id += 1;
+        // The counter saturates at the terminal id instead of wrapping: at
+        // `u64::MAX` the increment stays put, the terminal id remains live
+        // in `nfts`, and the duplicate check above refuses every further
+        // mint. A wrapping counter would have re-offered burned ids. The
+        // exhaustion check sits on the duplicate guard, so no registry
+        // mutation can happen that the increment then fails to describe.
+        self.next_id = self.next_id.saturating_add(1);
         Ok(id)
     }
 
@@ -97,9 +103,14 @@ impl NftRegistry {
             return Err(NftError::NotOwner);
         }
 
-        // Update ownership map
+        // Update ownership map. An owner whose list becomes empty loses the
+        // entry itself: keeping it would grow snapshots and state roots with
+        // owners that hold nothing.
         if let Some(list) = self.ownership.get_mut(from) {
             list.retain(|&x| x != id);
+            if list.is_empty() {
+                self.ownership.remove(from);
+            }
         }
         self.ownership.entry(to).or_default().push(id);
 
@@ -115,10 +126,14 @@ impl NftRegistry {
 
         let cid = nft.content_id;
 
-        // Remove from everywhere
+        // Remove from everywhere; an emptied ownership list drops its key
+        // for the same reason `transfer` drops it.
         self.nfts.remove(&id);
         if let Some(list) = self.ownership.get_mut(owner) {
             list.retain(|&x| x != id);
+            if list.is_empty() {
+                self.ownership.remove(owner);
+            }
         }
 
         Ok(cid)
@@ -163,7 +178,10 @@ impl NftRegistry {
             match nft.author_name.as_ref() {
                 Some(name) => {
                     hasher.update(b"name:");
-                    hasher.update(name.len().to_le_bytes());
+                    // u64, not usize: `usize::to_le_bytes` is four bytes on
+                    // a 32-bit target and eight on a 64-bit one, so the two
+                    // would hash different roots for the same registry.
+                    hasher.update((name.len() as u64).to_le_bytes());
                     hasher.update(name.as_bytes());
                 }
                 None => hasher.update(b"noname"),
@@ -171,7 +189,7 @@ impl NftRegistry {
             hasher.update((nft.tags.len() as u64).to_le_bytes());
             for tag in &nft.tags {
                 hasher.update(b"tag:");
-                hasher.update(tag.len().to_le_bytes());
+                hasher.update((tag.len() as u64).to_le_bytes());
                 hasher.update(tag.as_bytes());
             }
         }
@@ -190,6 +208,49 @@ impl NftRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An owner whose last NFT leaves them drops out of the ownership map
+    /// entirely; the map never carries an owner with an empty id list.
+    #[test]
+    fn emptied_ownership_entries_are_removed() {
+        let mut reg = NftRegistry::new();
+        let alice = Address::from([1u8; 32]);
+        let bob = Address::from([2u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let id = reg.mint(alice, cid, 0, None).expect("mint");
+        reg.transfer(id, &alice, bob).expect("transfer");
+        assert!(
+            !reg.ownership.contains_key(&alice),
+            "transfer emptied alice"
+        );
+        reg.burn(id, &bob).expect("burn");
+        assert!(!reg.ownership.contains_key(&bob), "burn emptied bob");
+        assert!(reg.ownership.is_empty());
+    }
+
+    /// The mint counter saturates at the terminal id: the id itself mints,
+    /// the registry stays consistent, and the next mint is refused instead
+    /// of wrapping to a reused id.
+    #[test]
+    fn the_terminal_id_mints_once_and_then_refuses() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        reg.next_id = u64::MAX;
+        let id = reg
+            .mint(owner, cid, 0, None)
+            .expect("the terminal id mints");
+        assert_eq!(id, u64::MAX);
+        assert_eq!(
+            reg.next_id,
+            u64::MAX,
+            "the counter saturates, it does not wrap"
+        );
+        let err = reg
+            .mint(owner, cid, 0, None)
+            .expect_err("a second mint is refused");
+        assert_eq!(err, NftError::DuplicateId);
+    }
 
     /// Regression: luminance overflow to u64::MAX must be clamped.
     #[test]

@@ -73,6 +73,13 @@ impl InvalidVoteTracker {
         validator: Address,
         params: &RegistryParams,
     ) -> Option<SlashingReport> {
+        // A stale epoch must not move the tracker: recording under it
+        // would reset the current epoch's counters and reported set, and a
+        // spammer could dodge the threshold forever by interleaving old
+        // votes. Only the current or a newer epoch is recorded.
+        if epoch < self.current_epoch {
+            return None;
+        }
         // New epoch: reset all per-epoch state.
         if epoch != self.current_epoch {
             self.current_epoch = epoch;
@@ -140,6 +147,24 @@ mod tests {
             max_invalid_votes_per_epoch: threshold,
             ..RegistryParams::default()
         }
+    }
+
+    /// A vote from an old epoch is ignored outright: it must not reset the
+    /// current epoch's counters, which would let interleaved stale votes
+    /// keep a spammer under the threshold forever.
+    #[test]
+    fn a_stale_epoch_vote_cannot_reset_the_counters() {
+        let mut t = InvalidVoteTracker::new();
+        let p = params(3);
+        for _ in 0..2 {
+            assert!(t.record_invalid_vote(5, addr(1), &p).is_none());
+        }
+        // Stale vote: ignored, and the two recorded votes survive it.
+        assert!(t.record_invalid_vote(2, addr(1), &p).is_none());
+        assert_eq!(t.current_epoch, 5);
+        assert_eq!(t.counts.get(&addr(1)), Some(&2));
+        // The third current-epoch vote still trips the threshold.
+        assert!(t.record_invalid_vote(5, addr(1), &p).is_some());
     }
 
     /// The counts map and the reported set are counted, so an address

@@ -384,6 +384,22 @@ impl Blockchain {
             #[cfg(test)]
             panic!("Genesis tokenomics supply mismatch: {e}");
         }
+        // A chain id that names a real network gets the full ceremony on
+        // top of the individual checks above: chain-id agreement,
+        // block-reward agreement, validator-list and consensus-key rules,
+        // and the mainnet-specific address, authority and PoW-parameter
+        // gates. Without this, a built-in per-network genesis that drifted
+        // from its ceremony would still build a chain here, while
+        // `main.rs` refuses the identical configuration passed as a file.
+        if let Some(network) = Network::from_chain_id(chain_id) {
+            if let Err(e) = resolved_genesis_config.validate_consensus_ceremony(network) {
+                error!("CRITICAL ERROR: {e}");
+                #[cfg(not(test))]
+                std::process::exit(1);
+                #[cfg(test)]
+                panic!("Genesis ceremony validation failed: {e}");
+            }
+        }
 
         let mut state = resolved_genesis_config.build_state();
 

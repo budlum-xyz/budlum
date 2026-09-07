@@ -167,7 +167,11 @@ services:
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:latest
+    # Pinned to a reviewed digest instead of `latest`: `latest` can resolve
+    # to unreviewed code, and this container shares `budlum-net` with the
+    # nodes and can read `prometheus_data`. v3.14.0 resolved from `latest`
+    # on 2026-09-07; move the pin through review, not a tag bump.
+    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     container_name: budlum-prometheus
     ports:
       # The Prometheus UI is unauthenticated; reach it through an SSH tunnel

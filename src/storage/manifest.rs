@@ -738,6 +738,14 @@ impl ContentManifest {
             ));
         }
         let mut seen = std::collections::BTreeSet::new();
+        // Placement and storage challenges key shards by content id, not by
+        // index. Inside a parity code word two shards sharing one content id
+        // are one stored blob answering for two indices: its holder owes one
+        // shard's duty and would collect for two, and the "redundancy" those
+        // two indices claim does not exist. Refuse the code word. Pure
+        // replication (no parity) may repeat content legitimately, so the
+        // rule applies only when n exceeds k.
+        let mut seen_ids = std::collections::BTreeSet::new();
         let mut total: u64 = 0;
         for s in &self.shards {
             if s.size == 0 {
@@ -745,6 +753,12 @@ impl ContentManifest {
             }
             if !seen.insert(s.index) {
                 return Err(format!("Duplicate shard index {}", s.index));
+            }
+            if self.erasure.n > self.erasure.k && !seen_ids.insert(s.shard_id) {
+                return Err(format!(
+                    "Shard {} repeats the content id of another shard in the same code word",
+                    s.index
+                ));
             }
             total = total
                 .checked_add(u64::from(s.size))
@@ -1117,6 +1131,29 @@ mod tests {
     #[test]
     fn empty_manifest_rejected() {
         assert!(ContentManifest::from_shards(vec![]).is_err());
+    }
+
+    /// Two shards of one parity code word cannot share a content id: they
+    /// would be one stored blob answering for two indices, paid twice for
+    /// one duty. The all-zero object is the canonical producer of such a
+    /// code word.
+    #[test]
+    fn a_code_word_cannot_repeat_a_shard_content_id() {
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let encoded = crate::storage::erasure::encode_object(&[0u8; 4], scheme)
+            .expect("all-zero object encodes");
+        let manifest = encoded.to_manifest().expect("manifest builds");
+        let err = manifest
+            .validate_untrusted()
+            .expect_err("identical shards collapse into one placement identity");
+        assert!(err.contains("repeats the content id"), "{err}");
+
+        // Pure replication may repeat content: two identical chunks are two
+        // real copies, not one blob claiming two duties.
+        let replicated = ContentManifest::from_bytes_sliced(b"abcdabcd", 4).expect("slices");
+        assert_eq!(replicated.shards.len(), 2);
+        assert_eq!(replicated.shards[0].shard_id, replicated.shards[1].shard_id);
+        assert!(replicated.validate_untrusted().is_ok());
     }
 
     #[test]

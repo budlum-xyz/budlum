@@ -361,6 +361,14 @@ impl GenesisConfig {
                     params.team_vesting_epochs, params.team_cliff_epochs
                 ));
             }
+            // Zero `epochs_per_year` cannot express a calendar. The reward
+            // path clamps with `.max(1)` and would pay the whole annual
+            // yield every epoch; `TimedBurnState::due_years` returns 0 for
+            // it and silently skips the timed reserve burn. Refuse the
+            // configuration at the genesis boundary instead.
+            if params.epochs_per_year == 0 {
+                return Err("Genesis bud_tokenomics epochs_per_year must be non-zero".into());
+            }
         }
         Ok(())
     }
@@ -924,6 +932,27 @@ mod tests {
         params.team_vesting_epochs = 0;
         config.bud_tokenomics = Some(params);
         assert!(config.validate_tokenomics_supply().is_ok());
+    }
+
+    /// Zero `epochs_per_year` cannot reach the burn or reward math: the
+    /// ceremony refuses it at the genesis boundary.
+    #[test]
+    fn zero_epochs_per_year_is_refused_at_genesis() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.epochs_per_year = 0;
+        config.bud_tokenomics = Some(params);
+        let error = config
+            .validate_tokenomics_supply()
+            .expect_err("zero epochs_per_year must be refused");
+        assert!(
+            error.contains("epochs_per_year must be non-zero"),
+            "{error}"
+        );
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
     }
 
     #[test]
