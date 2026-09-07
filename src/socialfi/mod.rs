@@ -249,7 +249,7 @@ mod tests {
         let err = reg
             .mint(owner, cid, 0, None)
             .expect_err("a second mint is refused");
-        assert_eq!(err, NftError::DuplicateId);
+        assert!(matches!(err, NftError::DuplicateId));
     }
 
     /// Regression: luminance overflow to u64::MAX must be clamped.
