@@ -198,3 +198,11 @@ pub use social_delete::{process_social_delete, DeleteOutcome};
 pub use three_visibility::{
     delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
 };
+
+pub mod canonical_archive;
+pub use canonical_archive::{
+    ArchivePin, CanonicalArchiveManager, CanonicalManifest, SlsaProvenance, StorageProviderKind,
+};
+
+pub use pact_binding::PrivatePact;
+pub use three_meter::RegenerationBudgetMeter;

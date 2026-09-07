@@ -27,6 +27,8 @@ pub mod permissionless;
 pub mod poa_compliance;
 pub mod poa_membership;
 pub mod poa_onboarding;
+pub mod producer;
+pub mod quarantine_ledger;
 pub mod role;
 
 pub use invalid_vote::InvalidVoteTracker;
@@ -49,3 +51,6 @@ pub use poa_onboarding::{
     OnboardingDecision, OnboardingEvent, PoAOnboarding, PoAWhitelist, DEFAULT_KYC_HORIZON,
 };
 pub use role::{roles, RoleId};
+
+pub use producer::{ProducerEntry, ProducerRegistry, MIN_PRODUCER_BOND};
+pub use quarantine_ledger::{AlarmEntry, QuarantineEntry, QuarantineLedger, QuarantineReason};

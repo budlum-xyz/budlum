@@ -150,3 +150,91 @@ mod tests {
         assert!(m.weight() > 0);
     }
 }
+
+/// E6: CPU/Step Budget Meter for Data Regeneration.
+///
+/// Prevents decompression bombs, unbounded loop execution, and algorithmic complexity DoS
+/// during recursive recipe expansion and data regeneration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegenerationBudgetMeter {
+    pub max_cpu_steps: u64,
+    pub max_memory_bytes: usize,
+    pub max_recursion_depth: u32,
+    pub cpu_steps_used: u64,
+    pub memory_used: usize,
+    pub current_depth: u32,
+}
+
+impl RegenerationBudgetMeter {
+    pub fn new(max_cpu_steps: u64, max_memory_bytes: usize, max_recursion_depth: u32) -> Self {
+        Self {
+            max_cpu_steps,
+            max_memory_bytes,
+            max_recursion_depth,
+            cpu_steps_used: 0,
+            memory_used: 0,
+            current_depth: 0,
+        }
+    }
+
+    pub fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
+        let used = self.cpu_steps_used.saturating_add(steps);
+        if used > self.max_cpu_steps {
+            return Err(MeterError::BudgetExceeded {
+                used,
+                budget: self.max_cpu_steps,
+            });
+        }
+        self.cpu_steps_used = used;
+        Ok(())
+    }
+
+    pub fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
+        let used = self.memory_used.saturating_add(bytes);
+        if used > self.max_memory_bytes {
+            return Err(MeterError::BudgetExceeded {
+                used: used as u64,
+                budget: self.max_memory_bytes as u64,
+            });
+        }
+        self.memory_used = used;
+        Ok(())
+    }
+
+    pub fn enter_recursion(&mut self) -> Result<(), MeterError> {
+        if self.current_depth >= self.max_recursion_depth {
+            return Err(MeterError::BudgetExceeded {
+                used: (self.current_depth + 1) as u64,
+                budget: self.max_recursion_depth as u64,
+            });
+        }
+        self.current_depth += 1;
+        Ok(())
+    }
+
+    pub fn exit_recursion(&mut self) {
+        self.current_depth = self.current_depth.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod regen_tests {
+    use super::*;
+
+    #[test]
+    fn regeneration_budget_enforcement() {
+        let mut meter = RegenerationBudgetMeter::new(1000, 4096, 5);
+        assert!(meter.consume_steps(500).is_ok());
+        assert!(meter.consume_steps(600).is_err());
+
+        assert!(meter.track_memory(2048).is_ok());
+        assert!(meter.track_memory(3000).is_err());
+
+        for _ in 0..5 {
+            assert!(meter.enter_recursion().is_ok());
+        }
+        assert!(meter.enter_recursion().is_err());
+        meter.exit_recursion();
+        assert!(meter.enter_recursion().is_ok());
+    }
+}

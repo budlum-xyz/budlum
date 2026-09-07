@@ -333,3 +333,6 @@ mod tests {
         );
     }
 }
+
+pub mod split_resolver;
+pub use split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};

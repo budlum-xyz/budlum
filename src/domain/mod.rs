@@ -43,3 +43,9 @@ pub use types::{
     DomainId, DomainStatus, Hash32, PoWDomainParameters, RootScheme, VerifiedDomainCommitment,
     AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER, STORAGE_ATTESTATION_ADAPTER,
 };
+
+pub mod plugin_sandbox;
+pub use plugin_sandbox::{
+    PluginSandbox, PluginSandboxConfig, SandboxError, DEFAULT_PLUGIN_GAS_LIMIT,
+    MAX_PLUGIN_MEMORY_BYTES,
+};
