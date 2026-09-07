@@ -243,9 +243,9 @@ pub fn default_domain(
     let adapter_str: String = finality_adapter.into();
     let pow_parameters = if adapter_str == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
         Some(PoWDomainParameters {
-            min_difficulty_bits: 1,
+            min_difficulty_bits: 8,
             max_difficulty_bits: 120,
-            min_cumulative_work: 1,
+            min_cumulative_work: 6 * (1u128 << 8),
             max_headers: 4096,
         })
     } else {

@@ -72,6 +72,26 @@ impl ValidatorSetSnapshot {
         hex::encode(hasher.finalize())
     }
 
+    /// Validates that `set_hash` and `total_stake` match the computed values from `validators`.
+    pub fn validate_metadata(&self) -> Result<(), String> {
+        let computed_hash = Self::compute_hash(&self.validators);
+        if self.set_hash != computed_hash {
+            return Err(format!(
+                "ValidatorSetSnapshot set_hash mismatch: claimed {}, computed {}",
+                self.set_hash, computed_hash
+            ));
+        }
+        let sum: u128 = self.validators.iter().map(|v| u128::from(v.stake)).sum();
+        let expected_total = sum.min(u128::from(u64::MAX)) as u64;
+        if self.total_stake != expected_total {
+            return Err(format!(
+                "ValidatorSetSnapshot total_stake mismatch: claimed {}, computed sum {}",
+                self.total_stake, expected_total
+            ));
+        }
+        Ok(())
+    }
+
     pub fn find_validator(&self, address: &Address) -> Option<&ValidatorEntry> {
         self.validators.iter().find(|v| &v.address == address)
     }

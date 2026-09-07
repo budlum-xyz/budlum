@@ -443,6 +443,7 @@ impl GenesisConfig {
                 );
             }
             self.validate_mainnet_poa_authorities()?;
+            self.validate_mainnet_pow_parameters()?;
             if self.validators.len() < 4 {
                 return Err(
                     "Mainnet genesis requires at least four ceremony validators (3f+1)".into(),
@@ -453,6 +454,23 @@ impl GenesisConfig {
                     "Mainnet genesis has {} validators but only {} complete consensus-key records",
                     self.validators.len(),
                     registered.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_mainnet_pow_parameters(&self) -> Result<(), String> {
+        let pow_domains: Vec<&BootstrapDomainConfig> = self
+            .bootstrap_domains
+            .iter()
+            .filter(|domain| domain.kind == "pow")
+            .collect();
+        for domain in pow_domains {
+            if domain.bridge_enabled && domain.min_confirmations == 0 {
+                return Err(format!(
+                    "Mainnet bridge-enabled PoW domain {} requires min_confirmations >= 1",
+                    domain.id
                 ));
             }
         }

@@ -850,11 +850,13 @@ impl WalletKeyPair {
         out
     }
 
-    pub fn address(&self) -> crate::core::address::Address {
+    pub fn try_address(&self) -> Result<crate::core::address::Address, CryptoError> {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
-            // Fixed 2592-byte encoding, so this cannot fail. A fallback
-            // beats a panic: a key-format change must not abort a node.
-            .unwrap_or_else(|_| crate::core::address::Address::from([0u8; 32]))
+    }
+
+    pub fn address(&self) -> crate::core::address::Address {
+        self.try_address()
+            .expect("Valid ML-DSA-87 public key must yield a valid address")
     }
 
     pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {

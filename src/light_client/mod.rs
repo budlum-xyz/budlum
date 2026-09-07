@@ -178,25 +178,7 @@ impl LightClient {
     /// export could lower `total_stake` and make a minority certificate pass
     /// the light-client quorum check.
     fn validate_snapshot_metadata(snapshot: &ValidatorSetSnapshot) -> Result<(), LightClientError> {
-        let computed_set_hash = ValidatorSetSnapshot::compute_hash(&snapshot.validators);
-        if snapshot.set_hash != computed_set_hash {
-            return Err(LightClientError::TrustBinding(format!(
-                "snapshot set hash {} != computed set hash {}",
-                snapshot.set_hash, computed_set_hash
-            )));
-        }
-        let computed_total_stake = snapshot
-            .validators
-            .iter()
-            .map(|validator| validator.stake)
-            .fold(0u64, u64::saturating_add);
-        if snapshot.total_stake != computed_total_stake {
-            return Err(LightClientError::TrustBinding(format!(
-                "snapshot total stake {} != computed total stake {}",
-                snapshot.total_stake, computed_total_stake
-            )));
-        }
-        Ok(())
+        snapshot.validate_metadata().map_err(LightClientError::TrustBinding)
     }
 
     /// Verify a BLS finality certificate checkpoint against the trusted set.

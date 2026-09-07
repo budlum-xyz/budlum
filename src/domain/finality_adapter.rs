@@ -380,6 +380,11 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
                 "PoS cert set hash does not match validator snapshot".into(),
             ));
         }
+        if let Err(e) = validator_snapshot.validate_metadata() {
+            return Ok(FinalityStatus::Rejected(format!(
+                "PoS validator snapshot metadata invalid: {e}"
+            )));
+        }
 
         // A set hash that cannot be decoded is a refusal, not a step to fall
         // Through. These two checks are the only things binding the proof's
@@ -715,6 +720,11 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
                 "BFT cert set hash does not match validator snapshot".into(),
             ));
         }
+        if let Err(e) = validator_snapshot.validate_metadata() {
+            return Ok(FinalityStatus::Rejected(format!(
+                "BFT validator snapshot metadata invalid: {e}"
+            )));
+        }
         // A set hash that cannot be decoded is a refusal, not a step to fall
         // through. These two comparisons are the only things binding the
         // proof's validator set to the one the domain registered and the one
@@ -969,6 +979,11 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                             .into(),
                     ));
                 }
+                if let Err(e) = validator_snapshot.validate_metadata() {
+                    return Ok(FinalityStatus::Rejected(format!(
+                        "Storage attestation PoS validator snapshot metadata invalid: {e}"
+                    )));
+                }
                 // A set hash that cannot be decoded is a refusal, not a step
                 // To fall through: these two checks are the only things binding
                 // The proof's validator set to the registered one, and the
@@ -1045,6 +1060,11 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                         "Storage attestation BFT cert set hash does not match validator snapshot"
                             .into(),
                     ));
+                }
+                if let Err(e) = validator_snapshot.validate_metadata() {
+                    return Ok(FinalityStatus::Rejected(format!(
+                        "Storage attestation BFT validator snapshot metadata invalid: {e}"
+                    )));
                 }
                 // A set hash that cannot be decoded is a refusal, not a step
                 // To fall through: these two checks are the only things binding
