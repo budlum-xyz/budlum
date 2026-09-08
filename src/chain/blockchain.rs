@@ -128,6 +128,10 @@ pub struct Blockchain {
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
+    /// Durable K3/K4 alarm & quarantine ledger (E1). Node-local and persisted
+    /// through the storage layer; deliberately not folded into the state root
+    /// (see `registry/quarantine_ledger.rs`).
+    pub quarantine_ledger: crate::registry::QuarantineLedger,
     /// Universal Relayer - permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
@@ -704,6 +708,7 @@ impl Blockchain {
         let _message_registry = CrossDomainMessageRegistry::new();
         let mut universal_relayer = UniversalRelayer::new(RelayerConfig::default());
         let mut proof_claims = crate::prover::ProofClaimRegistry::new();
+        let mut quarantine_ledger = crate::registry::QuarantineLedger::new();
 
         if let Some(ref store) = storage {
             if let Ok(domains) = store.load_consensus_domains() {
@@ -835,6 +840,10 @@ impl Blockchain {
                 }
                 state.message_registry = registry;
             }
+
+            if let Ok(Some(stored_quarantine_ledger)) = store.load_quarantine_ledger() {
+                quarantine_ledger = stored_quarantine_ledger;
+            }
         }
 
         // The stored-state loads above run AFTER the block-replay loop and
@@ -882,6 +891,7 @@ impl Blockchain {
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
+            quarantine_ledger,
             universal_relayer,
             settlement_finality_hashes: Vec::new(),
             pending_slashing_evidence: Vec::new(),
@@ -1309,6 +1319,23 @@ impl Blockchain {
                         tracing::error!(error = %e, "Failed to persist consensus domain");
                     }
                 }
+                {
+                    let target =
+                        crate::registry::QuarantineLedger::domain_target(commitment.domain_id);
+                    self.record_quarantine_event(
+                        target,
+                        crate::registry::QuarantineReason::Equivocation(format!(
+                            "conflict at domain height {}",
+                            commitment.domain_height
+                        )),
+                        "DOMAIN_EQUIVOCATION",
+                        &format!(
+                            "domain {} equivocation at height {}",
+                            commitment.domain_id, commitment.domain_height
+                        ),
+                        4,
+                    );
+                }
                 return Err(format!(
                     "Equivocation or invalid sequence detected for domain {} height {}",
                     commitment.domain_id, commitment.domain_height
@@ -1343,6 +1370,23 @@ impl Blockchain {
                     if let Err(e) = store.save_consensus_domain(d_mut) {
                         tracing::error!(error = %e, "Failed to persist consensus domain");
                     }
+                }
+                {
+                    let target =
+                        crate::registry::QuarantineLedger::domain_target(commitment.domain_id);
+                    self.record_quarantine_event(
+                        target,
+                        crate::registry::QuarantineReason::Equivocation(format!(
+                            "conflict at domain height {}",
+                            commitment.domain_height
+                        )),
+                        "DOMAIN_EQUIVOCATION",
+                        &format!(
+                            "domain {} equivocation at height {}",
+                            commitment.domain_id, commitment.domain_height
+                        ),
+                        4,
+                    );
                 }
                 return Err(format!(
                     "Equivocation or invalid sequence detected for domain {} height {}",
@@ -1406,6 +1450,30 @@ impl Blockchain {
             }
         }
         Ok(())
+    }
+
+    /// Record a consensus-integrity event in the durable quarantine ledger and
+    /// persist it. The ledger is node-local (not in the state root); see
+    /// `registry/quarantine_ledger.rs` for why committing it would fork honest
+    /// nodes.
+    fn record_quarantine_event(
+        &mut self,
+        target: crate::domain::types::Hash32,
+        reason: crate::registry::QuarantineReason,
+        code: &str,
+        message: &str,
+        severity: u8,
+    ) {
+        let height = self.chain.len() as u64;
+        self.quarantine_ledger
+            .quarantine_entity(target, reason, height);
+        self.quarantine_ledger
+            .record_alarm(code, message, height, severity);
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_quarantine_ledger(&self.quarantine_ledger) {
+                tracing::error!(error = %e, "Failed to persist quarantine ledger");
+            }
+        }
     }
 
     fn apply_pending_commitments(
@@ -2941,6 +3009,17 @@ impl Blockchain {
                     if let Some(ref m) = self.metrics {
                         m.slashing_events_total.inc();
                     }
+                    let target = *report.offender.as_bytes();
+                    self.record_quarantine_event(
+                        target,
+                        crate::registry::QuarantineReason::OperatorSlash(format!(
+                            "role {}",
+                            report.role
+                        )),
+                        "OPERATOR_SLASH",
+                        &format!("offender slashed (role {})", report.role),
+                        3,
+                    );
                 }
                 Ok(outcome)
             }
@@ -6270,6 +6349,7 @@ impl Clone for Blockchain {
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),
+            quarantine_ledger: self.quarantine_ledger.clone(),
             universal_relayer: self.universal_relayer.clone(),
             settlement_finality_hashes: self.settlement_finality_hashes.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),

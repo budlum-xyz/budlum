@@ -1061,6 +1061,35 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    pub fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        let val = encode(ledger)?;
+        self.db.insert(b"QUARANTINE_LEDGER", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_quarantine_ledger(
+        &self,
+    ) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        if let Some(val) = self.db.get(b"QUARANTINE_LEDGER")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_storage_registry(
         &self,
         registry: &crate::domain::storage_deal::StorageRegistry,
@@ -1742,6 +1771,17 @@ impl BlockchainStorage for Storage {
         &self,
     ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
         Self::load_proof_claim_registry(self)
+    }
+
+    fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        Self::save_quarantine_ledger(self, ledger)
+    }
+
+    fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        Self::load_quarantine_ledger(self)
     }
 
     fn save_storage_economics_state(
