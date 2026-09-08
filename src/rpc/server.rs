@@ -1623,6 +1623,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<String, ErrorObjectOwned> {
         let hash = hex::encode(payload.leaf_hash());
         let payload_clone = payload.clone();
+        let commitment = payload.commitment.clone();
 
         self.chain
             .submit_verified_domain_commitment(payload)
@@ -1634,6 +1635,27 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 )
             })?;
+
+        // C3 (decision 50): the commitment's nonce writes travel in a signed
+        // StateUpdateTx, enqueued here so they apply inside block execution.
+        // The commitment broadcast below keeps the domain registry in sync
+        // across peers until that advancement moves in-block too.
+        match self.chain.build_state_update_transaction(commitment).await {
+            Ok(tx) => {
+                let tx_clone = tx.clone();
+                self.chain.add_transaction(tx).await.map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("State update transaction rejected: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                self.node.broadcast_tx_sync(tx_clone);
+            }
+            Err(e) => {
+                tracing::warn!("Could not build state update transaction: {e}");
+            }
+        }
 
         self.node
             .broadcast_verified_domain_commitment_sync(payload_clone);

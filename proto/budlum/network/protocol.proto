@@ -49,6 +49,10 @@ enum ProtoTransactionType {
     // The developer's own claim that an app record is theirs. Distinct from
     // HUB_VERIFY_APP below: this proves ownership, not audit.
     HUB_ATTEST_APP = 43;
+    // Domain settlement: apply the state-update nonce writes a verified
+    // domain commitment carries. Replaces the out-of-block nonce writes the
+    // live commitment path used to perform (decision 50, C3).
+    STATE_UPDATE = 44;
 }
 
 message ProtoTransaction {
@@ -99,6 +103,7 @@ message ProtoTransaction {
         ProtoAiAttachExecutionProof ai_attach_execution_proof = 46;
         ProtoConsensusKeyRegistration register_consensus_keys = 47;
         ProtoHubAttestApp hub_attest_app = 48;
+        ProtoStateUpdate state_update = 51;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -132,6 +137,21 @@ message ProtoOwnerSignature {
 // name someone else and rely on the check being present.
 message ProtoHubAttestApp {
     uint64 app_id = 1;
+}
+
+// Block-scoped domain settlement payload (C3, decision 50). Carries the
+// per-account nonce writes a verified domain commitment authorizes. The
+// entries are ordered deterministically (address-sorted) so the canonical
+// signing preimage is stable across nodes.
+message ProtoStateUpdate {
+    uint32 domain_id = 1;
+    uint64 domain_height = 2;
+    repeated ProtoStateUpdateEntry state_updates = 3;
+}
+
+message ProtoStateUpdateEntry {
+    bytes address = 1;
+    uint64 nonce = 2;
 }
 
 message ProtoConsensusKeyRegistration {

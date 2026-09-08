@@ -1,16 +1,20 @@
 //! Consensus state must only change inside a block (C3, step 1).
 //!
-//! The full invariant - `message_registry`, `bridge_state` and `state_updates`
-//! mutate only inside block execution - lands with the signed-tx refactor
-//! (decision 50, PLAN-C3-TX-YOLU). Until it lands, the out-of-block mutators
-//! are safe only because of preconditions this gate pins:
+//! The `state_updates` half of decision 50 has landed (slice 1+2): a verified
+//! domain commitment's nonce writes now travel in a signed `StateUpdateTx` and
+//! are applied inside block execution by the executor's `StateUpdate` arm,
+//! instead of out of block by `apply_pending_commitments`. This gate pins the
+//! landed invariant and keeps the still-out-of-block mutators
+//! (`message_registry`, `bridge_state`) safe until their slices land:
 //!
 //!   1. The state root keeps covering the consensus fields. The fix moves the
 //!      mutation into blocks; it does not drop the fields from the root, which
 //!      would hide the divergence instead of fixing it.
-//!   2. `validate_commitment_state_updates` runs BEFORE the nonce write and
-//!      rejects non-monotonic, near-`u64::MAX` and over-ceiling updates.
-//!   3. Every out-of-block mutation leaves a durable trail
+//!   2. `apply_pending_commitments` no longer writes account nonces out of
+//!      block; the executor's `StateUpdate` arm validates before it writes.
+//!   3. The validation itself rejects non-monotonic, near-`u64::MAX` and
+//!      over-ceiling updates.
+//!   4. Every out-of-block mutation leaves a durable trail
 //!      (`save_cross_domain_message`, `save_universal_relayer`,
 //!      `save_bridge_state`), so a restart can reconstruct the same state.
 //!
@@ -47,6 +51,7 @@ fn slice_of<'a>(src: &'a str, start: &str, end: &str) -> Result<&'a str, String>
 pub fn run(root: &Path) -> Result<String, String> {
     let bc = code_of(root, "src/chain/blockchain.rs")?;
     let acc = code_of(root, "src/core/account.rs")?;
+    let ex = code_of(root, "src/execution/executor.rs")?;
 
     // 1. The state root covers the consensus fields the out-of-block paths
     //    mutate.
@@ -69,22 +74,52 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    // 2. Nonce writes: validate before write, inside apply_pending_commitments.
+    // 2. The commitment nonce writes are block-scoped: the out-of-block path
+    //    must not write account nonces any more, and the executor's StateUpdate
+    //    arm must validate before it writes. The assignment `account.nonce =
+    //    *new_nonce` may only exist in the executor's StateUpdate arm; every
+    //    other copy (apply_pending_commitments, the startup load path, the
+    //    reorg reload path) is an out-of-block mutation.
+    if bc.matches("account.nonce = *new_nonce").count() != 0 {
+        return Err(
+            "blockchain.rs still writes account nonces out of block (startup load, reorg reload, or apply_pending_commitments)"
+                .to_string(),
+        );
+    }
     let apc = slice_of(
         &bc,
         "fn apply_pending_commitments",
         "pub fn submit_verified_domain_commitment(",
     )?;
-    let val = apc.find("validate_commitment_state_updates(&com)?");
-    let write = apc.find("account.nonce = *new_nonce");
-    let val =
-        val.ok_or("apply_pending_commitments lost the validate_commitment_state_updates call")?;
-    let write = write.ok_or("apply_pending_commitments lost the nonce write")?;
-    if val > write {
+    if apc.contains("account.nonce = *new_nonce") {
         return Err(
-            "nonce write runs before validate_commitment_state_updates in apply_pending_commitments"
-                .to_string(),
+            "apply_pending_commitments still writes account nonces out of block".to_string(),
         );
+    }
+
+    let arm = slice_of(&ex, "TransactionType::StateUpdate", "Ok(())")?;
+    let val = arm
+        .find("*new_nonce <= current")
+        .ok_or("executor StateUpdate arm lost the monotonic nonce check")?;
+    let write = arm
+        .find("account.nonce = *new_nonce")
+        .ok_or("executor StateUpdate arm lost the nonce write")?;
+    if val > write {
+        return Err("executor StateUpdate arm writes nonces before validating".to_string());
+    }
+    for (needle, msg) in [
+        (
+            "MAX_STATE_UPDATES",
+            "executor StateUpdate arm lost the update ceiling check",
+        ),
+        (
+            "u64::MAX - 1000",
+            "executor StateUpdate arm lost the near-u64::MAX nonce guard",
+        ),
+    ] {
+        if !arm.contains(needle) {
+            return Err(msg.to_string());
+        }
     }
 
     // 3. The validation itself rejects non-monotonic, near-MAX and
@@ -138,7 +173,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
     }
 
-    Ok("Consensus-state boundary OK: state root covers consensus fields, nonce writes validate-before-write, out-of-block mutators persist a durable trail. Full block-scoped mutation lands with the signed-tx refactor (decision 50).".to_string())
+    Ok("Consensus-state boundary OK: state root covers consensus fields, StateUpdate nonce writes are block-scoped (executor validates before writing, no out-of-block write), out-of-block mutators persist a durable trail. message_registry and bridge_state move in-block in later slices (decision 50).".to_string())
 }
 
 /// # Errors
@@ -155,16 +190,19 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-cscib")?;
-    for sub in ["src/chain", "src/core"] {
+    for sub in ["src/chain", "src/core", "src/execution"] {
         std::fs::create_dir_all(tmp.join(sub)).map_err(|e| e.to_string())?;
     }
     let bc_src = root.join("src/chain/blockchain.rs");
     let acc_src = root.join("src/core/account.rs");
+    let ex_src = root.join("src/execution/executor.rs");
     let bc_dst = tmp.join("src/chain/blockchain.rs");
     let acc_dst = tmp.join("src/core/account.rs");
+    let ex_dst = tmp.join("src/execution/executor.rs");
 
     std::fs::copy(&bc_src, &bc_dst).map_err(|e| e.to_string())?;
     std::fs::copy(&acc_src, &acc_dst).map_err(|e| e.to_string())?;
+    std::fs::copy(&ex_src, &ex_dst).map_err(|e| e.to_string())?;
     if run(&tmp).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from("canary: an unmodified copy was refused"));
@@ -188,22 +226,40 @@ pub fn self_test() -> Result<String, String> {
     }
     std::fs::copy(&acc_src, &acc_dst).map_err(|e| e.to_string())?;
 
-    // Break 2: non-monotonic nonce updates are no longer rejected.
-    let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
+    // Break 2: the executor StateUpdate arm accepts equal nonce.
+    let text = std::fs::read_to_string(&ex_dst).map_err(|e| e.to_string())?;
     std::fs::write(
-        &bc_dst,
+        &ex_dst,
         text.replace("*new_nonce <= current", "*new_nonce < current"),
     )
     .map_err(|e| e.to_string())?;
     if run(&tmp).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "canary: a validation that accepts equal nonce passed",
+            "canary: an executor StateUpdate arm that accepts equal nonce passed",
+        ));
+    }
+    std::fs::copy(&ex_src, &ex_dst).map_err(|e| e.to_string())?;
+
+    // Break 3: apply_pending_commitments regains an out-of-block nonce write.
+    let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &bc_dst,
+        text.replace(
+            "self.validate_commitment_state_updates(&com)?;",
+            "self.validate_commitment_state_updates(&com)?;\n                for (addr, new_nonce) in &com.state_updates {\n                    let account = self.state.get_or_create(addr);\n                    account.nonce = *new_nonce;\n                }",
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&tmp).is_ok() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: an out-of-block nonce write in apply_pending_commitments passed",
         ));
     }
     std::fs::copy(&bc_src, &bc_dst).map_err(|e| e.to_string())?;
 
-    // Break 3: the cross-domain message durable trail is gone.
+    // Break 4: the cross-domain message durable trail is gone.
     let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
     std::fs::write(
         &bc_dst,
@@ -217,6 +273,24 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
             "canary: an unpersisted cross-domain message passed",
+        ));
+    }
+    std::fs::copy(&bc_src, &bc_dst).map_err(|e| e.to_string())?;
+
+    // Break 5: the startup load path regains an out-of-block nonce write.
+    let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &bc_dst,
+        text.replace(
+            "// out-of-block mutation of consensus state.\n",
+            "// out-of-block mutation of consensus state.\n                    let account = state.get_or_create(&commitment_addr); account.nonce = *new_nonce;\n",
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&tmp).is_ok() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: a startup load path that writes nonces out of block passed",
         ));
     }
 

@@ -2229,6 +2229,53 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::StateUpdate {
+                domain_id,
+                domain_height,
+                state_updates,
+            } => {
+                // The rules that used to guard the out-of-block commitment
+                // nonce writes now run here, inside block execution (C3,
+                // decision 50): ceiling, monotonicity, near-u64::MAX.
+                if state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
+                    return Err(BudlumError::validation(
+                        "state_update_ceiling",
+                        format!(
+                            "domain {domain_id} height {domain_height}: {} state updates exceed {}",
+                            state_updates.len(),
+                            crate::domain::types::MAX_STATE_UPDATES
+                        ),
+                    ));
+                }
+                for (addr, new_nonce) in state_updates {
+                    let current = state.get_nonce(addr);
+                    if *new_nonce <= current {
+                        return Err(BudlumError::validation(
+                            "state_update_nonce",
+                            format!(
+                                "domain {domain_id} height {domain_height}: non-monotonic nonce for {addr}"
+                            ),
+                        ));
+                    }
+                    if *new_nonce >= u64::MAX - 1000 {
+                        return Err(BudlumError::validation(
+                            "state_update_nonce_ceiling",
+                            format!(
+                                "domain {domain_id} height {domain_height}: nonce near u64::MAX for {addr}"
+                            ),
+                        ));
+                    }
+                }
+                for (addr, new_nonce) in state_updates {
+                    let account = state.get_or_create(addr);
+                    account.nonce = *new_nonce;
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
         }
 
         Ok(())

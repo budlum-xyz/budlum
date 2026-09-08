@@ -1320,6 +1320,20 @@ impl AccountState {
                     );
                 }
             }
+            TransactionType::StateUpdate { state_updates, .. } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err("State update requires zero amount/recipient and empty data".into());
+                }
+                if state_updates.is_empty() {
+                    return Err("State update requires at least one nonce write".into());
+                }
+                if state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
+                    return Err(format!(
+                        "State update exceeds {} nonce writes",
+                        crate::domain::types::MAX_STATE_UPDATES
+                    ));
+                }
+            }
             _ => {}
         }
 

@@ -155,6 +155,26 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     pb::ProtoHubAttestApp { app_id: *app_id },
                 )),
             ),
+            TransactionType::StateUpdate {
+                domain_id,
+                domain_height,
+                state_updates,
+            } => (
+                pb::ProtoTransactionType::StateUpdate as i32,
+                Some(pb::proto_transaction::TypePayload::StateUpdate(
+                    pb::ProtoStateUpdate {
+                        domain_id: *domain_id,
+                        domain_height: *domain_height,
+                        state_updates: state_updates
+                            .iter()
+                            .map(|(addr, nonce)| pb::ProtoStateUpdateEntry {
+                                address: addr.as_bytes().to_vec(),
+                                nonce: *nonce,
+                            })
+                            .collect(),
+                    },
+                )),
+            ),
             TransactionType::AiModelRegister(spec) => (
                 pb::ProtoTransactionType::AiModelRegister as i32,
                 Some(pb::proto_transaction::TypePayload::AiModelRegister(
@@ -934,6 +954,26 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 };
                 TransactionType::BudlumxyzAttestApp {
                     app_id: payload.app_id,
+                }
+            }
+            pb::ProtoTransactionType::StateUpdate => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::StateUpdate(p)) => p,
+                    _ => return Err("Missing or mismatched StateUpdate payload".into()),
+                };
+                let mut state_updates = Vec::with_capacity(payload.state_updates.len());
+                for entry in payload.state_updates {
+                    if entry.address.len() != 32 {
+                        return Err("StateUpdate entry address must be 32 bytes".into());
+                    }
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(&entry.address);
+                    state_updates.push((Address(addr), entry.nonce));
+                }
+                TransactionType::StateUpdate {
+                    domain_id: payload.domain_id,
+                    domain_height: payload.domain_height,
+                    state_updates,
                 }
             }
             pb::ProtoTransactionType::AiModelRegister => {
@@ -2137,6 +2177,11 @@ mod tests {
                 signature: vec![7, 7, 7],
                 submitted_at_block: 15,
             }),
+            TransactionType::StateUpdate {
+                domain_id: 7,
+                domain_height: 42,
+                state_updates: vec![(to, 5), (from, 6)],
+            },
         ];
 
         for tx_type in test_cases {

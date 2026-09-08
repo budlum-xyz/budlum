@@ -138,6 +138,10 @@ pub enum ChainCommand {
         crate::domain::VerifiedDomainCommitment,
         oneshot::Sender<Result<(), String>>,
     ),
+    BuildStateUpdateTransaction(
+        crate::domain::DomainCommitment,
+        oneshot::Sender<Result<Transaction, String>>,
+    ),
     SubmitCrossDomainMessage(
         crate::cross_domain::CrossDomainMessage,
         oneshot::Sender<Result<(), String>>,
@@ -1533,6 +1537,19 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::SubmitVerifiedDomainCommitment(payload, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn build_state_update_transaction(
+        &self,
+        commitment: crate::domain::DomainCommitment,
+    ) -> Result<Transaction, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BuildStateUpdateTransaction(commitment, tx))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -3293,6 +3310,10 @@ impl ChainActor {
                         self.blockchain
                             .submit_verified_domain_commitment(payload.commitment, payload.proof),
                     );
+                }
+                ChainCommand::BuildStateUpdateTransaction(commitment, res_tx) => {
+                    let _ =
+                        res_tx.send(self.blockchain.build_state_update_transaction(&commitment));
                 }
                 ChainCommand::SubmitCrossDomainMessage(message, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));

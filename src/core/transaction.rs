@@ -358,6 +358,15 @@ pub enum TransactionType {
     /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
+    /// Domain settlement: apply the nonce writes a verified domain commitment
+    /// carries (decision 50, C3). Replaces the out-of-block account nonce
+    /// writes the live commitment path used to perform; the executor validates
+    /// and applies them inside block execution.
+    StateUpdate {
+        domain_id: crate::domain::types::DomainId,
+        domain_height: u64,
+        state_updates: Vec<(Address, u64)>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1129,6 +1138,9 @@ impl Transaction {
             TransactionType::AiOperatorBond
             | TransactionType::AiOperatorUnbond
             | TransactionType::AiOperatorWithdraw => schedule.stake_gas,
+            // One lookup plus one write per state-update entry; priced like a
+            // registry mutation, not a value transfer.
+            TransactionType::StateUpdate { .. } => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1353,6 +1365,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::AiOperatorWithdraw => 41,
         TransactionType::RegisterConsensusKeys(_) => 42,
         TransactionType::BudlumxyzAttestApp { .. } => 43,
+        TransactionType::StateUpdate { .. } => 44,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1725,6 +1738,19 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                 None => put_u8(out, 0),
             }
         }
+        TransactionType::StateUpdate {
+            domain_id,
+            domain_height,
+            state_updates,
+        } => {
+            put_u32(out, *domain_id);
+            put_u64(out, *domain_height);
+            put_u64(out, state_updates.len() as u64);
+            for (addr, nonce) in state_updates {
+                put_fixed(out, addr.as_bytes());
+                put_u64(out, *nonce);
+            }
+        }
     }
 }
 
@@ -1767,6 +1793,26 @@ mod v29_signing_tests {
             nft_id: 7,
             tag: "tampered".into(),
         };
+        assert!(!tx.verify());
+    }
+
+    #[test]
+    fn state_update_payload_tampering_invalidates_signature() {
+        let mut tx = signed_variant(TransactionType::StateUpdate {
+            domain_id: 7,
+            domain_height: 42,
+            state_updates: vec![
+                (test_addr_from_byte(3u8), 10),
+                (test_addr_from_byte(9u8), 11),
+            ],
+        });
+        let original_hash = tx.hash.clone();
+        if let TransactionType::StateUpdate { state_updates, .. } = &mut tx.tx_type {
+            state_updates[0].1 = 999;
+        } else {
+            unreachable!("variant must stay StateUpdate");
+        }
+        assert_ne!(tx.calculate_hash(), original_hash);
         assert!(!tx.verify());
     }
 

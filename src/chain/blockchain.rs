@@ -777,15 +777,13 @@ impl Blockchain {
                         warn!("Skipping invalid stored domain commitment: {e}");
                         continue;
                     }
+                    // C3 (decision 50): the commitment registry is durable, but
+                    // the account nonce is not restored from it. The nonce only
+                    // moves when a block commits the StateUpdateTx and the block
+                    // replay re-executes it; writing it here would be an
+                    // out-of-block mutation of consensus state.
                     if let Err(e) = domain_commitment_registry.insert(commitment.clone()) {
                         warn!("Skipping duplicate stored domain commitment: {e}");
-                    } else {
-                        for (addr, new_nonce) in &commitment.state_updates {
-                            if *new_nonce > state.get_nonce(addr) {
-                                let account = state.get_or_create(addr);
-                                account.nonce = *new_nonce;
-                            }
-                        }
                     }
                 }
             }
@@ -1518,10 +1516,12 @@ impl Blockchain {
 
                 self.validate_commitment_state_updates(&com)?;
 
-                for (addr, new_nonce) in &com.state_updates {
-                    let account = self.state.get_or_create(addr);
-                    account.nonce = *new_nonce;
-                }
+                // The nonce writes a commitment carries no longer happen here,
+                // out of block. They travel in the signed StateUpdateTx and are
+                // applied inside block execution by the executor's StateUpdate
+                // arm (C3, decision 50). The domain registry advancement stays:
+                // it is committed via `domain_registry_root`, not the account
+                // state root, and moves in a later slice of the refactor.
 
                 let d_mut = self
                     .domain_registry
@@ -1545,6 +1545,52 @@ impl Blockchain {
     ) -> Result<(), String> {
         self.verify_domain_commitment_finality(&commitment, &proof)?;
         self.accept_domain_commitment(commitment)
+    }
+
+    /// Build the signed `StateUpdateTx` that carries a verified commitment's
+    /// nonce writes into the mempool (C3, decision 50). Signed by the local
+    /// consensus signer, so the transaction is a normal V4 Ed25519 transaction
+    /// paying the base fee from the signer's account. Read-only: it does not
+    /// mutate state; the caller decides whether to enqueue it.
+    pub fn build_state_update_transaction(
+        &self,
+        commitment: &DomainCommitment,
+    ) -> Result<Transaction, String> {
+        let signer = self.consensus.signer().ok_or_else(|| {
+            "No consensus signer available to build a state update transaction".to_string()
+        })?;
+        let from = signer.address();
+        let nonce = self.state.get_nonce(&from);
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            self.state.base_fee,
+            nonce,
+            Vec::new(),
+            self.chain_id,
+            crate::core::transaction::TransactionType::StateUpdate {
+                domain_id: commitment.domain_id,
+                domain_height: commitment.domain_height,
+                state_updates: commitment
+                    .state_updates
+                    .iter()
+                    .map(|(addr, n)| (*addr, *n))
+                    .collect(),
+            },
+        );
+        // V4 Ed25519: the signer backend signs a 32-byte hash, and `from` is
+        // the legacy Ed25519 public key itself.
+        tx.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
+        tx.signer_public_key = Vec::new();
+        tx.authorization = None;
+        let signing_hash = tx.signing_hash();
+        let signature = signer
+            .sign_block(&signing_hash)
+            .map_err(|e| format!("State update transaction signing failed: {e}"))?;
+        tx.signature = Some(signature);
+        tx.hash = tx.calculate_hash();
+        Ok(tx)
     }
 
     pub fn verify_domain_commitment_finality(
@@ -4791,13 +4837,6 @@ impl Blockchain {
                     }
                     if let Err(e) = self.domain_commitment_registry.insert(commitment.clone()) {
                         warn!("Skipping duplicate commitment during reorg: {e}");
-                    } else {
-                        for (addr, new_nonce) in &commitment.state_updates {
-                            if *new_nonce > self.state.get_nonce(addr) {
-                                let account = self.state.get_or_create(addr);
-                                account.nonce = *new_nonce;
-                            }
-                        }
                     }
                 }
             }
