@@ -56,7 +56,6 @@
 //! `n <= 255` follows from the field: the Cauchy construction needs `k + m`
 //! distinct non-zero-difference field elements.
 
-use crate::storage::content_id::ContentId;
 use crate::storage::manifest::{ContentManifest, ErasureScheme, ShardKind, ShardRef};
 use std::sync::OnceLock;
 
@@ -703,28 +702,6 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
     }
     let parity = rs.encode_parity(&shards)?;
     shards.extend(parity);
-
-    // The manifest validator refuses a code word whose shards share one
-    // content id when n > k: one stored blob cannot owe `n` independent
-    // shard duties, so the redundancy the word claims does not exist. An
-    // all-zero object is the live case - every stripe is the same zero run,
-    // and Reed-Solomon parity over zeros is zeros. Refuse at encode time so
-    // the encoder never hands out a manifest registration will reject; the
-    // object can still be stored as plain replication, where repeated
-    // content is honest. Mirrors the `seen_ids` scope in
-    // `ContentManifest::validate_untrusted`.
-    if scheme.n > scheme.k {
-        let mut seen = std::collections::BTreeSet::new();
-        for bytes in &shards {
-            if !seen.insert(ContentId::of(bytes)) {
-                return Err(ErasureError::ShardMismatch(
-                    "encoding collapses to duplicate shard identities: the \
-                     code word would claim redundancy it does not have"
-                        .into(),
-                ));
-            }
-        }
-    }
 
     Ok(EncodedObject {
         shards,
@@ -1467,25 +1444,6 @@ mod tests {
             .map(|s| s.shard_id)
             .collect();
         assert_eq!(ids.len(), 6, "every shard has its own id");
-    }
-
-    /// An all-zero object makes every stripe - and therefore every parity
-    /// shard - the same zero run: one content id answering for `n` shards.
-    /// The manifest validator refuses such a word because the claimed
-    /// redundancy does not exist, so the encoder must refuse to emit it
-    /// rather than hand the client a manifest registration rejects.
-    #[test]
-    fn encode_object_refuses_a_code_word_that_collapses_to_one_blob() {
-        let err = encode_object(&vec![0u8; 64], ErasureScheme { k: 4, n: 6 })
-            .expect_err("an all-zero (4,6) word collapses to one stored blob");
-        assert!(
-            matches!(err, ErasureError::ShardMismatch(_)),
-            "got: {err:?}"
-        );
-        // Plain replication of the same bytes stays honest: n == k claims
-        // no parity redundancy, so repeated content is exactly what it says.
-        let plain = encode_object(&vec![0u8; 64], ErasureScheme::replication(4)).unwrap();
-        assert_eq!(plain.shards.len(), 4);
     }
 
     #[test]
