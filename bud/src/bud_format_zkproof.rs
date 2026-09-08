@@ -284,22 +284,21 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
-}
-
 #[cfg(unix)]
-#[test]
-fn save_refuses_a_pre_planted_symlink() {
-    let witness = witness_for(&b"symlink refusal ".repeat(60));
-    let rows = witness_to_field_trace(&witness);
-    let (_, root) = field_trace_meta(&rows);
-    let dir = std::env::temp_dir().join(format!("budzk-sym-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("dir");
-    let victim = dir.join("victim");
-    let link = dir.join("trace.trace");
-    std::os::unix::fs::symlink(&victim, &link).expect("symlink");
-    let err = save_field_trace(&link, &rows, &root)
-        .expect_err("a pre-planted symlink must be refused, not followed");
-    assert!(err.contains("create error"), "{err}");
-    assert!(!victim.exists(), "the symlink target must remain untouched");
-    let _ = std::fs::remove_dir_all(&dir);
+        #[test]
+    fn save_refuses_a_pre_planted_symlink() {
+        let witness = witness_for(&b"symlink refusal ".repeat(60));
+        let rows = witness_to_field_trace(&witness);
+        let (_, root) = field_trace_meta(&rows);
+        let dir = std::env::temp_dir().join(format!("budzk-sym-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let victim = dir.join("victim");
+        let link = dir.join("trace.trace");
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+        let err = save_field_trace(&link, &rows, &root)
+            .expect_err("a pre-planted symlink must be refused, not followed");
+        assert!(err.contains("create error"), "{err}");
+        assert!(!victim.exists(), "the symlink target must remain untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

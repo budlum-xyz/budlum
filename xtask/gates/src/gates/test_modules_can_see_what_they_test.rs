@@ -319,7 +319,7 @@ fn the_walker_does_not_follow_symlinks() -> Result<(), String> {
     walker_symlink_check()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn walker_symlink_check() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("gate-walk-{}", std::process::id()));
     let inner = dir.join("inner");
