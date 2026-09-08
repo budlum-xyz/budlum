@@ -859,7 +859,6 @@ impl WalletKeyPair {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
             .expect("Valid ML-DSA-87 public key must yield a valid address")
     }
-    }
 
     pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {
         // Hedged per FIPS 204 3.6.1 (see the validator path above). The only

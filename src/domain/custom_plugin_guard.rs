@@ -17,7 +17,7 @@ use crate::domain::types::{ConsensusDomain, ConsensusKind};
 /// A string finding when the domain is Custom but declares no hash, the
 /// plugin bytes are empty, or the computed hash disagrees with the
 /// registered one.
-fn validate_custom_plugin_hash(
+pub fn validate_custom_plugin_hash(
     domain: &ConsensusDomain,
     plugin_bytes: &[u8],
 ) -> Result<(), String> {

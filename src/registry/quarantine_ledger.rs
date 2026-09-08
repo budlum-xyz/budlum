@@ -61,7 +61,7 @@ impl QuarantineLedger {
         }
     }
 
-    fn quarantine_entity(
+    pub fn quarantine_entity(
         &mut self,
         target_id: Hash32,
         reason: QuarantineReason,
@@ -82,15 +82,15 @@ impl QuarantineLedger {
     }
 
     #[must_use]
-    fn is_quarantined(&self, target_id: &Hash32) -> bool {
+    pub fn is_quarantined(&self, target_id: &Hash32) -> bool {
         self.quarantined_entities.contains_key(target_id)
     }
 
-    fn lift_quarantine(&mut self, target_id: &Hash32) -> bool {
+    pub fn lift_quarantine(&mut self, target_id: &Hash32) -> bool {
         self.quarantined_entities.remove(target_id).is_some()
     }
 
-    fn record_alarm(
+    pub fn record_alarm(
         &mut self,
         code: &str,
         message: &str,
@@ -125,7 +125,7 @@ impl QuarantineLedger {
 
     /// Compute state root commitment for quarantine and alarm state.
     #[must_use]
-    fn root_hash(&self) -> Hash32 {
+    pub fn root_hash(&self) -> Hash32 {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_BUDZERO_QUARANTINE_V1");
         for (id, entry) in &self.quarantined_entities {
@@ -148,7 +148,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quarantine_and_alarm_lifecycle() {
+    pub fn quarantine_and_alarm_lifecycle() {
         let mut ledger = QuarantineLedger::new();
         let target = [0x42u8; 32];
         let reporter = Address::from([0x01u8; 32]);

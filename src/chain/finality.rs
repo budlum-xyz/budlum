@@ -252,9 +252,9 @@ const BLS_POP_DST: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 /// The G2 `SSWU_RO` map is used by the Ethereum sync-committee interop path
 /// in `cross_domain::evm::sync_committee`, where public keys are 48-byte G1
 /// points and signatures are 96-byte G2 points.
-const BLS_SIGNATURE_G2_DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+pub const BLS_SIGNATURE_G2_DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-fn hash_to_g1(msg: &[u8]) -> G1Affine {
+pub fn hash_to_g1(msg: &[u8]) -> G1Affine {
     // RFC 9380 §8.8.1: hash_to_curve, expand_message_xmd(SHA-256), Simplified
     // SWU, random-oracle encoding. Unlike the removed scalar-times-generator
     // Construction, the discrete logarithm of this point is not known.

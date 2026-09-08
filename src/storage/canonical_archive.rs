@@ -9,7 +9,7 @@ use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-enum StorageProviderKind {
+pub enum StorageProviderKind {
     SelfHostedP2P,
     IPFS,
     Arweave,
@@ -17,7 +17,7 @@ enum StorageProviderKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ArchivePin {
+pub struct ArchivePin {
     pub provider: StorageProviderKind,
     pub location_uri: String,
     pub replica_count: u32,
@@ -26,7 +26,7 @@ struct ArchivePin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SlsaProvenance {
+pub struct SlsaProvenance {
     pub builder_id: String,
     pub build_type: String,
     pub source_repo: String,
@@ -36,7 +36,7 @@ struct SlsaProvenance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct CanonicalManifest {
+pub struct CanonicalManifest {
     pub manifest_id: Hash32,
     pub name: String,
     pub version: String,
@@ -46,7 +46,7 @@ struct CanonicalManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-struct CanonicalArchiveManager {
+pub struct CanonicalArchiveManager {
     #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<Hash32, CanonicalManifest>,
 }
@@ -101,7 +101,7 @@ impl CanonicalArchiveManager {
     }
 
     #[must_use]
-    fn has_min_replicas(&self, id: &Hash32, min_replicas: u32) -> bool {
+    pub fn has_min_replicas(&self, id: &Hash32, min_replicas: u32) -> bool {
         if let Some(m) = self.manifests.get(id) {
             let total_replicas: u32 = m.pins.iter().map(|p| p.replica_count).sum();
             return total_replicas >= min_replicas;
@@ -115,7 +115,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_archive_pin_and_verify() {
+    pub fn canonical_archive_pin_and_verify() {
         let mut mgr = CanonicalArchiveManager::new();
         let content_hash = [0x77u8; 32];
         let pins = vec![

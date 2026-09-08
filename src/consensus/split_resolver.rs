@@ -13,7 +13,7 @@ use crate::domain::types::Hash32;
 use sha3::{Digest, Sha3_256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SplitCandidate {
+pub struct SplitCandidate {
     pub block_hash: Hash32,
     pub proposer: Address,
     pub height: u64,
@@ -21,14 +21,14 @@ struct SplitCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SplitDecision {
+pub enum SplitDecision {
     LeftWins,
     RightWins,
 }
 
 /// Deterministically resolve a 2-2 split between two equally weighted fork candidates.
 #[must_use]
-fn resolve_split_tie(
+pub fn resolve_split_tie(
     left: &SplitCandidate,
     right: &SplitCandidate,
     epoch_seed: &Hash32,
@@ -77,7 +77,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn higher_weight_wins() {
+    pub fn higher_weight_wins() {
         let left = SplitCandidate {
             block_hash: [0x01; 32],
             proposer: Address::from([0xAA; 32]),
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_weight_is_deterministic() {
+    pub fn equal_weight_is_deterministic() {
         let left = SplitCandidate {
             block_hash: [0x01; 32],
             proposer: Address::from([0xAA; 32]),

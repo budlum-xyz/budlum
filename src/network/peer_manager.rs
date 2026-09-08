@@ -19,7 +19,7 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// ban-length is reclaimed by `prune_spent_records`, so ids an attacker
 /// mints for one burst of malformed handshakes cannot fill the tracked
 /// table forever and refuse every peer the node has never seen.
-const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
+pub const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
 pub const MAX_MSG_BURST: f64 = 20.0;
