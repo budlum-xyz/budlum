@@ -3350,7 +3350,3 @@ mod mobile_profile_wiring_tests {
         );
     }
 }
-
-pub fn get_peer_negative_record_ttl() -> std::time::Duration {
-    crate::network::peer_manager::NEGATIVE_RECORD_TTL
-}

@@ -71,7 +71,7 @@ impl ThreeMeter {
             .saturating_add(self.seals.saturating_mul(4))
     }
 
-    pub const fn charge(&mut self, add_weight: u64) -> Result<(), MeterError> {
+    const fn charge(&mut self, add_weight: u64) -> Result<(), MeterError> {
         let used = self.weight().saturating_add(add_weight);
         if let Some(b) = self.budget {
             if used > b {
@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn budget_trips() {
+    fn budget_trips() {
         let mut m = ThreeMeter::with_budget(Some(5));
         m.record_pack().unwrap(); // 1
         m.record_frames(2).unwrap(); // +4 → 5
@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    pub fn unlimited_lab() {
+    fn unlimited_lab() {
         let mut m = ThreeMeter::with_budget(None);
         for _ in 0..1000 {
             m.record_drops(10).unwrap();
@@ -157,7 +157,7 @@ mod tests {
 /// complexity attacks during recursive recipe expansion and data
 /// regeneration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegenerationBudgetMeter {
+struct RegenerationBudgetMeter {
     pub max_cpu_steps: u64,
     pub max_memory_bytes: usize,
     pub max_recursion_depth: u32,
@@ -186,7 +186,7 @@ impl RegenerationBudgetMeter {
     /// # Errors
     ///
     /// [`MeterError::BudgetExceeded`] when the steps would pass the budget.
-    pub const fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
+    const fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
         let used = self.cpu_steps_used.saturating_add(steps);
         if used > self.max_cpu_steps {
             return Err(MeterError::BudgetExceeded {
@@ -201,7 +201,7 @@ impl RegenerationBudgetMeter {
     /// # Errors
     ///
     /// [`MeterError::BudgetExceeded`] when the allocation would pass the cap.
-    pub const fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
+    const fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
         let used = self.memory_used.saturating_add(bytes);
         if used > self.max_memory_bytes {
             return Err(MeterError::BudgetExceeded {
@@ -218,18 +218,19 @@ impl RegenerationBudgetMeter {
     /// [`MeterError::BudgetExceeded`] at the recursion-depth cap.
     // The two u32->u64 casts keep this fn const: `From<u32> for u64` is not
     // const-callable yet, and the widening cast cannot lose information.
-    pub fn enter_recursion(&mut self) -> Result<(), MeterError> {
+    #[allow(clippy::cast_lossless)]
+    const fn enter_recursion(&mut self) -> Result<(), MeterError> {
         if self.current_depth >= self.max_recursion_depth {
             return Err(MeterError::BudgetExceeded {
-                used: u64::from(self.current_depth) + 1,
-                budget: u64::from(self.max_recursion_depth),
+                used: (self.current_depth as u64) + 1,
+                budget: self.max_recursion_depth as u64,
             });
         }
         self.current_depth += 1;
         Ok(())
     }
 
-    pub const fn exit_recursion(&mut self) {
+    const fn exit_recursion(&mut self) {
         self.current_depth = self.current_depth.saturating_sub(1);
     }
 }
@@ -239,7 +240,7 @@ mod regen_tests {
     use super::*;
 
     #[test]
-    pub fn regeneration_budget_enforcement() {
+    fn regeneration_budget_enforcement() {
         let mut meter = RegenerationBudgetMeter::new(1000, 4096, 5);
         assert!(meter.consume_steps(500).is_ok());
         assert!(meter.consume_steps(600).is_err());

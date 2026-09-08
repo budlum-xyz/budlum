@@ -9,7 +9,7 @@ use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StorageProviderKind {
+enum StorageProviderKind {
     SelfHostedP2P,
     IPFS,
     Arweave,
@@ -17,7 +17,7 @@ pub enum StorageProviderKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ArchivePin {
+struct ArchivePin {
     pub provider: StorageProviderKind,
     pub location_uri: String,
     pub replica_count: u32,
@@ -26,7 +26,7 @@ pub struct ArchivePin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SlsaProvenance {
+struct SlsaProvenance {
     pub builder_id: String,
     pub build_type: String,
     pub source_repo: String,
@@ -36,7 +36,7 @@ pub struct SlsaProvenance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CanonicalManifest {
+struct CanonicalManifest {
     pub manifest_id: Hash32,
     pub name: String,
     pub version: String,
@@ -46,7 +46,7 @@ pub struct CanonicalManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct CanonicalArchiveManager {
+struct CanonicalArchiveManager {
     #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<Hash32, CanonicalManifest>,
 }
@@ -75,7 +75,6 @@ impl CanonicalArchiveManager {
         hasher.update(version.as_bytes());
         hasher.update(root_content_hash);
         for pin in &pins {
-            hasher.update((pin.location_uri.len() as u64).to_le_bytes());
             hasher.update(pin.location_uri.as_bytes());
             hasher.update(pin.pinned_at.to_le_bytes());
         }
@@ -101,7 +100,7 @@ impl CanonicalArchiveManager {
     }
 
     #[must_use]
-    pub fn has_min_replicas(&self, id: &Hash32, min_replicas: u32) -> bool {
+    fn has_min_replicas(&self, id: &Hash32, min_replicas: u32) -> bool {
         if let Some(m) = self.manifests.get(id) {
             let total_replicas: u32 = m.pins.iter().map(|p| p.replica_count).sum();
             return total_replicas >= min_replicas;
@@ -115,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn canonical_archive_pin_and_verify() {
+    fn canonical_archive_pin_and_verify() {
         let mut mgr = CanonicalArchiveManager::new();
         let content_hash = [0x77u8; 32];
         let pins = vec![

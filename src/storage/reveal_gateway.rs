@@ -189,8 +189,6 @@ impl RevealGateway {
     /// New, empty table with a fresh secret id nonce.
     #[must_use]
     pub fn new() -> Self {
-        let _ = crate::storage::three_rpc::verify_archive_pact_and_metering;
-
         use rand::Rng;
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);

@@ -19,7 +19,7 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// ban-length is reclaimed by `prune_spent_records`, so ids an attacker
 /// mints for one burst of malformed handshakes cannot fill the tracked
 /// table forever and refuse every peer the node has never seen.
-pub const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
+const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
 pub const MAX_MSG_BURST: f64 = 20.0;
@@ -523,10 +523,6 @@ impl PeerManager {
         self.peers.get(peer_id)
     }
     /// Test-only: set ban expiry for a peer (simulates ban TTL expiry).
-
-    fn _wire_peer_manager_deps() {
-        let _ = crate::network::node::get_peer_negative_record_ttl;
-    }
     #[cfg(test)]
     pub fn set_ban_expiry_for_test(&mut self, peer_id: &PeerId, expiry: Option<u64>) {
         if let Some(score) = self.peers.get_mut(peer_id) {

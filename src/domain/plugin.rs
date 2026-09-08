@@ -81,10 +81,6 @@ pub struct PoWDomainPlugin {
 }
 
 impl PoWDomainPlugin {
-    fn _unused_sandbox() {
-        let _ = crate::domain::plugin_registry::run_plugin_in_sandbox;
-    }
-
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
@@ -113,10 +109,6 @@ pub struct PoSDomainPlugin {
 }
 
 impl PoSDomainPlugin {
-    fn _unused_sandbox() {
-        let _ = crate::domain::plugin_registry::run_plugin_in_sandbox;
-    }
-
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
@@ -145,10 +137,6 @@ pub struct PoADomainPlugin {
 }
 
 impl PoADomainPlugin {
-    fn _unused_sandbox() {
-        let _ = crate::domain::plugin_registry::run_plugin_in_sandbox;
-    }
-
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
@@ -177,10 +165,6 @@ pub struct BftDomainPlugin {
 }
 
 impl BftDomainPlugin {
-    fn _unused_sandbox() {
-        let _ = crate::domain::plugin_registry::run_plugin_in_sandbox;
-    }
-
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
@@ -209,10 +193,6 @@ pub struct ZkDomainPlugin {
 }
 
 impl ZkDomainPlugin {
-    fn _unused_sandbox() {
-        let _ = crate::domain::plugin_registry::run_plugin_in_sandbox;
-    }
-
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,

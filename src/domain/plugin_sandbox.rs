@@ -3,11 +3,11 @@
 //! Enforces bounded execution budgets (gas and memory limits) and panic isolation
 //! so custom domain plugins cannot cause Denial-of-Service or node crashes.
 
-pub const DEFAULT_PLUGIN_GAS_LIMIT: u64 = 1_000_000;
-pub const MAX_PLUGIN_MEMORY_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+const DEFAULT_PLUGIN_GAS_LIMIT: u64 = 1_000_000;
+const MAX_PLUGIN_MEMORY_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginSandboxConfig {
+struct PluginSandboxConfig {
     pub gas_limit: u64,
     pub max_memory_bytes: usize,
     pub allow_external_io: bool,
@@ -24,7 +24,7 @@ impl Default for PluginSandboxConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxError {
+enum SandboxError {
     GasExhausted { used: u64, limit: u64 },
     MemoryLimitExceeded { requested: usize, limit: usize },
     ExecutionPanicked(String),
@@ -50,7 +50,7 @@ impl std::fmt::Display for SandboxError {
 
 impl std::error::Error for SandboxError {}
 
-pub struct PluginSandbox {
+struct PluginSandbox {
     pub config: PluginSandboxConfig,
     pub gas_used: u64,
     pub memory_allocated: usize,
@@ -69,7 +69,7 @@ impl PluginSandbox {
     /// # Errors
     ///
     /// [`SandboxError::GasExhausted`] when the charge would pass the gas limit.
-    pub const fn charge_gas(&mut self, amount: u64) -> Result<(), SandboxError> {
+    const fn charge_gas(&mut self, amount: u64) -> Result<(), SandboxError> {
         let new_gas = self.gas_used.saturating_add(amount);
         if new_gas > self.config.gas_limit {
             return Err(SandboxError::GasExhausted {
@@ -85,7 +85,7 @@ impl PluginSandbox {
     ///
     /// [`SandboxError::MemoryLimitExceeded`] when the allocation would pass
     /// the memory cap.
-    pub const fn allocate(&mut self, bytes: usize) -> Result<(), SandboxError> {
+    const fn allocate(&mut self, bytes: usize) -> Result<(), SandboxError> {
         let new_mem = self.memory_allocated.saturating_add(bytes);
         if new_mem > self.config.max_memory_bytes {
             return Err(SandboxError::MemoryLimitExceeded {
@@ -103,7 +103,7 @@ impl PluginSandbox {
     ///
     /// [`SandboxError::ExecutionPanicked`] when the closure panics, or the
     /// closure's own [`SandboxError`] when it returns one.
-    pub fn run_isolated<F, R>(&mut self, f: F) -> Result<R, SandboxError>
+    fn run_isolated<F, R>(&mut self, f: F) -> Result<R, SandboxError>
     where
         F: FnOnce(&mut Self) -> Result<R, SandboxError> + std::panic::UnwindSafe,
     {
@@ -123,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn gas_exhaustion_is_enforced() {
+    fn gas_exhaustion_is_enforced() {
         let mut sandbox = PluginSandbox::new(PluginSandboxConfig {
             gas_limit: 100,
             max_memory_bytes: 1024,
@@ -134,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    pub fn panic_is_caught_and_isolated() {
+    fn panic_is_caught_and_isolated() {
         let mut sandbox = PluginSandbox::new(PluginSandboxConfig::default());
         let res = sandbox.run_isolated(|_| -> Result<(), SandboxError> {
             panic!("fatal plugin bug");

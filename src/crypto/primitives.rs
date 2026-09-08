@@ -854,6 +854,9 @@ impl WalletKeyPair {
     /// Only if the derived address is invalid, which cannot happen: the
     /// public key comes from a generated ML-DSA-87 keypair, and address
     /// derivation only rejects malformed keys. The panic is allowed here
+    /// deliberately rather than by the workspace default: a silent
+    /// zero-address fallback would let a malformed key spend as
+    /// `[0u8; 32]`.
     #[allow(clippy::expect_used)]
     pub fn address(&self) -> crate::core::address::Address {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
@@ -943,6 +946,8 @@ pub fn verify_ml_dsa_87_signature(
 }
 
 pub fn hash_message(message: &[u8]) -> [u8; 32] {
+    // A distinct hasher name keeps this single-field digest visibly separate
+    // from the address derivation above: the preimages share no chain.
     let mut digest = Sha3_256::new();
     digest.update(message);
     digest.finalize().into()

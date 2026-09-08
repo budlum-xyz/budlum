@@ -404,9 +404,6 @@ fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {
     ])
 }
 
-fn _wire_evm_deps() {
-    let _ = crate::cross_domain::evm::sync_committee::verify_bls_signature_dst_alignment;
-}
 #[cfg(test)]
 mod tests {
     use super::*;
