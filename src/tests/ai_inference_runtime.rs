@@ -836,3 +836,27 @@ fn slash_tavani_da_kaldirir() {
         .unwrap();
     assert_eq!(reg.effort_ceiling(&operator), EffortTier::BASELINE);
 }
+
+#[test]
+fn a_request_whose_own_clock_lies_is_refused_at_submission() {
+    let mut state = AccountState::new();
+    let operator = Address::from([0x26; 32]);
+    let bond_amount = state.required_ai_bond(DEFAULT_CHAIN_ID);
+    let fee = state.base_fee.max(1);
+    state.add_balance(&operator, bond_amount + fee);
+    let bond = Transaction::new_ai_operator_bond(operator, bond_amount, fee, 0, DEFAULT_CHAIN_ID);
+    Executor::apply_transaction(&mut state, &bond).expect("bond");
+
+    let (spec, mut request) = model_and_request(operator);
+    state.ai_registry.register_model(spec).expect("model");
+    // Attacker-chosen clock: u64::MAX would push every derived deadline
+    // (pruning, result window) to u64::MAX, i.e. permanent state for a
+    // one-time fee.
+    request.submitted_at_block = u64::MAX;
+    request.request_id = request.calculate_id();
+    let err = state
+        .ai_registry
+        .submit_request(request, 0)
+        .expect_err("a lying submitted_at_block must be refused");
+    assert!(err.contains("not the current block"), "{err}");
+}

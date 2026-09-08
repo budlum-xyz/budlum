@@ -210,10 +210,17 @@ fn walk(dir: &Path, findings: &mut Vec<String>) {
         return;
     };
     for entry in entries.flatten() {
+        // `entry.file_type()` reads the dirent, so a symlink is a symlink,
+        // not whatever it names: `Path::is_dir()` would follow it and a
+        // committed link could walk the gate out of the tree or into a
+        // cycle (CWE-61). Links are simply not walked.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if kind.is_dir() {
             walk(&path, findings);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "rs") {
             check_file(&path, findings);
         }
     }
@@ -301,4 +308,20 @@ mod tests {
         return Err("a method call was read as a free function".into());
     }
     Ok("self test OK: narrow imports flagged, globs and qualified paths not".into())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_walker_does_not_follow_symlinks() {
+    let dir = std::env::temp_dir().join(format!("gate-walk-{}", std::process::id()));
+    let inner = dir.join("inner");
+    std::fs::create_dir_all(&inner).expect("dirs");
+    // A cycle: inner/loop points back at the tree root. A following walker
+    // would recurse until stack exhaustion; the dirent-based one returns.
+    std::os::unix::fs::symlink(&dir, inner.join("loop")).expect("symlink");
+    std::fs::write(inner.join("clean.rs"), "pub fn f() -> u8 { 1 }\n").expect("file");
+    let mut findings = Vec::new();
+    walk(&dir, &mut findings);
+    assert!(findings.is_empty(), "clean file must stay clean: {findings:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -83,7 +83,13 @@ pub fn attempt_proof(witness: &[WitnessStep], prover: Option<&Path>) -> Result<Z
             ),
         });
     };
-    let trace_path = std::env::temp_dir().join(format!("budzk-{}.trace", hex8(&root)));
+    // The pid suffix keeps the name out of an attacker's pre-planting reach:
+    // a predictable temp name is a symlink target waiting to happen (CWE-59).
+    let trace_path = std::env::temp_dir().join(format!(
+        "budzk-{}-{}.trace",
+        hex8(&root),
+        std::process::id()
+    ));
     save_field_trace(&trace_path, &rows, &root)?;
     let out = Command::new(prover).arg(&trace_path).output();
     let _ = std::fs::remove_file(&trace_path);
@@ -117,7 +123,15 @@ pub fn save_field_trace(path: &Path, rows: &[[u64; 10]], root: &[u8; 32]) -> Res
             out.extend_from_slice(&w.to_le_bytes());
         }
     }
-    std::fs::write(path, out).map_err(|e| format!("trace write error {}: {e}", path.display()))
+    // create_new refuses a pre-existing path outright: `fs::write` would
+    // follow a planted symlink and truncate whatever it names (CWE-59).
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("trace create error {}: {e}", path.display()))?;
+    std::io::Write::write_all(&mut file, &out)
+        .map_err(|e| format!("trace write error {}: {e}", path.display()))
 }
 
 /// Load a field trace and REFUSE it unless it binds to its stored root -
@@ -254,6 +268,7 @@ mod tests {
         let rows = witness_to_field_trace(&witness);
         let (_, root) = field_trace_meta(&rows);
         let path = std::env::temp_dir().join(format!("budzk-{}.trace", hex8(&root)));
+        let _ = std::fs::remove_file(&path); // stale trace from a failed run must not poison create_new
         save_field_trace(&path, &rows, &root).expect("saves");
         let (loaded, loaded_root) = load_field_trace(&path).expect("loads");
         assert_eq!(loaded, rows);
@@ -269,4 +284,22 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn save_refuses_a_pre_planted_symlink() {
+    let witness = witness_for(&b"symlink refusal ".repeat(60));
+    let rows = witness_to_field_trace(&witness);
+    let (_, root) = field_trace_meta(&rows);
+    let dir = std::env::temp_dir().join(format!("budzk-sym-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let victim = dir.join("victim");
+    let link = dir.join("trace.trace");
+    std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+    let err = save_field_trace(&link, &rows, &root)
+        .expect_err("a pre-planted symlink must be refused, not followed");
+    assert!(err.contains("create error"), "{err}");
+    assert!(!victim.exists(), "the symlink target must remain untouched");
+    let _ = std::fs::remove_dir_all(&dir);
 }

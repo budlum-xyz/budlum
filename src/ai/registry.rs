@@ -259,6 +259,18 @@ impl AiRegistry {
         if !request.verify_id() {
             return Err("Request ID does not match canonical preimage".into());
         }
+        // The request's own clock field is untrusted input: an unchecked
+        // `submitted_at_block = u64::MAX` would push every derived deadline
+        // (pruning in `prune`, the result window in `submit_result`) to
+        // `u64::MAX`, turning a one-time fee into permanent state and a
+        // never-closing escrow. `submit_result` already enforces equality;
+        // the request path gets the same admission condition.
+        if request.submitted_at_block != current_block {
+            return Err(format!(
+                "Request submitted_at_block {} is not the current block {current_block}",
+                request.submitted_at_block
+            ));
+        }
         crate::ai_inference::admit_inference_request(self, &request)?;
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s,
