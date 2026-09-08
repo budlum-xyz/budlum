@@ -230,9 +230,13 @@ pub fn assign_object(
         // candidate already holds a shard of this object, the pool falls
         // back to the full set - spreading is best-effort once the
         // validator set is smaller than the code word.
+        // `stake > 0` mirrors `assign_shard`'s own eligibility rule: a
+        // candidate with nothing at stake can never win a shard, and if it
+        // alone is left "unused" it would masquerade as a free pool, making
+        // the placement refuse an object the full pool can still serve.
         let unused: Vec<ShardCandidate> = candidates
             .iter()
-            .filter(|c| !used.contains(&c.address))
+            .filter(|c| c.stake > 0 && !used.contains(&c.address))
             .copied()
             .collect();
         let pool: &[ShardCandidate] = if unused.is_empty() {
@@ -506,6 +510,27 @@ mod tests {
             "100 shards over 20 equal-stake validators should touch most of \
              them, touched {}",
             seen.len()
+        );
+    }
+
+    #[test]
+    fn a_zero_stake_leftover_does_not_block_the_fallback_pool() {
+        // Every positive-stake candidate already holds a shard of this
+        // object; the only candidate still "unused" has nothing at stake.
+        // `assign_shard` excludes zero stake, so a pool of one zero-stake
+        // candidate is a pool of none: the placement must fall back to the
+        // full set instead of refusing the object.
+        let mut c = candidates(2);
+        c.push(ShardCandidate {
+            address: Address([0xEE; 32]),
+            stake: 0,
+        });
+        let ids: Vec<ContentId> = (1..=3).map(shard).collect();
+        let holders = assign_object(&ids, &[9u8; 32], &c).unwrap();
+        assert_eq!(holders.len(), 3);
+        assert!(
+            holders.iter().all(|h| h.0 != [0xEE; 32]),
+            "zero stake never holds a shard"
         );
     }
 }

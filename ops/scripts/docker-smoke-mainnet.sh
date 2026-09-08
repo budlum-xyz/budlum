@@ -45,7 +45,9 @@ cleanup() {
 trap cleanup EXIT
 
 rpc() {
-    curl -sf -H 'Content-Type: application/json' \
+    # Bound each request: a listener that accepts the connection but never
+    # finishes the response must not block past the polling budget.
+    curl -sf --connect-timeout 5 --max-time 5 -H 'Content-Type: application/json' \
         --data "{\"jsonrpc\":\"2.0\",\"method\":\"$1\",\"params\":$2,\"id\":1}" \
         "http://127.0.0.1:$RPC_PORT" > "$RESPONSE" 2>/dev/null
 }
