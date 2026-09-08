@@ -1187,6 +1187,19 @@ impl Blockchain {
             ));
         }
 
+        // A Custom domain delegates its finality decision to a plugin, and a
+        // plugin is consensus code. The code hash is the only thing that binds
+        // a Custom domain's rule change to a committed value, so a Custom
+        // domain that declares no hash has no verifiable rule at all. The
+        // byte-level comparison (declared hash vs computed hash) waits for the
+        // plugin byte loader; until then the hash is mandatory at declaration.
+        if matches!(domain.kind, ConsensusKind::Custom(_)) && domain.plugin_code_hash.is_none() {
+            return Err(format!(
+                "Custom domain {} must declare a plugin_code_hash",
+                domain.id
+            ));
+        }
+
         Ok(())
     }
 
