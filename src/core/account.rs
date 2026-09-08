@@ -1320,7 +1320,9 @@ impl AccountState {
                     );
                 }
             }
-            TransactionType::StateUpdate { state_updates, .. } => {
+            TransactionType::StateUpdate {
+                ref state_updates, ..
+            } => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err("State update requires zero amount/recipient and empty data".into());
                 }

@@ -2232,7 +2232,7 @@ impl Executor {
             TransactionType::StateUpdate {
                 domain_id,
                 domain_height,
-                state_updates,
+                ref state_updates,
             } => {
                 // The rules that used to guard the out-of-block commitment
                 // nonce writes now run here, inside block execution (C3,
