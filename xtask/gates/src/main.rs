@@ -63,6 +63,7 @@ mod gates {
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
+    pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
     pub mod content_encryption_is_declared_and_bound;
     pub mod coverage;
@@ -1215,6 +1216,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::fixture_integrity::self_test,
+    },
+    Gate {
+        name: "consensus-state-only-changes-in-blocks",
+        replaces: None,
+        run: gates::consensus_state_only_changes_in_blocks::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::consensus_state_only_changes_in_blocks::self_test,
     },
 ];
 
