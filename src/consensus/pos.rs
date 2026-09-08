@@ -43,10 +43,11 @@ impl Default for PoSConfig {
             epoch_length: crate::core::chain_config::Network::Devnet
                 .consensus_params()
                 .epoch_len,
-            // F-184/185/186 (Bulgu Raporu 2026-07-27): f64 sabit ifadesi
-            // tamsayi aritmetigiyle degistirildi. Olculdu: iki ifade de
-            // [50000, 100000, 500000] uretir; davranis birebir ayni,
-            // konsens us sabitlerinde kayan nokta kalmadi.
+            // F-184/185/186 (findings report 2026-07-27): the f64 constant
+            // expression was replaced with integer arithmetic. Measured: both
+            // expressions produce [50000, 100000, 500000]; the behaviour is
+            // identical, and no floating point remains in the consensus
+            // constants.
             annual_reward_rate: (FIXED_POINT_SCALE * 5) / 100,
             slashing_penalty: FIXED_POINT_SCALE / 10,
             double_sign_penalty: FIXED_POINT_SCALE / 2,

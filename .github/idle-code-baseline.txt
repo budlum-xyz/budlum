@@ -1382,7 +1382,6 @@ src/core/governance.rs	fn	is_governance_parameter_whitelisted
 src/core/governance.rs	fn	validate_governance_parameter_update
 src/core/governance.rs	fn	vote_weight_of
 src/core/hash.rs	fn	hash_fields
-src/core/transaction.rs	const	SIGNATURE_VERSION_V4
 src/core/transaction.rs	const	SIGNATURE_VERSION_V6
 src/core/transaction.rs	fn	estimate_gas_with_schedule
 src/core/transaction.rs	fn	fee_limit

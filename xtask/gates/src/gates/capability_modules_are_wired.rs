@@ -71,34 +71,170 @@ fn strip_test_mods(src: &str) -> String {
     let bytes: Vec<char> = src.chars().collect();
     let mut i = 0;
     while i < bytes.len() {
-        // Look for a cfg(test) attribute followed by a mod.
+        // A cfg(test) attribute removes the whole item it attaches to. The
+        // item is usually a `mod`, but the attribute also lands on a `fn`, an
+        // `impl`, a `const`, a `use`, or a `panic!` statement. The previous
+        // scan grabbed the first `{` after the attribute and swallowed that
+        // balanced block, which is right for a `mod` and wrong for everything
+        // else: a `#[cfg(test)] panic!` whose message carries no braces made
+        // it skip the panic's own `;` and eat the next braced block. In
+        // `src/chain/blockchain.rs` that block was the domain-commitment arm
+        // that calls `registry/quarantine_ledger.rs`, so a wired module read
+        // as unwired. `test_item_end` skips strings and comments and stops at
+        // the item's own terminator instead.
         if bytes[i] == '#' && src[byte_index(&bytes, i)..].starts_with("#[cfg(test)]") {
-            // Find the opening brace of the module that follows.
-            let mut j = i;
-            let mut depth = 0i32;
-            let mut started = false;
-            while j < bytes.len() {
-                if bytes[j] == '{' {
-                    depth += 1;
-                    started = true;
-                } else if bytes[j] == '}' {
-                    depth -= 1;
-                    if started && depth == 0 {
-                        j += 1;
-                        break;
-                    }
-                }
-                j += 1;
-            }
-            if started {
-                i = j;
-                continue;
-            }
+            i = test_item_end(&bytes, i);
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
     }
     out
+}
+
+/// Index just past the item a `#[cfg(test)]` attribute at `start` attaches to.
+///
+/// Scans from the attribute, skipping whitespace, further attributes, comments
+/// and string literals, until the item's own terminator: a `;` when the item
+/// opens no brace (a `const`, `use`, `static`, or a `panic!` statement), or
+/// the balanced closing brace of the first body it opens. Skipping strings is
+/// what stops a `panic!("{}")` format string from ending the scan inside
+/// itself and letting the next braced block be swallowed.
+fn test_item_end(chars: &[char], start: usize) -> usize {
+    let n = chars.len();
+    let mut j = start;
+    while j < n {
+        if chars[j].is_whitespace() {
+            j += 1;
+            continue;
+        }
+        if chars[j] == '/' && j + 1 < n && chars[j + 1] == '/' {
+            while j < n && chars[j] != '\n' {
+                j += 1;
+            }
+            continue;
+        }
+        if chars[j] == '/' && j + 1 < n && chars[j + 1] == '*' {
+            j += 2;
+            while j + 1 < n && !(chars[j] == '*' && chars[j + 1] == '/') {
+                j += 1;
+            }
+            j = (j + 2).min(n);
+            continue;
+        }
+        // A further attribute: `#[derive(..)]` and the like.
+        if chars[j] == '#' {
+            while j < n && chars[j] != ']' {
+                j += 1;
+            }
+            j = (j + 1).min(n);
+            continue;
+        }
+        // A string literal, raw or ordinary, is skipped whole.
+        if chars[j] == '"'
+            || (chars[j] == 'r' && j + 1 < n && (chars[j + 1] == '"' || chars[j + 1] == '#'))
+        {
+            j = string_end(chars, j);
+            continue;
+        }
+        // A `;` before any brace ends the item: a const, use or statement.
+        if chars[j] == ';' {
+            return j + 1;
+        }
+        // The first braced body is the item's; consume it balanced, skipping
+        // strings and comments so a `{` inside either cannot close it early.
+        if chars[j] == '{' {
+            let mut depth = 0i32;
+            while j < n {
+                if chars[j] == '"'
+                    || (chars[j] == 'r'
+                        && j + 1 < n
+                        && (chars[j + 1] == '"' || chars[j + 1] == '#'))
+                {
+                    j = string_end(chars, j);
+                    continue;
+                }
+                if chars[j] == '/' && j + 1 < n && chars[j + 1] == '/' {
+                    while j < n && chars[j] != '\n' {
+                        j += 1;
+                    }
+                    continue;
+                }
+                if chars[j] == '/' && j + 1 < n && chars[j + 1] == '*' {
+                    j += 2;
+                    while j + 1 < n && !(chars[j] == '*' && chars[j + 1] == '/') {
+                        j += 1;
+                    }
+                    j = (j + 2).min(n);
+                    continue;
+                }
+                if chars[j] == '{' {
+                    depth += 1;
+                } else if chars[j] == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+                j += 1;
+            }
+            return j;
+        }
+        j += 1;
+    }
+    n
+}
+
+/// Index just past a string literal starting at `i`.
+///
+/// Handles ordinary strings (escapes included) and raw strings `r"..."` /
+/// `r#"..."#`. A raw identifier `r#name` is not a string: it returns the
+/// index of `name`, so the caller keeps scanning the identifier rather than
+/// running to the end of the file looking for a quote that is not there.
+fn string_end(chars: &[char], i: usize) -> usize {
+    let n = chars.len();
+    if chars[i] == 'r' {
+        let mut hashes = 0;
+        let mut j = i + 1;
+        while j < n && chars[j] == '#' {
+            hashes += 1;
+            j += 1;
+        }
+        if j < n && chars[j] == '"' {
+            j += 1;
+            loop {
+                if j >= n {
+                    break;
+                }
+                if chars[j] == '"' {
+                    let mut k = j + 1;
+                    let mut seen = 0;
+                    while k < n && chars[k] == '#' && seen < hashes {
+                        seen += 1;
+                        k += 1;
+                    }
+                    if seen == hashes {
+                        return k;
+                    }
+                }
+                j += 1;
+            }
+            return n;
+        }
+        return j;
+    }
+    let mut j = i + 1;
+    while j < n {
+        if chars[j] == '\\' {
+            j = (j + 2).min(n);
+            continue;
+        }
+        if chars[j] == '"' {
+            return j + 1;
+        }
+        j += 1;
+    }
+    n
 }
 
 /// Char index to byte index, for the one place a substring check is needed.
@@ -809,6 +945,36 @@ pub fn self_test() -> Result<String, String> {
     if strip_test_mods(with_test).contains("alpha();") {
         problems.push(String::from(
             "VACUOUS: a call from inside #[cfg(test)] survived stripping",
+        ));
+    }
+
+    // A #[cfg(test)] on a statement that opens no brace must not swallow the
+    // block after it. A panic! with no braces in its message is the shape
+    // that made the scanner skip the panic's `;`, eat the next braced block,
+    // and read `registry/quarantine_ledger.rs` as unwired while it was called.
+    let bare_panic = "fn outer() {\n    #[cfg(test)]\n    panic!(\"boom\");\n    if true {\n        quarantine_entity();\n    }\n}\n";
+    if !strip_test_mods(bare_panic).contains("quarantine_entity();") {
+        problems.push(String::from(
+            "VACUOUS: a #[cfg(test)] panic! with no braces swallowed the block after it",
+        ));
+    }
+
+    // The same for a #[cfg(test)] const: it ends at its `;`, and what follows
+    // it survives.
+    let const_item = "fn outer() {\n    #[cfg(test)]\n    const X: u64 = 10;\n    if true {\n        quarantine_entity();\n    }\n}\n";
+    if !strip_test_mods(const_item).contains("quarantine_entity();") {
+        problems.push(String::from(
+            "VACUOUS: a #[cfg(test)] const swallowed the block after it",
+        ));
+    }
+
+    // Braces inside a panic message are part of the format string, not a
+    // braced body: the panic is still dropped to its `;`.
+    let brace_msg =
+        "fn outer() {\n    #[cfg(test)]\n    panic!(\"{}\");\n    quarantine_entity();\n}\n";
+    if strip_test_mods(brace_msg).contains("panic!") {
+        problems.push(String::from(
+            "VACUOUS: a #[cfg(test)] panic! with braces in its message survived stripping",
         ));
     }
 
