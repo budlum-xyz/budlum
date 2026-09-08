@@ -56,7 +56,8 @@
 //! `n <= 255` follows from the field: the Cauchy construction needs `k + m`
 //! distinct non-zero-difference field elements.
 
-use crate::storage::manifest::{ContentId, ContentManifest, ErasureScheme, ShardKind, ShardRef};
+use crate::storage::content_id::ContentId;
+use crate::storage::manifest::{ContentManifest, ErasureScheme, ShardKind, ShardRef};
 use std::sync::OnceLock;
 
 /// The primitive polynomial for GF(2^8): x^8 + x^4 + x^3 + x^2 + 1.
