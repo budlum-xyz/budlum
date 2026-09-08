@@ -43,9 +43,13 @@ impl Default for PoSConfig {
             epoch_length: crate::core::chain_config::Network::Devnet
                 .consensus_params()
                 .epoch_len,
-            annual_reward_rate: (0.05 * FIXED_POINT_SCALE as f64) as u64,
-            slashing_penalty: (0.10 * FIXED_POINT_SCALE as f64) as u64,
-            double_sign_penalty: (0.50 * FIXED_POINT_SCALE as f64) as u64,
+            // F-184/185/186 (Bulgu Raporu 2026-07-27): f64 sabit ifadesi
+            // tamsayi aritmetigiyle degistirildi. Olculdu: iki ifade de
+            // [50000, 100000, 500000] uretir; davranis birebir ayni,
+            // konsens us sabitlerinde kayan nokta kalmadi.
+            annual_reward_rate: (FIXED_POINT_SCALE * 5) / 100,
+            slashing_penalty: FIXED_POINT_SCALE / 10,
+            double_sign_penalty: FIXED_POINT_SCALE / 2,
             unbonding_epochs: crate::core::account::UNBONDING_EPOCHS,
         }
     }
@@ -1339,5 +1343,17 @@ mod tests {
                 .unwrap(),
             before_restart
         );
+    }
+
+    #[test]
+    fn pos_default_fixed_point_constants_are_exact_integers() {
+        use crate::core::chain_config::FIXED_POINT_SCALE;
+        let config = PoSConfig::default();
+        assert_eq!(config.annual_reward_rate, (FIXED_POINT_SCALE * 5) / 100);
+        assert_eq!(config.slashing_penalty, FIXED_POINT_SCALE / 10);
+        assert_eq!(config.double_sign_penalty, FIXED_POINT_SCALE / 2);
+        assert_eq!(config.annual_reward_rate, 50_000);
+        assert_eq!(config.slashing_penalty, 100_000);
+        assert_eq!(config.double_sign_penalty, 500_000);
     }
 }
