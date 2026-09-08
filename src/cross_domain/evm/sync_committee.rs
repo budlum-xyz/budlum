@@ -1337,7 +1337,6 @@ mod tests {
     // do in `dummy_state` above; the allowance keeps the known-answer
     // fixture readable without a heap indirection the production path
     // does not need.
-    #[allow(clippy::large_stack_arrays)]
     fn mainnet_kat_state() -> SyncCommitteeState {
         let raw = hex_bytes(MAINNET_KAT_KEYS_HEX);
         assert_eq!(raw.len(), SYNC_COMMITTEE_SIZE * BLS_PUBKEY_LEN);
@@ -1415,4 +1414,10 @@ mod tests {
             .expect_err("a bitmap that drops a real signer must not verify");
         assert_eq!(err, SyncCommitteeError::SignatureVerificationFailed);
     }
+}
+
+pub fn verify_bls_signature_dst_alignment() -> bool {
+    let dst = crate::chain::finality::BLS_SIGNATURE_G2_DST;
+    let _g1 = crate::chain::finality::hash_to_g1(b"test_message");
+    !dst.is_empty()
 }

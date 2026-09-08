@@ -2217,3 +2217,9 @@ mod v29_signing_tests {
         }
     }
 }
+
+pub fn derive_wallet_address_safe(
+    keypair: &crate::crypto::primitives::WalletKeyPair,
+) -> Result<crate::core::address::Address, crate::crypto::primitives::CryptoError> {
+    keypair.try_address()
+}

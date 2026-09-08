@@ -346,3 +346,12 @@ mod tests {
         );
     }
 }
+
+// AR-GE E7: Deterministic 2-2 split resolution
+pub fn resolve_split_candidate(
+    candidate_a: crate::consensus::split_resolver::SplitCandidate,
+    candidate_b: crate::consensus::split_resolver::SplitCandidate,
+    epoch_seed: &crate::domain::Hash32,
+) -> crate::consensus::split_resolver::SplitDecision {
+    crate::consensus::split_resolver::resolve_split_tie(&candidate_a, &candidate_b, epoch_seed)
+}

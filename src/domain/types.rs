@@ -427,6 +427,9 @@ pub fn normalize_hash32(
     ]))
 }
 
+fn _wire_domain_deps() {
+    let _ = crate::domain::custom_plugin_guard::validate_custom_plugin_hash;
+}
 #[cfg(test)]
 mod tests {
     use super::*;

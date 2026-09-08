@@ -75,6 +75,7 @@ impl CanonicalArchiveManager {
         hasher.update(version.as_bytes());
         hasher.update(root_content_hash);
         for pin in &pins {
+            hasher.update((pin.location_uri.len() as u64).to_le_bytes());
             hasher.update(pin.location_uri.as_bytes());
             hasher.update(pin.pinned_at.to_le_bytes());
         }

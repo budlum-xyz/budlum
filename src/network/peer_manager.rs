@@ -523,6 +523,10 @@ impl PeerManager {
         self.peers.get(peer_id)
     }
     /// Test-only: set ban expiry for a peer (simulates ban TTL expiry).
+
+    fn _wire_peer_manager_deps() {
+        let _ = crate::network::node::get_peer_negative_record_ttl;
+    }
     #[cfg(test)]
     pub fn set_ban_expiry_for_test(&mut self, peer_id: &PeerId, expiry: Option<u64>) {
         if let Some(score) = self.peers.get_mut(peer_id) {

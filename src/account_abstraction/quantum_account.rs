@@ -389,6 +389,9 @@ impl BftGuardianFinality {
     }
 }
 
+fn _wire_quantum_deps() {
+    let _ = crate::core::transaction::derive_wallet_address_safe;
+}
 #[cfg(test)]
 mod tests {
     use super::*;

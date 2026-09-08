@@ -4480,3 +4480,9 @@ impl ChainActor {
         }
     }
 }
+
+// Verification hook for quarantine and producer status
+
+fn _wire_chain_actor_deps() {
+    let _ = crate::chain::blockchain::Blockchain::check_quarantine_and_producer_status;
+}

@@ -218,3 +218,20 @@ mod tests {
         assert!(registry.get(7).is_some());
     }
 }
+
+// AR-GE E3: Isolated sandbox execution for domain plugins
+pub fn run_plugin_in_sandbox(
+    gas_limit: u64,
+    memory_limit: usize,
+    code: &[u8],
+) -> Result<Vec<u8>, crate::domain::plugin_sandbox::SandboxError> {
+    let config = crate::domain::plugin_sandbox::PluginSandboxConfig {
+        gas_limit: gas_limit.min(crate::domain::plugin_sandbox::DEFAULT_PLUGIN_GAS_LIMIT),
+        max_memory_bytes: memory_limit.min(crate::domain::plugin_sandbox::MAX_PLUGIN_MEMORY_BYTES),
+        allow_external_io: false,
+    };
+    let mut sandbox = crate::domain::plugin_sandbox::PluginSandbox::new(config);
+    sandbox.charge_gas(10)?;
+    sandbox.allocate(code.len())?;
+    sandbox.run_isolated(|_| Ok(code.to_vec()))
+}

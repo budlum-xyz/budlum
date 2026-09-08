@@ -91,6 +91,7 @@ impl ProducerRegistry {
         for &b in seed.iter().take(8) {
             seed_num = (seed_num << 8) | u64::from(b);
         }
+        }
         let target = seed_num % self.total_producer_bond;
         let mut acc = 0u64;
         for p in active_producers {
