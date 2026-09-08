@@ -185,6 +185,26 @@ mod pos_checkpoint_is_a_limit_not_a_score {
     }
 
     #[test]
+    fn equal_weight_split_resolves_to_one_deterministic_winner() {
+        // Two tips of equal length (a 2-2 stake split) with no checkpoint:
+        // the old strict `>` refused a reorg in both directions, leaving the
+        // choice to the order the tips arrived. The resolver must pick exactly
+        // one side, and picking must be stable under repeated evaluation.
+        let engine = engine();
+        let a = chain_of(6, "aa");
+        let b = chain_of(6, "bb");
+        assert_eq!(engine.fork_choice_score(&a), engine.fork_choice_score(&b));
+
+        let a_beats_b = engine.is_better_chain(&a, &b);
+        let b_beats_a = engine.is_better_chain(&b, &a);
+        assert_ne!(
+            a_beats_b, b_beats_a,
+            "an equal-weight split must have a single deterministic winner"
+        );
+        assert_eq!(a_beats_b, engine.is_better_chain(&a, &b));
+    }
+
+    #[test]
     fn a_violating_candidate_loses_even_when_the_current_chain_also_scores_zero() {
         // The node least able to tell the difference is one whose own chain
         // has not reached the checkpoint height. Scoring alone would let the

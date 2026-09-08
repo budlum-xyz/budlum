@@ -3,6 +3,7 @@ pub mod poa;
 pub mod pos;
 pub mod pow;
 pub mod qc;
+pub mod split_resolver;
 use crate::core::block::Block;
 pub use poa::PoAEngine;
 pub use pos::PoSEngine;

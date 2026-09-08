@@ -2,6 +2,7 @@ use super::{ConsensusEngine, ConsensusError};
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 
+use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use crate::core::block::Block;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
@@ -847,13 +848,26 @@ impl ConsensusEngine for PoSEngine {
         )
     }
     fn select_best_chain<'a>(&self, chains: &[&'a [Block]]) -> Option<&'a [Block]> {
-        if chains.is_empty() {
-            return None;
+        let mut best: Option<&'a [Block]> = None;
+        for &chain in chains {
+            match best {
+                None => best = Some(chain),
+                Some(current) => {
+                    let current_score = self.fork_choice_score(current);
+                    let candidate_score = self.fork_choice_score(chain);
+                    let candidate_wins = candidate_score > current_score
+                        || (candidate_score == current_score
+                            && resolve_split_tie(
+                                &SplitCandidate::from_chain_tip(current, current_score),
+                                &SplitCandidate::from_chain_tip(chain, candidate_score),
+                            ) == SplitDecision::RightWins);
+                    if candidate_wins {
+                        best = Some(chain);
+                    }
+                }
+            }
         }
-        chains
-            .iter()
-            .max_by_key(|c| self.fork_choice_score(c))
-            .copied()
+        best
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
@@ -889,7 +903,20 @@ impl ConsensusEngine for PoSEngine {
         if !self.chain_honours_checkpoint(candidate) {
             return false;
         }
-        self.fork_choice_score(candidate) > self.fork_choice_score(current)
+        let candidate_score = self.fork_choice_score(candidate);
+        let current_score = self.fork_choice_score(current);
+        if candidate_score != current_score {
+            return candidate_score > current_score;
+        }
+        // Equal accumulated weight (a 2-2 stake split): the deterministic
+        // resolver picks a side, so honest nodes converge on the same tip
+        // regardless of the order in which the two tips arrived. `RightWins`
+        // means the candidate replaces the current chain; identical tips keep
+        // the incumbent (no reorg).
+        resolve_split_tie(
+            &SplitCandidate::from_chain_tip(current, current_score),
+            &SplitCandidate::from_chain_tip(candidate, candidate_score),
+        ) == SplitDecision::RightWins
     }
 
     fn record_block(
