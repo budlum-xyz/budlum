@@ -284,8 +284,8 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
-#[cfg(unix)]
-        #[test]
+    #[cfg(unix)]
+    #[test]
     fn save_refuses_a_pre_planted_symlink() {
         let witness = witness_for(&b"symlink refusal ".repeat(60));
         let rows = witness_to_field_trace(&witness);

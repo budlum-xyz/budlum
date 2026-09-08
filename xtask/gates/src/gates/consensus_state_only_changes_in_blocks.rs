@@ -77,11 +77,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     )?;
     let val = apc.find("validate_commitment_state_updates(&com)?");
     let write = apc.find("account.nonce = *new_nonce");
-    let val = val.ok_or(
-        "apply_pending_commitments lost the validate_commitment_state_updates call",
-    )?;
-    let write =
-        write.ok_or("apply_pending_commitments lost the nonce write")?;
+    let val =
+        val.ok_or("apply_pending_commitments lost the validate_commitment_state_updates call")?;
+    let write = write.ok_or("apply_pending_commitments lost the nonce write")?;
     if val > write {
         return Err(
             "nonce write runs before validate_commitment_state_updates in apply_pending_commitments"
@@ -209,7 +207,10 @@ pub fn self_test() -> Result<String, String> {
     let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
     std::fs::write(
         &bc_dst,
-        text.replace("save_cross_domain_message(", "save_cross_domain_message_gone("),
+        text.replace(
+            "save_cross_domain_message(",
+            "save_cross_domain_message_gone(",
+        ),
     )
     .map_err(|e| e.to_string())?;
     if run(&tmp).is_ok() {
