@@ -310,18 +310,30 @@ mod tests {
     Ok("self test OK: narrow imports flagged, globs and qualified paths not".into())
 }
 
+// The test returns a Result on purpose: the gates-do-not-panic gate reads
+// this file too, and an `.expect`/`panic!` inside gate code is itself the
+// defect that gate catches.
 #[cfg(unix)]
 #[test]
-fn the_walker_does_not_follow_symlinks() {
+fn the_walker_does_not_follow_symlinks() -> Result<(), String> {
+    walker_symlink_check()
+}
+
+#[cfg(unix)]
+fn walker_symlink_check() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("gate-walk-{}", std::process::id()));
     let inner = dir.join("inner");
-    std::fs::create_dir_all(&inner).expect("dirs");
+    std::fs::create_dir_all(&inner).map_err(|e| format!("dirs: {e}"))?;
     // A cycle: inner/loop points back at the tree root. A following walker
     // would recurse until stack exhaustion; the dirent-based one returns.
-    std::os::unix::fs::symlink(&dir, inner.join("loop")).expect("symlink");
-    std::fs::write(inner.join("clean.rs"), "pub fn f() -> u8 { 1 }\n").expect("file");
+    std::os::unix::fs::symlink(&dir, inner.join("loop")).map_err(|e| format!("symlink: {e}"))?;
+    std::fs::write(inner.join("clean.rs"), "pub fn f() -> u8 { 1 }\n")
+        .map_err(|e| format!("file: {e}"))?;
     let mut findings = Vec::new();
     walk(&dir, &mut findings);
-    assert!(findings.is_empty(), "clean file must stay clean: {findings:?}");
     let _ = std::fs::remove_dir_all(&dir);
+    if !findings.is_empty() {
+        return Err(format!("clean file must stay clean: {findings:?}"));
+    }
+    Ok(())
 }

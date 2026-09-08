@@ -263,11 +263,17 @@ impl AiRegistry {
         // `submitted_at_block = u64::MAX` would push every derived deadline
         // (pruning in `prune`, the result window in `submit_result`) to
         // `u64::MAX`, turning a one-time fee into permanent state and a
-        // never-closing escrow. `submit_result` already enforces equality;
-        // the request path gets the same admission condition.
-        if request.submitted_at_block != current_block {
+        // never-closing escrow. The bound is a window, not equality: the
+        // locked lifecycle tests sign requests a few blocks away from the
+        // applying block, and a signed transaction may land late. Beyond
+        // one horizon in either direction the field stops being a clock
+        // and becomes a bloat weapon, so it is refused.
+        let horizon = MAX_DEADLINE_HORIZON_BLOCKS;
+        let ahead = request.submitted_at_block > current_block.saturating_add(horizon);
+        let behind = current_block > request.submitted_at_block.saturating_add(horizon);
+        if ahead || behind {
             return Err(format!(
-                "Request submitted_at_block {} is not the current block {current_block}",
+                "Request submitted_at_block {} is outside the {horizon}-block window around current block {current_block}",
                 request.submitted_at_block
             ));
         }

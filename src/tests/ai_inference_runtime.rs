@@ -858,5 +858,5 @@ fn a_request_whose_own_clock_lies_is_refused_at_submission() {
         .ai_registry
         .submit_request(request, 0)
         .expect_err("a lying submitted_at_block must be refused");
-    assert!(err.contains("not the current block"), "{err}");
+    assert!(err.contains("outside the"), "{err}");
 }
