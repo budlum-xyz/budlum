@@ -201,9 +201,3 @@ pub use three_visibility::{
 };
 
 pub mod canonical_archive;
-pub use canonical_archive::{
-    ArchivePin, CanonicalArchiveManager, CanonicalManifest, SlsaProvenance, StorageProviderKind,
-};
-
-pub use private_pact::PrivatePact;
-pub use three_meter::RegenerationBudgetMeter;

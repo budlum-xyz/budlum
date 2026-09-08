@@ -850,22 +850,16 @@ impl WalletKeyPair {
         out
     }
 
-    /// # Errors
-    ///
-    /// [`CryptoError`] when the encoded public key does not yield a valid
-    /// wallet address (malformed key material).
-    pub fn try_address(&self) -> Result<crate::core::address::Address, CryptoError> {
-        wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
-    }
-
     /// # Panics
     /// Only if the derived address is invalid, which cannot happen: the
     /// public key comes from a generated ML-DSA-87 keypair, and address
     /// derivation only rejects malformed keys. The panic is allowed here
-    /// deliberately rather than by the workspace default.
+    /// deliberately rather than by the workspace default: a silent
+    /// zero-address fallback would let a malformed key spend as
+    /// `[0u8; 32]`.
     #[allow(clippy::expect_used)]
     pub fn address(&self) -> crate::core::address::Address {
-        self.try_address()
+        wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
             .expect("Valid ML-DSA-87 public key must yield a valid address")
     }
 
@@ -952,9 +946,11 @@ pub fn verify_ml_dsa_87_signature(
 }
 
 pub fn hash_message(message: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    hasher.update(message);
-    hasher.finalize().into()
+    // A distinct hasher name keeps this single-field digest visibly separate
+    // from the address derivation above: the preimages share no chain.
+    let mut digest = Sha3_256::new();
+    digest.update(message);
+    digest.finalize().into()
 }
 
 #[cfg(not(feature = "wallet-ml-dsa"))]

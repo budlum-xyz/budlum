@@ -434,11 +434,7 @@ mod integration_tests {
         };
 
         let msg = cert.signing_message();
-        let h_msg_point = crate::chain::finality::hash_to_g1(&msg);
-        let sig_point = bls12_381::G1Projective::from(h_msg_point) * bls_sk;
-        cert.agg_sig_bls = bls12_381::G1Affine::from(sig_point)
-            .to_compressed()
-            .to_vec();
+        cert.agg_sig_bls = crate::chain::finality::sign_bls(&bls_sk, &msg);
 
         let qc_blob = QcBlob::new(
             cert.epoch,
@@ -689,11 +685,7 @@ mod integration_tests {
         };
 
         let msg = cert.signing_message();
-        let h_msg_point = crate::chain::finality::hash_to_g1(&msg);
-        let sig_point = bls12_381::G1Projective::from(h_msg_point) * bls_sk;
-        cert.agg_sig_bls = bls12_381::G1Affine::from(sig_point)
-            .to_compressed()
-            .to_vec();
+        cert.agg_sig_bls = crate::chain::finality::sign_bls(&bls_sk, &msg);
 
         let valid_blob = QcBlob::new(
             cert.epoch,

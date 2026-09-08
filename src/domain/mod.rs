@@ -11,7 +11,6 @@ pub mod storage_params;
 pub mod types;
 
 pub use commitment_registry::DomainCommitmentRegistry;
-pub use custom_plugin_guard::validate_custom_plugin_hash;
 pub use finality_adapter::{
     hash_finality_proof, hash_pow_header, poa_authority_set_hash, AiInferenceFinalityAdapter,
     BftFinalityAdapter, DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,
@@ -47,7 +46,3 @@ pub use types::{
 };
 
 pub mod plugin_sandbox;
-pub use plugin_sandbox::{
-    PluginSandbox, PluginSandboxConfig, SandboxError, DEFAULT_PLUGIN_GAS_LIMIT,
-    MAX_PLUGIN_MEMORY_BYTES,
-};

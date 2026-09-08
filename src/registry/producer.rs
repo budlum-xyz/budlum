@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 
-pub const MIN_PRODUCER_BOND: u64 = 10_000;
+const MIN_PRODUCER_BOND: u64 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProducerEntry {
+struct ProducerEntry {
     pub producer: Address,
     pub bond: u64,
     pub registered_at_epoch: u64,
@@ -23,7 +23,7 @@ pub struct ProducerEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ProducerRegistry {
+struct ProducerRegistry {
     pub producers: BTreeMap<Address, ProducerEntry>,
     pub total_producer_bond: u64,
 }
@@ -70,7 +70,7 @@ impl ProducerRegistry {
         Ok(())
     }
 
-    pub fn record_production(&mut self, producer: &Address) -> bool {
+    fn record_production(&mut self, producer: &Address) -> bool {
         if let Some(entry) = self.producers.get_mut(producer) {
             if entry.active {
                 entry.blocks_produced = entry.blocks_produced.saturating_add(1);
@@ -81,14 +81,14 @@ impl ProducerRegistry {
     }
 
     #[must_use]
-    pub fn select_producer(&self, seed: &Hash32) -> Option<Address> {
+    fn select_producer(&self, seed: &Hash32) -> Option<Address> {
         let active_producers: Vec<&ProducerEntry> =
             self.producers.values().filter(|p| p.active).collect();
         if active_producers.is_empty() || self.total_producer_bond == 0 {
             return None;
         }
         let mut seed_num = 0u64;
-        for &b in &seed[0..8] {
+        for &b in seed.iter().take(8) {
             seed_num = (seed_num << 8) | u64::from(b);
         }
         let target = seed_num % self.total_producer_bond;
@@ -103,7 +103,7 @@ impl ProducerRegistry {
     }
 
     #[must_use]
-    pub fn root_hash(&self) -> Hash32 {
+    fn root_hash(&self) -> Hash32 {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_PRODUCER_REGISTRY_V1");
         for (addr, p) in &self.producers {

@@ -157,7 +157,7 @@ mod tests {
 /// complexity attacks during recursive recipe expansion and data
 /// regeneration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegenerationBudgetMeter {
+struct RegenerationBudgetMeter {
     pub max_cpu_steps: u64,
     pub max_memory_bytes: usize,
     pub max_recursion_depth: u32,
@@ -186,7 +186,7 @@ impl RegenerationBudgetMeter {
     /// # Errors
     ///
     /// [`MeterError::BudgetExceeded`] when the steps would pass the budget.
-    pub const fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
+    const fn consume_steps(&mut self, steps: u64) -> Result<(), MeterError> {
         let used = self.cpu_steps_used.saturating_add(steps);
         if used > self.max_cpu_steps {
             return Err(MeterError::BudgetExceeded {
@@ -201,7 +201,7 @@ impl RegenerationBudgetMeter {
     /// # Errors
     ///
     /// [`MeterError::BudgetExceeded`] when the allocation would pass the cap.
-    pub const fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
+    const fn track_memory(&mut self, bytes: usize) -> Result<(), MeterError> {
         let used = self.memory_used.saturating_add(bytes);
         if used > self.max_memory_bytes {
             return Err(MeterError::BudgetExceeded {
@@ -219,7 +219,7 @@ impl RegenerationBudgetMeter {
     // The two u32->u64 casts keep this fn const: `From<u32> for u64` is not
     // const-callable yet, and the widening cast cannot lose information.
     #[allow(clippy::cast_lossless)]
-    pub const fn enter_recursion(&mut self) -> Result<(), MeterError> {
+    const fn enter_recursion(&mut self) -> Result<(), MeterError> {
         if self.current_depth >= self.max_recursion_depth {
             return Err(MeterError::BudgetExceeded {
                 used: (self.current_depth as u64) + 1,
@@ -230,7 +230,7 @@ impl RegenerationBudgetMeter {
         Ok(())
     }
 
-    pub const fn exit_recursion(&mut self) {
+    const fn exit_recursion(&mut self) {
         self.current_depth = self.current_depth.saturating_sub(1);
     }
 }

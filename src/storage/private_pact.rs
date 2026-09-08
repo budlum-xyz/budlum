@@ -18,7 +18,7 @@ use crate::storage::pact_binding::hasher_init;
 /// preventing cleartext leakage of proprietary AI/data generation recipes while keeping
 /// state root bindings verifiable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrivatePact {
+struct PrivatePact {
     pub id: [u8; 32],
     pub recipe_hash: [u8; 32],
     pub seed_commitment: [u8; 32],
@@ -51,7 +51,7 @@ impl PrivatePact {
 
     /// Compute seed commitment from cleartext seed and blinding factor.
     #[must_use]
-    pub fn compute_seed_commitment(seed: &[u8; 32], blinding: &[u8; 32]) -> [u8; 32] {
+    fn compute_seed_commitment(seed: &[u8; 32], blinding: &[u8; 32]) -> [u8; 32] {
         let mut h = Sha3_256::new();
         hasher_init(&mut h, b"BDLM_PACT_PRIVATE_SEED_V1");
         h.update(seed);
@@ -61,7 +61,7 @@ impl PrivatePact {
 
     /// Verify an opening of the private seed.
     #[must_use]
-    pub fn verify_seed_opening(&self, seed: &[u8; 32], blinding: &[u8; 32]) -> bool {
+    fn verify_seed_opening(&self, seed: &[u8; 32], blinding: &[u8; 32]) -> bool {
         Self::compute_seed_commitment(seed, blinding) == self.seed_commitment
     }
 }

@@ -52,5 +52,4 @@ pub use poa_onboarding::{
 };
 pub use role::{roles, RoleId};
 
-pub use producer::{ProducerEntry, ProducerRegistry, MIN_PRODUCER_BOND};
 pub use quarantine_ledger::{AlarmEntry, QuarantineEntry, QuarantineLedger, QuarantineReason};

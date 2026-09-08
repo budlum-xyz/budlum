@@ -19,7 +19,7 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// ban-length is reclaimed by `prune_spent_records`, so ids an attacker
 /// mints for one burst of malformed handshakes cannot fill the tracked
 /// table forever and refuse every peer the node has never seen.
-pub const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
+const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
 pub const MAX_MSG_BURST: f64 = 20.0;
@@ -343,7 +343,7 @@ impl PeerManager {
     /// fresh. The entries an attacker mints through
     /// `report_invalid_handshake` and friends are negative-scored the moment
     /// they exist; a fresh one stays, but an unbanned negative record whose
-    /// `last_seen` is older than [`NEGATIVE_RECORD_TTL`] is reclaimed. The
+    /// `last_seen` is older than `NEGATIVE_RECORD_TTL` is reclaimed. The
     /// earlier rule kept every negative record forever, so minted garbage
     /// filled the ceiling once and every unseen peer was refused for the
     /// rest of the node's uptime - the denial of service this very bound
