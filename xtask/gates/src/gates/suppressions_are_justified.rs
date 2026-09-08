@@ -518,12 +518,6 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "`WalletKeyPair::address` derives from a generated ML-DSA-87 public key, and derivation only rejects malformed keys, so the panic path is unreachable; the expect beats the previous silent zero-address fallback, which would have let a malformed key spend as `[0u8; 32]`",
     },
-    Budget {
-        file: "src/storage/three_meter.rs",
-        lint: "clippy::cast_lossless",
-        count: 1,
-        reason: "`enter_recursion` is `const`, and `u64::from(u32)` is not const-callable yet; the widening `as u64` cast cannot lose information, and the const-ness is what lets the budget check run at compile time",
-    },
 ];
 
 /// Lints that may never be suppressed anywhere.

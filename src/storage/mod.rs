@@ -120,7 +120,6 @@ pub use render::{render, render_and_verify, RenderError, RenderFormat};
 pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 
 pub mod pact_binding;
-pub mod private_pact;
 pub use view_grant::{
     confidential_commit_digest, grant_issue_digest, grant_revoke_digest, social_delete_digest,
     view_claim_digest, ConfidentialBodyCommit, ConfidentialProofKind, GrantAuthError,
@@ -199,5 +198,3 @@ pub use social_delete::{process_social_delete, DeleteOutcome};
 pub use three_visibility::{
     delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
 };
-
-pub mod canonical_archive;

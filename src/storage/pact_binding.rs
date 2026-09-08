@@ -199,10 +199,6 @@ impl PactGates {
     }
 }
 
-pub(crate) fn hasher_init(h: &mut Sha3_256, domain: &[u8]) {
-    h.update(domain);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

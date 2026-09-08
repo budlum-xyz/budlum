@@ -1,5 +1,4 @@
 pub mod commitment_registry;
-pub mod custom_plugin_guard;
 pub mod finality_adapter;
 pub mod fork_choice;
 pub mod plugin;
@@ -44,5 +43,3 @@ pub use types::{
     DomainId, DomainStatus, Hash32, PoWDomainParameters, RootScheme, VerifiedDomainCommitment,
     AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER, STORAGE_ATTESTATION_ADAPTER,
 };
-
-pub mod plugin_sandbox;

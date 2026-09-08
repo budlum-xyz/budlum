@@ -333,5 +333,3 @@ mod tests {
         );
     }
 }
-
-pub mod split_resolver;
