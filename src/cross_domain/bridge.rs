@@ -117,7 +117,11 @@ pub struct BridgeTransfer {
     pub target_domain: DomainId,
     pub owner: Address,
     pub recipient: Address,
-    pub amount: u128,
+    /// The locked amount. Balances are u64, so the amount is u64 too: a
+    /// u128 here left the "fits a balance" invariant entirely to callers
+    /// and every settle path had to narrow it back with a cast that nobody
+    /// re-audited. The type now carries the invariant.
+    pub amount: u64,
     pub status: BridgeStatus,
     pub source_event_hash: Hash32,
     /// (security audit §3) height at which this lock expires.
@@ -229,6 +233,37 @@ pub fn split_bridge_fee(
     Ok((recipient, fee))
 }
 
+/// The bridge fee split on a u64 amount, for every path that moves balances.
+///
+/// Balances are u64, so a transfer carrying a u128 amount could only be
+/// settled by refusing most of its range at the edges or by narrowing it
+/// back where nobody re-checked. The transfer carries u64 now and this
+/// split is taken on it, which makes both legs u64 by construction: the
+/// fee never exceeds the amount, the amount never exceeds a balance, and
+/// no bridge path narrows anything with a cast. The asymmetric-defence
+/// finding (the mint path checked the fee ceiling and the unlock path did
+/// not) cannot recur here: there is no ceiling left to check.
+///
+/// # Errors
+///
+/// Returns `Err` under the same rule as [`split_bridge_fee`]: when the
+/// amount cannot cover `min_fee`.
+pub fn split_bridge_fee_u64(
+    amount: u64,
+    fee_ppm: u64,
+    min_fee: u64,
+) -> Result<(u64, u64), BridgeError> {
+    let (recipient, fee) = split_bridge_fee(u128::from(amount), fee_ppm, min_fee)?;
+    // Both legs are bounded by the u64 amount on every accepted input, so
+    // these conversions cannot fail; they are written as refusals rather
+    // than casts so that stays true by reading the code, not by trusting
+    // an invariant stated somewhere else.
+    let recipient = u64::try_from(recipient)
+        .map_err(|_| BridgeError("bridge recipient amount exceeds u64".into()))?;
+    let fee = u64::try_from(fee).map_err(|_| BridgeError("bridge fee exceeds u64".into()))?;
+    Ok((recipient, fee))
+}
+
 /// Refuse a relayed burn whose lock was opened in a different domain.
 ///
 /// A burn message says "the tokens were destroyed on the target chain, release
@@ -316,7 +351,7 @@ impl BridgeState {
         asset_id: AssetId,
         owner: Address,
         recipient: Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<(BridgeTransfer, DomainEvent), BridgeError> {
         self.require_asset_status(
@@ -465,7 +500,7 @@ impl BridgeState {
         let mut total = 0u128;
         for transfer in self.transfers.values() {
             if matches!(transfer.status, BridgeStatus::Locked { .. }) {
-                total = total.saturating_add(transfer.amount);
+                total = total.saturating_add(u128::from(transfer.amount));
             }
         }
         total
@@ -747,7 +782,7 @@ impl BridgeState {
     }
 }
 
-pub fn bridge_payload_hash(asset_id: AssetId, amount: u128) -> Hash32 {
+pub fn bridge_payload_hash(asset_id: AssetId, amount: u64) -> Hash32 {
     hash_fields_bytes(&[
         b"BDLM_BRIDGE_PAYLOAD_V1",
         asset_id.as_ref(),
@@ -1092,7 +1127,7 @@ mod tests {
 
 #[cfg(test)]
 mod bridge_fee_split {
-    use super::{check_burn_matches_lock_domain, split_bridge_fee};
+    use super::{check_burn_matches_lock_domain, split_bridge_fee, split_bridge_fee_u64};
 
     const PPM_1_PCT: u64 = 10_000;
 
@@ -1166,6 +1201,22 @@ mod bridge_fee_split {
             split_bridge_fee(11, PPM_1_PCT, 10).is_ok(),
             "just above floor"
         );
+    }
+
+    /// The u64 split is total on the whole u64 range: no narrowing, no
+    /// refusal at the top, value conserved. The u128 core stays for the
+    /// arithmetic; the balance-moving paths take this one.
+    #[test]
+    fn the_u64_split_covers_the_whole_range() {
+        for amount in [11u64, 1_000, u64::MAX - 1, u64::MAX] {
+            let (recipient, fee) =
+                split_bridge_fee_u64(amount, PPM_1_PCT, 10).expect("covers floor");
+            assert_eq!(
+                u128::from(recipient) + u128::from(fee),
+                u128::from(amount),
+                "amount {amount} must conserve value"
+            );
+        }
     }
 
     /// The recipient is never credited more than arrived, and never nothing.

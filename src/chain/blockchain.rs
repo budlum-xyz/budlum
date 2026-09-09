@@ -1937,25 +1937,18 @@ impl Blockchain {
         // governance parameters; see `split_bridge_fee` for why a bare
         // percentage was not enough.
         let params = *self.state.registry.params();
-        let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
             transfer.amount,
             params.bridge_relayer_fee_ppm,
             params.bridge_relayer_min_fee,
         )
         .map_err(|e| e.to_string())?;
 
-        // Security: prevent u128 -> u64 truncation.
-        // Check BOTH final_amount AND fee for u64 overflow.
-        if final_amount > u64::MAX as u128 {
-            return Err(
-                "Bridge amount exceeds maximum representable balance (u64 overflow)".into(),
-            );
-        }
-        if fee > u64::MAX as u128 {
-            return Err("Bridge fee exceeds maximum representable balance (u64 overflow)".into());
-        }
-        let minted = (final_amount as u64)
-            .checked_add(fee as u64)
+        // The transfer carries a u64 amount and the split is taken on it,
+        // so both legs are u64 by construction: there is no u128 -> u64
+        // narrowing left to refuse on this path.
+        let minted = final_amount
+            .checked_add(fee)
             .ok_or_else(|| "Bridge amount exceeds maximum representable balance".to_string())?;
         self.state
             .ensure_mint_headroom(minted)
@@ -1973,10 +1966,10 @@ impl Blockchain {
         // `try_mint_balance` checks the fixed ceiling; the fee comes from the same
         // mint and is subject to the same ceiling.
         self.state
-            .try_mint_balance(&transfer.recipient, final_amount as u64)
+            .try_mint_balance(&transfer.recipient, final_amount)
             .map_err(|e| format!("Bridge mint (recipient): {e}"))?;
         self.state
-            .try_mint_balance(&relayer, fee as u64)
+            .try_mint_balance(&relayer, fee)
             .map_err(|e| format!("Bridge mint fee (relayer): {e}"))?;
 
         if let Some(store) = &self.storage {
@@ -2024,7 +2017,7 @@ impl Blockchain {
         asset_id: crate::cross_domain::AssetId,
         owner: Address,
         recipient: Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<(crate::cross_domain::BridgeTransfer, DomainEvent), String> {
         for domain_id in [source_domain, target_domain] {
@@ -2067,20 +2060,14 @@ impl Blockchain {
         // Out of thin air (inflation bug). The sweep_expired_locks path
         // Already refunds the owner on expiry, so this debit is the
         // Corresponding credit-side bookkeeping.
-        if amount > u64::MAX as u128 {
-            return Err(
-                "Bridge transfer amount exceeds maximum representable balance (u64 overflow)"
-                    .into(),
-            );
-        }
         let owner_balance = self.state.get_balance(&owner);
-        if owner_balance < amount as u64 {
+        if owner_balance < amount {
             return Err(format!(
                 "Insufficient balance for bridge lock: owner has {owner_balance}, needed {amount}"
             ));
         }
         let owner_account = self.state.get_or_create(&owner);
-        owner_account.balance = owner_account.balance.saturating_sub(amount as u64);
+        owner_account.balance = owner_account.balance.saturating_sub(amount);
 
         if let Some(store) = &self.storage {
             store
@@ -2799,30 +2786,17 @@ impl Blockchain {
                     .clone();
 
                 let params = *self.state.registry.params();
-                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
                     transfer.amount,
                     params.bridge_relayer_fee_ppm,
                     params.bridge_relayer_min_fee,
                 )
                 .map_err(|e| e.to_string())?;
 
-                // Security: prevent u128 -> u64 truncation.
-                // Check BOTH final_amount AND fee for u64 overflow.
-                if final_amount > u64::MAX as u128 {
-                    return Err(format!(
-                        "Bridge amount {final_amount} exceeds maximum representable balance"
-                    ));
-                }
-                if fee > u64::MAX as u128 {
-                    return Err(format!(
-                        "Bridge fee {fee} exceeds maximum representable balance"
-                    ));
-                }
-                let minted = (final_amount as u64)
-                    .checked_add(fee as u64)
-                    .ok_or_else(|| {
-                        "Bridge amount exceeds maximum representable balance".to_string()
-                    })?;
+                // u64 amount in, u64 legs out: no narrowing exists here.
+                let minted = final_amount.checked_add(fee).ok_or_else(|| {
+                    "Bridge amount exceeds maximum representable balance".to_string()
+                })?;
                 self.state
                     .ensure_mint_headroom(minted)
                     .map_err(|e| format!("Bridge relay mint: {e}"))?;
@@ -2836,10 +2810,10 @@ impl Blockchain {
                 // relayer pipeline. Both entries must be bound to the same gate:
                 // if one is bound and the other forgotten, the ceiling holds only half.
                 self.state
-                    .try_mint_balance(&transfer.recipient, final_amount as u64)
+                    .try_mint_balance(&transfer.recipient, final_amount)
                     .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
                 self.state
-                    .try_mint_balance(&relayer, fee as u64)
+                    .try_mint_balance(&relayer, fee)
                     .map_err(|e| format!("Bridge relay mint fee (relayer): {e}"))?;
             }
             MessageKind::BridgeBurn => {
@@ -2881,30 +2855,22 @@ impl Blockchain {
                 // For unlock, the full amount goes back to the owner (Decision: relayer paid on target side)
                 // Actually, if a relayer brings proof of burn on target, they should be paid on source.
                 let params = *self.state.registry.params();
-                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
                     transfer.amount,
                     params.bridge_relayer_fee_ppm,
                     params.bridge_relayer_min_fee,
                 )
                 .map_err(|e| e.to_string())?;
 
-                // Security: prevent u128 -> u64 truncation.
-                // Check BOTH final_amount AND fee for u64 overflow.
-                if final_amount > u64::MAX as u128 {
-                    return Err(format!(
-                        "Unlock amount {final_amount} exceeds maximum balance"
-                    ));
-                }
-                if fee > u64::MAX as u128 {
-                    return Err(format!("Unlock fee {fee} exceeds maximum balance"));
-                }
-
-                // Try_add_balance for relay bridge unlock
+                // The unlock path and the mint path now share the same
+                // split, so the old asymmetry (the mint side refused a fee
+                // over u64::MAX and this side narrowed it with a cast)
+                // cannot exist: both legs are u64 by construction.
                 self.state
-                    .try_add_balance(&transfer.owner, final_amount as u64)
+                    .try_add_balance(&transfer.owner, final_amount)
                     .map_err(|e| format!("Bridge relay unlock overflow (owner): {e}"))?;
                 self.state
-                    .try_add_balance(&relayer, fee as u64)
+                    .try_add_balance(&relayer, fee)
                     .map_err(|e| format!("Bridge relay unlock fee overflow (relayer): {e}"))?;
             }
             _ => {

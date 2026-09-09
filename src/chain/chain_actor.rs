@@ -286,7 +286,7 @@ pub enum ChainCommand {
         asset_id: crate::cross_domain::AssetId,
         owner: crate::core::address::Address,
         recipient: crate::core::address::Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
         response: oneshot::Sender<
             Result<
@@ -2107,7 +2107,7 @@ impl ChainHandle {
         asset_id: crate::cross_domain::AssetId,
         owner: crate::core::address::Address,
         recipient: crate::core::address::Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<
         (

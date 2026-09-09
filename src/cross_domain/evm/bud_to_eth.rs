@@ -31,7 +31,7 @@ pub struct BudToEthClaim {
     /// The burned asset, to be unlocked on Ethereum.
     pub asset_id: [u8; 32],
     /// The unlock amount, minted or released on Ethereum.
-    pub amount: u128,
+    pub amount: u64,
     /// The recipient Ethereum address, 20 bytes.
     pub recipient_eth: [u8; 20],
     /// The Budlum block height at which the burn was finalised.
@@ -114,7 +114,7 @@ pub fn build_bud_to_eth_claim(
 
     // 3. Check the amount against the cap, in a single lookup.
     let amount = transfer.amount;
-    if amount > bridge_cap {
+    if u128::from(amount) > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }
 

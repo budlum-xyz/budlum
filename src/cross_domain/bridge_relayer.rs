@@ -129,7 +129,7 @@ impl BridgeRelayerPipeline {
         asset_id: crate::cross_domain::bridge::AssetId,
         owner: Address,
         recipient: Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<DomainEvent, PipelineError> {
         let event_index = self.get_or_create_tree(source_domain).events().len() as u32;
