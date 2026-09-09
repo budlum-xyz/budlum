@@ -446,8 +446,11 @@ impl BridgeState {
         // Claiming a different amount - fund inflation vector.
         let expected_payload = bridge_payload_hash(transfer.asset_id, transfer.amount);
         if message.payload_hash != expected_payload {
+            // Internal audit reference for this refusal: B2. The id stays
+            // here in the comment; the string a client reads says what went
+            // wrong, not which internal review found it.
             return Err(BridgeError(format!(
-                "B2: payload_hash mismatch - message claims {:?}, transfer binds {:?}",
+                "payload_hash mismatch - message claims {:?}, transfer binds {:?}",
                 message.payload_hash, expected_payload
             )));
         }
