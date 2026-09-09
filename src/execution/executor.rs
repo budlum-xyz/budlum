@@ -997,7 +997,7 @@ impl Executor {
                                     .clone();
                                 let params = *state.registry.params();
                                 let (final_amount, fee) =
-                                    crate::cross_domain::bridge::split_bridge_fee_u64(
+                                    crate::cross_domain::bridge::split_bridge_fee(
                                         transfer.amount,
                                         params.bridge_relayer_fee_ppm,
                                         params.bridge_relayer_min_fee,
@@ -1005,15 +1005,17 @@ impl Executor {
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_fee_below_minimum", e.0)
                                     })?;
-                                // The transfer amount is u64 and the split
-                                // is taken on it, so both legs are u64 by
-                                // construction: no narrowing to refuse here.
-                                let minted = final_amount.checked_add(fee).ok_or_else(|| {
-                                    BudlumError::validation(
-                                        "bridge_mint_failed",
-                                        "Bridge amount exceeds maximum representable balance",
-                                    )
-                                })?;
+                                // The split legs arrive as Bud, the money
+                                // type: bounded by construction, and the
+                                // legs rejoin through u64 arithmetic at the
+                                // balance boundary, in plain sight.
+                                let minted =
+                                    final_amount.get().checked_add(fee.get()).ok_or_else(|| {
+                                        BudlumError::validation(
+                                            "bridge_mint_failed",
+                                            "Bridge amount exceeds maximum representable balance",
+                                        )
+                                    })?;
                                 state.ensure_mint_headroom(minted).map_err(|e| {
                                     BudlumError::validation("bridge_mint_overflow", &e)
                                 })?;
@@ -1034,7 +1036,7 @@ impl Executor {
                                 // refused. The relayer fee comes out of the same mint
                                 // and is subject to the same ceiling.
                                 state
-                                    .try_mint_balance(&transfer.recipient, final_amount)
+                                    .try_mint_balance(&transfer.recipient, final_amount.get())
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_mint_overflow", &e)
                                     })?;
@@ -1042,8 +1044,8 @@ impl Executor {
                                 // Relayer who submitted the proof). Previously the fee was
                                 // Silently dropped - BUD lost to the void. The submit_relay_proof
                                 // Path correctly credits the relayer; this path should too.
-                                if fee > 0 {
-                                    state.try_mint_balance(&tx.from, fee).map_err(|e| {
+                                if !fee.is_zero() {
+                                    state.try_mint_balance(&tx.from, fee.get()).map_err(|e| {
                                         BudlumError::validation("bridge_fee_overflow", &e)
                                     })?;
                                 }
@@ -1094,7 +1096,7 @@ impl Executor {
                                 // Refund owner (1% relayer fee deducted, same as submit_relay_proof)
                                 let params = *state.registry.params();
                                 let (final_amount, fee) =
-                                    crate::cross_domain::bridge::split_bridge_fee_u64(
+                                    crate::cross_domain::bridge::split_bridge_fee(
                                         transfer.amount,
                                         params.bridge_relayer_fee_ppm,
                                         params.bridge_relayer_min_fee,
@@ -1102,20 +1104,20 @@ impl Executor {
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_fee_below_minimum", e.0)
                                     })?;
-                                // The unlock side now takes the same u64
+                                // The unlock side takes the same money-typed
                                 // split as the mint side, so the fee cannot
-                                // be narrowed here: it is u64 before it
-                                // reaches a balance.
-                                // Use try_add_balance instead of add_balance
+                                // be narrowed here: it is Bud before it
+                                // reaches a balance, and crosses as u64 in
+                                // plain sight.
                                 state
-                                    .try_add_balance(&transfer.owner, final_amount)
+                                    .try_add_balance(&transfer.owner, final_amount.get())
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_unlock_overflow", &e)
                                     })?;
                                 // Fix: Credit relayer fee
                                 // To tx.from on unlock. Use try_add_balance for overflow safety.
-                                if fee > 0 {
-                                    state.try_add_balance(&tx.from, fee).map_err(|e| {
+                                if !fee.is_zero() {
+                                    state.try_add_balance(&tx.from, fee.get()).map_err(|e| {
                                         BudlumError::validation("bridge_unlock_fee_overflow", &e)
                                     })?;
                                 }

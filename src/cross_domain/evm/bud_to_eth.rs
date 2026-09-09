@@ -113,7 +113,7 @@ pub fn build_bud_to_eth_claim(
     }
 
     // 3. Check the amount against the cap, in a single lookup.
-    let amount = transfer.amount;
+    let amount = transfer.amount.get();
     if u128::from(amount) > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }

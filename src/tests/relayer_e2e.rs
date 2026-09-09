@@ -357,24 +357,22 @@ fn full_internal_relay_cycle_lock_mint() {
     //   Does NOT debit the relayer's native balance, so the relayer stays
     //   At its initial 100M plus the fee.
     let params = bc.state.registry.params();
-    let (expected_recipient, expected_fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
-        100,
+    let (expected_recipient, expected_fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(100),
         params.bridge_relayer_fee_ppm,
         params.bridge_relayer_min_fee,
     )
     .expect("100 units must cover the default floor");
     assert_eq!(
-        expected_fee, 10,
+        expected_fee.get(),
+        10,
         "1% of 100 is 1, so the floor of 10 applies"
     );
-    assert_eq!(expected_recipient, 90);
-    assert_eq!(
-        bc.state.get_balance(&recipient()),
-        u64::try_from(expected_recipient).expect("recipient amount fits u64")
-    );
+    assert_eq!(expected_recipient.get(), 90);
+    assert_eq!(bc.state.get_balance(&recipient()), expected_recipient.get());
     assert_eq!(
         bc.state.get_balance(&relayer),
-        100_000_000 + u64::try_from(expected_fee).expect("fee fits u64")
+        100_000_000 + expected_fee.get()
     );
 }
 
@@ -533,16 +531,13 @@ fn full_internal_relay_cycle_burn_unlock() {
     // The previous 999 assumed a bare 1% cut with no floor, which is the
     // Rounding that let sub-100-unit bridges move for free.
     let params = bc.state.registry.params();
-    let (credited, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
-        100,
+    let (credited, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(100),
         params.bridge_relayer_fee_ppm,
         params.bridge_relayer_min_fee,
     )
     .expect("100 units must cover the default floor");
-    assert_eq!(fee, 10);
-    assert_eq!(credited, 90);
-    assert_eq!(
-        bc.state.get_balance(&owner()),
-        1000 - 100 + u64::try_from(credited).expect("credited fits u64")
-    );
+    assert_eq!(fee.get(), 10);
+    assert_eq!(credited.get(), 90);
+    assert_eq!(bc.state.get_balance(&owner()), 1000 - 100 + credited.get());
 }

@@ -1972,18 +1972,18 @@ impl Blockchain {
         // governance parameters; see `split_bridge_fee` for why a bare
         // percentage was not enough.
         let params = *self.state.registry.params();
-        let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
+        let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
             transfer.amount,
             params.bridge_relayer_fee_ppm,
             params.bridge_relayer_min_fee,
         )
         .map_err(|e| e.to_string())?;
 
-        // The transfer carries a u64 amount and the split is taken on it,
-        // so both legs are u64 by construction: there is no u128 -> u64
-        // narrowing left to refuse on this path.
+        // The split legs arrive as Bud, the money type: bounded by
+        // construction, crossing to a balance as u64 in plain sight.
         let minted = final_amount
-            .checked_add(fee)
+            .get()
+            .checked_add(fee.get())
             .ok_or_else(|| "Bridge amount exceeds maximum representable balance".to_string())?;
         self.state
             .ensure_mint_headroom(minted)
@@ -2001,10 +2001,10 @@ impl Blockchain {
         // `try_mint_balance` checks the fixed ceiling; the fee comes from the same
         // mint and is subject to the same ceiling.
         self.state
-            .try_mint_balance(&transfer.recipient, final_amount)
+            .try_mint_balance(&transfer.recipient, final_amount.get())
             .map_err(|e| format!("Bridge mint (recipient): {e}"))?;
         self.state
-            .try_mint_balance(&relayer, fee)
+            .try_mint_balance(&relayer, fee.get())
             .map_err(|e| format!("Bridge mint fee (relayer): {e}"))?;
 
         if let Some(store) = &self.storage {
@@ -2279,8 +2279,10 @@ impl Blockchain {
         if transfer.owner != message.recipient {
             return Err("Verified bridge burn recipient mismatch".into());
         }
-        let expected_payload_hash =
-            crate::cross_domain::bridge::bridge_payload_hash(transfer.asset_id, transfer.amount);
+        let expected_payload_hash = crate::cross_domain::bridge::bridge_payload_hash(
+            transfer.asset_id,
+            transfer.amount.get(),
+        );
         if message.payload_hash != expected_payload_hash {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
@@ -2824,15 +2826,16 @@ impl Blockchain {
                     .clone();
 
                 let params = *self.state.registry.params();
-                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
                     transfer.amount,
                     params.bridge_relayer_fee_ppm,
                     params.bridge_relayer_min_fee,
                 )
                 .map_err(|e| e.to_string())?;
 
-                // u64 amount in, u64 legs out: no narrowing exists here.
-                let minted = final_amount.checked_add(fee).ok_or_else(|| {
+                // Money-typed split in, u64 legs out at the balance
+                // boundary: no narrowing exists here.
+                let minted = final_amount.get().checked_add(fee.get()).ok_or_else(|| {
                     "Bridge amount exceeds maximum representable balance".to_string()
                 })?;
                 self.state
@@ -2848,10 +2851,10 @@ impl Blockchain {
                 // relayer pipeline. Both entries must be bound to the same gate:
                 // if one is bound and the other forgotten, the ceiling holds only half.
                 self.state
-                    .try_mint_balance(&transfer.recipient, final_amount)
+                    .try_mint_balance(&transfer.recipient, final_amount.get())
                     .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
                 self.state
-                    .try_mint_balance(&relayer, fee)
+                    .try_mint_balance(&relayer, fee.get())
                     .map_err(|e| format!("Bridge relay mint fee (relayer): {e}"))?;
             }
             MessageKind::BridgeBurn => {
@@ -2893,22 +2896,23 @@ impl Blockchain {
                 // For unlock, the full amount goes back to the owner (Decision: relayer paid on target side)
                 // Actually, if a relayer brings proof of burn on target, they should be paid on source.
                 let params = *self.state.registry.params();
-                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
                     transfer.amount,
                     params.bridge_relayer_fee_ppm,
                     params.bridge_relayer_min_fee,
                 )
                 .map_err(|e| e.to_string())?;
 
-                // The unlock path and the mint path now share the same
-                // split, so the old asymmetry (the mint side refused a fee
-                // over u64::MAX and this side narrowed it with a cast)
-                // cannot exist: both legs are u64 by construction.
+                // The unlock path and the mint path share the same
+                // money-typed split, so the old asymmetry (the mint side
+                // refused a fee over u64::MAX and this side narrowed it
+                // with a cast) cannot exist: both legs are Bud before they
+                // reach a balance.
                 self.state
-                    .try_add_balance(&transfer.owner, final_amount)
+                    .try_add_balance(&transfer.owner, final_amount.get())
                     .map_err(|e| format!("Bridge relay unlock overflow (owner): {e}"))?;
                 self.state
-                    .try_add_balance(&relayer, fee)
+                    .try_add_balance(&relayer, fee.get())
                     .map_err(|e| format!("Bridge relay unlock fee overflow (relayer): {e}"))?;
             }
             _ => {
@@ -4099,11 +4103,11 @@ impl Blockchain {
     fn apply_bridge_sweep_to_state(
         state: &mut AccountState,
         current_height: u64,
-    ) -> Result<Vec<(Address, u64)>, String> {
+    ) -> Result<Vec<(Address, crate::core::money::Bud)>, String> {
         let released = state.bridge_state.sweep_expired_locks(current_height);
         for (owner, amount) in &released {
             state
-                .try_add_balance(owner, *amount)
+                .try_add_balance(owner, amount.get())
                 .map_err(|error| format!("Bridge sweep refund overflow for {owner}: {error}"))?;
         }
         Ok(released)
@@ -4111,7 +4115,10 @@ impl Blockchain {
 
     /// Compatibility API. Canonical block execution invokes the same sweep on
     /// The prospective state before root calculation and durable commit.
-    pub fn apply_bridge_sweep(&mut self, current_height: u64) -> Vec<(Address, u64)> {
+    pub fn apply_bridge_sweep(
+        &mut self,
+        current_height: u64,
+    ) -> Vec<(Address, crate::core::money::Bud)> {
         let mut prospective = self.state.clone();
         match Self::apply_bridge_sweep_to_state(&mut prospective, current_height) {
             Ok(released) => {

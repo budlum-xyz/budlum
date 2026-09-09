@@ -130,7 +130,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     );
     // Sweep returns (owner, amount) for balance refund.
     assert_eq!(released[0].0, owner);
-    assert_eq!(released[0].1, 100);
+    assert_eq!(released[0].1.get(), 100);
 
     // The asset is back to `Active` and reusable.
     let fresh = bc

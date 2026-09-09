@@ -318,23 +318,23 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
         .expect("lock succeeds");
     let message = lock_event.message.expect("lock carries its message");
     let params = *state.registry.params();
-    let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
-        100,
+    let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(100),
         params.bridge_relayer_fee_ppm,
         params.bridge_relayer_min_fee,
     )
     .expect("100 units cover the minimum fee");
-    assert!(fee > 0, "the case needs a nonzero fee");
+    assert!(!fee.is_zero(), "the case needs a nonzero fee");
 
     // Headroom for the recipient's share exactly, and nothing for the fee.
     // Balances and the supply ceiling are u64 end to end, so the headroom
     // arithmetic stays in u64: there is no widening to undo any more.
     let headroom_before = state.supply_capacity_remaining();
-    let fill = headroom_before - final_amount - 1;
+    let fill = headroom_before - final_amount.get() - 1;
     state.add_balance(&owner, fill);
     let fee_payer_balance = state.get_balance(&relayer_addr());
     state.add_balance(&relayer_addr(), 1);
-    assert_eq!(state.supply_capacity_remaining(), final_amount);
+    assert_eq!(state.supply_capacity_remaining(), final_amount.get());
 
     let mut res = make_result("0xLOCK_ON_ETHEREUM_2");
     res.message = Some(message.clone());
