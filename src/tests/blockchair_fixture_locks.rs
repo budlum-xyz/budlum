@@ -306,7 +306,22 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
             0
         )
         .is_ok());
-    assert_eq!(store.processed_count(), 2);
+    // The replay memory is one high-water row per direction and sender, so
+    // the second real-payload message - same sender, later nonce - advances
+    // the same row instead of adding one: two processed messages, one row.
+    assert_eq!(store.processed_count(), 1);
+    assert!(store.is_processed(
+        msg1.source_domain,
+        msg1.target_domain,
+        &msg1.sender,
+        msg1.nonce
+    ));
+    assert!(!store.is_processed(
+        msg1.source_domain,
+        msg1.target_domain,
+        &msg1.sender,
+        msg1.nonce + 1
+    ));
 }
 
 // ============ 4. Bitcoin merkle root vectors ============
