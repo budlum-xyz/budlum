@@ -112,6 +112,7 @@ mod gates {
     pub mod no_orphan_source_files;
     pub mod no_unicode_dashes;
     pub mod node_classification_gate;
+    pub mod one_house_guards;
     pub mod paid_content;
     pub mod parallel_execution;
     pub mod pinned_downloads;
@@ -1233,6 +1234,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::release_profile_pins::self_test,
+    },
+    Gate {
+        name: "one-house-guards",
+        replaces: None,
+        run: gates::one_house_guards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::one_house_guards::self_test,
     },
 ];
 
