@@ -318,7 +318,7 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
         .expect("lock succeeds");
     let message = lock_event.message.expect("lock carries its message");
     let params = *state.registry.params();
-    let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+    let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
         100,
         params.bridge_relayer_fee_ppm,
         params.bridge_relayer_min_fee,

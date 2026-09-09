@@ -214,11 +214,7 @@ const SETTLED_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_
 /// Returns `Err` when the amount cannot cover `min_fee`. Relaying at a loss and
 /// crediting a negative balance are both worse than refusing, and the caller
 /// surfaces the refusal instead of silently moving zero.
-pub fn split_bridge_fee(
-    amount: u128,
-    fee_ppm: u64,
-    min_fee: u64,
-) -> Result<(u128, u128), BridgeError> {
+fn split_bridge_fee(amount: u128, fee_ppm: u64, min_fee: u64) -> Result<(u128, u128), BridgeError> {
     let min_fee = u128::from(min_fee);
     if amount <= min_fee {
         return Err(BridgeError(format!(
@@ -246,7 +242,7 @@ pub fn split_bridge_fee(
 ///
 /// # Errors
 ///
-/// Returns `Err` under the same rule as [`split_bridge_fee`]: when the
+/// Returns `Err` under the same rule as the u128 core above: when the
 /// amount cannot cover `min_fee`.
 pub fn split_bridge_fee_u64(
     amount: u64,

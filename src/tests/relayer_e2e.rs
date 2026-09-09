@@ -357,7 +357,7 @@ fn full_internal_relay_cycle_lock_mint() {
     //   Does NOT debit the relayer's native balance, so the relayer stays
     //   At its initial 100M plus the fee.
     let params = bc.state.registry.params();
-    let (expected_recipient, expected_fee) = crate::cross_domain::bridge::split_bridge_fee(
+    let (expected_recipient, expected_fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
         100,
         params.bridge_relayer_fee_ppm,
         params.bridge_relayer_min_fee,
@@ -533,7 +533,7 @@ fn full_internal_relay_cycle_burn_unlock() {
     // The previous 999 assumed a bare 1% cut with no floor, which is the
     // Rounding that let sub-100-unit bridges move for free.
     let params = bc.state.registry.params();
-    let (credited, fee) = crate::cross_domain::bridge::split_bridge_fee(
+    let (credited, fee) = crate::cross_domain::bridge::split_bridge_fee_u64(
         100,
         params.bridge_relayer_fee_ppm,
         params.bridge_relayer_min_fee,
