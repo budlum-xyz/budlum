@@ -1392,7 +1392,7 @@ mod tests {
         assert_eq!(bridge.root(), expected_root);
         assert_eq!(
             bridge.transfer(&transfer.message_id).map(|t| t.amount),
-            Some(100)
+            Some(crate::core::money::Bud::new(100))
         );
         // The tuple-keyed outbound nonce map came back too: the lock above
         // consumed nonce 0, so the next one on that route is 1.

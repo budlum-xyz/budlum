@@ -351,7 +351,7 @@ mod tests {
             let root = merkle_root(&leaves, combine_sha3, promote_sha3);
             for i in 0..leaves.len() {
                 let proof = merkle_proof(&leaves, i, combine_sha3, promote_sha3)
-                    .unwrap_or_else(|| panic("leaf {i} of {len}"));
+                    .unwrap_or_else(|| panic!("leaf {i} of {len}"));
                 assert_eq!(
                     merkle_root_from_proof(&leaves[i], i, &proof, combine_sha3, promote_sha3),
                     root,

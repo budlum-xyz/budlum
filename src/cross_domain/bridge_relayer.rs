@@ -324,7 +324,10 @@ impl BridgeRelayerPipeline {
 
     /// Sweep expired bridge locks (DoS prevention).
     /// Returns (owner, amount) for balance refund.
-    pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, u64)> {
+    pub fn sweep_expired_locks(
+        &mut self,
+        current_height: u64,
+    ) -> Vec<(Address, crate::core::money::Bud)> {
         self.bridge.sweep_expired_locks(current_height)
     }
 }

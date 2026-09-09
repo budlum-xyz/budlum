@@ -466,7 +466,8 @@ impl QcFaultProof {
                 // The prover recorded a promotion: this digest had no
                 // sibling at this level and was hashed under the promotion
                 // tag alone.
-                current.copy_from_slice(&merkle_tree::promote_sha3(&current));
+                let promoted = merkle_tree::promote_sha3(&current);
+                current.copy_from_slice(&promoted);
             } else {
                 let mut hasher = Sha3_256::new();
                 if idx % 2 == 0 {
