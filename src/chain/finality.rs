@@ -204,6 +204,56 @@ pub fn is_checkpoint_height_for_chain(height: u64, chain_id: u64) -> bool {
     height > 0 && height.is_multiple_of(interval)
 }
 
+/// Decode a block-hash string into 32 bytes, or `None` when the string is
+/// not 32-byte hex. Used by the settlement finality window, which skips
+/// what it cannot decode - deterministically, since every node holds the
+/// same string.
+fn hash32_from_hex(s: &str) -> Option<crate::domain::Hash32> {
+    let bytes = hex::decode(s).ok()?;
+    let mut out = [0u8; 32];
+    if bytes.len() != 32 {
+        return None;
+    }
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+/// The settlement finality window (F-7): the hashes of a chain's
+/// checkpoint blocks that are buried at least the finality horizon
+/// ([`crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH`]) deep and no
+/// deeper than the settled-row retention
+/// ([`crate::cross_domain::bridge::SETTLED_RETENTION_BLOCKS`]).
+///
+/// Pure derivation over `(height, block hash)` pairs: every checkpoint
+/// height in `[tip - SETTLED_RETENTION_BLOCKS, tip - FINALITY_PRUNE_DEPTH]`
+/// whose hash decodes to 32 bytes is in, in height order; the genesis
+/// height, non-checkpoint heights and malformed hashes are skipped. The
+/// settlement root folded into the state root is therefore a function of
+/// the blocks a node already holds, never of when this particular node
+/// happened to see a finality certificate - two honest nodes cannot split
+/// over it.
+pub fn settlement_finality_window_from<'a>(
+    heights_and_hashes: impl Iterator<Item = (u64, &'a str)>,
+    interval: u64,
+    tip: u64,
+) -> Vec<crate::domain::Hash32> {
+    if interval == 0 {
+        return Vec::new();
+    }
+    let newest = tip.saturating_sub(crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH);
+    let oldest = tip.saturating_sub(crate::cross_domain::bridge::SETTLED_RETENTION_BLOCKS);
+    let mut window = Vec::new();
+    for (height, hash) in heights_and_hashes {
+        if height == 0 || height % interval != 0 || height < oldest || height > newest {
+            continue;
+        }
+        if let Some(decoded) = hash32_from_hex(hash) {
+            window.push(decoded);
+        }
+    }
+    window
+}
+
 pub fn checkpoint_signing_message(epoch: u64, height: u64, hash: &str) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(b"BUDLUM_PRECOMMIT");

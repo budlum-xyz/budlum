@@ -1701,24 +1701,25 @@ mod settlement_prod_tests {
         assert_ne!(baseline.calculate_hash(), after.calculate_hash());
     }
 
+    /// F-7 closed the dead `settlement_finality_hashes` input by replacing
+    /// the stored field with a derived window (see the twin test in
+    /// `chain/blockchain.rs`). This module is still disabled pending the
+    /// devnet FinalityProof rewrite, so the derivation is pinned here only
+    /// through the pure helper.
     #[test]
-    fn settlement_finality_root_reflects_finality_hashes() {
-        let mut bc = test_chain();
-        let baseline = bc.build_global_header(None);
-
-        bc.settlement_finality_hashes.push([1u8; 32]);
-        let after = bc.build_global_header(None);
-        assert_ne!(
-            baseline.settlement_finality_root,
-            after.settlement_finality_root
+    fn settlement_finality_window_is_derived_not_stored() {
+        let hash_of = |h: u64| {
+            let mut bytes = [0u8; 32];
+            bytes[0..8].copy_from_slice(&h.to_be_bytes());
+            hex::encode(bytes)
+        };
+        let entries: Vec<(u64, String)> = (0..1501u64).map(|h| (h, hash_of(h))).collect();
+        let window = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            10,
+            1500,
         );
-
-        bc.settlement_finality_hashes.push([2u8; 32]);
-        let after2 = bc.build_global_header(None);
-        assert_ne!(
-            after.settlement_finality_root,
-            after2.settlement_finality_root
-        );
+        assert_eq!(window.len(), 50);
     }
 
     /// A plugin cannot be replaced without a record.

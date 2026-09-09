@@ -135,7 +135,6 @@ pub struct Blockchain {
     /// Universal Relayer - permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
-    pub settlement_finality_hashes: Vec<crate::domain::Hash32>,
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
     pub finality_aggregator: Option<FinalityAggregator>,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
@@ -163,6 +162,7 @@ pub struct Blockchain {
     /// Append-only in-memory event log consumed by RPC/gossip/reporting layers.
     pub storage_economics_events: Vec<StorageEconomicsEvent>,
 }
+
 impl Blockchain {
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
@@ -891,7 +891,6 @@ impl Blockchain {
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger,
             universal_relayer,
-            settlement_finality_hashes: Vec::new(),
             pending_slashing_evidence: Vec::new(),
             finality_aggregator: None,
             metrics: None,
@@ -1748,6 +1747,41 @@ impl Blockchain {
         Ok(())
     }
 
+    /// The settlement finality window: the hashes of checkpoint blocks that
+    /// are buried at least the finality horizon deep, and no deeper than
+    /// the settled-row retention.
+    ///
+    /// Derived from the chain prefix on every read, never stored. The
+    /// previous `settlement_finality_hashes` field had no production
+    /// writer at all, so the settlement root folded into the state root
+    /// was always the empty-tree root (F-7, dead-feature illusion). Wiring
+    /// a writer that appended on finality-certificate arrival would have
+    /// traded the dead input for a consensus race: two honest nodes that
+    /// finalized the same checkpoint at different moments would fold
+    /// different windows into the same block's state root and split.
+    /// Burial depth is a pure function of the blocks both nodes already
+    /// hold, so every node derives the same window for the same tip.
+    fn settlement_finality_window(&self) -> Vec<crate::domain::Hash32> {
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        if self.chain.is_empty() {
+            return Vec::new();
+        }
+        let tip = (self.chain.len() - 1) as u64;
+        // Only the retention band can matter; scanning it keeps the cost
+        // bounded by the window, not by the chain length.
+        let oldest =
+            tip.saturating_sub(crate::cross_domain::bridge::SETTLED_RETENTION_BLOCKS) as usize;
+        crate::chain::finality::settlement_finality_window_from(
+            self.chain[oldest..]
+                .iter()
+                .enumerate()
+                .map(|(i, block)| ((oldest + i) as u64, block.hash.as_str())),
+            interval,
+            tip,
+        )
+    }
+
     pub fn build_global_header(&self, proposer: Option<Address>) -> GlobalBlockHeader {
         let previous_global_hash = self
             .global_headers
@@ -1755,10 +1789,11 @@ impl Blockchain {
             .map(GlobalBlockHeader::calculate_hash_bytes)
             .unwrap_or([0u8; 32]);
 
-        let settlement_finality_root = if self.settlement_finality_hashes.is_empty() {
+        let settlement_window = self.settlement_finality_window();
+        let settlement_finality_root = if settlement_window.is_empty() {
             merkle_root(&[])
         } else {
-            merkle_root(&self.settlement_finality_hashes)
+            merkle_root(&settlement_window)
         };
 
         // B.U.D.: storage_root is computed from any verified
@@ -4130,10 +4165,11 @@ impl Blockchain {
         };
         committed_state.bridge_root = committed_state.bridge_state.root();
         committed_state.message_root = committed_state.message_registry.root();
-        let settlement_root = if self.settlement_finality_hashes.is_empty() {
+        let settlement_window = self.settlement_finality_window();
+        let settlement_root = if settlement_window.is_empty() {
             merkle_root(&[])
         } else {
-            merkle_root(&self.settlement_finality_hashes)
+            merkle_root(&settlement_window)
         };
         committed_state.settlement_root = settlement_root;
         committed_state.global_header_summary = self
@@ -4442,10 +4478,11 @@ impl Blockchain {
         if block.index > 0 {
             commit_state.bridge_root = commit_state.bridge_state.root();
             commit_state.message_root = commit_state.message_registry.root();
-            let settlement_root = if self.settlement_finality_hashes.is_empty() {
+            let settlement_window = self.settlement_finality_window();
+            let settlement_root = if settlement_window.is_empty() {
                 merkle_root(&[])
             } else {
-                merkle_root(&self.settlement_finality_hashes)
+                merkle_root(&settlement_window)
             };
             commit_state.settlement_root = settlement_root;
             commit_state.global_header_summary = self
@@ -4759,7 +4796,6 @@ impl Blockchain {
         self.global_headers = Vec::new();
         self.pending_finality_certs = BTreeMap::new();
         self.pending_slashing_evidence = Vec::new();
-        self.settlement_finality_hashes = Vec::new();
         self.universal_relayer = UniversalRelayer::new(RelayerConfig::default());
         self.proof_claims = crate::prover::ProofClaimRegistry::new();
         self.pending_storage_root = None;
@@ -6356,7 +6392,6 @@ impl Clone for Blockchain {
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger: self.quarantine_ledger.clone(),
             universal_relayer: self.universal_relayer.clone(),
-            settlement_finality_hashes: self.settlement_finality_hashes.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
             finality_aggregator: None,
             metrics: self.metrics.clone(),
@@ -6374,6 +6409,99 @@ impl Clone for Blockchain {
 mod tests {
     use super::*;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
+
+    /// Decode helper for the window tests.
+    fn h32(hex_str: &str) -> crate::domain::Hash32 {
+        let bytes = hex::decode(hex_str).expect("test hashes are hex");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
+    /// F-7: the settlement finality window is a pure function of the chain
+    /// prefix. A checkpoint enters only once it is buried a finality
+    /// horizon deep, and leaves once it is older than the settled-row
+    /// retention; the genesis height, non-checkpoint heights and malformed
+    /// hashes never enter.
+    #[test]
+    fn settlement_window_buries_checkpoints_behind_the_horizon() {
+        let hash_of = |h: u64| {
+            let mut bytes = [0u8; 32];
+            bytes[0..8].copy_from_slice(&h.to_be_bytes());
+            hex::encode(bytes)
+        };
+        let interval = 10u64;
+        let entries: Vec<(u64, String)> = (0..1501u64).map(|h| (h, hash_of(h))).collect();
+
+        // tip 1500: checkpoints 10..=500 are buried at least the horizon
+        // (1000); 510 and everything shallower are not; the genesis height
+        // and every non-checkpoint height are skipped; the retention floor
+        // saturates at 0, so nothing rotates out yet.
+        let window = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        assert_eq!(window.len(), 50);
+        assert_eq!(window[0], h32(&hash_of(10)));
+        assert_eq!(window[49], h32(&hash_of(500)));
+
+        // A malformed hash at a checkpoint height is skipped
+        // deterministically: every node holds the same string and derives
+        // the same (shorter) window.
+        let mut malformed = entries.clone();
+        malformed[300].1 = String::from("not-hex");
+        let window = crate::chain::finality::settlement_finality_window_from(
+            malformed.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        assert_eq!(window.len(), 49);
+
+        // tip 12000: horizon 11000, retention floor 2000. Checkpoints
+        // 2000..=11000 stay; 10..=1990 have rotated out; 11010 is not
+        // buried yet.
+        let entries: Vec<(u64, String)> = (0..12001u64).map(|h| (h, hash_of(h))).collect();
+        let window = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            12000,
+        );
+        assert_eq!(window.len(), 901);
+        assert_eq!(window[0], h32(&hash_of(2000)));
+        assert_eq!(window[900], h32(&hash_of(11000)));
+
+        // Before any checkpoint can be buried a full horizon deep, the
+        // window is empty: the settlement input starts out honest.
+        let entries: Vec<(u64, String)> = (0..1000u64).map(|h| (h, hash_of(h))).collect();
+        assert!(crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            999,
+        )
+        .is_empty());
+
+        // The same inputs always derive the same window, and a zero
+        // interval cannot invent checkpoints.
+        let entries: Vec<(u64, String)> = (0..1501u64).map(|h| (h, hash_of(h))).collect();
+        let first = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        let second = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        assert_eq!(first, second);
+        assert!(crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            0,
+            1500,
+        )
+        .is_empty());
+    }
     use crate::consensus::PoWEngine;
     use crate::crypto::primitives::KeyPair;
     use crate::storage::db::Storage;
