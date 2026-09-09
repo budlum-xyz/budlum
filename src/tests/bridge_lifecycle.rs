@@ -219,7 +219,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     );
     // (Owner, amount)
     assert_eq!(r[0].0, owner);
-    assert_eq!(r[0].1, 100);
+    assert_eq!(r[0].1.get(), 100);
 
     // The 100-expiry lock is now Active and the asset is reusable,
     // But the second lock (expiry=500) still holds asset_b as Locked.
@@ -243,7 +243,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     let r3 = bc.apply_bridge_sweep(500);
     // Returns owner addresses; asset_b lock owner is `owner`.
     assert!(
-        r3.iter().any(|(a, amt)| *a == owner && *amt == 50),
+        r3.iter().any(|(a, amt)| *a == owner && amt.get() == 50),
         "owner must be refunded 50 for asset_b lock at height 500: {r3:?}"
     );
 }
