@@ -83,8 +83,14 @@ pub fn qr_frame_count(
     if content_bytes == 0 || bytes_per_droplet == 0 || frame_capacity == 0 {
         return 0;
     }
+    // A frame that cannot hold even one droplet carries nothing; report 0
+    // instead of dividing by zero.
+    let droplets_per_frame = frame_capacity / bytes_per_droplet;
+    if droplets_per_frame == 0 {
+        return 0;
+    }
     let droplets = content_bytes.div_ceil(bytes_per_droplet);
-    droplets.div_ceil(frame_capacity / bytes_per_droplet)
+    droplets.div_ceil(droplets_per_frame)
 }
 
 /// A long video (for example 2 hours, 4 GB) -> how many frames, rounds and
@@ -175,6 +181,14 @@ pub fn ux_digest(frames: usize, segments: usize, fee: f64) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qr_frame_count_frame_smaller_than_droplet_is_zero() {
+        // v1 QR (17 B) cannot hold a 200 B droplet: 0 frames, no divide-by-zero.
+        assert_eq!(qr_frame_count(100, 200, qr_capacity_bytes(1)), 0);
+        // One droplet per frame exactly.
+        assert_eq!(qr_frame_count(400, 200, 200), 2);
+    }
 
     #[test]
     fn qr_kapasite_tablosu_gercek() {

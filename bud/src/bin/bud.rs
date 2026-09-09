@@ -676,14 +676,7 @@ fn run(cli: Cli) -> Result<String, String> {
             prev,
         } => {
             // prev hex -> [u8;32]
-            if prev.len() != 64 {
-                return Err("prev_hash must be 64 hex characters".into());
-            }
-            let mut prev_hash = [0u8; 32];
-            for i in 0..32 {
-                prev_hash[i] = u8::from_str_radix(&prev[i * 2..i * 2 + 2], 16)
-                    .map_err(|_| "prev hex is corrupt")?;
-            }
+            let prev_hash = parse_prev_hash(&prev)?;
             // Sample PACT challenge: the produced bytes match the commitment (VERIFIED)
             let produced = b"deterministic content 1234567890";
             let pact = bud_core::bud_format_pact::PactRecord::pure(
@@ -839,6 +832,22 @@ fn run(cli: Cli) -> Result<String, String> {
             }
         }
     }
+}
+
+/// `--prev` as 32 bytes. Works on the byte view, never on `str` slices: a
+/// 64-byte value holding one multi-byte character passed the old length check
+/// and then aborted at the slice boundary instead of returning the typed error.
+fn parse_prev_hash(prev: &str) -> Result<[u8; 32], String> {
+    let raw = prev.as_bytes();
+    if raw.len() != 64 || !raw.iter().all(u8::is_ascii_hexdigit) {
+        return Err("prev_hash must be 64 hex characters".into());
+    }
+    let nibble = |c: u8| (c as char).to_digit(16).ok_or("prev hex is corrupt");
+    let mut out = [0u8; 32];
+    for (i, pair) in raw.chunks_exact(2).enumerate() {
+        out[i] = (nibble(pair[0])? << 4) as u8 | nibble(pair[1])? as u8;
+    }
+    Ok(out)
 }
 
 fn main() -> ExitCode {
