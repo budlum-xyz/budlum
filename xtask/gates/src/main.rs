@@ -125,6 +125,7 @@ mod gates {
     pub mod regeneration;
     pub mod rejection_tests;
     pub mod relay;
+    pub mod release_profile_pins;
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
@@ -1224,6 +1225,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::consensus_state_only_changes_in_blocks::self_test,
+    },
+    Gate {
+        name: "release-profile-pins",
+        replaces: None,
+        run: gates::release_profile_pins::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::release_profile_pins::self_test,
     },
 ];
 
