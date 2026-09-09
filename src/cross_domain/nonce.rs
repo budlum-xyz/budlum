@@ -24,7 +24,11 @@ pub struct ReplayNonceStore {
     /// Block height at which each message was processed.
     /// Used for safe height-based pruning that only removes entries after
     /// FINALITY_PRUNE_DEPTH blocks - ensuring replay protection covers the
-    /// Finality window. Messages younger than the depth are never pruned.
+    /// Finality window. Rows younger than the depth leave only when the
+    /// store is over MAX_PROCESSED_MESSAGES and the finality band has
+    /// nothing older to release; the eviction order is oldest first, so the
+    /// replay window a bound can open is measured in the oldest rows the
+    /// store still held.
     ///
     /// Persisted with the rest of the store. It used to be `#[serde(skip)]`,
     /// which meant a restarted node reloaded every processed id with no
@@ -86,41 +90,74 @@ impl ReplayNonceStore {
         Ok(())
     }
 
-    /// Fix (legacy - kept for backward compat): Unconditional count-based prune.
-    /// WARNING: This can create a replay window for pruned messages.
-    /// Prefer prune_processed_safe which respects finality depth.
+    /// Legacy count-based prune, kept for the paths that have no height in
+    /// hand. The eviction order is the shared oldest-first order; the
+    /// previous version removed the smallest message id, which is an
+    /// ordering on the id bytes with no relation to age: a fresh message
+    /// whose id happened to sort below every old one left first, so the
+    /// cap spent replay protection on the newest rows and kept stale ones.
+    ///
+    /// WARNING: A count-based prune does not respect the finality window.
+    /// Prefer prune_processed_safe which releases finalized rows first.
     pub fn prune_processed(&mut self) {
-        while self.processed_messages.len() > MAX_PROCESSED_MESSAGES {
-            if let Some(oldest) = self.processed_messages.iter().next().copied() {
-                self.processed_messages.remove(&oldest);
-                self.processed_at_height.remove(&oldest);
-            } else {
-                break;
-            }
+        self.enforce_cap_oldest_first();
+    }
+
+    /// Evict rows until the set is at most MAX_PROCESSED_MESSAGES, oldest
+    /// processed height first, smallest id on equal heights.
+    ///
+    /// Deterministic on both keys, so nodes that prune at the same height
+    /// evict the same rows and the committed root stays reproducible.
+    fn enforce_cap_oldest_first(&mut self) {
+        let excess = match self
+            .processed_messages
+            .len()
+            .checked_sub(MAX_PROCESSED_MESSAGES)
+        {
+            Some(excess) if excess > 0 => excess,
+            _ => return,
+        };
+        let mut by_age: Vec<(u64, MessageId)> = self
+            .processed_at_height
+            .iter()
+            .map(|(id, height)| (*height, *id))
+            .collect();
+        by_age.sort_unstable();
+        for (_, id) in by_age.into_iter().take(excess) {
+            self.processed_messages.remove(&id);
+            self.processed_at_height.remove(&id);
         }
     }
 
-    /// Height-aware pruning that only removes
-    /// Messages processed at least FINALITY_PRUNE_DEPTH blocks ago.
-    /// This prevents replay attacks within the finality window while
-    /// Still bounding memory usage for long-running nodes.
+    /// Height-aware pruning: release finalized rows first, then hold the
+    /// cap even when the whole set is younger than the finality depth.
+    ///
+    /// The old header called MAX_PROCESSED_MESSAGES a hard cap while the
+    /// body only removed rows below the finality cutoff. A set filled with
+    /// messages newer than the cutoff never shrank: the cap existed in the
+    /// comment and nowhere else, and the test suite pinned that growth as
+    /// a property. An unbounded set is a liveness failure the node cannot
+    /// recover from; a bounded set that evicts oldest-first opens the
+    /// smallest replay window a bound can open, and only when the
+    /// finalized band had nothing left to give.
     pub fn prune_processed_safe(&mut self, current_height: u64) {
-        // Hard cap: even with height awareness, bound the set size
         if self.processed_messages.len() <= MAX_PROCESSED_MESSAGES {
             return;
         }
-        // Only prune entries that are safely finalized
+        // Finalized first: removing these opens no replay window at all.
         let cutoff = current_height.saturating_sub(FINALITY_PRUNE_DEPTH);
-        let to_remove: Vec<MessageId> = self
+        let finalized: Vec<MessageId> = self
             .processed_at_height
             .iter()
-            .filter(|(_, h)| **h < cutoff)
+            .filter(|(_, height)| **height < cutoff)
             .map(|(id, _)| *id)
             .collect();
-        for id in &to_remove {
+        for id in &finalized {
             self.processed_messages.remove(id);
             self.processed_at_height.remove(id);
         }
+        // Whatever the finality band could not release, the cap must.
+        self.enforce_cap_oldest_first();
     }
 
     /// Returns the number of processed messages currently stored.
@@ -181,9 +218,9 @@ mod tests {
             id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             store.mark_processed_at(id, 0).unwrap();
         }
-        // Marking at height zero never triggers the height-aware prune
-        // (V4-13), so the set is allowed to grow here; this verifies the
-        // legacy prune_processed still caps correctly.
+        // Marking at height zero releases nothing through the finality band
+        // (V4-13); the cap holds anyway, through oldest-first eviction, and
+        // the legacy entry point agrees: there is nothing left to remove.
         store.prune_processed();
         assert!(
             store.processed_count() <= MAX_PROCESSED_MESSAGES,
@@ -292,16 +329,21 @@ mod v4_prune_tests {
             id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             store.mark_processed_at(id, 10).unwrap();
         }
+        // The cap held during insertion itself (oldest-first eviction), so
+        // the row that round-trips is exactly at the cap, heights included.
+        assert_eq!(store.processed_count(), MAX_PROCESSED_MESSAGES);
         let bytes = bincode::serialize(&store).expect("the store serializes");
         let mut reloaded: ReplayNonceStore =
             bincode::deserialize(&bytes).expect("the store deserializes");
-        assert_eq!(reloaded.processed_count(), MAX_PROCESSED_MESSAGES + 50);
+        assert_eq!(reloaded.processed_count(), MAX_PROCESSED_MESSAGES);
+        // Every reloaded row was processed at height 10, so at height 2000
+        // the whole set is finalized and the reloaded store must be able to
+        // release it: the heights survived the encoding, not just the ids.
         reloaded.prune_processed_safe(2000);
-        assert!(
-            reloaded.processed_count() <= MAX_PROCESSED_MESSAGES,
-            "a reloaded store must still be able to prune entries past the finality depth, \
-             got {} entries",
-            reloaded.processed_count()
+        assert_eq!(
+            reloaded.processed_count(),
+            0,
+            "a reloaded store must still be able to prune entries past the finality depth"
         );
         // Replay protection is unchanged by the reload.
         let mut recent = [0xEEu8; 32];
@@ -333,22 +375,34 @@ mod v4_prune_tests {
     #[test]
     fn v4_13_prune_removes_old_messages_beyond_finality() {
         let mut store = ReplayNonceStore::new();
-        // Simulate more than MAX messages, all at old heights
+        // Simulate more than MAX messages, all at old heights. Insertion
+        // holds the cap through oldest-first eviction, so the set settles
+        // at MAX with the newest rows.
         for i in 0..(MAX_PROCESSED_MESSAGES + 50) {
             let mut id = [0u8; 32];
             id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             store.mark_processed_at(id, 10).unwrap(); // all at height 10
         }
-        // Prune at height 2000 (well beyond FINALITY_PRUNE_DEPTH=1000)
+        assert_eq!(store.processed_count(), MAX_PROCESSED_MESSAGES);
+        // Prune at height 2000 (well beyond FINALITY_PRUNE_DEPTH=1000):
+        // every remaining row is finalized and the finality band alone
+        // empties the set; the cap never has to evict in-window rows here.
         store.prune_processed_safe(2000);
-        assert!(
-            store.processed_count() <= MAX_PROCESSED_MESSAGES,
+        assert_eq!(
+            store.processed_count(),
+            0,
             "old messages beyond finality should be pruned"
         );
     }
 
+    /// The reversed pin: this test used to assert that a set filled with
+    /// messages younger than the finality depth grew past the cap and kept
+    /// every row, which is the unbounded-growth finding stated as a
+    /// property. The cap is real now: the finality band has nothing to
+    /// release at these heights, so the oldest rows leave, in (height, id)
+    /// order, and the store settles at the cap with the newest rows.
     #[test]
-    fn v4_13_recent_messages_never_pruned() {
+    fn over_cap_recent_rows_are_evicted_oldest_first() {
         let mut store = ReplayNonceStore::new();
         // Fill past MAX with recent messages
         for i in 0..(MAX_PROCESSED_MESSAGES + 100) {
@@ -358,11 +412,25 @@ mod v4_prune_tests {
         }
         // Prune at height 1000 - cutoff = 1000-1000=0, nothing is below 0
         store.prune_processed_safe(1000);
-        // All messages are at height 999, cutoff is 0, so none are pruned
         assert_eq!(
             store.processed_count(),
-            MAX_PROCESSED_MESSAGES + 100,
-            "recent messages must NOT be pruned even if over cap"
+            MAX_PROCESSED_MESSAGES,
+            "the cap must hold even when every row is inside the finality window"
         );
+        // All heights are equal, so the eviction order falls to the id:
+        // the smallest ids left first, the newest hundred survived.
+        for i in 0..100u64 {
+            let mut id = [0u8; 32];
+            id[0..8].copy_from_slice(&i.to_le_bytes());
+            assert!(
+                !store.is_processed(&id),
+                "id {i} is among the oldest rows and must have been evicted"
+            );
+        }
+        for i in (MAX_PROCESSED_MESSAGES as u64 + 50)..(MAX_PROCESSED_MESSAGES as u64 + 100) {
+            let mut id = [0u8; 32];
+            id[0..8].copy_from_slice(&i.to_le_bytes());
+            assert!(store.is_processed(&id), "id {i} is among the newest rows");
+        }
     }
 }
