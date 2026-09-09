@@ -327,12 +327,14 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
     assert!(fee > 0, "the case needs a nonzero fee");
 
     // Headroom for the recipient's share exactly, and nothing for the fee.
-    let headroom_before = u128::from(state.supply_capacity_remaining());
+    // Balances and the supply ceiling are u64 end to end, so the headroom
+    // arithmetic stays in u64: there is no widening to undo any more.
+    let headroom_before = state.supply_capacity_remaining();
     let fill = headroom_before - final_amount - 1;
-    state.add_balance(&owner, u64::try_from(fill).expect("fits"));
+    state.add_balance(&owner, fill);
     let fee_payer_balance = state.get_balance(&relayer_addr());
     state.add_balance(&relayer_addr(), 1);
-    assert_eq!(u128::from(state.supply_capacity_remaining()), final_amount);
+    assert_eq!(state.supply_capacity_remaining(), final_amount);
 
     let mut res = make_result("0xLOCK_ON_ETHEREUM_2");
     res.message = Some(message.clone());
