@@ -128,8 +128,11 @@ impl QcBlob {
             );
         }
 
-        let layers =
-            merkle_tree::merkle_layers(&Self::leaves(signatures), merkle_tree::combine_sha3);
+        let layers = merkle_tree::merkle_layers(
+            &Self::leaves(signatures),
+            merkle_tree::combine_sha3,
+            merkle_tree::promote_sha3,
+        );
         hex::encode(
             layers
                 .last()
@@ -159,6 +162,7 @@ impl QcBlob {
             &Self::leaves(&self.pq_signatures),
             leaf_index,
             merkle_tree::combine_sha3,
+            merkle_tree::promote_sha3,
         )
         .ok_or_else(|| "leaf index was bounds-checked above".to_string())?;
         Ok(proof.into_iter().map(|digest| digest.to_vec()).collect())
@@ -458,16 +462,23 @@ impl QcFaultProof {
 
         let mut idx = leaf_index;
         for proof_element in merkle_proof {
-            let mut hasher = Sha3_256::new();
-            if idx % 2 == 0 {
-                hasher.update(current);
-                hasher.update(proof_element);
+            if proof_element.as_slice() == merkle_tree::odd_promotion_sentinel() {
+                // The prover recorded a promotion: this digest had no
+                // sibling at this level and was hashed under the promotion
+                // tag alone.
+                current.copy_from_slice(&merkle_tree::promote_sha3(&current));
             } else {
-                hasher.update(proof_element);
-                hasher.update(current);
+                let mut hasher = Sha3_256::new();
+                if idx % 2 == 0 {
+                    hasher.update(current);
+                    hasher.update(proof_element);
+                } else {
+                    hasher.update(proof_element);
+                    hasher.update(current);
+                }
+                let result = hasher.finalize();
+                current.copy_from_slice(&result);
             }
-            let result = hasher.finalize();
-            current.copy_from_slice(&result);
             idx /= 2;
         }
 
@@ -1241,14 +1252,22 @@ mod tests {
                 index.saturating_sub(1)
             }
         }
-        // The Kani in-place parent fold, verbatim.
+        // The Kani promotion, verbatim.
+        fn kani_promote(node: u64) -> u64 {
+            node.rotate_left(13) ^ 0x5A5A_5A5A_5A5A_5A5A
+        }
+
+        // The Kani in-place parent fold, verbatim: pairs combine, an
+        // unpaired tail is promoted, never paired with itself.
         fn kani_fold(layer: &mut [u64; 4], len: usize) -> usize {
             let mut i = 0;
             let mut out = 0;
             while i < len {
-                let left = layer[i];
-                let right = if i + 1 < len { layer[i + 1] } else { left };
-                layer[out] = kani_combine(left, right);
+                if i + 1 < len {
+                    layer[out] = kani_combine(layer[i], layer[i + 1]);
+                } else {
+                    layer[out] = kani_promote(layer[i]);
+                }
                 i += 2;
                 out += 1;
             }
@@ -1275,12 +1294,17 @@ mod tests {
             let mut idx = index;
             let mut cur = work[idx];
             while layer_len > 1 {
-                let sibling = work[kani_sibling(idx, layer_len)];
-                cur = if idx.is_multiple_of(2) {
-                    kani_combine(cur, sibling)
+                if idx.is_multiple_of(2) && idx + 1 >= layer_len {
+                    // The tail of an odd layer is promoted, not paired.
+                    cur = kani_promote(cur);
                 } else {
-                    kani_combine(sibling, cur)
-                };
+                    let sibling = work[kani_sibling(idx, layer_len)];
+                    cur = if idx.is_multiple_of(2) {
+                        kani_combine(cur, sibling)
+                    } else {
+                        kani_combine(sibling, cur)
+                    };
+                }
                 idx /= 2;
                 layer_len = kani_fold(&mut work, layer_len);
             }
@@ -1299,9 +1323,13 @@ mod tests {
         }
 
         // The production tree over packed u64 leaves with the Kani combine
-        // shape: every production node is exactly the packed Kani node.
+        // and promote shapes: every production node is exactly the packed
+        // Kani node, promoted or paired alike.
         fn u64_combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
             to_digest(kani_combine(from_digest(*left), from_digest(*right)))
+        }
+        fn u64_promote(node: &[u8; 32]) -> [u8; 32] {
+            to_digest(kani_promote(from_digest(*node)))
         }
 
         let samples = [
@@ -1323,6 +1351,7 @@ mod tests {
                     Some(from_digest(crate::consensus::merkle_tree::merkle_root(
                         &prod_leaves,
                         u64_combine,
+                        u64_promote,
                     )))
                 };
                 assert_eq!(root, prod_root, "root disagreement at len {len}");
@@ -1332,6 +1361,7 @@ mod tests {
                         &prod_leaves,
                         index,
                         u64_combine,
+                        u64_promote,
                     )
                     .map(from_digest);
                     assert_eq!(

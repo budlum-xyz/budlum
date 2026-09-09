@@ -124,8 +124,10 @@ pub const MAX_MIRROR_LEAVES: usize = 4;
 /// Sibling index under the production rule, mirroring
 /// `consensus::merkle_tree::merkle_sibling_index`.
 ///
-/// An even node pairs with the next node; when it is the odd tail of its
-/// layer it pairs with itself. An odd node pairs with the previous node.
+/// An even node pairs with the next node; an odd node pairs with the
+/// previous node. An even node that is the tail of its layer has no sibling
+/// at all - it is promoted - and the rebuild walk detects that case before
+/// it asks for a sibling here.
 #[must_use]
 pub fn merkle_sibling_index(index: usize, layer_len: usize) -> usize {
     if index.is_multiple_of(2) {
@@ -147,18 +149,32 @@ pub fn combine_nodes_u64(left: u64, right: u64) -> u64 {
     left.rotate_left(17) ^ right.rotate_right(7)
 }
 
+/// Abstract 64-bit node promotion used by the harnesses.
+///
+/// This is NOT the production hash. It is deliberately unreachable from
+/// `combine_nodes_u64` (a rotation plus a constant the binary combine never
+/// applies), so the proof of the rebuild walk can tell a promoted tail from
+/// a self-paired one - the property the duplicate-tail rule could not
+/// express.
+#[must_use]
+pub fn promote_node_u64(node: u64) -> u64 {
+    node.rotate_left(13) ^ 0x5A5A_5A5A_5A5A_5A5A
+}
+
 /// Fold one parent layer into `layer[0..len]` in place, mirroring
-/// `consensus::merkle_tree::merkle_parent_layer` (odd tail duplicated, pairs
-/// combined, parents written to the front of the buffer). Returns the number
-/// of parents.
+/// `consensus::merkle_tree::merkle_parent_layer` (pairs combined, an
+/// unpaired tail promoted - never paired with itself, parents written to
+/// the front of the buffer). Returns the number of parents.
 #[must_use]
 pub fn merkle_parent_layer_fold(layer: &mut [u64; MAX_MIRROR_LEAVES], len: usize) -> usize {
     let mut i = 0;
     let mut out = 0;
     while i < len {
-        let left = layer[i];
-        let right = if i + 1 < len { layer[i + 1] } else { left };
-        layer[out] = combine_nodes_u64(left, right);
+        if i + 1 < len {
+            layer[out] = combine_nodes_u64(layer[i], layer[i + 1]);
+        } else {
+            layer[out] = promote_node_u64(layer[i]);
+        }
         i += 2;
         out += 1;
     }
@@ -198,17 +214,23 @@ pub fn merkle_rebuild_root_u64(
     let mut idx = leaf_index;
     let mut cur = work[idx];
     while layer_len > 1 {
-        let sibling_idx = merkle_sibling_index(idx, layer_len);
-        let sibling = work[sibling_idx];
-        // Order the two children by position: an even node is the left child,
-        // an odd node the right child. `verify_inclusion` in `qc.rs` orders
-        // the same way; a swapped order only matches the tree under a
-        // commutative combine, which is why the harness combine is not one.
-        cur = if idx.is_multiple_of(2) {
-            combine_nodes_u64(cur, sibling)
+        if idx.is_multiple_of(2) && idx + 1 >= layer_len {
+            // The tail of an odd layer is promoted, not paired with itself.
+            cur = promote_node_u64(cur);
         } else {
-            combine_nodes_u64(sibling, cur)
-        };
+            let sibling_idx = merkle_sibling_index(idx, layer_len);
+            let sibling = work[sibling_idx];
+            // Order the two children by position: an even node is the left
+            // child, an odd node the right child. `verify_inclusion` in
+            // `qc.rs` orders the same way; a swapped order only matches the
+            // tree under a commutative combine, which is why the harness
+            // combine is not one.
+            cur = if idx.is_multiple_of(2) {
+                combine_nodes_u64(cur, sibling)
+            } else {
+                combine_nodes_u64(sibling, cur)
+            };
+        }
         idx /= 2;
         layer_len = merkle_parent_layer_fold(&mut work, layer_len);
     }
