@@ -2038,6 +2038,22 @@ impl Blockchain {
         if expiry_height <= source_height {
             return Err("Bridge transfer expiry must be after source height".into());
         }
+        // Debit the owner's balance when locking a bridge transfer. The
+        // balance is validated *before* `bridge_state.lock()` inserts the
+        // transfer into the in-memory ledger: a refusal after the insert
+        // would leave a lock record for a transfer that never debited the
+        // owner (memory/disk divergence, and a sweep would later refund
+        // units that were never locked). Without the debit itself the owner
+        // retains the locked amount while the recipient also receives it on
+        // the target domain, creating BUD out of thin air (inflation bug).
+        // The sweep_expired_locks path already refunds the owner on expiry,
+        // so this debit is the corresponding credit-side bookkeeping.
+        let owner_balance = self.state.get_balance(&owner);
+        if owner_balance < amount {
+            return Err(format!(
+                "Insufficient balance for bridge lock: owner has {owner_balance}, needed {amount}"
+            ));
+        }
         let result = self
             .state
             .bridge_state
@@ -2053,19 +2069,6 @@ impl Blockchain {
                 expiry_height,
             )
             .map_err(|e| e.to_string())?;
-
-        // Debit the owner's balance when locking bridge
-        // Transfer. Without this, the owner retains the locked amount while
-        // The recipient also receives it on the target domain, creating BUD
-        // Out of thin air (inflation bug). The sweep_expired_locks path
-        // Already refunds the owner on expiry, so this debit is the
-        // Corresponding credit-side bookkeeping.
-        let owner_balance = self.state.get_balance(&owner);
-        if owner_balance < amount {
-            return Err(format!(
-                "Insufficient balance for bridge lock: owner has {owner_balance}, needed {amount}"
-            ));
-        }
         let owner_account = self.state.get_or_create(&owner);
         owner_account.balance = owner_account.balance.saturating_sub(amount);
 
