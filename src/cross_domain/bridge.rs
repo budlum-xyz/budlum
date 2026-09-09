@@ -702,7 +702,7 @@ impl BridgeState {
     /// Once released; subsequent calls are no-ops.
     /// Sweep expired locks and return (owner, amount) for balance refund.
     /// The owner is returned so the caller can refund the balance.
-    pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, u128)> {
+    pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, u64)> {
         let mut released = Vec::new();
 
         // O(log N) sweep using the expiry queue.

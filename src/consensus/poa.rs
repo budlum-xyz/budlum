@@ -2,6 +2,8 @@ use super::{ConsensusEngine, ConsensusError};
 use crate::core::account::{AccountState, Validator};
 use crate::core::address::Address;
 use crate::core::block::Block;
+
+use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use tracing::{info, warn};
 
 /// Leader-election entropy derived from a block hash string.

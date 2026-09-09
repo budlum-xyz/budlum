@@ -1,6 +1,8 @@
 use super::{ConsensusEngine, ConsensusError};
 use crate::core::account::AccountState;
 use crate::core::block::Block;
+
+use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use std::sync::RwLock;
 use tracing::info;
 

@@ -4064,14 +4064,11 @@ impl Blockchain {
     fn apply_bridge_sweep_to_state(
         state: &mut AccountState,
         current_height: u64,
-    ) -> Result<Vec<(Address, u128)>, String> {
+    ) -> Result<Vec<(Address, u64)>, String> {
         let released = state.bridge_state.sweep_expired_locks(current_height);
         for (owner, amount) in &released {
-            let refund_amount = u64::try_from(*amount).map_err(|_| {
-                format!("Bridge sweep refund for {owner} exceeds u64::MAX: {amount}")
-            })?;
             state
-                .try_add_balance(owner, refund_amount)
+                .try_add_balance(owner, *amount)
                 .map_err(|error| format!("Bridge sweep refund overflow for {owner}: {error}"))?;
         }
         Ok(released)
@@ -4079,7 +4076,7 @@ impl Blockchain {
 
     /// Compatibility API. Canonical block execution invokes the same sweep on
     /// The prospective state before root calculation and durable commit.
-    pub fn apply_bridge_sweep(&mut self, current_height: u64) -> Vec<(Address, u128)> {
+    pub fn apply_bridge_sweep(&mut self, current_height: u64) -> Vec<(Address, u64)> {
         let mut prospective = self.state.clone();
         match Self::apply_bridge_sweep_to_state(&mut prospective, current_height) {
             Ok(released) => {
