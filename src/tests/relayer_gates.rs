@@ -365,8 +365,13 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
         "the lock is still open"
     );
     assert!(
-        !state.bridge_state.replay.is_processed(&message.message_id),
-        "the replay id is not spent by a refused mint"
+        !state.bridge_state.replay.is_processed(
+            message.source_domain,
+            message.target_domain,
+            &message.sender,
+            message.nonce
+        ),
+        "the replay high water is not advanced by a refused mint"
     );
 }
 

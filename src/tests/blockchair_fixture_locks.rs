@@ -264,13 +264,32 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
         msg0.verify_id(),
         "an id derived from a real payload has to verify"
     );
-    assert!(store.mark_processed_at(msg0.message_id, 0).is_ok());
+    assert!(store
+        .mark_processed_at(
+            msg0.source_domain,
+            msg0.target_domain,
+            &msg0.sender,
+            msg0.nonce,
+            0
+        )
+        .is_ok());
     assert_eq!(
-        store.mark_processed_at(msg0.message_id, 0),
+        store.mark_processed_at(
+            msg0.source_domain,
+            msg0.target_domain,
+            &msg0.sender,
+            msg0.nonce,
+            0
+        ),
         Err("Cross-domain message was already processed".to_string()),
         "applying it twice has to be refused - a replay"
     );
-    assert!(store.is_processed(&msg0.message_id));
+    assert!(store.is_processed(
+        msg0.source_domain,
+        msg0.target_domain,
+        &msg0.sender,
+        msg0.nonce
+    ));
     assert_eq!(store.processed_count(), 1);
 
     let msg1 = CrossDomainMessage::new(params(1));
@@ -278,7 +297,15 @@ fn replay_store_uses_real_tx_derived_ids_and_refuses_double_apply() {
         msg0.message_id, msg1.message_id,
         "a different real payload gives a different id"
     );
-    assert!(store.mark_processed_at(msg1.message_id, 0).is_ok());
+    assert!(store
+        .mark_processed_at(
+            msg1.source_domain,
+            msg1.target_domain,
+            &msg1.sender,
+            msg1.nonce,
+            0
+        )
+        .is_ok());
     assert_eq!(store.processed_count(), 2);
 }
 

@@ -182,7 +182,8 @@ pub struct BridgeState {
 /// replay store's finality depth is long past any reorg the consensus
 /// tolerates. Rows in `Locked`, `Minted` or `Burned` are never dropped: they
 /// are inventory, not history.
-const SETTLED_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
+pub(crate) const SETTLED_RETENTION_BLOCKS: u64 =
+    10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
 
 /// Split an inbound bridge amount into the recipient's share and the relayer's.
 ///
@@ -414,16 +415,12 @@ impl BridgeState {
     ///
     /// `current_height` is the Budlum chain height at which this mint is
     /// applied. It is threaded to the replay store so that
-    /// [`ReplayNonceStore::mark_processed_at`] records *when* the message was
-    /// processed; the height-aware pruning in that store then only removes
-    /// entries older than the finality window, so replay protection is never
-    /// lost on a message that is still within finality.
-    ///
-    /// Passing the height is what lets the store prune at all. The previous
-    /// call used a height-less `mark_processed`, which never prunes and
-    /// records no height, so a long-running node leaked the processed-message
-    /// set unboundedly (an OOM liveness failure) and had a count-based fallback
-    /// whose own documentation warns it opens a replay window.
+    /// [`ReplayNonceStore::mark_processed_at`] records *when* the per-sender
+    /// high-water mark was advanced; the height is committed in the replay
+    /// root, so a node that mints the same message at a different height
+    /// carries a different root. The mark itself never needs pruning: one
+    /// row per direction and sender bounds the store by the number of
+    /// distinct bridging senders, not by traffic.
     pub fn mint(
         &mut self,
         message: &CrossDomainMessage,
@@ -450,7 +447,12 @@ impl BridgeState {
                 message.payload_hash, expected_payload
             )));
         }
-        if self.replay.is_processed(&message.message_id) {
+        if self.replay.is_processed(
+            message.source_domain,
+            message.target_domain,
+            &message.sender,
+            message.nonce,
+        ) {
             return Err(BridgeError(
                 "Cross-domain message was already processed".into(),
             ));
@@ -465,7 +467,13 @@ impl BridgeState {
             ));
         }
         self.replay
-            .mark_processed_at(message.message_id, current_height)
+            .mark_processed_at(
+                message.source_domain,
+                message.target_domain,
+                &message.sender,
+                message.nonce,
+                current_height,
+            )
             .map_err(BridgeError)?;
 
         let transfer = self

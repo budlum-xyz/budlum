@@ -459,9 +459,9 @@ mod tests {
         // Root (transfers) is left UNCHANGED; only bridge_state
         // Serde binding (which also covers expiry_queue) must catch this.
         let mut bs = snap.bridge_state.clone().unwrap_or_default();
-        let bogus_mid: [u8; 32] = [0x24u8; 32];
+        let bogus_sender = Address::from([0x24u8; 32]);
         bs.replay
-            .mark_processed_at(bogus_mid, 0)
+            .mark_processed_at(1, 2, &bogus_sender, 7, 0)
             .expect("mark processed");
         snap.bridge_state = Some(bs);
 

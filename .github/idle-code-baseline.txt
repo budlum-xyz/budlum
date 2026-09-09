@@ -1426,10 +1426,7 @@ src/cross_domain/evm/sync_committee.rs	fn	participation_count
 src/cross_domain/evm/sync_committee.rs	fn	rotate_period
 src/cross_domain/evm/verify.rs	struct	SyncAttestation
 src/cross_domain/message.rs	fn	calculate_message_id
-src/cross_domain/nonce.rs	const	MAX_PROCESSED_MESSAGES
 src/cross_domain/nonce.rs	fn	processed_count
-src/cross_domain/nonce.rs	fn	prune_processed
-src/cross_domain/nonce.rs	fn	prune_processed_safe
 src/cross_domain/relayer.rs	fn	expired_relays
 src/cross_domain/relayer.rs	fn	get_record
 src/cross_domain/relayer.rs	fn	is_relayed
