@@ -422,6 +422,25 @@ impl ConsensusEngine for PoAEngine {
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
         chain.len() as u128
     }
+
+    fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
+        let current_score = self.fork_choice_score(current);
+        let candidate_score = self.fork_choice_score(candidate);
+        if candidate_score != current_score {
+            return candidate_score > current_score;
+        }
+        // PoS resolves its equal-weight split through the deterministic
+        // resolver; PoA inherited the trait's strict `>`, which refused the
+        // reorg in both directions and left the winner to whichever tip a
+        // node happened to adopt first. Round-robin authorities can produce
+        // equal-length competing tails just as stake splits do, so the same
+        // resolver decides here: height, then block hash, then proposer;
+        // identical tips keep the incumbent.
+        resolve_split_tie(
+            &SplitCandidate::from_chain_tip(current, current_score),
+            &SplitCandidate::from_chain_tip(candidate, candidate_score),
+        ) == SplitDecision::RightWins
+    }
 }
 #[cfg(test)]
 mod tests {

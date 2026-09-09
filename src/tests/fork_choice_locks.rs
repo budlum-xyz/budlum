@@ -10,6 +10,10 @@
 //!    every candidate scored `u128::MAX` and no reorg was ever accepted.
 //!
 //! Each test below fails if its fix is reverted.
+//!
+//! 3. **`PoW` and `PoA` had no equal-weight tie-break at all**: the strict
+//!    `>` refused the reorg in both directions, so the winner was whichever
+//!    tip a node adopted first and two honest nodes split permanently.
 
 use crate::consensus::pos::{PoSConfig, PoSEngine};
 use crate::consensus::pow::{PoWConfig, PoWEngine, U256};
@@ -186,7 +190,7 @@ mod pos_checkpoint_is_a_limit_not_a_score {
 
     #[test]
     fn equal_weight_split_resolves_to_one_deterministic_winner() {
-        // Two tips of equal length (a 2-2 stake split) with no checkpoint:
+        // Two tips of equal length (a 2-2 validator split) with no checkpoint:
         // the old strict `>` refused a reorg in both directions, leaving the
         // choice to the order the tips arrived. The resolver must pick exactly
         // one side, and picking must be stable under repeated evaluation.
@@ -328,17 +332,77 @@ mod pow_work_does_not_saturate {
     }
 
     #[test]
-    fn equal_chains_do_not_trigger_a_reorg() {
+    fn an_identical_tip_never_replaces_itself() {
         let engine = PoWEngine::with_config(PoWConfig {
             difficulty: 4,
             target_block_time: 10,
             adjustment_interval: 0,
         });
         let a = chain_of(6, "aa");
-        let b = chain_of(6, "bb");
         assert!(
-            !engine.is_better_chain(&a, &b),
-            "equal work is not better work"
+            !engine.is_better_chain(&a, &a),
+            "an identical tip is not a better tip"
+        );
+    }
+}
+
+mod equal_weight_resolves_in_every_family {
+    use super::*;
+    use crate::consensus::poa::{PoAConfig, PoAEngine};
+
+    fn pow_engine() -> PoWEngine {
+        PoWEngine::with_config(PoWConfig {
+            difficulty: 4,
+            target_block_time: 10,
+            adjustment_interval: 0,
+        })
+    }
+
+    /// PoW refused the reorg in both directions on equal work, so the
+    /// winner was whichever tip a node adopted first: two honest nodes
+    /// diverged permanently. The resolver must pick exactly one side,
+    /// stably under repeated evaluation.
+    #[test]
+    fn pow_equal_work_picks_one_side_in_both_directions() {
+        let engine = pow_engine();
+        let a = chain_of(6, "aa");
+        let b = chain_of(6, "bb");
+        assert_eq!(
+            engine.accumulated_work(&a),
+            engine.accumulated_work(&b),
+            "same difficulty and length: the accumulated work is equal"
+        );
+        let a_beats_b = engine.is_better_chain(&a, &b);
+        let b_beats_a = engine.is_better_chain(&b, &a);
+        assert_ne!(
+            a_beats_b, b_beats_a,
+            "an equal-work split must have a single deterministic winner"
+        );
+        assert_eq!(a_beats_b, engine.is_better_chain(&a, &b));
+    }
+
+    /// PoA had no override at all: the trait's strict `>` on the length
+    /// score left equal-length competing tails to arrival order.
+    #[test]
+    fn poa_equal_length_picks_one_side_in_both_directions() {
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let a = chain_of(6, "aa");
+        let b = chain_of(6, "bb");
+        assert_eq!(
+            engine.fork_choice_score(&a),
+            engine.fork_choice_score(&b),
+            "same length: the scores are equal"
+        );
+        let a_beats_b = engine.is_better_chain(&a, &b);
+        let b_beats_a = engine.is_better_chain(&b, &a);
+        assert_ne!(
+            a_beats_b, b_beats_a,
+            "an equal-length authority split must have a single deterministic winner"
+        );
+        assert_eq!(a_beats_b, engine.is_better_chain(&a, &b));
+        assert!(
+            !engine.is_better_chain(&a, &a),
+            "an identical tip is not a better tip"
         );
     }
 }

@@ -467,7 +467,24 @@ impl ConsensusEngine for PoWEngine {
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
-        self.accumulated_work(candidate) > self.accumulated_work(current)
+        let current_work = self.accumulated_work(current);
+        let candidate_work = self.accumulated_work(candidate);
+        if candidate_work != current_work {
+            return candidate_work > current_work;
+        }
+        // Equal accumulated work is the exact case the deterministic
+        // resolver exists for. A strict `>` refused the reorg in both
+        // directions, so two honest nodes that first adopted opposite tips
+        // kept opposite heads for good: a permanent fork out of fully
+        // honest behaviour. The resolver orders equal-work tips by height,
+        // then block hash, then proposer, so every node that sees the same
+        // two tips picks the same one regardless of arrival order. Work
+        // that saturates U256 still compares equal here, and the
+        // low-128-bit score must never decide this branch.
+        resolve_split_tie(
+            &SplitCandidate::from_chain_tip(current, current_work.saturating_to_u128()),
+            &SplitCandidate::from_chain_tip(candidate, candidate_work.saturating_to_u128()),
+        ) == SplitDecision::RightWins
     }
 }
 #[cfg(test)]
