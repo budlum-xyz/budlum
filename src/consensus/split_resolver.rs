@@ -1,7 +1,7 @@
 //! E7: Deterministic equal-weight fork resolver (2-2 split).
 //!
 //! When two competing fork tips carry identical accumulated weight (a 2-2
-//! stake split), `fork_choice_score` alone cannot order them, and the old
+//! validator split), `fork_choice_score` alone cannot order them, and the old
 //! `max_by_key` / strict `>` paths either picked whichever slice happened to
 //! come last or refused to reorg at all. Both leave the ordering to gossip
 //! arrival order, so honest nodes that saw the two tips in opposite orders

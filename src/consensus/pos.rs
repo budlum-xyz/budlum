@@ -913,7 +913,7 @@ impl ConsensusEngine for PoSEngine {
         if candidate_score != current_score {
             return candidate_score > current_score;
         }
-        // Equal accumulated weight (a 2-2 stake split): the deterministic
+        // Equal accumulated weight (a 2-2 validator split): the deterministic
         // resolver picks a side, so honest nodes converge on the same tip
         // regardless of the order in which the two tips arrived. `RightWins`
         // means the candidate replaces the current chain; identical tips keep
