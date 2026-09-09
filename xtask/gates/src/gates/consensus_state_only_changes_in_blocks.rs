@@ -48,11 +48,14 @@ fn slice_of<'a>(src: &'a str, start: &str, end: &str) -> Result<&'a str, String>
 /// # Errors
 ///
 /// Returns the first violated claim.
-pub fn run(root: &Path) -> Result<String, String> {
-    let bc = code_of(root, "src/chain/blockchain.rs")?;
-    let acc = code_of(root, "src/core/account.rs")?;
-    let ex = code_of(root, "src/execution/executor.rs")?;
-
+/// Checks 1 and 2: the state root still covers the consensus fields, and
+/// the nonce writes are block-scoped (no out-of-block write, the executor
+/// validates before it writes).
+fn check_root_covers_and_nonces_are_block_scoped(
+    bc: &str,
+    acc: &str,
+    ex: &str,
+) -> Result<(), String> {
     // 1. The state root covers the consensus fields the out-of-block paths
     //    mutate.
     for (needle, msg) in [
@@ -87,7 +90,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
     }
     let apc = slice_of(
-        &bc,
+        bc,
         "fn apply_pending_commitments",
         "pub fn submit_verified_domain_commitment(",
     )?;
@@ -97,7 +100,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
     }
 
-    let arm = slice_of(&ex, "TransactionType::StateUpdate", "Ok(())")?;
+    let arm = slice_of(ex, "TransactionType::StateUpdate", "Ok(())")?;
     let val = arm
         .find("*new_nonce <= current")
         .ok_or("executor StateUpdate arm lost the monotonic nonce check")?;
@@ -121,11 +124,17 @@ pub fn run(root: &Path) -> Result<String, String> {
             return Err(msg.to_string());
         }
     }
+    Ok(())
+}
 
+/// Checks 3 and 4: the validation rejects non-monotonic, near-MAX and
+/// over-ceiling updates, and every out-of-block mutator leaves a durable
+/// trail.
+fn check_validation_and_durable_trails(bc: &str) -> Result<(), String> {
     // 3. The validation itself rejects non-monotonic, near-MAX and
     //    over-ceiling updates.
     let vcu = slice_of(
-        &bc,
+        bc,
         "fn validate_commitment_state_updates",
         "fn apply_pending_commitments",
     )?;
@@ -147,7 +156,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     // 4. Out-of-block mutators leave a durable trail.
     let scdm = slice_of(
-        &bc,
+        bc,
         "pub fn submit_cross_domain_message(",
         "pub fn burn_bridge_transfer(",
     )?;
@@ -158,7 +167,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
     }
     let srp = slice_of(
-        &bc,
+        bc,
         "pub fn submit_relay_proof(",
         "pub fn pending_relay_count(",
     )?;
@@ -172,6 +181,19 @@ pub fn run(root: &Path) -> Result<String, String> {
             "submit_relay_proof no longer persists bridge_state after mint/unlock".to_string(),
         );
     }
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns the first violated claim.
+pub fn run(root: &Path) -> Result<String, String> {
+    let bc = code_of(root, "src/chain/blockchain.rs")?;
+    let acc = code_of(root, "src/core/account.rs")?;
+    let ex = code_of(root, "src/execution/executor.rs")?;
+
+    check_root_covers_and_nonces_are_block_scoped(&bc, &acc, &ex)?;
+    check_validation_and_durable_trails(&bc)?;
 
     Ok("Consensus-state boundary OK: state root covers consensus fields, StateUpdate nonce writes are block-scoped (executor validates before writing, no out-of-block write), out-of-block mutators persist a durable trail. message_registry and bridge_state move in-block in later slices (decision 50).".to_string())
 }
@@ -179,6 +201,28 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// # Errors
 ///
 /// Returns a finding when the gate accepts a broken copy of the real tree.
+/// Break one file of the staged copy, expect the gate to refuse it, and
+/// restore the pristine row either way, so the next canary starts from a
+/// clean tree.
+fn break_and_expect_refusal(
+    tmp: &std::path::Path,
+    pristine: &std::path::Path,
+    rel: &str,
+    from: &str,
+    to: &str,
+    why: &str,
+) -> Result<(), String> {
+    let dst = tmp.join(rel);
+    let text = std::fs::read_to_string(&dst).map_err(|e| e.to_string())?;
+    std::fs::write(&dst, text.replace(from, to)).map_err(|e| e.to_string())?;
+    let refused = run(tmp).is_err();
+    std::fs::copy(pristine.join(rel), &dst).map_err(|e| e.to_string())?;
+    if !refused {
+        return Err(format!("canary: {why}"));
+    }
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     let root = std::env::var_os("BUDLUM_ROOT").map_or_else(
         || std::env::current_dir().unwrap_or_default(),
@@ -193,106 +237,67 @@ pub fn self_test() -> Result<String, String> {
     for sub in ["src/chain", "src/core", "src/execution"] {
         std::fs::create_dir_all(tmp.join(sub)).map_err(|e| e.to_string())?;
     }
-    let bc_src = root.join("src/chain/blockchain.rs");
-    let acc_src = root.join("src/core/account.rs");
-    let ex_src = root.join("src/execution/executor.rs");
-    let bc_dst = tmp.join("src/chain/blockchain.rs");
-    let acc_dst = tmp.join("src/core/account.rs");
-    let ex_dst = tmp.join("src/execution/executor.rs");
-
-    std::fs::copy(&bc_src, &bc_dst).map_err(|e| e.to_string())?;
-    std::fs::copy(&acc_src, &acc_dst).map_err(|e| e.to_string())?;
-    std::fs::copy(&ex_src, &ex_dst).map_err(|e| e.to_string())?;
+    for rel in [
+        "src/chain/blockchain.rs",
+        "src/core/account.rs",
+        "src/execution/executor.rs",
+    ] {
+        std::fs::copy(root.join(rel), tmp.join(rel)).map_err(|e| e.to_string())?;
+    }
     if run(&tmp).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from("canary: an unmodified copy was refused"));
     }
 
     // Break 1: the state root stops covering settlement_root.
-    let text = std::fs::read_to_string(&acc_dst).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &acc_dst,
-        text.replace(
-            "final_hasher.update(self.settlement_root)",
-            "final_hasher.update([0u8; 32])",
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: a state root without settlement_root passed",
-        ));
-    }
-    std::fs::copy(&acc_src, &acc_dst).map_err(|e| e.to_string())?;
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/core/account.rs",
+        "final_hasher.update(self.settlement_root)",
+        "final_hasher.update([0u8; 32])",
+        "a state root without settlement_root passed",
+    )?;
 
     // Break 2: the executor StateUpdate arm accepts equal nonce.
-    let text = std::fs::read_to_string(&ex_dst).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &ex_dst,
-        text.replace("*new_nonce <= current", "*new_nonce < current"),
-    )
-    .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: an executor StateUpdate arm that accepts equal nonce passed",
-        ));
-    }
-    std::fs::copy(&ex_src, &ex_dst).map_err(|e| e.to_string())?;
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/execution/executor.rs",
+        "*new_nonce <= current",
+        "*new_nonce < current",
+        "an executor StateUpdate arm that accepts equal nonce passed",
+    )?;
 
     // Break 3: apply_pending_commitments regains an out-of-block nonce write.
-    let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &bc_dst,
-        text.replace(
-            "self.validate_commitment_state_updates(&com)?;",
-            "self.validate_commitment_state_updates(&com)?;\n                for (addr, new_nonce) in &com.state_updates {\n                    let account = self.state.get_or_create(addr);\n                    account.nonce = *new_nonce;\n                }",
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: an out-of-block nonce write in apply_pending_commitments passed",
-        ));
-    }
-    std::fs::copy(&bc_src, &bc_dst).map_err(|e| e.to_string())?;
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/chain/blockchain.rs",
+        "self.validate_commitment_state_updates(&com)?;",
+        "self.validate_commitment_state_updates(&com)?;\n                for (addr, new_nonce) in &com.state_updates {\n                    let account = self.state.get_or_create(addr);\n                    account.nonce = *new_nonce;\n                }",
+        "an out-of-block nonce write in apply_pending_commitments passed",
+    )?;
 
     // Break 4: the cross-domain message durable trail is gone.
-    let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &bc_dst,
-        text.replace(
-            "save_cross_domain_message(",
-            "save_cross_domain_message_gone(",
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: an unpersisted cross-domain message passed",
-        ));
-    }
-    std::fs::copy(&bc_src, &bc_dst).map_err(|e| e.to_string())?;
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/chain/blockchain.rs",
+        "save_cross_domain_message(",
+        "save_cross_domain_message_gone(",
+        "an unpersisted cross-domain message passed",
+    )?;
 
     // Break 5: the startup load path regains an out-of-block nonce write.
-    let text = std::fs::read_to_string(&bc_dst).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &bc_dst,
-        text.replace(
-            "// out-of-block mutation of consensus state.\n",
-            "// out-of-block mutation of consensus state.\n                    let account = state.get_or_create(&commitment_addr); account.nonce = *new_nonce;\n",
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: a startup load path that writes nonces out of block passed",
-        ));
-    }
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/chain/blockchain.rs",
+        "// out-of-block mutation of consensus state.\n",
+        "// out-of-block mutation of consensus state.\n                    let account = state.get_or_create(&commitment_addr); account.nonce = *new_nonce;\n",
+        "a startup load path that writes nonces out of block passed",
+    )?;
 
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(

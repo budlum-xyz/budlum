@@ -937,9 +937,10 @@ fn self_test_extraction(problems: &mut Vec<String>) {
 /// # Errors
 ///
 /// The canaries that did not behave.
-pub fn self_test() -> Result<String, String> {
-    let mut problems: Vec<String> = Vec::new();
-
+/// Canaries for `strip_test_mods`: a call from inside a test module must
+/// vanish, and a `#[cfg(test)]` item that opens no brace must not swallow
+/// the block after it.
+fn self_test_strip_canaries(problems: &mut Vec<String>) {
     // Test modules are stripped, so a call from one is not a call.
     let with_test = "pub fn alpha() {}\n#[cfg(test)]\nmod tests {\n  fn t() { alpha(); }\n}\n";
     if strip_test_mods(with_test).contains("alpha();") {
@@ -977,7 +978,12 @@ pub fn self_test() -> Result<String, String> {
             "VACUOUS: a #[cfg(test)] panic! with braces in its message survived stripping",
         ));
     }
+}
 
+/// Canaries for `mentions`: doc links, strings, bare mentions and another
+/// module's members are not calls; plain, turbofish, own-module and
+/// own-type paths are.
+fn self_test_mentions_canaries(problems: &mut Vec<String>) {
     // A mention in a doc comment is not a call.
     if mentions(
         &strip_noise("//! see [`crate::x::alpha`]\n"),
@@ -1075,7 +1081,13 @@ pub fn self_test() -> Result<String, String> {
     if mentions("alphabet();", "alpha", "x", true, &BTreeSet::new()) {
         problems.push(String::from("VACUOUS: alphabet matched alpha"));
     }
+}
 
+pub fn self_test() -> Result<String, String> {
+    let mut problems: Vec<String> = Vec::new();
+
+    self_test_strip_canaries(&mut problems);
+    self_test_mentions_canaries(&mut problems);
     self_test_extraction(&mut problems);
 
     if !problems.is_empty() {
