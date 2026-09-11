@@ -238,7 +238,14 @@ pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<S
     let mut out = String::with_capacity(template.len());
     let mut cursor = 0usize;
     while cursor < template.len() {
-        let rest = &template[cursor..];
+        // Same rule as template_slots: the sibling parser must not own an abort
+        // path either. It was tolerated only because the gate's baseline predates
+        // this file, not because the indexing is safe.
+        let Some(rest) = template.get(cursor..) else {
+            return Err(FillError::MalformedTemplate(
+                "template cursor left a char boundary".to_string(),
+            ));
+        };
         if let Some(name) = rest.strip_prefix("{{") {
             let close = name
                 .find("}}")
