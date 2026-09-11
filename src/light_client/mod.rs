@@ -695,7 +695,6 @@ mod tests {
         ));
     }
 
-    #[test]
     /// AR-GE-6 / F-12: a verified checkpoint exposes the external state root
     /// as an anchorable Hash32; non-32-byte / non-hex roots are refused.
     #[test]

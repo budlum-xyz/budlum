@@ -3074,7 +3074,7 @@ impl StorageRegistry {
     /// same best-effort answer the per-ticket loop produced.
     ///
     /// The reason the advice is recorded at all is measurability:
-    /// [`placements_that_diverged`] compares the recommendation against the
+    /// [`StorageRegistry::placements_that_diverged`] compares the recommendation against the
     /// operator who actually accepted the ticket, and the maintenance pass
     /// logs the gap. Neither failure mode - a placement that does not reflect
     /// real capacity, and assigned operators skipping their obligation - is

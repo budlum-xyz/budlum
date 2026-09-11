@@ -183,7 +183,9 @@ fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
 /// mined headers. The first header's state root is parameterized so tests
 /// can exercise the zero-root boundary; the later headers always carry
 /// distinct non-zero roots.
-fn pow_fixture(first_state_root: [u8; 32]) -> (
+fn pow_fixture(
+    first_state_root: [u8; 32],
+) -> (
     Blockchain,
     crate::domain::ConsensusDomain,
     Vec<(PoWHeader, [u8; 32])>,

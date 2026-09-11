@@ -825,9 +825,9 @@ impl Executor {
 
                 // Vesting gate (audit 2026-09-09, E-1): the boost is a spend;
                 // read spendable before the mutable borrow of get_or_create.
-                let boost_total = amount
-                    .checked_add(tx.fee)
-                    .ok_or_else(|| BudlumError::validation("cost_overflow", "boost cost overflow"))?;
+                let boost_total = amount.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("cost_overflow", "boost cost overflow")
+                })?;
                 let boost_spendable = state.spendable_balance(&tx.from);
                 if boost_spendable < boost_total {
                     return Err(BudlumError::validation(
@@ -2443,9 +2443,7 @@ mod tests {
     fn stake_arm_refuses_vesting_locked_funds() {
         use crate::core::account::AccountState;
         use crate::core::address::Address;
-        use crate::core::transaction::{
-            DEFAULT_CHAIN_ID, Transaction, TransactionType,
-        };
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
         use crate::execution::executor::Executor;
 
         let team = Address::from([7u8; 32]);
@@ -2470,7 +2468,7 @@ mod tests {
             team,
             Address::zero(),
             1_000, // stake amount
-            1, // fee
+            1,     // fee
             0,
             vec![],
             DEFAULT_CHAIN_ID,
@@ -2478,9 +2476,8 @@ mod tests {
         );
         tx.hash = tx.calculate_hash();
 
-        let err =
-            Executor::apply_transaction_checked(&mut state, &tx)
-                .expect_err("vesting-locked stake must be refused");
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("vesting-locked stake must be refused");
         assert!(
             err.message().contains("stake_vesting_locked"),
             "unexpected error: {}",

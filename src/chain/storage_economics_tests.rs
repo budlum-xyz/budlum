@@ -419,8 +419,7 @@ mod tests {
         blockchain.state.add_balance(&operator, 5_000_000);
         blockchain.state.add_balance(&payer, 5_000_000);
 
-        let manifest =
-            ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
+        let manifest = ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
         let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
@@ -445,7 +444,9 @@ mod tests {
             .storage_registry
             .open_never_placed_ticket(42, manifest.manifest_id, shard_id, 0, 1)
             .expect("the sweep's ticket opens for an empty slot");
-        (blockchain, ticket_id, operator, payer, economics, params, proof)
+        (
+            blockchain, ticket_id, operator, payer, economics, params, proof,
+        )
     }
 
     #[test]
@@ -495,16 +496,13 @@ mod tests {
 
     #[test]
     fn accept_reallocation_refuses_the_slashed_operator() {
-        let (mut blockchain, deal_id, operator, _bond, _after_bond) =
-            blockchain_with_one_deal(10);
+        let (mut blockchain, deal_id, operator, _bond, _after_bond) = blockchain_with_one_deal(10);
         blockchain
             .state
             .storage_registry
             .open_challenge(deal_id, 0, 4, 1, 2, Address::zero(), 1)
             .unwrap();
-        let (finalized, _slashed) = blockchain
-            .finalize_missed_storage_challenges(20)
-            .unwrap();
+        let (finalized, _slashed) = blockchain.finalize_missed_storage_challenges(20).unwrap();
         assert_eq!(finalized, 1, "the missed challenge finalizes and slashes");
         // `all_reallocation_tickets` yields `Vec<&Ticket>`, so a `ticket` kept
         // past here holds an immutable borrow on `blockchain` - and the rest of
@@ -625,7 +623,10 @@ mod tests {
                 None,
             )
             .expect_err("the merkle envelope is mandatory on the replacement too");
-        assert!(err.contains("accept_reallocation_ticket failed"), "got: {err}");
+        assert!(
+            err.contains("accept_reallocation_ticket failed"),
+            "got: {err}"
+        );
         // A refused replacement keeps neither the escrow nor the bond.
         assert_eq!(blockchain.state.get_balance(&payer), payer_before);
         assert_eq!(blockchain.state.get_balance(&operator), op_before);

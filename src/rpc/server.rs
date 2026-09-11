@@ -3052,7 +3052,11 @@ impl BudlumApiServer for RpcServer {
             &request_id.to_le_bytes(),
         ]);
         let payer_sig = hex::decode(payer_signature).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer_signature hex: {e}"), None::<()>)
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid payer_signature hex: {e}"),
+                None::<()>,
+            )
         })?;
         let op_sig = hex::decode(operator_signature).map_err(|e| {
             ErrorObjectOwned::owned(
@@ -3063,8 +3067,8 @@ impl BudlumApiServer for RpcServer {
         })?;
         crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
             .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
-            })?;
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+        })?;
         crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
             .map_err(|e| {
                 ErrorObjectOwned::owned(

@@ -28,7 +28,7 @@
 //! made here) needs exactly one guarantee from this layer: what a folder
 //! holds is a list a screen can render truthfully - which is why
 //! [`VaultRegistry::open`] returns ids in registration order and why the
-//! root counts members in the same order [`Self::root`] hashes.
+//! root counts members in the same order [`VaultRegistry::root`] hashes.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,7 +125,9 @@ impl VaultRegistry {
 
     #[must_use]
     pub fn contains(&self, folder: u64, member: u64) -> bool {
-        self.members.get(&folder).is_some_and(|m| m.contains(&member))
+        self.members
+            .get(&folder)
+            .is_some_and(|m| m.contains(&member))
     }
 
     /// Add one token to one folder, keeping the forest a forest.
@@ -173,12 +175,7 @@ impl VaultRegistry {
     /// folders, cycles, duplicates) checked BEFORE either list changes -
     /// a move that half-applied would be the token vanishing, which is the
     /// one failure this layer must not have.
-    pub fn move_member(
-        &mut self,
-        from: u64,
-        to: u64,
-        member: u64,
-    ) -> Result<(), VaultError> {
+    pub fn move_member(&mut self, from: u64, to: u64, member: u64) -> Result<(), VaultError> {
         if !self.folders.contains(&to) {
             return Err(VaultError::UnregisteredParent(to));
         }
@@ -282,7 +279,11 @@ mod tests {
     #[test]
     fn a_folder_lists_what_a_screen_would_show_in_the_order_it_happened() {
         let (mut v, a, b) = two_folders();
-        assert_eq!(v.open(a), Some(&[][..]), "an empty folder is still openable");
+        assert_eq!(
+            v.open(a),
+            Some(&[][..]),
+            "an empty folder is still openable"
+        );
         v.add_member(a, 10).unwrap();
         v.add_member(a, 11).unwrap();
         v.add_member(b, 12).unwrap();
@@ -294,24 +295,39 @@ mod tests {
     #[test]
     fn the_forest_stays_a_forest() {
         let (mut v, a, b) = two_folders();
-        assert!(matches!(v.add_member(a, a), Err(VaultError::SelfMembership)));
+        assert!(matches!(
+            v.add_member(a, a),
+            Err(VaultError::SelfMembership)
+        ));
         v.add_member(a, b).unwrap(); // a contains b: legal nesting
         assert!(matches!(v.add_member(b, a), Err(VaultError::Cycle(x, y)) if x == b && y == a));
         // transitive: a->b->c, then c->a must refuse
         v.register_folder(3).unwrap();
         v.add_member(b, 3).unwrap();
         assert!(matches!(v.add_member(3, a), Err(VaultError::Cycle(x, y)) if x == 3 && y == a));
-        assert!(matches!(v.add_member(77, 5), Err(VaultError::UnregisteredParent(77))));
+        assert!(matches!(
+            v.add_member(77, 5),
+            Err(VaultError::UnregisteredParent(77))
+        ));
     }
 
     #[test]
     fn duplicates_and_extrusions_are_exact() {
         let (mut v, a, _b) = two_folders();
         v.add_member(a, 10).unwrap();
-        assert!(matches!(v.add_member(a, 10), Err(VaultError::AlreadyMember(10, 1))));
+        assert!(matches!(
+            v.add_member(a, 10),
+            Err(VaultError::AlreadyMember(10, 1))
+        ));
         v.extract_member(a, 10).unwrap();
-        assert!(matches!(v.extract_member(a, 10), Err(VaultError::NotMember(10, 1))));
-        assert!(matches!(v.extract_member(99, 10), Err(VaultError::UnknownFolder(99))));
+        assert!(matches!(
+            v.extract_member(a, 10),
+            Err(VaultError::NotMember(10, 1))
+        ));
+        assert!(matches!(
+            v.extract_member(99, 10),
+            Err(VaultError::UnknownFolder(99))
+        ));
     }
 
     #[test]
@@ -322,10 +338,19 @@ mod tests {
         assert_eq!(v.open(a), Some(&[][..]));
         assert_eq!(v.open(b), Some(&[10u64][..]));
         // refusing moves change nothing: the target already holds it
-        assert!(matches!(v.move_member(b, b, 10), Err(VaultError::SelfMembership)));
+        assert!(matches!(
+            v.move_member(b, b, 10),
+            Err(VaultError::SelfMembership)
+        ));
         v.register_folder(3).unwrap();
-        assert!(matches!(v.move_member(b, 3, 42), Err(VaultError::NotMember(42, 1))));
-        assert!(v.contains(b, 10), "the failed move must have left 10 exactly where it was");
+        assert!(matches!(
+            v.move_member(b, 3, 42),
+            Err(VaultError::NotMember(42, 1))
+        ));
+        assert!(
+            v.contains(b, 10),
+            "the failed move must have left 10 exactly where it was"
+        );
     }
 
     #[test]
@@ -335,14 +360,26 @@ mod tests {
         assert!(matches!(v.close_folder(a), Err(VaultError::NonEmpty(1))));
         v.extract_member(a, 10).unwrap();
         v.close_folder(a).unwrap();
-        assert!(!v.is_folder(a), "closed means it is not a folder here anymore");
+        assert!(
+            !v.is_folder(a),
+            "closed means it is not a folder here anymore"
+        );
         // a leaf is not a folder, and closing it is that refusal, not another
-        assert!(matches!(v.close_folder(10), Err(VaultError::UnknownFolder(10))));
+        assert!(matches!(
+            v.close_folder(10),
+            Err(VaultError::UnknownFolder(10))
+        ));
         // an EMPTY folder another folder lists still cannot vanish: the
         // lister would open to a gap
         let (mut w, p, q) = two_folders();
         w.add_member(p, q).unwrap();
-        assert!(matches!(w.close_folder(q), Err(VaultError::Referenced { folder: 2, parent: 1 })));
+        assert!(matches!(
+            w.close_folder(q),
+            Err(VaultError::Referenced {
+                folder: 2,
+                parent: 1
+            })
+        ));
     }
 
     #[test]

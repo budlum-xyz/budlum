@@ -222,7 +222,7 @@ fn hash32_from_hex(s: &str) -> Option<crate::domain::Hash32> {
 /// checkpoint blocks that are buried at least the finality horizon
 /// ([`crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH`]) deep and no
 /// deeper than the settled-row retention
-/// ([`crate::cross_domain::bridge::SETTLED_RETENTION_BLOCKS`]).
+/// (`SETTLED_RETENTION_BLOCKS`, private to the bridge module).
 ///
 /// Pure derivation over `(height, block hash)` pairs: every checkpoint
 /// height in `[tip - SETTLED_RETENTION_BLOCKS, tip - FINALITY_PRUNE_DEPTH]`

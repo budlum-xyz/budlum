@@ -978,6 +978,11 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// Flat forwarder for `ChainCommand::AcceptStorageReallocation`: the field list is
+    /// the command's own payload, so bundling it here would only rename the same five
+    /// fields at every call site. `accept_storage_reallocation_with_escrow` carries the
+    /// same exemption for the same reason (blockchain.rs).
+    #[allow(clippy::too_many_arguments)]
     pub async fn accept_storage_reallocation(
         &self,
         ticket_id: u64,
@@ -3823,19 +3828,17 @@ impl ChainActor {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
                     }
-                    let _ = response.send(
-                        self.blockchain.accept_storage_reallocation_with_escrow(
-                            ticket_id,
-                            replacement_operator,
-                            payer,
-                            start_epoch,
-                            end_epoch,
-                            economics,
-                            &domain_params,
-                            merkle_proof,
-                            storage_root,
-                        ),
-                    );
+                    let _ = response.send(self.blockchain.accept_storage_reallocation_with_escrow(
+                        ticket_id,
+                        replacement_operator,
+                        payer,
+                        start_epoch,
+                        end_epoch,
+                        economics,
+                        &domain_params,
+                        merkle_proof,
+                        storage_root,
+                    ));
                 }
                 ChainCommand::RegisterStorageManifest { manifest, response } => {
                     if self.storage_economics_disabled_on_mainnet() {

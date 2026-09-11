@@ -59,7 +59,12 @@ impl SlotDisclosure {
     /// there is no field to lie through.
     #[must_use]
     pub fn recompute_commitment(&self, schema: &str) -> [u8; 32] {
-        field_commitment(schema, &self.field, &self.salt, &value_digest_of(&self.value))
+        field_commitment(
+            schema,
+            &self.field,
+            &self.salt,
+            &value_digest_of(&self.value),
+        )
     }
 }
 
@@ -112,13 +117,19 @@ impl std::fmt::Display for FillError {
                 "a disclosure names `{slot}`, which the template never asked for"
             ),
             Self::ValueCarriesBraces { slot } => {
-                write!(f, "the value for `{slot}` carries template grammar; refusing to re-scan it")
+                write!(
+                    f,
+                    "the value for `{slot}` carries template grammar; refusing to re-scan it"
+                )
             }
             Self::CredentialNotValid { slot, reason } => {
                 write!(f, "credential behind `{slot}` is not usable: {reason}")
             }
             Self::DisclosureMismatch { slot } => {
-                write!(f, "the disclosure for `{slot}` does not open a committed field")
+                write!(
+                    f,
+                    "the disclosure for `{slot}` does not open a committed field"
+                )
             }
             Self::WrongRequester => write!(f, "this receipt was made for a different requester"),
             Self::WrongDocument => write!(f, "this receipt was made for a different document"),
@@ -188,7 +199,9 @@ pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<S
     }
     for disclosure in disclosures {
         if !asked.contains(&disclosure.slot) {
-            return Err(FillError::UnknownSlot { slot: disclosure.slot.clone() });
+            return Err(FillError::UnknownSlot {
+                slot: disclosure.slot.clone(),
+            });
         }
         if disclosure.slot.is_empty()
             || disclosure.slot.contains('{')
@@ -200,13 +213,17 @@ pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<S
             )));
         }
         if disclosure.value.contains("{{") || disclosure.value.contains("}}") {
-            return Err(FillError::ValueCarriesBraces { slot: disclosure.slot.clone() });
+            return Err(FillError::ValueCarriesBraces {
+                slot: disclosure.slot.clone(),
+            });
         }
     }
     let mut seen: Vec<&str> = Vec::with_capacity(disclosures.len());
     for d in disclosures {
         if seen.contains(&d.slot.as_str()) {
-            return Err(FillError::DuplicateSlot { slot: d.slot.clone() });
+            return Err(FillError::DuplicateSlot {
+                slot: d.slot.clone(),
+            });
         }
         seen.push(&d.slot);
     }
@@ -221,10 +238,11 @@ pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<S
                     FillError::MalformedTemplate("unreachable after validate".to_string())
                 })?;
             let slot = &name[..close];
-            let disclosure = disclosures
-                .iter()
-                .find(|d| d.slot == slot)
-                .expect("validated above");
+            let Some(disclosure) = disclosures.iter().find(|d| d.slot == slot) else {
+                // validate_template above refuses a slot with no disclosure. Refusing again
+                // here rather than panicking: a template must not be able to take the node down.
+                return Err(FillError::MissingSlot { slot: slot.to_string() });
+            };
             out.push_str(&disclosure.value);
             cursor += 2 + close + 2;
         } else {
@@ -338,8 +356,14 @@ pub fn build_presentation(
                 slot: disclosure.slot.clone(),
                 reason: e.to_string(),
             })?;
-        let Some(index) = credential.fields.iter().position(|f| f.name == disclosure.field) else {
-            return Err(FillError::DisclosureMismatch { slot: disclosure.slot.clone() });
+        let Some(index) = credential
+            .fields
+            .iter()
+            .position(|f| f.name == disclosure.field)
+        else {
+            return Err(FillError::DisclosureMismatch {
+                slot: disclosure.slot.clone(),
+            });
         };
         // The proof is the node's own work: every field commitment is
         // already on-chain, so a wallet-supplied path could only lie. What
@@ -358,7 +382,9 @@ pub fn build_presentation(
             &proof,
         );
         if !opens || recomputed != credential.fields[index].commitment {
-            return Err(FillError::DisclosureMismatch { slot: disclosure.slot.clone() });
+            return Err(FillError::DisclosureMismatch {
+                slot: disclosure.slot.clone(),
+            });
         }
         entries.push(ReceiptEntry {
             slot: disclosure.slot.clone(),
@@ -418,12 +444,13 @@ pub fn check_receipt(
         return Err(FillError::WrongDocument);
     }
     for entry in &receipt.entries {
-        let credential = registry
-            .credential(&entry.credential_id)
-            .ok_or(FillError::CredentialNotValid {
-                slot: entry.slot.clone(),
-                reason: "gone from the registry".to_string(),
-            })?;
+        let credential =
+            registry
+                .credential(&entry.credential_id)
+                .ok_or(FillError::CredentialNotValid {
+                    slot: entry.slot.clone(),
+                    reason: "gone from the registry".to_string(),
+                })?;
         registry
             .is_credential_valid(&entry.credential_id, receipt.epoch)
             .map_err(|e| FillError::CredentialNotValid {
@@ -439,7 +466,9 @@ pub fn check_receipt(
             &entry.proof,
         );
         if !opens {
-            return Err(FillError::DisclosureMismatch { slot: entry.slot.clone() });
+            return Err(FillError::DisclosureMismatch {
+                slot: entry.slot.clone(),
+            });
         }
     }
     Ok(())
@@ -459,10 +488,22 @@ mod tests {
     #[test]
     fn slots_are_the_screen_and_they_are_exact() {
         let slots = template_slots("Id: {{legal_name}}, born {{birth_date}}.").unwrap();
-        assert_eq!(slots, vec!["legal_name".to_string(), "birth_date".to_string()]);
-        assert!(matches!(template_slots("{{a}} {{a}}"), Err(FillError::DuplicateSlot { .. })));
-        assert!(matches!(template_slots("{{a"), Err(FillError::MalformedTemplate(_))));
-        assert!(matches!(template_slots("a}}"), Err(FillError::MalformedTemplate(_))));
+        assert_eq!(
+            slots,
+            vec!["legal_name".to_string(), "birth_date".to_string()]
+        );
+        assert!(matches!(
+            template_slots("{{a}} {{a}}"),
+            Err(FillError::DuplicateSlot { .. })
+        ));
+        assert!(matches!(
+            template_slots("{{a"),
+            Err(FillError::MalformedTemplate(_))
+        ));
+        assert!(matches!(
+            template_slots("a}}"),
+            Err(FillError::MalformedTemplate(_))
+        ));
         assert!(matches!(template_slots("{{ }}"), Err(FillError::EmptySlot)));
     }
 
@@ -476,9 +517,9 @@ mod tests {
             salt: [2; 32],
         };
         let err = fill_template("A {{one}} B {{two}}", &[d("one", "1")]).unwrap_err();
-        assert!(matches!(err, FillError::MissingSlot { slot } if slot == "two"), "{err}");
+        assert!(matches!(err, FillError::MissingSlot { ref slot } if slot == "two"), "{err}");
         let err = fill_template("A {{one}}", &[d("one", "1"), d("extra", "x")]).unwrap_err();
-        assert!(matches!(err, FillError::UnknownSlot { slot } if slot == "extra"), "{err}");
+        assert!(matches!(err, FillError::UnknownSlot { ref slot } if slot == "extra"), "{err}");
         let err = fill_template("A {{one}}", &[d("one", "sneaky {{two}}")]).unwrap_err();
         assert!(matches!(err, FillError::ValueCarriesBraces { .. }), "{err}");
         let filled = fill_template(
@@ -493,7 +534,7 @@ mod tests {
     fn a_presentation_is_built_checked_and_unmade_by_revocation() {
         use crate::core::hash::hash_fields_bytes as hf;
         use crate::registry::identity::{
-            field_commitment, credential_id, CredentialCommitment, FieldCommitment, IdentityOp,
+            credential_id, field_commitment, CredentialCommitment, FieldCommitment, IdentityOp,
             IdentityRecord, MethodKind, VerificationMethod,
         };
         use crate::registry::IdentityRegistry;
@@ -555,7 +596,9 @@ mod tests {
         registry
             .apply(
                 &crate::domain::ConsensusKind::PoA,
-                IdentityOp::Issue { credential: credential.clone() },
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
                 100,
             )
             .unwrap();
