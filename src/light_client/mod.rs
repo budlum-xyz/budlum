@@ -727,6 +727,7 @@ mod tests {
         assert_eq!(nonhex.external_root(), None);
     }
 
+    #[test]
     fn advance_rejects_regression_and_set_change() {
         let (snapshot, sks) = make_bls_snapshot(4, 1000);
         let header = make_block_header_at(10, TEST_CHAIN_ID);

@@ -147,7 +147,7 @@ starts certifying a fiction.
 
 ### The mirrored lubot series
 
-`repo-lubot/` ships lubot work as an appliable patch series against
+`repo-lubot/` ships lubot work as an applicable patch series against
 `ayazkussan/lubot` `main`. Its generator ships with it:
 
 ```bash
