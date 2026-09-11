@@ -616,7 +616,7 @@ mod tests {
             &requester,
             &subject,
             template,
-            &[disclosure.clone()],
+            std::slice::from_ref(&disclosure),
             200,
         )
         .unwrap();

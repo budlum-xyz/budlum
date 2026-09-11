@@ -144,10 +144,12 @@ impl VaultRegistry {
         if self.folders.contains(&member) && self.reaches(member, folder) {
             return Err(VaultError::Cycle(folder, member));
         }
-        let list = self
-            .members
-            .get_mut(&folder)
-            .expect("registered folders always have a slot");
+        // `no-panic-path` denies expect() outside tests, and the reasoning is
+        // real: a registered id with no slot means the two maps disagree, which
+        // is a refusal to mutate - not a reason to take the node down.
+        let Some(list) = self.members.get_mut(&folder) else {
+            return Err(VaultError::UnregisteredParent(folder));
+        };
         if list.contains(&member) {
             return Err(VaultError::AlreadyMember(member, folder));
         }
@@ -337,9 +339,16 @@ mod tests {
         v.move_member(a, b, 10).unwrap();
         assert_eq!(v.open(a), Some(&[][..]));
         assert_eq!(v.open(b), Some(&[10u64][..]));
-        // refusing moves change nothing: the target already holds it
+        // refusing moves change nothing: the target already holds it, which is
+        // AlreadyMember (the member is where it already is), not SelfMembership
+        // ("a folder cannot contain itself"). SelfMembership is asserted below
+        // for the case that actually means it, so the rule keeps its lock.
         assert!(matches!(
             v.move_member(b, b, 10),
+            Err(VaultError::AlreadyMember(10, b))
+        ));
+        assert!(matches!(
+            v.move_member(a, b, b),
             Err(VaultError::SelfMembership)
         ));
         v.register_folder(3).unwrap();

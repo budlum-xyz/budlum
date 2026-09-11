@@ -1749,7 +1749,7 @@ mod tests {
         ));
         let subject = registry.record(&addr(1)).unwrap();
         assert!(
-            subject.live_method(&*addr(9).as_bytes(), 200).is_some(),
+            subject.live_method(addr(9).as_bytes(), 200).is_some(),
             "the original key must still be live: a refused rotation changed nothing"
         );
     }
