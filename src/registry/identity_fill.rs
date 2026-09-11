@@ -152,7 +152,15 @@ pub fn template_slots(template: &str) -> Result<Vec<String>, FillError> {
     let mut slots = Vec::new();
     let mut cursor = 0usize;
     while cursor < template.len() {
-        let rest = &template[cursor..];
+        // `get(range)` refuses a non-boundary offset instead of panicking; the
+        // cursor only advances over `{{`/`}}` found by str::find, so this arm is
+        // unreachable for the templates validate() accepts - it is the price of
+        // not owning a release-build abort path in a parser.
+        let Some(rest) = template.get(cursor..) else {
+            return Err(FillError::MalformedTemplate(
+                "template cursor left a char boundary".to_string(),
+            ));
+        };
         if let Some(name) = rest.strip_prefix("{{") {
             let close = name
                 .find("}}")

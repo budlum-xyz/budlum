@@ -90,8 +90,11 @@ pub fn address_of_did(did: &str) -> Option<Address> {
     }
     let mut raw = [0u8; 32];
     for (i, out) in raw.iter_mut().enumerate() {
-        let hi = hex_val(bytes[i * 2])?;
-        let lo = hex_val(bytes[i * 2 + 1])?;
+        // The len==64 guard above makes these in-bounds today, but the gate
+        // (indexing-is-not-new) refuses raw indexing in release paths: a future
+        // edit that drops the guard would turn this into an abort, not a None.
+        let hi = hex_val(*bytes.get(i * 2)?)?;
+        let lo = hex_val(*bytes.get(i * 2 + 1)?)?;
         *out = (hi << 4) | lo;
     }
     // Lowercase-only rule: an "uppercase DID" is the same key two spellings
