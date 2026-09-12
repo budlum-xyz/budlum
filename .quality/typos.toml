@@ -22,6 +22,11 @@ extend-exclude = [
   "proto/",          # the wire schema - changing a word breaks the protocol
   "fuzz/corpus/",    # fuzzer produced binary seeds, not text
   "fuzz/artifacts/",
+  "repo-lubot/patches/",  # git format-patch output: the text is another repo's
+                          # commit message, re-verified verbatim by `git am`, not
+                          # hand-edited here. A typo inside it is fixed upstream in
+                          # the crate, never by editing the mirror and calling it
+                          # an export.
 ]
 
 [default]

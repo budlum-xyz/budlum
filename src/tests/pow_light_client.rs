@@ -178,3 +178,149 @@ fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
         "legacy self-declared PoW must stay mint-gated, got: {legacy_error}"
     );
 }
+
+/// Shared fixture: a registered PoW header-chain domain plus four chained
+/// mined headers. The first header's state root is parameterized so tests
+/// can exercise the zero-root boundary; the later headers always carry
+/// distinct non-zero roots.
+fn pow_fixture(first_state_root: [u8; 32]) -> (
+    Blockchain,
+    crate::domain::ConsensusDomain,
+    Vec<(PoWHeader, [u8; 32])>,
+) {
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+
+    let mut source = default_domain(41, ConsensusKind::PoW, 41_001, POW_HEADER_CHAIN_ADAPTER, 3);
+    source.operator = Some(address(41));
+    source.bridge_enabled = true;
+    source.pow_parameters = Some(PoWDomainParameters {
+        min_difficulty_bits: 4,
+        max_difficulty_bits: 8,
+        min_cumulative_work: 3 * (1u128 << 4),
+        max_headers: 8,
+    });
+    chain
+        .register_consensus_domain(source.clone())
+        .expect("light-client domain registration");
+
+    let mut mined = Vec::new();
+    let mut parent = [0u8; 32];
+    for (i, height) in (1u64..=4).enumerate() {
+        let state_root = if i == 0 {
+            first_state_root
+        } else {
+            [10u8 + i as u8; 32]
+        };
+        let (header, hash) = mine_header(
+            &source,
+            PoWHeader {
+                height,
+                parent_hash: parent,
+                state_root,
+                tx_root: [2u8; 32],
+                event_root: [5u8; 32],
+                // `height` is the `u64` from the range, and this field is `u128`:
+                // `1_000 + height` infers `u64` and the field then refuses it (E0308).
+                timestamp_ms: 1_000 + u128::from(height),
+                nonce: 0,
+                difficulty_bits: 4,
+            },
+        );
+        parent = hash;
+        mined.push((header, hash));
+    }
+    (chain, source, mined)
+}
+
+/// Bind a three-header sliding window to a domain commitment: the window's
+/// first header is the target (height, parent, roots, timestamp, hash); the
+/// rest provide the confirmation depth.
+fn commitment_for_window(
+    source: &crate::domain::ConsensusDomain,
+    window: &[(PoWHeader, [u8; 32])],
+) -> (DomainCommitment, FinalityProof) {
+    let target = &window[0].0;
+    let proof = FinalityProof::PoWHeaderChain {
+        headers: window.iter().map(|(header, _)| header.clone()).collect(),
+    };
+    let commitment = DomainCommitment {
+        domain_id: source.id,
+        domain_height: target.height,
+        domain_block_hash: window[0].1,
+        parent_domain_block_hash: target.parent_hash,
+        state_root: target.state_root,
+        tx_root: target.tx_root,
+        event_root: target.event_root,
+        finality_proof_hash: hash_finality_proof(&proof).unwrap(),
+        consensus_kind: ConsensusKind::PoW,
+        validator_set_hash: source.validator_set_hash,
+        timestamp_ms: target.timestamp_ms,
+        sequence: target.height - 1,
+        producer: None,
+        state_updates: BTreeMap::new(),
+    };
+    (commitment, proof)
+}
+
+#[test]
+fn finalized_pow_commitment_anchors_external_root() {
+    let (mut chain, source, mined) = pow_fixture([1u8; 32]);
+    let (commitment, proof) = commitment_for_window(&source, &mined[0..3]);
+    chain
+        .submit_verified_domain_commitment(commitment, proof)
+        .expect("real header chain finalizes");
+    assert_eq!(
+        chain.state.external_roots.get(&source.id),
+        Some(&[1u8; 32]),
+        "a finalized commitment must anchor its state root in the consensus registry"
+    );
+}
+
+#[test]
+fn zero_state_root_commitment_is_refused_fail_closed() {
+    let (mut chain, source, mined) = pow_fixture([0u8; 32]);
+    let (commitment, proof) = commitment_for_window(&source, &mined[0..3]);
+    let err = chain
+        .submit_verified_domain_commitment(commitment, proof)
+        .expect_err("a zero state root must not finalize");
+    assert!(err.contains("zero state root"), "got: {err}");
+    assert!(
+        chain.state.external_roots.is_empty(),
+        "no anchor may be written for a zero root"
+    );
+    let domain = chain
+        .domain_registry
+        .get(source.id)
+        .expect("domain registered");
+    assert_eq!(
+        domain.last_committed_height, 0,
+        "the domain must not advance without an anchor"
+    );
+}
+
+#[test]
+fn newer_finalized_commitment_supersedes_older_anchor() {
+    let (mut chain, source, mined) = pow_fixture([1u8; 32]);
+
+    let (first, first_proof) = commitment_for_window(&source, &mined[0..3]);
+    chain
+        .submit_verified_domain_commitment(first, first_proof)
+        .expect("first commitment finalizes");
+    assert_eq!(
+        chain.state.external_roots.get(&source.id),
+        Some(&[1u8; 32]),
+        "first anchor written"
+    );
+
+    let second_root = mined[1].0.state_root;
+    assert_ne!(second_root, [0u8; 32]);
+    let (second, second_proof) = commitment_for_window(&source, &mined[1..4]);
+    chain
+        .submit_verified_domain_commitment(second, second_proof)
+        .expect("second commitment finalizes");
+    assert_eq!(
+        chain.state.external_roots.get(&source.id),
+        Some(&second_root),
+        "one latest finalized root per domain: the newer anchor supersedes"
+    );
+}

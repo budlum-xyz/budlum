@@ -77,6 +77,26 @@ jobs:
       - name: Repository scan (a finding = fail)
         run: typos --config .quality/typos.toml --format long
 
+      # The verdict step above is untouched; this only makes it readable. The log
+      # host is unreachable from an audit sandbox, and `exit code 2` on its own is
+      # not actionable: a red spell check that does not name the word is a task
+      # nobody can start. Nine selected lines travel on the API host instead. The
+      # cap is real and small - a check run keeps ten annotations and drops the
+      # earlier ones. The strip before the selection matters just as much: typos
+      # colors its findings, and an anchored pattern on colored text matches nothing.
+      # earlier ones - so this is a *selection*, not a tail.
+      - name: Typos failure surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          tmp=$(mktemp)
+          typos --config .quality/typos.toml --format long > "$tmp" 2>&1 || true
+          sed -e 's/\x1b\[[0-9;]*m//g' "$tmp" | grep -E "^In |^error|-->|misspelled|suggestion|Found" | head -n 9 \
+            | sed -e "s@^@::error::@"
+          printf '::error::%s output lines from the scan; first 9 matching lines shown\n' \
+            "$(grep -c '' "$tmp")"
+          rm -f "$tmp"
+
   trufflehog:
     # A second layer on top of gitleaks: VERIFICATION.
     #

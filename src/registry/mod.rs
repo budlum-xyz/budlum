@@ -19,6 +19,8 @@
 //! `tests::permissionless`.
 
 pub mod d4_merge_tests;
+pub mod identity;
+pub mod identity_fill;
 pub mod evidence;
 pub mod invalid_vote;
 pub mod liveness;
@@ -30,6 +32,18 @@ pub mod poa_onboarding;
 pub mod quarantine_ledger;
 pub mod role;
 
+pub use identity_fill::{
+    build_presentation, check_receipt, credential_proof, document_digest_of,
+    fill_template, template_slots, value_digest_of, FillError, PresentationReceipt,
+    ReceiptEntry, SlotDisclosure,
+};
+pub use identity::{
+    address_of_did, did_of, field_commitment, IdentityError, IdentityOp, IdentityRecord,
+    IdentityRegistry, MethodKind, VerificationMethod, CredentialCommitment,
+    DisclosureProof, FieldCommitment, credential_id, disclosure_proof, merkle_root,
+    verify_disclosure, authorize_recovery, credential_issue_digest, credential_revoke_digest,
+    recovery_digest, execute_identity_tx, GuardianApproval, IdentityTx, DID_METHOD_NAME,
+};
 pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::LivenessTracker;
 

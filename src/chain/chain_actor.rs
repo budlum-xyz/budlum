@@ -353,6 +353,18 @@ pub enum ChainCommand {
         storage_root: Option<crate::domain::Hash32>,
         response: oneshot::Sender<Result<u64, String>>,
     },
+    AcceptStorageReallocation {
+        ticket_id: u64,
+        replacement_operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
     RegisterStorageManifest {
         manifest: crate::storage::ContentManifest,
         response: oneshot::Sender<Result<crate::storage::ContentId, String>>,
@@ -953,6 +965,38 @@ impl ChainHandle {
                 operator,
                 payer,
                 replica_index,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn accept_storage_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AcceptStorageReallocation {
+                ticket_id,
+                replacement_operator,
+                payer,
                 start_epoch,
                 end_epoch,
                 economics,
@@ -2905,6 +2949,24 @@ impl ChainActor {
             );
         }
 
+        // The action the demand band was missing. Each shard under its target
+        // gets a replacement ticket for every replica slot that is actually
+        // free, which is the same repair the zero-replica path performs; the
+        // guard is per slot, not per shard, because "the shard has an active
+        // deal" and "this slot has one" are different statements and only the
+        // second one means paying two operators for one slot. Tickets are
+        // registry state, so the count below feeds the persist decision.
+        let repair_tickets = self
+            .blockchain
+            .state
+            .storage_registry
+            .open_repair_tickets_for_free_slots(current_epoch);
+        if repair_tickets > 0 {
+            tracing::warn!(
+                "B.U.D. storage maintenance opened {repair_tickets} repair tickets for free replica slots at epoch {current_epoch}"
+            );
+        }
+
         let under_replicated = self
             .blockchain
             .state
@@ -2927,8 +2989,11 @@ impl ChainActor {
         // An advisory written into a pending ticket is registry state too: a
         // tick that only annotated used to skip the write, and a crash before
         // the next persisting tick dropped every advisory of this epoch.
-        let registry_changed =
-            annotated > 0 || under_replicated > 0 || swept > 0 || !repair_band.is_empty();
+        let registry_changed = annotated > 0
+            || under_replicated > 0
+            || swept > 0
+            || repair_tickets > 0
+            || !repair_band.is_empty();
         if registry_changed {
             if let Err(error) = self.blockchain.persist_storage_registry() {
                 tracing::error!("Failed to persist storage reallocation status: {error}");
@@ -3741,6 +3806,36 @@ impl ChainActor {
                         merkle_proof,
                         storage_root,
                     ));
+                }
+                ChainCommand::AcceptStorageReallocation {
+                    ticket_id,
+                    replacement_operator,
+                    payer,
+                    start_epoch,
+                    end_epoch,
+                    economics,
+                    domain_params,
+                    merkle_proof,
+                    storage_root,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let _ = response.send(
+                        self.blockchain.accept_storage_reallocation_with_escrow(
+                            ticket_id,
+                            replacement_operator,
+                            payer,
+                            start_epoch,
+                            end_epoch,
+                            economics,
+                            &domain_params,
+                            merkle_proof,
+                            storage_root,
+                        ),
+                    );
                 }
                 ChainCommand::RegisterStorageManifest { manifest, response } => {
                     if self.storage_economics_disabled_on_mainnet() {

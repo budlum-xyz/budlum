@@ -511,6 +511,27 @@ pub trait BudlumApi {
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Accept a reallocation (repair) ticket: the replacement operator
+    /// opens the replacement deal for the ticket's slot, paying the same
+    /// escrow and bond shape as the original open. The placement (manifest,
+    /// shard, replica) is decided by the ticket, not the caller.
+    #[method(name = "bud_storageAcceptReallocation")]
+    async fn storage_accept_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: String,
+        payer: String,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Look up a previously-registered `ContentManifest` by its
     /// `manifest_id`.
     #[method(name = "bud_storageGetManifest")]

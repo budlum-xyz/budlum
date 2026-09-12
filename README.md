@@ -370,6 +370,12 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
   request that caused it.
 - **Tests must be tests.** Every name a gate declares as required is checked to actually carry
   `#[test]`, a required test that silently stopped existing would otherwise pass forever.
+- **Public API must be reached.** A `pub fn` in `src/` that nothing outside a test calls is
+  recorded in a checked-in list, and the list may only shrink. It is checked in both
+  directions: wiring a function up without deleting its line fails too, because a ratchet
+  that only counts upward is a to-do list nobody reads. An exemption exists - a
+  `/// Convenience:` or `WIRING:` line within fourteen lines above the declaration - and the
+  fact that prose can silence this gate is written down in the gate, not patched around.
 - **Formal methods.** [Kani](kani) model-checks arithmetic invariants; `cargo fuzz` targets
   cover wire deserialization; Miri runs the suite under UB detection.
 - **Supply chain.** `cargo-deny`, `cargo-audit`, `cargo-vet`, `osv-scanner`, Grype, SBOM

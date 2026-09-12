@@ -53,10 +53,20 @@
 //! not there. What is enforceable here is that one address never holds two
 //! shards of the same object, which is checkable from state.
 //!
-//! WIRING: wired - `assign_shard` is called once per epoch by the storage
-//! maintenance sweep, through `StorageRegistry::annotate_expected_holders`.
-//! Each pending repair ticket is annotated with the holder rendezvous
-//! placement would choose.
+//! WIRING: wired - two production entry points, both from the storage
+//! maintenance sweep. `StorageRegistry::annotate_expected_holders` runs once
+//! per epoch and annotates each pending repair ticket with the holder
+//! placement would choose; the annotation goes through `assign_object`, one
+//! call per object, so several tickets for one object cannot all be advised
+//! to the same operator.
+//!
+//! The entry points were not always both there. `assign_object` was written,
+//! tested and never called outside its own module, while the annotation loop
+//! asked for one shard at a time - the exact shape whose failure the spread
+//! exists to remove. The production behaviour was therefore the unspread one,
+//! and no gate saw it: the `unwired-guards` baseline counts guards *named*
+//! `check`/`verify`/`validate`/..., and a placement rule named `assign_*` is
+//! invisible to it. Wiring a rule is not the same as having the rule run.
 //!
 //! The annotation is **advisory**. Whoever accepts a ticket still gets it;
 //! `accept_reallocation_ticket` did not change. Binding acceptance to the
@@ -204,6 +214,15 @@ pub fn assign_shard(
 /// The order matches the manifest's shard order, so index `i` of the result
 /// holds shard `i` of the code word.
 ///
+/// A subset may be passed when only some of the object's shards are being
+/// placed - the repair path does this, one object per maintenance pass, over
+/// the shards that currently have no live replica. The spreading rule is the
+/// point of the function, and it only has something to spread over if the
+/// shards are handed to it together: asking for one shard at a time is exactly
+/// the per-shard loop whose failure mode this exists to remove. A one-shard
+/// subset therefore returns what [`assign_shard`] would, and a
+/// multi-shard subset returns the same answers plus the distinctness rule.
+///
 /// # Errors
 ///
 /// Propagates [`assign_shard`]'s errors. A partial index is never returned:
@@ -303,6 +322,37 @@ mod tests {
         let small = candidates(2);
         let holders = assign_object(&ids, &[7u8; 32], &small).unwrap();
         assert_eq!(holders.len(), 12);
+    }
+
+    /// The shape the repair path uses: one object, the subset of its shards
+    /// that are missing, placed together.
+    ///
+    /// This is the regression lock for the wiring. Before it, each pending
+    /// ticket asked for its own shard and nothing else, so two tickets for one
+    /// object could both be advised to the same operator.
+    #[test]
+    fn a_multi_shard_subset_still_spreads() {
+        let c = candidates(20);
+        let ids = vec![shard(3), shard(4)];
+        let holders = assign_object(&ids, &[7u8; 32], &c).unwrap();
+        assert_eq!(holders.len(), 2);
+        assert_ne!(
+            holders[0], holders[1],
+            "two shards of one object must not be placed on one address while the pool has another"
+        );
+    }
+
+    /// And the other half of the lock: a subset of one must be *unchanged*
+    /// from the per-shard rule, so wiring the spread cannot silently move an
+    /// object that has only one shard to repair.
+    #[test]
+    fn a_single_shard_subset_places_exactly_as_the_per_shard_rule() {
+        let c = candidates(20);
+        for tag in [1u8, 2, 3, 7, 19] {
+            let spread = assign_object(&[shard(tag)], &[11u8; 32], &c).unwrap();
+            let direct = assign_shard(&shard(tag), &[11u8; 32], &c, 1).unwrap();
+            assert_eq!(spread, direct, "shard {tag} must place identically");
+        }
     }
 
     #[test]

@@ -1543,7 +1543,35 @@ impl Blockchain {
         proof: FinalityProof,
     ) -> Result<(), String> {
         self.verify_domain_commitment_finality(&commitment, &proof)?;
-        self.accept_domain_commitment(commitment)
+        let domain_id = commitment.domain_id;
+        let domain_height = commitment.domain_height;
+        let state_root = commitment.state_root;
+        // AR-GE-6: a zero state root anchors nothing, and the relayer gate
+        // already rejects zero roots on the result side, so such a
+        // commitment could only advance a domain that can never satisfy the
+        // gate. Refused before anything moves (fail-closed).
+        if state_root == [0u8; 32] {
+            return Err(format!(
+                "Domain {domain_id} height {domain_height}: zero state root, no external-root anchor written (fail-closed)"
+            ));
+        }
+        self.accept_domain_commitment(commitment)?;
+        // AR-GE-6: the only production writer of the consensus-owned
+        // external-root registry. The anchor lands only after the domain's
+        // own adapter has proven finality AND the commitment was accepted,
+        // so a rejected or equivocal commitment never leaves an orphan
+        // anchor behind. The executor's relayer gate reads `external_roots`
+        // exclusively, so a relayer transaction can never mint the anchor
+        // it relies on (the relayer-data-to-open trap stays closed).
+        if !self.state.anchor_external_root(domain_id, state_root) {
+            // Unreachable: the zero root was refused above. If this were
+            // ever reached, the commitment advanced without its anchor —
+            // fail loud instead of trusting the invariant.
+            return Err(format!(
+                "Domain {domain_id} height {domain_height}: anchor write failed after acceptance (invariant broken)"
+            ));
+        }
+        Ok(())
     }
 
     /// Build the signed `StateUpdateTx` that carries a verified commitment's
@@ -4179,11 +4207,17 @@ impl Blockchain {
             merkle_root(&settlement_window)
         };
         committed_state.settlement_root = settlement_root;
-        committed_state.global_header_summary = self
-            .global_headers
-            .last()
-            .map(|h| h.calculate_hash_bytes())
-            .unwrap_or([0u8; 32]);
+        // Canonical (zero) global header summary in the state root (audit
+        // 2026-09-09, F-3): the last sealed header is node-local operator
+        // state. Until H-10 carries the commitment into the L1 block,
+        // hashing the node's own seal into the root made the root
+        // irreproducible by every other node - a guaranteed self-fork the
+        // moment an operator seals. The validation paths
+        // (validate_candidate_chain / try_reorg) already use the empty
+        // canonical value; production now matches them. The sealed chain
+        // stays committed via its own previous_global_hash chain +
+        // persistence.
+        committed_state.global_header_summary = [0u8; 32];
         block.state_root = committed_state.calculate_state_root();
         if self.sharding.is_active_at(block.index) {
             block.shards_root = Some(crate::sharding::shards_commitment(
@@ -4492,11 +4526,11 @@ impl Blockchain {
                 merkle_root(&settlement_window)
             };
             commit_state.settlement_root = settlement_root;
-            commit_state.global_header_summary = self
-                .global_headers
-                .last()
-                .map(|h| h.calculate_hash_bytes())
-                .unwrap_or([0u8; 32]);
+            // Canonical (zero) global header summary - the same rule the
+            // producer applies (audit 2026-09-09, F-3): the sealed header is
+            // node-local operator state and must not enter the reproducible
+            // state root until H-10 carries the commitment in the block.
+            commit_state.global_header_summary = [0u8; 32];
             let computed_root = commit_state.calculate_state_root();
             if computed_root != block.state_root {
                 return Err(format!(
@@ -5667,6 +5701,142 @@ impl Blockchain {
                         .map_err(|e| format!("deal bond refund overflow: {e}"))?;
                 }
                 Err(format!("open_deal failed: {:?}", e))
+            }
+        }
+    }
+
+    /// B.U.D.: On-chain acceptance of a reallocation (repair) ticket.
+    ///
+    /// The economic mirror of [`Self::open_storage_deal_with_escrow`] for
+    /// the replacement placement: the placement is decided by the ticket,
+    /// not the caller — manifest, shard and replica come from the registry
+    /// record — while the escrow and the bond are debited by this layer and
+    /// refunded on refusal, exactly like the original open.
+    ///
+    /// The registry's `accept_reallocation_ticket` keeps the one-shot
+    /// guarantee (a filled ticket refuses a second acceptance) and the
+    /// merkle envelope stays mandatory, so a replacement cannot claim a
+    /// shard it cannot prove. Until this path existed, a repair ticket
+    /// opened by the maintenance sweep could never be filled on-chain:
+    /// the trigger ran, and the acceptance was test-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_storage_reallocation_with_escrow(
+        &mut self,
+        ticket_id: u64,
+        replacement_operator: Address,
+        payer: Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: &crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let now_unix = self.current_unix_secs();
+        if let Some(until) = self
+            .state
+            .storage_registry
+            .operator_cooldown_until(&replacement_operator, now_unix)
+        {
+            return Err(format!(
+                "operator {replacement_operator} missed a challenge and cannot take storage work until unix {until} ({} seconds left)",
+                until.saturating_sub(now_unix)
+            ));
+        }
+
+        let ticket = self
+            .state
+            .storage_registry
+            .get_reallocation_ticket(ticket_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown reallocation ticket {ticket_id}"))?;
+        if !matches!(
+            ticket.status,
+            crate::domain::storage_deal::ReallocationStatus::Pending
+                | crate::domain::storage_deal::ReallocationStatus::UnderReplicated
+        ) {
+            return Err(format!(
+                "reallocation ticket {ticket_id} is not open for acceptance"
+            ));
+        }
+        if replacement_operator == ticket.slashed_operator {
+            return Err(format!(
+                "operator {replacement_operator} is the slashed operator of ticket {ticket_id}"
+            ));
+        }
+
+        let manifest = self
+            .state
+            .storage_registry
+            .get_manifest(&ticket.manifest_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!("manifest {} of ticket {ticket_id} vanished", ticket.manifest_id)
+            })?;
+        let epochs = end_epoch.saturating_sub(start_epoch);
+        if epochs == 0 {
+            return Err("Deal duration must be > 0".into());
+        }
+        // The ticket decides the placement; the bytes come from the
+        // manifest, the same source `open_deal` records below prices from.
+        let shard_bytes = u64::from(
+            manifest
+                .shard(&ticket.shard_id)
+                .ok_or_else(|| {
+                    format!(
+                        "shard {:?} is not part of manifest {:?}",
+                        ticket.shard_id, ticket.manifest_id
+                    )
+                })?
+                .size,
+        );
+        let total_fee = economics.total_fee(shard_bytes, epochs);
+        let bond = economics.operator_bond;
+
+        // 1. Debit Payer (Client Escrow) — same shape as the open path.
+        if total_fee > 0 {
+            if self.state.get_balance(&payer) < total_fee {
+                return Err(format!("Insufficient payer balance for deal fee {total_fee}"));
+            }
+            let account = self.state.get_or_create(&payer);
+            account.balance = account.balance.saturating_sub(total_fee);
+        }
+        // 2. Lock Operator Bond.
+        if bond > 0 {
+            if self.state.get_balance(&replacement_operator) < bond {
+                return Err(format!("Insufficient operator balance for bond {bond}"));
+            }
+            let account = self.state.get_or_create(&replacement_operator);
+            account.balance = account.balance.saturating_sub(bond);
+        }
+        match self.state.storage_registry.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+            merkle_proof,
+            storage_root,
+        ) {
+            Ok(replacement_deal_id) => {
+                self.persist_storage_registry()?;
+                Ok(replacement_deal_id)
+            }
+            Err(e) => {
+                // Refund on refusal — mirroring the open path, where a
+                // refused deal never keeps the escrow or the bond.
+                if total_fee > 0 {
+                    self.state
+                        .try_add_balance(&payer, total_fee)
+                        .map_err(|e| format!("deal fee refund overflow: {e}"))?;
+                }
+                if bond > 0 {
+                    self.state
+                        .try_add_balance(&replacement_operator, bond)
+                        .map_err(|e| format!("deal bond refund overflow: {e}"))?;
+                }
+                Err(format!("accept_reallocation_ticket failed: {e:?}"))
             }
         }
     }
@@ -7257,6 +7427,35 @@ mod tests {
         receiver
             .validate_and_add_block(block)
             .expect("peer must accept a self-produced mainnet block");
+    }
+
+    /// Audit 2026-09-09, F-3: an operator sealing global headers must not
+    /// fork the node. The last sealed header is node-local operator state;
+    /// hashing it into the state root made the producer's root irreproducible
+    /// by unsealed peers (and inconsistent with the reorg paths, which
+    /// validate against the empty canonical value). Regression: a producer
+    /// that has sealed produces a block an unsealed peer accepts.
+    #[test]
+    fn sealed_global_header_does_not_fork_peer_state_root() {
+        let chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let producer = Address::from([0xABu8; 32]);
+        let mut producer_chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, chain_id, None);
+
+        // The operator exercises the seal path (bud_sealGlobalHeader).
+        producer_chain.seal_global_header(None).expect("first seal");
+        producer_chain.seal_global_header(None).expect("second seal");
+        assert_eq!(producer_chain.global_headers.len(), 2);
+
+        let (block, _) = producer_chain
+            .produce_block(producer)
+            .expect("producer should create a block after sealing");
+
+        let mut receiver = Blockchain::new(Arc::new(PoWEngine::new(0)), None, chain_id, None);
+        receiver
+            .validate_and_add_block(block)
+            .expect("peer without any sealed global header must accept the block");
     }
 
     #[test]

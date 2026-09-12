@@ -67,7 +67,7 @@ fn prod_files(root: &Path) -> BTreeMap<String, String> {
 }
 
 /// Remove `#[cfg(test)] mod ... { }` blocks, brace matched.
-fn strip_test_mods(text: &str) -> String {
+pub(crate) fn strip_test_mods(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
     loop {

@@ -471,9 +471,9 @@ impl RpcServer {
                     "treasury_percent": 5,
                 },
             },
-            "data_layer": "requester-bound Pollen AccessGrant checks live; grant builder issues to requester (F-12 closed)",
+            "data_layer": "requester-bound Pollen AccessGrant checks live; the grant builder issues to the requester",
             "verification_level": "structural_envelope_checks_only",
-            "verification_level_note": "results are not STARK-proven (F-05); full_execution_proof_verification remains false",
+            "verification_level_note": "results are not STARK-proven; full_execution_proof_verification remains false",
         })
     }
 
@@ -1851,6 +1851,15 @@ impl BudlumApiServer for RpcServer {
         proof: crate::cross_domain::event_tree::MerkleProof,
         source_domain: crate::domain::types::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Audit 2026-09-09 (E-7): this RPC applies consensus state changes
+        // OUTSIDE block execution (bridge mint/unlock + balance credits via
+        // Blockchain::submit_relay_proof), so a public-listener caller would
+        // fork the node against the network. All five sibling bridge-mutating
+        // RPCs (mint/burn/unlock x3) carry this operator gate; this one did
+        // not. The consensus-correct rework (verify + ledger record only, with
+        // settlement via the on-chain RelayerResult transaction) is logged as
+        // an open design item; until it lands the gate is the minimum.
+        self.require_operator("bud_submitRelayProof")?;
         let clean_addr = relayer.strip_prefix("0x").unwrap_or(&relayer);
         let relayer_addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid relayer address: {e}"), None::<()>)
@@ -2996,6 +3005,102 @@ impl BudlumApiServer for RpcServer {
             "dealId": deal_id,
             "status": "Active",
             "operator": operator,
+        }))
+    }
+
+    async fn storage_accept_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: String,
+        payer: String,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid replacement operator hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
+        })?;
+
+        // The caller must prove control of BOTH addresses this call debits:
+        // the payer's escrow and the replacement operator's bond. The
+        // signed message binds every parameter that changes the debit; the
+        // placement (manifest, shard, replica, bytes) is derived by the
+        // chain from the ticket, so a signature cannot be replayed against
+        // a different slot. Same pattern as BUD_OPEN_DEAL_V1.
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ACCEPT_REALLOCATION_V1",
+            &ticket_id.to_le_bytes(),
+            op_addr.as_bytes(),
+            payer_addr.as_bytes(),
+            &start_epoch.to_le_bytes(),
+            &end_epoch.to_le_bytes(),
+            &economics.fee_per_byte_epoch.to_le_bytes(),
+            &economics.operator_bond.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        let payer_sig = hex::decode(payer_signature).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer_signature hex: {e}"), None::<()>)
+        })?;
+        let op_sig = hex::decode(operator_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+            })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid operator signature: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let replacement_deal_id = self
+            .chain
+            .accept_storage_reallocation(
+                ticket_id,
+                op_addr,
+                payer_addr,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("accept_reallocation failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(serde_json::json!({
+            "ticketId": ticket_id,
+            "replacementDealId": replacement_deal_id,
+            "status": "ActiveReplacement",
+            "operator": replacement_operator,
         }))
     }
 

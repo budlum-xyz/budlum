@@ -9,6 +9,9 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod vault;
+pub use vault::{VaultError, VaultRegistry};
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NftRegistry {
     /// Id -> nft

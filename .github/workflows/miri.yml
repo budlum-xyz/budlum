@@ -76,6 +76,21 @@ jobs:
           MIRIFLAGS: "-Zmiri-disable-isolation"
         continue-on-error: true  # the storage sled dependency may be incompatible with Miri
 
+      # Miri's own output is the only thing that makes a red Miri check
+      # fixable, and it lives on the log host. The commands above already tee to
+      # /tmp, so re-reading those files costs nothing: same bytes, nine lines,
+      # verdict unchanged.
+      - name: Miri failure surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          for f in /tmp/miri-crypto.txt /tmp/miri-budvm.txt /tmp/miri-storage.txt; do
+            [ -s "$f" ] || continue
+            sed -e 's/\x1b\[[0-9;]*m//g' "$f" \
+              | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
+              | head -n 9 | sed -e "s@^@::error::$f @"
+          done
+
   asan:
     # An alternative to cargo-careful. With the pinned nightly the 0.4.7 tool
 # cannot build a sysroot (std moved `panic_unwind` behind `dep:` while the tool
@@ -174,5 +189,22 @@ jobs:
           set -euo pipefail
           export RUSTFLAGS="-Zsanitizer=address -Cdebug-assertions=on"
           export ASAN_OPTIONS="detect_leaks=0"
+          # `| tee` is safe here and only here: the job runs under
+          # `set -euo pipefail`, so a non-zero cargo exit still fails the step.
+          # Where that setting is absent the same rewrite silently turns a red
+          # ASan run green (this file's canary step records exactly that bug).
           cargo +nightly-2026-07-19 test --lib -Zbuild-std \
-            --target x86_64-unknown-linux-gnu -- --test-threads=1
+            --target x86_64-unknown-linux-gnu -- --test-threads=1 \
+            2>&1 | tee /tmp/asan-lib.log
+      - name: ASan failure surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          if [ -s /tmp/asan-lib.log ]; then
+            sed -e 's/\x1b\[[0-9;]*m//g' /tmp/asan-lib.log \
+              | grep -E "ERROR|runtime error|SUMMARY|panicked|test result|error\[" \
+              | head -n 9 | sed -e "s@^@::error::@"
+            printf '::error::%s log lines; first 9 matching shown\n' "$(grep -c '' /tmp/asan-lib.log)"
+          else
+            echo "::error::/tmp/asan-lib.log is empty - the ASan step died before it produced output, which means the build of the sanitizer harness failed and its log is on the log host."
+          fi
