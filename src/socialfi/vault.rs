@@ -28,7 +28,7 @@
 //! made here) needs exactly one guarantee from this layer: what a folder
 //! holds is a list a screen can render truthfully - which is why
 //! [`VaultRegistry::open`] returns ids in registration order and why the
-//! root counts members in the same order [`Self::root`] hashes.
+//! root counts members in the same order [`VaultRegistry::root`] hashes.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -438,7 +438,7 @@ mod tests {
         // rule keeps its own lock one assert below.
         assert!(matches!(
             v.move_member(b, b, 10),
-            Err(VaultError::AlreadyMember(10, b))
+            Err(VaultError::AlreadyMember(10, folder)) if folder == b
         ));
         assert!(matches!(
             v.move_member(a, b, b),

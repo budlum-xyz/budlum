@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(participation(&[0b0000_0000]), 0);
         assert_eq!(participation(&[0b1111_1111]), 8);
         assert_eq!(participation(&[0b1010_1010]), 4);
-        assert_eq!(participation(&bits_for(342)).iter().map(|b| u64::from(b.count_ones())).sum::<u64>(), 342);
+        assert_eq!(participation(&bits_for(342)), 342);
         // A full bitvector is the whole committee.
         let full = vec![0xff; BITVECTOR_BYTES];
         assert_eq!(participation(&full), SYNC_COMMITTEE_SIZE);
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn a_payload_of_the_wrong_length_is_refused_at_the_door() {
-        let err = parse_update(&[0u8; layout_len() - 1]).unwrap_err();
+        let err = parse_update(&[0u8; crate::cross_domain::external::ethereum::layout::LEN - 1]).unwrap_err();
         assert!(matches!(err, AdapterError::Malformed { .. }));
         let err = parse_update(&[]).unwrap_err();
         assert!(matches!(err, AdapterError::Malformed { .. }));
@@ -940,7 +940,7 @@ mod tests {
 
     // --- helpers ---
 
-    fn layout_len() -> usize {
+    const fn layout_len() -> usize {
         crate::cross_domain::external::ethereum::layout::LEN
     }
 

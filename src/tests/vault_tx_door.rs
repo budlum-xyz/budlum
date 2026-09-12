@@ -26,7 +26,7 @@ fn alice_state() -> (AccountState, Address, Vec<u64>) {
     let mut state = AccountState::new();
     state.add_balance(&alice, 1_000);
     let mut ids = Vec::new();
-    for (i, tag) in ["folder-a", "token-1", "token-2", "folder-b"]
+    for (_i, tag) in ["folder-a", "token-1", "token-2", "folder-b"]
         .iter()
         .enumerate()
     {

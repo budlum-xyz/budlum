@@ -150,7 +150,9 @@ impl ColdRefusal {
 /// One entry in the refusal history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefusalRecord {
-    pub kind: &'static str,
+    /// Owned because the record is serialized and deserialized independently
+    /// of the process that produced the refusal.
+    pub kind: String,
     /// The height the refused request claimed. Recorded because an operator
     /// asking "why did height N not settle" needs to find it.
     pub height: u64,
@@ -377,7 +379,7 @@ impl ColdWalletState {
     /// device is supposed to be immune to by being offline.
     fn record_refusal(&mut self, request: &SettlementRequest, err: &ColdRefusal) {
         let record = RefusalRecord {
-            kind: err.kind(),
+            kind: err.kind().to_string(),
             height: request.height,
             nonce: request.nonce,
         };

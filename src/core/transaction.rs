@@ -1916,7 +1916,6 @@ mod v29_signing_tests {
         tx
     }
 
-    #[test]
     /// Every field an identity transaction carries must reach the signing
     /// preimage: flip one at a time, the hash must change. The
     /// `wire-fields-are-signed` gate proves the encoder MENTIONS each field;
