@@ -152,11 +152,19 @@ impl VersionPolicy {
                 allowed: self.max_grace_heights,
             });
         }
-        let sunset = fork_height.saturating_add(grace_heights);
+        let sunset =
+            fork_height
+                .checked_add(grace_heights)
+                .ok_or(ForkError::ForkHeightOverflow {
+                    fork_height,
+                    grace_heights,
+                })?;
 
         // The outgoing version's window must end. Leaving it open would mean
         // the fork never actually happened and both formats are current
-        // forever - which is the state that produces silent divergence.
+        // forever - which is the state that produces silent divergence. A
+        // sunset version cannot be reused: doing so would silently resurrect
+        // an old format and rewrite its already-published grace window.
         let Some(old) = self.windows.iter_mut().find(|w| w.version == old_version) else {
             return Err(ForkError::UnknownOldVersion {
                 version: old_version,
@@ -167,6 +175,11 @@ impl VersionPolicy {
                 version: old_version,
                 valid_from: old.valid_from_height,
                 fork_height,
+            });
+        }
+        if old.sunset_height.is_some() {
+            return Err(ForkError::OldVersionAlreadySunset {
+                version: old_version,
             });
         }
         old.sunset_height = Some(sunset);
@@ -234,6 +247,12 @@ impl VersionPolicy {
             if seen.contains(&window.version) {
                 return false;
             }
+            if window
+                .sunset_height
+                .is_some_and(|sunset| sunset < window.valid_from_height)
+            {
+                return false;
+            }
             seen.push(window.version);
         }
         true
@@ -249,6 +268,13 @@ pub enum ForkError {
     VersionAlreadyScheduled { version: u32 },
     #[error("the outgoing version {version} was never scheduled")]
     UnknownOldVersion { version: u32 },
+    #[error("the outgoing version {version} has already sunset and cannot be reused")]
+    OldVersionAlreadySunset { version: u32 },
+    #[error("fork height {fork_height} plus grace {grace_heights} overflows the height type")]
+    ForkHeightOverflow {
+        fork_height: u64,
+        grace_heights: u64,
+    },
     #[error("a grace window of {requested} heights exceeds the domain's limit of {allowed}")]
     GraceTooWide { requested: u64, allowed: u64 },
     #[error(
@@ -259,4 +285,56 @@ pub enum ForkError {
         valid_from: u64,
         fork_height: u64,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> VersionPolicy {
+        VersionPolicy::single(AdapterId::from_name("test-adapter"), 1, 10)
+    }
+
+    #[test]
+    fn fork_height_overflow_is_a_refusal_not_a_saturated_window() {
+        let mut policy = policy();
+        let err = policy
+            .schedule_fork(1, 2, u64::MAX, 1)
+            .expect_err("overflow must not create a never-sunset window");
+        assert_eq!(
+            err,
+            ForkError::ForkHeightOverflow {
+                fork_height: u64::MAX,
+                grace_heights: 1,
+            }
+        );
+        assert_eq!(
+            policy.window(1).and_then(|window| window.sunset_height),
+            None
+        );
+        assert!(policy.window(2).is_none());
+    }
+
+    #[test]
+    fn a_sunset_version_cannot_be_resurrected_by_a_second_fork() {
+        let mut policy = policy();
+        policy.schedule_fork(1, 2, 100, 2).expect("first fork");
+        let err = policy
+            .schedule_fork(1, 3, 200, 2)
+            .expect_err("a published sunset cannot be rewritten");
+        assert_eq!(err, ForkError::OldVersionAlreadySunset { version: 1 });
+        assert_eq!(
+            policy.window(1).and_then(|window| window.sunset_height),
+            Some(102)
+        );
+        assert!(policy.window(3).is_none());
+    }
+
+    #[test]
+    fn an_inverted_deserialized_window_is_not_consistent() {
+        let mut policy = policy();
+        policy.windows[0].sunset_height = Some(0);
+        policy.windows[0].valid_from_height = 1;
+        assert!(!policy.is_consistent());
+    }
 }
