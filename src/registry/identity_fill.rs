@@ -446,12 +446,16 @@ pub fn build_presentation(
             proof,
         });
     }
+    // The digest is taken before `filled` moves into the tuple. Struct-field
+    // shorthand does not save it: the tuple element above is evaluated first,
+    // so `&filled` below would borrow a value that has already moved.
+    let document_digest = document_digest_of(&filled);
     Ok((
         filled,
         PresentationReceipt {
             requester: *requester,
             subject: *subject,
-            document_digest: document_digest_of(&filled),
+            document_digest,
             epoch,
             entries,
         },

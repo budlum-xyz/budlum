@@ -56,7 +56,11 @@ pub const EVIDENCE_VERSION: u32 = 1;
 pub const MAX_PAYLOAD_BYTES: usize = 12 * 1024 * 1024;
 
 /// The wire shape of one proven finality claim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq`/`Eq` are deliberately absent: `ProofEnvelope` derives neither, and
+// adding them here would mean comparing proof bytes field by field in a wrapper
+// that cannot see inside them. Two envelopes being byte-equal is a question
+// about `proof_bytes`, and the caller that needs it can ask that directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZkFinalityEvidence {
     pub envelope: ProofEnvelope,
     pub inputs: ExecutionPublicInputs,

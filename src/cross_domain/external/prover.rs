@@ -138,7 +138,7 @@ pub fn required_bond_atoms(ceiling_atoms: u128, ratio_num: u128, ratio_den: u128
 /// attestation lets move - which is what makes lying unprofitable: the reward
 /// for a false attestation is the same as for a true one, but the bond at risk
 /// grows with the value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProverFee {
     pub base_atoms: u128,
     /// Basis points of the routed value. Ten thousand basis points is 100%.
@@ -166,7 +166,7 @@ pub const BPS_DEN: u128 = 10_000;
 /// and it comes out of the slashed bond rather than from nowhere - otherwise
 /// challenging would be a cost the chain pays indefinitely and the incentive
 /// to challenge would depend on the chain's budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChallengeReward {
     /// Basis points of the slashed amount paid to the challenger.
     pub bps_of_slash: u32,

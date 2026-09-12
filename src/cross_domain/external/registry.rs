@@ -21,7 +21,7 @@ use crate::cross_domain::external::profile::{DomainRecord, DomainState, StateEve
 use crate::cross_domain::external::prover::{DomainEconomics, ProverBond};
 use crate::cross_domain::external::selftest::AdmissionReport;
 use crate::cross_domain::external::spec::{
-    AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
+    AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
 use crate::cross_domain::external::versioning::VersionPolicy;
