@@ -302,23 +302,25 @@ impl ExternalDomainRegistry {
 
         // Everything below needs the registration; take it once and hold the
         // key, not a borrow, so the counters can be updated on the way out.
-        let Some(descriptor) = self.domains.get(&domain).map(|r| r.record.descriptor.clone()) else {
+        // One lookup, then clone out what the checks need. Taking the
+        // registration once matters for a reason that is not stylistic:
+        //
+        // The previous shape fell back to `VersionPolicy::single(descriptor.id,
+        // evidence.evidence_version, 0)` and `DomainEconomics::default()` when
+        // the lookup missed. Those fallbacks were unreachable - the line above
+        // already returned on a miss - but they were reachable *by an edit*,
+        // and the version fallback was a hole: it built the version policy from
+        // the evidence's own declared version, which is the evidence choosing
+        // the rules it is checked against. An unreachable fallback that would
+        // be a hole if it became reachable is a worse thing to leave behind
+        // than no fallback at all.
+        let Some(reg) = self.domains.get(&domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
-        let versions = self
-            .domains
-            .get(&domain)
-            .map(|r| r.versions.clone())
-            .unwrap_or_else(|| VersionPolicy::single(descriptor.id, evidence.evidence_version, 0));
-        let economics = self
-            .domains
-            .get(&domain)
-            .map(|r| r.economics)
-            .unwrap_or_default();
-        let prover_bond = self
-            .domains
-            .get(&domain)
-            .and_then(|r| r.provers.get(&evidence.submitter).cloned());
+        let descriptor = reg.record.descriptor.clone();
+        let versions = reg.versions.clone();
+        let economics = reg.economics;
+        let prover_bond = reg.provers.get(&evidence.submitter).cloned();
 
         let refusal = self.check(adapter, &descriptor, &versions, &economics, prover_bond.as_ref(), evidence, policy);
 
