@@ -129,6 +129,10 @@ message ProtoTransaction {
 // stateless, and `from` is derived from the set and threshold, so a wrong
 // set cannot point at somebody else's account: the address will not match.
 message ProtoMultisigAuthorization {
+    // Explicit algorithm/profile identifier. Empty or unknown values are
+    // refused by transaction admission; peers must not infer a scheme from
+    // key length.
+    string scheme_id = 4;
     repeated bytes owners = 1;
     uint32 threshold = 2;
     repeated ProtoOwnerSignature signatures = 3;

@@ -1,3 +1,6 @@
+#[cfg(all(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
+compile_error!("pq-dilithium and pq-ml-dsa are mutually exclusive validator backends");
+
 use bls12_381::{G2Affine, G2Projective, Scalar};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,

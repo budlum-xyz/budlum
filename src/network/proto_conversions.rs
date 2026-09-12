@@ -468,6 +468,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 .authorization
                 .as_ref()
                 .map(|auth| pb::ProtoMultisigAuthorization {
+                    scheme_id: auth.scheme_id.clone(),
                     owners: auth.owners.clone(),
                     threshold: auth.threshold,
                     signatures: auth
@@ -1490,6 +1491,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             signer_public_key: proto.signer_public_key,
             authorization: proto.authorization.map(|auth| {
                 crate::core::transaction::MultisigAuthorizationV6 {
+                    scheme_id: auth.scheme_id,
                     owners: auth.owners,
                     threshold: auth.threshold,
                     signatures: auth
@@ -2099,6 +2101,46 @@ mod tests {
             Transaction::try_from(proto_tx).expect("Failed to decode proto transaction");
 
         assert_eq!(tx, decoded_tx);
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn v6_authorization_proto_roundtrip_preserves_scheme_id() {
+        use crate::core::transaction::{multisig_address, ML_DSA_87_SCHEME_ID};
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let keys: Vec<_> = (0..2).map(|_| WalletKeyPair::generate()).collect();
+        let owners: Vec<_> = keys.iter().map(WalletKeyPair::public_key_bytes).collect();
+        let mut tx = Transaction::new_with_fee(
+            multisig_address(&owners, 2),
+            Address::zero(),
+            7,
+            1,
+            0,
+            vec![],
+        );
+        tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+        assert_eq!(
+            tx.authorization.as_ref().map(|a| a.scheme_id.as_str()),
+            Some(ML_DSA_87_SCHEME_ID)
+        );
+
+        let decoded = Transaction::try_from(pb::ProtoTransaction::from(&tx)).unwrap();
+        assert_eq!(decoded, tx);
+        assert!(decoded.verify());
+
+        // A pre-profile peer that omits the field must not be upgraded by
+        // inference: decoding may preserve the bytes for diagnostics, but
+        // admission has to refuse the authorization.
+        let mut legacy_wire = pb::ProtoTransaction::from(&tx);
+        legacy_wire
+            .authorization
+            .as_mut()
+            .expect("V6 authorization on wire")
+            .scheme_id
+            .clear();
+        let legacy = Transaction::try_from(legacy_wire).unwrap();
+        assert!(!legacy.verify());
     }
 
     #[test]

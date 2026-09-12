@@ -47,8 +47,13 @@ pub const SIGNATURE_VERSION_V5: u32 = 5;
 /// which set spends is bound to the address itself; an attacker cannot spend
 /// somebody else's address with their own owner set.
 pub const SIGNATURE_VERSION_V6: u32 = 6;
+/// Explicit wire/profile identifier for V6 authorizations. The feature gate
+/// selects whether this verifier exists; this identifier selects the exact
+/// algorithm and encoding on the wire. Missing or different values refuse at
+/// admission instead of being guessed from key length.
+pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
-/// The address of a multisig account: the owner set plus the threshold.
+/// The address of a multisig account: the ML-DSA profile, owner set and threshold.
 ///
 /// The address is derived from the set itself. The threshold has to enter the
 /// derivation as well: `2-of-3` and `3-of-3` policies over the same three owners are two different
@@ -63,6 +68,11 @@ pub fn multisig_address(
     sorted.sort_unstable();
     let mut hasher = Sha3_256::new();
     hasher.update(b"BDLM_TX_V6_MULTISIG_ADDRESS");
+    // Commit the algorithm profile to the account identity as well as to the
+    // signed transaction. A future V6 profile cannot alias this account by
+    // reusing the same owner set and threshold.
+    hasher.update((ML_DSA_87_SCHEME_ID.len() as u64).to_le_bytes());
+    hasher.update(ML_DSA_87_SCHEME_ID.as_bytes());
     hasher.update((sorted.len() as u64).to_le_bytes());
     for owner in &sorted {
         hasher.update((owner.len() as u64).to_le_bytes());
@@ -432,6 +442,9 @@ pub struct Transaction {
 /// cannot point at somebody else's account: the address will not match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultisigAuthorizationV6 {
+    /// Explicit algorithm/profile id. Empty or unknown ids are refused; the
+    /// verifier must never infer a scheme from a key length alone.
+    pub scheme_id: String,
     /// The owner ML-DSA-87 public keys.
     pub owners: Vec<Vec<u8>>,
     /// The number of valid signatures required.
@@ -679,6 +692,9 @@ impl Transaction {
         // unchanged; and if the signatures were included the signature would be
         // signing itself.
         if let Some(auth) = &self.authorization {
+            // The exact algorithm/profile is signed, not merely carried as
+            // metadata. A relay cannot relabel a signature as another scheme.
+            put_string(&mut preimage, &auth.scheme_id);
             let mut sorted: Vec<&Vec<u8>> = auth.owners.iter().collect();
             sorted.sort_unstable();
             put_u64(&mut preimage, sorted.len() as u64);
@@ -776,6 +792,7 @@ impl Transaction {
         self.signer_public_key = Vec::new();
         self.signature_version = SIGNATURE_VERSION_V6;
         self.authorization = Some(MultisigAuthorizationV6 {
+            scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
             owners: owners.iter().map(|o| o.to_vec()).collect(),
             threshold: u32::try_from(threshold).unwrap_or(u32::MAX),
             signatures: Vec::new(),
@@ -917,6 +934,10 @@ impl Transaction {
             debug!("V6 transaction carries no authorization");
             return false;
         };
+        if auth.scheme_id != ML_DSA_87_SCHEME_ID {
+            debug!("V6 authorization scheme id is not the supported ML-DSA-87 profile");
+            return false;
+        }
         // The single signature field stays empty in V6: authority lives in the authorization.
         if self.signature.is_some() || !self.signer_public_key.is_empty() {
             debug!("V6 transaction must not carry a single-key signature");
@@ -1214,6 +1235,7 @@ mod tests {
             Box::new(|tx| tx.signer_public_key = vec![1u8; 32]),
             Box::new(|tx| {
                 tx.authorization = Some(MultisigAuthorizationV6 {
+                    scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
                     owners: vec![vec![1u8; 32]],
                     threshold: 1,
                     signatures: Vec::new(),
@@ -2559,6 +2581,18 @@ mod v29_signing_tests {
             assert!(!tx.verify(), "the set is signed and cannot be altered");
         }
 
+        /// A profile relabel is not accepted, even when the transaction hash is
+        /// recomputed: the scheme id is an admission binding, not a hint.
+        #[test]
+        fn an_unknown_mldsa_scheme_id_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            tx.authorization.as_mut().unwrap().scheme_id = "ml-dsa-87-unknown".into();
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "unknown ML-DSA profile must fail closed");
+        }
+
         /// A transaction that arrives at `sign_v5` under another version marker
         /// is still signed and verified in the V5 domain.
         #[test]
@@ -2570,6 +2604,7 @@ mod v29_signing_tests {
                 // A stale multisig authorization is dropped by the V5 signer
                 // rather than being signed into a transaction that cannot verify.
                 tx.authorization = Some(MultisigAuthorizationV6 {
+                    scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
                     owners: vec![keypair.public_key_bytes().to_vec()],
                     threshold: 1,
                     signatures: Vec::new(),
@@ -2593,6 +2628,7 @@ mod v29_signing_tests {
             tx.sign_v5(&keypair);
             assert!(tx.verify());
             tx.authorization = Some(MultisigAuthorizationV6 {
+                scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
                 owners: vec![keypair.public_key_bytes().to_vec()],
                 threshold: 1,
                 signatures: Vec::new(),
