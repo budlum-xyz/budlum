@@ -44,6 +44,8 @@ pub enum AdapterError {
     ConfirmationTimeout,
     /// Generic adapter error.
     Other(String),
+    /// A registry may expose at most one authoritative adapter per chain.
+    DuplicateChainAdapter(ExternalChain),
 }
 
 impl std::fmt::Display for AdapterError {
@@ -71,6 +73,9 @@ impl std::fmt::Display for AdapterError {
                 write!(f, "confirmation timeout")
             }
             AdapterError::Other(msg) => write!(f, "adapter error: {}", msg),
+            AdapterError::DuplicateChainAdapter(chain) => {
+                write!(f, "duplicate adapter for chain: {:?}", chain)
+            }
         }
     }
 }
@@ -197,6 +202,10 @@ impl AdapterRegistry {
     ///
     /// Whatever [`ChainAdapter::check_fit_for_relay`] reports.
     pub fn register(&mut self, adapter: Box<dyn ChainAdapter>) -> Result<(), AdapterError> {
+        let chain = adapter.chain_type();
+        if self.adapters.iter().any(|existing| existing.chain_type() == chain) {
+            return Err(AdapterError::DuplicateChainAdapter(chain));
+        }
         adapter.check_fit_for_relay()?;
         self.adapters.push(adapter);
         Ok(())
@@ -371,6 +380,22 @@ pub mod test_adapter {
         let chains = registry.supported_chains();
         assert_eq!(chains.len(), 1);
         assert_eq!(chains[0], ExternalChain::Ethereum);
+    }
+
+    #[test]
+    fn duplicate_chain_adapters_are_refused_instead_of_shadowed() {
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(Box::new(StubAdapter::new(ExternalChain::Ethereum)))
+            .expect("first adapter must register");
+        let err = registry
+            .register(Box::new(StubAdapter::new(ExternalChain::Ethereum)))
+            .expect_err("a second adapter must not become an unreachable shadow");
+        assert_eq!(
+            err,
+            AdapterError::DuplicateChainAdapter(ExternalChain::Ethereum)
+        );
+        assert_eq!(registry.supported_chains().len(), 1);
     }
 }
 
