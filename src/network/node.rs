@@ -565,7 +565,23 @@ impl Node {
         let version_major = crate::core::encoding::PROTOCOL_VERSION_MAJOR;
         let version_minor = crate::core::encoding::PROTOCOL_VERSION_MINOR;
         let chain_id = chain.get_chain_id().await;
-        let best_height = chain.get_height().await + 1;
+        // UNIT: this is a chain LENGTH, not a height, and the field name says
+        // the opposite. `get_height` returns the index of the last block, so a
+        // chain holding only genesis answers 0 and its length is 1.
+        //
+        // The `+1` is not a bug and must not be "fixed" on one side alone:
+        // `sync_if_behind` applies the same `saturating_add(1)` to our own
+        // height before comparing, so `peer_best_height > our_chain_length`
+        // is exactly `peer_height > our_height`. Removing the increment here
+        // and not there would make every peer look one block ahead forever and
+        // open a sync round on every handshake.
+        //
+        // One consequence worth knowing: `get_height` answers 0 when the chain
+        // actor does not reply, so an unreachable actor advertises length 1.
+        // That is an overstatement, not an understatement, so it cannot make a
+        // peer skip syncing - the failure direction is a wasted round, not a
+        // missed one.
+        let best_height = chain.get_height().await.saturating_add(1);
         let validator_set_hash = chain.get_validator_set_hash().await;
         let supported_schemes = vec![
             "ED25519".to_string(),

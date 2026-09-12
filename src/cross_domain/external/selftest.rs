@@ -239,7 +239,7 @@ fn outcome_label(outcome: &ProbeOutcome) -> String {
 /// Applies a patch to an evidence sample, producing the corrupted copy.
 ///
 /// Returns the sample or a reason it could not be applied. Never panics and
-/// never silently does nothing: an not applicable patch is reported so the
+/// never silently does nothing: a patch that cannot be applied is reported so the
 /// harness can record it.
 #[must_use]
 pub fn apply_patch(

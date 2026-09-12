@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn an_not applicable_patch_is_recorded_rather_than_skipped() {
+    fn a_not_applicable_patch_is_recorded_rather_than_skipped() {
         let golden = Tiny.golden_evidence().expect("golden");
         let probe = FaultProbe {
             name: "patches past the end".to_string(),
@@ -415,7 +415,7 @@ mod tests {
         };
         let outcome = run_probe(&Tiny, &golden, &probe, &VerificationPolicy::strict(10));
         assert!(matches!(outcome, ProbeOutcome::NotApplicable { .. }));
-        assert!(!outcome.passed(), "an not applicable probe must not pass");
+        assert!(!outcome.passed(), "a not-applicable probe must not pass");
     }
 
     #[test]
