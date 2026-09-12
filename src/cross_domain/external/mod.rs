@@ -36,6 +36,33 @@
 //!    routing ceiling, a fee that does not reward lying, and a challenger
 //!    reward paid out of the slash.
 //!
+//! # WIRING STATUS - read this before trusting anything below
+//!
+//! **Not yet driven from production code.** As of this commit the module is
+//! reachable only from its own tests. Nothing in `chain_actor`, `blockchain` or
+//! the RPC surface constructs an [`ExternalDomainRegistry`], calls [`admit`], or
+//! submits evidence through it.
+//!
+//! That is a statement of fact with an expiry date, not a property of the text
+//! it sits next to - re-derive it before believing it. The check is
+//! `grep -rn 'ExternalDomainRegistry' src/ --include='*.rs'` and looking for a
+//! hit outside this directory and outside the `cross_domain` re-export.
+//!
+//! Three consequences, and they matter more than they sound:
+//!
+//! - The framework's rules are **specified and tested**, not deployed. A domain
+//!   registered today would not be consulted by anything.
+//! - The `dead_pub_api` gate counts a `pub fn` nothing reaches as dead, and most
+//!   of this module would be counted that way - correctly. The gate is
+//!   registered at `xtask/gates/src/main.rs:1081` but is not invoked from any
+//!   workflow, so this does not fail CI. A red step that is absent is not a
+//!   green one, and saying so here is cheaper than letting the silence read as
+//!   a pass.
+//! - Wiring it means choosing where the registry lives in consensus state and
+//!   how an attestation becomes a `GlobalBlockHeader` commitment. Both are
+//!   consensus-visible decisions; making them silently inside a framework
+//!   module would be the wrong way to make them.
+//!
 //! # The rule underneath all six
 //!
 //! Budlum does not decide whether a domain is good. It decides whether the
