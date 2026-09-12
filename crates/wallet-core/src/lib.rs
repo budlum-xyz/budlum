@@ -1410,7 +1410,12 @@ impl Wallet {
                 self.next_blinding_counter
             )));
         }
-        self.next_blinding_counter = blinding_counter.saturating_add(1);
+        let next_counter = blinding_counter.checked_add(1).ok_or_else(|| {
+            WalletError::InvalidPrivateTransfer(
+                "blinding counter exhausted; refusing to reuse the final counter".into(),
+            )
+        })?;
+        self.next_blinding_counter = next_counter;
         let blinding = derive_blinding(&self.seed, blinding_counter);
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
@@ -2171,6 +2176,19 @@ mod tests {
     /// they carry the same amount and the nullifier set rejects the second
     /// spend. The caller picks the counter, so the wallet has to be the one
     /// that refuses a counter it already handed out.
+    #[test]
+    fn the_final_blinding_counter_cannot_be_reused_after_overflow() {
+        let mut w = Wallet::from_entropy(&[0x34u8; 16]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+        // The failed attempt did not mutate the cursor; the wallet still
+        // refuses the exhausted value rather than treating saturation as a
+        // fresh counter.
+        let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+    }
+
     #[test]
     fn a_reused_blinding_counter_is_refused() {
         let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
