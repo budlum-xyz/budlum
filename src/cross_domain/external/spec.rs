@@ -314,10 +314,36 @@ pub struct VerificationPolicy {
 impl VerificationPolicy {
     /// The policy every caller in this tree starts from. Deliberately strict:
     /// a caller loosens it on purpose, in writing, at the call site.
+    ///
+    /// For **vote-based** domains. Depth is a proxy for security in a system
+    /// whose finality is a vote; a proven domain does not need the proxy, and
+    /// asking one for depth makes it refuse - see [`Self::proven`].
     #[must_use]
     pub fn strict(now: u64) -> Self {
         Self {
             min_depth: 1,
+            require_declared_match: true,
+            max_age: 0,
+            now,
+            require_slashable: false,
+        }
+    }
+
+    /// The policy for a **proven** domain: one whose finality is a validity
+    /// proof rather than a vote.
+    ///
+    /// `min_depth` is zero because depth is not a property of a proof - it is
+    /// valid or it is not. A proven adapter refuses a non-zero `min_depth`
+    /// rather than ignoring it, so that a caller who asks for depth is told
+    /// they are asking for something this attestation cannot give instead of
+    /// silently receiving an attestation without it.
+    ///
+    /// `require_slashable` is false for the same reason: there is nobody to
+    /// slash.
+    #[must_use]
+    pub fn proven(now: u64) -> Self {
+        Self {
+            min_depth: 0,
             require_declared_match: true,
             max_age: 0,
             now,

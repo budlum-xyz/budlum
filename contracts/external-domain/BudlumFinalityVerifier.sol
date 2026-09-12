@@ -33,15 +33,43 @@ pragma solidity ^0.8.24;
 ///         OPTIMISTIC model: accept the attestation, open a challenge window,
 ///         and let a fraud proof revert it.
 ///
-///      ADDRESS COLLISION WARNING
+///      ADDRESS ALLOCATION - CHECKED, AND WHY THE PROBE STAYS ANYWAY
 ///
-///      EIP-2537 allocated 0x0b through 0x13 for BLS12-381. EIP-8051 proposes
-///      0x12 and 0x13 for ML-DSA. Those ranges overlap. This contract does not
-///      assume either allocation: it probes the address at runtime with
-///      `_precompileExists` and refuses to call an address that does not behave
-///      like the precompile it expects. A chain that shipped BLS at 0x12 and
-///      then shipped ML-DSA at 0x12 would otherwise produce a verification that
-///      silently means something else.
+///      EIP-2537 is FINAL at seven addresses, 0x0b through 0x11:
+///            0x0b BLS12_G1ADD          375 gas
+///            0x0c BLS12_G1MSM          variable
+///            0x0d BLS12_G2ADD          600 gas
+///            0x0e BLS12_G2MSM          variable
+///            0x0f BLS12_PAIRING_CHECK  variable
+///            0x10 BLS12_MAP_FP_TO_G1   5500 gas
+///            0x11 BLS12_MAP_FP2_TO_G2  23800 gas
+///      EIP-8051 proposes 0x12 and 0x13 for ML-DSA. Those are ADJACENT to
+///      EIP-2537, not overlapping - there is no collision.
+///
+///      The runtime probe stays regardless, for a reason the collision theory
+///      got wrong but the conclusion got right: EIP-2537 was DRAFTED at
+///      0x0a-0x12 and later at 0x0c-0x14 before settling on 0x0b-0x11. A chain
+///      that implemented an early draft has BLS12_PAIRING at 0x10, not 0x0f,
+///      and calling 0x0f there reaches G2MSM - which returns successfully with
+///      garbage. That is the failure the probe exists for, and it is real.
+///
+///      THE COST NOBODY PRICES: COMPRESSED POINTS
+///
+///      EIP-2537's precompiles take UNCOMPRESSED points: 128 bytes for G1, 256
+///      for G2. An Ethereum sync committee signature is 96 bytes of compressed
+///      G2 and the aggregate public key is 48 bytes of compressed G1. Nothing
+///      in EIP-2537 decompresses a point. Decompression needs a square root in
+///      Fp (and in Fp2 for G2), which is the expensive half of the whole
+///      verification and is NOT covered by the 4500-gas-style precompile
+///      pricing.
+///
+///      So an honest statement of the cost is: the pairing is cheap, getting
+///      points into the form the pairing wants is not. This contract therefore
+///      takes the points already decompressed and makes the caller attest to
+///      that, rather than pretending to do it in 4500 gas. Doing the
+///      decompression inside a ZK circuit - and verifying the circuit - is the
+///      route that actually works, and it is the reason the Budlum-side
+///      verification is a STARK.
 ///
 ///      NOTHING IN THIS CONTRACT IS A TRUST ASSUMPTION
 ///
@@ -60,11 +88,23 @@ struct Attestation {
     /// The chain id this attestation was produced for. Without it, an
     /// attestation from a testnet verifies on mainnet.
     uint64 chainId;
-    /// BLS12-381 aggregate signature over the signing root (96 bytes).
-    bytes blsSignature;
-    /// The aggregate public key of the signing set (48 bytes per key, or one
-    /// aggregated G1 point).
-    bytes blsAggregatePubkey;
+    // --- BLS12-381, in the UNCOMPRESSED form EIP-2537 requires ---
+    //
+    // Four points, not two. A BLS verification is the pairing equation
+    //     e(H(m), agg_pubkey) * e(-sig, g1) == 1
+    // and the precompile wants each side of each pairing as a separate
+    // uncompressed point. The negation of the signature is done by the caller
+    // for the same reason the decompression is: neither is something the
+    // precompile does, and doing them in Solidity is the expensive part.
+    /// H(signing root) mapped to G1, uncompressed (128 bytes).
+    bytes g1HashedMessage;
+    /// The aggregate public key, uncompressed G2 (256 bytes).
+    bytes g2AggregatePubkey;
+    /// The G1 generator, uncompressed (128 bytes). Carried rather than hardcoded
+    /// so a chain with a different encoding is served by the same contract.
+    bytes g1Generator;
+    /// The negated aggregate signature, uncompressed G2 (256 bytes).
+    bytes g2NegSignature;
     /// ML-DSA signature over the same signing root.
     bytes mlDsaSignature;
     /// ML-DSA public key.
@@ -86,8 +126,16 @@ contract BudlumFinalityVerifier {
     // Precompile addresses. Probed, never assumed.
     // ---------------------------------------------------------------------
 
-    /// EIP-2537 pairing check.
-    address internal constant PRECOMPILE_BLS_PAIRING = address(0x0e);
+    /// EIP-2537, final allocation. The pairing check is 0x0f - 0x0e is
+    /// BLS12_G2MSM, and calling it as if it were the pairing check returns a
+    /// successful result that means nothing.
+    address internal constant PRECOMPILE_BLS_G1ADD = address(0x0b);
+    address internal constant PRECOMPILE_BLS_G1MSM = address(0x0c);
+    address internal constant PRECOMPILE_BLS_G2ADD = address(0x0d);
+    address internal constant PRECOMPILE_BLS_G2MSM = address(0x0e);
+    address internal constant PRECOMPILE_BLS_PAIRING = address(0x0f);
+    address internal constant PRECOMPILE_BLS_MAP_FP_TO_G1 = address(0x10);
+    address internal constant PRECOMPILE_BLS_MAP_FP2_TO_G2 = address(0x11);
     /// EIP-8051 VERIFY_MLDSA (FIPS-204).
     address internal constant PRECOMPILE_MLDSA = address(0x12);
     /// EIP-8051 VERIFY_MLDSA_ETH (Keccak PRNG, NTT-domain t1).
@@ -161,8 +209,10 @@ contract BudlumFinalityVerifier {
                 a.stateRoot,
                 a.epoch,
                 a.chainId,
-                keccak256(a.blsSignature),
-                keccak256(a.blsAggregatePubkey),
+                keccak256(a.g1HashedMessage),
+                keccak256(a.g2AggregatePubkey),
+                keccak256(a.g1Generator),
+                keccak256(a.g2NegSignature),
                 keccak256(a.mlDsaSignature),
                 keccak256(a.mlDsaPubkey),
                 a.mlDsaEthVariant
@@ -213,7 +263,13 @@ contract BudlumFinalityVerifier {
         bool pqOk = false;
 
         if (hasBlsPrecompile) {
-            blsOk = _verifyBls(root, a.blsAggregatePubkey, a.blsSignature);
+            blsOk = _verifyBls(
+                root,
+                a.g1HashedMessage,
+                a.g2AggregatePubkey,
+                a.g1Generator,
+                a.g2NegSignature
+            );
         }
         if (hasMlDsaPrecompile) {
             pqOk = _verifyMlDsa(root, a.mlDsaPubkey, a.mlDsaSignature, a.mlDsaEthVariant);
@@ -269,27 +325,47 @@ contract BudlumFinalityVerifier {
     // Verification internals
     // ---------------------------------------------------------------------
 
-    /// @dev Calls the EIP-2537 pairing precompile.
+    /// @dev Calls the EIP-2537 pairing check with the ABI it actually defines.
     ///
-    ///      The exact ABI is the pairing-check input encoding; this contract
-    ///      passes the aggregate pubkey and signature through and requires a
-    ///      one-word success. A precompile that returns anything else is
-    ///      treated as a refusal, not as an unknown - an unknown answer from a
-    ///      cryptographic check is a refusal.
-    function _verifyBls(bytes32 root, bytes calldata pubkey, bytes calldata signature)
+    ///      The pairing check takes 384 bytes per pair - 128 bytes of G1
+    ///      followed by 256 bytes of G2 - and returns 32 bytes whose last byte
+    ///      is 0x01 when the pairing product is the identity, 0x00 otherwise.
+    ///      BLS verification is two pairs:
+    ///            e(H(m), agg_pubkey) * e(-signature, g1_generator) == 1
+    ///
+    ///      Both points arrive UNCOMPRESSED and the caller is responsible for
+    ///      having decompressed them; see the header note on why that step is
+    ///      the expensive one and is not done here.
+    ///
+    ///      A precompile that returns anything other than a 32-byte word is
+    ///      treated as a refusal, never as an unknown - an unknown answer from
+    ///      a cryptographic check is a refusal.
+    function _verifyBls(bytes32 root, bytes calldata g1HashedMessage, bytes calldata g2Pubkey, bytes calldata g1Generator, bytes calldata g2NegSignature)
         internal
         view
         returns (bool)
     {
-        if (signature.length != 96) {
-            revert BadSignatureLength("BLS signature must be 96 bytes");
+        // Pair layout: G1 (128) then G2 (256), twice.
+        if (g1HashedMessage.length != 128) {
+            revert BadSignatureLength("hashed message must be an uncompressed G1 point (128 bytes)");
         }
-        if (pubkey.length != 48) {
-            revert BadSignatureLength("BLS aggregate pubkey must be 48 bytes");
+        if (g2Pubkey.length != 256) {
+            revert BadSignatureLength("aggregate pubkey must be an uncompressed G2 point (256 bytes)");
         }
-        bytes memory input = abi.encodePacked(root, pubkey, signature);
-        (bool ok, bytes memory out) =
-            PRECOMPILE_BLS_PAIRING.staticcall{gas: 200_000}(input);
+        if (g1Generator.length != 128) {
+            revert BadSignatureLength("generator must be an uncompressed G1 point (128 bytes)");
+        }
+        if (g2NegSignature.length != 256) {
+            revert BadSignatureLength("negated signature must be an uncompressed G2 point (256 bytes)");
+        }
+        // `root` is carried in the G1 point the caller hashed to; it is not
+        // concatenated into the input, because the pairing ABI has no place
+        // for a bare scalar and inventing one would be inventing an ABI.
+        bytes memory input = abi.encodePacked(
+            g1HashedMessage, g2Pubkey,
+            g1Generator, g2NegSignature
+        );
+        (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: 400_000}(input);
         if (!ok || out.length < 32) {
             return false;
         }

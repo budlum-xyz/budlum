@@ -51,6 +51,7 @@ pub mod registry;
 pub mod selftest;
 pub mod spec;
 pub mod versioning;
+pub mod zkvm_proof;
 
 pub use ethereum::{
     epoch_of_slot, has_supermajority, minimum_signers, participation, parse_update, period_of_slot,
@@ -73,6 +74,7 @@ pub use spec::{
     TimeUnit, TrustModel, VerificationPolicy,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
+pub use zkvm_proof::{ZkFinalityEvidence, ZkVmFinalityAdapter, EVIDENCE_VERSION as ZK_EVIDENCE_VERSION, MAX_PAYLOAD_BYTES as ZK_MAX_PAYLOAD_BYTES};
 
 #[cfg(test)]
 mod tests {
