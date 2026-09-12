@@ -64,6 +64,8 @@ pub mod hardening;
 #[cfg(test)]
 pub mod identity_tx_door;
 #[cfg(test)]
+pub mod ported_slice_redteam;
+#[cfg(test)]
 pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
