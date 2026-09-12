@@ -26,9 +26,9 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::ConsensusKind;
 use crate::registry::{
-    address_of_did, credential_id, did_of, execute_identity_tx, field_commitment,
-    CredentialCommitment, FieldCommitment, IdentityError, IdentityOp, IdentityRecord,
-    IdentityRegistry, IdentityTx, MethodKind, VerificationMethod,
+    address_of_did, credential_id, did_of, execute_identity_tx, field_commitment, fill_template,
+    template_slots, CredentialCommitment, FieldCommitment, FillError, IdentityError, IdentityOp,
+    IdentityRecord, IdentityRegistry, IdentityTx, MethodKind, SlotDisclosure, VerificationMethod,
 };
 
 fn addr(byte: u8) -> Address {
@@ -518,5 +518,79 @@ fn a_record_cannot_be_built_past_its_own_guard_rules() {
     assert!(
         matches!(err, IdentityError::ThresholdWithoutGuardians { .. }),
         "{err:?}"
+    );
+}
+
+fn disclosure(slot: &str, value: &str) -> SlotDisclosure {
+    SlotDisclosure {
+        slot: slot.to_string(),
+        credential_id: [1; 32],
+        field: "legal_name".to_string(),
+        value: value.to_string(),
+        salt: [2; 32],
+    }
+}
+
+#[test]
+fn a_template_may_be_written_in_turkish() {
+    // The ported parser walked the template one BYTE at a time and then asked
+    // `str::get(cursor..)`, which answers `None` from inside a multi-byte
+    // character. Every template containing a non-ASCII character was
+    // therefore refused as malformed. In a product whose users write Turkish
+    // that is not an edge case, it is the ordinary case - and the refusal
+    // named the wrong cause, so nothing pointed at the real one.
+    let template = "İsim: {{ad}}\nDoğum: {{dogum_tarihi}}";
+    let slots = template_slots(template).expect("a Turkish template is not malformed");
+    assert_eq!(
+        slots,
+        vec!["ad".to_string(), "dogum_tarihi".to_string()],
+        "the slot list must not depend on the template's alphabet"
+    );
+
+    let filled = fill_template(
+        template,
+        &[
+            disclosure("ad", "Ayşe Yılmaz"),
+            disclosure("dogum_tarihi", "1990-01-01"),
+        ],
+    )
+    .expect("the fill must not depend on the template's alphabet either");
+    assert_eq!(filled, "İsim: Ayşe Yılmaz\nDoğum: 1990-01-01");
+}
+
+#[test]
+fn multibyte_values_survive_and_the_grammar_refusals_still_bite() {
+    // Values as well as templates: a multi-byte value must land intact.
+    let filled = fill_template("ad: {{ad}}", &[disclosure("ad", "ğüşöçİ🎉")]).unwrap();
+    assert_eq!(filled, "ad: ğüşöçİ🎉");
+
+    // The rewrite tightened the walk; it must not have loosened the grammar.
+    assert!(matches!(
+        template_slots("ad: {{ad"),
+        Err(FillError::MalformedTemplate(_))
+    ), "an unclosed slot was accepted");
+    assert!(matches!(
+        template_slots("ad: }}"),
+        Err(FillError::MalformedTemplate(_))
+    ), "a stray closer was accepted");
+    assert!(
+        matches!(template_slots("ad: {{}}"), Err(FillError::EmptySlot)),
+        "a nameless slot was accepted"
+    );
+    assert!(
+        matches!(
+            template_slots("{{a}} {{a}}"),
+            Err(FillError::DuplicateSlot { .. })
+        ),
+        "a repeated slot was accepted"
+    );
+
+    // And the single-pass guarantee: a value carrying grammar is refused
+    // rather than re-scanned, which is how "ad: {{tc_kimlik}}" would become a
+    // disclosure no consent screen ever showed.
+    let err = fill_template("ad: {{ad}}", &[disclosure("ad", "{{tc_kimlik}}")]).unwrap_err();
+    assert!(
+        matches!(err, FillError::ValueCarriesBraces { .. }),
+        "a value carrying template grammar was substituted: {err}"
     );
 }

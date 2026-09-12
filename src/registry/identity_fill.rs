@@ -2,31 +2,31 @@
 //!
 //! The registry (see [`crate::registry::identity`]) answers "what did this
 //! subject commit to". This module answers the question a wallet actually
-//! faces: some document names slots ("legal_name", "birth_date"), the
-//! holder's wallet holds the salts and preimages, and disclosure happens -
-//! or does not - through here. Three rules shape everything below, and each
-//! one refuses rather than warns:
+//! faces: a document names slots ("legal_name", "birth_date"), the holder's
+//! wallet holds the salts and preimages, and disclosure happens - or does not
+//! happen - through here. Three rules shape everything below, and each one
+//! refuses rather than warns:
 //!
-//! 1. **The screen is the data.** A template's slots are extracted before
-//!    anything is read, so "which fields will open" is a list the requester
+//! 1. **The screen is the data.** A template's slots are extracted before any
+//!    value is looked at, so "which fields will open" is a list the requester
 //!    sees and the subject signs over - not a promise in prose. An unfilled
-//!    slot or an unknown slot fails the fill; there is no partial document
-//!    that "looks complete".
-//! 2. **Values bind to the requester.** The receipt carries the requester
-//!    address and the document digest; [`check_receipt`] refuses a receipt
-//!    presented to anyone else, for any other document. This is the on-chain
-//!    half of "the opened value lands in the requester's wallet, only" -
-//!    the node cannot delete what a wallet displayed, but it can make a
-//!    re-purposed presentation verify as nothing.
+//!    slot, or a disclosure for a slot nobody asked for, fails the fill; there
+//!    is no partial document that "looks complete".
+//! 2. **Values bind to the requester.** The receipt carries the requester and
+//!    the document digest, and [`check_receipt`] refuses a receipt presented
+//!    to anyone else or for any other document. This is the on-chain half of
+//!    "the opened value lands in the requester's wallet, only": a node cannot
+//!    unshow what a wallet displayed, but it can make a re-purposed
+//!    presentation verify as nothing.
 //! 3. **Receipts keep no plaintext.** An entry stores the value's digest, the
-//!    salt, and the sibling path - enough to re-verify the commitment against
+//!    salt and the sibling path - enough to re-verify the commitment against
 //!    the credential root forever, and not enough to recover the value. The
-//!    plaintext lived once, in the filled text, between the two hashes.
+//!    plaintext existed once, in the filled text, between the two hashes.
 //!
-//! Substitution is single-pass and positional: a disclosed value containing
-//! `{{` is refused at the door rather than scanned again, because a fill
-//! that re-reads what it just wrote is how "name: {{ssn}}" becomes a
-//! disclosure the consent screen never showed.
+//! Substitution is single-pass and positional. A disclosed value carrying `{{`
+//! is refused at the door rather than scanned again, because a fill that
+//! re-reads what it just wrote is how "name: {{ssn}}" turns into a disclosure
+//! the consent screen never showed.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -37,14 +37,14 @@ use serde::{Deserialize, Serialize};
 
 /// The digest a field's value enters the commitment as. Public because the
 /// wallet and the verifier must compute the same 32 bytes from the same text
-/// without conversing about it.
+/// without having to agree on anything else.
 #[must_use]
 pub fn value_digest_of(value: &str) -> [u8; 32] {
     hash_fields_bytes(&[b"bud-vc-v1-value", value.as_bytes()])
 }
 
-/// One slot's disclosure: the credential it comes from, the field inside it,
-/// and the preimage material the path opens against.
+/// One slot's disclosure: the credential it comes from, the field inside that
+/// credential, and the preimage material the path opens against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotDisclosure {
     pub slot: String,
@@ -55,8 +55,8 @@ pub struct SlotDisclosure {
 }
 
 impl SlotDisclosure {
-    /// The commitment this disclosure claims to open, computed - not stored:
-    /// there is no field to lie through.
+    /// The commitment this disclosure claims to open - computed, never
+    /// stored, so there is no field to lie through.
     #[must_use]
     pub fn recompute_commitment(&self, schema: &str) -> [u8; 32] {
         field_commitment(
@@ -68,14 +68,14 @@ impl SlotDisclosure {
     }
 }
 
-/// A why-the-fill-was-refused.
+/// Why a fill was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FillError {
-    /// `{{` with no closing `}}`, or a closing brace with no opener.
+    /// `{{` with no closing `}}`, or a closing marker with no opener.
     MalformedTemplate(String),
     /// A `{{}}` slot with no name inside.
     EmptySlot,
-    /// A slot name repeated in the template: one disclosure cannot fill two
+    /// A slot name repeated in the template. One disclosure cannot fill two
     /// places under one question, and two identical questions is a template
     /// bug the consent screen would render twice.
     DuplicateSlot { slot: String },
@@ -83,19 +83,19 @@ pub enum FillError {
     MissingSlot { slot: String },
     /// A disclosure names a slot the template never asked for.
     UnknownSlot { slot: String },
-    /// A disclosed value carries template grammar: refusing it is the only
+    /// A disclosed value carries template grammar. Refusing it is the only
     /// answer that keeps the single-pass guarantee true.
     ValueCarriesBraces { slot: String },
-    /// The credential behind a disclosure is unknown, revoked, expired at
-    /// this epoch, or its subject is not who this fill is for.
+    /// The credential behind a disclosure is unknown, revoked, expired at this
+    /// epoch, or its subject is not who this fill is for.
     CredentialNotValid { slot: String, reason: String },
     /// The disclosed preimage does not open a field of that credential under
-    /// that name: wrong salt, wrong value, wrong credential, tampered path -
-    /// all one answer, because the verifier cannot tell which failure an
-    /// attacker meant, and the refusal is the same either way.
+    /// that name. Wrong salt, wrong value, wrong credential and tampered path
+    /// all get one answer, because the verifier cannot tell which failure an
+    /// attacker meant and the refusal is the same either way.
     DisclosureMismatch { slot: String },
     /// The receipt was presented to a different requester than it was made
-    /// for. The whole point of binding; never a warning.
+    /// for. The whole point of the binding; never a warning.
     WrongRequester,
     /// The receipt does not cover this document.
     WrongDocument,
@@ -116,20 +116,15 @@ impl std::fmt::Display for FillError {
                 f,
                 "a disclosure names `{slot}`, which the template never asked for"
             ),
-            Self::ValueCarriesBraces { slot } => {
-                write!(
-                    f,
-                    "the value for `{slot}` carries template grammar; refusing to re-scan it"
-                )
-            }
+            Self::ValueCarriesBraces { slot } => write!(
+                f,
+                "the value for `{slot}` carries template grammar; refusing to re-scan it"
+            ),
             Self::CredentialNotValid { slot, reason } => {
                 write!(f, "credential behind `{slot}` is not usable: {reason}")
             }
             Self::DisclosureMismatch { slot } => {
-                write!(
-                    f,
-                    "the disclosure for `{slot}` does not open a committed field"
-                )
+                write!(f, "the disclosure for `{slot}` does not open a committed field")
             }
             Self::WrongRequester => write!(f, "this receipt was made for a different requester"),
             Self::WrongDocument => write!(f, "this receipt was made for a different document"),
@@ -139,10 +134,78 @@ impl std::fmt::Display for FillError {
 
 impl std::error::Error for FillError {}
 
+/// One piece of a template: literal text to copy, or a named slot to fill.
+enum Piece<'a> {
+    Text(&'a str),
+    Slot(&'a str),
+}
+
+/// The single read of a template. Both the slot list and the fill are built
+/// from this, which is the point: two parsers that have to agree eventually
+/// disagree, and the disagreement is a consent screen showing one document
+/// while another one gets filled.
+///
+/// The cursor moves by whole characters. A byte-wise walk parks the cursor
+/// inside a multi-byte character, `str::get` answers `None` there, and the
+/// refusal reads as "malformed template" - which is what this file did until
+/// it was rewritten, so every template containing a non-ASCII character was
+/// rejected. In a product whose users write Turkish, "İsim: {{ad}}" is not an
+/// edge case; it is the ordinary case.
+fn pieces(template: &str) -> Result<Vec<Piece<'_>>, FillError> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while !rest.is_empty() {
+        if let Some(after_open) = rest.strip_prefix("{{") {
+            let close = after_open
+                .find("}}")
+                .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
+            let raw = &after_open[..close];
+            if raw.trim().is_empty() {
+                return Err(FillError::EmptySlot);
+            }
+            // A brace inside the name would make the slot's own spelling
+            // ambiguous against the grammar, so the name is refused rather
+            // than interpreted.
+            if raw.contains('{') || raw.contains('}') {
+                return Err(FillError::MalformedTemplate(raw.to_string()));
+            }
+            out.push(Piece::Slot(raw));
+            rest = &after_open[close + 2..];
+        } else if rest.starts_with("}}") {
+            return Err(FillError::MalformedTemplate("stray `}}`".to_string()));
+        } else {
+            // Copy the literal run up to the next marker. Slicing at a `find`
+            // offset is always on a boundary - both needles are ASCII - and
+            // when no marker is in sight the whole remainder is literal. The
+            // `stop == 0` arm cannot be reached (both markers are handled
+            // above); it is here so that if it ever is, the walk still makes
+            // progress instead of spinning.
+            let stop = rest
+                .find("{{")
+                .unwrap_or(rest.len())
+                .min(rest.find("}}").unwrap_or(rest.len()));
+            let take = if stop == 0 {
+                rest.chars().next().map_or(0, char::len_utf8)
+            } else {
+                stop
+            };
+            out.push(Piece::Text(&rest[..take]));
+            rest = &rest[take..];
+        }
+    }
+    Ok(out)
+}
+
+/// The first few characters of a bad region, for an error message that can
+/// point at the template without echoing all of it.
+fn take_preview(rest: &str) -> String {
+    rest.chars().take(8).collect()
+}
+
 /// The slots a template will fill, in document order, duplicates refused.
-/// This is the list a consent screen (whoever renders one) would show - the
-/// reason it is extracted before any value is looked at is that the answer
-/// must not depend on the secrets.
+/// This is the list a consent screen shows, and the reason it is extracted
+/// before any value is looked at is that the answer must not depend on the
+/// secrets.
 ///
 /// # Errors
 ///
@@ -150,63 +213,49 @@ impl std::error::Error for FillError {}
 /// [`FillError::DuplicateSlot`].
 pub fn template_slots(template: &str) -> Result<Vec<String>, FillError> {
     let mut slots = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < template.len() {
-        // `get(range)` refuses a non-boundary offset instead of panicking; the
-        // cursor only advances over `{{`/`}}` found by str::find, so this arm is
-        // unreachable for the templates validate() accepts - it is the price of
-        // not owning a release-build abort path in a parser.
-        let Some(rest) = template.get(cursor..) else {
-            return Err(FillError::MalformedTemplate(
-                "template cursor left a char boundary".to_string(),
-            ));
-        };
-        if let Some(name) = rest.strip_prefix("{{") {
-            let close = name
-                .find("}}")
-                .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
-            let raw = &name[..close];
-            if raw.trim().is_empty() {
-                return Err(FillError::EmptySlot);
-            }
-            if raw.contains('{') || raw.contains('}') {
-                return Err(FillError::MalformedTemplate(raw.to_string()));
-            }
-            let slot = raw.to_string();
+    for piece in pieces(template)? {
+        if let Piece::Slot(name) = piece {
+            let slot = name.to_string();
             if slots.contains(&slot) {
                 return Err(FillError::DuplicateSlot { slot });
             }
             slots.push(slot);
-            cursor += 2 + close + 2;
-        } else if rest.starts_with("}}") {
-            return Err(FillError::MalformedTemplate("stray `}}`".to_string()));
-        } else {
-            cursor += 1;
         }
     }
     Ok(slots)
 }
 
-fn take_preview(rest: &str) -> String {
-    rest.chars().take(8).collect()
-}
-
-/// The single-pass fill: literal text is copied, `{{slot}}` is replaced by
-/// the disclosed value, and the cursor never re-reads written bytes.
+/// The single-pass fill: literal runs are copied, `{{slot}}` is replaced by
+/// the disclosed value, and nothing already written is ever read again.
 ///
 /// # Errors
 ///
-/// Every refusal listed on [`FillError`] that concerns the template shape
-/// and the slot/value pairing.
+/// Every [`FillError`] refusal that concerns the template's shape or the
+/// slot/value pairing.
 pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<String, FillError> {
-    let asked = template_slots(template)?;
+    let parsed = pieces(template)?;
+
+    let mut asked: Vec<&str> = Vec::new();
+    for piece in &parsed {
+        if let Piece::Slot(name) = piece {
+            if asked.contains(name) {
+                return Err(FillError::DuplicateSlot {
+                    slot: (*name).to_string(),
+                });
+            }
+            asked.push(name);
+        }
+    }
+
     for slot in &asked {
-        if !disclosures.iter().any(|d| &d.slot == slot) {
-            return Err(FillError::MissingSlot { slot: slot.clone() });
+        if !disclosures.iter().any(|d| d.slot == *slot) {
+            return Err(FillError::MissingSlot {
+                slot: (*slot).to_string(),
+            });
         }
     }
     for disclosure in disclosures {
-        if !asked.contains(&disclosure.slot) {
+        if !asked.contains(&disclosure.slot.as_str()) {
             return Err(FillError::UnknownSlot {
                 slot: disclosure.slot.clone(),
             });
@@ -226,56 +275,40 @@ pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<S
             });
         }
     }
+    // Two disclosures for one slot: the template asked once, so whichever
+    // answer the fill picked would be arbitrary.
     let mut seen: Vec<&str> = Vec::with_capacity(disclosures.len());
-    for d in disclosures {
-        if seen.contains(&d.slot.as_str()) {
+    for disclosure in disclosures {
+        if seen.contains(&disclosure.slot.as_str()) {
             return Err(FillError::DuplicateSlot {
-                slot: d.slot.clone(),
+                slot: disclosure.slot.clone(),
             });
         }
-        seen.push(&d.slot);
+        seen.push(&disclosure.slot);
     }
+
     let mut out = String::with_capacity(template.len());
-    let mut cursor = 0usize;
-    while cursor < template.len() {
-        // Same rule as template_slots: the sibling parser must not own an abort
-        // path either. It was tolerated only because the gate's baseline predates
-        // this file, not because the indexing is safe.
-        let Some(rest) = template.get(cursor..) else {
-            return Err(FillError::MalformedTemplate(
-                "template cursor left a char boundary".to_string(),
-            ));
-        };
-        if let Some(name) = rest.strip_prefix("{{") {
-            let close = name
-                .find("}}")
-                .ok_or_else(|| {
-                    FillError::MalformedTemplate("unreachable after validate".to_string())
-                })?;
-            let slot = &name[..close];
-            let Some(disclosure) = disclosures.iter().find(|d| d.slot == slot) else {
-                // validate_template above refuses a slot with no disclosure. Refusing again
-                // here rather than panicking: a template must not be able to take the node down.
-                return Err(FillError::MissingSlot { slot: slot.to_string() });
-            };
-            out.push_str(&disclosure.value);
-            cursor += 2 + close + 2;
-        } else {
-            // Copy the literal run up to the next `{{` or `}}` (or the end).
-            // `str::find` lands on char boundaries for ASCII needles, so
-            // whole slices move over and no character can split.
-            let next_open = rest.find("{{").unwrap_or(rest.len());
-            let next_close = rest.find("}}").unwrap_or(rest.len());
-            let take = next_open.min(next_close);
-            out.push_str(&rest[..take]);
-            cursor += take;
+    for piece in parsed {
+        match piece {
+            Piece::Text(literal) => out.push_str(literal),
+            Piece::Slot(slot) => {
+                let Some(disclosure) = disclosures.iter().find(|d| d.slot == slot) else {
+                    // Unreachable after the pairing checks above; refused
+                    // rather than panicked, because a template must never be
+                    // able to take the node down.
+                    return Err(FillError::MissingSlot {
+                        slot: slot.to_string(),
+                    });
+                };
+                out.push_str(&disclosure.value);
+            }
         }
     }
     Ok(out)
 }
 
 /// What a completed presentation leaves behind. No plaintext: the digest is
-/// enough to re-verify forever, and is not enough to re-read the value.
+/// enough to re-verify forever and is not enough to re-read the value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresentationReceipt {
     pub requester: Address,
@@ -327,21 +360,19 @@ impl PresentationReceipt {
 /// Verifies every disclosure against the registry, fills the template, and
 /// returns the filled document with its receipt.
 ///
-/// WIRING: the presentation RPC/transaction door is the caller; the rules are
-/// unit-tested here exactly as it will use them. One function because a
-/// fill that skipped verification would be the failure mode this exists to
-/// prevent: the moment the values became usable is the moment the signatures
-/// stopped being checked.
+/// One function on purpose: a fill that skipped verification is exactly the
+/// failure mode this module exists to prevent, because the moment the values
+/// became usable is the moment the signatures stopped being checked.
 ///
-/// The proof comes from the credential's own leaves (`credential_proof`
-/// below is the wallet-side helper that builds it); by the time `fill` runs,
-/// proofs are inputs, and every wrong one lands in
-/// [`FillError::DisclosureMismatch`].
+/// The proof is the node's own work - every field commitment is already
+/// on-chain, so a wallet-supplied path could only lie. What the wallet
+/// supplies is the preimage, salt and value, and the recomputation below is
+/// where a lie about either of those lands.
 ///
 /// # Errors
 ///
-/// Any [`FillError`]: an invalid credential behind any slot, a mismatched
-/// disclosure, a template that does not pair with the disclosures.
+/// Any [`FillError`]: an unusable credential behind any slot, a mismatched
+/// disclosure, or a template that does not pair with the disclosures.
 pub fn build_presentation(
     registry: &IdentityRegistry,
     requester: &Address,
@@ -353,12 +384,13 @@ pub fn build_presentation(
     let filled = fill_template(template, disclosures)?;
     let mut entries = Vec::with_capacity(disclosures.len());
     for disclosure in disclosures {
-        let credential = registry
-            .credential(&disclosure.credential_id)
-            .ok_or_else(|| FillError::CredentialNotValid {
-                slot: disclosure.slot.clone(),
-                reason: "unknown to the registry".to_string(),
-            })?;
+        let credential =
+            registry
+                .credential(&disclosure.credential_id)
+                .ok_or_else(|| FillError::CredentialNotValid {
+                    slot: disclosure.slot.clone(),
+                    reason: "unknown to the registry".to_string(),
+                })?;
         if &credential.subject != subject {
             return Err(FillError::CredentialNotValid {
                 slot: disclosure.slot.clone(),
@@ -380,13 +412,17 @@ pub fn build_presentation(
                 slot: disclosure.slot.clone(),
             });
         };
-        // The proof is the node's own work: every field commitment is
-        // already on-chain, so a wallet-supplied path could only lie. What
-        // the wallet supplies is the preimage - salt and value - and the
-        // recomputation below is where a lie about those lands.
         let proof = credential_proof(credential, index).ok_or(FillError::DisclosureMismatch {
             slot: disclosure.slot.clone(),
         })?;
+        // `get`, not `[index]`: the position came from the same vec a moment
+        // ago so it is in range, but an index that is merely *probably* in
+        // range is an abort waiting for an edit.
+        let Some(committed) = credential.fields.get(index) else {
+            return Err(FillError::DisclosureMismatch {
+                slot: disclosure.slot.clone(),
+            });
+        };
         let recomputed = disclosure.recompute_commitment(&credential.schema);
         let opens = verify_disclosure(
             &credential.root(),
@@ -396,7 +432,7 @@ pub fn build_presentation(
             &value_digest_of(&disclosure.value),
             &proof,
         );
-        if !opens || recomputed != credential.fields[index].commitment {
+        if !opens || recomputed != committed.commitment {
             return Err(FillError::DisclosureMismatch {
                 slot: disclosure.slot.clone(),
             });
@@ -410,13 +446,12 @@ pub fn build_presentation(
             proof,
         });
     }
-    let document_digest = document_digest_of(&filled);
     Ok((
         filled,
         PresentationReceipt {
             requester: *requester,
             subject: *subject,
-            document_digest,
+            document_digest: document_digest_of(&filled),
             epoch,
             entries,
         },
@@ -424,7 +459,7 @@ pub fn build_presentation(
 }
 
 /// The wallet-side helper: the proof for one field of a credential. It lives
-/// here so the node and a wallet compute paths identically; a mismatch
+/// here so the node and a wallet compute paths identically - a disagreement
 /// between these two lines is a fork in every verification downstream.
 #[must_use]
 pub fn credential_proof(
@@ -435,11 +470,10 @@ pub fn credential_proof(
 }
 
 /// Re-verify a receipt the way the receiving side must: bound to this
-/// requester, this document, and - through the registry - credentials still
-/// valid at the receipt's epoch.
-///
-/// WIRING: the receiving client/RPC path is the caller. A revoked credential turns yesterday's
-/// presentation unverifiable today; that is the point, not a limitation.
+/// requester, bound to this document, and - through the registry - backed by
+/// credentials that are still valid at the receipt's epoch. A credential
+/// revoked since then turns yesterday's presentation unverifiable today; that
+/// is the point, not a limitation.
 ///
 /// # Errors
 ///
@@ -454,15 +488,17 @@ pub fn check_receipt(
     if &receipt.requester != requester {
         return Err(FillError::WrongRequester);
     }
-    let digest = hash_fields_bytes(&[b"bud-vc-document-digest-v1", document.as_bytes()]);
-    if digest != receipt.document_digest {
+    // Through `document_digest_of`, never a second copy of the tag: two
+    // spellings of one domain tag is a verifier that silently stops matching
+    // the day either one is edited.
+    if document_digest_of(document) != receipt.document_digest {
         return Err(FillError::WrongDocument);
     }
     for entry in &receipt.entries {
         let credential =
             registry
                 .credential(&entry.credential_id)
-                .ok_or(FillError::CredentialNotValid {
+                .ok_or_else(|| FillError::CredentialNotValid {
                     slot: entry.slot.clone(),
                     reason: "gone from the registry".to_string(),
                 })?;
@@ -489,8 +525,8 @@ pub fn check_receipt(
     Ok(())
 }
 
-/// The digest of a document's *filled* text - exported so a workflow can
-/// store the digest next to the filled copy without re-deriving the tag.
+/// The digest of a document's *filled* text - exported so a workflow can store
+/// the digest beside the filled copy without re-deriving the tag.
 #[must_use]
 pub fn document_digest_of(filled: &str) -> [u8; 32] {
     hash_fields_bytes(&[b"bud-vc-document-digest-v1", filled.as_bytes()])
