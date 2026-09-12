@@ -68,6 +68,8 @@ pub enum RegistryError {
     AdmissionAdapterVersionMismatch { expected: u32, found: u32 },
     #[error("admission evidence version {version} is not in the descriptor and version policy")]
     AdmissionEvidenceVersionMismatch { version: u32 },
+    #[error("the external domain's version policy is inconsistent")]
+    InvalidVersionPolicy,
 }
 
 /// A domain's full registration.
@@ -196,6 +198,9 @@ impl ExternalDomainRegistry {
                 expected: hex(&descriptor.id.0),
                 found: hex(&versions.adapter.0),
             });
+        }
+        if !versions.is_consistent() {
+            return Err(RegistryError::InvalidVersionPolicy);
         }
         if admission.adapter_version != descriptor.adapter_version {
             return Err(RegistryError::AdmissionAdapterVersionMismatch {
