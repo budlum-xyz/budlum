@@ -64,6 +64,10 @@ pub enum RegistryError {
     Version(AdapterError),
     #[error("the admission report's digest {found} does not match the one registered {expected}")]
     AdmissionDigestMismatch { expected: String, found: String },
+    #[error("admission adapter version {found} does not match the descriptor's {expected}")]
+    AdmissionAdapterVersionMismatch { expected: u32, found: u32 },
+    #[error("admission evidence version {version} is not in the descriptor and version policy")]
+    AdmissionEvidenceVersionMismatch { version: u32 },
 }
 
 /// A domain's full registration.
@@ -191,6 +195,21 @@ impl ExternalDomainRegistry {
             return Err(RegistryError::DescriptorMismatch {
                 expected: hex(&descriptor.id.0),
                 found: hex(&versions.adapter.0),
+            });
+        }
+        if admission.adapter_version != descriptor.adapter_version {
+            return Err(RegistryError::AdmissionAdapterVersionMismatch {
+                expected: descriptor.adapter_version,
+                found: admission.adapter_version,
+            });
+        }
+        if !descriptor
+            .accepted_evidence_versions
+            .contains(&admission.evidence_version)
+            || versions.window(admission.evidence_version).is_none()
+        {
+            return Err(RegistryError::AdmissionEvidenceVersionMismatch {
+                version: admission.evidence_version,
             });
         }
         let required = economics.required_bond_atoms();
@@ -428,7 +447,17 @@ impl ExternalDomainRegistry {
             });
         }
 
-        // 2. One height/version slot can hold only one accepted evidence
+        // 2. The envelope must name the adapter bound to this domain. The
+        //    adapter is expected to repeat this check, but the registry keeps
+        //    the boundary fail-closed even for a newly written adapter.
+        if evidence.adapter != descriptor.id {
+            return Err(RegistryError::Adapter(AdapterError::WrongAdapter {
+                expected: hex(&descriptor.id.0),
+                found: hex(&evidence.adapter.0),
+            }));
+        }
+
+        // 3. One height/version slot can hold only one accepted evidence
         //    format. Without this check a replay would overwrite the first
         //    attestation while incrementing the accepted counter again.
         let domain = DomainKey::from_parts(&descriptor.id, &evidence.network);
@@ -442,14 +471,14 @@ impl ExternalDomainRegistry {
             });
         }
 
-        // 3. The version gate, before the adapter parses anything. An unknown
+        // 4. The version gate, before the adapter parses anything. An unknown
         //    format is refused here rather than being handed to an adapter that
         //    might guess.
         versions
             .gate(evidence.evidence_version, evidence.declared_height)
             .map_err(RegistryError::Version)?;
 
-        // 3. The prover must exist and their bond must still cover the
+        // 5. The prover must exist and their bond must still cover the
         //    ceiling. Checked against the live bond, so a slashed prover stops
         //    serving without anybody having to remove them.
         let Some(bond) = prover else {
@@ -463,12 +492,37 @@ impl ExternalDomainRegistry {
             });
         }
 
-        // 4. The adapter itself.
+        // 6. The adapter itself.
         let attestation = adapter
             .verify(evidence, policy)
             .map_err(RegistryError::Adapter)?;
 
-        // 5. The attestation must agree with the evidence it claims to come
+        // The adapter output is bound back to the registered domain before
+        // any counters are incremented. Checking only the digest, height and
+        // root would let a broken adapter return an attestation for another
+        // adapter, domain or format while still looking internally coherent.
+        if attestation.adapter != descriptor.id {
+            return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
+                field: "adapter",
+            }));
+        }
+        if attestation.domain != domain {
+            return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
+                field: "domain",
+            }));
+        }
+        if attestation.adapter_version != descriptor.adapter_version {
+            return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
+                field: "adapter_version",
+            }));
+        }
+        if attestation.evidence_version != evidence.evidence_version {
+            return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
+                field: "evidence_version",
+            }));
+        }
+
+        // The attestation must agree with the evidence it claims to come
         //    from. An adapter that produces an attestation about a different
         //    height than the evidence declares is broken, and this is where
         //    that is caught rather than trusted.
