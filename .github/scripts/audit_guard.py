@@ -28,55 +28,57 @@ def fail(message: str, errors: list[str]) -> None:
     errors.append(message)
 
 
+def workflow_text_audit(rel: str, text: str, errors: list[str]) -> None:
+    """Audit one workflow text. Kept pure so the red-team can mutate it."""
+    uncommented = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+    if not re.search(r"^permissions:\s*$", text, re.MULTILINE):
+        fail(f"{rel}: missing top-level permissions block", errors)
+    if re.search(r"^\s*pull_request_target\s*:", text, re.MULTILINE):
+        fail(f"{rel}: pull_request_target is forbidden", errors)
+    if re.search(r"^\s*workflow_run\s*:", text, re.MULTILINE):
+        fail(f"{rel}: workflow_run is forbidden in the audit surface", errors)
+
+    for line_no, line in enumerate(text.splitlines(), 1):
+        match = USES_LINE.match(line)
+        if not match:
+            continue
+        ref = match.group(1)
+        if ref.startswith("./"):
+            continue
+        if not SHA_REF.search(ref):
+            fail(f"{rel}:{line_no}: action is not pinned to a full commit SHA: {ref}", errors)
+
+    lines = text.splitlines()
+    checkout_lines = [
+        i for i, line in enumerate(lines) if CHECKOUT in line and not line.lstrip().startswith("#")
+    ]
+    for start in checkout_lines:
+        block = lines[start : start + 12]
+        if not any("persist-credentials: false" in line for line in block):
+            fail(f"{rel}:{start + 1}: checkout must disable persisted credentials", errors)
+
+    has_pull_request = bool(re.search(r"^\s*pull_request:\s*$", text, re.MULTILINE))
+    if has_pull_request:
+        for line_no, line in enumerate(uncommented.splitlines(), 1):
+            if re.search(
+                r"^\s*(?:contents|actions|pull-requests):\s*(?:write|write-all)\s*$",
+                line,
+            ):
+                fail(f"{rel}:{line_no}: write permission on a pull_request workflow", errors)
+
+    for line_no, line in enumerate(uncommented.splitlines(), 1):
+        if re.search(r"\bgit\s+push\b", line):
+            fail(f"{rel}:{line_no}: workflow must not push repository changes", errors)
+
+
 def workflow_audit(errors: list[str]) -> None:
     files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
     if not files:
         fail("no workflow files were found", errors)
         return
-
     for path in files:
-        text = path.read_text(encoding="utf-8")
-        rel = path.relative_to(ROOT)
-        uncommented = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
-
-        if not re.search(r"^permissions:\s*$", text, re.MULTILINE):
-            fail(f"{rel}: missing top-level permissions block", errors)
-        if re.search(r"^\s*pull_request_target\s*:", text, re.MULTILINE):
-            fail(f"{rel}: pull_request_target is forbidden", errors)
-        if re.search(r"^\s*workflow_run\s*:", text, re.MULTILINE):
-            fail(f"{rel}: workflow_run is forbidden in the audit surface", errors)
-
-        for line_no, line in enumerate(text.splitlines(), 1):
-            match = USES_LINE.match(line)
-            if not match:
-                continue
-            ref = match.group(1)
-            if ref.startswith("./"):
-                continue
-            if not SHA_REF.search(ref):
-                fail(f"{rel}:{line_no}: action is not pinned to a full commit SHA: {ref}", errors)
-
-        checkout_lines = [
-            i for i, line in enumerate(text.splitlines()) if CHECKOUT in line and not line.lstrip().startswith("#")
-        ]
-        lines = text.splitlines()
-        for start in checkout_lines:
-            block = lines[start : start + 12]
-            if not any("persist-credentials: false" in line for line in block):
-                fail(f"{rel}:{start + 1}: checkout must disable persisted credentials", errors)
-
-        has_pull_request = bool(re.search(r"^\s*pull_request:\s*$", text, re.MULTILINE))
-        if has_pull_request:
-            for line_no, line in enumerate(uncommented.splitlines(), 1):
-                if re.search(
-                    r"^\s*(?:contents|actions|pull-requests):\s*(?:write|write-all)\s*$",
-                    line,
-                ):
-                    fail(f"{rel}:{line_no}: write permission on a pull_request workflow", errors)
-
-        for line_no, line in enumerate(uncommented.splitlines(), 1):
-            if re.search(r"\bgit\s+push\b", line):
-                fail(f"{rel}:{line_no}: workflow must not push repository changes", errors)
+        workflow_text_audit(path.relative_to(ROOT).as_posix(), path.read_text(encoding="utf-8"), errors)
 
 
 def tracked_paths() -> list[Path]:
@@ -126,20 +128,53 @@ def commit_subject_audit(errors: list[str]) -> None:
             fail(f"commit {sha[:12]}: review identity remains in subject", errors)
 
 
-def self_test() -> None:
-    errors: list[str] = []
-    sample = """
+def red_team() -> None:
+    """Mutate each protected rule and require the detector to go red."""
+    clean = """
 permissions:
   contents: read
+on:
+  pull_request:
+    branches: [main]
 jobs:
   check:
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@not-a-sha
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+        with:
+          persist-credentials: false
 """
-    if not any(not SHA_REF.search(m.group(1)) for m in map(USES_LINE.match, sample.splitlines()) if m):
-        raise AssertionError("self-test failed to recognize an unpinned action")
-    if re.search(r"^\s*pull_request_target\s*:", "pull_request_target:\n", re.MULTILINE) is None:
-        raise AssertionError("self-test failed to recognize pull_request_target")
+    mutants = {
+        "unpinned-action": clean.replace(
+            "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            "actions/checkout@main",
+        ),
+        "missing-permissions": clean.replace("permissions:\n  contents: read\n", "", 1),
+        "checkout-credentials": clean.replace("persist-credentials: false", "persist-credentials: true"),
+        "forbidden-trigger": clean.replace("pull_request:\n", "pull_request_target:\n"),
+        "pull-write": clean.replace("contents: read\n    steps:", "contents: write\n    steps:"),
+        "workflow-push": clean + "\n# mutation\nrun: git push\n",
+    }
+    expected = {
+        "unpinned-action": "not pinned",
+        "missing-permissions": "missing top-level permissions",
+        "checkout-credentials": "disable persisted credentials",
+        "forbidden-trigger": "pull_request_target is forbidden",
+        "pull-write": "write permission on a pull_request",
+        "workflow-push": "workflow must not push",
+    }
+    for name, mutant in mutants.items():
+        errors: list[str] = []
+        workflow_text_audit(f"red-team/{name}.yml", mutant, errors)
+        if not any(expected[name] in error for error in errors):
+            raise AssertionError(f"red-team mutant passed unexpectedly: {name}: {errors}")
+    print("audit-guard red-team: PASS (6 mutations rejected)")
+
+
+def self_test() -> None:
+    red_team()
+    errors: list[str] = []
     active_code_audit(errors)
     commit_subject_audit(errors)
     if errors:
