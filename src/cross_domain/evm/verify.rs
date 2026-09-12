@@ -49,6 +49,9 @@ pub enum VerifyError {
     Receipt(ReceiptError),
     /// The transaction itself failed (`status == false`).
     TxFailed,
+    /// The transaction identifier is metadata rather than a receipt proof,
+    /// but an empty identifier cannot be correlated with the relayer request.
+    EmptyTransactionHash,
     /// No deposit log was found: the emitter or topic0 did not match.
     LogNotFound,
     /// The deposit payload did not match what was expected: amount, asset or
@@ -69,6 +72,9 @@ impl std::fmt::Display for VerifyError {
             VerifyError::Mpt(e) => write!(f, "evm verify: mpt: {e}"),
             VerifyError::Receipt(e) => write!(f, "evm verify: receipt: {e}"),
             VerifyError::TxFailed => write!(f, "evm verify: transaction status=false"),
+            VerifyError::EmptyTransactionHash => {
+                write!(f, "evm verify: transaction hash is empty")
+            }
             VerifyError::LogNotFound => write!(f, "evm verify: deposit log not found"),
             VerifyError::PayloadMismatch => write!(f, "evm verify: deposit payload mismatch"),
             VerifyError::SyncCommittee(e) => write!(f, "evm verify: sync-committee: {e}"),
@@ -237,6 +243,14 @@ pub struct SyncAttestation<'a> {
 /// the mint needs. On failure it gets a `VerifyError` naming the step at which
 /// the proof turned out to be invalid.
 pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {
+    // The receipt proof cannot prove a transaction hash, but the relay result
+    // still needs a non-empty identifier to correlate the proof with the
+    // external action it claims to observe. Refuse the ambiguous value before
+    // doing expensive header/MPT work.
+    if proof.tx_hash.is_empty() {
+        return Err(VerifyError::EmptyTransactionHash);
+    }
+
     // 1. Header decode + N-confirmation finality.
     let target = decode_header_or_err(proof.target_header)?;
     let confs: Result<Vec<EthHeader>, VerifyError> = proof
@@ -425,6 +439,28 @@ mod tests {
     use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
     // ---- Pozitif: tam happy-path ----
+
+    #[test]
+    fn an_empty_transaction_hash_is_refused_before_proof_work() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        let f = build_fixture(&emitter, topic0, b"deposit-payload", true, 3);
+        let proof = EvmDepositProof {
+            target_header: &f.target_header,
+            confirmation_headers: &conf_refs(&f),
+            required_confirmations: 3,
+            proof_nodes: &f.proof_nodes,
+            receipt_key: &f.receipt_key,
+            tx_hash: "",
+            emitter_address: &emitter,
+            deposit_topic0: &topic0,
+            sync_attestation: None,
+        };
+        assert_eq!(
+            verify_evm_receipt(&proof),
+            Err(VerifyError::EmptyTransactionHash)
+        );
+    }
 
     #[test]
     fn verify_full_happy_path() {
