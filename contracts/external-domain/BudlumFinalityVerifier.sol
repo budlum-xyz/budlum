@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Polyfield
+// License: Polyfield
 pragma solidity ^0.8.24;
 
 /// @title BudlumFinalityVerifier
@@ -194,9 +194,13 @@ contract BudlumFinalityVerifier {
     constructor(uint64 budlumChainId_, uint256 challengeWindow_) {
         budlumChainId = budlumChainId_;
         challengeWindow = challengeWindow_;
-        hasBlsPrecompile = _precompileExists(PRECOMPILE_BLS_PAIRING);
+        // Pairing's ABI is 384 bytes per pair. A malformed one-pair probe
+        // distinguishes the final pairing precompile from an early-draft
+        // address that hosts a different BLS operation.
+        hasBlsPrecompile = _probeBlsPairing(new bytes(384));
         hasMlDsaPrecompile =
-            _precompileExists(PRECOMPILE_MLDSA) || _precompileExists(PRECOMPILE_MLDSA_ETH);
+            _probeRejectsMalformed(PRECOMPILE_MLDSA)
+                || _probeRejectsMalformed(PRECOMPILE_MLDSA_ETH);
     }
 
     /// @notice The digest an attestation is identified by. Everything that must
@@ -231,7 +235,17 @@ contract BudlumFinalityVerifier {
                 a.height,
                 a.stateRoot,
                 a.epoch,
-                a.chainId
+                a.chainId,
+                // The signature must bind the exact decompressed points that
+                // the pairing call will consume. This does not replace
+                // hash-to-curve; the deployment still requires the circuit
+                // binding recorded by the Rust planner. It does prevent a
+                // valid signature over one point encoding from being paired
+                // with another after signing.
+                keccak256(a.g1HashedMessage),
+                keccak256(a.g2AggregatePubkey),
+                keccak256(a.g1Generator),
+                keccak256(a.g2NegSignature)
             )
         );
     }
@@ -390,7 +404,7 @@ contract BudlumFinalityVerifier {
         bool ethVariant
     ) internal view returns (bool) {
         address target = ethVariant ? PRECOMPILE_MLDSA_ETH : PRECOMPILE_MLDSA;
-        if (!_precompileExists(target)) {
+        if (!_probeRejectsMalformed(target)) {
             return false;
         }
         bytes memory input = abi.encodePacked(root, pubkey, signature);
@@ -407,20 +421,28 @@ contract BudlumFinalityVerifier {
         return result == 1;
     }
 
-    /// @dev Probes whether an address behaves like a precompile.
-    ///
-    ///      A plain EOA and an empty contract both return success with empty
-    ///      output for a staticcall with empty input, so presence alone is not
-    ///      enough; but an address that REVERTS on empty input is definitely
-    ///      not the precompile we expect, and that is the case that matters for
-    ///      the 0x12/0x13 collision between EIP-2537 and EIP-8051.
-    function _precompileExists(address target) internal view returns (bool) {
-        if (target.code.length > 0) {
-            // A deployed contract at a precompile address is not the
-            // precompile. Refuse rather than call it.
+    /// @dev EIP-2537 pairing probe. A valid-length pairing call returns its
+    ///      32-byte boolean even when the supplied points do not pair; another
+    ///      operation at the address normally returns a different shape or
+    ///      reverts. The actual verification call remains the authority.
+    function _probeBlsPairing(bytes memory probe) internal view returns (bool) {
+        if (PRECOMPILE_BLS_PAIRING.code.length > 0) {
             return false;
         }
-        (bool ok,) = target.staticcall{gas: 5_000}("");
-        return ok;
+        (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: 5_000}(probe);
+        return ok && out.length == 32;
+    }
+
+    /// @dev ML-DSA has no cheap valid public test vector in the deployment
+    ///      constructor. Its malformed-input rejection is still enough to
+    ///      distinguish the reserved address from an EOA; the verification
+    ///      call checks the signature and key later. A contract occupying the
+    ///      reserved address is never treated as the precompile.
+    function _probeRejectsMalformed(address target) internal view returns (bool) {
+        if (target.code.length > 0) {
+            return false;
+        }
+        (bool ok, bytes memory out) = target.staticcall{gas: 5_000}(hex"00");
+        return !ok || out.length == 32;
     }
 }

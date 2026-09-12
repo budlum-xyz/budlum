@@ -188,6 +188,11 @@ pub struct AdmissionReport {
     /// is meaningless and `admitted` must be false.
     pub golden_verified: bool,
     pub probes: Vec<(String, ProbeOutcome)>,
+    /// Commits to the exact fault patches and expected refusal kinds that were
+    /// run. Names and outcomes alone were insufficient: an author could keep
+    /// the same names while swapping a meaningful corruption for a no-op.
+    #[serde(default)]
+    pub probe_commitment: [u8; 32],
     pub admitted: bool,
 }
 
@@ -213,6 +218,7 @@ impl AdmissionReport {
             &self.evidence_version.to_le_bytes(),
             &[u8::from(self.golden_verified)],
             &self.probes.len().to_le_bytes(),
+            &self.probe_commitment,
         ]);
         for (name, outcome) in &self.probes {
             acc = crate::core::hash::hash_fields_bytes(&[
@@ -314,6 +320,56 @@ pub fn run_probe(
     }
 }
 
+/// Commits to probe patches without relying on debug formatting. The exact
+/// byte mutation is consensus data: a registration that only commits to the
+/// display name can silently weaken its own admission suite.
+#[must_use]
+fn probe_commitment(probes: &[FaultProbe]) -> [u8; 32] {
+    let mut acc = crate::core::hash::hash_fields_bytes(&[
+        b"bud-admission-probes-v1",
+        &probes.len().to_le_bytes(),
+    ]);
+    for probe in probes {
+        let patch = patch_label(&probe.patch);
+        let expectation = match &probe.expect {
+            ExpectedRefusal::Any => "any".to_string(),
+            ExpectedRefusal::Kind(kind) => format!("kind:{}", kind.as_str()),
+        };
+        acc = crate::core::hash::hash_fields_bytes(&[
+            &acc,
+            probe.name.as_bytes(),
+            patch.as_bytes(),
+            expectation.as_bytes(),
+        ]);
+    }
+    acc
+}
+
+#[must_use]
+fn patch_label(patch: &BytePatch) -> String {
+    match patch {
+        BytePatch::InPayload { offset, bytes } => {
+            format!("payload:{offset}:{}", hex(bytes))
+        }
+        BytePatch::TruncatePayload { keep } => format!("truncate:{keep}"),
+        BytePatch::DeclaredHeight { value } => format!("height:{value}"),
+        BytePatch::DeclaredRoot { value } => format!("root:{}", hex(value)),
+        BytePatch::EvidenceVersion { value } => format!("version:{value}"),
+        BytePatch::Submitter { value } => format!("submitter:{}", hex(value.as_bytes())),
+        BytePatch::Network { value } => format!("network:{value}"),
+    }
+}
+
+#[must_use]
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    out
+}
+
 /// The full admission run.
 ///
 /// The golden check comes first and gates everything: without it, an adapter
@@ -330,12 +386,15 @@ pub fn admit(
         .copied()
         .unwrap_or(0);
 
+    let fault_probes = adapter.fault_probes();
+    let probe_commitment = probe_commitment(&fault_probes);
     let Some(golden) = adapter.golden_evidence() else {
         return AdmissionReport {
             adapter_version: descriptor.adapter_version,
             evidence_version,
             golden_verified: false,
             probes: Vec::new(),
+            probe_commitment,
             admitted: false,
         };
     };
@@ -344,8 +403,8 @@ pub fn admit(
     // results mean anything.
     let golden_verified = adapter.verify(&golden, policy).is_ok();
 
-    let mut probes = Vec::with_capacity(adapter.fault_probes().len());
-    for probe in adapter.fault_probes() {
+    let mut probes = Vec::with_capacity(fault_probes.len());
+    for probe in fault_probes {
         let outcome = run_probe(adapter, &golden, &probe, policy);
         probes.push((probe.name.clone(), outcome));
     }
@@ -357,5 +416,6 @@ pub fn admit(
         golden_verified,
         admitted: golden_verified && all_passed && !probes.is_empty(),
         probes,
+        probe_commitment,
     }
 }

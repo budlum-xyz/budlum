@@ -72,6 +72,7 @@
 //! needs are in [`profile`].
 
 pub mod ethereum;
+pub mod evm_hybrid;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
@@ -85,6 +86,14 @@ pub use ethereum::{
     bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
     period_of_slot, BlsVerifier, EthereumSyncAdapter, SyncCommitteeUpdate, BITVECTOR_BYTES,
     EPOCHS_PER_SYNC_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+};
+pub use evm_hybrid::{
+    plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof, EvmPlanError,
+    EvmPrecompiles,
+    EvmVerificationMode, EvmVerificationPlan, MessageBinding, MlDsaVariant,
+    PrecompileObservation, BLS_G1_ADD_ADDRESS, BLS_G1_MSM_ADDRESS, BLS_G2_ADD_ADDRESS,
+    BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS, BLS_MAP_FP_TO_G1_ADDRESS,
+    BLS_PAIRING_ADDRESS, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS, MAX_ML_DSA_FIELD_BYTES,
 };
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{

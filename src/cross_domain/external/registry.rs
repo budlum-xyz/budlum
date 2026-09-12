@@ -35,6 +35,8 @@ pub enum RegistryError {
     AlreadyRegistered(String),
     #[error("domain {0} is not registered")]
     UnknownDomain(String),
+    #[error("an external domain needs a non-empty network name")]
+    EmptyNetwork,
     #[error("admission did not pass: golden={golden_verified} admitted={admitted} probes={passed}/{total}")]
     AdmissionFailed {
         golden_verified: bool,
@@ -52,6 +54,8 @@ pub enum RegistryError {
     ProverUnderbonded { live: u128 },
     #[error("the prover {0} has no bond with this domain")]
     UnknownProver(String),
+    #[error("prover {found} did not carry the accepted attestation; its carrier was {expected}")]
+    AttestationProverMismatch { expected: String, found: String },
     #[error("an attestation at height {height} already exists from evidence version {version}")]
     DuplicateAttestation { height: u64, version: u32 },
     #[error("the adapter refused: {0}")]
@@ -77,6 +81,12 @@ pub struct DomainRegistration {
     /// attested under two versions and both are true statements about
     /// different formats.
     pub attestations: BTreeMap<(u64, u32), FinalityAttestation>,
+    /// The prover that carried each accepted evidence digest. Keeping this
+    /// beside the attestation makes slashing addressable to the actual
+    /// carrier; accepting a proof and later charging an unrelated bond would
+    /// turn permissionless registration into arbitrary confiscation.
+    #[serde(default)]
+    pub attestation_provers: BTreeMap<[u8; 32], Address>,
     pub provers: BTreeMap<Address, ProverBond>,
 }
 
@@ -152,9 +162,13 @@ impl ExternalDomainRegistry {
     /// # Errors
     ///
     /// A duplicate registration, a failed admission, a descriptor that does not
-    /// match the adapter id, or a bond below the requirement.
+    /// match the adapter id, or a bond below the requirement. `network` is
+    /// explicit because the same adapter can serve many external networks;
+    /// deriving it from the version list would make every later submission
+    /// miss the registration.
     pub fn register(
         &mut self,
+        network: &str,
         descriptor: AdapterDescriptor,
         economics: DomainEconomics,
         versions: VersionPolicy,
@@ -162,6 +176,9 @@ impl ExternalDomainRegistry {
         bond_atoms: u128,
         poster: Address,
     ) -> Result<DomainKey, RegistryError> {
+        if network.is_empty() {
+            return Err(RegistryError::EmptyNetwork);
+        }
         if !admission.admitted || !admission.golden_verified {
             return Err(RegistryError::AdmissionFailed {
                 golden_verified: admission.golden_verified,
@@ -184,7 +201,7 @@ impl ExternalDomainRegistry {
             });
         }
 
-        let domain = DomainKey::from_parts(&descriptor.id, &versions.accepted_list());
+        let domain = DomainKey::from_parts(&descriptor.id, network);
         if self.domains.contains_key(&domain) {
             return Err(RegistryError::AlreadyRegistered(hex(domain.as_bytes())));
         }
@@ -342,6 +359,8 @@ impl ExternalDomainRegistry {
                         (attestation.height, attestation.evidence_version),
                         attestation.clone(),
                     );
+                    reg.attestation_provers
+                        .insert(attestation.evidence_digest, evidence.submitter);
                     reg.record.attestations_accepted =
                         reg.record.attestations_accepted.saturating_add(1);
                     reg.record.last_accepted_height = Some(attestation.height);
@@ -408,7 +427,22 @@ impl ExternalDomainRegistry {
             });
         }
 
-        // 2. The version gate, before the adapter parses anything. An unknown
+        // 2. One height/version slot can hold only one accepted evidence
+        //    format. Without this check a replay would overwrite the first
+        //    attestation while incrementing the accepted counter again.
+        let domain = DomainKey::from_parts(&descriptor.id, &evidence.network);
+        if self
+            .domains
+            .get(&domain)
+            .is_some_and(|reg| reg.attestations.contains_key(&(evidence.declared_height, evidence.evidence_version)))
+        {
+            return Err(RegistryError::DuplicateAttestation {
+                height: evidence.declared_height,
+                version: evidence.evidence_version,
+            });
+        }
+
+        // 3. The version gate, before the adapter parses anything. An unknown
         //    format is refused here rather than being handed to an adapter that
         //    might guess.
         versions
@@ -485,6 +519,17 @@ impl ExternalDomainRegistry {
             return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
                 field: "evidence_digest",
             }));
+        }
+        let Some(owner) = reg.attestation_provers.get(&evidence_digest).copied() else {
+            return Err(RegistryError::Adapter(AdapterError::Unavailable {
+                reason: "the accepted attestation has no recorded carrier".to_string(),
+            }));
+        };
+        if owner != prover {
+            return Err(RegistryError::AttestationProverMismatch {
+                expected: hex(owner.as_bytes()),
+                found: hex(prover.as_bytes()),
+            });
         }
         let Some(bond) = reg.provers.get_mut(&prover) else {
             return Err(RegistryError::UnknownProver(hex(prover.as_bytes())));
