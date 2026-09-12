@@ -129,6 +129,21 @@ fn test_relayer_result_malformed_proof_rejected() {
 }
 
 #[test]
+fn test_relayer_result_empty_tx_hash_is_rejected() {
+    let mut state = AccountState::new();
+    state.add_balance(&relayer_addr(), 1_000);
+    let mut result = make_result("");
+    seal_single_leaf(&mut result);
+    state
+        .external_roots
+        .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
+    let tx = relayer_tx(result, 1);
+    let err = Executor::apply_transaction(&mut state, &tx).expect_err("empty hash must reject");
+    assert!(err.contains("Transaction hash cannot be empty"));
+    assert_eq!(state.get_balance(&relayer_addr()), 1_000);
+}
+
+#[test]
 fn test_relayer_result_empty_proof_and_zero_root_regressions() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);

@@ -991,6 +991,15 @@ impl Executor {
             }
             TransactionType::RelayerResult(res) => {
                 // Relayer EVM Proofs - cryptographic verification.
+                // An empty identifier cannot correlate the claimed receipt
+                // with an external action, even though it can still be
+                // included in the result-fact hash.
+                if res.tx_hash.trim().is_empty() {
+                    return Err(BudlumError::validation(
+                        "relayer_empty_tx_hash",
+                        "Transaction hash cannot be empty",
+                    ));
+                }
                 if res.receipt_proof.is_empty() {
                     return Err(BudlumError::validation(
                         "relayer_invalid_proof",
