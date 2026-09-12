@@ -434,7 +434,10 @@ impl ExternalDomainRegistry {
         if self
             .domains
             .get(&domain)
-            .is_some_and(|reg| reg.attestations.contains_key(&(evidence.declared_height, evidence.evidence_version)))
+            .is_some_and(|reg| {
+                reg.attestations
+                    .contains_key(&(evidence.declared_height, evidence.evidence_version))
+            })
         {
             return Err(RegistryError::DuplicateAttestation {
                 height: evidence.declared_height,
