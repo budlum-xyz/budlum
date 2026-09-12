@@ -55,6 +55,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The rotation log is an audit trail, not an append-only denial-of-service
+/// surface. Once this many entries exist the oldest entry is evicted; the
+/// current epoch remains authoritative.
+pub const MAX_COLD_ROTATION_HISTORY: usize = 1_024;
+/// Rotation reasons are operator evidence, not an unbounded payload channel.
+pub const MAX_ROTATION_REASON_BYTES: usize = 256;
+
 /// The ceiling on one settlement, in atoms.
 ///
 /// Held by the cold side. A request that carries its own ceiling is a request
@@ -80,6 +87,38 @@ pub struct ColdWalletPolicy {
     /// every attempt is a way to fill a cold device's storage from the network
     /// side.
     pub refusal_history_capacity: usize,
+}
+
+impl ColdWalletPolicy {
+    /// Reject policy values that would make the state machine trivially
+    /// bypassable or permanently unusable. `new` remains infallible for
+    /// backwards compatibility, so `check` calls this guard before it accepts
+    /// any request; an invalid policy therefore fails closed rather than
+    /// becoming a zero-quorum wallet.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.chain_id == 0 {
+            return Err("chain-id-zero");
+        }
+        if self.max_value_per_settlement_atoms == 0 {
+            return Err("per-settlement-ceiling-zero");
+        }
+        if self.max_value_per_epoch_atoms == 0 {
+            return Err("per-epoch-budget-zero");
+        }
+        if self.max_value_per_settlement_atoms > self.max_value_per_epoch_atoms {
+            return Err("settlement-ceiling-above-epoch-budget");
+        }
+        if self.device_count == 0 {
+            return Err("device-count-zero");
+        }
+        if self.required_quorum == 0 {
+            return Err("quorum-zero");
+        }
+        if self.required_quorum > self.device_count {
+            return Err("quorum-above-device-count");
+        }
+        Ok(())
+    }
 }
 
 impl Default for ColdWalletPolicy {
@@ -118,6 +157,12 @@ pub struct SettlementRequest {
 /// know which of eight rules fired.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColdRefusal {
+    InvalidPolicy {
+        rule: String,
+    },
+    InvalidState {
+        rule: String,
+    },
     WrongChain {
         expected: u64,
         got: u64,
@@ -146,10 +191,23 @@ pub enum ColdRefusal {
         current_epoch: u32,
         presented: u32,
     },
+    KeyEpochAhead {
+        current_epoch: u32,
+        presented: u32,
+    },
     QuorumNotReached {
         required: u32,
         presented: u32,
     },
+    QuorumExceedsDeviceCount {
+        device_count: u32,
+        presented: u32,
+    },
+    EpochRolledBack {
+        last_signed: u64,
+        requested: u64,
+    },
+    NonceZero,
     HeightAdvanceTooSmall {
         required: u64,
         actual: u64,
@@ -161,6 +219,8 @@ impl ColdRefusal {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::InvalidPolicy { .. } => "invalid-policy",
+            Self::InvalidState { .. } => "invalid-state",
             Self::WrongChain { .. } => "wrong-chain",
             Self::HeightRolledBack { .. } => "height-rolled-back",
             Self::HeightAlreadySettled { .. } => "height-already-settled",
@@ -168,7 +228,11 @@ impl ColdRefusal {
             Self::ValueAboveCeiling { .. } => "value-above-ceiling",
             Self::EpochBudgetExceeded { .. } => "epoch-budget-exceeded",
             Self::KeyRotatedOut { .. } => "key-rotated-out",
+            Self::KeyEpochAhead { .. } => "key-epoch-ahead",
             Self::QuorumNotReached { .. } => "quorum-not-reached",
+            Self::QuorumExceedsDeviceCount { .. } => "quorum-exceeds-device-count",
+            Self::EpochRolledBack { .. } => "epoch-rolled-back",
+            Self::NonceZero => "nonce-zero",
             Self::HeightAdvanceTooSmall { .. } => "height-advance-too-small",
         }
     }
@@ -228,6 +292,28 @@ pub struct ColdWalletState {
     pub signed_count: u64,
 }
 
+/// Why a key rotation was refused before it changed state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RotationError {
+    EpochExhausted,
+    EmptyReason,
+    ReasonTooLong { bytes: usize, maximum: usize },
+}
+
+impl std::fmt::Display for RotationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EpochExhausted => write!(f, "cold-wallet key epoch exhausted"),
+            Self::EmptyReason => write!(f, "cold-wallet key rotation reason is empty"),
+            Self::ReasonTooLong { bytes, maximum } => {
+                write!(f, "cold-wallet key rotation reason is {bytes} bytes; maximum is {maximum}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RotationError {}
+
 impl ColdWalletState {
     /// A cold wallet with `policy` and nothing signed yet.
     #[must_use]
@@ -243,6 +329,57 @@ impl ColdWalletState {
             refusals: Vec::new(),
             signed_count: 0,
         }
+    }
+
+    /// Validate state restored from storage before it is allowed to sign.
+    ///
+    /// The state is serializable because a cold device must survive a reboot,
+    /// but deserialization is not authentication. This guard prevents a
+    /// tampered snapshot from smuggling in counters, a budget, or an unbounded
+    /// audit log.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.policy.validate()?;
+        if self.key_epoch == 0 {
+            return Err("key-epoch-zero");
+        }
+        if self.refusals.len() > self.policy.refusal_history_capacity {
+            return Err("refusal-history-over-capacity");
+        }
+        if self.rotations.len() > MAX_COLD_ROTATION_HISTORY {
+            return Err("rotation-history-over-capacity");
+        }
+        if self.signed_count == 0
+            && (self.last_signed_height != 0
+                || self.last_signed_nonce != 0
+                || self.epoch_spent_atoms != 0
+                || self.budget_epoch != 0)
+        {
+            return Err("counters-without-a-signed-settlement");
+        }
+        if self.epoch_spent_atoms > self.policy.max_value_per_epoch_atoms {
+            return Err("epoch-spent-above-budget");
+        }
+        let mut previous = 0u32;
+        for rotation in &self.rotations {
+            if rotation.key_epoch <= previous || rotation.key_epoch > self.key_epoch {
+                return Err("rotation-epochs-not-monotonic");
+            }
+            if rotation.reason.is_empty() {
+                return Err("empty-rotation-reason");
+            }
+            if rotation.reason.len() > MAX_ROTATION_REASON_BYTES {
+                return Err("rotation-reason-too-long");
+            }
+            previous = rotation.key_epoch;
+        }
+        // An empty rotation history is valid at epoch one. If a history is
+        // present, its newest entry must explain the current epoch.
+        if let Some(last) = self.rotations.last() {
+            if last.key_epoch != self.key_epoch {
+                return Err("current-key-epoch-not-recorded");
+            }
+        }
+        Ok(())
     }
 
     /// The canonical payload for a request.
@@ -298,14 +435,40 @@ impl ColdWalletState {
         match refusal {
             Ok(()) => {
                 let payload = Self::payload_for(request, self.key_epoch);
+                // Compute every next value before mutating any field. This is
+                // important for a restored or hand-edited state: a late
+                // arithmetic refusal must not partially advance the epoch.
+                let next_spent = if request.epoch != self.budget_epoch {
+                    request.value_atoms
+                } else {
+                    match self.epoch_spent_atoms.checked_add(request.value_atoms) {
+                        Some(total) => total,
+                        None => {
+                            let err = ColdRefusal::EpochBudgetExceeded {
+                                spent: self.epoch_spent_atoms,
+                                requested: request.value_atoms,
+                                budget: self.policy.max_value_per_epoch_atoms,
+                            };
+                            self.record_refusal(request, &err);
+                            return Err(err);
+                        }
+                    }
+                };
+                let next_count = match self.signed_count.checked_add(1) {
+                    Some(count) => count,
+                    None => {
+                        let err = ColdRefusal::InvalidState {
+                            rule: "signed-count-exhausted".to_string(),
+                        };
+                        self.record_refusal(request, &err);
+                        return Err(err);
+                    }
+                };
                 self.last_signed_height = request.height;
                 self.last_signed_nonce = request.nonce;
-                if request.epoch != self.budget_epoch {
-                    self.budget_epoch = request.epoch;
-                    self.epoch_spent_atoms = 0;
-                }
-                self.epoch_spent_atoms = self.epoch_spent_atoms.saturating_add(request.value_atoms);
-                self.signed_count = self.signed_count.saturating_add(1);
+                self.budget_epoch = request.epoch;
+                self.epoch_spent_atoms = next_spent;
+                self.signed_count = next_count;
                 Ok(payload)
             }
             Err(err) => {
@@ -327,6 +490,16 @@ impl ColdWalletState {
         presented_key_epoch: u32,
         presented_signatures: u32,
     ) -> Result<(), ColdRefusal> {
+        if let Err(rule) = self.validate() {
+            if self.policy.validate().is_err() {
+                return Err(ColdRefusal::InvalidPolicy {
+                    rule: rule.to_string(),
+                });
+            }
+            return Err(ColdRefusal::InvalidState {
+                rule: rule.to_string(),
+            });
+        }
         if request.chain_id != self.policy.chain_id {
             return Err(ColdRefusal::WrongChain {
                 expected: self.policy.chain_id,
@@ -337,6 +510,18 @@ impl ColdWalletState {
             return Err(ColdRefusal::KeyRotatedOut {
                 current_epoch: self.key_epoch,
                 presented: presented_key_epoch,
+            });
+        }
+        if presented_key_epoch > self.key_epoch {
+            return Err(ColdRefusal::KeyEpochAhead {
+                current_epoch: self.key_epoch,
+                presented: presented_key_epoch,
+            });
+        }
+        if presented_signatures > self.policy.device_count {
+            return Err(ColdRefusal::QuorumExceedsDeviceCount {
+                device_count: self.policy.device_count,
+                presented: presented_signatures,
             });
         }
         if presented_signatures < self.policy.required_quorum {
@@ -369,6 +554,15 @@ impl ColdWalletState {
                 });
             }
         }
+        if request.epoch < self.budget_epoch {
+            return Err(ColdRefusal::EpochRolledBack {
+                last_signed: self.budget_epoch,
+                requested: request.epoch,
+            });
+        }
+        if request.nonce == 0 {
+            return Err(ColdRefusal::NonceZero);
+        }
         if request.nonce <= self.last_signed_nonce {
             return Err(ColdRefusal::NonceReplayed {
                 last_signed: self.last_signed_nonce,
@@ -386,7 +580,13 @@ impl ColdWalletState {
         } else {
             0
         };
-        let total = spent_before.saturating_add(request.value_atoms);
+        let Some(total) = spent_before.checked_add(request.value_atoms) else {
+            return Err(ColdRefusal::EpochBudgetExceeded {
+                spent: spent_before,
+                requested: request.value_atoms,
+                budget: self.policy.max_value_per_epoch_atoms,
+            });
+        };
         if total > self.policy.max_value_per_epoch_atoms {
             return Err(ColdRefusal::EpochBudgetExceeded {
                 spent: spent_before,
@@ -408,6 +608,9 @@ impl ColdWalletState {
             height: request.height,
             nonce: request.nonce,
         };
+        if self.policy.refusal_history_capacity == 0 {
+            return;
+        }
         if self.refusals.len() >= self.policy.refusal_history_capacity {
             self.refusals.remove(0);
         }
@@ -418,20 +621,38 @@ impl ColdWalletState {
     ///
     /// Returns the new epoch. The rotation is recorded with the height, because
     /// a rotation that cannot be tied to a point in the chain cannot be audited.
-    pub fn rotate_key(&mut self, at_height: u64, reason: &str) -> u32 {
-        self.key_epoch = self.key_epoch.saturating_add(1);
+    pub fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
+        if reason.is_empty() {
+            return Err(RotationError::EmptyReason);
+        }
+        if reason.len() > MAX_ROTATION_REASON_BYTES {
+            return Err(RotationError::ReasonTooLong {
+                bytes: reason.len(),
+                maximum: MAX_ROTATION_REASON_BYTES,
+            });
+        }
+        let next = self
+            .key_epoch
+            .checked_add(1)
+            .ok_or(RotationError::EpochExhausted)?;
+        self.key_epoch = next;
+        if self.rotations.len() >= MAX_COLD_ROTATION_HISTORY {
+            self.rotations.remove(0);
+        }
         self.rotations.push(KeyRotation {
             key_epoch: self.key_epoch,
             at_height,
             reason: reason.to_string(),
         });
-        self.key_epoch
+        Ok(self.key_epoch)
     }
 
     /// How much of this epoch's budget remains.
     #[must_use]
     pub fn budget_remaining(&self, epoch: u64) -> u128 {
-        let spent = if epoch == self.budget_epoch {
+        let spent = if epoch < self.budget_epoch {
+            return 0;
+        } else if epoch == self.budget_epoch {
             self.epoch_spent_atoms
         } else {
             0
@@ -465,6 +686,17 @@ mod tests {
             value_atoms: value,
             nonce,
         }
+    }
+
+    #[test]
+    fn an_invalid_policy_fails_closed_before_any_request_is_seen() {
+        let mut cold = ColdWalletState::new(ColdWalletPolicy {
+            required_quorum: 0,
+            ..policy()
+        });
+        let err = cold.sign(&request(10, 1, 500), 1, 0).unwrap_err();
+        assert!(matches!(err, ColdRefusal::InvalidPolicy { .. }));
+        assert_eq!(cold.signed_count, 0);
     }
 
     #[test]
@@ -526,7 +758,9 @@ mod tests {
         // Rotating a leaked key has to actually stop the leak, not stop it at
         // some convenient moment.
         let mut cold = ColdWalletState::new(policy());
-        let new_epoch = cold.rotate_key(100, "suspected leak");
+        let new_epoch = cold
+            .rotate_key(100, "suspected leak")
+            .expect("rotation must fit");
         assert_eq!(new_epoch, 2);
         let err = cold.sign(&request(10, 1, 500), 1, 2).unwrap_err();
         assert_eq!(
@@ -540,6 +774,20 @@ mod tests {
         assert_eq!(cold.rotations.first().map(|r| r.at_height), Some(100));
         cold.sign(&request(10, 1, 500), 2, 2)
             .expect("the new epoch signs");
+    }
+
+    #[test]
+    fn a_future_key_epoch_is_not_accepted_as_current() {
+        let mut cold = ColdWalletState::new(policy());
+        let err = cold.sign(&request(10, 1, 500), 2, 2).unwrap_err();
+        assert_eq!(
+            err,
+            ColdRefusal::KeyEpochAhead {
+                current_epoch: 1,
+                presented: 2
+            }
+        );
+        assert_eq!(cold.signed_count, 0);
     }
 
     #[test]
@@ -650,6 +898,24 @@ mod tests {
     }
 
     #[test]
+    fn an_old_epoch_cannot_reset_the_budget() {
+        let mut cold = ColdWalletState::new(policy());
+        cold.sign(&request(10, 1, 3000), 1, 2).expect("fills epoch 1");
+        let mut old = request(20, 2, 1);
+        old.epoch = 0;
+        let err = cold.sign(&old, 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            ColdRefusal::EpochRolledBack {
+                last_signed: 1,
+                requested: 0
+            }
+        );
+        assert_eq!(cold.epoch_spent_atoms, 3000);
+        assert_eq!(cold.budget_epoch, 1);
+    }
+
+    #[test]
     fn the_refusal_log_is_bounded() {
         // An unbounded refusal log is a way to fill a cold device's storage from
         // the network side - the one attack being offline is supposed to prevent.
@@ -679,6 +945,38 @@ mod tests {
         assert_eq!(cold.epoch_spent_atoms, before.epoch_spent_atoms);
         assert_eq!(cold.signed_count, before.signed_count);
         assert_eq!(cold.refusals.len(), 1, "only the refusal record was added");
+    }
+
+    #[test]
+    fn a_zero_capacity_refusal_log_is_a_valid_no_log_mode() {
+        let mut cold = ColdWalletState::new(ColdWalletPolicy {
+            refusal_history_capacity: 0,
+            ..policy()
+        });
+        let _ = cold.sign(&request(10, 1, 500), 1, 1);
+        assert!(cold.refusals.is_empty());
+    }
+
+    #[test]
+    fn rotation_reason_and_epoch_overflow_fail_closed() {
+        let mut cold = ColdWalletState::new(policy());
+        assert_eq!(
+            cold.rotate_key(10, "").unwrap_err(),
+            RotationError::EmptyReason
+        );
+        assert_eq!(
+            cold.rotate_key(10, &"x".repeat(MAX_ROTATION_REASON_BYTES + 1))
+                .unwrap_err(),
+            RotationError::ReasonTooLong {
+                bytes: MAX_ROTATION_REASON_BYTES + 1,
+                maximum: MAX_ROTATION_REASON_BYTES
+            }
+        );
+        cold.key_epoch = u32::MAX;
+        assert_eq!(
+            cold.rotate_key(10, "exhausted").unwrap_err(),
+            RotationError::EpochExhausted
+        );
     }
 
     #[test]
