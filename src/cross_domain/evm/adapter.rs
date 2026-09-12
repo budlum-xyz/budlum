@@ -103,6 +103,12 @@ impl EvmChainAdapter {
     ///
     /// A message naming which of the two is wrong.
     pub fn check_fit_for_relay(&self) -> Result<(), String> {
+        if self.bridge_address.len() != 20 {
+            return Err(format!(
+                "EVM adapter bridge address must be exactly 20 bytes, got {}",
+                self.bridge_address.len()
+            ));
+        }
         if self.bridge_address.iter().all(|b| *b == 0) {
             return Err(
                 "EVM adapter has a zero bridge address: every receipt leaf binds to this \
@@ -495,6 +501,13 @@ mod tests {
             adapter.wait_for_confirmation("0xabc", 1).await.is_err(),
             "an adapter that cannot produce a proof must not report a successful result"
         );
+    }
+
+    #[test]
+    fn a_bridge_address_with_the_wrong_shape_cannot_be_registered() {
+        let adapter = EvmChainAdapter::new(vec![7u8; 19], DEFAULT_DEPOSIT_TOPIC0);
+        let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
+        assert!(err.contains("exactly 20 bytes"), "got: {err}");
     }
 
     #[test]
