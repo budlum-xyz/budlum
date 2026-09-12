@@ -47,6 +47,7 @@
 pub mod ethereum;
 pub mod profile;
 pub mod prover;
+pub mod quorum;
 pub mod registry;
 pub mod selftest;
 pub mod spec;
@@ -62,6 +63,10 @@ pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEve
 pub use prover::{
     honesty_is_cheaper, required_bond_atoms, ChallengeReward, DomainEconomics, ProverBond,
     ProverFee, Slashing, BOND_RATIO_DEN, BOND_RATIO_NUM, BPS_DEN,
+};
+pub use quorum::{
+    decide, group_answers, lead_is_unassailable, Answer, AnswerGroup, DisputeBehavior,
+    LowParticipantsBehavior, QuorumOutcome, QuorumPolicy,
 };
 pub use registry::{no_backing, DomainRegistration, ExternalDomainRegistry, RegistryError};
 pub use selftest::{
