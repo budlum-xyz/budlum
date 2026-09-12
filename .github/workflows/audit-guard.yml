@@ -1,0 +1,45 @@
+name: Audit Guard
+
+# This is the lightweight review-boundary gate. The heavyweight Rust,
+# dependency, SAST and mutation jobs remain separate; this gate ensures none of
+# them can be bypassed by an unpinned action, a writable PR token, a credential
+# persisted by checkout, a forbidden trigger, or a workflow that pushes.
+
+on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit-guard:
+    name: Audit Guard (fail-closed review boundary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Python version
+        run: python3 --version
+      - name: Guard self-test (a gate must prove it can fail)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/audit_guard.py --self-test
+      - name: Audit workflows and review boundary
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/audit_guard.py
