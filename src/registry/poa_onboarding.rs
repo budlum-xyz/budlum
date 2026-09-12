@@ -164,6 +164,7 @@ pub struct PoAOnboarding {
     audit: Vec<OnboardingEvent>,
     /// Per (domain, account): the block after which the KYC dossier is stale.
     /// Only meaningful for `Approved` members.
+    #[serde(with = "crate::core::map_keys")]
     kyc_expiry: BTreeMap<(DomainId, Address), u64>,
     /// (domain, account) pairs whose expiry has already been logged to the
     /// Audit trail, so the observation is recorded exactly once.

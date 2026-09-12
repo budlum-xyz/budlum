@@ -175,8 +175,10 @@ mod tests {
 
         /// INVARIANT 5: validator reward consistency.
         ///
-        /// calculate_epoch_reward(0) is nothing at all, and a positive stake
-        /// gives a positive reward.
+        /// calculate_epoch_reward(0) is nothing at all, the reward never
+        /// decreases with stake, and a year of epochs never pays more than
+        /// the annual yield the parameters promise (there is no floor that
+        /// could push a dust stake above its share).
         #[test]
         fn epoch_reward_consistency(
             stake in 0..100_000_000_000u64,
@@ -186,9 +188,18 @@ mod tests {
 
             if stake == 0 {
                 assert_eq!(reward, 0, "Zero stake must produce no reward at all");
-            } else {
-                assert!(reward > 0, "Positive stake should produce positive reward");
             }
+            assert!(
+                params.calculate_epoch_reward(stake.saturating_add(1)) >= reward,
+                "the reward must not decrease with stake"
+            );
+            let annual_yield = (stake as u128 * params.validator_annual_yield_ratio_fixed as u128)
+                / crate::core::chain_config::FIXED_POINT_SCALE as u128;
+            let paid = reward as u128 * params.epochs_per_year as u128;
+            assert!(
+                paid <= annual_yield,
+                "a year of epoch rewards ({paid}) exceeds the annual yield ({annual_yield})"
+            );
         }
     }
 }

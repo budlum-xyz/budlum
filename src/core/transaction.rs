@@ -18,11 +18,20 @@ use tracing::debug;
 /// Was 1337, which is Geth Testnet in the public `chainid.network` registry.
 /// See `Network::chain_id` for why the three ids moved.
 pub const DEFAULT_CHAIN_ID: u64 = 45262;
-/// Strict signing format; all non-genesis transaction admission requires V5.
+/// The three signing formats admission accepts, each in its own signing
+/// domain (`BDLM_TX_V4` / `_V5` / `_V6`) with its own address derivation.
 ///
-/// V5 transactions carry an ML-DSA-87 (FIPS 204) public key and signature.
-/// V4 was the retired Ed25519 format and is rejected to prevent a downgrade
-/// path from the post-quantum wallet format.
+/// V4 is the Ed25519 format: `from` is the 32-byte Ed25519 public key
+/// itself. It is what the validator and relayer tooling signs with
+/// ([`Transaction::sign`], consensus-key registration, relay results), so it
+/// stays admissible. V5 is the wallet format: `from` is the hash of an
+/// ML-DSA-87 (FIPS 204) public key, which `verify` recomputes from the
+/// carried key. V6 is the multisig form.
+///
+/// There is no downgrade between them: a V4 signature verifies only against
+/// `from` read as an Ed25519 public key, and a V5 account's `from` is a hash
+/// no Ed25519 secret key is known for, so a V4 signature cannot spend a V5
+/// account (pinned by `a_v4_signature_cannot_spend_a_v5_account`).
 pub const SIGNATURE_VERSION_V4: u32 = 4;
 pub const SIGNATURE_VERSION_V5: u32 = 5;
 /// The transaction form that carries multisig authorization.
@@ -38,8 +47,13 @@ pub const SIGNATURE_VERSION_V5: u32 = 5;
 /// which set spends is bound to the address itself; an attacker cannot spend
 /// somebody else's address with their own owner set.
 pub const SIGNATURE_VERSION_V6: u32 = 6;
+/// Explicit wire/profile identifier for V6 authorizations. The feature gate
+/// selects whether this verifier exists; this identifier selects the exact
+/// algorithm and encoding on the wire. Missing or different values refuse at
+/// admission instead of being guessed from key length.
+pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
-/// The address of a multisig account: the owner set plus the threshold.
+/// The address of a multisig account: the ML-DSA profile, owner set and threshold.
 ///
 /// The address is derived from the set itself. The threshold has to enter the
 /// derivation as well: `2-of-3` and `3-of-3` policies over the same three owners are two different
@@ -54,6 +68,11 @@ pub fn multisig_address(
     sorted.sort_unstable();
     let mut hasher = Sha3_256::new();
     hasher.update(b"BDLM_TX_V6_MULTISIG_ADDRESS");
+    // Commit the algorithm profile to the account identity as well as to the
+    // signed transaction. A future V6 profile cannot alias this account by
+    // reusing the same owner set and threshold.
+    hasher.update((ML_DSA_87_SCHEME_ID.len() as u64).to_le_bytes());
+    hasher.update(ML_DSA_87_SCHEME_ID.as_bytes());
     hasher.update((sorted.len() as u64).to_le_bytes());
     for owner in &sorted {
         hasher.update((owner.len() as u64).to_le_bytes());
@@ -349,6 +368,30 @@ pub enum TransactionType {
     /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
+    /// Domain settlement: apply the nonce writes a verified domain commitment
+    /// carries (decision 50, C3). Replaces the out-of-block account nonce
+    /// writes the live commitment path used to perform; the executor validates
+    /// and applies them inside block execution.
+    StateUpdate {
+        domain_id: crate::domain::types::DomainId,
+        domain_height: u64,
+        state_updates: Vec<(Address, u64)>,
+    },
+    /// Write to the identity master registry (`src/registry/identity.rs`):
+    /// DID registration, credential issue/revoke, guardian-quorum recovery.
+    ///
+    /// Carries the registry's own `IdentityTx` and nothing else. No domain
+    /// field is defined here: the executor's single arm supplies the kind
+    /// read from state, because a caller-declared "this is PoA" is authority
+    /// fabrication - the same refusal the domain-freeze path applies in
+    /// `chain/blockchain.rs`, applied at the identity door.
+    Identity(crate::registry::IdentityTx),
+    /// A folder mutation on the social-fi vault (`src/socialfi/vault.rs`).
+    ///
+    /// Ids only, like the identity door: no owner fields, no folder names -
+    /// what a folder is and what it may hold is `NftRegistry`'s and the
+    /// vault layer's own business, consulted at every operation.
+    Vault(crate::socialfi::VaultTx),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -399,6 +442,9 @@ pub struct Transaction {
 /// cannot point at somebody else's account: the address will not match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultisigAuthorizationV6 {
+    /// Explicit algorithm/profile id. Empty or unknown ids are refused; the
+    /// verifier must never infer a scheme from a key length alone.
+    pub scheme_id: String,
     /// The owner ML-DSA-87 public keys.
     pub owners: Vec<Vec<u8>>,
     /// The number of valid signatures required.
@@ -646,6 +692,9 @@ impl Transaction {
         // unchanged; and if the signatures were included the signature would be
         // signing itself.
         if let Some(auth) = &self.authorization {
+            // The exact algorithm/profile is signed, not merely carried as
+            // metadata. A relay cannot relabel a signature as another scheme.
+            put_string(&mut preimage, &auth.scheme_id);
             let mut sorted: Vec<&Vec<u8>> = auth.owners.iter().collect();
             sorted.sort_unstable();
             put_u64(&mut preimage, sorted.len() as u64);
@@ -707,12 +756,19 @@ impl Transaction {
                 self.from, expected_from
             );
         }
-        self.hash = self.calculate_hash();
+        // Version and key go in before the signing hash is taken: both the
+        // preimage and the domain tag carry the version, so a transaction that
+        // arrives here with a V4 or V6 marker would otherwise be signed under
+        // the wrong domain and then relabelled V5, which `verify` rejects.
+        self.signature_version = SIGNATURE_VERSION_V5;
+        self.signer_public_key = pubkey.to_vec();
+        // A V5 transaction carries no multisig authorization: `verify`
+        // refuses one. A stale V6 authorization left here would enter the
+        // preimage and produce a transaction that can never verify.
+        self.authorization = None;
         let signing_hash = self.signing_hash();
         let signature = keypair.sign(&signing_hash);
         self.signature = Some(signature.to_vec());
-        self.signer_public_key = pubkey.to_vec();
-        self.signature_version = SIGNATURE_VERSION_V5;
         self.hash = self.calculate_hash();
     }
     /// Signs on behalf of a multisig account.
@@ -736,6 +792,7 @@ impl Transaction {
         self.signer_public_key = Vec::new();
         self.signature_version = SIGNATURE_VERSION_V6;
         self.authorization = Some(MultisigAuthorizationV6 {
+            scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
             owners: owners.iter().map(|o| o.to_vec()).collect(),
             threshold: u32::try_from(threshold).unwrap_or(u32::MAX),
             signatures: Vec::new(),
@@ -758,16 +815,12 @@ impl Transaction {
     }
 
     pub fn verify(&self) -> bool {
-        let canonical_genesis = self.from == Address::zero()
-            && self.to == Address::zero()
-            && self.amount == 0
-            && self.fee == 0
-            && self.nonce == 0
-            && self.timestamp == 0
-            && self.chain_id == DEFAULT_CHAIN_ID
-            && self.tx_type == TransactionType::Transfer
-            && self.data == b"BUDLUM_GENESIS_TX"
-            && self.signature.is_none();
+        // The canonical genesis transaction is the one `Transaction::genesis`
+        // builds, field for field. A predicate that named some fields left
+        // `max_fee`, `priority_fee`, `signer_public_key` and `authorization`
+        // free, so a crafted zero-address transaction with a recomputed hash
+        // passed here with no signature at all.
+        let canonical_genesis = self.from == Address::zero() && *self == Self::genesis();
         if self.signature_version != SIGNATURE_VERSION_V6
             && self.signature_version != SIGNATURE_VERSION_V5
             && self.signature_version != SIGNATURE_VERSION_V4
@@ -881,6 +934,10 @@ impl Transaction {
             debug!("V6 transaction carries no authorization");
             return false;
         };
+        if auth.scheme_id != ML_DSA_87_SCHEME_ID {
+            debug!("V6 authorization scheme id is not the supported ML-DSA-87 profile");
+            return false;
+        }
         // The single signature field stays empty in V6: authority lives in the authorization.
         if self.signature.is_some() || !self.signer_public_key.is_empty() {
             debug!("V6 transaction must not carry a single-key signature");
@@ -1117,6 +1174,18 @@ impl Transaction {
             TransactionType::AiOperatorBond
             | TransactionType::AiOperatorUnbond
             | TransactionType::AiOperatorWithdraw => schedule.stake_gas,
+            // One lookup plus one write per state-update entry; priced like a
+            // registry mutation, not a value transfer.
+            TransactionType::StateUpdate { .. } => schedule.contract_call_gas * 2,
+            // Registry mutation for register/issue/revoke; recovery adds a
+            // quorum of ML-DSA verifications whose weight the door bounds by
+            // transaction size, not by a per-approval price. Priced like the
+            // registry arms beside it.
+            TransactionType::Identity(_) => schedule.contract_call_gas * 2,
+            // Same family of registry mutations: the vault ops read
+            // `NftRegistry` beside their own map, which is exactly what the
+            // registry arms already price.
+            TransactionType::Vault(_) => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1152,6 +1221,57 @@ mod tests {
         let genesis = Transaction::genesis();
         assert!(genesis.verify());
         assert!(genesis.is_valid());
+    }
+
+    /// Every field of the genesis transaction is pinned: a zero-address
+    /// transaction that differs in a field the old predicate did not name
+    /// is not genesis and has no signature to fall back on.
+    #[test]
+    fn a_zero_address_transaction_off_genesis_by_any_field_is_refused() {
+        type Edit = Box<dyn Fn(&mut Transaction)>;
+        let variants: Vec<Edit> = vec![
+            Box::new(|tx| tx.max_fee = 1),
+            Box::new(|tx| tx.priority_fee = 1),
+            Box::new(|tx| tx.signer_public_key = vec![1u8; 32]),
+            Box::new(|tx| {
+                tx.authorization = Some(MultisigAuthorizationV6 {
+                    scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
+                    owners: vec![vec![1u8; 32]],
+                    threshold: 1,
+                    signatures: Vec::new(),
+                });
+            }),
+            Box::new(|tx| tx.signature_version = SIGNATURE_VERSION_V4),
+            Box::new(|tx| tx.amount = 1),
+        ];
+        for (i, mutate) in variants.iter().enumerate() {
+            let mut tx = Transaction::genesis();
+            mutate(&mut tx);
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "variant {i} must not pass as genesis");
+            assert!(!tx.is_valid(), "variant {i} must not be valid");
+        }
+    }
+
+    /// A V4 (Ed25519) signature verifies only against `from` read as an
+    /// Ed25519 public key; a V5 account's `from` is a key hash, so no V4
+    /// signature spends it.
+    // `WalletKeyPair` only exists with the (default-on) `wallet-ml-dsa`
+    // feature; without it this test does not compile.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_v4_signature_cannot_spend_a_v5_account() {
+        let wallet = crate::crypto::primitives::WalletKeyPair::generate();
+        let ed = KeyPair::generate().unwrap();
+        let mut tx =
+            Transaction::new_with_fee(wallet.address(), test_addr_from_byte(7u8), 5, 1, 0, vec![]);
+        tx.sign(&ed);
+        assert_eq!(tx.signature_version, SIGNATURE_VERSION_V4);
+        assert_eq!(tx.from, wallet.address(), "the account under attack");
+        assert!(
+            !tx.verify(),
+            "an Ed25519 key cannot sign for a key-hash address"
+        );
     }
     #[test]
     fn test_stake_transaction() {
@@ -1291,6 +1411,9 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::AiOperatorWithdraw => 41,
         TransactionType::RegisterConsensusKeys(_) => 42,
         TransactionType::BudlumxyzAttestApp { .. } => 43,
+        TransactionType::StateUpdate { .. } => 44,
+        TransactionType::Identity(_) => 45,
+        TransactionType::Vault(_) => 46,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1335,6 +1458,126 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
     encode_message_kind(&message.kind, out);
     put_u64(out, message.expiry_height);
 }
+/// Canonical preimage of a vault transaction. Fixed-width ids throughout -
+/// there is nothing variable-length to length-prefix here, and the
+/// operation tag is the only separation the shape needs (an id is an id in
+/// every arm, so `AddMember{1,2}` and `ExtractMember{1,2}` must not be able
+/// to sign for each other; the tag byte is what keeps them apart).
+fn encode_vault_tx(tx: &crate::socialfi::VaultTx, out: &mut Vec<u8>) {
+    match tx {
+        crate::socialfi::VaultTx::RegisterFolder { folder } => {
+            put_u8(out, 0);
+            put_u64(out, *folder);
+        }
+        crate::socialfi::VaultTx::CloseFolder { folder } => {
+            put_u8(out, 1);
+            put_u64(out, *folder);
+        }
+        crate::socialfi::VaultTx::AddMember { folder, member } => {
+            put_u8(out, 2);
+            put_u64(out, *folder);
+            put_u64(out, *member);
+        }
+        crate::socialfi::VaultTx::ExtractMember { folder, member } => {
+            put_u8(out, 3);
+            put_u64(out, *folder);
+            put_u64(out, *member);
+        }
+        crate::socialfi::VaultTx::MoveMember { from, to, member } => {
+            put_u8(out, 4);
+            put_u64(out, *from);
+            put_u64(out, *to);
+            put_u64(out, *member);
+        }
+    }
+}
+
+/// Canonical preimage of an identity transaction. Every pub field of every
+/// carried struct is written explicitly - nothing is bincode-ed here: bincode
+/// is the wire format, and the signature preimage is the consensus commitment
+/// (the `wire-fields-are-signed` gate enforces the coverage in both
+/// directions of drift).
+fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
+    match tx {
+        crate::registry::IdentityTx::Register { record } => {
+            put_u8(out, 0);
+            encode_identity_record(record, out);
+        }
+        crate::registry::IdentityTx::Issue { credential } => {
+            put_u8(out, 1);
+            encode_credential_commitment(credential, out);
+        }
+        crate::registry::IdentityTx::Revoke { credential } => {
+            put_u8(out, 2);
+            encode_credential_commitment(credential, out);
+        }
+        crate::registry::IdentityTx::Recover {
+            subject,
+            new_key,
+            approvals,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, subject.as_bytes());
+            put_fixed(out, new_key);
+            put_u64(out, approvals.len() as u64);
+            for approval in approvals {
+                put_bytes(out, &approval.public_key);
+                put_bytes(out, &approval.signature);
+            }
+        }
+    }
+}
+fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Vec<u8>) {
+    put_fixed(out, record.subject.as_bytes());
+    put_u64(out, record.methods.len() as u64);
+    for method in &record.methods {
+        put_fixed(out, &method.key_id);
+        // A closed set today: one scheme, one tag. When `MethodKind` grows,
+        // this match must grow with it - a new scheme folding into the old
+        // tag would sign two different records alike.
+        put_u8(
+            out,
+            match method.kind {
+                crate::registry::MethodKind::MlDsa87 => 0,
+            },
+        );
+        match method.revoked_at {
+            None => put_u8(out, 0),
+            Some(revoked_at) => {
+                put_u8(out, 1);
+                put_u64(out, revoked_at);
+            }
+        }
+    }
+    put_option_fixed32(out, record.credential_root);
+    put_u64(out, record.guardians.len() as u64);
+    for guardian in &record.guardians {
+        put_fixed(out, guardian.as_bytes());
+    }
+    put_u64(out, record.recovery_threshold as u64);
+}
+fn encode_credential_commitment(
+    credential: &crate::registry::CredentialCommitment,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, credential.issuer.as_bytes());
+    put_fixed(out, credential.subject.as_bytes());
+    put_string(out, &credential.schema);
+    put_u64(out, credential.fields.len() as u64);
+    for field in &credential.fields {
+        put_string(out, &field.name);
+        put_fixed(out, &field.commitment);
+    }
+    put_u64(out, credential.issued_at);
+    match credential.expires_at {
+        None => put_u8(out, 0),
+        Some(expires_at) => {
+            put_u8(out, 1);
+            put_u64(out, expires_at);
+        }
+    }
+}
+
 fn encode_pollen_asset(asset: &crate::pollen::DataAsset, out: &mut Vec<u8>) {
     put_fixed(out, &asset.asset_id.0);
     put_fixed(out, asset.owner.as_bytes());
@@ -1658,10 +1901,26 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                     put_u64(out, pi.exit_code);
                     put_u64(out, pi.trace_len);
                     put_fixed(out, &pi.event_digest);
+                    put_fixed(out, &pi.state_writes_digest);
                 }
                 None => put_u8(out, 0),
             }
         }
+        TransactionType::StateUpdate {
+            domain_id,
+            domain_height,
+            state_updates,
+        } => {
+            put_u32(out, *domain_id);
+            put_u64(out, *domain_height);
+            put_u64(out, state_updates.len() as u64);
+            for (addr, nonce) in state_updates {
+                put_fixed(out, addr.as_bytes());
+                put_u64(out, *nonce);
+            }
+        }
+        TransactionType::Identity(identity_tx) => encode_identity_tx(identity_tx, out),
+        TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
     }
 }
 
@@ -1677,6 +1936,231 @@ mod v29_signing_tests {
         tx.sign(&keypair);
         assert!(tx.verify());
         tx
+    }
+
+    /// Every field an identity transaction carries must reach the signing
+    /// preimage: flip one at a time, the hash must change. The
+    /// `wire-fields-are-signed` gate proves the encoder MENTIONS each field;
+    /// this proves the mention actually appends bytes. The issue/revoke pair
+    /// pins the operation tag: one struct, two meanings, and only the tag
+    /// distinguishes them.
+    #[test]
+    fn identity_preimage_covers_every_field_it_claims() {
+        use crate::registry::{
+            CredentialCommitment, FieldCommitment, GuardianApproval, IdentityRecord, IdentityTx,
+            MethodKind, VerificationMethod,
+        };
+        let base_record = IdentityRecord {
+            subject: test_addr_from_byte(1u8),
+            methods: vec![VerificationMethod {
+                key_id: [7u8; 32],
+                kind: MethodKind::MlDsa87,
+                revoked_at: None,
+            }],
+            credential_root: None,
+            guardians: vec![],
+            recovery_threshold: 0,
+        };
+        let base_credential = CredentialCommitment {
+            issuer: test_addr_from_byte(2u8),
+            subject: test_addr_from_byte(1u8),
+            schema: "kyc".to_string(),
+            fields: vec![FieldCommitment {
+                name: "age".to_string(),
+                commitment: [3u8; 32],
+            }],
+            issued_at: 10,
+            expires_at: Some(20),
+        };
+        let base_approval = GuardianApproval {
+            public_key: vec![4u8; 8],
+            signature: vec![5u8; 9],
+        };
+        let hash_of = |tx_type: TransactionType| -> String {
+            let mut tx = Transaction::new_with_fee(
+                test_addr_from_byte(1u8),
+                test_addr_from_byte(7u8),
+                0,
+                1,
+                0,
+                vec![],
+            );
+            tx.tx_type = tx_type;
+            tx.calculate_hash()
+        };
+        let register =
+            |record: IdentityRecord| TransactionType::Identity(IdentityTx::Register { record });
+        let issue = |credential: CredentialCommitment| {
+            TransactionType::Identity(IdentityTx::Issue { credential })
+        };
+
+        let base_register = hash_of(register(base_record.clone()));
+        let mut r = base_record.clone();
+        r.subject = test_addr_from_byte(9u8);
+        assert_ne!(base_register, hash_of(register(r)), "subject");
+        let mut r = base_record.clone();
+        r.methods[0].key_id = [8u8; 32];
+        assert_ne!(base_register, hash_of(register(r)), "method key_id");
+        let mut r = base_record.clone();
+        r.methods[0].revoked_at = Some(5);
+        assert_ne!(base_register, hash_of(register(r)), "method revoked_at");
+        let mut r = base_record.clone();
+        r.methods.push(VerificationMethod {
+            key_id: [9u8; 32],
+            kind: MethodKind::MlDsa87,
+            revoked_at: None,
+        });
+        assert_ne!(base_register, hash_of(register(r)), "methods count");
+        let mut r = base_record.clone();
+        r.credential_root = Some([6u8; 32]);
+        assert_ne!(base_register, hash_of(register(r)), "credential_root");
+        let mut r = base_record.clone();
+        r.guardians = vec![test_addr_from_byte(4u8)];
+        assert_ne!(base_register, hash_of(register(r)), "guardians");
+        let mut r = base_record.clone();
+        r.recovery_threshold = 1;
+        assert_ne!(base_register, hash_of(register(r)), "recovery_threshold");
+
+        let base_issue = hash_of(issue(base_credential.clone()));
+        let mut c = base_credential.clone();
+        c.issuer = test_addr_from_byte(8u8);
+        assert_ne!(base_issue, hash_of(issue(c)), "issuer");
+        let mut c = base_credential.clone();
+        c.subject = test_addr_from_byte(9u8);
+        assert_ne!(base_issue, hash_of(issue(c)), "credential subject");
+        let mut c = base_credential.clone();
+        c.schema = "kyc2".to_string();
+        assert_ne!(base_issue, hash_of(issue(c)), "schema");
+        let mut c = base_credential.clone();
+        c.fields[0].name = "older".to_string();
+        assert_ne!(base_issue, hash_of(issue(c)), "field name");
+        let mut c = base_credential.clone();
+        c.fields[0].commitment = [4u8; 32];
+        assert_ne!(base_issue, hash_of(issue(c)), "field commitment");
+        let mut c = base_credential.clone();
+        c.issued_at = 11;
+        assert_ne!(base_issue, hash_of(issue(c)), "issued_at");
+        let mut c = base_credential.clone();
+        c.expires_at = None;
+        assert_ne!(base_issue, hash_of(issue(c)), "expires_at");
+
+        // Issue and Revoke carry the same struct; only the operation tag
+        // separates them. If the tag were dropped from the preimage, a
+        // signed revocation would verify as an issuance.
+        assert_ne!(
+            base_issue,
+            hash_of(TransactionType::Identity(IdentityTx::Revoke {
+                credential: base_credential.clone()
+            })),
+            "issue vs revoke is only the operation tag"
+        );
+
+        // The vault door's same-shape pair: AddMember and ExtractMember
+        // carry identical id tuples with opposite meanings, and a missing
+        // tag here would let a signed "put it in" be replayed as a
+        // "take it out".
+        use crate::socialfi::VaultTx;
+        let add = hash_of(TransactionType::Vault(VaultTx::AddMember {
+            folder: 1,
+            member: 2,
+        }));
+        let extract = hash_of(TransactionType::Vault(VaultTx::ExtractMember {
+            folder: 1,
+            member: 2,
+        }));
+        let close = hash_of(TransactionType::Vault(VaultTx::CloseFolder { folder: 1 }));
+        assert_ne!(add, extract, "add vs extract is only the operation tag");
+        assert_ne!(add, close, "folder-only ops must not alias membership ops");
+        // Field coverage: every id, in every position.
+        let add_moved = hash_of(TransactionType::Vault(VaultTx::AddMember {
+            folder: 1,
+            member: 3,
+        }));
+        assert_ne!(add, add_moved, "member must reach the preimage");
+        let move_ = hash_of(TransactionType::Vault(VaultTx::MoveMember {
+            from: 1,
+            to: 2,
+            member: 3,
+        }));
+        let move_other_target = hash_of(TransactionType::Vault(VaultTx::MoveMember {
+            from: 1,
+            to: 9,
+            member: 3,
+        }));
+        assert_ne!(move_, move_other_target, "move destination must reach it");
+        let move_other_source = hash_of(TransactionType::Vault(VaultTx::MoveMember {
+            from: 8,
+            to: 2,
+            member: 3,
+        }));
+        assert_ne!(move_, move_other_source, "move source must reach it");
+
+        let recover = |subject: Address, new_key: [u8; 32], approvals: Vec<GuardianApproval>| {
+            TransactionType::Identity(IdentityTx::Recover {
+                subject,
+                new_key,
+                approvals,
+            })
+        };
+        let base_recover = hash_of(recover(
+            test_addr_from_byte(1u8),
+            [9u8; 32],
+            vec![base_approval.clone()],
+        ));
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(8u8),
+                [9u8; 32],
+                vec![base_approval.clone()]
+            )),
+            "recover subject"
+        );
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [10u8; 32],
+                vec![base_approval.clone()]
+            )),
+            "new_key"
+        );
+        let mut other_key = base_approval.clone();
+        other_key.public_key = vec![4u8; 9];
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [9u8; 32],
+                vec![other_key]
+            )),
+            "approval public_key"
+        );
+        let mut other_sig = base_approval.clone();
+        other_sig.signature = vec![6u8; 9];
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [9u8; 32],
+                vec![other_sig]
+            )),
+            "approval signature"
+        );
+        assert_ne!(
+            base_recover,
+            hash_of(recover(test_addr_from_byte(1u8), [9u8; 32], vec![])),
+            "approval count zero"
+        );
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [9u8; 32],
+                vec![base_approval.clone(), base_approval.clone()]
+            )),
+            "approval count two"
+        );
     }
 
     #[test]
@@ -1704,6 +2188,26 @@ mod v29_signing_tests {
             nft_id: 7,
             tag: "tampered".into(),
         };
+        assert!(!tx.verify());
+    }
+
+    #[test]
+    fn state_update_payload_tampering_invalidates_signature() {
+        let mut tx = signed_variant(TransactionType::StateUpdate {
+            domain_id: 7,
+            domain_height: 42,
+            state_updates: vec![
+                (test_addr_from_byte(3u8), 10),
+                (test_addr_from_byte(9u8), 11),
+            ],
+        });
+        let original_hash = tx.hash.clone();
+        if let TransactionType::StateUpdate { state_updates, .. } = &mut tx.tx_type {
+            state_updates[0].1 = 999;
+        } else {
+            unreachable!("variant must stay StateUpdate");
+        }
+        assert_ne!(tx.calculate_hash(), original_hash);
         assert!(!tx.verify());
     }
 
@@ -1876,6 +2380,7 @@ mod v29_signing_tests {
              aims the proof at a different registration"
         );
 
+        let proof_with_writes = proof.clone();
         let mut tx = signed_variant(TransactionType::AiAttachExecutionProof {
             request_id: crate::ai::types::AiRequestId([0u8; 32]),
             proof,
@@ -1892,6 +2397,24 @@ mod v29_signing_tests {
         assert!(
             !tx.verify(),
             "the public inputs are the claim the STARK is checked against"
+        );
+
+        let mut tx = signed_variant(TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId([0u8; 32]),
+            proof: proof_with_writes,
+        });
+        let TransactionType::AiAttachExecutionProof {
+            proof: attached, ..
+        } = &mut tx.tx_type
+        else {
+            unreachable!();
+        };
+        if let Some(pi) = attached.public_inputs.as_mut() {
+            pi.state_writes_digest = [9u8; 32];
+        }
+        assert!(
+            !tx.verify(),
+            "the write-set digest is part of the claim; it is signed like the rest"
         );
     }
 
@@ -2059,6 +2582,45 @@ mod v29_signing_tests {
             assert!(!tx.verify(), "the set is signed and cannot be altered");
         }
 
+        /// A profile relabel is not accepted, even when the transaction hash is
+        /// recomputed: the scheme id is an admission binding, not a hint.
+        #[test]
+        fn an_unknown_mldsa_scheme_id_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            tx.authorization.as_mut().unwrap().scheme_id = "ml-dsa-87-unknown".into();
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "unknown ML-DSA profile must fail closed");
+        }
+
+        /// A transaction that arrives at `sign_v5` under another version marker
+        /// is still signed and verified in the V5 domain.
+        #[test]
+        fn sign_v5_signs_in_the_v5_domain_whatever_the_prior_version() {
+            let keypair = WalletKeyPair::generate();
+            for prior in [SIGNATURE_VERSION_V4, SIGNATURE_VERSION_V6] {
+                let mut tx = tx_for(keypair.address());
+                tx.signature_version = prior;
+                // A stale multisig authorization is dropped by the V5 signer
+                // rather than being signed into a transaction that cannot verify.
+                tx.authorization = Some(MultisigAuthorizationV6 {
+                    scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
+                    owners: vec![keypair.public_key_bytes().to_vec()],
+                    threshold: 1,
+                    signatures: Vec::new(),
+                });
+                tx.sign_v5(&keypair);
+                assert_eq!(tx.signature_version, SIGNATURE_VERSION_V5);
+                assert!(tx.authorization.is_none());
+                assert!(
+                    tx.verify(),
+                    "prior version {prior} must not leak into the hash"
+                );
+                assert_eq!(tx.hash, tx.calculate_hash());
+            }
+        }
+
         /// A V5 transaction cannot carry an authorization.
         #[test]
         fn a_v5_transaction_carrying_an_authorization_is_refused() {
@@ -2067,6 +2629,7 @@ mod v29_signing_tests {
             tx.sign_v5(&keypair);
             assert!(tx.verify());
             tx.authorization = Some(MultisigAuthorizationV6 {
+                scheme_id: ML_DSA_87_SCHEME_ID.to_string(),
                 owners: vec![keypair.public_key_bytes().to_vec()],
                 threshold: 1,
                 signatures: Vec::new(),

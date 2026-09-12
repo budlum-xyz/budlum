@@ -1683,11 +1683,21 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //      the proof never commits to the VM's post-execution storage
         //      writes; a storage-mutating program could verify while its
         //      actual state transition stayed unbound.
+        //
+        //      This body once compared `COL_FINAL_ROOT_0` against
+        //      `public[18..26]`, a second copy of (2), so the digest was not
+        //      bound at all and a proof carrying any `state_writes_digest`
+        //      verified (measured 2026-09-03: a storage-writing program proved
+        //      and verified with an all-zero digest). The post-proof tamper
+        //      tests did not notice because Fiat-Shamir refuses any public
+        //      value changed after proving; only a wrong value baked in before
+        //      proving reaches this constraint. `soundness_negatives.rs`
+        //      now bakes one in.
         for j in 0..8 {
             builder
                 .when(is_halt.clone())
                 .when(cpu_active.clone())
-                .assert_zero(cur[COL_FINAL_ROOT_0 + j].into() - public_inputs[18 + j].into());
+                .assert_zero(cur[COL_STATE_WRITES_0 + j].into() - public_inputs[48 + j].into());
         }
 
         // (2c) state-write accumulator carry + first-row zero (HIGH)

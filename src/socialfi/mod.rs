@@ -9,6 +9,9 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod vault;
+pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NftRegistry {
     /// Id -> nft
@@ -64,7 +67,13 @@ impl NftRegistry {
         };
         self.nfts.insert(id, nft);
         self.ownership.entry(owner).or_default().push(id);
-        self.next_id += 1;
+        // The counter saturates at the terminal id instead of wrapping: at
+        // `u64::MAX` the increment stays put, the terminal id remains live
+        // in `nfts`, and the duplicate check above refuses every further
+        // mint. A wrapping counter would have re-offered burned ids. The
+        // exhaustion check sits on the duplicate guard, so no registry
+        // mutation can happen that the increment then fails to describe.
+        self.next_id = self.next_id.saturating_add(1);
         Ok(id)
     }
 
@@ -97,9 +106,14 @@ impl NftRegistry {
             return Err(NftError::NotOwner);
         }
 
-        // Update ownership map
+        // Update ownership map. An owner whose list becomes empty loses the
+        // entry itself: keeping it would grow snapshots and state roots with
+        // owners that hold nothing.
         if let Some(list) = self.ownership.get_mut(from) {
             list.retain(|&x| x != id);
+            if list.is_empty() {
+                self.ownership.remove(from);
+            }
         }
         self.ownership.entry(to).or_default().push(id);
 
@@ -115,10 +129,14 @@ impl NftRegistry {
 
         let cid = nft.content_id;
 
-        // Remove from everywhere
+        // Remove from everywhere; an emptied ownership list drops its key
+        // for the same reason `transfer` drops it.
         self.nfts.remove(&id);
         if let Some(list) = self.ownership.get_mut(owner) {
             list.retain(|&x| x != id);
+            if list.is_empty() {
+                self.ownership.remove(owner);
+            }
         }
 
         Ok(cid)
@@ -137,10 +155,20 @@ impl NftRegistry {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_NFT_REGISTRY_V5");
+        // V6: collections carry their counts, the record commits its own
+        // id next to the map key, and the tag list is counted, so the
+        // stream has one parse.
+        //
+        // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
+        // for the shared rule - the V-bumped roots activate with the USL
+        // genesis, there is no pre-launch mainnet state to migrate, and a
+        // post-launch bump needs its migration recorded in the same commit.
+        hasher.update(b"BDLM_NFT_REGISTRY_V6");
         hasher.update(self.next_id.to_le_bytes());
+        hasher.update((self.nfts.len() as u64).to_le_bytes());
         for (id, nft) in &self.nfts {
             hasher.update(id.to_le_bytes());
+            hasher.update(nft.id.to_le_bytes());
             hasher.update(nft.owner.0);
             hasher.update(nft.content_id.0);
             hasher.update(nft.luminance.to_le_bytes());
@@ -153,19 +181,25 @@ impl NftRegistry {
             match nft.author_name.as_ref() {
                 Some(name) => {
                     hasher.update(b"name:");
-                    hasher.update(name.len().to_le_bytes());
+                    // u64, not usize: `usize::to_le_bytes` is four bytes on
+                    // a 32-bit target and eight on a 64-bit one, so the two
+                    // would hash different roots for the same registry.
+                    hasher.update((name.len() as u64).to_le_bytes());
                     hasher.update(name.as_bytes());
                 }
                 None => hasher.update(b"noname"),
             }
+            hasher.update((nft.tags.len() as u64).to_le_bytes());
             for tag in &nft.tags {
                 hasher.update(b"tag:");
-                hasher.update(tag.len().to_le_bytes());
+                hasher.update((tag.len() as u64).to_le_bytes());
                 hasher.update(tag.as_bytes());
             }
         }
+        hasher.update((self.ownership.len() as u64).to_le_bytes());
         for (owner, ids) in &self.ownership {
             hasher.update(owner.0);
+            hasher.update((ids.len() as u64).to_le_bytes());
             for id in ids {
                 hasher.update(id.to_le_bytes());
             }
@@ -177,6 +211,49 @@ impl NftRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An owner whose last NFT leaves them drops out of the ownership map
+    /// entirely; the map never carries an owner with an empty id list.
+    #[test]
+    fn emptied_ownership_entries_are_removed() {
+        let mut reg = NftRegistry::new();
+        let alice = Address::from([1u8; 32]);
+        let bob = Address::from([2u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let id = reg.mint(alice, cid, 0, None).expect("mint");
+        reg.transfer(id, &alice, bob).expect("transfer");
+        assert!(
+            !reg.ownership.contains_key(&alice),
+            "transfer emptied alice"
+        );
+        reg.burn(id, &bob).expect("burn");
+        assert!(!reg.ownership.contains_key(&bob), "burn emptied bob");
+        assert!(reg.ownership.is_empty());
+    }
+
+    /// The mint counter saturates at the terminal id: the id itself mints,
+    /// the registry stays consistent, and the next mint is refused instead
+    /// of wrapping to a reused id.
+    #[test]
+    fn the_terminal_id_mints_once_and_then_refuses() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        reg.next_id = u64::MAX;
+        let id = reg
+            .mint(owner, cid, 0, None)
+            .expect("the terminal id mints");
+        assert_eq!(id, u64::MAX);
+        assert_eq!(
+            reg.next_id,
+            u64::MAX,
+            "the counter saturates, it does not wrap"
+        );
+        let err = reg
+            .mint(owner, cid, 0, None)
+            .expect_err("a second mint is refused");
+        assert!(matches!(err, NftError::DuplicateId));
+    }
 
     /// Regression: luminance overflow to u64::MAX must be clamped.
     #[test]
@@ -211,6 +288,30 @@ mod tests {
         let root_before = reg.root();
         reg.transfer(id, &owner, new_owner).unwrap();
         assert_ne!(root_before, reg.root());
+    }
+
+    /// The ownership section commits each owner's id count, so ids cannot
+    /// move between two owners without moving the root; and a record's own
+    /// `id` is committed next to its map key.
+    #[test]
+    fn root_distinguishes_ownership_boundaries() {
+        let alice = Address::from([1u8; 32]);
+        let bob = Address::from([2u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let mut a = NftRegistry::new();
+        let first = a.mint(alice, cid, 0, None).unwrap();
+        let second = a.mint(alice, cid, 0, None).unwrap();
+        a.mint(bob, cid, 0, None).unwrap();
+        let mut b = a.clone();
+        // Same ids, same owners in the map, but the ownership vectors are
+        // rearranged so the concatenated id bytes stay identical.
+        b.ownership.insert(alice, vec![first]);
+        b.ownership.insert(bob, vec![second, 2]);
+        assert_ne!(a.root(), b.root(), "id counts per owner are committed");
+
+        let mut c = a.clone();
+        c.nfts.get_mut(&first).unwrap().id = 99;
+        assert_ne!(a.root(), c.root(), "the record's own id is committed");
     }
 
     /// A counter that disagrees with the map must not overwrite an NFT.

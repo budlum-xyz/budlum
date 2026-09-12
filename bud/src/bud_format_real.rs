@@ -35,11 +35,19 @@ pub fn zstd_decompress_safe(bytes: &[u8], max_out: u64) -> Option<Vec<u8>> {
             return None; // bomb: the frame claims an original size above the ceiling
         }
     }
-    let mut dec = zstd::stream::read::Decoder::new(bytes).ok()?;
+    // The header check above only helps when the frame states its content
+    // size; a streaming frame states none, and the old code then decompressed
+    // the whole stream into memory and compared the length afterwards, which
+    // is the bomb the ceiling exists to stop. Read at most `max_out + 1`
+    // bytes: one past the ceiling is enough to know the stream is too large,
+    // and nothing beyond that is ever allocated.
+    let dec = zstd::stream::read::Decoder::new(bytes).ok()?;
     let mut out = Vec::new();
-    dec.read_to_end(&mut out).ok()?;
+    dec.take(max_out.saturating_add(1))
+        .read_to_end(&mut out)
+        .ok()?;
     if out.len() as u64 > max_out {
-        return None; // defence: the output still cannot pass the ceiling
+        return None; // the stream passed the ceiling; it is refused, not held
     }
     Some(out)
 }
@@ -181,6 +189,36 @@ mod tests {
         assert!(
             zstd_decompress_safe(&c, 1024).is_none(),
             "passing the ceiling must return None"
+        );
+    }
+
+    /// A frame written without its content size (the streaming encoder does
+    /// this) bypassed the header check and was fully decompressed before the
+    /// ceiling was compared. It is now refused at the ceiling, and the
+    /// refusal is reached by reading at most one byte past it.
+    #[test]
+    fn a_streaming_frame_past_the_ceiling_is_refused_without_being_held() {
+        use std::io::Write;
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("encoder");
+        for _ in 0..64 {
+            enc.write_all(&[0u8; 4096]).expect("write");
+        }
+        let frame = enc.finish().expect("finish"); // 256 KiB of zeros, no content size
+        assert_eq!(
+            zstd::zstd_safe::get_frame_content_size(&frame)
+                .ok()
+                .flatten(),
+            None,
+            "the fixture must be a frame without a stated size, or the header check hides the path"
+        );
+        assert!(
+            zstd_decompress_safe(&frame, 4096).is_none(),
+            "past the ceiling: refused"
+        );
+        assert_eq!(
+            zstd_decompress_safe(&frame, 256 * 1024).map(|v| v.len()),
+            Some(256 * 1024),
+            "at the ceiling: accepted"
         );
     }
 }

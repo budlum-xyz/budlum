@@ -209,14 +209,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-ratio-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .subsec_nanos()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ratio")?;
     std::fs::create_dir_all(dir.join("bud/src")).map_err(|e| e.to_string())?;
     let good = "pub fn candidates_for_format(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {\n    match class {\n        BudFormatClass::Json => vec![\n            RatioCandidate { pipe_id: 1, pipe_name: \"flat\", ratio: 1.2, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Ndjson => vec![\n            RatioCandidate { pipe_id: 2, pipe_name: \"CDC16K+zstd\", ratio: 15.5, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Binary => vec![\n            RatioCandidate { pipe_id: 3, pipe_name: \"xz9\", ratio: 17.0, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Mixed => vec![\n            RatioCandidate { pipe_id: 4, pipe_name: \"zstd19\", ratio: 6.0, payload: original.to_vec(), flags: f() },\n        ],\n    }\n}\n";
     std::fs::write(dir.join("bud/src/bud_format.rs"), good).map_err(|e| e.to_string())?;

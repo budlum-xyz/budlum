@@ -785,19 +785,14 @@ impl MultiRatioConsensus {
             .filter(|c| c.ratio >= required || c.flags.is_device_only())
             .cloned()
             .collect();
-        if !passing.is_empty() {
-            passing.sort_by(|a, b| b.ratio.total_cmp(&a.ratio)); // K38: total_cmp NaN'da panik yapmaz
-            Some(passing[0].clone())
-        } else {
-            // keep with device_only
-            let mut filtered2: Vec<_> =
-                Self::candidates_for_format(BudFormatClass::Image, b"dummy")
-                    .into_iter()
-                    .filter(|c| c.flags.is_device_only())
-                    .collect();
-            filtered2.sort_by(|a, b| b.ratio.total_cmp(&a.ratio)); // K38
-            filtered2.into_iter().next()
-        }
+        // `total_cmp`: a NaN ratio must not panic the sort.
+        passing.sort_by(|a, b| b.ratio.total_cmp(&a.ratio));
+        // No candidate: the callers store the original bytes verbatim. There
+        // used to be a fallback here that pulled the Image list's device-only
+        // candidates built over the literal `b"dummy"`, so a caller that
+        // trusted the returned payload wrote five bytes of "dummy" in place of
+        // the user's data.
+        passing.into_iter().next()
     }
 }
 
@@ -1052,6 +1047,49 @@ mod tests {
         let mut plain = f.clone();
         plain.header.flags = BudFlags(0);
         assert!(plain.decode().is_ok());
+    }
+
+    /// When no candidate passes, `select_best` says so. It used to answer
+    /// with a device-only candidate whose payload was the literal `b"dummy"`,
+    /// which a caller then encoded as the file's data.
+    #[test]
+    fn select_best_without_a_passing_candidate_returns_none() {
+        let data = b"the user's bytes";
+        let none = MultiRatioConsensus::select_best(
+            MultiRatioConsensus::candidates_for_format(BudFormatClass::Json, data),
+            1_000.0,
+        );
+        assert!(none.is_none());
+        for class in [
+            BudFormatClass::Json,
+            BudFormatClass::Image,
+            BudFormatClass::Jpeg,
+            BudFormatClass::Png,
+            BudFormatClass::Pdf,
+        ] {
+            for c in MultiRatioConsensus::candidates_for_format(class, data) {
+                assert_ne!(
+                    c.payload, b"dummy",
+                    "{}: no placeholder payload",
+                    c.pipe_name
+                );
+            }
+            if let Some(c) = MultiRatioConsensus::select_best(
+                MultiRatioConsensus::candidates_for_format(class, data),
+                1_000.0,
+            ) {
+                assert!(
+                    c.flags.is_device_only(),
+                    "{}: only device_only may pass",
+                    c.pipe_name
+                );
+                assert_eq!(
+                    c.payload, data,
+                    "{}: the payload is the user's data",
+                    c.pipe_name
+                );
+            }
+        }
     }
 
     #[test]

@@ -436,6 +436,15 @@ pub trait BudlumApi {
     /// refused here, not at the viewer. The returned session id is served by
     /// `bud_storageRevealFrames`; sessions are capped at
     /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
+    ///
+    /// The viewer is not a field: `viewer_claim` is
+    /// `{viewerPublicKey, signature, issuedAt}`, an ML-DSA-87 signature by the
+    /// viewer's own key over `view_claim_digest(content, viewer, key_id,
+    /// owner, payload_commitment(packed), issuedAt)`. The viewer address is
+    /// derived from the key, so a caller cannot name a grantee it is not; a
+    /// claim older than `VIEW_CLAIM_MAX_AGE_SECS` is refused. `owner` is
+    /// checked against the owner the chain recorded for `content_id` and a
+    /// mismatch is refused by name (`-32006`) before any grant is looked up.
     #[method(name = "bud_storageOpenReveal")]
     async fn storage_open_reveal(
         &self,
@@ -443,7 +452,7 @@ pub trait BudlumApi {
         recipe: serde_json::Value,
         full_public: Option<serde_json::Value>,
         packed: String,
-        viewer: String,
+        viewer_claim: serde_json::Value,
         owner: String,
         key_id: String,
         meter_budget: Option<u64>,
@@ -491,6 +500,27 @@ pub trait BudlumApi {
         operator: String,
         payer: String,
         replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Accept a reallocation (repair) ticket: the replacement operator
+    /// opens the replacement deal for the ticket's slot, paying the same
+    /// escrow and bond shape as the original open. The placement (manifest,
+    /// shard, replica) is decided by the ticket, not the caller.
+    #[method(name = "bud_storageAcceptReallocation")]
+    async fn storage_accept_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: String,
+        payer: String,
         start_epoch: u64,
         end_epoch: u64,
         economics: crate::domain::storage_deal::StorageEconomicsParams,
@@ -851,8 +881,6 @@ pub trait BudlumApi {
     #[method(name = "bud_aiGetModel")]
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a model registration transaction.
-    #[method(name = "bud_aiRegisterModel")]
     /// Prepare an AI model registration transaction template.
     ///
     /// The governance-tunable registration fee
@@ -860,12 +888,10 @@ pub trait BudlumApi {
     /// `tx.amount`; the template sets amount 0 - the caller signs the final
     /// amount. Below-fee registrations are rejected atomically by the
     /// executor (`ai_model_register_fee_insufficient`).
-    /// Register an AI model (template; the governance-tunable registration
-    /// fee must be attached as tx.amount - see `ai_model_register_fee`).
     ///
-    /// The modality bits (`ModalitySet`). Absent means the old behaviour
-    /// (`text_only`). 0 reads nothing (`none` - a deliberate refusal). 1 is
-    /// text.
+    /// `modality_bits` carries the modality bits (`ModalitySet`). Absent
+    /// means the old behaviour (`text_only`). 0 reads nothing (`none` - a
+    /// deliberate refusal). 1 is text.
     #[method(name = "bud_aiRegisterModel")]
     async fn ai_register_model(
         &self,
@@ -1061,4 +1087,35 @@ pub trait BudlumApi {
     /// Fail-closed flags for scheduler, worker, proof, and settlement wiring.
     #[method(name = "bud_aiInferenceStats")]
     async fn ai_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The DID document of a `did:bud:<hex>` subject, as the master registry
+    /// holds it: methods with their revocation state AT THIS READ'S EPOCH,
+    /// the credential root, guardians, and the recovery threshold.
+    ///
+    /// A malformed DID is a refused call, an absent document is `null`: the
+    /// two answers must stay tellable apart or a consent screen cannot render
+    /// "not registered yet" differently from "typo".
+    #[method(name = "bud_identityResolve")]
+    async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// One credential commitment by id, with the registry's own validity
+    /// verdict at the current epoch. The commitment is what the chain holds;
+    /// the values were never on it.
+    #[method(name = "bud_identityCredential")]
+    async fn identity_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-verify a wallet's presentation receipt against the registry as it
+    /// stands now: the receiving service's door, where a revocation turns
+    /// yesterday's accepted document into today's refusal. `valid:false` is
+    /// an answer, not a call error - only an ill-formed request errors.
+    #[method(name = "bud_identityVerifyPresentation")]
+    async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: String,
+        document: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

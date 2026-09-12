@@ -20,6 +20,58 @@ fn asset_id() -> crate::cross_domain::AssetId {
     crate::cross_domain::AssetId([42u8; 32])
 }
 
+/// A refused lock (insufficient balance) must not leave a lock record in
+/// the bridge state: the balance check runs before the in-memory insert,
+/// so a refusal cannot leave a phantom lock that a later sweep would
+/// "refund" out of thin air.
+#[test]
+fn a_refused_lock_leaves_no_bridge_record() {
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
+        d.operator = Some(operator);
+        d.operator_bond = 100_000;
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d)
+            .expect("domain must register");
+    }
+    bc.register_bridge_asset(asset_id(), 1)
+        .expect("asset must register");
+
+    let owner = addr(77);
+    let recipient = addr(12);
+    // Whatever the owner starts with, one unit more than that cannot be
+    // locked, so the lock must be refused...
+    let impossible = bc.state.get_balance(&owner).saturating_add(1).max(1);
+    let refused =
+        bc.lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, impossible, 1000);
+    assert!(
+        refused.is_err(),
+        "an owner short of the amount must not lock"
+    );
+    // ...and the refusal must not leave a phantom lock behind: nothing is
+    // locked, and nothing can be swept at the phantom expiry.
+    assert_eq!(
+        bc.state.bridge_state.locked_amount_total(),
+        0,
+        "a refused lock must not leave a bridge record"
+    );
+    assert!(
+        bc.apply_bridge_sweep(1000).is_empty(),
+        "a refused lock must not be swept back as a refund"
+    );
+
+    // After the refusal the same path still works for a funded owner.
+    bc.state.add_balance(&owner, 1_000_000);
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 100, 1000)
+        .expect("a funded owner must lock");
+    assert!(matches!(
+        lock_event.kind,
+        crate::cross_domain::DomainEventKind::BridgeLocked
+    ));
+}
+
 /// Bridge end-to-end: register domains, register the asset, lock through
 /// The internal system path, mint on the target side, burn on the source,
 /// And unlock. All via the *internal* `Blockchain` API - the RPC surface
@@ -78,7 +130,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     );
     // Sweep returns (owner, amount) for balance refund.
     assert_eq!(released[0].0, owner);
-    assert_eq!(released[0].1, 100);
+    assert_eq!(released[0].1.get(), 100);
 
     // The asset is back to `Active` and reusable.
     let fresh = bc
@@ -167,7 +219,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     );
     // (Owner, amount)
     assert_eq!(r[0].0, owner);
-    assert_eq!(r[0].1, 100);
+    assert_eq!(r[0].1.get(), 100);
 
     // The 100-expiry lock is now Active and the asset is reusable,
     // But the second lock (expiry=500) still holds asset_b as Locked.
@@ -191,7 +243,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     let r3 = bc.apply_bridge_sweep(500);
     // Returns owner addresses; asset_b lock owner is `owner`.
     assert!(
-        r3.iter().any(|(a, amt)| *a == owner && *amt == 50),
+        r3.iter().any(|(a, amt)| *a == owner && amt.get() == 50),
         "owner must be refunded 50 for asset_b lock at height 500: {r3:?}"
     );
 }

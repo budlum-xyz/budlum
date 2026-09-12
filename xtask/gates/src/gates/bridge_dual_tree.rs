@@ -145,14 +145,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-bridge-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bridge")?;
     std::fs::create_dir_all(dir.join("src/cross_domain")).map_err(|e| e.to_string())?;
     let good = "pub struct BridgeState {\n    asset_locations: BTreeMap<AssetId, BridgeStatus>,\n    transfers: BTreeMap<MessageId, BridgeTransfer>,\n    expiry_queue: BTreeMap<u64, Vec<MessageId>>,\n}\n\nimpl BridgeState {\n    pub fn root(&self) -> Hash32 {\n        let mut leaves = self.asset_locations.iter().map(hash_it).collect::<Vec<_>>();\n        for t in &self.transfers { leaves.push(hash_it(t)); }\n        crate::settlement::commitment_tree::merkle_root(&leaves)\n    }\n}\n";
     std::fs::write(dir.join("src/cross_domain/bridge.rs"), good).map_err(|e| e.to_string())?;

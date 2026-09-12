@@ -49,6 +49,18 @@ enum ProtoTransactionType {
     // The developer's own claim that an app record is theirs. Distinct from
     // HUB_VERIFY_APP below: this proves ownership, not audit.
     HUB_ATTEST_APP = 43;
+    // Domain settlement: apply the state-update nonce writes a verified
+    // domain commitment carries. Replaces the out-of-block nonce writes the
+    // live commitment path used to perform (decision 50, C3).
+    STATE_UPDATE = 44;
+    // Identity master-registry write: DID registration, credential
+    // issue/revoke, guardian-quorum recovery. The payload is the registry's
+    // own transaction struct; there is no domain field, because a caller
+    // that could declare "this is PoA" would manufacture write authority.
+    IDENTITY = 45;
+    // Social-fi vault folder mutation: ids only, ownership read from the
+    // NFT registry at every operation rather than carried here.
+    VAULT = 46;
 }
 
 message ProtoTransaction {
@@ -99,6 +111,9 @@ message ProtoTransaction {
         ProtoAiAttachExecutionProof ai_attach_execution_proof = 46;
         ProtoConsensusKeyRegistration register_consensus_keys = 47;
         ProtoHubAttestApp hub_attest_app = 48;
+        ProtoStateUpdate state_update = 51;
+        ProtoIdentityTx identity = 52;
+        ProtoVaultTx vault = 53;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -114,6 +129,10 @@ message ProtoTransaction {
 // stateless, and `from` is derived from the set and threshold, so a wrong
 // set cannot point at somebody else's account: the address will not match.
 message ProtoMultisigAuthorization {
+    // Explicit algorithm/profile identifier. Empty or unknown values are
+    // refused by transaction admission; peers must not infer a scheme from
+    // key length.
+    string scheme_id = 4;
     repeated bytes owners = 1;
     uint32 threshold = 2;
     repeated ProtoOwnerSignature signatures = 3;
@@ -132,6 +151,21 @@ message ProtoOwnerSignature {
 // name someone else and rely on the check being present.
 message ProtoHubAttestApp {
     uint64 app_id = 1;
+}
+
+// Block-scoped domain settlement payload (C3, decision 50). Carries the
+// per-account nonce writes a verified domain commitment authorizes. The
+// entries are ordered deterministically (address-sorted) so the canonical
+// signing preimage is stable across nodes.
+message ProtoStateUpdate {
+    uint32 domain_id = 1;
+    uint64 domain_height = 2;
+    repeated ProtoStateUpdateEntry state_updates = 3;
+}
+
+message ProtoStateUpdateEntry {
+    bytes address = 1;
+    uint64 nonce = 2;
 }
 
 message ProtoConsensusKeyRegistration {
@@ -394,6 +428,21 @@ message ProtoPollenAccessGrant {
 
 message ProtoPollenId {
     bytes id = 1;
+}
+
+// The identity transaction payload. Data is bincode-encoded canonical Rust
+// struct payload (registry::IdentityTx), the same convention as Pollen:
+// the wire carries the struct whole, while the signing preimage stays the
+// explicit field-by-field encoding in core::transaction::encode_identity_tx.
+message ProtoIdentityTx {
+    bytes data = 1;
+}
+
+// The vault transaction payload; bincode-encoded canonical Rust struct
+// payload, the Pollen/identity convention. The signing preimage stays the
+// explicit fixed-width encoding in core::transaction::encode_vault_tx.
+message ProtoVaultTx {
+    bytes data = 1;
 }
 
 message ProtoNetworkMessage {

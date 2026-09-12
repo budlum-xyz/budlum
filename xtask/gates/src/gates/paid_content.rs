@@ -408,12 +408,7 @@ const CALLED: &str = "if matches!(manifest.encryption, ContentEncryption::Plaint
 
 /// Write `content` to a temp file under `sub` and return the directory.
 fn temp_file(sub: &str, name: &str, content: &str) -> Result<std::path::PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("budlum-gates-paid-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-paid")?;
     let path = dir.join(sub);
     let _ = std::fs::create_dir_all(&path);
     std::fs::write(path.join(name), content).map_err(|e| e.to_string())?;

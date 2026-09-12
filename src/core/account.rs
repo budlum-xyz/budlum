@@ -153,9 +153,26 @@ impl Validator {
         self.has_role(&roles::AI_OPERATOR)
     }
 
-    /// Cross-role slashing: when any role is slashed, ALL roles are jailed.
-    /// This ensures a validator cannot continue operating in other roles
-    /// After being caught misbehaving in one role.
+    /// WIRING: unwired - kept as the `AccountState` view of a rule the chain
+    /// enforces one layer down. Nothing on any production path calls this.
+    ///
+    /// The live cross-role sweep is
+    /// [`PermissionlessRegistry::slash_cross_role`](crate::registry::permissionless),
+    /// reached from `PermissionlessRegistry::slash`; the consensus paths jail
+    /// through [`AccountState::slash_validator`] and through the liveness pass
+    /// in the blockchain, which set `slashed` / `active` / `jailed` /
+    /// `jail_until` here directly. The AI inference role is deliberately
+    /// excluded from any sweep: `slash_role_only` cuts the role's bond and
+    /// leaves the rest, because an equivocation proved in the inference layer
+    /// is not consensus evidence against a validator's stake.
+    ///
+    /// What this function used to claim - "this ensures a validator cannot
+    /// continue operating in other roles" - is true of the system and false of
+    /// this function, which is the worse combination: a reader of this file
+    /// concludes the guarantee lives here and does not go look. It stays
+    /// because the field writes are the shape `jail_until` needs, and deleting
+    /// an unused setter pair without a decision on that shape is its own
+    /// change. See `docs/AUDIT-DEAD-PUB-API-2026-09-10.md`.
     pub fn slash_all_roles(&mut self, jail_until_epoch: u64) {
         self.slashed = true;
         self.jailed = true;
@@ -246,6 +263,25 @@ pub struct AccountState {
     pub timed_burn: crate::tokenomics::TimedBurnState,
     pub bns_registry: crate::bns::BnsRegistry,
     pub nft_registry: crate::socialfi::NftRegistry,
+    /// Identity registry (`did:bud`): DID records, credential commitments and
+    /// revocations. Persisted through the snapshot's schema-5 field; the
+    /// state root folds its `root()` only when non-empty, on the bns pattern.
+    pub identity: crate::registry::IdentityRegistry,
+    /// Folder memberships over the NFT ids (`socialfi::vault`): the state
+    /// the folders live in, not a copy of the folders' contents. Persisted
+    /// through the snapshot's schema-6 field; the state root folds its
+    /// `root()` only when non-empty, on the identity pattern.
+    pub vault: crate::socialfi::VaultRegistry,
+    /// The consensus kind this state machine executes as.
+    ///
+    /// Read from the node's own engine at construction and re-read wherever
+    /// `state` is replaced wholesale (rebuild, snapshot apply) - never from a
+    /// transaction, never from a peer, and never snapshotted (each node
+    /// re-derives it from its own engine, so sync cannot smuggle a kind in).
+    /// The identity write gate consults this field, and it fails closed: a
+    /// state nobody wired is a plain PoS state, and the master registry
+    /// refuses writes there.
+    pub execution_domain: crate::domain::ConsensusKind,
     pub marketplace: crate::pollen::MarketplaceRegistry,
     pub budlumxyz: crate::budlumxyz::BudlumxyzRegistry,
     pub storage_registry: StorageRegistry,
@@ -360,6 +396,9 @@ impl AccountState {
             governance: GovernanceState::default(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
+            identity: crate::registry::IdentityRegistry::new(),
+            vault: crate::socialfi::VaultRegistry::new(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             storage_registry: StorageRegistry::new(),
             ai_registry: crate::ai::registry::AiRegistry::new(),
@@ -412,6 +451,9 @@ impl AccountState {
             message_registry: CrossDomainMessageRegistry::new(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
+            identity: crate::registry::IdentityRegistry::new(),
+            vault: crate::socialfi::VaultRegistry::new(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
@@ -472,6 +514,9 @@ impl AccountState {
             governance: GovernanceState::default(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
+            identity: crate::registry::IdentityRegistry::new(),
+            vault: crate::socialfi::VaultRegistry::new(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
@@ -550,6 +595,9 @@ impl AccountState {
             last_epoch_time: snapshot.last_epoch_time,
             bns_registry: snapshot.bns_registry.clone().unwrap_or_default(),
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
+            identity: snapshot.identity.clone().unwrap_or_default(),
+            vault: snapshot.vault.clone().unwrap_or_default(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: snapshot.marketplace.clone().unwrap_or_default(),
             budlumxyz: snapshot.budlumxyz.clone().unwrap_or_default(),
             governance: snapshot.governance.clone().unwrap_or_default(),
@@ -1320,6 +1368,22 @@ impl AccountState {
                     );
                 }
             }
+            TransactionType::StateUpdate {
+                ref state_updates, ..
+            } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err("State update requires zero amount/recipient and empty data".into());
+                }
+                if state_updates.is_empty() {
+                    return Err("State update requires at least one nonce write".into());
+                }
+                if state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
+                    return Err(format!(
+                        "State update exceeds {} nonce writes",
+                        crate::domain::types::MAX_STATE_UPDATES
+                    ));
+                }
+            }
             _ => {}
         }
 
@@ -1770,12 +1834,50 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid ai_model_register_fee: {e}"))?;
             }
+            "liveness_slashing_enabled" => {
+                params.liveness_slashing_enabled =
+                    crate::core::governance::parse_governance_bool(key, value)?;
+            }
             other => return Err(format!("unknown registry parameter: {other}")),
         }
         params.validate()?;
         self.registry.set_params(params);
         Ok(())
     }
+    /// Anchor the latest *finalized* external state root for a domain into the
+    /// consensus-owned [`Self::external_roots`] registry.
+    ///
+    /// This is the **create / supersede** step of the external-root anchor
+    /// lifecycle (AR-GE-6 / F-11). `external_roots` is the only source the
+    /// relayer gate consults: a `RelayerResult` is accepted only when its
+    /// declared `external_state_root` equals a finalized anchor. The write path
+    /// is **consensus-only** — it is driven by a light-client-verified finality
+    /// fact for the domain (AR-GE-6 / F-12) — and a relayer transaction can
+    /// never reach this method: the executor gate only reads `external_roots`.
+    /// Keeping the write here, out of the relayer path, is what closes the
+    /// relayer-data-to-open trap.
+    ///
+    /// Semantics:
+    /// - One finalized root per domain; re-anchoring **supersedes** the prior
+    ///   root, so the anchor tracks the domain's latest finality.
+    /// - The zero root is rejected: it encodes "no state commitment" and must
+    ///   not stand in for a real one, mirroring the relayer gate's own
+    ///   zero-root rejection.
+    ///
+    /// Returns `true` when an anchor was written, `false` when the root was
+    /// rejected (zero).
+    pub fn anchor_external_root(
+        &mut self,
+        domain_id: crate::domain::types::DomainId,
+        root: crate::domain::types::Hash32,
+    ) -> bool {
+        if root == [0u8; 32] {
+            return false;
+        }
+        self.external_roots.insert(domain_id, root);
+        true
+    }
+
     pub fn add_balance(&mut self, public_key: &Address, amount: u64) {
         let account = self.get_or_create(public_key);
         account.balance = account.balance.saturating_add(amount);
@@ -1828,6 +1930,23 @@ impl AccountState {
     /// If the amount exceeds the remaining headroom under the cap, or if the
     /// balance would overflow a `u64`.
     pub fn try_mint_balance(&mut self, public_key: &Address, amount: u64) -> Result<(), String> {
+        self.ensure_mint_headroom(amount)?;
+        self.try_add_balance(public_key, amount)
+    }
+
+    /// Refuse a mint of `amount` before anything is touched.
+    ///
+    /// A bridge mint is one supply event paid out as two credits, the
+    /// recipient's share and the relayer's fee. Checking the ceiling credit by
+    /// credit let the first one land and the second one fail, with the
+    /// transfer already marked minted and the replay id already spent: the
+    /// lock on the other side was consumed and the fee was never paid. The
+    /// callers ask for the whole amount here, before the bridge state moves.
+    ///
+    /// # Errors
+    ///
+    /// If `amount` exceeds the remaining headroom under the cap.
+    pub fn ensure_mint_headroom(&self, amount: u64) -> Result<(), String> {
         let headroom = self.supply_capacity_remaining();
         if amount > headroom {
             return Err(format!(
@@ -1837,7 +1956,7 @@ impl AccountState {
                  a property of the chain and not of any one account."
             ));
         }
-        self.try_add_balance(public_key, amount)
+        Ok(())
     }
 
     /// Amount of `address`'s balance that is currently spendable, taking team
@@ -2339,6 +2458,14 @@ impl AccountState {
             final_hasher.update(b"socialfi_v1");
             final_hasher.update(self.nft_registry.root());
         }
+        if !self.identity.is_empty() {
+            final_hasher.update(b"identity_v1");
+            final_hasher.update(self.identity.root());
+        }
+        if !self.vault.is_empty() {
+            final_hasher.update(b"vault_v1");
+            final_hasher.update(self.vault.root());
+        }
         final_hasher.update(b"pollen_v1");
         final_hasher.update(self.marketplace.root());
         if !self.budlumxyz.is_empty() {
@@ -2369,6 +2496,18 @@ impl AccountState {
             final_hasher.update(self.governance.root());
         }
         final_hasher.update(self.global_header_summary);
+        // Governance-unfreeze queue: applied at block close after the commit
+        // (blockchain.rs), so at root time it can be non-empty and is
+        // consensus state. Without this binding a restored snapshot could
+        // smuggle in an arbitrary unfreeze queue (tampered domain
+        // permissioning) while presenting an honest state root.
+        if !self.pending_domain_unfreezes.is_empty() {
+            final_hasher.update(b"domain_unfreeze_v1");
+            final_hasher.update(
+                bincode::serialize(&self.pending_domain_unfreezes)
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
         final_hasher.update(b"gov_disabled"); // governance version/enabled flags
 
         let final_root = final_hasher.finalize();
@@ -2661,10 +2800,15 @@ mod tests {
     fn every_whitelisted_governance_parameter_can_be_applied() {
         use crate::core::governance::GOVERNANCE_PARAMETER_WHITELIST;
 
-        // A value that parses for every currently whitelisted parameter. Each
-        // is a `u64`; `validate()` bounds are checked separately.
-        let probe = "1000";
+        // A value that parses for every currently whitelisted parameter:
+        // the switches take a boolean, the rest a `u64`. `validate()` bounds
+        // are checked separately.
         for key in GOVERNANCE_PARAMETER_WHITELIST {
+            let probe = if *key == "liveness_slashing_enabled" {
+                "true"
+            } else {
+                "1000"
+            };
             let mut state = AccountState::new();
             let err = state.apply_registry_parameter_update(key, probe).err();
             assert!(
@@ -2674,6 +2818,17 @@ mod tests {
                  apply_registry_parameter_update: {err:?}"
             );
         }
+        // The liveness switch is applied, not merely accepted.
+        let mut state = AccountState::new();
+        assert!(!state.registry.params().liveness_slashing_enabled);
+        state
+            .apply_registry_parameter_update("liveness_slashing_enabled", "true")
+            .unwrap();
+        assert!(state.registry.params().liveness_slashing_enabled);
+        assert!(state
+            .apply_registry_parameter_update("liveness_slashing_enabled", "on")
+            .is_err());
+        assert!(state.registry.params().liveness_slashing_enabled);
     }
 
     #[test]
@@ -2918,7 +3073,7 @@ mod tests {
         // applying it would be the second write of one vote.
         proposal.status = ProposalStatus::Passed;
         state.governance.proposals.push(proposal);
-        let actions = state.governance.execute_passed_proposals();
+        let actions = state.governance.execute_passed_proposals(u64::MAX);
         assert!(
             !actions.iter().any(|a| matches!(
                 a,
@@ -3200,6 +3355,99 @@ mod tests {
         assert_ne!(root_before, root_after);
     }
 
+    /// Holistic audit (2026-09-09, "her satır sorgula"): the governance
+    /// unfreeze queue is applied at block close AFTER the commit, so at
+    /// root time it can be non-empty and is consensus state. It MUST be
+    /// bound to the state root: otherwise a restored snapshot could carry a
+    /// smuggled queue (tampered domain permissioning) behind an honest root.
+    #[test]
+    fn pending_domain_unfreezes_change_account_state_root() {
+        let mut state = AccountState::new();
+        state.add_balance(&test_addr_from_byte(11u8), 1);
+        let root_before = state.calculate_state_root();
+
+        state.pending_domain_unfreezes.push(PendingDomainUnfreeze {
+            domain_id: 3,
+            expected_validator_set_hash: [0xab; 32],
+            justification_hash: [0xcd; 32],
+        });
+        let root_with_queue = state.calculate_state_root();
+        assert_ne!(root_before, root_with_queue);
+
+        // Field-level fidelity: different domain id must not collide.
+        let mut state2 = AccountState::new();
+        state2.add_balance(&test_addr_from_byte(11u8), 1);
+        state2.pending_domain_unfreezes.push(PendingDomainUnfreeze {
+            domain_id: 4,
+            expected_validator_set_hash: [0xab; 32],
+            justification_hash: [0xcd; 32],
+        });
+        assert_ne!(root_with_queue, state2.calculate_state_root());
+
+        // Determinism: clearing the queue returns to the exact prior root.
+        state.pending_domain_unfreezes.clear();
+        assert_eq!(root_before, state.calculate_state_root());
+    }
+
+    /// AR-GE-6 / F-11: anchoring a finalized external root (the registry's
+    /// create step) must move the state root, exactly like a direct insert.
+    #[test]
+    fn anchor_external_root_changes_state_root() {
+        let mut state = AccountState::new();
+        state.add_balance(&test_addr_from_byte(9u8), 1);
+        let root_before = state.calculate_state_root();
+        assert!(state.anchor_external_root(7, [0x77; 32]));
+        assert_eq!(state.external_roots.get(&7), Some(&[0x77; 32]));
+        assert_ne!(state.calculate_state_root(), root_before);
+    }
+
+    /// AR-GE-6 / F-11: the zero root encodes "no state commitment" and must be
+    /// refused, so an empty anchor can never stand in for a real one.
+    #[test]
+    fn anchor_external_root_rejects_zero_root() {
+        let mut state = AccountState::new();
+        state.add_balance(&test_addr_from_byte(9u8), 1);
+        let root_before = state.calculate_state_root();
+        assert!(!state.anchor_external_root(7, [0u8; 32]));
+        assert!(state.external_roots.is_empty());
+        assert_eq!(state.calculate_state_root(), root_before);
+    }
+
+    /// AR-GE-6 / F-11: one finalized root per domain; re-anchoring supersedes
+    /// the prior root (the anchor tracks the domain's latest finality).
+    #[test]
+    fn anchor_external_root_supersedes_prior_anchor() {
+        let mut state = AccountState::new();
+        assert!(state.anchor_external_root(7, [0x11; 32]));
+        assert!(state.anchor_external_root(7, [0x22; 32]));
+        assert_eq!(state.external_roots.get(&7), Some(&[0x22; 32]));
+        assert_eq!(state.external_roots.len(), 1);
+    }
+
+    /// AR-GE-6 / F-12 (lifecycle pin): the relayer gate accepts a declared
+    /// `external_state_root` only when it equals a root already anchored
+    /// through the consensus path. A relayer transaction has no write path
+    /// into `external_roots`, so it cannot open an anchor for itself. This
+    /// models the executor gate invariant (the gate reads `external_roots`;
+    /// the relayer cannot populate it).
+    #[test]
+    fn relayer_gate_depends_on_consensus_anchor_not_relayed_root() {
+        let mut state = AccountState::new();
+        let domain: u32 = 42;
+        let declared_root: [u8; 32] = [0xab; 32];
+
+        // executor.rs, `RelayerResult` arm: `external_roots.get(&domain) ==
+        // Some(&declared_root)`.
+        let gate_holds = |s: &AccountState| s.external_roots.get(&domain) == Some(&declared_root);
+
+        // Unanchored: a relayer-declared root must not be accepted.
+        assert!(!gate_holds(&state));
+
+        // Only the consensus anchor can open it; the relayer path cannot.
+        assert!(state.anchor_external_root(domain, declared_root));
+        assert!(gate_holds(&state));
+    }
+
     #[test]
     fn tokenomics_runtime_fields_change_account_state_root() {
         let mut state = AccountState::new();
@@ -3228,6 +3476,36 @@ mod tests {
         ));
         let root_after_vesting = state.calculate_state_root();
         assert_ne!(root_after_reserve, root_after_vesting);
+    }
+
+    /// A non-empty vault must move the state root: "no folders" and "a
+    /// folder whose fold came out zero" may not share an anchor - the same
+    /// discipline the `identity_v1` fold introduced, and the gate that
+    /// makes the schema-6 snapshot argument true at the root level too.
+    #[test]
+    fn state_root_notices_a_non_empty_vault_and_only_that() {
+        let empty = AccountState::new().calculate_state_root();
+        let mut with_folders = AccountState::new();
+        with_folders.vault.register_folder(1).expect("fresh id");
+        let registered = with_folders.calculate_state_root();
+        assert_ne!(empty, registered, "a live folder must move the state root");
+        let mut added = with_folders.clone();
+        added
+            .vault
+            .add_member(1, 2)
+            .expect("the vault layer does not know owners; the door does");
+        assert_ne!(
+            registered,
+            added.calculate_state_root(),
+            "changing a folder's contents moves the root"
+        );
+        let mut closed = with_folders.clone();
+        closed.vault.close_folder(1).expect("empty folder closes");
+        assert_eq!(
+            closed.calculate_state_root(),
+            empty,
+            "a vault emptied again folds nothing, as at genesis: no tombstone in the root"
+        );
     }
 }
 

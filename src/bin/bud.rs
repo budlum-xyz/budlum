@@ -108,9 +108,14 @@ enum TxAction {
         /// Transfer amount (base units).
         #[arg(long, required = true)]
         amount: u64,
-        /// The sender's 32-byte hex signing seed (private key).
-        #[arg(long, required = true)]
-        priv_key: String,
+        /// Path to a file holding the sender's 32-byte hex signing seed.
+        ///
+        /// The seed is never taken on the command line: `argv` is visible in
+        /// the process list, shell history and any log that captures the
+        /// invocation. Either this flag or the `BUD_PRIV_KEY` environment
+        /// variable must supply it.
+        #[arg(long)]
+        priv_key_file: Option<std::path::PathBuf>,
         /// Transaction fee (base units).
         #[arg(long, default_value_t = 0)]
         fee: u64,
@@ -122,7 +127,7 @@ enum TxAction {
 
 #[derive(Subcommand)]
 enum QueryAction {
-    /// Adres bakiyesini sorgula (`bud_getBalance`).
+    /// Query an address balance (`bud_getBalance`).
     Balance {
         /// Address (hex, `0x` prefix optional).
         address: String,
@@ -233,6 +238,22 @@ fn parse_address(s: &str) -> Result<Address, String> {
 }
 
 /// Parse a 32-byte hex signing seed.
+/// The signing seed comes from a file (`--priv-key-file`) or from the
+/// `BUD_PRIV_KEY` environment variable, in that order, never from `argv`.
+fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
+    if let Some(path) = path {
+        return std::fs::read_to_string(path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()));
+    }
+    std::env::var("BUD_PRIV_KEY").map_err(|_| {
+        String::from(
+            "no signing seed: pass --priv-key-file <path> or set BUD_PRIV_KEY \
+             (the seed is not accepted as a command-line argument)",
+        )
+    })
+}
+
 fn parse_seed(hex_str: &str) -> Result<[u8; 32], String> {
     let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(clean).map_err(|e| format!("invalid hex priv key: {e}"))?;
@@ -259,11 +280,11 @@ fn run_tx_send(
     rpc_url: &str,
     to: &str,
     amount: u64,
-    priv_key: &str,
+    priv_key_file: Option<&std::path::Path>,
     fee: u64,
     nonce: Option<u64>,
 ) -> Result<(), String> {
-    let seed = parse_seed(priv_key)?;
+    let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
     let keypair = KeyPair::from_seed(&seed).map_err(|e| format!("key derivation: {e}"))?;
     let from = Address::from(keypair.public_key_bytes());
     let to_addr = parse_address(to)?;
@@ -398,7 +419,7 @@ fn build_manifest(name: &str, source_hash: &str) -> Result<DeveloperOsManifest, 
 
 fn run_project_id(name: &str, source_hash: &str) -> Result<(), String> {
     let manifest = build_manifest(name, source_hash)?;
-    println!("proje: {name}");
+    println!("project: {name}");
     println!("chain_id: {}", manifest.chain_id);
     println!("project id: 0x{}", hex::encode(manifest.project_id()));
     Ok(())
@@ -426,14 +447,17 @@ fn run_project_bind_proof(
         .ok_or_else(|| format!("the manifest has no proof record named '{fixture}'"))?;
 
     // A record arrives `Pending` from the local template; binding is meaningful on a
-    // record that claims the verifier has run.
-    record.status = ProofFixtureStatus::Verified;
-    record.proof_hash = verified;
-    let bound = record.clone();
-
-    bound
+    // record that claims the verifier has run. The hash the record already
+    // carries is what gets compared with the verified envelope; it is not
+    // overwritten first, since a record rewritten to the supplied hash would
+    // pass the comparison whatever it said before, and the mismatch check
+    // would never fire.
+    let mut candidate = record.clone();
+    candidate.status = ProofFixtureStatus::Verified;
+    candidate
         .bind_verified(verified)
         .map_err(|e| format!("proof binding refused: {e:?}"))?;
+    *record = candidate;
     println!("proof record '{fixture}' bound to the verified envelope");
     println!("proof hash: 0x{}", hex::encode(verified));
     println!("project id: 0x{}", hex::encode(manifest.project_id()));
@@ -447,10 +471,17 @@ fn main() {
             TxAction::Send {
                 to,
                 amount,
-                priv_key,
+                priv_key_file,
                 fee,
                 nonce,
-            } => run_tx_send(&cli.rpc_url, to, *amount, priv_key, *fee, *nonce),
+            } => run_tx_send(
+                &cli.rpc_url,
+                to,
+                *amount,
+                priv_key_file.as_deref(),
+                *fee,
+                *nonce,
+            ),
         },
         Command::Query { action } => match action {
             QueryAction::Balance { address } => run_query_balance(&cli.rpc_url, address),
@@ -528,6 +559,17 @@ mod tests {
     fn binding_a_proof_to_its_own_hash_passes() {
         let proof = "01".repeat(32);
         run_project_bind_proof("demo-app", SOURCE_HASH, "zkvm-smoke", &proof).unwrap();
+    }
+
+    /// A record whose own hash differs from the verified envelope is refused.
+    /// The record used to be rewritten to the supplied hash before the
+    /// comparison, so this case passed.
+    #[test]
+    fn binding_a_proof_to_another_hash_is_refused() {
+        let other = "02".repeat(32);
+        let err = run_project_bind_proof("demo-app", SOURCE_HASH, "zkvm-smoke", &other)
+            .expect_err("a record speaking of another proof must be refused");
+        assert!(err.contains("ProofFixtureHashMismatch"), "{err}");
     }
 
     /// A record absent from the manifest cannot be bound.

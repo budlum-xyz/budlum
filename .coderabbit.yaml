@@ -1,0 +1,17 @@
+# Review-bot configuration. The merge gate for this repository is a review
+# approval from the bots; CodeRabbit only approves when this workflow is on,
+# once every one of its comments is resolved and the latest commit has been
+# reviewed. Reviews are requested by hand, one pull request at a time, so the
+# hourly review allowance goes to the branch that actually changed instead of
+# being spent by every push at once.
+language: "en-US"
+reviews:
+  profile: "chill"
+  request_changes_workflow: true
+  poem: false
+  auto_review:
+    enabled: true
+    auto_incremental_review: false
+    drafts: false
+chat:
+  auto_reply: true

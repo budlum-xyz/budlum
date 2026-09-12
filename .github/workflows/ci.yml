@@ -17,49 +17,32 @@ jobs:
   budlum:
     name: Budlum Core
     runs-on: ubuntu-latest
-    # Badge self-commit (Q5, loop-guarded) needs write only in this job;
-    # all other jobs stay at the global minimum (contents: read).
+    # Read only. The badge used to be self-committed from this job, which is
+    # why it once held `contents: write` and a persisted token; the badge is
+    # now verified by `badges-are-current` and nothing here pushes. A job
+    # that compiles and runs code from a pull request must not hold a
+    # write-capable token in its git configuration.
     permissions:
-      contents: write
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1  # zizmor: ignore[artipacked] badge bot self-commit intentionally uses GITHUB_TOKEN
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: true
-      - name: Install Rust
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
-      - name: Install protoc
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Format (kani proof harnesses)
-        # kani/ is not a member of the root workspace, so the step above never
-        # walks it: two drift hunks sat in kani/src/lib.rs while the root fmt
-        # step stayed green. Measured 2026-08-28 and pinned here so the gap
-        # cannot reopen.
-        run: cargo fmt --manifest-path kani/Cargo.toml --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Clippy pedantic/nursery ratchet (izleme modu)
-        # Warning visibility + ratchet against count growth (baseline 191,
-        # evidence .github/clippy-extra-baseline.txt). Driving to zero is gradual and deliberate.
-        run: |
-          set -euo pipefail
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra --self-test
-          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
-          # Diagnostic only: the ratchet reports a count, and the JSON it counts
-          # lives in the runner's /tmp, so a trip leaves nothing to inspect.
-          # This prints the per-lint tally and every first-party file:line.
-          # It writes nothing and runs before the gate, so it cannot change the
-          # verdict.
-          python3 ./ops/scripts/clippy-extra-report.py /tmp/clippy-extra.json
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra /tmp/clippy-extra.json
       - name: "Feature matrix: pq-ml-dsa solo"
+        if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
           cargo check --no-default-features --features "pq-ml-dsa wallet-ml-dsa"
@@ -112,6 +95,7 @@ jobs:
           done
           grep -E 'test result:' /tmp/aa-tests.log
       - name: Feature canary - --all-features MUST BE REFUSED
+        if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
           if cargo check --all-features 2>/dev/null; then
@@ -120,6 +104,7 @@ jobs:
           fi
           echo "Canary OK: --all-features was refused with compile_error as expected (PQ backends are mutually exclusive)."
       - name: Test
+        if: always() && steps.rust.outcome == 'success'
         # Pipefail is required: tee alone returns exit 0; otherwise a test failure
         # makes the Core job falsely green (evidence: d815561 Test=success, 1 hidden fail;
         # Coverage nextest went red on the same fail - 2026-07-19).
@@ -127,30 +112,223 @@ jobs:
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
       - name: cargo doc (Item 6 - public API documentation)
+        if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
           RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features pq-ml-dsa 2>&1 | tee /tmp/doc.log
           echo "cargo doc: warnings as errors - passed"
+  # The gate suite used to sit at the tail of `budlum`, after Format, Clippy and Test.
+  # GitHub Actions skips every step after the first failure of a job, and run 50
+  # measured what that costs on a branch carrying a formatting diff: one red `Format`,
+  # and 47 of 56 steps skipped - including all 126 gates this repository is made of, and
+  # the canary that is supposed to prove they can fail. A protection that cannot run is
+  # not a protection, and nothing about that job said so: the failing step reported its
+  # own diff, which is exactly what it is for. So the gates are a job of their own; a red
+  # `cargo fmt --check` can no longer reach them, and `budlum` keeps the verdict on
+  # format, clippy, tests and docs, where a formatting failure should stop the job.
+            # Style last, verdicts first, and this order is load-bearing: in the old
+            # arrangement Format was the fifth step of this job, so a rustfmt failure
+            # skipped Clippy, the feature canary, Test and cargo doc - 47 skipped steps at
+            # one point, with the job's red mark saying nothing about whether the code
+            # builds. A style check is worth failing on, not worth hiding a compile error
+            # behind; do not move these three steps up because they are cheap.
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy pedantic/nursery ratchet (izleme modu)
+        if: always() && steps.rust.outcome == 'success'
+        # Warning visibility + ratchet against count growth (baseline 191,
+        # evidence .github/clippy-extra-baseline.txt). Driving to zero is gradual and deliberate.
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra --self-test
+          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
+          # Diagnostic only: the ratchet reports a count, and the JSON it counts
+          # lives in the runner's /tmp, so a trip leaves nothing to inspect.
+          # This prints the per-lint tally and every first-party file:line.
+          # It writes nothing and runs before the gate, so it cannot change the
+          # verdict.
+          python3 ./ops/scripts/clippy-extra-report.py /tmp/clippy-extra.json
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra /tmp/clippy-extra.json
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --all -- --check
+      # Same reason as the build surface in rust.yml: `cargo fmt --check` prints a
+      # diff to stdout, and stdout is on the log host. Here it is an annotation,
+      # so the fix is mechanical even from a sandbox that cannot read logs.
+      - name: Format diff surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          # A check run keeps ten annotations and drops the earlier ones, so the
+          # first version of this step (120 raw lines) reported the tail of the
+          # diff and lost its head. What survives instead: up to eight `Diff in`
+          # file headers, then a count line last, so the reader can see which
+          # files and how many, and cannot mistake a truncated sample for the
+          # whole debt. The fix is unchanged: `cargo fmt --all`. The escapes are stripped
+          # first: under `CARGO_TERM_COLOR: always` the diff is colored, and an anchored
+          # pattern would report an empty debt while hunks waited.
+          tmp=$(mktemp)
+          cargo fmt --all -- --check 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | grep -E "^Diff in " > "$tmp" || true
+          head -n 8 "$tmp" | sed -e "s/^/::error::/"
+          # The backticks around Diff in were a live command substitution inside a
+          # double-quoted printf format: the step ran `Diff in`, and the message it
+          # printed was whatever that left behind, which is nothing. Quoting is now
+          # single, and the fragment is plain text - actionlint's SC2006 fired on
+          # exactly this, and security-audit.yml already documents the trap.
+          printf '::error::%s "Diff in" hunks total (first 8 shown)\n' "$(grep -c . "$tmp")"
+          rm -f "$tmp"
+      - name: Format (kani proof harnesses)
+        if: always() && steps.rust.outcome == 'success'
+        # kani/ is not a member of the root workspace, so the step above never
+        # walks it: two drift hunks sat in kani/src/lib.rs while the root fmt
+        # step stayed green. Measured 2026-08-28 and pinned here so the gap
+        # cannot reopen.
+        run: cargo fmt --manifest-path kani/Cargo.toml --all -- --check
+  gates:
+    name: Gates (a suite that cannot run is not a protection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit Guard aggregation (the gate itself must be alive)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/audit_guard.py --self-test
+          python3 .github/scripts/audit_guard.py
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      # Every step below invokes the same binary, and until now the first one that
+      # invoked it was a canary: a build failure in `xtask/gates` (its own workspace,
+      # so no other job's clippy covers it) was reported as "the gate found a defect"
+      # in six jobs at once - measured on 2026-09-10, where Budscan's canary flipped
+      # success -> exit 101 while its own Format and Clippy steps stayed green, which
+      # proves nothing about this crate. A build step of its own names the real cause;
+      # the surface below puts rustc's lines in annotations because the log host is
+      # not reachable from everywhere, and a red job whose reason lives only in a log
+      # nobody can open is a red job with no finding.
+      - name: Build the gate binary
+        id: build
+        run: cargo build --release --manifest-path xtask/gates/Cargo.toml 2>&1 | tee /tmp/gates-build.log; exit "${PIPESTATUS[0]}"
+      - name: Build surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          tmp=$(mktemp)
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/gates-build.log > "$tmp" 2>/dev/null || true
+          grep -E "^error" -A4 "$tmp" | head -n 40 | sed -e 's/^/::error::/'
+          printf '::error::build surface: %s error line(s), first 40 shown - the Build step holds the rest\n' "$(grep -cE '^error' "$tmp")"
+          rm -f "$tmp"
+      # `badges-are-current` reads the test log the badge is derived from. In `budlum`
+      # that log is written by the authoritative `Test` step; here it is regenerated for
+      # the gate, and `continue-on-error` because the verdict on the suite belongs to
+      # `budlum`: a job whose only failing step is a copy of another job's verdict teaches
+      # nothing and hides the steps after it, which is the disease being cured.
+      # The gates crate is its own cargo workspace, so no root `--workspace` clippy
+      # ever saw it, and the pedantic debt it carries is invisible: measured 2026-09-10
+      # only after a build failure in it red six jobs' canaries at once. This step is
+      # monitoring, not enforcement - the same `izleme modu` shape the pedantic ratchet
+      # uses in `budlum` - because making a lint surface visible and enforcing it in the
+      # same commit is how a repo ends up reverting the visibility. The count is an
+      # annotation, so the number survives a log host nobody can reach.
+      - name: Clippy (gates workspace)
+        # Graduated from izleme modu (monitoring) on 2026-09-11: the step's own
+        # surface annotation measured `0 warning/error headline line(s)` in the run
+        # for aaf491e, three denied lints in dead_pub_api.rs fixed and nothing else
+        # outstanding. It refuses now. Enforcing it is only safe because every step
+        # in this job carries `if: always() && steps.build.outcome == 'success'` -
+        # a red step here cannot hide a neighbour's verdict any more, which is the
+        # property that made the earlier count-only staging necessary. Every cargo
+        # step in this job carries the same guard; the surfaces carry `always()`.
+        # No `FAIL [..]` headline is written, so the Tally does not list this one:
+        # the step's own failure and the surface below are the report. It carries
+        # the job's standard cargo guard so that a broken build does not also
+        # produce a clippy failure nobody asked for.
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets 2>&1 \
+            | tee /tmp/gates-clippy.log | tail -n 5
+      - name: Clippy surface (annotations)
+        if: always()
+        run: |
+          set +o pipefail
+          tmp=$(mktemp)
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/gates-clippy.log > "$tmp" 2>/dev/null || true
+          # -A1 pairs each headline with its `--> file:line:col`, because a lint
+          # surface without a location is a to-do list, not a fix. The count stays a
+          # count of headlines: `head` truncates the pairs, the number does not lie.
+          grep -E "^(warning|error)(\[|:)" "$tmp" -A1 | grep -v "^--$" | head -n 16 | sed -e 's/^/::notice::/'
+          printf '::notice::gates-workspace clippy: %s warning/error headline line(s), first 8 shown with their locations\n' "$(grep -cE '^(warning|error)(\[|:)' "$tmp")"
+          rm -f "$tmp"
+
+      - name: Test log for the badge gate (the verdict lives in budlum)
+        # A log producer, so it must run whatever else is red: the badge gate reads
+        # this file, and if a neighbouring failure skipped it the badge gate would
+        # report "no log" - a tooling artefact dressed up as a content finding.
+        if: always() && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
       - name: Badge canary (independent of the log)
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- badges-are-current --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- badges-are-current --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Is the badge current (README = measured test count)
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- badges-are-current /tmp/libtests.log
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- badges-are-current /tmp/libtests.log 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Paid content canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- paid-content-cannot-be-read-for-free --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- paid-content-cannot-be-read-for-free --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Paid content cannot be read for free
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- paid-content-cannot-be-read-for-free
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- paid-content-cannot-be-read-for-free 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Generatable content canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Generatable content is verifiable
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: QR is derivative only canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: QR is derivative only
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Three is recipe only canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- three-is-recipe-only --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- three-is-recipe-only --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Three is recipe only
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- three-is-recipe-only
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- three-is-recipe-only 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       # For a described object the recipe is the ONLY copy. An edit that changes the
       # generator does not produce a wrong image, it produces an object that can no longer be produced at all:
       # the id stops verifying and there are no bytes on disk to fall back to. Applied to a value
@@ -159,29 +337,108 @@ jobs:
       # that had already left the scale, it discards both extreme colours
       # and drew flat black, hashing it consistently.
       - name: Zero-storage vector canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-storage-bytes-are-frozen --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-storage-bytes-are-frozen --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Generated bytes are bound to a frozen vector
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-storage-bytes-are-frozen
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-storage-bytes-are-frozen 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Unreachable gate canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Unreachable gate count did not grow
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      # `guards-are-reachable` covers the refusal-shaped subset. The rest of the
+      # public surface had no ratchet at all: docs/AUDIT-DEAD-PUB-API-2026-09-10.md
+      # measured what that costs and asked for this file, and a gate added here is
+      # worthless if nothing runs it, which is the failure the comment above this
+      # block was written about.
+      - name: Dead public API canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- dead-public-api-is-ratcheted --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Dead public API did not grow
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- dead-public-api-is-ratcheted 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Self-source-reading test canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- source-reading-tests-are-narrowed --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- source-reading-tests-are-narrowed --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Self-source-reading tests are narrowed
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- source-reading-tests-are-narrowed
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- source-reading-tests-are-narrowed 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Conflict marker canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: No conflict markers in the tree
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      # The gate existed for weeks as a file: declared in no module, invoked in
+      # no list, named in no workflow. `no-orphan-source-files` cannot see it
+      # (its SCAN_ROOTS are src/budzero/wallet-core) and `gates-are-wired` only
+      # walks scripts that already belong to a list. A protection that is not
+      # compiled is not a protection.
+      # Workflow hygiene needs no cargo, so it is not guarded on the build: a red
+      # gate binary must not hide the fact that a guard expression points at a step
+      # that does not exist - that failure mode skips gates silently, build or not.
+      - name: Step reachability canary
+        if: always()
+        run: |
+          python3 ops/scripts/check-step-reachability.py --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No guard can hide a step
+        if: always()
+        run: |
+          python3 ops/scripts/check-step-reachability.py 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Researched-product naming canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-upstream-brands --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No researched product is named in the tree
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-upstream-brands 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Repair trigger canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Repair fires on loss
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: AI inference layer detection canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: AI inference layer reads, does not produce
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ai-inference-reads-but-does-not-generate 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       # crates/ai-inference is a separate workspace: not a member of the root Cargo.toml, so
       # `cargo clippy --all-targets` never reached it. Only the gate above,
       # which reads the source text, existed. Result: the tree stopped compiling
@@ -189,6 +446,7 @@ jobs:
       # `ConnState: Default` was missing, one test was passing `&[]`). The build
       # and the tests were wired in here so it cannot break silently again.
       - name: AI inference layer builds and its tests pass
+        if: always() && steps.build.outcome == 'success'
         run: |
           cargo clippy --manifest-path crates/ai-inference/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/ai-inference/Cargo.toml
@@ -211,8 +469,10 @@ jobs:
       # telling a real change from noise gets harder. The tree was fixed once
       # (`2c95cfe2`); this step prevents it drifting back.
       - name: B.U.D. core is formatted
+        if: always() && steps.build.outcome == 'success'
         run: cargo fmt --manifest-path bud/Cargo.toml --all -- --check
       - name: B.U.D. core builds and its tests pass
+        if: always() && steps.build.outcome == 'success'
         run: |
           cargo clippy --manifest-path bud/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path bud/Cargo.toml --features bud3 --all-targets -- -D warnings
@@ -225,13 +485,25 @@ jobs:
       # the number is frozen: the existing 66 files may keep their debt, a file not on
       # the list may NOT add a new index.
       - name: Indexing canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: A new file adds no panicking index
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Derived content canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Derived content is byte-exact
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       # A derived object holds no bytes of its own: reading it means fetching the master and
       # recomputing. When the master goes, storage does not shrink, the derivation is gone
       # happens, and happens silently: the derivation manifest is still there, still looks
@@ -246,19 +518,82 @@ jobs:
       # passed, because the tests compared thresholds against each other and both sides
       # had shifted together. It was caught by recomputing outside Rust.
       - name: Threshold ratios single-scale canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Threshold ratios on a single scale
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Derivation durability canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: A derivative cannot outlive its master
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Claim unit canary
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units --self-test
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: The claim states both units
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
 
 
+      # A canary prints its reason to stderr, which belongs to the log host. On
+      # failure the self-tests are re-run here and every FAIL/panic line becomes an
+      # annotation: "a canary must fail for exactly one reason" is worthless if the
+      # reason is unreadable, and the count line last so an empty surface cannot be
+      # mistaken for a clean one.
+      # One red gate used to skip every gate step after it, which is the disease this
+      # whole job was created to cure - it had simply inherited the shape. So every
+      # gate step runs on `always()` (guarded by the build, because a failed build
+      # makes 36 identical failures a wall of noise), each one appends its own output
+      # to a shared file, and this step reads that file: the full list of red gates as
+      # annotations, then the job's verdict. It exits 1 when the list is non-empty so
+      # the job cannot go green, and it says so out loud when the file is empty but the
+      # job is red anyway - a compound step (the two that build and test crates) can
+      # fail without printing `FAIL [gate]`, and silence here would be a masked
+      # failure with a nicer name.
+      - name: Tally (every red gate, annotated)
+        if: always()
+        run: |
+          set +o pipefail
+          log=/tmp/gate-out.log
+          [ -f "$log" ] || : > "$log"
+          # no -n: an annotation that starts with a line number of a scratch file is
+          # noise, and the gate's own message already names the gate and the reason.
+          grep "^FAIL \[" "$log" | tail -n 40 | sed -e 's/^/::error::/'
+          n=$(grep -c "^FAIL \[" "$log")
+          if [ "$n" -eq 0 ]; then
+            echo "gate tally: no FAIL headlines recorded; if this job is red the cause is the step that owns it"
+            exit 0
+          fi
+          printf '::error::gate tally: %s red gate(s) - every step ran, this is the whole list\n' "$n"
+          exit 1
+
+      - name: Canary surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          tmp=$(mktemp)
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test > "$tmp" 2>&1 || true
+          # `thread 'main' panicked at ...` does not start with the word panicked, so
+          # the first version of this filter dropped the panic and kept only the line
+          # after it - the one thing it existed to report. `thread ` is matched, and
+          # -A1 carries the message that follows both a panic and a rustc error.
+          sed -e 's/\x1b\[[0-9;]*m//g' "$tmp" | grep -E "^(FAIL |error|thread |panicked)" -A1 | head -n 20 | sed -e 's/^/::error::/'
+          printf '::error::canary surface: %s reason line(s) above; 0 means the self-tests pass when re-run - the failing step itself is the finding\n' "$(sed -e 's/\x1b\[[0-9;]*m//g' "$tmp" | grep -cE '^(FAIL |error|thread |panicked)')"
+          rm -f "$tmp"
   budzero:
     name: BudZero / BudZKVM
     runs-on: ubuntu-latest
@@ -269,7 +604,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust
+      - id: rust
+        name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         # NOTE: master 2026-07-16 and later make the `toolchain` input MANDATORY
         # (CI evidence: job 87741629986 - "'toolchain' is a required input").
@@ -280,14 +616,18 @@ jobs:
         with:
           shared-key: budzero
           workspaces: budzero
-      - name: Format
-        run: cargo fmt --all -- --check
       - name: Check
+        if: always() && steps.rust.outcome == 'success'
         run: cargo check --workspace --all-targets
       - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
+        if: always() && steps.rust.outcome == 'success'
         run: cargo test --workspace
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --all -- --check
 
   bud-e2e-invariants:
     # 9 module-independence invariants as a named REQUIRED
@@ -469,6 +809,20 @@ jobs:
       - name: Inventory matches code
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- domain-tags
 
+  serialize-map-keys-gate:
+    # A Serialize struct must not key a map by bytes or a tuple: serde_json
+    # refuses such keys at the first entry, and the V2 snapshot is JSON.
+    name: Serialize Map Keys Are Strings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gate self-test (canary)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings --self-test
+      - name: Every map key is a string, a number, or carries a serde with
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings
+
   poa-compliance-gate:
     # : MASAK/AML hooks are isolated to PoA domains only.
     name: PoA Compliance Isolation
@@ -558,7 +912,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust
+      - id: rust
+        name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
           toolchain: "1.97.1"
@@ -567,27 +922,34 @@ jobs:
         with:
           shared-key: budscan
           workspaces: budscan
-      - name: Format
-        run: cargo fmt --manifest-path crates/budscan/Cargo.toml --all -- --check
       - name: Clippy (pedantic, -D warnings)
+        if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/budscan/Cargo.toml --all-targets -- -D warnings
       - name: budscan testleri
+        if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/budscan/Cargo.toml
       - name: budscan own canaries
+        if: always() && steps.rust.outcome == 'success'
         # The binary runs its own internal canaries: a schema never becomes a name, an empty
         # proof does not say `verified`, a dangling patch does not pass the check.
         run: cargo run --manifest-path crates/budscan/Cargo.toml --bin budscan -- self-test
       - name: Gate canary (proof it is not vacuous)
+        if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset --self-test
       - name: Name rule and ContentId parity
+        if: always() && steps.rust.outcome == 'success'
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
       - name: Patch layer (list=disk, no foreign brand)
+        if: always() && steps.rust.outcome == 'success'
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
 
   # ============================  / Bolum 4 (BNS gate) ============================
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/budscan/Cargo.toml --all -- --check
   bns-gate:
     #  Section 4 module separation: BNS has its own CI gate (the B.U.D. gate pattern).
     # Name canary: if a test is deleted or renamed the gate FAILs.
@@ -637,6 +999,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: PoA isolation tests (7 tests, 5 leak scenarios)
         run: |
+          # pipefail: `tee` alone returns 0, and seven passing tests next to
+          # one failing test satisfied the count below. The filter must run
+          # green AND reach the expected count.
+          set -euo pipefail
           cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
           N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
           echo "PoA isolation test count: $N"
@@ -988,27 +1354,36 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-          scanners: secret,misconfig
+          # `vuln` is what `ignore-unfixed: false` below is about: without it
+          # the step never reads a lockfile and the unfixed-advisory setting
+          # governs nothing. The root and workspace Cargo.lock files are the
+          # inputs; osv-scanner and cargo-deny read the same files, and a
+          # finding needs a fix or a written, scoped exception in each tool.
+          scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
-      - name: Trivy fs gate (secret + misconfig; CRITICAL/HIGH = fail)
+      - name: Trivy fs gate (vuln + secret + misconfig; CRITICAL/HIGH = fail)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
-          scanners: secret,misconfig
+          scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
           exit-code: "1"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
 
   coverage:
     # : nextest + llvm-cov, ratchet gate (Q-7b1(a)).
@@ -1057,9 +1432,9 @@ jobs:
           cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
       - name: Module analysis canary (not vacuous)
-        run: python3 ./ops/scripts/check_module_coverage.py --self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)
-        run: python3 ./ops/scripts/check_module_coverage.py coverage/cov.json
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/cov.json
       - name: BudZero coverage measurement (llvm-cov nextest, budzero workspace)
         # `cd` was used without checking its exit code. If the directory is not found
         # the shell stays at the root, the next command measures the ROOT workspace and
@@ -1071,7 +1446,7 @@ jobs:
           cd budzero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
       - name: Module coverage report - budzero (report mode)
-        run: python3 ./ops/scripts/check_module_coverage.py coverage/budzero-cov.json
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/budzero-cov.json
       - name: Coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1123,8 +1498,8 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
-      - name: Rust gates clippy (pedantic, allow yok)
-        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets
+      - name: Rust gates clippy (pedantic, no allow)
+        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       # A typographic dash in a workflow `name:` silently unlists the job from
@@ -1422,6 +1797,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code
+      # The licence is named in LICENSE.md, budzero/LICENSE, every Cargo.toml,
+      # the README badge and docs/NOTICE. They once contradicted each other
+      # (MIT in one file, Apache-2.0 in the next) and the python check that
+      # was meant to notice ran in no workflow and skipped any manifest with
+      # no licence line at all. Every package now resolves to the one SPDX
+      # expression, inheritance included, and the upstream attributions stay.
+      - name: every licence declaration agrees + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- license-consistency --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- license-consistency
       # Two storage rules with the same failure mode: the data exists, the
       # tests pass, and nothing on the operator's path reads it. An operator
       # that misses a challenge sits out six hours, and a mobile operator may
@@ -1594,7 +1979,10 @@ jobs:
           else
             echo "SKIP (honest marker): main has no buf.yaml yet - the baseline is established by this wave."
           fi
+      # The scheduling keys (chain_id, epochs_per_year, slot_duration_secs,
+      # epoch_length_slots) must be strictly positive; the python version
+      # declared that set and never applied it, so a zero-slot epoch passed.
       - name: genesis schema gate + canary
         run: |
-          python3 ./ops/scripts/check_genesis_schema.py --self-test
-          python3 ./ops/scripts/check_genesis_schema.py config/mainnet-genesis.json
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema

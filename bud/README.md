@@ -25,7 +25,7 @@ bud restore -i output.bud -o back.json              # verify and restore, lossle
 bud check  -i output.bud                            # integrity: magic, chunk cid, root
 bud encode -i input.json -o v1.bud --class json     # v1 format
 bud bench  -f input.log                             # speed and cost, against the $0.016 ceiling gate
-bud bft-vote --pipe-id 3 --ratio 17.19 --validator v   # BFT finality, 2n/3
+bud bft-vote --pipe-id 3 --ratio 17.19 --validator v   # BFT finality, more than two thirds
 ```
 
 ## Module map
@@ -41,7 +41,7 @@ bud bft-vote --pipe-id 3 --ratio 17.19 --validator v   # BFT finality, 2n/3
 | `bud_format_por` | Shacham-Waters PoR, a proof of retrievability, bounds-safe |
 | `bud_format_dedup` | Intra-tenant dedup plus PoW ownership (K20) |
 | `bud_format_social` | Social bridge records and the K74 ownership split (Owned/Licensed, EU 2426) |
-| `bud_format_bft` | Ratio finality, 2n/3, GRANDPA-like |
+| `bud_format_bft` | Ratio finality, more than two thirds, GRANDPA-like |
 | `quantum_chain` | Ed25519 plus ML-DSA-87 hybrid signatures and a dual wallet (K3/K4/B1) |
 | `bud_format_economics` | The cost model with its honest ceiling gate, plus K60 zero-egress |
 | `bud_format_registry` | The MIME and format registry, plus the proof gates |

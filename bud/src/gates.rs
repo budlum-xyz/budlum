@@ -19,6 +19,15 @@ pub struct GateSuite;
 
 impl GateSuite {
     pub fn kp1(n: usize, e: f64, f: usize) -> GateResult {
+        // The ratio below needs N > 0 and f <= N. Outside that domain the
+        // gate fails and says why; it never wraps into a false pass.
+        if n == 0 || f > n {
+            return GateResult {
+                name: "KP1",
+                passed: false,
+                detail: format!("N={n} f={f} e={e:.3} -> INVALID (need N>0, f<=N)"),
+            };
+        }
         let ok = (n - f) as f64 / n as f64 * e >= 1.0 - 1e-9;
         GateResult {
             name: "KP1",
@@ -160,6 +169,20 @@ impl GateSuite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gate_kp1_refuses_invalid_domain_without_panic() {
+        // f > N used to underflow into a huge "survivor" count (false pass);
+        // N == 0 divided into NaN. Both now fail with an explicit reason.
+        let over = GateSuite::kp1(4, 1.0, 8);
+        assert!(!over.passed);
+        assert!(over.detail.contains("INVALID"));
+        let empty = GateSuite::kp1(0, 1.0, 0);
+        assert!(!empty.passed);
+        assert!(empty.detail.contains("INVALID"));
+        // The valid domain is unchanged.
+        assert!(GateSuite::kp1(4, 1.0, 0).passed);
+    }
+
     #[test]
     fn gate_kp2_catches_rs28_4() {
         let ok = GateSuite::kp2(28, 8);

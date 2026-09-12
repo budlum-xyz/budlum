@@ -20,7 +20,7 @@ BudZKVM is designed modularly. Through the book we build these components step b
 
 ## A note on current status
 
-BudZKVM is now a **fully production-ready** ZKVM with 31 opcodes. The AIR constraints of every opcode are complete and 51 tests (36 proof tests, 6 of them negative, included) pass. Stabilization is complete.
+BudZKVM is a ZKVM whose every opcode has AIR constraints and a prover/verifier path exercised by the workspace tests (`cargo test --workspace` in `budzero/`; CI measures the count, this page does not repeat it). Production scope is narrower than implementation scope: `MainnetActivation::default()` keeps `VerifyMerkle`, `VerifyInference`, `PrivacyCommit`, `NullifierCheck` and `SumConservation` **off** until the post-ceremony activation, `VerifyInference` has an opcode and a gate but no verification circuit yet, and the BudL language is still marked Draft in [BudL_SPEC.md](BudL_SPEC.md). Implemented is not the same as activated; the sections below say which one they mean.
 
 ## Contents
 

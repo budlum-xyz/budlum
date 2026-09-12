@@ -312,14 +312,19 @@ mod relayer_escrow_silent_failure_regression {
             request_id: AiRequestId::default(),
             requester,
             model_id,
-            input_commitment: [2u8; 32],
+            input_commitment: crate::ai::types::canonical_input_commitment(b"test"),
             input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
             max_fee: 500,
             callback: None,
             submitted_at_block: current_block,
             deadline_block,
             effort: crate::ai_inference::effort::EffortTier::default(),
-            perception: None,
+            perception: Some(crate::ai_inference::perception::PerceptionRequest {
+                asset_id: crate::pollen::AssetId([0xAB; 32]),
+                content_id: crate::storage::content_id::ContentId([0xBC; 32]),
+                kind: crate::ai_inference::perception::PerceptionKind::Text,
+                declared_units: 4,
+            }),
         };
         req.request_id = req.calculate_id();
         registry.submit_request(req, current_block).unwrap()

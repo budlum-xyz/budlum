@@ -249,15 +249,30 @@ pub fn encode_request(req: &BitswapRequest) -> Result<Vec<u8>, CodecError> {
     Ok(bytes)
 }
 
+/// The bincode reader for peer input: the byte cap alone is not enough,
+/// because the default deserializer trusts a collection length prefix and
+/// reserves that much before reading a single element. With the limit the
+/// reservation is bounded by the bytes that can actually follow.
+fn bounded_bincode() -> impl bincode::Options {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_MESSAGE_SIZE as u64)
+}
+
 /// Decode a Bitswap request from bytes.
 pub fn decode_request(bytes: &[u8]) -> Result<BitswapRequest, CodecError> {
+    use bincode::Options;
     if bytes.len() > MAX_MESSAGE_SIZE {
         return Err(CodecError::TooLarge {
             size: bytes.len(),
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bincode::deserialize(bytes).map_err(|e| CodecError::Deserialize(e.to_string()))
+    bounded_bincode()
+        .deserialize(bytes)
+        .map_err(|e| CodecError::Deserialize(e.to_string()))
 }
 
 /// Encode a Bitswap response to bytes.
@@ -274,13 +289,16 @@ pub fn encode_response(resp: &BitswapResponse) -> Result<Vec<u8>, CodecError> {
 
 /// Decode a Bitswap response from bytes.
 pub fn decode_response(bytes: &[u8]) -> Result<BitswapResponse, CodecError> {
+    use bincode::Options;
     if bytes.len() > MAX_MESSAGE_SIZE {
         return Err(CodecError::TooLarge {
             size: bytes.len(),
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bincode::deserialize(bytes).map_err(|e| CodecError::Deserialize(e.to_string()))
+    bounded_bincode()
+        .deserialize(bytes)
+        .map_err(|e| CodecError::Deserialize(e.to_string()))
 }
 
 #[cfg(test)]
@@ -312,6 +330,19 @@ mod tests {
         assert_eq!(decoded.cid, cid);
         assert_eq!(decoded.data, data);
         assert!(!decoded.not_found);
+    }
+
+    /// A response whose length prefix promises far more bytes than follow.
+    /// The default deserializer reserved that much up front; the bounded
+    /// reader refuses it before allocating.
+    #[test]
+    fn decode_response_refuses_a_lying_length_prefix() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x11; 32]); // cid
+        bytes.extend_from_slice(&(u64::MAX / 2).to_le_bytes()); // data length
+        bytes.extend_from_slice(&[0u8; 8]); // far fewer bytes than promised
+        let err = decode_response(&bytes).expect_err("refused");
+        assert!(matches!(err, CodecError::Deserialize(_)), "{err}");
     }
 
     #[test]

@@ -151,18 +151,24 @@ mod tests {
             "docker-compose.yml no longer states that auth is required"
         );
         assert!(
-            !base.contains("\"8545:8545\""),
+            !base.contains(":8545:8545\"") && !base.contains("\"8545:8545\""),
             "docker-compose.yml publishes the public RPC port to the host; the \
              CI overlay is the place for that"
         );
 
         // The overlay still has to carry the CI settings, or the smoke harness
-        // silently loses its unauthenticated listener.
+        // silently loses its unauthenticated listener. The publication is
+        // pinned to loopback: the overlay turns auth off, so a runner with a
+        // routable address must not serve that listener beyond the host.
         let ci = include_str!("../../ops/docker-compose.ci.yml");
         assert!(
-            ci.contains("BUDLUM_RPC_AUTH_REQUIRED=0") && ci.contains("\"8545:8545\""),
+            ci.contains("BUDLUM_RPC_AUTH_REQUIRED=0") && ci.contains("\"127.0.0.1:8545:8545\""),
             "docker-compose.ci.yml no longer provides the harness settings it \
-             was split out to hold"
+             was split out to hold (unauthenticated RPC published on loopback only)"
+        );
+        assert!(
+            !ci.contains("\"8545:8545\""),
+            "docker-compose.ci.yml publishes the unauthenticated RPC on every interface"
         );
     }
 

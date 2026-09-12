@@ -95,6 +95,18 @@ pub fn parse_nginx_line(line: &[u8]) -> Option<(Vec<&[u8]>, Vec<Vec<u8>>)> {
     parts.push(status);
     parts.push(size);
     let _ = parts;
+    // Lossless means the rebuild is byte-identical. The reader accepted
+    // lines the writer cannot reproduce: a trailing referer or user agent,
+    // doubled spaces, a status or size with leading zeros, a missing final
+    // newline. Such a line is refused here, so the caller falls back to the
+    // raw bytes instead of silently storing a different log.
+    let status_num: u16 = status.parse().ok()?;
+    let size_num: u64 = size.parse().ok()?;
+    let rebuilt =
+        format!("{remote} - - [{time}] \"{method} {path} {proto}\" {status_num} {size_num}\n");
+    if rebuilt.as_bytes() != line {
+        return None;
+    }
     // the fixed template pieces (between the fields):
     // "" - - "[" "]" "\"" " " "\"" " " "\n"
     let fixed: Vec<&[u8]> = vec![b" - - [", b"] \"", b" ", b" ", b"\" ", b" ", b"\n"];
@@ -244,6 +256,13 @@ impl LogFieldColumnar {
             return None;
         }
         let lines = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
+        // The header count is bound the same way `encode` bounds its input:
+        // no empty container, nothing above `MAX_LINES`. `decode` indexes
+        // every column by the first column's length, so each column below
+        // has to hold exactly `lines` entries or a short one panics there.
+        if lines == 0 || lines > MAX_LINES {
+            return None;
+        }
         let mut pos = HDR;
         let fixed_template = read_bytes(bytes, &mut pos)?;
         let mut columns = Vec::with_capacity(7);
@@ -253,7 +272,12 @@ impl LogFieldColumnar {
             }
             let n = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
             pos += 4;
-            if n > lines {
+            // Every entry carries at least its 4-byte length prefix, so the
+            // bytes left bound the count. A count that the input cannot hold
+            // is refused before it is allocated: `Vec::with_capacity` from a
+            // header-supplied number is an allocation bomb, and under
+            // `panic = "abort"` an allocation failure takes the process down.
+            if n != lines || n > payload_len.saturating_sub(pos) / 4 {
                 return None;
             }
             let mut col = Vec::with_capacity(n);
@@ -326,6 +350,81 @@ mod tests {
         assert_eq!(values[6], b"1024");
     }
 
+    /// A blob whose header claims a column count the body cannot hold used
+    /// to reach `Vec::with_capacity(n)` before any body byte was read; with
+    /// `lines` set to match, a few dozen bytes asked for gigabytes. The digest
+    /// is recomputed so only the count check can be what refuses it.
+    #[test]
+    fn a_column_count_the_body_cannot_hold_is_refused_before_allocation() {
+        let claimed = (MAX_LINES / 2) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&LOGFIELD_MAGIC);
+        out.push(LOGFIELD_VERSION);
+        out.extend_from_slice(&claimed.to_le_bytes()); // lines, within MAX_LINES
+        push_bytes(&mut out, b"tpl");
+        out.extend_from_slice(&claimed.to_le_bytes()); // first column count
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_LOGFIELD_V1");
+        h.update(&out);
+        let d: [u8; 32] = h.finalize().into();
+        out.extend_from_slice(&d);
+        assert!(LogFieldColumnar::from_blob(&out).is_none());
+    }
+
+    /// A header line count outside what `encode` can produce (zero or above
+    /// `MAX_LINES`) is refused, and so is a blob whose columns do not all
+    /// hold exactly that many entries: `decode` walks every column by the
+    /// first column's length, so a shorter column used to panic there.
+    #[test]
+    fn column_lengths_must_match_the_header_line_count() {
+        let seal = |mut out: Vec<u8>| {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_BUD_LOGFIELD_V1");
+            h.update(&out);
+            let d: [u8; 32] = h.finalize().into();
+            out.extend_from_slice(&d);
+            out
+        };
+        let header = |lines: u32| {
+            let mut out = Vec::new();
+            out.extend_from_slice(&LOGFIELD_MAGIC);
+            out.push(LOGFIELD_VERSION);
+            out.extend_from_slice(&lines.to_le_bytes());
+            push_bytes(&mut out, b"tpl");
+            out
+        };
+        for lines in [0u32, (MAX_LINES + 1) as u32, u32::MAX] {
+            let mut out = header(lines);
+            for _ in 0..7 {
+                out.extend_from_slice(&0u32.to_le_bytes());
+            }
+            assert!(
+                LogFieldColumnar::from_blob(&seal(out)).is_none(),
+                "lines={lines} must be refused"
+            );
+        }
+        // Two lines claimed; column 5 carries a single entry.
+        let mut out = header(2);
+        for ci in 0..7 {
+            let n: u32 = if ci == 5 { 1 } else { 2 };
+            out.extend_from_slice(&n.to_le_bytes());
+            for _ in 0..n {
+                push_bytes(&mut out, b"x");
+            }
+        }
+        assert!(LogFieldColumnar::from_blob(&seal(out)).is_none());
+        // The same layout with every column at two entries parses.
+        let mut out = header(2);
+        for _ in 0..7 {
+            out.extend_from_slice(&2u32.to_le_bytes());
+            push_bytes(&mut out, b"x");
+            push_bytes(&mut out, b"x");
+        }
+        let parsed = LogFieldColumnar::from_blob(&seal(out)).expect("well formed blob");
+        assert_eq!(parsed.lines, 2);
+        assert!(parsed.columns.iter().all(|c| c.len() == 2));
+    }
+
     #[test]
     fn roundtrip_lossless() {
         // K38: encode -> decode = the original (lossless)
@@ -361,6 +460,34 @@ mod tests {
         assert!(parse_nginx_line(b"broken line").is_none());
         assert!(LogFieldColumnar::encode(b"broken line\nsecond line\n").is_none());
         assert!(LogFieldColumnar::encode(b"").is_none());
+    }
+
+    /// Lines the old parser accepted and the writer rebuilt differently.
+    /// Each is refused now, so no log is stored as a different log.
+    #[test]
+    fn a_line_the_rebuild_cannot_reproduce_is_refused() {
+        let good = b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 512\n";
+        assert!(parse_nginx_line(good).is_some());
+        let lossy: [&[u8]; 4] = [
+            // combined format: referer and user agent after the size
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 512 \"-\" \"curl\"\n",
+            // doubled space before the status
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\"  200 512\n",
+            // leading zero in the size
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 0512\n",
+            // no final newline
+            b"10.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /a HTTP/1.1\" 200 512",
+        ];
+        for line in lossy {
+            assert!(
+                parse_nginx_line(line).is_none(),
+                "refused: {}",
+                String::from_utf8_lossy(line)
+            );
+        }
+        let mut text = good.to_vec();
+        text.extend_from_slice(lossy[0]);
+        assert!(LogFieldColumnar::encode(&text).is_none());
     }
 
     #[test]

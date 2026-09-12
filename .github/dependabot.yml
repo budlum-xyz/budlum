@@ -92,6 +92,10 @@ updates:
       # Compatible with hickory >=0.26; unlike the former list, already-patched
       # Lru/gossipsub/yamux dependencies are NOT hidden from Dependabot.
       - dependency-name: "hickory-proto"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
   - package-ecosystem: "docker"
     # The Dockerfile lives under ops/; with directory: "/" Dependabot ERRORED
     # with "No Dockerfiles nor Kubernetes YAML found in /".

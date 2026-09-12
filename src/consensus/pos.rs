@@ -2,6 +2,7 @@ use super::{ConsensusEngine, ConsensusError};
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 
+use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use crate::core::block::Block;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
@@ -42,9 +43,14 @@ impl Default for PoSConfig {
             epoch_length: crate::core::chain_config::Network::Devnet
                 .consensus_params()
                 .epoch_len,
-            annual_reward_rate: (0.05 * FIXED_POINT_SCALE as f64) as u64,
-            slashing_penalty: (0.10 * FIXED_POINT_SCALE as f64) as u64,
-            double_sign_penalty: (0.50 * FIXED_POINT_SCALE as f64) as u64,
+            // F-184/185/186 (findings report 2026-07-27): the f64 constant
+            // expression was replaced with integer arithmetic. Measured: both
+            // expressions produce [50000, 100000, 500000]; the behaviour is
+            // identical, and no floating point remains in the consensus
+            // constants.
+            annual_reward_rate: (FIXED_POINT_SCALE * 5) / 100,
+            slashing_penalty: FIXED_POINT_SCALE / 10,
+            double_sign_penalty: FIXED_POINT_SCALE / 2,
             unbonding_epochs: crate::core::account::UNBONDING_EPOCHS,
         }
     }
@@ -100,6 +106,16 @@ pub struct PoSEngine {
     epoch_seed: RwLock<[u8; 32]>,
 }
 impl PoSEngine {
+    /// `PoSConfig::epoch_length` is a public field and nothing rejects zero
+    /// at construction; the division paths below must refuse it explicitly
+    /// instead of panicking on the first block.
+    fn epoch_length_checked(&self) -> Result<u64, ConsensusError> {
+        if self.config.epoch_length == 0 {
+            return Err(ConsensusError("PoS epoch length must be non-zero".into()));
+        }
+        Ok(self.config.epoch_length)
+    }
+
     pub fn new(config: PoSConfig, validator_keys: Option<ValidatorKeys>) -> Self {
         PoSEngine {
             config,
@@ -189,12 +205,6 @@ impl PoSEngine {
             timestamp: block.timestamp,
         };
 
-        let mut checkpoints = self
-            .checkpoints
-            .write()
-            .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
-        checkpoints.push(checkpoint.clone());
-
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
             // cosmetic loss. On restart the node would not know the block was
@@ -207,6 +217,24 @@ impl PoSEngine {
                 ))
             })?;
         }
+
+        // The durable write comes first. An in-memory checkpoint pushed
+        // before a failed write anchored this process to a height the disk
+        // never learned, and the two disagreed until the next restart.
+        let mut checkpoints = self
+            .checkpoints
+            .write()
+            .map_err(|_| ConsensusError("Failed to acquire write lock on checkpoints".into()))?;
+        // Idempotent at one height: `record_block` persists the checkpoint
+        // before the seen-block record, and a crash in that window replays
+        // this whole path for the same block. Without the check the replay
+        // would push a second copy of the same checkpoint.
+        if checkpoints.last().is_some_and(|c| {
+            c.block_index == checkpoint.block_index && c.block_hash == checkpoint.block_hash
+        }) {
+            return Ok(());
+        }
+        checkpoints.push(checkpoint);
         Ok(())
     }
     /// The last checkpoint this node has established, and its hash.
@@ -236,10 +264,22 @@ impl PoSEngine {
             // Nothing established yet: nothing to violate.
             return true;
         };
-        let Ok(index) = usize::try_from(height) else {
+        // Locate the block by its height, not by its slice position: the
+        // slices handed to fork choice are not required to start at genesis,
+        // and on a suffix `chain[height]` names the wrong block (or none),
+        // which read as a violation for an honest chain.
+        let Some(first) = chain.first() else {
             return false;
         };
-        chain.get(index).is_some_and(|block| block.hash == hash)
+        let Some(offset) = height
+            .checked_sub(first.index)
+            .and_then(|o| usize::try_from(o).ok())
+        else {
+            return false;
+        };
+        chain
+            .get(offset)
+            .is_some_and(|block| block.index == height && block.hash == hash)
     }
 
     pub fn is_before_checkpoint(&self, block: &Block) -> bool {
@@ -521,7 +561,7 @@ impl PoSEngine {
         chain: &[Block],
     ) -> Result<(), ConsensusError> {
         let slot = block.index;
-        let epoch = slot / self.config.epoch_length;
+        let epoch = slot / self.epoch_length_checked()?;
         block.epoch = epoch;
         block.slot = slot;
 
@@ -670,7 +710,7 @@ impl ConsensusEngine for PoSEngine {
             ));
         }
 
-        let expected_epoch = block.index / self.config.epoch_length;
+        let expected_epoch = block.index / self.epoch_length_checked()?;
         if block.epoch != expected_epoch {
             return Err(ConsensusError(format!(
                 "PoS epoch mismatch: expected {}, got {}",
@@ -813,13 +853,26 @@ impl ConsensusEngine for PoSEngine {
         )
     }
     fn select_best_chain<'a>(&self, chains: &[&'a [Block]]) -> Option<&'a [Block]> {
-        if chains.is_empty() {
-            return None;
+        let mut best: Option<&'a [Block]> = None;
+        for &chain in chains {
+            match best {
+                None => best = Some(chain),
+                Some(current) => {
+                    let current_score = self.fork_choice_score(current);
+                    let candidate_score = self.fork_choice_score(chain);
+                    let candidate_wins = candidate_score > current_score
+                        || (candidate_score == current_score
+                            && resolve_split_tie(
+                                &SplitCandidate::from_chain_tip(current, current_score),
+                                &SplitCandidate::from_chain_tip(chain, candidate_score),
+                            ) == SplitDecision::RightWins);
+                    if candidate_wins {
+                        best = Some(chain);
+                    }
+                }
+            }
         }
-        chains
-            .iter()
-            .max_by_key(|c| self.fork_choice_score(c))
-            .copied()
+        best
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
@@ -855,7 +908,20 @@ impl ConsensusEngine for PoSEngine {
         if !self.chain_honours_checkpoint(candidate) {
             return false;
         }
-        self.fork_choice_score(candidate) > self.fork_choice_score(current)
+        let candidate_score = self.fork_choice_score(candidate);
+        let current_score = self.fork_choice_score(current);
+        if candidate_score != current_score {
+            return candidate_score > current_score;
+        }
+        // Equal accumulated weight (a 2-2 validator split): the deterministic
+        // resolver picks a side, so honest nodes converge on the same tip
+        // regardless of the order in which the two tips arrived. `RightWins`
+        // means the candidate replaces the current chain; identical tips keep
+        // the incumbent (no reorg).
+        resolve_split_tie(
+            &SplitCandidate::from_chain_tip(current, current_score),
+            &SplitCandidate::from_chain_tip(candidate, candidate_score),
+        ) == SplitDecision::RightWins
     }
 
     fn record_block(
@@ -863,6 +929,7 @@ impl ConsensusEngine for PoSEngine {
         block: &Block,
         storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
+        let epoch_length = self.epoch_length_checked()?;
         let producer = block
             .producer
             .as_ref()
@@ -870,10 +937,6 @@ impl ConsensusEngine for PoSEngine {
         let header = BlockHeader::from_block(block);
         let signature = block.signature.clone().unwrap_or_default();
         let key = (*producer, header.index);
-
-        if let Some(store) = storage {
-            let _ = store.save_seen_block(&header, &signature);
-        }
 
         let mut seen_blocks = self
             .seen_blocks
@@ -886,6 +949,16 @@ impl ConsensusEngine for PoSEngine {
                     "DOUBLE-SIGN: {} signed two blocks for slot {}!",
                     producer, header.index
                 );
+                // The persisted seen-block record is the double-sign
+                // evidence across restarts, so the FIRST header must stay
+                // the durable one. Persisting unconditionally here would
+                // overwrite `SEEN:{producer}:{height}` with the second,
+                // conflicting signature before this comparison runs; after
+                // a restart only the second signature would survive and the
+                // equivocation could never be proven. `load_state` refills
+                // `seen_blocks` from storage at startup, so the in-memory
+                // view is authoritative and the write is skipped on a
+                // conflict.
                 let evidence = SlashingEvidence::new(
                     existing.0.clone(),
                     header,
@@ -899,16 +972,39 @@ impl ConsensusEngine for PoSEngine {
                 slashing_evidence.push(evidence);
             }
         } else {
-            seen_blocks.insert(key, (header, signature));
-            if block.index > 0 && block.index.is_multiple_of(self.config.epoch_length) {
-                let _ = self.add_checkpoint(block, storage);
+            if block.index > 0 && block.index.is_multiple_of(epoch_length) {
+                // The checkpoint is persisted BEFORE the seen-block record,
+                // and the pair converges across a crash in the window: the
+                // retry takes this same new-entry branch again because the
+                // SEEN record never landed, and `add_checkpoint` is
+                // idempotent for a checkpoint it already holds. The old
+                // order persisted SEEN first; a crash in the window left
+                // the SEEN entry without its checkpoint forever, because
+                // the retry then took the existing-hash branch and never
+                // returned here.
+                self.add_checkpoint(block, storage)?;
             }
+            if let Some(store) = storage {
+                // Not `let _ =`: the seen-block record is the double-sign
+                // evidence. A record that fails to persist means a restart
+                // forgets the first signature and the second one is never
+                // caught, so the failure has to surface.
+                store
+                    .save_seen_block(&header, &signature)
+                    .map_err(|error| {
+                        ConsensusError(format!(
+                            "failed to persist seen block at height {}: {error}",
+                            header.index
+                        ))
+                    })?;
+            }
+            seen_blocks.insert(key, (header, signature));
 
             // Prune seen_blocks to prevent unbounded growth.
             // Keep entries from the last 2 epochs only, older double-sign evidence
             // Is no longer actionable (already slashed or epoch-finalized).
-            let current_epoch = block.index / self.config.epoch_length;
-            let min_slot = current_epoch.saturating_sub(2) * self.config.epoch_length;
+            let current_epoch = block.index / epoch_length;
+            let min_slot = current_epoch.saturating_sub(2) * epoch_length;
             let before = seen_blocks.len();
             seen_blocks.retain(|(_, slot), _| *slot >= min_slot);
             let pruned = before - seen_blocks.len();
@@ -1159,6 +1255,31 @@ mod tests {
         chain
     }
 
+    /// A zero `epoch_length` is a configuration error, not a reason to divide
+    /// by zero on the first block that arrives.
+    #[test]
+    fn zero_epoch_length_is_refused_not_panicked() {
+        let engine = PoSEngine::new(
+            PoSConfig {
+                epoch_length: 0,
+                ..Default::default()
+            },
+            None,
+        );
+        let chain = synthetic_pos_chain(4, 1);
+        let state = AccountState::new();
+        let block = chain[1].clone();
+
+        let err = engine
+            .validate_block(&block, &chain[..1], &state)
+            .expect_err("validation must refuse a zero epoch length");
+        assert!(err.0.contains("epoch length"), "{err:?}");
+        let err = engine
+            .record_block(&block, None)
+            .expect_err("recording must refuse a zero epoch length");
+        assert!(err.0.contains("epoch length"), "{err:?}");
+    }
+
     #[test]
     fn replay_derived_randomness_resists_header_grinding_and_xor_cancellation() {
         let config = PoSConfig {
@@ -1223,5 +1344,17 @@ mod tests {
                 .unwrap(),
             before_restart
         );
+    }
+
+    #[test]
+    fn pos_default_fixed_point_constants_are_exact_integers() {
+        use crate::core::chain_config::FIXED_POINT_SCALE;
+        let config = PoSConfig::default();
+        assert_eq!(config.annual_reward_rate, (FIXED_POINT_SCALE * 5) / 100);
+        assert_eq!(config.slashing_penalty, FIXED_POINT_SCALE / 10);
+        assert_eq!(config.double_sign_penalty, FIXED_POINT_SCALE / 2);
+        assert_eq!(config.annual_reward_rate, 50_000);
+        assert_eq!(config.slashing_penalty, 100_000);
+        assert_eq!(config.double_sign_penalty, 500_000);
     }
 }

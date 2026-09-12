@@ -287,6 +287,103 @@ mod tests {
         }
     }
 
+    /// Every `.rs` file under `dir`, recursively.
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable source tree") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// RUSTSEC-2026-0253 (lru `pop()` use-after-free) is waived in
+    /// `.quality/osv-scanner.toml` on one argument: the only `LruCache` in the
+    /// graph is rqrr's `LruCache<u8, ColoredRegion>`, and a `u8` key has no
+    /// `Drop` that could panic mid-pop. The waiver is scoped to the locked
+    /// version and dated; this test is what invalidates it early. It fails
+    /// when a second crate starts depending on lru, when lru moves to a
+    /// version the waiver does not name, or when first-party code gains an
+    /// `lru` use of its own, each of which is a new reachability question.
+    #[test]
+    fn lru_advisory_waiver_stays_scoped_to_the_rqrr_instantiation() {
+        let lock = include_str!("../../Cargo.lock");
+        let versions = locked_versions_in(lock, "lru");
+        assert_eq!(
+            versions.len(),
+            1,
+            "exactly one lru in the root lock, found {versions:?}"
+        );
+        let locked = versions.first().expect("one lru version");
+
+        // Every package whose dependency list names lru.
+        let dependents: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|block| {
+                block
+                    .lines()
+                    .any(|l| l.trim() == "\"lru\"," || l.trim().starts_with("\"lru "))
+            })
+            .filter_map(|block| {
+                block
+                    .lines()
+                    .find_map(|l| l.strip_prefix("name = \"")?.strip_suffix('"'))
+            })
+            .collect();
+        assert_eq!(
+            dependents,
+            ["rqrr"],
+            "the waiver reasons about rqrr's LruCache<u8, _> only; a new lru \
+             dependent is a new instantiation and needs its own reachability \
+             argument (or the rqrr upgrade that drops lru 0.16)"
+        );
+
+        let osv = include_str!("../../.quality/osv-scanner.toml");
+        let at = osv
+            .find("name = \"lru\"")
+            .expect("the lru waiver is a PackageOverrides entry, not a bare IgnoredVulns id");
+        let entry = &osv[at..osv.len().min(at + 600)];
+        assert!(
+            entry.contains(&format!("version = \"{locked}\"")),
+            "the lru waiver names a version other than the locked {locked}; \
+             re-read the advisory against the new version before re-scoping it"
+        );
+        assert!(
+            entry.contains("effectiveUntil = "),
+            "the lru waiver must carry an expiry"
+        );
+        assert!(
+            !osv.lines().any(|l| {
+                let code = l.split('#').next().unwrap_or("").trim();
+                code == "id = \"RUSTSEC-2026-0253\""
+            }),
+            "RUSTSEC-2026-0253 must not be waived globally by id"
+        );
+
+        // First-party code never instantiates lru itself.
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let this_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tests/advisory_reachability.rs");
+        for path in files {
+            if path == this_file {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("readable source file");
+            assert!(
+                !body.contains("LruCache") && !body.contains("lru::"),
+                "{} uses lru directly; the RUSTSEC-2026-0253 waiver covers \
+                 only rqrr's u8-keyed cache",
+                path.display()
+            );
+        }
+    }
+
     /// The version comparison above is the load-bearing part of these locks,
     /// so it gets its own canary.
     #[test]

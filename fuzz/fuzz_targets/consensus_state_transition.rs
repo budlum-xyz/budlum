@@ -67,14 +67,22 @@ fuzz_target!(|data: &[u8]| {
             chain.chain[..keep.max(1)].to_vec()
         }
         2 => {
-            // Deep synthetic reorg attempt past MAX_REORG_DEPTH.
-            let mut deep = chain.chain.clone();
+            // Deep DIVERGENT reorg attempt past MAX_REORG_DEPTH: fork from
+            // an ancestor of the tip and replace every block after the
+            // branch point with differently-produced ones. Appending to a
+            // clone of the current chain (what this mode used to do) is an
+            // extension, not a reorg - `try_reorg` never saw a candidate
+            // that removes old blocks.
             let depth = MAX_REORG_DEPTH + 1 + (take_u8(data, &mut i) as usize % 8);
-            for d in 0..depth {
+            let branch_at = chain.chain.len().saturating_sub(depth).max(1);
+            let mut deep = chain.chain[..branch_at].to_vec();
+            for d in 0..(depth + 4) {
                 if let Some(last) = deep.last() {
                     let mut b = Block::new(last.index.saturating_add(1), last.hash.clone(), vec![]);
                     b.chain_id = last.chain_id;
-                    b.producer = Some(producer_from(take_u8(data, &mut i)));
+                    // A different producer and timestamp than the block this
+                    // replaces, so the fork block really is another block.
+                    b.producer = Some(producer_from(take_u8(data, &mut i).wrapping_add(d as u8)));
                     b.timestamp = last.timestamp.saturating_add(1000);
                     b.hash = b.calculate_hash();
                     deep.push(b);
@@ -82,7 +90,6 @@ fuzz_target!(|data: &[u8]| {
                 if deep.len() > MAX_CANDIDATE + chain.chain.len() {
                     break;
                 }
-                let _ = d;
             }
             deep
         }

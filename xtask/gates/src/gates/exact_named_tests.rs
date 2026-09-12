@@ -43,13 +43,7 @@ pub fn check_exact_log(log: &Path, tests: &[&str], subject: &str) -> Result<Stri
 /// The shell gates' canary: full log passes, a missing name fails, a FAILED
 /// line fails.
 pub fn self_test_exact(tests: &[&str], subject: &str) -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("budlum-gates-exact-{}-{nanos}", std::process::id()));
-    let _ = fs::create_dir_all(&dir);
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-exact")?;
 
     let full = dir.join("full.txt");
     let mut full_text = String::new();

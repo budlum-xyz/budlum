@@ -10,15 +10,15 @@
 //!   5) PoR respond/verify - no panic on out-of-bounds indices (K38)
 //!   6) structural chunking is lossless for every kind (split+join == d)
 #![no_main]
-use libfuzzer_sys::fuzz_target;
-use bud_core::bud_format::{BudFile, BudFormatClass, BudFlags};
+use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass};
 use bud_core::bud_format_container::{
-    BudV2File, FormatCodec, MultiHash, StructuralKind, content_id, structural_join,
-    structural_split, structural_split_compact,
+    content_id, structural_join, structural_split, structural_split_compact, BudV2File,
+    FormatCodec, MultiHash, StructuralKind,
 };
 use bud_core::bud_format_huffman::HuffmanCoder;
-use bud_core::bud_format_por::{PorChallenge, PorKey};
 use bud_core::bud_format_pipe::{restore, store, store_zstd};
+use bud_core::bud_format_por::{PorChallenge, PorKey};
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // 1) The v1 format (bud_format.rs) - K25 stream plus limits.
@@ -27,7 +27,16 @@ fuzz_target!(|data: &[u8]| {
         let _ = file.decode_streaming(|_| Ok(()));
     }
     if data.len() < 1024 {
-        let _ = BudFile::encode(data, BudFormatClass::Json, "application/json", 0, 0, 3, BudFlags::new(true, true, false, false, false, false), data.to_vec());
+        let _ = BudFile::encode(
+            data,
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            data.to_vec(),
+        );
     }
 
     // 2) The .bud v2 container - the decode/parse paths must not panic.
@@ -58,7 +67,9 @@ fuzz_target!(|data: &[u8]| {
         let chunks = structural_split_compact(StructuralKind::Binary, data, 128);
         if let Some(comp) = BudV2File::new_compressed(FormatCodec::Unknown, chunks.clone()) {
             if let Some(dec) = BudV2File::decode(&comp.encode()) {
-                let back = dec.restore_original().expect("the Huffman expansion succeeds");
+                let back = dec
+                    .restore_original()
+                    .expect("the Huffman expansion succeeds");
                 assert_eq!(&back[..], data, "the Huffman roundtrip has to be lossless");
             }
         }
@@ -74,7 +85,10 @@ fuzz_target!(|data: &[u8]| {
             let _ = key.verify(&blocks, &ch, &resp);
         }
         // a challenge with an out-of-bounds index -> respond None, NO PANIC
-        let bad = PorChallenge { indices: vec![999_999], nonce: [0u8; 32] };
+        let bad = PorChallenge {
+            indices: vec![999_999],
+            nonce: [0u8; 32],
+        };
         let _ = key.respond(&blocks, &bad);
     }
 
@@ -88,7 +102,11 @@ fuzz_target!(|data: &[u8]| {
     ] {
         let chunks = structural_split(kind, data);
         let joined = structural_join(kind, &chunks);
-        assert_eq!(&joined[..], data, "structural chunking is lossless (K38): {kind:?}");
+        assert_eq!(
+            &joined[..],
+            data,
+            "structural chunking is lossless (K38): {kind:?}"
+        );
         let _ = structural_split_compact(kind, data, 64 * 1024);
     }
 });

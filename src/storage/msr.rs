@@ -84,11 +84,14 @@ pub fn msr_repair_traffic_scaled(k: u64, d: u64) -> Result<u64, MsrError> {
     if k == 0 {
         return Err(MsrError::NoDataShards);
     }
-    if d < k || d >= 2 * k {
-        // d >= k: you must be able to read at least the data shards.
-        // d < 2k: the denominator d - k + 1 stays positive and the floor
-        // stays below k (a regenerating code that reads more than k shards
-        // is worse than plain RS, so it is not MSR).
+    // d >= k: you must be able to read at least the data shards.
+    // d < 2k: the denominator d - k + 1 stays positive and the floor
+    // stays below k (a regenerating code that reads more than k shards
+    // is worse than plain RS, so it is not MSR). Written as `d - k >= k`
+    // (safe once `d >= k` holds) rather than `d >= 2 * k`, which overflows
+    // for `k >= 2^63` and would panic in debug builds or, in release, wrap
+    // and admit a degree the doc refuses.
+    if d < k || d - k >= k {
         return Err(MsrError::BadRepairDegree { k, d });
     }
     let denom = d - k + 1;
@@ -174,6 +177,23 @@ mod tests {
         assert!(msr_repair_traffic_scaled(20, 10).is_err());
         assert!(msr_repair_traffic_scaled(20, 40).is_err());
         assert!(msr_repair_traffic_scaled(0, 5).is_err());
+    }
+
+    /// The degree check must not compute `2 * k`: for `k >= 2^63` that
+    /// multiplication overflows. Every `d` in `k..=u64::MAX` is then a legal
+    /// degree (`d < 2k` holds mathematically), and the answer is the floor's
+    /// saturated value rather than a panic.
+    #[test]
+    fn a_huge_k_does_not_overflow_the_degree_check() {
+        let k = 1u64 << 63;
+        assert!(msr_repair_traffic_scaled(k, k).is_ok());
+        assert!(msr_repair_traffic_scaled(k, u64::MAX).is_ok());
+        assert_eq!(
+            msr_repair_traffic_scaled(u64::MAX, u64::MAX),
+            Ok(u64::MAX),
+            "d / (d - k + 1) = u64::MAX shard-equivalents, saturated after scaling"
+        );
+        assert!(msr_repair_traffic_scaled(k, k - 1).is_err());
     }
 
     /// Determinism: the same parameters always give the same floor.

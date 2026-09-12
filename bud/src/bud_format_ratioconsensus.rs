@@ -13,7 +13,7 @@
 //! 3. The content class (static/moving/repetitive and so on) WEIGHTS the
 //!    candidates (K84: codec choice depends on the content - "x265 is not always
 //!    good").
-//! 4. The weighted candidates enter a BFT vote (2n/3) -> the FINAL ratio and
+//! 4. The weighted candidates enter a BFT vote (more than two thirds) -> the FINAL ratio and
 //!    pipeline are chosen.
 //! 5. The chosen ratio is written into the production proof and the checkpoint
 //!    (verifiable on chain).
@@ -151,9 +151,9 @@ impl RatioConsensus {
         c.measured_ratio * c.content_class_bonus
     }
 
-    /// The BFT vote: n voters back the highest weighted candidate (a 2n/3
-    /// majority). The choice is deterministic: the score ordering makes the best
-    /// candidate final.
+    /// The BFT vote: n voters back the highest weighted candidate (a strict
+    /// supermajority). The choice is deterministic: the score ordering makes
+    /// the best candidate final.
     pub fn finalize(
         pool: Vec<RatioCandidateAgent>,
         n: usize,
@@ -166,7 +166,9 @@ impl RatioConsensus {
         let best = pool
             .iter()
             .max_by(|a, b| Self::weighted_score(a).total_cmp(&Self::weighted_score(b)))?;
-        let quorum = (n * 2).div_ceil(3);
+        // The same strict supermajority `ValidatorSet::quorum` uses:
+        // `floor(2n/3) + 1`, so two quorums always share an honest voter.
+        let quorum = n - (n - 1) / 3;
         // final: the best candidate takes the quorum vote (a deterministic simulation)
         Some(RatioConsensus {
             final_pipe: best.pipe.to_string(),
@@ -290,7 +292,7 @@ mod tests {
         let cons = RatioConsensus::finalize(pool, 7, 1).expect("consensus");
         assert_eq!(cons.final_pipe, "json-columnar-orderfree");
         assert!((cons.final_ratio - 12.07).abs() < 0.01);
-        assert_eq!(cons.quorum, 5, "2n/3 = 5/7");
+        assert_eq!(cons.quorum, 5, "floor(2n/3) + 1 = 5 of 7");
         // the final record can be hashed and survives a blob roundtrip
         let blob = cons.to_blob();
         let back = RatioConsensus::from_blob(&blob).expect("blob");

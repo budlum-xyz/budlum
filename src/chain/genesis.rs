@@ -14,6 +14,18 @@ pub const GENESIS_ALLOCATION: u64 = 1_000_000_000;
 
 pub const GENESIS_TIMESTAMP: u128 = 0;
 
+/// Post-quantum signature scheme the shipped networks launched with.
+///
+/// Fixed here rather than read from `crate::crypto::primitives::PQ_SCHEME_ID`:
+/// that constant names whatever backend this binary was compiled with, so a
+/// genesis built from it follows the build instead of the chain, and the
+/// startup comparison in `GenesisConfig::validate_pq_scheme` passes for every
+/// build. The shipped `config/*-genesis.json` files declare this same word,
+/// and `Blockchain::new_with_genesis` refuses to start a binary built for any
+/// other scheme. Custom chains (`GenesisConfig::new`) still record the scheme
+/// of the build that created them.
+const LAUNCHED_PQ_SCHEME: &str = "ml-dsa-65";
+
 /// The domain configuration bootstrapped at genesis.
 /// Serialisation-safe (serde); it starts with placeholder addresses and the
 /// launch ceremony replaces them.
@@ -39,6 +51,16 @@ pub struct BootstrapDomainConfig {
 impl BootstrapDomainConfig {
     /// The four-domain bootstrap list for mainnet (PoW, PoS, BFT and PoA
     /// placeholders).
+    ///
+    /// The PoS and BFT entries are declared bridge-enabled but carry no
+    /// validator set (only a PoA entry can name one here), so they register
+    /// with a zero `validator_set_hash`. A set-bound finality adapter refuses
+    /// every proof for a bridge-enabled domain in that state (see
+    /// `reject_unregistered_set_for_bridge`), so until a launch ceremony
+    /// registers their sets these two domains finalize nothing. That is the
+    /// intended shape of a bridge with no one behind it; the alternative,
+    /// letting the proof name its own validator set, would let anyone
+    /// finalize a commitment and mint against it.
     pub fn mainnet_defaults() -> Vec<Self> {
         vec![
             Self {
@@ -306,6 +328,51 @@ impl GenesisConfig {
         Ok(())
     }
 
+    /// The `bud_tokenomics` distribution, if present, sums to the fixed
+    /// supply, and its team vesting is at least as long as its cliff.
+    ///
+    /// `build_state` seeds nothing for a genesis that fails the supply check,
+    /// so a chain built on one would run with an empty distribution; every
+    /// path that builds a chain checks it first, next to the PQ scheme check.
+    ///
+    /// # Errors
+    ///
+    /// Names the sum and the supply it should have been, or the vesting and
+    /// the cliff it falls short of.
+    pub fn validate_tokenomics_supply(&self) -> Result<(), String> {
+        if let Some(params) = &self.bud_tokenomics {
+            if !params.is_balanced() {
+                return Err(format!(
+                    "Genesis bud_tokenomics allocations sum to {} base units, not the fixed supply of {}",
+                    params.total(),
+                    crate::tokenomics::BUD_TOTAL_SUPPLY
+                ));
+            }
+            // The team schedule unlocks linearly from genesis over
+            // `team_vesting_epochs` and pays nothing before the cliff. A
+            // duration shorter than the cliff would unlock the whole
+            // allocation the moment the cliff ends, which is a cliff without
+            // a schedule; it is refused rather than read as one.
+            if params.team_vesting_epochs != 0
+                && params.team_vesting_epochs < params.team_cliff_epochs
+            {
+                return Err(format!(
+                    "Genesis bud_tokenomics team vesting of {} epochs is shorter than its cliff of {} epochs",
+                    params.team_vesting_epochs, params.team_cliff_epochs
+                ));
+            }
+            // Zero `epochs_per_year` cannot express a calendar. The reward
+            // path clamps with `.max(1)` and would pay the whole annual
+            // yield every epoch; `TimedBurnState::due_years` returns 0 for
+            // it and silently skips the timed reserve burn. Refuse the
+            // configuration at the genesis boundary instead.
+            if params.epochs_per_year == 0 {
+                return Err("Genesis bud_tokenomics epochs_per_year must be non-zero".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_pq_scheme()?;
         if self.chain_id != network.chain_id().value() {
@@ -316,6 +383,15 @@ impl GenesisConfig {
                 network.chain_id()
             ));
         }
+        if let Some(params) = &self.bud_tokenomics {
+            if params.block_reward != self.block_reward {
+                return Err(format!(
+                    "Genesis block_reward {} disagrees with bud_tokenomics.block_reward {}",
+                    self.block_reward, params.block_reward
+                ));
+            }
+        }
+        self.validate_tokenomics_supply()?;
         let validator_set = self
             .validators
             .iter()
@@ -375,6 +451,7 @@ impl GenesisConfig {
                 );
             }
             self.validate_mainnet_poa_authorities()?;
+            self.validate_mainnet_pow_parameters()?;
             if self.validators.len() < 4 {
                 return Err(
                     "Mainnet genesis requires at least four ceremony validators (3f+1)".into(),
@@ -385,6 +462,23 @@ impl GenesisConfig {
                     "Mainnet genesis has {} validators but only {} complete consensus-key records",
                     self.validators.len(),
                     registered.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_mainnet_pow_parameters(&self) -> Result<(), String> {
+        let pow_domains: Vec<&BootstrapDomainConfig> = self
+            .bootstrap_domains
+            .iter()
+            .filter(|domain| domain.kind == "pow")
+            .collect();
+        for domain in pow_domains {
+            if domain.bridge_enabled && domain.min_confirmations == 0 {
+                return Err(format!(
+                    "Mainnet bridge-enabled PoW domain {} requires min_confirmations >= 1",
+                    domain.id
                 ));
             }
         }
@@ -516,18 +610,42 @@ impl GenesisConfig {
         // The on-chain burn-reserve address + team vesting so the timed burn and
         // Vesting enforcement operate on the real chain state.
         if let Some(params) = &self.bud_tokenomics {
-            let addrs = self
-                .tokenomics_addresses
-                .unwrap_or_else(crate::tokenomics::TokenomicsAddresses::reserved);
-            for (address, amount) in crate::tokenomics::genesis_allocations(params, &addrs) {
-                state.add_balance(&address, amount);
-            }
+            // The tokenomics struct is the committed economic parameter set,
+            // so it also decides `block_reward`; the top-level field only
+            // serves chains without `bud_tokenomics`. A disagreement between
+            // the two is rejected by `validate_consensus_ceremony`.
             state.tokenomics = *params;
-            state.burn_reserve_address = Some(addrs.burn_reserve);
-            state.team_vesting = Some((addrs.team, params.team_vesting(0)));
+            if let Some(addrs) = self.tokenomics_destinations() {
+                // An unbalanced distribution is refused by
+                // `validate_consensus_ceremony` before any chain is built on
+                // this genesis; a configuration that reaches this point
+                // unchecked seeds nothing rather than a wrong supply.
+                if let Ok(allocations) = crate::tokenomics::genesis_allocations(params, &addrs) {
+                    for (address, amount) in allocations {
+                        state.add_balance(&address, amount);
+                    }
+                    state.burn_reserve_address = Some(addrs.burn_reserve);
+                    state.team_vesting = Some((addrs.team, params.team_vesting(0)));
+                }
+            }
         }
 
         state
+    }
+
+    /// The $BUD distribution destinations this genesis seeds. Development
+    /// chains fall back to the reserved marker addresses. Mainnet accepts only
+    /// ceremony-controlled addresses, so a mainnet genesis without them seeds
+    /// no distribution at all instead of committing marker accounts into the
+    /// state root.
+    fn tokenomics_destinations(&self) -> Option<crate::tokenomics::TokenomicsAddresses> {
+        if self.tokenomics_addresses.is_some() {
+            return self.tokenomics_addresses;
+        }
+        if Network::from_chain_id(self.chain_id) == Some(Network::Mainnet) {
+            return None;
+        }
+        Some(crate::tokenomics::TokenomicsAddresses::reserved())
     }
 
     fn validator_stake(&self) -> u64 {
@@ -590,8 +708,10 @@ pub fn mainnet_genesis() -> GenesisConfig {
 
         // Stake yield: 5% APY
         validator_annual_yield_ratio_fixed: (FIXED_POINT_SCALE * 5) / 100,
-        slot_duration_secs: 10,
-        epoch_length_slots: 32,
+        // The tokenomics epoch is the consensus epoch: 6 s slots, 100 slots,
+        // 600 s, so `epochs_per_year` (52 560) is a calendar year.
+        slot_duration_secs: 6,
+        epoch_length_slots: 100,
     };
 
     GenesisConfig {
@@ -620,7 +740,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
         // 4 domain bootstrap (PoW/PoS/BFT/PoA).
         // PoA: placeholder authorities (the launch ceremony turns these into
         // real addresses).
-        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
+        pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
     }
 }
@@ -640,7 +760,7 @@ pub fn testnet_genesis() -> GenesisConfig {
         timestamp: 1_735_689_600_000,
         bud_tokenomics: None,
         tokenomics_addresses: None,
-        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
+        pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
     }
 }
@@ -657,7 +777,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         timestamp: GENESIS_TIMESTAMP,
         bud_tokenomics: None,
         tokenomics_addresses: None,
-        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
+        pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
     }
 }
@@ -729,6 +849,131 @@ mod tests {
             .validate_consensus_ceremony(Network::Mainnet)
             .unwrap_err()
             .contains("unique non-reserved"));
+    }
+
+    #[test]
+    fn mainnet_state_never_seeds_reserved_marker_addresses() {
+        let reserved = crate::tokenomics::TokenomicsAddresses::reserved();
+
+        // The template has no ceremony addresses: nothing is credited and the
+        // marker accounts stay out of the state root.
+        let template = mainnet_genesis();
+        let state = template.build_state();
+        assert_eq!(state.get_balance(&reserved.community), 0);
+        assert_eq!(state.get_balance(&reserved.burn_reserve), 0);
+        assert_eq!(state.burn_reserve_address, None);
+        assert!(state.team_vesting.is_none());
+        assert_eq!(state.circulating_supply(), 0);
+        assert_eq!(
+            state.tokenomics,
+            template
+                .bud_tokenomics
+                .expect("mainnet template tokenomics")
+        );
+
+        // Ceremony addresses are seeded exactly as configured.
+        let mut ceremony = mainnet_genesis();
+        let addresses = ceremony_tokenomics_addresses();
+        ceremony.tokenomics_addresses = Some(addresses);
+        let seeded = ceremony.build_state();
+        assert_eq!(
+            seeded.circulating_supply(),
+            crate::tokenomics::BUD_TOTAL_SUPPLY as u128
+        );
+        assert_eq!(seeded.burn_reserve_address, Some(addresses.burn_reserve));
+        assert_eq!(seeded.get_balance(&reserved.community), 0);
+
+        // Development chains keep the reserved fallback.
+        let devnet = GenesisConfig::new(Network::Devnet.chain_id().value()).with_bud_tokenomics();
+        let dev_state = devnet.build_state();
+        assert_eq!(dev_state.burn_reserve_address, Some(reserved.burn_reserve));
+        assert_eq!(
+            dev_state.circulating_supply(),
+            crate::tokenomics::BUD_TOTAL_SUPPLY as u128
+        );
+    }
+
+    /// An unbalanced distribution is refused by the ceremony check and seeds
+    /// nothing in `build_state`, so it can never become a chain with a
+    /// supply other than the fixed one.
+    #[test]
+    fn an_unbalanced_tokenomics_is_refused_and_seeds_nothing() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.community += 1;
+        config.bud_tokenomics = Some(params);
+        let error = config
+            .validate_tokenomics_supply()
+            .expect_err("an unbalanced distribution must be refused");
+        assert!(error.contains("not the fixed supply"), "{error}");
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
+        assert_eq!(config.build_state().circulating_supply(), 0);
+        assert_eq!(config.build_state().burn_reserve_address, None);
+    }
+
+    /// A team vesting shorter than its cliff is a cliff without a schedule:
+    /// the ceremony refuses it instead of unlocking the allocation at once.
+    #[test]
+    fn a_team_vesting_shorter_than_its_cliff_is_refused() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.team_vesting_epochs = params.team_cliff_epochs - 1;
+        config.bud_tokenomics = Some(params);
+        let error = config
+            .validate_tokenomics_supply()
+            .expect_err("a vesting shorter than its cliff must be refused");
+        assert!(error.contains("shorter than its cliff"), "{error}");
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
+
+        // Zero duration is the no-schedule case and still unlocks at the
+        // cliff, so it stays accepted.
+        params.team_vesting_epochs = 0;
+        config.bud_tokenomics = Some(params);
+        assert!(config.validate_tokenomics_supply().is_ok());
+    }
+
+    /// Zero `epochs_per_year` cannot reach the burn or reward math: the
+    /// ceremony refuses it at the genesis boundary.
+    #[test]
+    fn zero_epochs_per_year_is_refused_at_genesis() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let mut params = config.bud_tokenomics.expect("tokenomics");
+        params.epochs_per_year = 0;
+        config.bud_tokenomics = Some(params);
+        let error = config
+            .validate_tokenomics_supply()
+            .expect_err("zero epochs_per_year must be refused");
+        assert!(
+            error.contains("epochs_per_year must be non-zero"),
+            "{error}"
+        );
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
+    }
+
+    #[test]
+    fn ceremony_rejects_block_reward_disagreement() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        config.block_reward = config.bud_tokenomics.expect("tokenomics").block_reward + 1;
+        let error = config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .unwrap_err();
+        assert!(error.contains("disagrees with bud_tokenomics.block_reward"));
+
+        // The committed value is the tokenomics one, never the stray field.
+        assert_eq!(
+            config.build_state().tokenomics.block_reward,
+            config.bud_tokenomics.expect("tokenomics").block_reward
+        );
     }
 
     #[test]
@@ -805,6 +1050,21 @@ mod tests {
 
         assert_eq!(genesis1.hash, genesis2.hash);
         assert_eq!(genesis1.timestamp, GENESIS_TIMESTAMP);
+    }
+
+    /// `ops/scripts/docker-smoke-mainnet.sh` pins the devnet genesis hash and
+    /// refuses to boot when the image disagrees with it. The pin has to move
+    /// with `devnet_genesis()`: when this test fails, update
+    /// `DEVNET_GENESIS_HASH` in that script in the same change. The pinned
+    /// value is the hash the docker-smoke job itself printed at head
+    /// `25f0583` (run 34156887325).
+    #[test]
+    fn devnet_genesis_hash_matches_the_docker_smoke_pin() {
+        let block = devnet_genesis().build_genesis_block();
+        assert_eq!(
+            block.hash, "87d93624975213bbdf7879ba8af973935e21f52d3436cc736b8df586774879ba",
+            "the docker-smoke-mainnet.sh pin must move with devnet_genesis()"
+        );
     }
 
     #[test]
@@ -930,6 +1190,73 @@ mod tests {
         let poa = registry.get(4).expect("poa bootstrap domain");
         assert!(!poa.bridge_enabled);
         assert_ne!(poa.validator_set_hash, [0u8; 32]);
+
+        // The PoS and BFT placeholders ship bridge-enabled with no validator
+        // set. Until a ceremony registers one, a proof that names its own
+        // set must not finalize on them: the adapter refuses before it
+        // looks at the certificate.
+        use crate::domain::{DomainFinalityAdapter, FinalityProof, FinalityStatus};
+        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(0, vec![]);
+        for (id, kind) in [(2u32, "PoS"), (3u32, "BFT")] {
+            let domain = registry.get(id).expect("bootstrap domain");
+            assert!(domain.bridge_enabled);
+            assert_eq!(domain.validator_set_hash, [0u8; 32]);
+            let commitment = crate::domain::DomainCommitment {
+                domain_id: domain.id,
+                domain_height: 1,
+                domain_block_hash: [9u8; 32],
+                parent_domain_block_hash: [0u8; 32],
+                state_root: [1u8; 32],
+                tx_root: [2u8; 32],
+                event_root: [3u8; 32],
+                finality_proof_hash: [0u8; 32],
+                consensus_kind: domain.kind.clone(),
+                validator_set_hash: [0u8; 32],
+                timestamp_ms: 0,
+                sequence: 0,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            };
+            let cert = crate::chain::finality::FinalityCert {
+                epoch: 0,
+                checkpoint_height: 1,
+                checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                agg_sig_bls: vec![],
+                bitmap: vec![],
+                set_hash: snapshot.set_hash.clone(),
+            };
+            let status = if kind == "PoS" {
+                crate::domain::PoSFinalityAdapter.verify_finality(
+                    domain,
+                    &commitment,
+                    &FinalityProof::PoS {
+                        cert,
+                        validator_snapshot: snapshot.clone(),
+                    },
+                )
+            } else {
+                crate::domain::BftFinalityAdapter::default().verify_finality(
+                    domain,
+                    &commitment,
+                    &FinalityProof::Bft {
+                        round: 0,
+                        commit_hash: commitment.domain_block_hash,
+                        cert,
+                        validator_snapshot: snapshot.clone(),
+                    },
+                )
+            }
+            .expect("verification runs");
+            match status {
+                FinalityStatus::Rejected(reason) => {
+                    assert!(
+                        reason.contains("no registered validator set"),
+                        "{kind}: {reason}"
+                    )
+                }
+                other => panic!("{kind} placeholder must refuse, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -946,6 +1273,10 @@ mod tests {
         assert_eq!(from_json.gas_schedule, from_code.gas_schedule);
         assert_eq!(from_json.timestamp, from_code.timestamp);
         assert_eq!(from_json.bud_tokenomics, from_code.bud_tokenomics);
+        // The scheme is the launched one, fixed, not whichever backend this
+        // test binary was built with; and the file says the same word.
+        assert_eq!(from_code.pq_scheme.as_deref(), Some(LAUNCHED_PQ_SCHEME));
+        assert_eq!(from_json.pq_scheme, from_code.pq_scheme);
 
         let code_block = from_code.build_genesis_block();
         let json_block = from_json.build_genesis_block();
@@ -971,6 +1302,12 @@ mod tests {
             assert_eq!(from_json.block_reward, from_code.block_reward, "{path}");
             assert_eq!(from_json.gas_schedule, from_code.gas_schedule, "{path}");
             assert_eq!(from_json.timestamp, from_code.timestamp, "{path}");
+            assert_eq!(
+                from_code.pq_scheme.as_deref(),
+                Some(LAUNCHED_PQ_SCHEME),
+                "{path}"
+            );
+            assert_eq!(from_json.pq_scheme, from_code.pq_scheme, "{path}");
             assert_eq!(
                 from_code.build_genesis_block().hash,
                 from_json.build_genesis_block().hash,

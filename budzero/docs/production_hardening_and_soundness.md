@@ -286,4 +286,4 @@ These steps, applied while building BudZKVM from scratch and preparing it for pr
 10. **[x] Storage soundness:** storage consistency folded into the memory LogUp through STORAGE_BASE addressing.
 11. **[x] Merkle soundness:** 64-depth Merkle verification on poseidon4_hash, with a boolean output constraint.
 
-> **Completed (2026):** every checklist item is met. 31 opcodes are production-ready with 51 tests (8 of them negative). For detailed documentation see [Chapter 9: Stabilization](STABILIZATION.md).
+> **Completed (2026):** every checklist item is met at the implementation level. The mainnet-gated opcodes (`VerifyMerkle`, `VerifyInference`, the privacy trio) remain off in `MainnetActivation::default()` until the post-ceremony activation, and `VerifyInference` still has no verification circuit. The test count is measured by CI on the current tree. For detailed documentation see [Chapter 9: Stabilization](STABILIZATION.md).

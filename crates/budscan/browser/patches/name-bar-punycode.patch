@@ -16,9 +16,44 @@ produces `xn--yaz-5cd`; Python's `str.encode("idna")` reference gives the same
 result. The `xn--yaz-hlc` written in the architecture document was wrong and
 has been corrected.
 
+`BudScan.sys.mjs` is registered in the urlbar `moz.build` so that
+`resource:///modules/BudScan.sys.mjs` resolves, and every module that reads
+`lazy.BudScan` declares the getter on its own `lazy` object: a lazy getter
+belongs to the object it was defined on, so a getter in `UrlbarUtils` does
+nothing for `UrlbarInput` or `UrlbarTokenizer`, and a missing one throws in
+the middle of tokenizing what the user typed.
+
+`BudScan.sys.mjs` forwards every question to `BudScanCore.sys.mjs`, so the
+core is registered next to it in the same `moz.build` and resolves under
+`resource:///modules/`. Until the Rust core is reachable from JS the shipped
+core is a fail-closed placeholder: it decides nothing, draws the spec
+unchanged, fails the name rule with a reason, and classifies as free text.
+An import that resolved to nothing threw on the first token the tokenizer
+classified; a placeholder that answers is what keeps the bar working without
+letting a second place decide what a name may contain.
+
+--- a/browser/components/urlbar/moz.build
++++ b/browser/components/urlbar/moz.build
+@@ -15,6 +15,8 @@ EXTRA_JS_MODULES += [
+     "ActionsProvider.sys.mjs",
+     "ActionsProviderContextualSearch.sys.mjs",
+     "ActionsProviderQuickActions.sys.mjs",
++    "BudScan.sys.mjs",
++    "BudScanCore.sys.mjs",
+     "MerinoClient.sys.mjs",
+     "QuickActionsLoaderDefault.sys.mjs",
+     "QuickSuggest.sys.mjs",
 --- a/browser/components/urlbar/UrlbarInput.sys.mjs
 +++ b/browser/components/urlbar/UrlbarInput.sys.mjs
-@@ -1892,6 +1892,20 @@ export class UrlbarInput {
+@@ -12,6 +12,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   BrowserSearchTelemetry: "resource:///modules/BrowserSearchTelemetry.sys.mjs",
+   BrowserUIUtils: "resource:///modules/BrowserUIUtils.sys.mjs",
+   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
++  BudScan: "resource:///modules/BudScan.sys.mjs",
+   ExtensionSearchHandler:
+     "resource://gre/modules/ExtensionSearchHandler.sys.mjs",
+   ObjectUtils: "resource://gre/modules/ObjectUtils.sys.mjs",
+@@ -1892,6 +1893,21 @@ export class UrlbarInput {
        return uri.spec;
      }
  
@@ -52,7 +87,7 @@ has been corrected.
  export var UrlbarUtils = {
 --- /dev/null
 +++ b/browser/components/urlbar/BudScan.sys.mjs
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,64 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -76,7 +111,7 @@ has been corrected.
 +const lazy = {};
 +
 +ChromeUtils.defineLazyGetter(lazy, "core", () => {
-+  return ChromeUtils.importESModule("resource://gre/modules/BudScanCore.sys.mjs");
++  return ChromeUtils.importESModule("resource:///modules/BudScanCore.sys.mjs");
 +});
 +
 +export var BudScan = {
@@ -117,9 +152,54 @@ has been corrected.
 +    return lazy.core.classify(input);
 +  },
 +};
+--- /dev/null
++++ b/browser/components/urlbar/BudScanCore.sys.mjs
+@@ -0,0 +1,34 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * The core the urlbar asks. Placeholder, fail-closed.
++ *
++ * Every decision about a name belongs to the `budscan` Rust core, reached
++ * through the same FFI the protocol handler uses. That bridge does not
++ * exist yet; until it does this module decides nothing:
++ *
++ *   - `displayForm` returns the spec unchanged (the pre-patch drawing);
++ *   - `checkName` fails the name with a reason an error line can show;
++ *   - `classify` reports free text, so what the user typed is tokenized
++ *     exactly as it was before this patch existed.
++ *
++ * A placeholder that invented answers would be worse than one that admits
++ * it has none: the urlbar would start deciding in a second place what a
++ * name may contain, and the two places would disagree. When the FFI bridge
++ * lands, only this file changes; `BudScan.sys.mjs` already forwards
++ * everything.
++ */
++
++export function displayForm(spec) {
++  return spec;
++}
++
++export function checkName(name) {
++  return "budscan-core-not-built";
++}
++
++export function classify(input) {
++  return "free-text";
++}
 --- a/browser/components/urlbar/UrlbarTokenizer.sys.mjs
 +++ b/browser/components/urlbar/UrlbarTokenizer.sys.mjs
-@@ -318,6 +318,17 @@ export var UrlbarTokenizer = {
+@@ -10,6 +10,7 @@
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
++  BudScan: "resource:///modules/BudScan.sys.mjs",
+   UrlbarUtils: "resource:///modules/UrlbarUtils.sys.mjs",
+   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+ });
+@@ -318,6 +319,17 @@ export var UrlbarTokenizer = {
    },
  
    _getTokenType(token) {

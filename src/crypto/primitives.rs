@@ -1,3 +1,6 @@
+#[cfg(all(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
+compile_error!("pq-dilithium and pq-ml-dsa are mutually exclusive validator backends");
+
 use bls12_381::{G2Affine, G2Projective, Scalar};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,
@@ -850,11 +853,17 @@ impl WalletKeyPair {
         out
     }
 
+    /// # Panics
+    /// Only if the derived address is invalid, which cannot happen: the
+    /// public key comes from a generated ML-DSA-87 keypair, and address
+    /// derivation only rejects malformed keys. The panic is allowed here
+    /// deliberately rather than by the workspace default: a silent
+    /// zero-address fallback would let a malformed key spend as
+    /// `[0u8; 32]`.
+    #[allow(clippy::expect_used)]
     pub fn address(&self) -> crate::core::address::Address {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
-            // Fixed 2592-byte encoding, so this cannot fail. A fallback
-            // beats a panic: a key-format change must not abort a node.
-            .unwrap_or_else(|_| crate::core::address::Address::from([0u8; 32]))
+            .expect("Valid ML-DSA-87 public key must yield a valid address")
     }
 
     pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {
@@ -940,9 +949,11 @@ pub fn verify_ml_dsa_87_signature(
 }
 
 pub fn hash_message(message: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    hasher.update(message);
-    hasher.finalize().into()
+    // A distinct hasher name keeps this single-field digest visibly separate
+    // from the address derivation above: the preimages share no chain.
+    let mut digest = Sha3_256::new();
+    digest.update(message);
+    digest.finalize().into()
 }
 
 #[cfg(not(feature = "wallet-ml-dsa"))]

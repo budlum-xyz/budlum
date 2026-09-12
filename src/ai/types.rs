@@ -37,6 +37,15 @@ impl AiModelId {
     }
 }
 
+impl crate::core::map_keys::MapKey for AiModelId {
+    fn to_key_string(&self) -> String {
+        self.to_hex()
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        crate::core::map_keys::parse_hex32(s).map(Self)
+    }
+}
+
 /// Canonical AI Inference Request Identifier (`[u8; 32]`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -50,6 +59,15 @@ impl AiRequestId {
 
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+}
+
+impl crate::core::map_keys::MapKey for AiRequestId {
+    fn to_key_string(&self) -> String {
+        self.to_hex()
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        crate::core::map_keys::parse_hex32(s).map(Self)
     }
 }
 
@@ -202,6 +220,14 @@ impl AiModelSpec {
         }
         if self.request_deadline_blocks == 0 || self.result_deadline_blocks == 0 {
             return Err("Deadlines must be >= 1 block".into());
+        }
+        if self.request_deadline_blocks > crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+            || self.result_deadline_blocks > crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+        {
+            return Err(format!(
+                "Deadline windows must be <= {} blocks",
+                crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+            ));
         }
         // The execution_dims bounds: None means an old record (those cannot
         // ask for an execution proof, which is checked above). Some means at

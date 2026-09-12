@@ -69,7 +69,8 @@ The gossip path: `GossipSub` → `Node` → `ChainHandle::handle_prevote/handle_
 
 The node exposes a standard JSON-RPC 2.0 interface via **two separate listeners** (public + operator).
 
-#### Public Listener (default: `0.0.0.0:8545`)
+#### Public Listener (default: `127.0.0.1:8545`)
+- Plain HTTP; the shipped mainnet and testnet profiles keep it on loopback behind a TLS-terminating reverse proxy, so the API key never crosses the network in clear text
 - API key auth, CORS allowlists, per-IP rate limiting
 - Trusted proxy validation (only configured proxies may set `X-Forwarded-For`)
 - 10MB body limit, 500 max connections

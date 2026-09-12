@@ -371,6 +371,84 @@ async fn a_zero_external_root_is_refused_before_signing() {
     assert!(msg.contains("zero external state root"), "msg: {msg}");
 }
 
+/// An adapter whose observation is internally valid but about a different
+/// transaction than the one it broadcast. Everything verifies; only the hash
+/// binding can catch it.
+struct SubstitutingAdapter;
+
+#[async_trait::async_trait]
+impl ChainAdapter for SubstitutingAdapter {
+    fn chain_type(&self) -> ExternalChain {
+        ExternalChain::Ethereum
+    }
+
+    async fn generate_receipt_proof(
+        &self,
+        tx_hash: &str,
+    ) -> Result<(MerkleProof, Hash32, String), AdapterError> {
+        HonestAdapter {
+            chain: ExternalChain::Ethereum,
+        }
+        .generate_receipt_proof(tx_hash)
+        .await
+    }
+
+    fn verify_receipt_proof(
+        &self,
+        proof: &MerkleProof,
+        external_state_root: &Hash32,
+        expected_tx_hash: &str,
+    ) -> Result<(), AdapterError> {
+        HonestAdapter {
+            chain: ExternalChain::Ethereum,
+        }
+        .verify_receipt_proof(proof, external_state_root, expected_tx_hash)
+    }
+
+    async fn submit_transaction(
+        &self,
+        _ext_tx: &ExternalTransaction,
+    ) -> Result<String, AdapterError> {
+        Ok("0xbroadcast".to_string())
+    }
+
+    async fn wait_for_confirmation(
+        &self,
+        _tx_hash: &str,
+        _confirmations: u32,
+    ) -> Result<RelayerExternalResult, AdapterError> {
+        // A valid observation of some other confirmed transaction.
+        let (proof, root, hash) = self.generate_receipt_proof("0xsomeone-elses").await?;
+        Ok(RelayerExternalResult {
+            chain: ExternalChain::Ethereum,
+            tx_hash: hash,
+            success: true,
+            message: None,
+            receipt_proof: bincode::serialize(&proof).expect("proof serialize"),
+            external_state_root: root,
+        })
+    }
+}
+
+/// The observation must be about the transaction the worker broadcast: a
+/// valid proof for another confirmed transaction is refused before signing.
+#[tokio::test]
+async fn an_observation_of_a_different_transaction_than_the_broadcast_is_refused() {
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Box::new(SubstitutingAdapter))
+        .expect("test adapter must be fit to relay");
+    let err =
+        RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
+            .await
+            .expect_err("an observation of another transaction must be refused");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("broadcast 0xbroadcast") && msg.contains("0xsomeone-elses"),
+        "msg: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn a_result_tagged_for_a_different_chain_is_refused() {
     let mut registry = AdapterRegistry::new();
@@ -492,21 +570,13 @@ async fn the_placeholder_transaction_hash_is_no_longer_reachable() {
     }
 }
 
-/// The adapter proof and the executor's result-fact leaf commit to different
-/// things, and neither side can satisfy the other.
-///
-/// - an adapter proves *"this receipt is under this external receipts root"*;
-/// - the executor requires *"this proof's leaf is `result_leaf()` of the
-///   declared Budlum-side facts, under a root present in `external_roots`"*.
-///
-/// A real Ethereum receipts root does not commit to Budlum's
-/// `BDLM_RELAYER_RESULT_V2` leaf, so an honest adapter observation is rejected
-/// by the executor. That is the correct direction to fail, but it means the
-/// bridge acceptance path is not merely unfinished, it is unsatisfiable as
-/// specified. This test pins that so the gap is closed by designing the
-/// anchor, not by loosening the executor until adapter output slips through.
+/// The adapter produces a real observation shape, but the executor refuses
+/// every Ethereum `RelayerResult` until it receives the full
+/// `DepositProofPackage` (header chain, receipts MPT and typed event binding).
+/// This is deliberately a refusal rather than an attempt to reinterpret an
+/// Ethereum receipts proof as the generic Budlum result-fact tree.
 #[tokio::test]
-async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
+async fn an_adapter_observation_hits_the_evm_package_refusal() {
     use crate::core::account::AccountState;
     use crate::execution::executor::Executor;
 
@@ -550,10 +620,11 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
         TransactionType::RelayerResult(result),
     );
     let err = Executor::apply_transaction(&mut state, &tx)
-        .expect_err("adapter proof must not satisfy the result-fact gate");
+        .expect_err("Ethereum adapter output must hit the full-package refusal");
     assert!(
-        err.contains("does not match the declared result facts"),
-        "err: {err}"
+        err.contains("relayer_evm_package_required")
+            || err.contains("full DepositProofPackage"),
+        "an Ethereum adapter result must hit the consensus package refusal: {err}"
     );
     assert_eq!(
         state.get_balance(&relayer),
@@ -570,7 +641,16 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
 /// inline" - from coming back through a different function.
 #[test]
 fn the_worker_source_contains_no_fabricated_success_literal() {
-    let src = include_str!("../relayer/worker.rs");
+    let whole = include_str!("../relayer/worker.rs");
+    // Only the shipped half is measured. The file carries its own test
+    // module after `#[cfg(test)]`, and a fixture there builds the observation
+    // an adapter would hand back, `success: true` included; that is test
+    // input, not a fabricated result, and it never compiles into the node.
+    let src = whole.split("#[cfg(test)]").next().unwrap_or(whole);
+    assert!(
+        whole.contains("#[cfg(test)]"),
+        "worker.rs no longer carries a test module; narrow the scan another way"
+    );
     // Comments are allowed to name the thing they forbid, that is how the
     // next reader learns why the branch is missing. Only executable lines are
     // measured.
@@ -774,6 +854,10 @@ fn deposit_topic0() -> String {
     "0x".to_string() + &"bb".repeat(32)
 }
 
+fn deposit_topic0_bytes() -> [u8; 32] {
+    [0xbb; 32]
+}
+
 /// Half a bridge configuration is refused, not completed by guessing.
 ///
 /// A deposit log is matched on emitter address and topic0 together. Given one
@@ -866,9 +950,10 @@ fn a_bridge_address_of_the_wrong_length_is_refused() {
 /// single-leaf tree that happened to fail the leaf binding; the refusal was
 /// real but incidental, and the same stub passed the Merkle check itself
 /// because a tree with no siblings verifies `leaf == root` (see
-/// ARCHITECTURE.md section 69). The assembler now returns an error outright:
-/// this adapter does not read Ethereum, so it cannot produce a receipt
-/// proof. The worker submits nothing.
+/// ARCHITECTURE.md section 69). The assembler then returned an error
+/// outright, and now the broadcast does too: this adapter neither writes to
+/// nor reads Ethereum, so `submit_transaction` refuses before any receipt
+/// proof is asked for. The worker submits nothing.
 ///
 /// That is the property worth pinning: turning the bridge on gets a stalled
 /// transfer, never a signed claim about an Ethereum transaction that was
@@ -877,13 +962,13 @@ fn a_bridge_address_of_the_wrong_length_is_refused() {
 /// truthful.
 #[tokio::test]
 async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
-    use crate::cross_domain::evm::adapter::{EvmChainAdapter, DEFAULT_DEPOSIT_TOPIC0};
+    use crate::cross_domain::evm::adapter::EvmChainAdapter;
 
     let mut registry = AdapterRegistry::new();
     registry
         .register(Box::new(EvmChainAdapter::new(
             vec![0xaa; 20],
-            DEFAULT_DEPOSIT_TOPIC0,
+            deposit_topic0_bytes(),
         )))
         .expect("a properly configured adapter must register");
 
@@ -895,9 +980,11 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
              adapter is willing to verify",
             );
 
+    // The refusal is the adapter's own, not the registry saying the chain
+    // is unsupported: the chain was registered above.
     assert!(
-        matches!(err, AdapterError::ProofVerificationFailed(_)),
-        "the refusal must come from verification, not from the chain being \
+        !matches!(err, AdapterError::UnsupportedChain(_)),
+        "the refusal must come from the adapter, not from the chain being \
          unsupported: got {err:?}"
     );
 
@@ -907,14 +994,22 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
     // whose leaf did not match `hash(tag || tx_hash || bridge_address)`. That
     // refusal was real but incidental, and the same stub sailed through the
     // Merkle check because a tree with no siblings verifies `leaf == root`
-    // (ARCHITECTURE.md section 69). The assembler now refuses outright, so
-    // the message names the actual gap: this adapter does not read Ethereum.
+    // (ARCHITECTURE.md section 69). Then the assembler refused outright.
+    // Now the broadcast itself refuses, one step earlier again: an adapter
+    // that cannot read Ethereum cannot claim to have written to it, so
+    // `submit_transaction` returns `SubmissionFailed` and no constant hash
+    // ever reaches the confirmation step. The message names the gap.
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("does not read Ethereum")
+        msg.contains("does not speak to Ethereum")
+            || msg.contains("does not read Ethereum")
             || msg.contains("Merkle")
             || msg.contains("leaf")
             || msg.contains("forgery"),
         "the refusal must name what is missing, got: {msg}"
+    );
+    assert!(
+        matches!(err, AdapterError::SubmissionFailed(_)),
+        "the stubbed adapter refuses at broadcast, before any observation: got {err:?}"
     );
 }

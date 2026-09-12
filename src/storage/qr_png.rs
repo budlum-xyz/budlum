@@ -9,9 +9,18 @@
 //! The stored-block writer this replaced made every frame PNG the size of its
 //! raw RGB8 buffer: measured on a 224-byte optical frame that was 203 086
 //! bytes against 2 104 with deflate, a 96.6x difference, and the whole BDLV
-//! video inherits it frame by frame. zlib deflate at a fixed level is
-//! deterministic, so K-QR-DETERMINIZM is unchanged; the test pins both the
-//! ratio and bit-equality across runs.
+//! video inherits it frame by frame.
+//!
+//! # What the determinism claim covers
+//!
+//! The PNG bytes go into the BDLV blob that `QrVideo::blob_commitment` and
+//! `VideoRecipe::video_commitment` hash, so they are committed bytes. Deflate
+//! output is fixed for one compressor implementation at one level: the
+//! `flate2` crate with its `rust_backend` (`miniz_oxide`), at the versions
+//! `Cargo.lock` pins. It is not promised across compressor versions; a
+//! dependency bump may change the bytes, and then every blob committed under
+//! the old bytes stops matching. The golden test below pins the exact digest
+//! of one frame so such a bump fails the build instead of the commitments.
 
 use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MODULE_PX, QUIET_ZONE};
 
@@ -197,6 +206,27 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(&a[0..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
     }
+
+    /// Golden bytes: the digest of one frame's PNG under the compressor
+    /// `Cargo.lock` pins. Bit-equality across two runs on one machine says
+    /// nothing about a compressor bump; this does. If it fails after a
+    /// dependency change, the change alters committed BDLV bytes and needs a
+    /// recorded decision, not a new constant.
+    #[test]
+    fn png_bytes_match_the_golden_digest() {
+        use sha2::{Digest, Sha256};
+        let png = frame_to_qr_png(b"stable-qr-png-payload-001").unwrap();
+        let digest = Sha256::digest(&png);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, GOLDEN_PNG_SHA256,
+            "PNG bytes drifted from the golden digest: the compressor changed"
+        );
+    }
+
+    /// `flate2` 1.1.9 with `miniz_oxide` 0.8.9, `Compression::best()`.
+    const GOLDEN_PNG_SHA256: &str =
+        "1b78451705e302ef654ddf0d8e2ff6c1d3d0017688a86a2558d3a2a771435cd4";
 
     /// IDAT chunk length, scanned from the chunk stream (no fixed offset).
     fn idat_len(png: &[u8]) -> usize {

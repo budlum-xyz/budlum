@@ -301,9 +301,27 @@ impl BnsRegistry {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_REGISTRY_V1");
+        // V2: every variable-length part carries its length and every
+        // collection its count. V1 wrote names and subdomain labels back to
+        // back, so two registries with different name boundaries could
+        // share a root.
+        //
+        // Migration policy (shared by all four V-bumped registry roots,
+        // BNS V2 / liveness V3 / invalid-vote V2 / NFT V6): the new tags
+        // activate with the USL genesis. Mainnet has no committed state
+        // before that genesis (launch timestamp is still TBD), so there is
+        // no old-format root in existence to carry over, and no activation
+        // height or compatibility path is needed. Devnet and testnet state
+        // is disposable and resets with its genesis; a node that still
+        // holds pre-USL devnet data must resync from the new genesis
+        // instead of migrating. Any future tag bump after launch needs a
+        // recorded migration (activation height or state rewrite) in the
+        // same commit as the bump.
+        hasher.update(b"BDLM_BNS_REGISTRY_V2");
         hasher.update(self.base_cost.to_le_bytes());
+        hasher.update((self.names.len() as u64).to_le_bytes());
         for (name, record) in &self.names {
+            hasher.update((name.len() as u64).to_le_bytes());
             hasher.update(name.as_bytes());
             hasher.update(record.owner.0);
             hasher.update(record.expires_at.to_le_bytes());
@@ -356,7 +374,9 @@ impl BnsRegistry {
                 }
                 None => hasher.update([0u8]),
             }
+            hasher.update((record.subdomains.len() as u64).to_le_bytes());
             for (sub_label, sub_owner) in &record.subdomains {
+                hasher.update((sub_label.len() as u64).to_le_bytes());
                 hasher.update(sub_label.as_bytes());
                 hasher.update(sub_owner.0);
             }
@@ -378,5 +398,38 @@ mod tests {
         reg.set_content("alice.bud", &owner, ContentId([0x55; 32]))
             .unwrap();
         assert_ne!(root_before, reg.root());
+    }
+
+    /// The root is injective over name and label boundaries: two records
+    /// whose subdomain labels concatenate to the same bytes, and two
+    /// registries whose names differ only in where one ends and the next
+    /// begins, hash differently.
+    #[test]
+    fn root_distinguishes_label_boundaries() {
+        let owner = Address::from([1u8; 32]);
+        let sub_owner = Address::from([2u8; 32]);
+
+        let mut a = BnsRegistry::new();
+        a.register("alice.bud".into(), owner, 1, 10).unwrap();
+        a.register_subdomain("alice.bud", "ab".into(), sub_owner, &owner)
+            .unwrap();
+        let mut b = BnsRegistry::new();
+        b.register("alice.bud".into(), owner, 1, 10).unwrap();
+        b.register_subdomain("alice.bud", "a".into(), sub_owner, &owner)
+            .unwrap();
+        b.register_subdomain("alice.bud", "b".into(), sub_owner, &owner)
+            .unwrap();
+        assert_ne!(
+            a.root(),
+            b.root(),
+            "one label `ab` is not two labels `a`, `b`"
+        );
+
+        let mut c = BnsRegistry::new();
+        c.register("alice.bud".into(), owner, 1, 10).unwrap();
+        let mut d = BnsRegistry::new();
+        d.register("alice.bud".into(), owner, 1, 10).unwrap();
+        d.register("bob.bud".into(), owner, 1, 10).unwrap();
+        assert_ne!(c.root(), d.root(), "the name count is committed");
     }
 }

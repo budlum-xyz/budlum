@@ -39,6 +39,12 @@ pub const DEFAULT_BLOCK_LEN: u16 = 200;
 pub const MAX_K: u16 = 4096;
 /// Maximum original payload accepted by one carousel segment (not consensus).
 pub const MAX_CAROUSEL_BYTES: usize = 64 * 1024 * 1024;
+/// Largest `block_len` a carousel accepts: header plus body of one drop must
+/// fit the optical frame's drop-wire cap (`qr_frame::MAX_DROP_WIRE`, 8 KiB),
+/// so `DROP_HEADER_LEN + MAX_BLOCK_LEN` is exactly that cap. `from_payload`
+/// used to accept any non-zero `u16` here, and a drop packed above the cap
+/// was refused by every receiver as `BadDropLen`.
+pub const MAX_BLOCK_LEN: u16 = 8 * 1024 - DROP_HEADER_LEN as u16;
 
 /// Repair margin for a one-shot encode, in permillage of `k`.
 ///
@@ -159,7 +165,7 @@ impl CarouselParams {
         if payload.is_empty() {
             return Err(CarouselError::Empty);
         }
-        if block_len == 0 {
+        if block_len == 0 || block_len > MAX_BLOCK_LEN {
             return Err(CarouselError::BadBlockLen);
         }
         if payload.len() > MAX_CAROUSEL_BYTES {
@@ -258,7 +264,7 @@ impl Drop {
         let body = bytes
             .get(DROP_HEADER_LEN..)
             .ok_or(CarouselError::Truncated)?;
-        if block_len == 0 {
+        if block_len == 0 || block_len > MAX_BLOCK_LEN {
             return Err(CarouselError::BadBlockLen);
         }
         if k == 0 || k > MAX_K {
@@ -400,9 +406,12 @@ impl CarouselEncoder {
 pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {
     let k = u32::from(k);
     let p = p_milli.min(999);
-    // T_milli = 1000 / (1000 - p), rounded up.
+    // T in milli-units: T_milli = 1000 * 1000 / (1000 - p), rounded up once,
+    // after the scaling. Rounding `1000 / denom` first collapsed T to a whole
+    // number (T = 2.0 for every loss rate up to 50%), so a 30% channel was
+    // budgeted 2.04k drops where the derivation asks for 1.46k.
     let denom = 1000u32.saturating_sub(p).max(1);
-    let t_milli = 1000u32.div_ceil(denom) * 1000;
+    let t_milli = 1_000_000u32.div_ceil(denom);
     // n = ceil(k * T * 1.02) = ceil(k * t_milli * 1020 / 1_000_000)
     let num = u64::from(k) * u64::from(t_milli) * 1020;
     let n = num.div_ceil(1_000_000);
@@ -1269,6 +1278,19 @@ mod tests {
         assert!(n >= 200, "zero-loss plan must cover 2k systematic+repair");
         let n_lossy = planned_drop_count(100, 300);
         assert!(n_lossy >= n);
+    }
+
+    /// The plan follows the formula, not a whole-number T. At p = 0.6,
+    /// T = 1 / 0.4 = 2.5 and n = ceil(1000 * 2.5 * 1.02) = 2550. Rounding T
+    /// up to 3 before scaling gave 3060 here, one fifth more than derived.
+    #[test]
+    fn planned_count_scales_before_it_rounds() {
+        assert_eq!(planned_drop_count(1000, 600), 2550);
+        // T = 1 / 0.7 = 1.4286: n = ceil(1000 * 1.4286 * 1.02) = 1458, under
+        // the 2k floor, so the floor answers.
+        assert_eq!(planned_drop_count(1000, 300), 2000);
+        // Lossless: 1.02k, under the floor.
+        assert_eq!(planned_drop_count(1000, 0), 2000);
     }
 
     /// Deterministic pseudo-random subset, so a loss-tolerance test is a

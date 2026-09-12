@@ -1,6 +1,6 @@
 [network]
 profile = "mainnet"
-chain_id = 1
+chain_id = 45260
 # The genesis file must exist and its hash must match the launch record.
 # This checked-in genesis is an unlaunchable ceremony template. Freeze and record
 # the launch hash only after validator keys and tokenomics destinations are final.
@@ -24,11 +24,11 @@ identity_file = "./secrets/mainnet-node-id.key"
 # These are ceremony-ready bootstrap peers. Replace with actual operator
 # peer IDs and IPs during MAINNET_GENESIS_CEREMONY.
 # IPs use RFC 5737 TEST-NET-3 documentation range.
-bootnodes = [
-  "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWCeremonyBootstrap1BudlumMainnetNod0001",
-  "/ip4/203.0.113.11/tcp/4001/p2p/12D3KooWCeremonyBootstrap2BudlumMainnetNod0002",
-  "/ip4/203.0.113.12/tcp/4001/p2p/12D3KooWCeremonyBootstrap3BudlumMainnetNod0003"
-]
+# Empty on purpose. The ceremony records the real peer multiaddrs here; a
+# placeholder is refused at startup (`first_placeholder_peer`), and a made-up
+# peer id is worse than a placeholder: it fails to parse as base58 and breaks
+# profile loading instead of waiting for the ceremony.
+bootnodes = []
 # Kept in sync with MAINNET_DNS_SEEDS in chain_config.rs: the "placeholder"
 # marker is deliberate until the real TXT records are published (the
 # fail-closed guard is active).
@@ -42,13 +42,31 @@ banned_peer_db = "./data/mainnet/banned-peers.json"
 mdns_enabled = false
 
 [rpc]
-public_listener = "0.0.0.0:8545"
+# The node speaks plain HTTP. Every request carries `BUDLUM_RPC_API_KEY`, so
+# a listener reachable from the network would send the key in clear text.
+# The public listener therefore binds loopback and a TLS-terminating reverse
+# proxy on the same host (nginx, caddy, haproxy) is the only thing that
+# reaches it; the proxy's address goes in `trusted_proxies` so the client IP
+# it forwards is honoured for allow-lists and rate limits. Binding 0.0.0.0
+# here is a deliberate, logged decision, never the shipped default.
+public_listener = "127.0.0.1:8545"
 operator_listener = "127.0.0.1:8546"
-trusted_proxies = []
+trusted_proxies = ["127.0.0.1"]
 enabled = true
+# The key is not optional even behind the proxy: TLS says who the server
+# is, the key says who the caller is. Without these two lines the node
+# inherits `auth_required = true` with no key source and refuses to start.
+# Empty `allowed_ips` is app-layer allow-all (the key still binds); narrow
+# it or firewall the port.
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = []
+rate_limit_per_minute = 600
 
 [metrics]
-listener = "0.0.0.0:9090"
+# Loopback: scrape through a local agent or an authenticated reverse proxy.
+# The metrics endpoint has no authentication of its own.
+listener = "127.0.0.1:9090"
 
 [validator]
 backend = "pkcs11"

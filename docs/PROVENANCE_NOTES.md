@@ -17,7 +17,7 @@ by line. Findings that rest on a measurement quote the measurement.
 
 ---
 
-## Requires attribution: action needed
+## Derived code: attribution recorded
 
 ### `budzero/bud-proof/src/bud_stark/`: derived from Plonky3 `p3-uni-stark`
 
@@ -43,11 +43,9 @@ independent implementation.
   PolyForm Shield 1.0.0. Taking the upstream MIT option keeps this compatible:
   MIT permits redistribution under different terms provided the MIT notice is
   retained, which `NOTICE` does. No licence conflict.
-- **Gap:** there is currently **no attribution anywhere in the tree**, no
-  header, no `NOTICE`, no mention in the crate docs. Apache-2.0 §4 requires
-  retaining attribution notices for derivative works. This should be fixed
-  before mainnet; it is a paperwork gap, not a legal blocker, but it is the
-  clearest actionable item in this file.
+- **Attribution:** `docs/NOTICE` names Plonky3, its copyright holders and
+  its `MIT OR Apache-2.0` licence, and records the `bud_stark` relationship.
+  The gap this file first reported is closed.
 - Upstream: <https://github.com/Plonky3/Plonky3>
 
 ---
@@ -100,6 +98,19 @@ hardest: they are consensus-critical and have no upstream to compare against.
 | `src/core/block.rs`, `src/core/account.rs` | Block hashing and state-root folding, domain-separated with `BDLM_*` tags. Structure is conventional Merkle accounting; the specific layout is project-specific. **Origin unclear.** |
 | `src/tokenomics/` | Fixed-supply emission, vesting, burn. Economic design, not a ported algorithm. **Original as far as can be determined.** |
 
+## Design references (idea level, no code copied)
+
+Studied projects that influenced a design decision. They are recorded here
+and in `docs/NOTICE` so the names are stated where attribution belongs.
+
+| module | studied project | licence | what was taken | what was not taken |
+|---|---|---|---|---|
+| `crates/ai-inference/crates/ai-serve/src/residency.rs` | JustVugg/colibri, pure C on-device MoE engine (https://github.com/JustVugg/colibri) | Apache-2.0 | The placement principle: keep the dense part of a mixture-of-experts model resident, stage the routed experts across a VRAM/RAM/disk hierarchy, and let placement never change semantics. | The runtime: colibri's streaming, prefetch, heat maps and eviction live in C runtime code that is not present in the tree. The in-tree module is a Rust planner that plans placements and refuses to change the semantic profile. Different language, different layer, no shared lines. |
+| bounded-buffer and ceiling behaviour, `docs/ARCHITECTURE.md` | 1jehuang/jcode, coding agent (https://github.com/1jehuang/jcode) | MIT | The memory discipline: bounded buffers and explicit ceilings as the default, and a ceiling that silently turns a feature off being treated as a design failure. | jcode is a JavaScript agent. The in-tree behaviour is Rust RPC and proof-cache code written in this tree. No shared code. |
+| `crates/ai-inference/crates/ai-core/src/system_prompt.rs` | a corpus of published system prompts (consulted for structure; not redistributed, no single upstream named) | n/a | The discipline of stating machine-checkable limits inside the prompt itself. | The prompt text is original: it states this protocol's own admission limits and is checked against the tree by the `ai-inference-prompt-is-true` gate. No prompt text was reproduced. |
+
+---
+
 ## Not reviewed here
 
 `src/ai/`, `src/pollen/`, `src/socialfi/`, `src/storage/`, `src/hub/`,
@@ -112,9 +123,7 @@ to be clean.
 
 ## Follow-ups
 
-1. **Add attribution for `bud_stark`.** A `NOTICE` file plus a header in
-   `bud_stark/mod.rs` naming Plonky3 and its `MIT OR Apache-2.0` licence.
-   Tracked as the one concrete gap this pass found.
+1. **Attribution for `bud_stark`:** done, see `docs/NOTICE`.
 2. **Snippet-level scan before mainnet.** Out of scope for CI and out of scope
    for what an assistant can assert. Needs FOSSA / Black Duck / ScanCode.
 3. **Conformance tests over novelty review** for the spec-based modules: RLP

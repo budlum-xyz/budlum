@@ -252,12 +252,15 @@ async fn main() {
         if validators.is_empty() {
             validators = network_defaults.validators.clone();
         }
+        // After the fill above, an empty set means neither the operator nor
+        // the network defaults named a validator. Only devnet may start
+        // without one; any other chain id would get a genesis that no
+        // validator can extend, reported as success.
         if chain_id
             != budlum_core::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
             && validators.is_empty()
-            && !network_defaults.validators.is_empty()
         {
             eprintln!("Error: this network genesis requires an explicit or default validator set");
             std::process::exit(1);
@@ -478,32 +481,44 @@ async fn main() {
             }
         };
         println!("Starting Database Integrity Audit on: {}", config.db_path);
-        match storage.check_integrity() {
+        // The exit status carries the verdict: automation reading only the
+        // status must not take a failed audit, a failed repair or an audit
+        // that could not run for a clean database.
+        let status = match storage.check_integrity() {
+            Ok(errors) if errors.is_empty() => {
+                println!("Integrity Audit PASSED. No corruptions found.");
+                0
+            }
             Ok(errors) => {
-                if errors.is_empty() {
-                    println!("Integrity Audit PASSED. No corruptions found.");
-                } else {
-                    println!("Integrity Audit FAILED! Found {} errors.", errors.len());
-                    for err in errors {
-                        println!("- {err}");
-                    }
-                    if config.repair_db {
-                        println!("Attempting automatic repair...");
-                        if let Err(e) = storage.repair_index() {
-                            eprintln!("FAIL Repair failed: {e}");
-                        } else {
+                println!("Integrity Audit FAILED! Found {} errors.", errors.len());
+                for err in errors {
+                    println!("- {err}");
+                }
+                if config.repair_db {
+                    println!("Attempting automatic repair...");
+                    match storage.repair_index() {
+                        Ok(()) => {
                             println!(
                                 "OK Repair successful. Please run --check-db again to verify."
                             );
+                            1
                         }
-                    } else {
-                        println!("Tip: Run with --repair-db to attempt index reconstruction.");
+                        Err(e) => {
+                            eprintln!("FAIL Repair failed: {e}");
+                            1
+                        }
                     }
+                } else {
+                    println!("Tip: Run with --repair-db to attempt index reconstruction.");
+                    1
                 }
             }
-            Err(e) => eprintln!("System error during audit: {e}"),
-        }
-        return;
+            Err(e) => {
+                eprintln!("System error during audit: {e}");
+                1
+            }
+        };
+        std::process::exit(status);
     }
 
     if config.repair_db {
@@ -520,9 +535,9 @@ async fn main() {
         println!("Starting manual Database Repair on: {}", config.db_path);
         if let Err(e) = storage.repair_index() {
             eprintln!("Repair failed: {e}");
-        } else {
-            println!("Repair complete. Re-indexing finished.");
+            std::process::exit(1);
         }
+        println!("Repair complete. Re-indexing finished.");
         return;
     }
 
@@ -549,19 +564,18 @@ async fn main() {
         .and_then(|s| load_signing_key(s))
         .map(|key| Address::from(key.public_key_bytes()));
 
-    // F2 config-driven: set env var for VM VerifyMerkle gate from TOML [features] verify_merkle
-    std::env::set_var(
-        "BUDLUM_VERIFY_MERKLE",
-        config.features_verify_merkle.to_string(),
-    );
-    println!(
-        "   VerifyMerkle: {} (config-driven F2, MainnetActivation)",
-        if config.features_verify_merkle {
-            "enabled (full)"
-        } else {
-            "disabled (staged rollout)"
-        }
-    );
+    // `[features] verify_merkle` does not reach the VM: `bud-vm` decodes
+    // with `MainnetActivation::default()` and reads no environment variable
+    // (the old `BUDLUM_VERIFY_MERKLE` hook was removed as a configuration
+    // attack vector). The flag is only refused on mainnet by
+    // `validate_strict_rules`; reporting it as an applied setting would
+    // claim a wiring that does not exist.
+    if config.features_verify_merkle {
+        println!(
+            "   VerifyMerkle: requested by [features] verify_merkle, not applied \
+             (the VM uses MainnetActivation defaults; see bud-vm)"
+        );
+    }
 
     println!("Budlum Node - v0.2.0 (Framework Edition)");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -911,11 +925,23 @@ async fn main() {
         // Basic quorum-based finality via BftFinalityAdapter. If the BFT
         // Engine is not yet wired for a specific domain, it will operate
         // In fail-closed mode (blocks require valid BFT commit signatures).
+        // The status a domain boots with is consensus state: this process
+        // and the next restart must read the same one. The write goes first
+        // and the in-memory change follows it; when the write fails the node
+        // stops instead of running on a status the disk does not hold.
         if domain.kind == ConsensusKind::Bft {
             if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
+                let previous = existing.status;
                 existing.status = DomainStatus::Active;
                 if let Some(store) = blockchain.storage.as_ref() {
-                    let _ = store.save_consensus_domain(existing);
+                    if let Err(e) = store.save_consensus_domain(existing) {
+                        existing.status = previous;
+                        eprintln!(
+                            "CRITICAL: BFT bootstrap domain {}: status change not persisted, refusing to start on a status the store does not hold: {e}",
+                            domain.id
+                        );
+                        std::process::exit(1);
+                    }
                 }
             }
             tracing::info!(
@@ -926,9 +952,17 @@ async fn main() {
         }
         if domain.kind == ConsensusKind::PoA {
             if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
+                let previous = existing.status;
                 existing.status = DomainStatus::Frozen;
                 if let Some(store) = blockchain.storage.as_ref() {
-                    let _ = store.save_consensus_domain(existing);
+                    if let Err(e) = store.save_consensus_domain(existing) {
+                        existing.status = previous;
+                        eprintln!(
+                            "CRITICAL: PoA bootstrap domain {}: status change not persisted, refusing to start on a status the store does not hold: {e}",
+                            domain.id
+                        );
+                        std::process::exit(1);
+                    }
                 }
             }
             tracing::warn!(
@@ -1058,6 +1092,18 @@ async fn main() {
     } else {
         bootstraps.extend(network.bootnodes());
         bootstraps.extend(network.fallback_bootnodes());
+    }
+
+    // Testnet has no public bootnodes yet and mDNS is refused outside devnet,
+    // so a node with neither a bootnode nor a DNS seed would come up and never
+    // meet a peer. Refuse instead of idling; mainnet is held to the stricter
+    // bootnode rule below.
+    if !budlum_core::core::chain_config::has_peer_source(network, &bootstraps, &config.dns_seeds) {
+        eprintln!("Refusing to start {network} without a peer source.");
+        eprintln!(
+            "Set p2p.bootnodes or p2p.dns_seeds in config/{network}.toml, or pass --bootstrap for a private mesh."
+        );
+        std::process::exit(1);
     }
 
     if network == budlum_core::core::chain_config::Network::Mainnet {
@@ -1268,18 +1314,34 @@ async fn main() {
                 .allowed_ips
                 .iter()
                 .all(|ip| ip == "127.0.0.1" || ip == "::1");
-        if !has_localhost_only && !rpc_security.allowed_ips.is_empty() {
+        if rpc_security.allowed_ips.is_empty() {
+            tracing::warn!(
+                "[SECURITY] Public RPC allowed_ips is empty: every source address is accepted and only authentication and rate limiting stand between the network and the RPC."
+            );
+        } else if !has_localhost_only {
             tracing::warn!(
                 "[SECURITY] Public RPC allowed_ips was widened: {:?}. Run this only on a trusted or private network.",
                 rpc_security.allowed_ips
             );
         }
 
-        // Public RPC listener
-        let public_addr = config
-            .rpc_public_listener
-            .clone()
-            .unwrap_or_else(|| format!("{}:{}", config.rpc_host, config.rpc_port));
+        // Public RPC listener. Composed and normalized through one path so
+        // an IPv6 host is bracketed and a malformed listener stops the node
+        // here, with the string in the message, instead of at bind time.
+        let public_addr = match config.rpc_public_listener.clone() {
+            Some(listener) => budlum_core::cli::commands::normalize_listener(&listener),
+            None => budlum_core::cli::commands::normalize_listener(&format!(
+                "{}:{}",
+                config.rpc_host, config.rpc_port
+            )),
+        };
+        let Some(public_addr) = public_addr else {
+            eprintln!(
+                "Public RPC listener is not a host:port or [ipv6]:port address: {:?} (rpc_host {:?}, rpc_port {})",
+                config.rpc_public_listener, config.rpc_host, config.rpc_port
+            );
+            std::process::exit(1);
+        };
         let pub_server = RpcServer::with_security_and_mode(
             chain.clone(),
             node.get_client(),
@@ -1302,11 +1364,23 @@ async fn main() {
         // Fail-closed: if a non-loopback address is configured, the node does
         // not start.
         if let Some(operator_addr) = config.rpc_operator_listener.as_ref() {
-            let host = operator_addr.split(':').next().unwrap_or("");
-            let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+            // Parsed as the socket address it will be bound as: the old
+            // split at the first `:` read `[` out of `[::1]:8546` and
+            // refused the loopback IPv6 form, and would have passed a
+            // `localhost` that resolves wherever /etc/hosts says.
+            let Some(operator_addr) = budlum_core::cli::commands::normalize_listener(operator_addr)
+            else {
+                eprintln!(
+                    "Operator RPC listener is not a host:port or [ipv6]:port address: {operator_addr}"
+                );
+                std::process::exit(1);
+            };
+            let is_loopback = operator_addr
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|addr| addr.ip().is_loopback());
             if !is_loopback {
                 eprintln!(
-                    "Operator RPC listener must bind loopback only (no auth): {operator_addr}"
+                    "Operator RPC listener must bind a loopback IP address only (no auth): {operator_addr}"
                 );
                 std::process::exit(1);
             }
@@ -1354,11 +1428,21 @@ async fn main() {
         };
         println!("Prometheus metrics on {metrics_bind}/metrics");
         loop {
-            if let Ok((stream, _)) = listener.accept().await {
-                let m = metrics_clone.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let _ = hyper::server::conn::http1::Builder::new()
+            // A persistent `accept` error (file descriptor limit reached,
+            // for one) used to spin this loop at full speed. Log it and
+            // yield before the retry.
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    tracing::warn!("Metrics server accept failed: {e}; retrying shortly");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let m = metrics_clone.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(
                             io,
                             service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -1408,14 +1492,26 @@ async fn main() {
                             }),
                         )
                         .await;
-                });
-            }
+            });
         }
     });
 
-    // Start Relayer Worker if configured
-    if config.role == "relayer" || config.role == "validator" {
-        let relayer_addr = cli_producer_address.unwrap_or(Address::zero());
+    // Start Relayer Worker if configured. Without a producer address there is
+    // no identity to attribute relay actions to; the worker is not started
+    // with the zero address in that slot, the same way the block producer
+    // below declines without one.
+    let relayer_identity = if config.role == "relayer" || config.role == "validator" {
+        let identity = cli_producer_address;
+        if identity.is_none() {
+            tracing::warn!(
+                "Relayer: no relayer address configured (--validator-address / validator key); the relayer worker is not started."
+            );
+        }
+        identity
+    } else {
+        None
+    };
+    if let Some(relayer_addr) = relayer_identity {
         // Persist the relay cursor next to the chain database. Without a path
         // The worker resumes from `get_finalized_height()` at boot, so every
         // Request that finalized while it was down is skipped: the user has
@@ -1538,7 +1634,24 @@ async fn main() {
             loop {
                 line.clear();
                 use tokio::io::AsyncBufReadExt;
-                if stdin.read_line(&mut line).await.is_ok() {
+                // `Ok(0)` is end of file: a daemon with stdin closed or
+                // redirected from `/dev/null` gets it on every call, and a
+                // loop that treats it as an empty command spins on one
+                // core for the life of the process. The console is over;
+                // this branch parks so the other `select!` arms keep the
+                // node running.
+                match stdin.read_line(&mut line).await {
+                    Ok(0) => {
+                        tracing::info!("stdin closed; the interactive console is off");
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("stdin read failed: {e}; the interactive console is off");
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(_) => {}
+                }
+                {
                     let cmd = line.trim();
                     match cmd {
                         "tx" => {
@@ -1570,11 +1683,7 @@ async fn main() {
                             client.list_peers().await;
                         }
                         "sync" => {
-                            let msg = NetworkMessage::GetHeaders {
-                                locator: Vec::new(),
-                                limit: 2000,
-                            };
-                            client.broadcast("blocks".to_string(), msg).await;
+                            client.request_sync().await;
                         }
                         "help" => {
                             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

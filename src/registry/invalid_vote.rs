@@ -73,6 +73,13 @@ impl InvalidVoteTracker {
         validator: Address,
         params: &RegistryParams,
     ) -> Option<SlashingReport> {
+        // A stale epoch must not move the tracker: recording under it
+        // would reset the current epoch's counters and reported set, and a
+        // spammer could dodge the threshold forever by interleaving old
+        // votes. Only the current or a newer epoch is recorded.
+        if epoch < self.current_epoch {
+            return None;
+        }
         // New epoch: reset all per-epoch state.
         if epoch != self.current_epoch {
             self.current_epoch = epoch;
@@ -104,12 +111,21 @@ impl InvalidVoteTracker {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_INVALID_VOTE_TRACKER_V1");
+        // V2: each map carries its count, so an entry cannot slide from
+        // the counts into the reported set.
+        //
+        // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
+        // for the shared rule - the V-bumped roots activate with the USL
+        // genesis, there is no pre-launch mainnet state to migrate, and a
+        // post-launch bump needs its migration recorded in the same commit.
+        hasher.update(b"BDLM_INVALID_VOTE_TRACKER_V2");
         hasher.update(self.current_epoch.to_le_bytes());
+        hasher.update((self.counts.len() as u64).to_le_bytes());
         for (addr, count) in &self.counts {
             hasher.update(addr.0);
             hasher.update(count.to_le_bytes());
         }
+        hasher.update((self.reported.len() as u64).to_le_bytes());
         for addr in self.reported.keys() {
             hasher.update(addr.0);
         }
@@ -131,6 +147,39 @@ mod tests {
             max_invalid_votes_per_epoch: threshold,
             ..RegistryParams::default()
         }
+    }
+
+    /// A vote from an old epoch is ignored outright: it must not reset the
+    /// current epoch's counters, which would let interleaved stale votes
+    /// keep a spammer under the threshold forever.
+    #[test]
+    fn a_stale_epoch_vote_cannot_reset_the_counters() {
+        let mut t = InvalidVoteTracker::new();
+        let p = params(3);
+        for _ in 0..2 {
+            assert!(t.record_invalid_vote(5, addr(1), &p).is_none());
+        }
+        // Stale vote: ignored, and the two recorded votes survive it.
+        assert!(t.record_invalid_vote(2, addr(1), &p).is_none());
+        assert_eq!(t.current_epoch, 5);
+        assert_eq!(t.counts.get(&addr(1)), Some(&2));
+        // The third current-epoch vote still trips the threshold.
+        assert!(t.record_invalid_vote(5, addr(1), &p).is_some());
+    }
+
+    /// The counts map and the reported set are counted, so an address
+    /// cannot slide from one into the other without moving the root.
+    #[test]
+    fn root_commits_each_map_count() {
+        let mut a = InvalidVoteTracker::new();
+        a.counts.insert(addr(1), 1);
+        let mut b = InvalidVoteTracker::new();
+        b.reported.insert(addr(1), ());
+        assert_ne!(a.root(), b.root());
+        let mut c = a.clone();
+        c.reported.insert(addr(1), ());
+        assert_ne!(a.root(), c.root());
+        assert_ne!(InvalidVoteTracker::new().root(), a.root());
     }
 
     #[test]

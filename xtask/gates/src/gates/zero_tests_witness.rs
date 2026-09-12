@@ -47,29 +47,56 @@ fn vm_body(vm_src: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Comments and literals gone, through the shared
+/// [`rust_literals::scrub`](crate::gates::rust_literals::scrub): string and
+/// char literals first (so a `//` or `/*` inside one is data), then nested
+/// block comments, then line comments. This gate used to cut at `//` only,
+/// so `builder.when /* note */ (is_assert).assert_one(rs1_val)` kept the
+/// comment in the statement, `when(is_assert` never matched, and the
+/// direct assertion passed.
 fn strip_comments(text: &str) -> String {
-    text.lines()
-        .map(|l| {
-            let idx = l.find("//").unwrap_or(l.len());
-            l[..idx].to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::gates::rust_literals::scrub(text)
 }
 
-/// `reg (==|!=) 0` in the body.
+/// The statements of a source fragment, comments gone, every run of
+/// whitespace collapsed and the whitespace around punctuation removed, so
+/// that a chain rustfmt spread over several lines is one string again and
+/// `builder . when (is_assert) . assert_one(rs1_val)` reads the same as the
+/// compact spelling. Matching per line was a hole: a long builder chain is
+/// formatted as `builder\n    .when(..)\n    .assert_one(..);`, and no single
+/// line of that carried all three tokens, so the direct form passed; spaces
+/// kept around `.` and `(` were the same hole one token wide.
+fn statements(text: &str) -> Vec<String> {
+    strip_comments(text)
+        .split(';')
+        .map(|s| {
+            let mut out = String::with_capacity(s.len());
+            for word in s.split_whitespace() {
+                let glue = out.is_empty()
+                    || out.ends_with(['.', '(', ')', ',', '=', '!', '{', '}'])
+                    || word.starts_with(['.', '(', ')', ',', '=', '!', '{', '}']);
+                if !glue {
+                    out.push(' ');
+                }
+                out.push_str(word);
+            }
+            out
+        })
+        .collect()
+}
+
+/// `reg (==|!=) 0` in the body, however it was spaced.
 fn tests_zero(body: &str, reg: &str) -> bool {
-    strip_comments(body)
-        .lines()
-        .any(|l| l.contains(&format!("{reg} == 0")) || l.contains(&format!("{reg} != 0")))
+    statements(body)
+        .iter()
+        .any(|s| s.contains(&format!("{reg}==0")) || s.contains(&format!("{reg}!=0")))
 }
 
 /// The AIR constrains the register directly with `assert_one`, bypassing the
 /// witness: `.when(is_<snake>)...assert_one(<air_reg>)`.
 fn has_direct_assert(air_code: &str, snake: &str, air_reg: &str) -> bool {
-    let stripped = strip_comments(air_code);
-    stripped.lines().any(|l| {
-        l.contains(&format!("when(is_{snake}")) && l.contains("assert_one") && l.contains(air_reg)
+    statements(air_code).iter().any(|s| {
+        s.contains(&format!("when(is_{snake}")) && s.contains("assert_one(") && s.contains(air_reg)
     })
 }
 
@@ -160,11 +187,7 @@ fn camel_to_snake(s: &str) -> String {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-ztw-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ztw")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-vm/src"));
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
@@ -177,16 +200,92 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a correct tree was refused"));
     }
-    // Direct assert_one bypass.
-    let direct_air = "pub const COL_ASSERT_INV: usize = 740;\n        builder.when(is_assert).assert_one(rs1_val.clone());\n";
+    // Direct assert_one bypass. Prefixed with `good_air` so every witness
+    // constant the gate looks for is present: the refusal must come from the
+    // direct-assertion check alone, not from a missing witness column that
+    // would have failed `run` earlier anyway.
+    let direct_air =
+        format!("{good_air}        builder.when(is_assert).assert_one(rs1_val.clone());\n");
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), direct_air)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a direct assert_one passed"));
     }
+    // The same bypass as rustfmt writes it, one call per line.
+    let split_air = format!(
+        "{good_air}        builder\n            .when(is_assert.clone())\n            .assert_one(rs1_val.clone());\n"
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), split_air)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a direct assert_one split across lines passed",
+        ));
+    }
+    // The same bypass with spaces around the punctuation, which is still
+    // valid Rust and read the same by the compiler.
+    let spaced_air = format!(
+        "{good_air}        builder . when (is_assert . clone ()) . assert_one (rs1_val . clone ());\n"
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), spaced_air)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a direct assert_one with spaces around its punctuation passed",
+        ));
+    }
+    // The same bypass with a block comment inside the chain. A scanner that
+    // removes only `//` comments leaves the comment between `when` and its
+    // argument, so `when(is_assert` is never seen and the bypass passes.
+    let commented_air = format!(
+        "{good_air}        builder.when /* witness? no */ (is_assert).assert_one(rs1_val.clone());\n"
+    );
+    std::fs::write(
+        dir.join("budzero/bud-proof/src/plonky3_air.rs"),
+        commented_air,
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a direct assert_one with a block comment inside the chain passed",
+        ));
+    }
+    // A nested block comment holding the direct form is a comment, not an
+    // assertion: the witness form next to it still passes.
+    let nested_air = format!(
+        "{good_air}        /* builder.when(is_assert).assert_one(rs1_val); /* nested */ still a comment */\n"
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), nested_air)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = run(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "canary: the direct form inside a nested block comment was taken as code: {e}"
+        ));
+    }
+    // A zero test the VM writes across lines is still a zero test.
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good_air)
+        .map_err(|e| e.to_string())?;
+    let split_vm = good_vm.replace(
+        "if src1_val == 0 { return Err(VmError::AssertionFailed); }",
+        "if src1_val\n                    == 0\n                {\n                    return Err(VmError::AssertionFailed);\n                }",
+    );
+    std::fs::write(dir.join("budzero/bud-vm/src/lib.rs"), split_vm).map_err(|e| e.to_string())?;
+    if let Err(e) = run(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "canary: a zero test written across lines was not recognised: {e}"
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "zero-test canary OK: the witness form PASSes and the direct form FAILs.",
+        "zero-test canary OK: the witness form PASSes, the direct form FAILs on one line, \
+         across lines, with spaced punctuation and with a block comment in the chain, a \
+         commented-out direct form is not code, and a multi-line zero test is still \
+         recognised.",
     ))
 }

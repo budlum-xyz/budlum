@@ -86,6 +86,7 @@ impl From<LegacyConsensusDomainV1> for ConsensusDomain {
             // Allow = no allowance: the list is left empty, and the domain cannot
             // be advanced by zk until a program list is given.
             zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
         }
     }
 }
@@ -432,7 +433,16 @@ impl Storage {
         if let Some(height_bytes) = self.db.get(b"IN_PROGRESS_HEIGHT")? {
             let height_str = from_utf8(&height_bytes)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let height: u64 = height_str.parse().unwrap_or(0);
+            // A present but unreadable marker is not "height 0": 0 is the
+            // value that rolls back genesis and deletes `LAST`,
+            // `CANONICAL_HEIGHT` and the bridge state, so a corrupt marker
+            // has to stop the open instead of being read as that.
+            let height: u64 = height_str.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("IN_PROGRESS_HEIGHT holds {height_str:?}, not a height: {e}"),
+                )
+            })?;
             tracing::warn!(
                 "Interrupted commit detected at height {height}. Initiating rollback..."
             );
@@ -564,13 +574,19 @@ impl Storage {
             );
         }
 
-        // 9. Bridge state
+        // 9. Bridge state. Every durable height gets a snapshot: a commit
+        // that carries no new bridge state carries the live one forward, so
+        // that a rollback from the next height finds the state that was
+        // valid here. Without it, an interrupted commit at H+1 read the
+        // missing `BRIDGE_STATE_AT:H` as "no bridge state" and deleted the
+        // live `BRIDGE_STATE` that a commit at H had never touched.
+        let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
         if let Some(ref bridge_state) = batch.bridge_state {
             let val = encode(bridge_state)?;
             b.insert(b"BRIDGE_STATE", val.as_slice());
-            // Height-indexed durable bridge snapshot for crash recovery.
-            let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
             b.insert(at.as_bytes(), val.as_slice());
+        } else if let Some(live) = self.db.get(b"BRIDGE_STATE")? {
+            b.insert(at.as_bytes(), live);
         }
 
         // 10. Accounts
@@ -625,7 +641,14 @@ impl Storage {
         if let Some(val) = self.db.get("CANONICAL_HEIGHT")? {
             let s = from_utf8(&val)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(s.parse().unwrap_or(0))
+            // Missing means 0; present and unparsable is a different fact and
+            // is reported, the same rule `schema_version` follows.
+            s.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("CANONICAL_HEIGHT holds {s:?}, not a height: {e}"),
+                )
+            })
         } else {
             Ok(0)
         }
@@ -982,7 +1005,23 @@ impl Storage {
     /// conditions.
     pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
         if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
-            let decoded = decode(&val)?;
+            // One shape only. Two shorter shapes used to be accepted here
+            // and filled in with empty maps: one without the settled queue,
+            // one without the replay heights as well. Both maps feed a
+            // committed root (`bridge_state_root`, `replay_nonce_root`), so
+            // a node that loaded a shorter row committed roots its peers
+            // could not reproduce. A row this shape does not decode is
+            // reported, not repaired.
+            let decoded = decode::<BridgeState>(&val).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "BRIDGE_STATE row does not decode as the current BridgeState shape; \
+                         a row from an older build cannot be loaded without changing the \
+                         committed bridge and replay roots, so it is refused: {error}"
+                    ),
+                )
+            })?;
             Ok(Some(decoded))
         } else {
             Ok(None)
@@ -1022,6 +1061,35 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    pub fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        let val = encode(ledger)?;
+        self.db.insert(b"QUARANTINE_LEDGER", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_quarantine_ledger(
+        &self,
+    ) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        if let Some(val) = self.db.get(b"QUARANTINE_LEDGER")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_storage_registry(
         &self,
         registry: &crate::domain::storage_deal::StorageRegistry,
@@ -1040,7 +1108,22 @@ impl Storage {
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
-            let decoded = decode(&val)?;
+            // One shape only. A row written before the settled-ticket queue
+            // used to be padded with an empty queue and accepted; the queue
+            // is part of the registry root and decides when a ticket row is
+            // dropped, so the padded node split from its peers at the first
+            // retention cutoff. Such a row is reported, not repaired.
+            let decoded =
+                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
+                             shape; a row from an older build cannot be loaded without changing \
+                             the committed registry root, so it is refused: {error}"
+                        ),
+                    )
+                })?;
             Ok(Some(decoded))
         } else {
             Ok(None)
@@ -1175,7 +1258,10 @@ impl Storage {
     pub fn load_chain(&self) -> std::io::Result<Vec<Block>> {
         let mut chain = Vec::new();
         if let Some(mut current_hash) = self.get_last_hash()? {
-            while let Ok(Some(block)) = self.get_block(&current_hash) {
+            // A read error is not the end of the chain. `while let Ok(Some)`
+            // ended the walk on `Err` the same way as on `Ok(None)`, so one
+            // unreadable record brought the node up on a silently short chain.
+            while let Some(block) = self.get_block(&current_hash)? {
                 chain.push(block.clone());
                 if block.previous_hash == "0".repeat(64) {
                     break;
@@ -1341,11 +1427,19 @@ impl Storage {
         header: &crate::core::block::BlockHeader,
         sig: &[u8],
     ) -> std::io::Result<()> {
-        let producer_str = header
-            .producer
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let key = format!("SEEN:{}:{}", producer_str, header.index);
+        // A header with no producer has no key the loader can read back:
+        // `load_all_seen_blocks` parses the middle segment as an address and
+        // a literal "unknown" there stopped the whole scan. Refused here.
+        let producer = header.producer.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "seen block at height {} has no producer; nothing to record it under",
+                    header.index
+                ),
+            )
+        })?;
+        let key = format!("SEEN:{}:{}", producer, header.index);
         let val = encode(&(header, sig))?;
         self.db.insert(key.as_bytes(), val)?;
         Ok(())
@@ -1418,7 +1512,7 @@ impl Storage {
                     errors.push(format!("Block {i}: missing in index"));
                 }
                 Err(e) => {
-                    errors.push(format!("Block i: read error: {e}"));
+                    errors.push(format!("Block {i}: read error: {e}"));
                 }
             }
         }
@@ -1679,6 +1773,17 @@ impl BlockchainStorage for Storage {
         Self::load_proof_claim_registry(self)
     }
 
+    fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        Self::save_quarantine_ledger(self, ledger)
+    }
+
+    fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        Self::load_quarantine_ledger(self)
+    }
+
     fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
@@ -1875,6 +1980,85 @@ mod tests {
             "bridge must roll back to tip-1 after interrupted H=2"
         );
         assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
+    }
+
+    /// A commit that carries no bridge state still leaves a snapshot at its
+    /// height, so a rollback from the next height restores the live state
+    /// instead of deleting it. Measured before the fix: commit H=1 with
+    /// bridge state, commit H=2 with `None`, interrupt at H=3, and the
+    /// recovery removed `BRIDGE_STATE` outright.
+    #[test]
+    fn a_commit_without_bridge_state_carries_the_live_snapshot_forward() {
+        use crate::cross_domain::{AssetId, BridgeState};
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+
+        let mut block1 = Block::new(1, "0".repeat(64), vec![]);
+        block1.hash = block1.calculate_hash();
+        let mut bridge = BridgeState::new();
+        bridge.register_asset(AssetId([0x22u8; 32]), 1).unwrap();
+        let root = bridge.root();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block1.clone(),
+                state_root: "s1".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: Some(bridge),
+                accounts: vec![],
+            })
+            .unwrap();
+
+        let mut block2 = Block::new(2, block1.hash.clone(), vec![]);
+        block2.hash = block2.calculate_hash();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block2.clone(),
+                state_root: "s2".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: None,
+                accounts: vec![],
+            })
+            .unwrap();
+        assert!(
+            storage.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_some(),
+            "height 2 carries the live snapshot forward"
+        );
+
+        // Interrupt at height 3 with nothing else written.
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"3").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+
+        let storage2 = Storage::new(path).unwrap();
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("the bridge state valid at height 2 survives the rollback");
+        assert_eq!(restored.root(), root);
+        assert_eq!(storage2.get_canonical_height().unwrap(), 2);
+    }
+
+    /// Present-but-unreadable height markers are errors, not height 0.
+    #[test]
+    fn corrupt_height_markers_are_reported_not_read_as_zero() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+        storage.db.insert(b"CANONICAL_HEIGHT", b"forty").unwrap();
+        assert!(storage.get_canonical_height().is_err());
+        storage.db.insert(b"CANONICAL_HEIGHT", b"40").unwrap();
+        assert_eq!(storage.get_canonical_height().unwrap(), 40);
+
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"x").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+        assert!(
+            Storage::new(path).is_err(),
+            "a corrupt in-progress marker must stop the open, not roll back genesis"
+        );
     }
 
     #[test]

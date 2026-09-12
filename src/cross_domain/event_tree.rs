@@ -94,37 +94,23 @@ impl DomainEventTree {
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
+    /// The proof is the shared tree primitive's walk
+    /// (`consensus::merkle_tree`) under the settlement binding: an unpaired
+    /// tail is promoted under the odd-promotion tag rather than paired with
+    /// itself - the self-pairing made the proof for the last leaf of an odd
+    /// tree identical to the proof the same tree would give with that leaf
+    /// duplicated, so two different trees shared one verifying proof. The
+    /// sibling recorded for a promoted digest is the sentinel.
     pub fn proof(&self, index: usize) -> Option<MerkleProof> {
-        if index >= self.events.len() {
-            return None;
-        }
-
-        let mut idx = index;
-        let mut level: Vec<Hash32> = self.events.iter().map(DomainEvent::leaf_hash).collect();
-        let leaf = level[index];
-        let mut siblings = Vec::new();
-
-        while level.len() > 1 {
-            let sibling_idx = if idx.is_multiple_of(2) {
-                idx + 1
-            } else {
-                idx - 1
-            };
-            let sibling = level.get(sibling_idx).copied().unwrap_or(level[idx]);
-            siblings.push(sibling);
-
-            let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            for pair in level.chunks(2) {
-                let left = pair[0];
-                let right = if pair.len() == 2 { pair[1] } else { pair[0] };
-                next.push(hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", &left, &right]));
-            }
-            idx /= 2;
-            level = next;
-        }
-
+        let leaves: Vec<Hash32> = self.events.iter().map(DomainEvent::leaf_hash).collect();
+        let siblings = crate::consensus::merkle_tree::merkle_proof(
+            &leaves,
+            index,
+            crate::settlement::commitment_tree::merkle_node_hash,
+            crate::settlement::commitment_tree::merkle_odd_promote_hash,
+        )?;
         Some(MerkleProof {
-            leaf,
+            leaf: *leaves.get(index)?,
             index,
             siblings,
         })
@@ -133,19 +119,15 @@ impl DomainEventTree {
 
 impl MerkleProof {
     pub fn verify(&self, expected_root: Hash32) -> bool {
-        let mut hash = self.leaf;
-        let mut index = self.index;
-
-        for sibling in &self.siblings {
-            hash = if index.is_multiple_of(2) {
-                hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", &hash, sibling])
-            } else {
-                hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", sibling, &hash])
-            };
-            index /= 2;
-        }
-
-        hash == expected_root
+        // The verifying half of the same shared walk: the sentinel marks a
+        // promoted step, everything else is a pair ordered by position.
+        crate::consensus::merkle_tree::merkle_root_from_proof(
+            &self.leaf,
+            self.index,
+            &self.siblings,
+            crate::settlement::commitment_tree::merkle_node_hash,
+            crate::settlement::commitment_tree::merkle_odd_promote_hash,
+        ) == expected_root
     }
 }
 
@@ -200,5 +182,56 @@ mod tests {
         assert!(!tampered.verify(root));
 
         assert!(!proof.verify(hash(b"bad root")));
+    }
+
+    /// The promoted tail leaf proves inclusion through the sentinel: five
+    /// events make the leaf layer odd, so the fifth leaf's first step is a
+    /// promotion, not a pair, and its proof must verify against the same
+    /// root the even-indexed leaves verify against.
+    #[test]
+    fn the_promoted_tail_leaf_proves_inclusion_through_the_sentinel() {
+        let mut tree = DomainEventTree::new();
+        for index in 0..5 {
+            tree.push(event(index));
+        }
+        let root = tree.root();
+        let proof = tree.proof(4).expect("proof should exist");
+        assert_eq!(
+            proof.siblings.first(),
+            Some(&crate::consensus::merkle_tree::odd_promotion_sentinel()),
+            "the first step of the promoted leaf is the sentinel, not a sibling"
+        );
+        assert!(proof.verify(root));
+    }
+
+    /// A proof whose sentinel sits in a paired position must not verify
+    /// against the honest root: the marker is not a digest any honest tree
+    /// hands out as a sibling.
+    #[test]
+    fn a_sentinel_forged_into_a_paired_position_does_not_verify() {
+        let mut tree = DomainEventTree::new();
+        for index in 0..4 {
+            tree.push(event(index));
+        }
+        let root = tree.root();
+        let mut proof = tree.proof(0).expect("proof should exist");
+        assert!(proof.verify(root));
+        proof.siblings[0] = crate::consensus::merkle_tree::odd_promotion_sentinel();
+        assert!(
+            !proof.verify(root),
+            "a promotion marker where the tree paired must break the root"
+        );
+    }
+
+    /// One event: the tree is a single leaf, the root is the leaf, and the
+    /// proof carries no steps.
+    #[test]
+    fn a_single_event_tree_root_is_the_leaf() {
+        let mut tree = DomainEventTree::new();
+        tree.push(event(0));
+        let root = tree.root();
+        let proof = tree.proof(0).expect("proof should exist");
+        assert!(proof.siblings.is_empty());
+        assert!(proof.verify(root));
     }
 }

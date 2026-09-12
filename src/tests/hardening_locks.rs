@@ -53,8 +53,9 @@ mod tests {
     #[test]
     fn sync_committee_rejects_low_participation() {
         use crate::cross_domain::evm::sync_committee::{
-            verify_sync_aggregate, SyncAggregate, SyncCommitteeError, SyncCommitteeState,
-            BLS_PUBKEY_LEN, BLS_SIGNATURE_LEN, PARTICIPATION_THRESHOLD, SYNC_COMMITTEE_SIZE,
+            fixtures::binding_committing_to, verify_execution_block_finality, BeaconChainParams,
+            SyncAggregate, SyncCommitteeError, SyncCommitteeState, BLS_PUBKEY_LEN,
+            BLS_SIGNATURE_LEN, PARTICIPATION_THRESHOLD, SYNC_COMMITTEE_SIZE,
         };
         let state = SyncCommitteeState {
             current_period: 0,
@@ -62,12 +63,18 @@ mod tests {
             next_sync_committee: [[0u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
         };
         // Zero-participation aggregate → must be rejected by the threshold gate
-        // (which runs before any per-pubkey BLS verification).
+        // (which runs before any BLS verification).
         let agg = SyncAggregate {
             sync_committee_bits: [0u8; SYNC_COMMITTEE_SIZE / 8],
             sync_committee_signature: [0u8; BLS_SIGNATURE_LEN],
         };
-        let err = verify_sync_aggregate(&state, &agg, b"signing-message")
+        let block = [0xB1; 32];
+        let binding = binding_committing_to(block, 0);
+        let params = BeaconChainParams {
+            fork_version: [0x04, 0, 0, 0],
+            genesis_validators_root: [0x42; 32],
+        };
+        let err = verify_execution_block_finality(&state, &agg, &binding, &params, &block)
             .expect_err("low-participation aggregate must be rejected");
         match err {
             SyncCommitteeError::InsufficientParticipation {

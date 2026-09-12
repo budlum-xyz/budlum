@@ -34,12 +34,11 @@ fn main() {
 
     for i in 0..count {
         let (msg, sig) = &samples[i % sample_count];
-        if i == 0 {
-            budlum_core::crypto::primitives::verify_signature(msg, sig, &pk_bytes)
-                .expect("Initial signature failure");
-        } else {
-            let _ = budlum_core::crypto::primitives::verify_signature(msg, sig, &pk_bytes);
-        }
+        // Every sample is checked, not only the first: a benchmark that
+        // reports verification throughput while discarding failed
+        // verifications measures the cost of trying, not of succeeding.
+        budlum_core::crypto::primitives::verify_signature(msg, sig, &pk_bytes)
+            .expect("signature verification failed during the benchmark");
     }
 
     let duration = start.elapsed();

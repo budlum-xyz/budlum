@@ -3,6 +3,7 @@ name = "budlum-kani"
 version = "0.0.0"
 edition = "2021"
 publish = false
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 # Deliberately no `rust-version`, and deliberately no dependency on
 # `budlum-core`.

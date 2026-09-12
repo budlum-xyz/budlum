@@ -1,8 +1,13 @@
+pub mod cold_wallet;
 pub mod commitment_tree;
 pub mod global_block;
 pub mod proof_market;
 pub mod proof_verifier;
 
+pub use cold_wallet::{
+    ColdRefusal, ColdWalletPolicy, ColdWalletState, KeyRotation, RefusalRecord, RotationError,
+    SettlementRequest, MAX_COLD_ROTATION_HISTORY, MAX_ROTATION_REASON_BYTES,
+};
 pub use commitment_tree::merkle_root;
 pub use global_block::GlobalBlockHeader;
 pub use proof_market::{

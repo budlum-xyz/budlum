@@ -60,6 +60,40 @@ const FORBIDDEN: &[(&str, &str)] = &[
 /// project toward a licence violation to stay green.
 const ATTRIBUTION_FILES: &[&str] = &["LICENSE.md", "NOTICE.md", "THIRD-PARTY.md"];
 
+/// The same rule by stem, because the tree does not keep these at the root.
+///
+/// Measured on this checkout: the attribution register is `docs/NOTICE` - no
+/// extension, inside `docs/` - and the reading register is
+/// `docs/PROVENANCE_NOTES.md`. Neither matched the root-relative list above, so
+/// a gate wired straight from the old file would have failed on the tree's own
+/// licence compliance, which is the one outcome its header says is worse than
+/// having no gate at all. The stems, not the paths, are the invariant.
+const ATTRIBUTION_STEMS: &[&str] = &["LICENSE", "NOTICE", "THIRD-PARTY", "PROVENANCE_NOTES"];
+
+/// Audit mirrors: their entire content is a record of which external projects
+/// were read and what was taken from them. Exempting them is not tolerating a
+/// leak into the product; the name has to reach code, docs or a public read
+/// path to matter, and `canary 10` keeps a file in `docs/` failing so the
+/// exemption cannot quietly widen.
+const LOG_DIRS: &[&str] = &["repo-workspace/", "repo-lubot/"];
+
+/// Is `rel` a place a researched name may legitimately appear?
+fn is_exempt(rel: &str) -> bool {
+    if rel == SELF_PATH || ATTRIBUTION_FILES.contains(&rel) {
+        return true;
+    }
+    if LOG_DIRS.iter().any(|d| rel.starts_with(*d)) {
+        return true;
+    }
+    let stem = rel
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel)
+        .trim_end_matches(".md")
+        .trim_end_matches(".txt");
+    ATTRIBUTION_STEMS.contains(&stem)
+}
+
 /// This gate names what it forbids, so it cannot scan itself.
 const SELF_PATH: &str = "xtask/gates/src/gates/no_upstream_brands.rs";
 
@@ -167,7 +201,7 @@ fn contains_word(haystack_lower: &str, needle: &str) -> bool {
 /// Scan one file's text. Returns `(name, line number, trimmed line)` per hit.
 fn findings_in(rel: &str, text: &str) -> Vec<(&'static str, usize, String)> {
     let mut out = Vec::new();
-    if rel == SELF_PATH || ATTRIBUTION_FILES.contains(&rel) {
+    if is_exempt(rel) {
         return out;
     }
     for (line_no, line) in text.lines().enumerate() {
@@ -311,5 +345,25 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    Ok(String::from("no-upstream-brands: 8 canaries"))
+    // 9. The register moved and the rule followed it: `docs/NOTICE` is an
+    // attribution file, not a leak. Without this the gate fails the tree's own
+    // licence compliance and gets switched off, which is how gates die.
+    if !findings_in("docs/NOTICE", "JustVugg/colibri, Apache-2.0").is_empty() {
+        return Err(String::from(
+            "canary 9: the attribution register under docs/ was scanned; the rule is \
+             about product surface, not about complying with a licence",
+        ));
+    }
+
+    // 10. And the exemption is exactly that narrow: a design doc naming a
+    // researched product is still a finding, even in the directory the
+    // exemption lives in.
+    if findings_in("docs/ARCHITECTURE.md", "the colibri runtime is reused").is_empty() {
+        return Err(String::from(
+            "canary 10: a non-attribution file in docs/ passed; an exemption that \
+             widens to a whole directory is a disabled gate with extra steps",
+        ));
+    }
+
+    Ok(String::from("no-upstream-brands: 10 canaries"))
 }

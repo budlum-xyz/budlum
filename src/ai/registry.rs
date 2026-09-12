@@ -20,6 +20,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Prevents stale disputes and provides finality to verifiers.
 /// Default: 10080 blocks ≈ 7 days at 1 block/minute.
 pub const DISPUTE_WINDOW_BLOCKS: u64 = 10_080;
+
+/// Furthest ahead a request deadline or a payment expiry may sit, in blocks
+/// (about a year at six-second slots).
+///
+/// A deadline needs a ceiling as well as a floor. Without one a requester
+/// pays `max_fee = 1` for `deadline_block = u64::MAX`, `prune_expired` never
+/// reaches the row, `reclaim_escrow` never matures, and the request sits in
+/// the state root for the life of the chain. The agent-payment path had this
+/// bound already; requests and model deadline windows now share it.
+pub const MAX_DEADLINE_HORIZON_BLOCKS: u64 = 5_256_000;
 pub const EQUIVOCATION_ERROR_PREFIX: &str = "EQUIVOCATION:";
 
 pub fn is_equivocation_error(error: &str) -> bool {
@@ -55,9 +65,13 @@ pub const MAX_CALLBACK_EVENTS_PER_ADDRESS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRegistry {
+    #[serde(with = "crate::core::map_keys")]
     pub models: BTreeMap<AiModelId, AiModelSpec>,
+    #[serde(with = "crate::core::map_keys")]
     pub requests: BTreeMap<AiRequestId, AiInferenceRequest>,
+    #[serde(with = "crate::core::map_keys")]
     pub results: BTreeMap<AiRequestId, Vec<AiInferenceResult>>,
+    #[serde(with = "crate::core::map_keys")]
     pub outcomes: BTreeMap<AiRequestId, AiInferenceOutcome>,
     /// Set of request IDs whose max_fee has been reclaimed
     /// After deadline expiry without finalization. Prevents double-reclaim.
@@ -66,6 +80,7 @@ pub struct AiRegistry {
     /// Maps (request_id, verifier_bytes) → block_number when detected.
     /// Dispute window enforcement - equivocation events
     /// Expire after `DISPUTE_WINDOW_BLOCKS` blocks, preventing stale slashing.
+    #[serde(with = "crate::core::map_keys")]
     pub equivocation_events: BTreeMap<(AiRequestId, [u8; 32]), u64>,
     /// Set of request IDs that have been cancelled
     /// By the requester before the deadline. Prevents double-cancel and
@@ -101,6 +116,7 @@ pub struct AiRegistry {
     /// Submits a ZKVM-verified inference result, the proof is stored here.
     /// This enables trustless verification - the paradigm shift from
     /// "verifier says so" to "mathematics prove it."
+    #[serde(with = "crate::core::map_keys")]
     pub execution_proofs: BTreeMap<(AiRequestId, [u8; 32]), AiExecutionProof>,
     /// Verifier Quality of Service registry.
     /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
@@ -109,8 +125,10 @@ pub struct AiRegistry {
     /// Agent-to-Agent payment registry.
     /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
     /// Between AI agents in the Agentic Economy.
+    #[serde(with = "crate::core::map_keys")]
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
     /// Finalized payment receipts (payment_id never reusable).
+    #[serde(with = "crate::core::map_keys")]
     pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
     /// Verifier whitelist - only whitelisted verifiers
     /// Can submit results. When empty, any staked verifier can submit
@@ -226,6 +244,13 @@ impl AiRegistry {
     /// Submit an inference request with deadline enforcement.
     /// `current_block` is provided by the executor layer (defense-in-depth:
     /// Both registry and executor check deadlines independently).
+    ///
+    /// The read declaration is checked here, not only in the executor:
+    /// `verify_id` proves the fields are self-consistent, and a request that
+    /// is consistent with itself can still carry no perception declaration
+    /// or a non-canonical `input_commitment`. Every caller of this method
+    /// passes the same gate as the transaction path, so there is no second
+    /// door into the request table.
     pub fn submit_request(
         &mut self,
         request: AiInferenceRequest,
@@ -234,6 +259,25 @@ impl AiRegistry {
         if !request.verify_id() {
             return Err("Request ID does not match canonical preimage".into());
         }
+        // The request's own clock field is untrusted input: an unchecked
+        // `submitted_at_block = u64::MAX` would push every derived deadline
+        // (pruning in `prune`, the result window in `submit_result`) to
+        // `u64::MAX`, turning a one-time fee into permanent state and a
+        // never-closing escrow. The bound is a window, not equality: the
+        // locked lifecycle tests sign requests a few blocks away from the
+        // applying block, and a signed transaction may land late. Beyond
+        // one horizon in either direction the field stops being a clock
+        // and becomes a bloat weapon, so it is refused.
+        let horizon = MAX_DEADLINE_HORIZON_BLOCKS;
+        let ahead = request.submitted_at_block > current_block.saturating_add(horizon);
+        let behind = current_block > request.submitted_at_block.saturating_add(horizon);
+        if ahead || behind {
+            return Err(format!(
+                "Request submitted_at_block {} is outside the {horizon}-block window around current block {current_block}",
+                request.submitted_at_block
+            ));
+        }
+        crate::ai_inference::admit_inference_request(self, &request)?;
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s,
             None => {
@@ -267,6 +311,12 @@ impl AiRegistry {
             return Err(format!(
                 "Request deadline exceeded: current_block={current_block}, deadline_block={}",
                 request.deadline_block
+            ));
+        }
+        if request.deadline_block > current_block.saturating_add(MAX_DEADLINE_HORIZON_BLOCKS) {
+            return Err(format!(
+                "Request deadline too far in the future: deadline_block={}, maximum is {} blocks from current_block={current_block}",
+                request.deadline_block, MAX_DEADLINE_HORIZON_BLOCKS
             ));
         }
         // effort.rs rule 2: a request that fits under no authorized operator's
@@ -308,6 +358,17 @@ impl AiRegistry {
                 ))
             }
         };
+        // The result's block is the chain's block. The executor already
+        // overwrites the payload field with the consensus height, but this
+        // method is also reached by callers that do not; a verifier-chosen
+        // value fed the QoS clock and `finalized_at_block`, and a value of
+        // `u64::MAX` kept the outcome out of `prune_expired` forever.
+        if result.submitted_at_block != current_block {
+            return Err(format!(
+                "Result submitted_at_block {} is not the current block {current_block}",
+                result.submitted_at_block
+            ));
+        }
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s.clone(),
             None => return Err("Associated model for request not found".into()),
@@ -373,6 +434,15 @@ impl AiRegistry {
         if self.cancelled_requests.contains(&result.request_id) {
             return Err(format!(
                 "Request {} has been cancelled - results not accepted",
+                result.request_id.to_hex()
+            ));
+        }
+        // A reclaimed fee is terminal too. The deadline check above already
+        // refuses a result this late; this names the state instead of
+        // relying on the order of the two windows.
+        if self.reclaimed_fees.contains(&result.request_id) {
+            return Err(format!(
+                "Request {} fee was reclaimed - results not accepted",
                 result.request_id.to_hex()
             ));
         }
@@ -532,28 +602,64 @@ impl AiRegistry {
         request_deadline_blocks: u64,
         result_deadline_blocks: u64,
     ) -> Result<(), String> {
-        let spec = self
+        let owner = self
             .models
-            .get_mut(model_id)
+            .get(model_id)
+            .map(|spec| spec.owner)
             .ok_or_else(|| format!("Model ID {} not found", model_id.to_hex()))?;
 
-        if spec.owner != *caller {
+        if owner != *caller {
             return Err(format!(
                 "Only the model owner can update model {}",
                 model_id.to_hex()
             ));
         }
 
-        // Validate new thresholds before applying
-        if min_verifier_count == 0 {
-            return Err("min_verifier_count must be >= 1".into());
+        // A pending request binds only `model_id`; `submit_result` and
+        // `reclaim_fee` read the thresholds, the output limit and the
+        // deadline window from the current spec. An update while requests
+        // are open would change the terms after the requester signed them,
+        // and the version bump does not help because the request does not
+        // carry the version. The terms stay fixed until every request on
+        // the model has settled or been retired.
+        //
+        // Cancelled and reclaimed requests are terminal too: their escrow
+        // already went back and `submit_result` refuses further results for
+        // them. Counting them as pending kept the spec pinned until
+        // `prune_expired` retired the row a full retention window later.
+        let pending = self
+            .requests
+            .iter()
+            .filter(|(id, req)| {
+                req.model_id == *model_id
+                    && !self.outcomes.contains_key(*id)
+                    && !self.cancelled_requests.contains(*id)
+                    && !self.reclaimed_fees.contains(*id)
+            })
+            .count();
+        if pending > 0 {
+            return Err(format!(
+                "Model {} has {pending} pending request(s); its terms cannot change until they settle",
+                model_id.to_hex()
+            ));
         }
-        if agreement_threshold == 0 || agreement_threshold > min_verifier_count {
-            return Err("agreement_threshold must be between 1 and min_verifier_count".into());
-        }
-        if request_deadline_blocks == 0 || result_deadline_blocks == 0 {
-            return Err("Deadlines must be >= 1 block".into());
-        }
+        let spec = self
+            .models
+            .get_mut(model_id)
+            .ok_or_else(|| format!("Model ID {} not found", model_id.to_hex()))?;
+
+        // Validate the candidate through the same `AiModelSpec::validate` that
+        // registration uses, so an update cannot reach a state registration
+        // would have refused (the ref-byte caps were missing from an earlier
+        // hand-written copy of these checks).
+        let mut candidate = spec.clone();
+        candidate.min_verifier_count = min_verifier_count;
+        candidate.agreement_threshold = agreement_threshold;
+        candidate.max_input_ref_bytes = max_input_ref_bytes;
+        candidate.max_output_ref_bytes = max_output_ref_bytes;
+        candidate.request_deadline_blocks = request_deadline_blocks;
+        candidate.result_deadline_blocks = result_deadline_blocks;
+        candidate.validate()?;
 
         spec.min_verifier_count = min_verifier_count;
         spec.agreement_threshold = agreement_threshold;
@@ -607,22 +713,27 @@ impl AiRegistry {
     /// Recently-expired data for a configurable retention window.
     ///
     /// Prunable items:
-    /// - Requests whose effective deadline has passed + retention_blocks
+    /// - Requests whose effective deadline has passed + retention_blocks,
+    ///   reclaimed and cancelled ones included
     /// - Results associated with pruned requests
     /// - Outcomes that have been finalized + retention_blocks
-    /// - Reclaimed fee records older than retention_blocks
+    /// - Reclaimed and cancelled markers whose request row is gone
     ///
     /// Returns the number of items pruned.
     pub fn prune_expired(&mut self, current_block: u64, retention_blocks: u64) -> usize {
         let mut pruned = 0;
 
-        // Prune expired, unfinalized requests (and their results)
+        // Prune expired, unfinalized requests (and their results). A
+        // reclaimed or cancelled request is terminal: nothing can act on it
+        // again, so it retires on the same schedule. Reclaimed rows used to
+        // be kept, and their markers were swept only once the row was gone,
+        // so both stayed in `state_root` forever.
         let expired_request_ids: Vec<AiRequestId> = self
             .requests
             .iter()
             .filter(|(id, req)| {
-                if self.outcomes.contains_key(id) || self.reclaimed_fees.contains(id) {
-                    return false; // Don't prune finalized or reclaimed requests
+                if self.outcomes.contains_key(id) {
+                    return false; // finalized requests retire with their outcome
                 }
                 // Check if deadline + retention has passed
                 let model = self.models.get(&req.model_id);
@@ -644,24 +755,15 @@ impl AiRegistry {
             pruned += 1;
         }
 
-        // Prune reclaimed fee records older than retention
-        let reclaimed_to_prune: Vec<AiRequestId> = self
-            .reclaimed_fees
-            .iter()
-            .filter(|id| {
-                // Find the request to check its deadline
-                // If request was already pruned, use the ID itself
-                // Since we can't determine exact time without the request,
-                // We prune reclaimed fees whose requests have been pruned
-                !self.requests.contains_key(id)
-            })
-            .cloned()
-            .collect();
-
-        for id in &reclaimed_to_prune {
-            self.reclaimed_fees.remove(id);
-            pruned += 1;
-        }
+        // The terminal markers guard the refund paths of a request row.
+        // Once the row is gone every path refuses with "not found", so a
+        // marker without a row is dead weight in `state_root`.
+        let requests = &self.requests;
+        let before = self.reclaimed_fees.len() + self.cancelled_requests.len();
+        self.reclaimed_fees.retain(|id| requests.contains_key(id));
+        self.cancelled_requests
+            .retain(|id| requests.contains_key(id));
+        pruned += before - (self.reclaimed_fees.len() + self.cancelled_requests.len());
 
         // Prune finalized outcomes older than retention
         let prunable_outcomes: Vec<AiRequestId> = self
@@ -680,6 +782,37 @@ impl AiRegistry {
             pruned += 1;
         }
 
+        // A callback event outlives its outcome only for a consumer that
+        // never collects it. The per-address cap bounds one queue; it does
+        // not bound how many addresses hold one, and every distinct
+        // `callback` address in a request opened a new key that nothing
+        // removed. An event retires on the same schedule as its outcome,
+        // and an empty queue goes with it.
+        let mut retired = 0usize;
+        self.callback_queue.retain(|_, events| {
+            let kept = events.len();
+            events.retain(|event| {
+                current_block <= event.finalized_at_block.saturating_add(retention_blocks)
+            });
+            retired += kept - events.len();
+            !events.is_empty()
+        });
+        pruned += retired;
+
+        // An execution proof is keyed by its request. Once the request is
+        // gone (expired unfinalized, or its outcome retired) the proof has no
+        // reader left, but up to 256 KiB of `proof_bytes` per verifier stayed
+        // in the map and was rehashed into `state_root` on every block. The
+        // settled agent-payment receipts are deliberately not swept here:
+        // `submit_agent_payment` refuses a `payment_id` found among them,
+        // and `payment_id` is caller-supplied rather than derived, so the
+        // receipt is the replay guard, not a record of one.
+        let before = self.execution_proofs.len();
+        self.execution_proofs.retain(|(request_id, _), _| {
+            !expired_request_ids.contains(request_id) && !prunable_outcomes.contains(request_id)
+        });
+        pruned += before - self.execution_proofs.len();
+
         pruned
     }
     ///
@@ -689,7 +822,8 @@ impl AiRegistry {
     /// Agreement, or deadline expiry before threshold reached).
     ///
     /// Returns `(requester_address, max_fee)` on success.
-    /// Errors if: request not found, already finalized, not yet expired, or already reclaimed.
+    /// Errors if: request not found, already finalized, not yet expired,
+    /// already reclaimed, or already cancelled (the refund went out then).
     pub fn reclaim_fee(
         &mut self,
         request_id: &AiRequestId,
@@ -712,6 +846,15 @@ impl AiRegistry {
         if self.reclaimed_fees.contains(request_id) {
             return Err(format!(
                 "Request {} fee already reclaimed",
+                request_id.to_hex()
+            ));
+        }
+
+        // A cancelled request has already had its max_fee refunded by
+        // `cancel_request`; reclaiming it again would pay the same escrow twice.
+        if self.cancelled_requests.contains(request_id) {
+            return Err(format!(
+                "Request {} was cancelled - fee already refunded",
                 request_id.to_hex()
             ));
         }
@@ -742,13 +885,14 @@ impl AiRegistry {
     }
 
     /// Cancel a pending inference request.
-    /// Only the original requester can cancel, and only before the deadline.
-    /// A cancelled request cannot receive further results and its max_fee
-    /// Is eligible for refund. Cancellation is irreversible.
+    /// Only the original requester can cancel, at any point before the
+    /// request is finalised. A cancelled request cannot receive further
+    /// results and its max_fee is refunded exactly once, here; `reclaim_fee`
+    /// refuses a cancelled request afterwards. Cancellation is irreversible.
     ///
     /// Returns `(requester, max_fee)` on success for the executor to process refund.
     /// Errors if: request not found, not the requester, already finalized,
-    /// Already reclaimed, already cancelled, or deadline not yet passed.
+    /// already reclaimed, or already cancelled.
     pub fn cancel_request(
         &mut self,
         request_id: &AiRequestId,
@@ -789,11 +933,10 @@ impl AiRegistry {
             return Err(format!("Request {} already cancelled", request_id.to_hex()));
         }
 
-        // Cannot cancel before the deadline has passed, the request is
-        // Still valid and verifiers may still submit results.
-        // Cancellation is for requests where the requester no longer wants
-        // To wait, but verifiers might still be working. We allow
-        // Cancellation at any point before finalization.
+        // No deadline check: cancellation is for a requester who no longer
+        // wants to wait while verifiers may still be working, so it is allowed
+        // at any point before finalisation. Results submitted after this point
+        // are rejected by `submit_result`.
         let requester = request.requester;
         let max_fee = request.max_fee;
 
@@ -1188,6 +1331,24 @@ impl AiRegistry {
         verifier: &Address,
         proof: AiExecutionProof,
     ) -> Result<(), String> {
+        // Cancellation is terminal. `submit_result` already refuses results
+        // for a cancelled request; a proof attached to a result that was
+        // accepted before the cancellation must not reopen the request, or
+        // `try_finalize_with_proofs` emits an outcome after the refund.
+        if self.cancelled_requests.contains(request_id) {
+            return Err(format!(
+                "Request {} has been cancelled - proofs not accepted",
+                request_id.to_hex()
+            ));
+        }
+        // So is a reclaimed fee: the escrow went back to the requester, and
+        // an outcome after that would pay verifiers from money that is gone.
+        if self.reclaimed_fees.contains(request_id) {
+            return Err(format!(
+                "Request {} fee was reclaimed - proofs not accepted",
+                request_id.to_hex()
+            ));
+        }
         // Verify that a result exists for this verifier
         let results = self
             .results
@@ -1246,7 +1407,10 @@ impl AiRegistry {
         &mut self,
         request_id: &AiRequestId,
     ) -> Option<AiInferenceOutcome> {
-        if self.outcomes.contains_key(request_id) {
+        if self.outcomes.contains_key(request_id)
+            || self.cancelled_requests.contains(request_id)
+            || self.reclaimed_fees.contains(request_id)
+        {
             return None;
         }
         let request = self.requests.get(request_id)?.clone();
@@ -1363,11 +1527,10 @@ impl AiRegistry {
         // Future. Without a maximum, an attacker can create payments with
         // Expiry = u64::MAX, locking escrow forever. Cap at ~1 year (52560
         // Epochs × 100 blocks/epoch ≈ 5_256_000 blocks from current_block).
-        const MAX_PAYMENT_EXPIRY_HORIZON: u64 = 5_256_000;
-        if payment.expiry_block > current_block.saturating_add(MAX_PAYMENT_EXPIRY_HORIZON) {
+        if payment.expiry_block > current_block.saturating_add(MAX_DEADLINE_HORIZON_BLOCKS) {
             return Err(format!(
                 "Agent payment: expiry_block too far in the future (max {} blocks from current)",
-                MAX_PAYMENT_EXPIRY_HORIZON
+                MAX_DEADLINE_HORIZON_BLOCKS
             ));
         }
         if payment.is_expired(current_block) {

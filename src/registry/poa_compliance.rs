@@ -30,7 +30,7 @@
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComplianceDomainKind {
@@ -115,7 +115,8 @@ impl std::error::Error for PoaComplianceError {}
 pub struct PoaComplianceRegistry {
     screenings: HashMap<Address, ScreeningRecord>,
     freezes: HashMap<Address, FreezeRecord>,
-    travel_rules: HashMap<[u8; 32], TravelRuleRecord>,
+    #[serde(with = "crate::core::map_keys")]
+    travel_rules: BTreeMap<[u8; 32], TravelRuleRecord>,
     audit_log: Vec<ComplianceAuditEvent>,
 }
 

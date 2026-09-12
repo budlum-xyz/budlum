@@ -30,6 +30,46 @@ Plonky3
     their own licence terms through Cargo.
 
 --------------------------------------------------------------------------------
+Design references (no code copied)
+--------------------------------------------------------------------------------
+
+The following open-source projects were studied while designing specific
+modules. The in-tree implementations are independent (different language or
+different abstraction level). The entries record the inspiration so a
+reviewer can compare upstream and in-tree; the per-module detail is in
+PROVENANCE_NOTES.md.
+
+JustVugg/colibri
+    https://github.com/JustVugg/colibri
+    Copyright the colibri contributors
+    Licensed under Apache-2.0
+
+    On-device mixture-of-experts inference engine. Its core design, a
+    placement hierarchy across VRAM, RAM and disk for expert weights,
+    influenced the weight-residency planner in
+    crates/ai-inference/crates/ai-serve/src/residency.rs (tier model and the
+    invariant that placement must never change semantics). No code was
+    copied: colibri is a pure C runtime, and the in-tree module is a Rust
+    planner that explicitly contains none of colibri's runtime machinery.
+
+1jehuang/jcode
+    https://github.com/1jehuang/jcode
+    Copyright the jcode contributors
+    Licensed under MIT
+
+    Coding agent studied for its memory discipline. The bounded-buffer and
+    ceiling behaviour it prompted is ours and is described in
+    docs/ARCHITECTURE.md. No code was copied.
+
+A corpus of published system prompts (consulted while writing
+crates/ai-inference/crates/ai-core/src/system_prompt.rs; the corpus is not
+redistributed and no single upstream repository is named here).
+    The consultation covered prompt structure only. The in-tree prompt is
+    original text: it states this protocol's own limits and is checked
+    against the tree by the ai-inference-prompt-is-true gate. No prompt
+    text was reproduced.
+
+--------------------------------------------------------------------------------
 
 Dependencies obtained through Cargo are not vendored into this repository and
 are governed by their own licences. The permitted set is enforced in CI by the

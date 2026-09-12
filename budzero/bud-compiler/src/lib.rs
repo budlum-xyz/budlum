@@ -156,6 +156,100 @@ mod tests {
         }
     }
 
+    /// A `Map<K,V>` storage field must compile. Measured before the fix:
+    /// `Type::from_str` had no mapping case, so the parser's `Map<u64,u64>`
+    /// spelling became `Type::Struct("Map<u64,u64>")` and the storage type
+    /// check refused every mapping contract with "Undefined struct type".
+    #[test]
+    fn storage_mapping_compiles() {
+        let source = r"
+            contract Ledger {
+                storage {
+                    balances: Map<u64,u64>,
+                    total: u64,
+                }
+                pub fn main() {
+                    balances[1] = 5;
+                    let x = balances[1];
+                    emit E(x);
+                }
+            }
+        ";
+        compile(source, IsaProfile::Production)
+            .expect("a Map<u64,u64> storage field is the documented mapping syntax");
+    }
+
+    /// Indexing a scalar storage field, or a mapping that was never
+    /// declared, is refused. Before, every `name[key]` read typed as `u64`
+    /// without consulting the storage block.
+    #[test]
+    fn indexing_a_non_mapping_is_refused() {
+        for (source, needle) in [
+            (
+                "contract C { storage { total: u64, } pub fn main() { let x = total[1]; } }",
+                "not a mapping",
+            ),
+            (
+                "contract C { pub fn main() { ghost[1] = 2; } }",
+                "Undefined storage mapping",
+            ),
+            (
+                "contract C { storage { m: Map<u64,Nope>, } pub fn main() { } }",
+                "Undefined struct type 'Nope'",
+            ),
+            // The key type is checked, not only the value type: a comparison
+            // is a bool, and a Map<u64,u64> is keyed by u64.
+            (
+                "contract C { storage { m: Map<u64,u64>, } pub fn main() { let x = m[1 == 1]; } }",
+                "keyed by u64, got bool",
+            ),
+            (
+                "contract C { storage { m: Map<u64,u64>, } pub fn main() { m[2 < 3] = 1; } }",
+                "keyed by u64, got bool",
+            ),
+        ] {
+            match compile(source, IsaProfile::Production) {
+                Ok(_) => panic!("compiled although it should be refused: {source}"),
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains(needle), "wrong reason for {source}: {msg}")
+                }
+                Err(other) => panic!("expected a SemanticError for {source}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Reading a field through a nested access (`a.b.c`) resolves the inner
+    /// struct's type. Measured before the fix: codegen tracked a struct type
+    /// only for identifiers, and for anything else picked the first layout
+    /// in a `HashMap` that happened to carry a field of that name, so
+    /// `pos.inner.y` could be read at the offset of an unrelated struct.
+    #[test]
+    fn nested_field_access_uses_the_inner_struct_layout() {
+        let source = r"
+            contract N {
+                struct Other { y: u64, pad: u64, }
+                struct Inner { pad: u64, y: u64, }
+                struct Outer { inner: Inner, }
+                fn make() -> Outer {
+                    let i = Inner { pad: 1, y: 42 };
+                    return Outer { inner: i };
+                }
+                pub fn main() {
+                    let o = make();
+                    emit E(o.inner.y);
+                }
+            }
+        ";
+        let bytecode = compile(source, IsaProfile::Production).expect("nested access compiles");
+        let mut vm = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm.run(&bytecode).unwrap();
+        assert_eq!(
+            vm.events,
+            vec![42],
+            "read the inner struct's `y`, not another layout's"
+        );
+    }
+
     #[test]
     fn rejects_experimental_in_production() {
         // All 31 opcodes are now production-ready.

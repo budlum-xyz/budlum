@@ -4,9 +4,19 @@
 //! The regeneration gate embeds canonical content for two producer files and
 //! pins four program hashes; everything else in `budzero/` is outside any
 //! integrity check. This gate closes that gap: it pins the Keccak-256 hash of
-//! every `.rs` file under `budzero/` (excluding build outputs) in
-//! `xtask/gates/pins/budzero-tree.pins` and turns the relay red when any file
-//! is added, deleted or modified against the pins.
+//! every source and build-input file under `budzero/` (excluding build
+//! outputs) in `xtask/gates/pins/budzero-tree.pins` and turns the relay red
+//! when any file is added, deleted or modified against the pins.
+//!
+//! What counts as a source: `.rs` files, and the files that decide what those
+//! sources compile into or run against. A pin set that covered only `.rs`
+//! left `Cargo.toml` (dependencies, features, lints), `Cargo.lock` (exact
+//! versions), `rust-toolchain.toml` (the compiler), `deny.toml` and
+//! `osv-scanner.toml` (the audit policy), the `.bud` example programs the
+//! CLI tests run, and the Nix flake outside the check: an edit to any of
+//! them changes the produced artefact or the audit result without moving a
+//! single pinned hash. The extension set is [`PINNED_EXTENSIONS`] plus the
+//! [`PINNED_BASENAMES`] that have no extension.
 //!
 //! Pins move with development, not with the wind: `--pin` rewrites the pin
 //! file from the current tree and must be committed together with the change
@@ -24,7 +34,26 @@ use super::regeneration::{hex32, keccak256};
 /// Pin file, relative to the repo root.
 pub const PIN_FILE: &str = "xtask/gates/pins/budzero-tree.pins";
 
-/// Collect every `.rs` file under `budzero/`, excluding `target/` build
+/// File extensions that are pinned: sources, manifests, lock files, the
+/// toolchain and audit policies, the `.bud` programs and the Nix flake.
+/// Markdown is not a build input and stays out. JSON is pinned because the
+/// checked-in `budzero/state.json` schema is an input to the CLI tests.
+pub const PINNED_EXTENSIONS: &[&str] = &["rs", "toml", "lock", "bud", "nix", "json"];
+
+/// Extension-less files that are pinned by name.
+pub const PINNED_BASENAMES: &[&str] = &[".gitignore", "LICENSE"];
+
+/// Whether a file under `budzero/` takes part in the integrity pins.
+fn is_pinned_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        return PINNED_EXTENSIONS.contains(&ext);
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| PINNED_BASENAMES.contains(&n))
+}
+
+/// Collect every pinned file under `budzero/`, excluding `target/` build
 /// outputs. Returns (relpath, bytes) pairs sorted by relpath.
 fn collect_tree_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let base = root.join("budzero");
@@ -38,15 +67,26 @@ fn collect_dir(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> 
         .map_err(|e| format!("tree-pin: cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("tree-pin: read_dir entry: {e}"))?;
+        // `file_type` describes the entry itself, not a link target, so a
+        // committed symlink is neither followed into another directory nor
+        // hashed as a source file (CWE-61). `Path::is_dir` follows links:
+        // `budzero/loop -> .` recursed until the stack ran out, and a link
+        // out of the tree pinned files beyond the declared root.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if kind.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue; // build output, not source
             }
             collect_dir(base, &path, out)?;
             continue;
         }
-        if path.extension().is_some_and(|e| e == "rs") {
+        if is_pinned_file(&path) {
             let rel = path
                 .strip_prefix(base)
                 .map_err(|_| String::from("tree-pin: path outside budzero"))?;
@@ -188,10 +228,45 @@ pub fn run(_root: &Path) -> Result<String, String> {
 }
 
 /// Self-test: every red-injection this gate must catch, caught.
+/// A committed directory symlink is not followed (CWE-61): `loop -> .`
+/// used to recurse until the stack ran out, and a link out of the tree
+/// pinned files beyond the declared root. Neither the loop nor the outside
+/// file may reach the pin set.
+fn symlink_canary(tmp: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        write_pins(tmp)?;
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&outside).map_err(|e| e.to_string())?;
+        std::fs::write(outside.join("leak.rs"), "pub fn leak() {}\n").map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(".", tmp.join("budzero/loop")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&outside, tmp.join("budzero/escape"))
+            .map_err(|e| e.to_string())?;
+        let pinned = collect_tree_files(tmp)?;
+        if pinned
+            .iter()
+            .any(|(k, _)| k.contains("loop") || k.contains("escape"))
+        {
+            return Err(String::from(
+                "tree-pin self-test: a directory symlink was followed",
+            ));
+        }
+        verify_tree(tmp).map_err(|e| {
+            format!("tree-pin self-test: symlinks must not change the pinned set: {e}")
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tmp;
+    }
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
-    // Isolated tree: two source files under budzero/.
-    let tmp = std::env::temp_dir().join(format!("bud-tree-pin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
+    // Isolated tree: two source files under budzero/. The directory is
+    // created exclusively, so a path planted there by another local user
+    // is refused instead of receiving the fixture writes.
+    let tmp = super::rust_literals::exclusive_scratch_dir("bud-tree-pin")?;
     let a_path = tmp.join("budzero/bud-vm/src/a.rs");
     let b_path = tmp.join("budzero/bud-proof/src/b.rs");
     std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
@@ -228,6 +303,55 @@ pub fn self_test() -> Result<String, String> {
     }
     std::fs::remove_file(tmp.join("budzero/bud-vm/src/evil.rs")).unwrap();
 
+    // Build inputs are pinned too: a manifest, a lock file, the toolchain,
+    // an audit policy and a `.bud` program each count as a new unpinned file
+    // before they are pinned, and as a modification after. Markdown does
+    // not: a README edit must not move the pins.
+    for rel in [
+        "budzero/bud-vm/Cargo.toml",
+        "budzero/Cargo.lock",
+        "budzero/rust-toolchain.toml",
+        "budzero/deny.toml",
+        "budzero/example.bud",
+        "budzero/flake.nix",
+    ] {
+        let p = tmp.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "original\n").unwrap();
+        if verify_tree(&tmp).is_ok() {
+            return Err(format!(
+                "tree-pin self-test: an unpinned build input {rel} was accepted"
+            ));
+        }
+        write_pins(&tmp)?;
+        verify_tree(&tmp)?;
+        std::fs::write(&p, "edited\n").unwrap();
+        if verify_tree(&tmp).is_ok() {
+            return Err(format!(
+                "tree-pin self-test: a modified build input {rel} was accepted"
+            ));
+        }
+        write_pins(&tmp)?;
+    }
+    // Markdown stays excluded, while the checked-in state schema is pinned.
+    std::fs::write(tmp.join("budzero/README.md"), "# notes\n").unwrap();
+    std::fs::write(tmp.join("budzero/state.json"), "{}\n").unwrap();
+    if verify_tree(&tmp).is_ok() {
+        return Err(String::from(
+            "tree-pin self-test: an unpinned state.json was accepted",
+        ));
+    }
+    write_pins(&tmp)?;
+    std::fs::write(tmp.join("budzero/README.md"), "# edited notes\n").unwrap();
+    verify_tree(&tmp)
+        .map_err(|e| format!("tree-pin self-test: markdown must remain excluded: {e}"))?;
+    std::fs::write(tmp.join("budzero/state.json"), "{\"changed\":true}\n").unwrap();
+    if verify_tree(&tmp).is_ok() {
+        return Err(String::from(
+            "tree-pin self-test: a modified state.json was accepted",
+        ));
+    }
+
     // Re-pin, then a tampered pin entry must be caught as a mismatch.
     write_pins(&tmp)?;
     let pin_path = tmp.join(PIN_FILE);
@@ -248,9 +372,11 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    symlink_canary(&tmp)?;
+
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "tree-pin self-test: add/delete/modify detection, tampered pins and \
-         missing pin file all behave",
+        "tree-pin self-test: add/delete/modify detection on sources and build \
+        inputs (including state.json), markdown left out, tampered pins and missing pin file all behave",
     ))
 }

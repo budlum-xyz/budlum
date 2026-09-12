@@ -1,11 +1,10 @@
 # The cargo-fuzz target (run with cargo +nightly fuzz check/run).
-# It runs in a separate CI round (the bud2-ci.yml note: "fuzz and kani are an
-# open item for a separate CI round").
 [package]
 name = "bud-core-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 [package.metadata]
 cargo-fuzz = true

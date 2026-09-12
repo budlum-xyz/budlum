@@ -24,6 +24,15 @@
 //! Data-sovereignty rule (plan §0.5): anyone (any account, no
 //! Role required) may open a `RetrievalChallenge` and may submit a
 //! `StorageDeal`. There is no team-gated "official monitor" role.
+//!
+//! WIRING: wired - the durability half of this module is driven from
+//! `run_storage_maintenance` in `src/chain/chain_actor.rs`: the per-object
+//! repair margin from `objects_below_own_repair_margin`, the shard view from
+//! `under_replicated_shards`, the repair action from
+//! `open_repair_tickets_for_free_slots`, and the placement advisory from
+//! `annotate_expected_holders`. Re-derive before trusting this paragraph -
+//! a wiring note is a claim with an expiry date, not a property of the text it
+//! sits next to.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -518,6 +527,24 @@ pub const STORAGE_REPLICATION_TARGET: u8 = 3;
 pub const DEMAND_REPLICA_STEP_SCALED: u64 = 8 * crate::storage::living_threshold::ACCESS_SCALE;
 pub const REALLOCATION_ACCEPTANCE_EPOCHS: u64 = 4;
 
+/// How long a ticket whose replacement deal opened stays in the registry.
+///
+/// A ticket is a work item: it exists so a slot that lost its holder gets a
+/// new one. Once `accept_reallocation_ticket` opens the replacement deal the
+/// work is done, and what remains is a record that says which deal replaced
+/// which. That record is worth keeping for a while (`lifecycle_state` reports
+/// `ActiveReplacement` from it, and `placements_that_diverged` measures the
+/// placement algorithm against it), but not forever: the map had no delete
+/// path at all, so every slash and every expiry on the chain grew it by one
+/// row for the life of the node.
+///
+/// The window is long compared with the acceptance deadline on purpose. The
+/// question the retained row answers is an audit question, so the row lives
+/// through several acceptance windows before it goes. Tickets that still
+/// wait for a taker (`Pending`, `UnderReplicated`) are never swept: they are
+/// the obligation itself, not a record of one.
+const REALLOCATION_RECORD_RETENTION_EPOCHS: u64 = 16 * REALLOCATION_ACCEPTANCE_EPOCHS;
+
 /// How long before a deal matures its operator may renew it unopposed.
 ///
 /// Renewal exists because the two ways a deal ends are not symmetric. A
@@ -634,12 +661,14 @@ pub struct StorageRegistry {
     /// Index by `(manifest_id, shard_id)` for `bud_storageGetDealsByShard`
     /// And `bud_storageGetDealsByManifest`. `(deal_id)` is the value
     /// So the index is deterministic and small.
+    #[serde(with = "crate::core::map_keys")]
     deals_by_shard: BTreeMap<(ContentId, ContentId), Vec<u64>>,
     challenges: BTreeMap<u64, RetrievalChallenge>,
     results: BTreeMap<u64, ChallengeResult>,
     #[serde(default)]
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
     /// Shared dictionaries and how many manifests depend on them.
     ///
@@ -664,6 +693,7 @@ pub struct StorageRegistry {
     /// an operator inflate demand for its own content and keep replicas the
     /// network is paying for.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     access_events: BTreeMap<ContentId, Vec<crate::storage::living_threshold::AccessEvent>>,
     /// What each owner declared about content they intend to self-host.
     ///
@@ -676,6 +706,7 @@ pub struct StorageRegistry {
     /// than about the device: the same phone may self-host a holiday photo and
     /// be refused a legal document.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub self_host_policies: BTreeMap<ContentId, crate::storage::MobileSelfContentPolicy>,
     /// When each operator that missed a challenge may take storage work
     /// again, as a unix timestamp.
@@ -704,11 +735,23 @@ pub struct StorageRegistry {
     /// Classic/2.0 confidential body commits (ciphertext root + proof kind).
     /// Three/R1 has no body; this map is the private-body surface only.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub confidential_commits: BTreeMap<ContentId, crate::storage::ConfidentialBodyCommit>,
     /// The address each confidential commit was recorded for. Grants are signed
     /// authorisations, and a signature needs somebody whose word it is.
     #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
     pub confidential_owners: BTreeMap<ContentId, crate::core::address::Address>,
+    /// Epoch a ticket reached `ActiveReplacement`, keyed by that epoch, so
+    /// the sweep drops due rows without walking the whole map.
+    ///
+    /// Last field on purpose: the registry row is bincode, which is
+    /// positional, so a new field anywhere else would make every stored
+    /// registry unreadable. `#[serde(default)]` keeps JSON snapshots taken
+    /// before the field loadable; the bincode side is covered by
+    /// `LegacyStorageRegistryV1` in `storage/db.rs`.
+    #[serde(default)]
+    settled_tickets: BTreeMap<u64, Vec<u64>>,
 }
 
 use std::collections::BTreeMap;
@@ -1020,6 +1063,7 @@ impl StorageRegistry {
             && self.challenges.is_empty()
             && self.results.is_empty()
             && self.reallocations.is_empty()
+            && self.settled_tickets.is_empty()
             && self.operator_cooldowns.is_empty()
             && self.operator_classes.is_empty()
             && self.manifests.is_empty()
@@ -1067,6 +1111,15 @@ impl StorageRegistry {
         }
         for ticket in self.reallocations.values() {
             hasher.update(bincode::serialize(ticket).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
+        // The settled-ticket queue decides which tickets the next sweep
+        // drops, so two registries with the same tickets and different
+        // queues would diverge one epoch later; fold it in now, not then.
+        for (epoch, ticket_ids) in &self.settled_tickets {
+            hasher.update(epoch.to_le_bytes());
+            for ticket_id in ticket_ids {
+                hasher.update(ticket_id.to_le_bytes());
+            }
         }
         for manifest in self.manifests.values() {
             hasher
@@ -2804,6 +2857,16 @@ impl StorageRegistry {
             ticket.status = ReallocationStatus::ActiveReplacement;
             ticket.replacement_deal_id = Some(replacement_deal_id);
         }
+        // The retention clock starts no earlier than the ticket itself.
+        // `start_epoch` is the acceptor's number and `open_deal` only checks
+        // it against `end_epoch`; keyed on it alone, a start far in the past
+        // made the record due at the very next sweep, which is how a
+        // replacement operator would erase the slash record it just filled.
+        let settled_epoch = start_epoch.max(ticket.opened_epoch);
+        self.settled_tickets
+            .entry(settled_epoch)
+            .or_default()
+            .push(ticket_id);
         Ok(replacement_deal_id)
     }
 
@@ -2994,16 +3057,28 @@ impl StorageRegistry {
 
     /// Write the placement advice onto the pending tickets.
     ///
-    /// `assign_shard` uses rendezvous hashing to choose one deterministic holder
-    /// per shard: the same shard, the same entropy and the same
-    /// candidate set give the same answer on every node. The answer here is a
-    /// **recommendation**, whoever accepts the ticket takes it
-    /// (`accept_reallocation_ticket` did not change).
+    /// Rendezvous hashing chooses one deterministic holder per shard: the same
+    /// shard, the same entropy and the same candidate set give the same answer
+    /// on every node. The answer here is a **recommendation**, whoever accepts
+    /// the ticket takes it (`accept_reallocation_ticket` did not change).
     ///
-    /// The reason it is written is to make divergence visible. Today there is
-    /// no comparison at all between who took a ticket and who the placement
-    /// computation chose, so neither the computation failing to reflect real
-    /// capacity nor assigned operators skipping their obligation can be seen.
+    /// The placement runs per *object*, not per ticket. Two shards of one
+    /// object can be missing at the same epoch - that is the correlated case
+    /// the erasure scheme was sized against - and placing each ticket on its
+    /// own lets the highest-scoring operator win both advisories, so one
+    /// departure would take the whole repair set twice over. Grouping the
+    /// tickets by manifest and handing the group to
+    /// [`assign_object`](crate::storage::assignment::assign_object) makes it
+    /// name a distinct operator per shard whenever the pool has one to give;
+    /// when it does not, the spread falls back to the full pool, which is the
+    /// same best-effort answer the per-ticket loop produced.
+    ///
+    /// The reason the advice is recorded at all is measurability:
+    /// [`StorageRegistry::placements_that_diverged`] compares the recommendation against the
+    /// operator who actually accepted the ticket, and the maintenance pass
+    /// logs the gap. Neither failure mode - a placement that does not reflect
+    /// real capacity, and assigned operators skipping their obligation - is
+    /// visible without that comparison.
     ///
     /// Only `Pending` tickets and only once: writing a recommendation onto an
     /// already accepted ticket would be inventing the recommendation after the
@@ -3013,21 +3088,43 @@ impl StorageRegistry {
         entropy: &crate::domain::Hash32,
         candidates: &[crate::storage::assignment::ShardCandidate],
     ) -> usize {
-        let mut written = 0;
-        for ticket in self.reallocations.values_mut() {
+        use crate::storage::assignment;
+
+        // Plan first, mutate second. The spread has to see every ticket of an
+        // object at once, and holding `values_mut()` while doing that would
+        // borrow the map twice.
+        //
+        // `reallocations` is a `BTreeMap` keyed by ticket id, so both the group
+        // order and the order inside a group are the ticket-id order on every
+        // node: the same map walk, the same placement answers, the same
+        // registry root.
+        let mut groups: BTreeMap<ContentId, Vec<(u64, ContentId)>> = BTreeMap::new();
+        for ticket in self.reallocations.values() {
             if ticket.status != ReallocationStatus::Pending || ticket.expected_holder.is_some() {
                 continue;
             }
-            // One replica: a ticket fills a single slot, not the set.
-            let Ok(placed) =
-                crate::storage::assignment::assign_shard(&ticket.shard_id, entropy, candidates, 1)
-            else {
-                // No candidate, no recommendation. An empty recommendation
-                // is better than a wrong one.
+            groups
+                .entry(ticket.manifest_id)
+                .or_default()
+                .push((ticket.ticket_id, ticket.shard_id));
+        }
+        let mut placements: BTreeMap<u64, Address> = BTreeMap::new();
+        for members in groups.into_values() {
+            let shard_ids: Vec<ContentId> = members.iter().map(|(_, shard)| *shard).collect();
+            let placed = assignment::assign_object(&shard_ids, entropy, candidates);
+            let Ok(holders) = placed else {
+                // No staked candidate at all, so nothing to recommend. An
+                // empty recommendation is better than a wrong one.
                 continue;
             };
-            ticket.expected_holder = placed.first().copied();
-            if ticket.expected_holder.is_some() {
+            for ((ticket_id, _), holder) in members.iter().zip(holders) {
+                placements.insert(*ticket_id, holder);
+            }
+        }
+        let mut written = 0;
+        for ticket in self.reallocations.values_mut() {
+            if let Some(holder) = placements.get(&ticket.ticket_id) {
+                ticket.expected_holder = Some(*holder);
                 written += 1;
             }
         }
@@ -3061,6 +3158,50 @@ impl StorageRegistry {
             }
         }
         changed
+    }
+
+    /// Drop the tickets whose replacement deal opened
+    /// `REALLOCATION_RECORD_RETENTION_EPOCHS` or more epochs ago.
+    ///
+    /// Runs from the same epoch maintenance step as
+    /// [`Self::mark_overdue_reallocations_under_replicated`], so every node
+    /// drops the same rows at the same epoch and the registry digest stays
+    /// consensus-equal. Only a ticket still in `ActiveReplacement` is
+    /// dropped; the queue is a hint and the status is the fact, so a ticket
+    /// that is somehow back to waiting stays.
+    ///
+    /// Returns how many tickets were dropped.
+    pub fn sweep_settled_reallocations(&mut self, now_epoch: u64) -> usize {
+        let Some(cutoff) = now_epoch.checked_sub(REALLOCATION_RECORD_RETENTION_EPOCHS) else {
+            return 0;
+        };
+        let due: Vec<u64> = self
+            .settled_tickets
+            .range(..=cutoff)
+            .map(|(&epoch, _)| epoch)
+            .collect();
+        let mut dropped = 0;
+        for epoch in due {
+            let Some(ticket_ids) = self.settled_tickets.remove(&epoch) else {
+                continue;
+            };
+            for ticket_id in ticket_ids {
+                let settled = self
+                    .reallocations
+                    .get(&ticket_id)
+                    .is_some_and(|t| t.status == ReallocationStatus::ActiveReplacement);
+                if settled && self.reallocations.remove(&ticket_id).is_some() {
+                    dropped += 1;
+                }
+            }
+        }
+        dropped
+    }
+
+    /// Rows in the ticket map, for the `budlum_storage_reallocation_rows`
+    /// gauge: a number that only ever rises means the sweep is not running.
+    pub fn reallocation_ticket_count(&self) -> usize {
+        self.reallocations.len()
     }
 
     pub fn all_reallocation_tickets(&self) -> Vec<&StorageReallocationTicket> {
@@ -3295,6 +3436,62 @@ impl StorageRegistry {
                 (active < target).then_some((*manifest_id, *shard_id, active))
             })
             .collect()
+    }
+
+    /// Open replacement tickets for the free replica slots of shards that are
+    /// under their target.
+    ///
+    /// The actionable half of the repair band. A shard below its
+    /// demand-adjusted target used to produce a warning and nothing else:
+    /// [`StorageRegistry::open_never_placed_ticket`] correctly refuses a shard
+    /// that already has a live deal, and [`StorageRegistry::open_expiry_reallocation`]
+    /// needs a deal id - which the band never consulted. The deal ids are
+    /// there. A shard at 1 of a target of 3 got there by *losing* replicas, and
+    /// each loss left a closed deal behind. That slot is free, and a
+    /// replacement for it is the same repair the zero-replica path performs.
+    ///
+    /// Slot, not shard. The guard is `(shard_id, replica_index)`, because
+    /// "the shard has an active deal" and "this slot has an active deal" are
+    /// different statements, and only the second one means paying two operators
+    /// for one slot.
+    ///
+    /// Only [`DealStatus::Expired`] history is considered. A slashed deal's
+    /// slot belongs to the slash path: that path already opened the ticket and
+    /// it knows which operator to bar, and a ticket opened here would carry
+    /// `slashed_operator = 0` and let the barred operator take the slot back.
+    ///
+    /// Returns how many tickets were opened. A shard whose whole history is
+    /// still active yields nothing at all: adding a copy nobody lost is a
+    /// replication request, not a reallocation, and the ticket type has no
+    /// cause for it. That limit is stated here and pinned by a test, rather
+    /// than closed by inventing a cause the acceptance path would then have to
+    /// learn to price.
+    pub fn open_repair_tickets_for_free_slots(&mut self, now_epoch: u64) -> usize {
+        let gaps = self.under_replicated_shards(now_epoch);
+        let mut opened = 0usize;
+        for (manifest_id, shard_id, _active) in &gaps {
+            let history: Vec<(u64, u8, DealStatus)> = self
+                .deals_for_shard(manifest_id, shard_id)
+                .into_iter()
+                .map(|deal| (deal.deal_id, deal.replica_index, deal.status))
+                .collect();
+            let openable: Vec<u64> = history
+                .iter()
+                .filter(|(_, _, status)| *status == DealStatus::Expired)
+                .filter(|(_, index, _)| {
+                    !history
+                        .iter()
+                        .any(|(_, live, active)| *active == DealStatus::Active && live == index)
+                })
+                .map(|(deal_id, _, _)| *deal_id)
+                .collect();
+            for deal_id in openable {
+                if self.open_expiry_reallocation(deal_id, now_epoch).is_some() {
+                    opened += 1;
+                }
+            }
+        }
+        opened
     }
 
     /// How many of an object's distinct shards still have an active deal.
@@ -5263,6 +5460,174 @@ mod tests {
         );
     }
 
+    /// Slash, ticket, accept: the ticket that opened the replacement deal
+    /// is a record from then on, and records leave after the retention
+    /// window. The replacement deal itself is untouched.
+    #[test]
+    fn settled_reallocation_tickets_are_swept_after_retention() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+        let replacement = reg
+            .accept_reallocation_ticket(
+                ticket_id,
+                replacement_operator(),
+                151,
+                250,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+
+        // Even an epoch-zero queue entry retains its ticket until the full
+        // window has elapsed. Saturating subtraction used to make every
+        // pre-window sweep treat epoch zero as already due.
+        reg.settled_tickets.entry(0).or_default().push(ticket_id);
+        assert_eq!(
+            reg.sweep_settled_reallocations(REALLOCATION_RECORD_RETENTION_EPOCHS - 1),
+            0
+        );
+        assert!(reg.get_reallocation_ticket(ticket_id).is_some());
+        reg.settled_tickets.remove(&0);
+
+        // One epoch short of the window: the record stays.
+        let last_kept = 151 + REALLOCATION_RECORD_RETENTION_EPOCHS - 1;
+        assert_eq!(reg.sweep_settled_reallocations(last_kept), 0);
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+        assert_eq!(
+            reg.lifecycle_state(replacement),
+            Some(crate::storage::StorageLifecycleState::ActiveReplacement)
+        );
+
+        // At the window the record goes; the deal it opened does not.
+        assert_eq!(reg.sweep_settled_reallocations(last_kept + 1), 1);
+        assert_eq!(reg.reallocation_ticket_count(), 0);
+        assert!(reg.get_reallocation_ticket(ticket_id).is_none());
+        assert_eq!(deal_status(&reg, replacement), DealStatus::Active);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        // With the record gone the slashed deal reads as plain Slashed and
+        // the replacement as a plain active deal.
+        assert_eq!(
+            reg.lifecycle_state(deal_id),
+            Some(crate::storage::StorageLifecycleState::Slashed)
+        );
+        // A second sweep has nothing left to do.
+        assert_eq!(reg.sweep_settled_reallocations(last_kept + 100), 0);
+    }
+
+    /// A start epoch below the ticket's own epoch does not shorten the
+    /// record's retention: the queue key is the later of the two.
+    #[test]
+    fn a_backdated_start_epoch_does_not_shorten_record_retention() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+        assert_eq!(
+            reg.get_reallocation_ticket(ticket_id).unwrap().opened_epoch,
+            150
+        );
+        reg.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator(),
+            1,
+            250,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .unwrap();
+
+        // Keyed on the backdated start, the record would be due at epoch
+        // 1 + retention; keyed on the ticket's epoch it stays until 150 +
+        // retention.
+        let last_kept = 150 + REALLOCATION_RECORD_RETENTION_EPOCHS - 1;
+        assert_eq!(reg.sweep_settled_reallocations(last_kept), 0);
+        assert!(reg.get_reallocation_ticket(ticket_id).is_some());
+        assert_eq!(reg.sweep_settled_reallocations(last_kept + 1), 1);
+        assert!(reg.get_reallocation_ticket(ticket_id).is_none());
+    }
+
+    /// A ticket nobody has taken is the obligation itself, not a record of
+    /// one: no retention window applies to it, however old it gets.
+    #[test]
+    fn waiting_tickets_are_never_swept() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        let far = 150 + 100 * REALLOCATION_RECORD_RETENTION_EPOCHS;
+        assert_eq!(reg.sweep_settled_reallocations(far), 0);
+        assert_eq!(reg.mark_overdue_reallocations_under_replicated(far), 1);
+        assert_eq!(reg.sweep_settled_reallocations(far), 0);
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+    }
+
+    /// The registry row is bincode and positional. A row written before
+    /// `settled_tickets` existed is refused.
+    ///
+    /// The loader used to pad such a row with an empty queue and accept it.
+    /// The queue is hashed into `root()` and decides when
+    /// `sweep_settled_reallocations` drops a ticket, so a node that loaded
+    /// the padded row kept tickets its peers dropped and split from them at
+    /// the first retention cutoff. No network has launched, so there is no
+    /// older row to be loyal to; the shorter row fails to decode and the
+    /// loader reports it.
+    #[test]
+    fn registry_rows_written_before_the_settled_queue_are_refused() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        assert!(reg.settled_tickets.is_empty());
+
+        let current = bincode::serialize(&reg).unwrap();
+        let empty_map = 0u64.to_le_bytes();
+        assert!(current.ends_with(&empty_map));
+        let older = &current[..current.len() - empty_map.len()];
+        assert!(
+            bincode::deserialize::<StorageRegistry>(older).is_err(),
+            "the shorter row must be refused, not padded"
+        );
+
+        // A current row decodes, queue included, to the same root.
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+        reg.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator(),
+            151,
+            250,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .unwrap();
+        let with_queue = bincode::serialize(&reg).unwrap();
+        let loaded: StorageRegistry = bincode::deserialize(&with_queue).unwrap();
+        assert_eq!(loaded.settled_tickets, reg.settled_tickets);
+        assert_eq!(loaded.root(), reg.root());
+    }
+
     #[test]
     fn a_never_placed_shard_gets_a_bootstrap_ticket() {
         // Register without opening a deal. The repair band used to log
@@ -6446,6 +6811,161 @@ mod demand_driven_replication_tests {
             "the refusal must name the authorisation, got {err}"
         );
         assert!(reg.get_confidential_commit(&m.manifest_id).is_none());
+    }
+
+    /// A slot the object lost, not a slot it never had.
+    ///
+    /// One live replica of three, with two matured-and-lapsed deals behind it:
+    /// the lapsed slots are free, and each must get a replacement ticket. This
+    /// is the difference between a repair band that logs and one that acts.
+    #[test]
+    fn a_free_slot_gets_a_replacement_ticket() {
+        let mut reg = StorageRegistry::new();
+        let bytes = b"content with a lost replica".to_vec();
+        let manifest =
+            ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
+        reg.register_manifest(&manifest);
+        let manifest_id = manifest.manifest_id;
+        let shard_id = manifest.shards.first().expect("shard").shard_id;
+        reg.insert_test_deal(1, manifest_id, shard_id, 0, DealStatus::Active);
+        reg.insert_test_deal(2, manifest_id, shard_id, 1, DealStatus::Expired);
+        reg.insert_test_deal(3, manifest_id, shard_id, 2, DealStatus::Expired);
+        assert_eq!(reg.under_replicated_shards(0).len(), 1);
+        assert_eq!(
+            reg.open_repair_tickets_for_free_slots(0),
+            2,
+            "both lapsed slots must be offered"
+        );
+        assert_eq!(reg.reallocation_ticket_count(), 2);
+    }
+
+    /// A slashed deal's slot is the slash path's business.
+    ///
+    /// The slash path already opened the ticket and it records who to bar; a
+    /// ticket opened here would carry no barred operator and hand the slot back
+    /// to the one that just lost its bond.
+    #[test]
+    fn a_slashed_slot_is_left_to_the_slash_path() {
+        let mut reg = StorageRegistry::new();
+        let bytes = b"content with a slashed replica".to_vec();
+        let manifest =
+            ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
+        reg.register_manifest(&manifest);
+        let manifest_id = manifest.manifest_id;
+        let shard_id = manifest.shards.first().expect("shard").shard_id;
+        reg.insert_test_deal(1, manifest_id, shard_id, 0, DealStatus::Active);
+        reg.insert_test_deal(2, manifest_id, shard_id, 1, DealStatus::Expired);
+        reg.insert_test_deal(3, manifest_id, shard_id, 2, DealStatus::Slashed);
+        assert_eq!(
+            reg.open_repair_tickets_for_free_slots(0),
+            1,
+            "only the lapsed slot is ours to reopen"
+        );
+    }
+
+    /// The stated limit of this path, pinned so it cannot be mistaken for a
+    /// silent drop: a shard whose every past replica is still active has no
+    /// free slot, so nothing is offered. Growing the count from one to three
+    /// with no deal ever lost is replication, not reallocation.
+    #[test]
+    fn an_object_that_lost_nothing_gets_no_ticket() {
+        let mut reg = StorageRegistry::new();
+        let bytes = b"content at one replica".to_vec();
+        let manifest =
+            ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
+        reg.register_manifest(&manifest);
+        let manifest_id = manifest.manifest_id;
+        let shard_id = manifest.shards.first().expect("shard").shard_id;
+        reg.insert_test_deal(1, manifest_id, shard_id, 0, DealStatus::Active);
+        assert_eq!(reg.under_replicated_shards(0).len(), 1);
+        assert_eq!(reg.open_repair_tickets_for_free_slots(0), 0);
+        assert_eq!(reg.reallocation_ticket_count(), 0);
+    }
+
+    /// The band is re-measured every epoch, so this must be safe to call on
+    /// every tick. `open_expiry_reallocation` dedupes by `failed_deal_id`; the
+    /// second pass must find nothing left to open, and must not stack tickets.
+    #[test]
+    fn the_sweep_is_idempotent() {
+        let mut reg = StorageRegistry::new();
+        let bytes = b"content swept twice".to_vec();
+        let manifest =
+            ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
+        reg.register_manifest(&manifest);
+        let manifest_id = manifest.manifest_id;
+        let shard_id = manifest.shards.first().expect("shard").shard_id;
+        reg.insert_test_deal(1, manifest_id, shard_id, 0, DealStatus::Active);
+        reg.insert_test_deal(2, manifest_id, shard_id, 1, DealStatus::Expired);
+        assert_eq!(reg.open_repair_tickets_for_free_slots(0), 1);
+        assert_eq!(
+            reg.open_repair_tickets_for_free_slots(1),
+            0,
+            "a sweep that reopens what it already opened pays twice for one slot"
+        );
+        assert_eq!(reg.reallocation_ticket_count(), 1);
+    }
+
+    /// A healthy object is not a candidate, and must not be touched at all.
+    #[test]
+    fn an_object_at_its_target_is_not_a_repair_candidate() {
+        let mut reg = StorageRegistry::new();
+        let bytes = b"well replicated content".to_vec();
+        let manifest =
+            ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
+        reg.register_manifest(&manifest);
+        let manifest_id = manifest.manifest_id;
+        let shard_id = manifest.shards.first().expect("shard").shard_id;
+        for slot in 0..3u8 {
+            reg.insert_test_deal(
+                10 + u64::from(slot),
+                manifest_id,
+                shard_id,
+                slot,
+                DealStatus::Active,
+            );
+        }
+        assert!(reg.under_replicated_shards(0).is_empty());
+        assert_eq!(reg.open_repair_tickets_for_free_slots(0), 0);
+    }
+
+    /// Test-only deal construction. The registry keeps its deal maps private,
+    /// and this band is about the *relationship* between the two maps, so the
+    /// fixture lives next to the invariant instead of being a second copy of
+    /// the fields somewhere else.
+    impl StorageRegistry {
+        fn insert_test_deal(
+            &mut self,
+            deal_id: u64,
+            manifest_id: ContentId,
+            shard_id: ContentId,
+            replica_index: u8,
+            status: DealStatus,
+        ) {
+            let deal = StorageDeal {
+                deal_id,
+                domain_id: 0,
+                manifest_id,
+                shard_id,
+                operator: Address::zero(),
+                economics: StorageEconomicsParams {
+                    operator_bond: 1_000,
+                    fee_per_byte_epoch: 1,
+                },
+                shard_bytes: 1_024,
+                replica_index,
+                deal_start_epoch: 0,
+                deal_end_epoch: if status == DealStatus::Active { 999 } else { 5 },
+                status,
+                merkle_proof: None,
+                storage_root: None,
+                merkle_depth: 64,
+            };
+            self.deals.insert(deal_id, deal);
+            self.deals_by_shard
+                .entry((manifest_id, shard_id))
+                .or_default()
+                .push(deal_id);
+        }
     }
 
     fn generated_registry() -> (StorageRegistry, ContentId) {

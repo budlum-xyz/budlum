@@ -164,6 +164,13 @@ impl PassportProofBundle {
         if expected.bundle_root != self.bundle_root {
             return Err("PassportProofBundle root mismatch".into());
         }
+        // The root is recomputed from the profile, not from `self.items`, so
+        // it says nothing about the items this bundle carries. Compared
+        // outright: an item edited under an unchanged root is a bundle that
+        // shows one thing and commits to another.
+        if expected.items != self.items {
+            return Err("PassportProofBundle items do not match the profile".into());
+        }
         Ok(())
     }
 }
@@ -493,6 +500,25 @@ mod tests {
         let mut tampered = bundle.clone();
         tampered.generated_at_block = 78;
         assert!(tampered.validate_against_profile(&profile).is_err());
+    }
+
+    /// An item edited while the root is left alone is refused: the items are
+    /// compared against the profile, not trusted because the root matches.
+    #[test]
+    fn proof_bundle_validate_binds_the_items_too() {
+        let profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let bundle = try_build_passport_proof_bundle(&profile, 77).unwrap();
+        assert!(
+            !bundle.items.is_empty(),
+            "the case under test carries items"
+        );
+        let mut edited = bundle.clone();
+        edited.items[0].status = EvidenceStatus::Verified;
+        assert_eq!(edited.bundle_root, bundle.bundle_root, "root left alone");
+        assert!(
+            edited.validate_against_profile(&profile).is_err(),
+            "an edited item passed under an unchanged root"
+        );
     }
 
     #[test]

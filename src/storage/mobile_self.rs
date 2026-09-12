@@ -235,16 +235,18 @@ pub fn decide_upload_custody(
             Ok(d)
         }
         CustodyMode::NetworkHeld => {
-            if content_size > profile.max_storage_bytes {
-                // Oversize: the device literally cannot hold it, so the network
-                // is mandatory and consent is irrelevant.
-                Ok(d)
-            } else if network_custody_requested {
-                Ok(d)
-            } else {
-                // Critical: the network holds it only with the owner's ask.
-                Err(UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody)
+            // Critical content needs the owner's ask whatever its size: the
+            // consent rule is about who is trusted with the content, not
+            // about whether the device could have held it. Checked first,
+            // because the oversize branch below used to answer before it and
+            // let critical-and-oversize content reach the network with no
+            // consent at all.
+            if critical && !network_custody_requested {
+                return Err(UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody);
             }
+            // Non-critical here means oversize: the device literally cannot
+            // hold it, so the network is mandatory and the ask is irrelevant.
+            Ok(d)
         }
     }
 }
@@ -469,6 +471,23 @@ mod custody_tests {
         let d = decide_upload_custody(&p, 20_000, false, false).unwrap();
         assert_eq!(d.mode, CustodyMode::NetworkHeld);
         assert_eq!(d.user_held_bytes, 0);
+    }
+
+    /// Critical content that is also oversize still needs the owner's ask:
+    /// size does not waive consent.
+    #[test]
+    fn critical_and_oversize_content_still_needs_consent() {
+        let p = av(MobileAvailabilityClass::AlwaysOnReplica);
+        assert!(
+            20_000 > p.max_storage_bytes,
+            "the case under test is oversize"
+        );
+        assert_eq!(
+            decide_upload_custody(&p, 20_000, true, false).unwrap_err(),
+            UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody
+        );
+        let d = decide_upload_custody(&p, 20_000, true, true).unwrap();
+        assert_eq!(d.mode, CustodyMode::NetworkHeld);
     }
 
     #[test]

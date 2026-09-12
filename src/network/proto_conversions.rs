@@ -155,6 +155,42 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     pb::ProtoHubAttestApp { app_id: *app_id },
                 )),
             ),
+            TransactionType::StateUpdate {
+                domain_id,
+                domain_height,
+                state_updates,
+            } => (
+                pb::ProtoTransactionType::StateUpdate as i32,
+                Some(pb::proto_transaction::TypePayload::StateUpdate(
+                    pb::ProtoStateUpdate {
+                        domain_id: *domain_id,
+                        domain_height: *domain_height,
+                        state_updates: state_updates
+                            .iter()
+                            .map(|(addr, nonce)| pb::ProtoStateUpdateEntry {
+                                address: addr.as_bytes().to_vec(),
+                                nonce: *nonce,
+                            })
+                            .collect(),
+                    },
+                )),
+            ),
+            TransactionType::Identity(identity_tx) => (
+                pb::ProtoTransactionType::Identity as i32,
+                Some(pb::proto_transaction::TypePayload::Identity(
+                    pb::ProtoIdentityTx {
+                        data: bincode::serialize(identity_tx).unwrap_or_default(),
+                    },
+                )),
+            ),
+            TransactionType::Vault(vault_tx) => (
+                pb::ProtoTransactionType::Vault as i32,
+                Some(pb::proto_transaction::TypePayload::Vault(
+                    pb::ProtoVaultTx {
+                        data: bincode::serialize(vault_tx).unwrap_or_default(),
+                    },
+                )),
+            ),
             TransactionType::AiModelRegister(spec) => (
                 pb::ProtoTransactionType::AiModelRegister as i32,
                 Some(pb::proto_transaction::TypePayload::AiModelRegister(
@@ -432,6 +468,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 .authorization
                 .as_ref()
                 .map(|auth| pb::ProtoMultisigAuthorization {
+                    scheme_id: auth.scheme_id.clone(),
                     owners: auth.owners.clone(),
                     threshold: auth.threshold,
                     signatures: auth
@@ -936,6 +973,46 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     app_id: payload.app_id,
                 }
             }
+            pb::ProtoTransactionType::StateUpdate => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::StateUpdate(p)) => p,
+                    _ => return Err("Missing or mismatched StateUpdate payload".into()),
+                };
+                let mut state_updates = Vec::with_capacity(payload.state_updates.len());
+                for entry in payload.state_updates {
+                    if entry.address.len() != 32 {
+                        return Err("StateUpdate entry address must be 32 bytes".into());
+                    }
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(&entry.address);
+                    state_updates.push((Address(addr), entry.nonce));
+                }
+                TransactionType::StateUpdate {
+                    domain_id: payload.domain_id,
+                    domain_height: payload.domain_height,
+                    state_updates,
+                }
+            }
+            pb::ProtoTransactionType::Identity => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Identity(p)) => p,
+                    _ => return Err("Missing or mismatched Identity payload".into()),
+                };
+                TransactionType::Identity(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid IdentityTx payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::Vault => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Vault(p)) => p,
+                    _ => return Err("Missing or mismatched Vault payload".into()),
+                };
+                TransactionType::Vault(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid VaultTx payload: {e}"))?,
+                )
+            }
             pb::ProtoTransactionType::AiModelRegister => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::AiModelRegister(p)) => p,
@@ -1414,6 +1491,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             signer_public_key: proto.signer_public_key,
             authorization: proto.authorization.map(|auth| {
                 crate::core::transaction::MultisigAuthorizationV6 {
+                    scheme_id: auth.scheme_id,
                     owners: auth.owners,
                     threshold: auth.threshold,
                     signatures: auth
@@ -2025,6 +2103,46 @@ mod tests {
         assert_eq!(tx, decoded_tx);
     }
 
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn v6_authorization_proto_roundtrip_preserves_scheme_id() {
+        use crate::core::transaction::{multisig_address, ML_DSA_87_SCHEME_ID};
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let keys: Vec<_> = (0..2).map(|_| WalletKeyPair::generate()).collect();
+        let owners: Vec<_> = keys.iter().map(WalletKeyPair::public_key_bytes).collect();
+        let mut tx = Transaction::new_with_fee(
+            multisig_address(&owners, 2),
+            Address::zero(),
+            7,
+            1,
+            0,
+            vec![],
+        );
+        tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+        assert_eq!(
+            tx.authorization.as_ref().map(|a| a.scheme_id.as_str()),
+            Some(ML_DSA_87_SCHEME_ID)
+        );
+
+        let decoded = Transaction::try_from(pb::ProtoTransaction::from(&tx)).unwrap();
+        assert_eq!(decoded, tx);
+        assert!(decoded.verify());
+
+        // A pre-profile peer that omits the field must not be upgraded by
+        // inference: decoding may preserve the bytes for diagnostics, but
+        // admission has to refuse the authorization.
+        let mut legacy_wire = pb::ProtoTransaction::from(&tx);
+        legacy_wire
+            .authorization
+            .as_mut()
+            .expect("V6 authorization on wire")
+            .scheme_id
+            .clear();
+        let legacy = Transaction::try_from(legacy_wire).unwrap();
+        assert!(!legacy.verify());
+    }
+
     #[test]
     fn transaction_types_lossless_roundtrip() {
         let kp = KeyPair::generate().unwrap();
@@ -2137,6 +2255,28 @@ mod tests {
                 signature: vec![7, 7, 7],
                 submitted_at_block: 15,
             }),
+            TransactionType::StateUpdate {
+                domain_id: 7,
+                domain_height: 42,
+                state_updates: vec![(to, 5), (from, 6)],
+            },
+            TransactionType::Vault(crate::socialfi::VaultTx::MoveMember {
+                from: 3,
+                to: 4,
+                member: 5,
+            }),
+            TransactionType::Identity(crate::registry::IdentityTx::Register {
+                record: crate::registry::IdentityRecord::new(
+                    from,
+                    vec![crate::registry::VerificationMethod::new(
+                        [1u8; 32],
+                        crate::registry::MethodKind::MlDsa87,
+                    )],
+                    vec![],
+                    0,
+                )
+                .expect("a one-method record with no guardians is well-formed"),
+            }),
         ];
 
         for tx_type in test_cases {
@@ -2184,6 +2324,12 @@ mod tests {
             authorization: None,
         };
 
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Identity as i32;
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Vault as i32;
         assert!(Transaction::try_from(proto.clone()).is_err());
 
         proto.tx_type = 999; // Unknown transaction type tag
@@ -2296,7 +2442,8 @@ mod tests {
             event_root: [5u8; 32],
             finality_proof_hash: crate::domain::hash_finality_proof(
                 &crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] },
-            ),
+            )
+            .unwrap(),
             consensus_kind: crate::domain::ConsensusKind::PoW,
             validator_set_hash: [7u8; 32],
             timestamp_ms: 123,
@@ -2344,6 +2491,7 @@ mod tests {
             settlement_finality_root: [7u8; 32],
             storage_root: None,
             ai_root: None,
+            identity_root: None,
         };
         let msg = NetworkMessage::GlobalHeader(header.clone());
         let proto_msg = pb::ProtoNetworkMessage::from(&msg);

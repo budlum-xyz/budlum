@@ -1,5 +1,6 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::core::money::Bud;
 use crate::cross_domain::event_tree::{DomainEvent, DomainEventKind};
 use crate::cross_domain::message::{
     CrossDomainMessage, CrossDomainMessageParams, MessageId, MessageKind,
@@ -117,7 +118,13 @@ pub struct BridgeTransfer {
     pub target_domain: DomainId,
     pub owner: Address,
     pub recipient: Address,
-    pub amount: u128,
+    /// The locked amount, carried as [`Bud`]: the u64 quantity a balance
+    /// can hold, in the type that cannot be reached from a wider value
+    /// without a refusal or from a raw integer without a named boundary.
+    /// A u128 here left the "fits a balance" invariant entirely to callers
+    /// and every settle path had to narrow it back with a cast that nobody
+    /// re-audited. The type carries the invariant.
+    pub amount: Bud,
     pub status: BridgeStatus,
     pub source_event_hash: Hash32,
     /// (security audit §3) height at which this lock expires.
@@ -142,12 +149,44 @@ impl std::error::Error for BridgeError {}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
+    #[serde(with = "crate::core::map_keys")]
     transfers: BTreeMap<MessageId, BridgeTransfer>,
     /// Expiry queue: expiry_height -> [message_id]
     /// Fix O(N) sweep DoS by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
+    /// Settled queue: the height a transfer reached a terminal status
+    /// (`Unlocked`, or `Active` again after its lock expired) -> [message_id].
+    /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
+    /// later. Without it `transfers` only ever grew: every row stayed for
+    /// the life of the chain, and with it the per-block cost of `root()`,
+    /// which hashes every row into the state root.
+    ///
+    /// Part of the committed state. `drop_settled_rows` removes a transfer
+    /// row, and with it a leaf of [`Self::root`], at a height this queue
+    /// decides; two nodes with the same rows and different queues would
+    /// therefore compute different bridge roots later, so the queue is
+    /// hashed into the root as well and a persisted row without it is not
+    /// loaded. The readers that filled it with an empty map on load
+    /// (`LegacyBridgeStateV1`, `LegacyBridgeStateV2`) are gone for that
+    /// reason: no network has launched, so there is no old row to be loyal
+    /// to, and a node that pruned on a different schedule than its peers
+    /// would have split from them at the first retention cutoff.
+    settled_queue: BTreeMap<u64, Vec<MessageId>>,
 }
+
+/// Blocks a settled transfer row stays readable after it reached a terminal
+/// status, before `sweep_expired_locks` drops it.
+///
+/// Terminal means nothing can move it again: `unlock` is the last step of the
+/// lock/mint/burn/unlock chain, and an expired lock's asset is already back in
+/// `Active`. The row is kept for a while so a block explorer or a relayer's
+/// audit can still read the receipt of a recent settlement; ten times the
+/// replay store's finality depth is long past any reorg the consensus
+/// tolerates. Rows in `Locked`, `Minted` or `Burned` are never dropped: they
+/// are inventory, not history.
+pub(crate) const SETTLED_RETENTION_BLOCKS: u64 =
+    10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
 
 /// Split an inbound bridge amount into the recipient's share and the relayer's.
 ///
@@ -179,7 +218,7 @@ pub struct BridgeState {
 /// Returns `Err` when the amount cannot cover `min_fee`. Relaying at a loss and
 /// crediting a negative balance are both worse than refusing, and the caller
 /// surfaces the refusal instead of silently moving zero.
-pub fn split_bridge_fee(
+fn split_bridge_fee_u128(
     amount: u128,
     fee_ppm: u64,
     min_fee: u64,
@@ -195,6 +234,38 @@ pub fn split_bridge_fee(
     // `amount > min_fee` and `fee_ppm < 100%` (enforced by
     // `RegistryParams::validate`) together keep this below `amount`.
     let recipient = amount.saturating_sub(fee);
+    Ok((recipient, fee))
+}
+
+/// The bridge fee split on money, for every path that moves balances.
+///
+/// The amount arrives as [`Bud`] and both legs leave as [`Bud`]: the u64
+/// quantity a balance can hold, in the type a wider value cannot reach
+/// without a refusal. A transfer carrying a u128 amount could only be
+/// settled by refusing most of its range at the edges or by narrowing it
+/// back where nobody re-checked; the money type carries the invariant, the
+/// fee never exceeds the amount, and no bridge path narrows anything with
+/// a cast. The asymmetric-defence finding (the mint path checked the fee
+/// ceiling and the unlock path did not) cannot recur here: there is no
+/// ceiling left to check.
+///
+/// # Errors
+///
+/// Returns `Err` under the same rule as the u128 core above: when the
+/// amount cannot cover `min_fee`.
+pub fn split_bridge_fee(
+    amount: Bud,
+    fee_ppm: u64,
+    min_fee: u64,
+) -> Result<(Bud, Bud), BridgeError> {
+    let (recipient, fee) = split_bridge_fee_u128(u128::from(amount.get()), fee_ppm, min_fee)?;
+    // Both legs are bounded by the amount on every accepted input, so
+    // these conversions cannot fail; they are written as refusals rather
+    // than casts so that stays true by reading the code, not by trusting
+    // an invariant stated somewhere else.
+    let recipient = Bud::try_from(recipient)
+        .map_err(|_| BridgeError("bridge recipient amount exceeds u64".into()))?;
+    let fee = Bud::try_from(fee).map_err(|_| BridgeError("bridge fee exceeds u64".into()))?;
     Ok((recipient, fee))
 }
 
@@ -242,8 +313,24 @@ impl BridgeState {
             asset_locations: BTreeMap::new(),
             transfers: BTreeMap::new(),
             expiry_queue: BTreeMap::new(),
+            settled_queue: BTreeMap::new(),
             replay: ReplayNonceStore::new(),
         }
+    }
+
+    /// How many transfer rows this state holds, terminal or not.
+    #[must_use]
+    pub fn transfer_count(&self) -> usize {
+        self.transfers.len()
+    }
+
+    /// Record that `message_id` reached a terminal status at `height`, so
+    /// the sweep can drop its row after [`SETTLED_RETENTION_BLOCKS`].
+    fn mark_settled(&mut self, message_id: MessageId, height: u64) {
+        self.settled_queue
+            .entry(height)
+            .or_default()
+            .push(message_id);
     }
 
     pub fn register_asset(
@@ -269,7 +356,7 @@ impl BridgeState {
         asset_id: AssetId,
         owner: Address,
         recipient: Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<(BridgeTransfer, DomainEvent), BridgeError> {
         self.require_asset_status(
@@ -308,7 +395,7 @@ impl BridgeState {
             target_domain,
             owner,
             recipient,
-            amount,
+            amount: Bud::new(amount),
             status: BridgeStatus::Locked {
                 domain: source_domain,
             },
@@ -336,16 +423,12 @@ impl BridgeState {
     ///
     /// `current_height` is the Budlum chain height at which this mint is
     /// applied. It is threaded to the replay store so that
-    /// [`ReplayNonceStore::mark_processed_at`] records *when* the message was
-    /// processed; the height-aware pruning in that store then only removes
-    /// entries older than the finality window, so replay protection is never
-    /// lost on a message that is still within finality.
-    ///
-    /// Passing the height is what lets the store prune at all. The previous
-    /// call used a height-less `mark_processed`, which never prunes and
-    /// records no height, so a long-running node leaked the processed-message
-    /// set unboundedly (an OOM liveness failure) and had a count-based fallback
-    /// whose own documentation warns it opens a replay window.
+    /// [`ReplayNonceStore::mark_processed_at`] records *when* the per-sender
+    /// high-water mark was advanced; the height is committed in the replay
+    /// root, so a node that mints the same message at a different height
+    /// carries a different root. The mark itself never needs pruning: one
+    /// row per direction and sender bounds the store by the number of
+    /// distinct bridging senders, not by traffic.
     pub fn mint(
         &mut self,
         message: &CrossDomainMessage,
@@ -362,14 +445,22 @@ impl BridgeState {
         // Stored transfer's asset_id and amount. Without this check, a
         // Relayer could substitute a message with a different payload_hash
         // Claiming a different amount - fund inflation vector.
-        let expected_payload = bridge_payload_hash(transfer.asset_id, transfer.amount);
+        let expected_payload = bridge_payload_hash(transfer.asset_id, transfer.amount.get());
         if message.payload_hash != expected_payload {
+            // Internal audit reference for this refusal: B2. The id stays
+            // here in the comment; the string a client reads says what went
+            // wrong, not which internal review found it.
             return Err(BridgeError(format!(
-                "B2: payload_hash mismatch - message claims {:?}, transfer binds {:?}",
+                "payload_hash mismatch - message claims {:?}, transfer binds {:?}",
                 message.payload_hash, expected_payload
             )));
         }
-        if self.replay.is_processed(&message.message_id) {
+        if self.replay.is_processed(
+            message.source_domain,
+            message.target_domain,
+            &message.sender,
+            message.nonce,
+        ) {
             return Err(BridgeError(
                 "Cross-domain message was already processed".into(),
             ));
@@ -384,7 +475,13 @@ impl BridgeState {
             ));
         }
         self.replay
-            .mark_processed_at(message.message_id, current_height)
+            .mark_processed_at(
+                message.source_domain,
+                message.target_domain,
+                &message.sender,
+                message.nonce,
+                current_height,
+            )
             .map_err(BridgeError)?;
 
         let transfer = self
@@ -418,7 +515,7 @@ impl BridgeState {
         let mut total = 0u128;
         for transfer in self.transfers.values() {
             if matches!(transfer.status, BridgeStatus::Locked { .. }) {
-                total = total.saturating_add(transfer.amount);
+                total = total.saturating_add(u128::from(transfer.amount.get()));
             }
         }
         total
@@ -445,7 +542,7 @@ impl BridgeState {
             return Err(BridgeError("Transfer is not minted on burn domain".into()));
         }
         let asset_id = transfer.asset_id;
-        let amount = transfer.amount;
+        let amount = transfer.amount.get();
         let source_domain = transfer.source_domain;
         let owner = transfer.owner;
         let recipient = transfer.recipient;
@@ -487,10 +584,16 @@ impl BridgeState {
         Ok(event)
     }
 
+    /// Return a burned transfer's asset to its source domain.
+    ///
+    /// `settled_height` is the block this unlock lands in; the row becomes
+    /// history at that height and is dropped by the sweep
+    /// `SETTLED_RETENTION_BLOCKS` later.
     pub fn unlock(
         &mut self,
         message_id: MessageId,
         source_domain: DomainId,
+        settled_height: u64,
     ) -> Result<(), BridgeError> {
         let transfer = self
             .transfers
@@ -523,12 +626,14 @@ impl BridgeState {
         transfer.status = BridgeStatus::Unlocked {
             domain: original_source,
         };
+        let asset_id = transfer.asset_id;
         self.asset_locations.insert(
-            transfer.asset_id,
+            asset_id,
             BridgeStatus::Active {
                 domain: original_source,
             },
         );
+        self.mark_settled(message_id, settled_height);
         Ok(())
     }
 
@@ -554,11 +659,37 @@ impl BridgeState {
                 &transfer.target_domain.to_le_bytes(),
                 &transfer.owner.0,
                 &transfer.recipient.0,
-                &transfer.amount.to_le_bytes(),
+                &transfer.amount.get().to_le_bytes(),
                 &status,
                 &transfer.source_event_hash,
                 &transfer.expiry_height.to_le_bytes(),
             ]));
+        }
+        // The settled queue decides when a transfer leaf above disappears,
+        // so it is part of what the root commits to: two nodes with equal
+        // rows and unequal queues would agree now and disagree at the
+        // retention cutoff.
+        for (height, message_ids) in &self.settled_queue {
+            for message_id in message_ids {
+                leaves.push(hash_fields_bytes(&[
+                    b"BDLM_BRIDGE_SETTLED_V1",
+                    &height.to_le_bytes(),
+                    message_id,
+                ]));
+            }
+        }
+        // The expiry queue decides the height at which `sweep_expired_locks`
+        // turns a `Locked` row back to `Active`, so it is committed for the
+        // same reason: a loaded state whose queue lost or gained an entry
+        // has the same rows as its peers and a different root at expiry.
+        for (height, message_ids) in &self.expiry_queue {
+            for message_id in message_ids {
+                leaves.push(hash_fields_bytes(&[
+                    b"BDLM_BRIDGE_EXPIRY_V1",
+                    &height.to_le_bytes(),
+                    message_id,
+                ]));
+            }
         }
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
@@ -587,7 +718,7 @@ impl BridgeState {
     /// Once released; subsequent calls are no-ops.
     /// Sweep expired locks and return (owner, amount) for balance refund.
     /// The owner is returned so the caller can refund the balance.
-    pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, u128)> {
+    pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, Bud)> {
         let mut released = Vec::new();
 
         // O(log N) sweep using the expiry queue.
@@ -607,12 +738,45 @@ impl BridgeState {
                             self.asset_locations
                                 .insert(t.asset_id, BridgeStatus::Active { domain });
                             released.push((t.owner, t.amount));
+                            self.mark_settled(mid, current_height);
                         }
                     }
                 }
             }
         }
+        self.drop_settled_rows(current_height);
         released
+    }
+
+    /// Drop the rows of transfers that settled `SETTLED_RETENTION_BLOCKS`
+    /// or more blocks ago. Runs inside the block-apply sweep, so every node
+    /// drops the same rows at the same height and the bridge root stays
+    /// consensus-equal.
+    fn drop_settled_rows(&mut self, current_height: u64) {
+        let cutoff = current_height.saturating_sub(SETTLED_RETENTION_BLOCKS);
+        let due: Vec<u64> = self
+            .settled_queue
+            .range(..=cutoff)
+            .map(|(&h, _)| h)
+            .collect();
+        for h in due {
+            if let Some(mids) = self.settled_queue.remove(&h) {
+                for mid in mids {
+                    // Only a terminal row is dropped. A row re-listed here
+                    // that somehow moved again stays; the queue is a hint,
+                    // the status is the fact.
+                    let terminal = self.transfers.get(&mid).is_some_and(|t| {
+                        matches!(
+                            t.status,
+                            BridgeStatus::Unlocked { .. } | BridgeStatus::Active { .. }
+                        )
+                    });
+                    if terminal {
+                        self.transfers.remove(&mid);
+                    }
+                }
+            }
+        }
     }
 
     fn require_asset_status(
@@ -633,7 +797,7 @@ impl BridgeState {
     }
 }
 
-pub fn bridge_payload_hash(asset_id: AssetId, amount: u128) -> Hash32 {
+pub fn bridge_payload_hash(asset_id: AssetId, amount: u64) -> Hash32 {
     hash_fields_bytes(&[
         b"BDLM_BRIDGE_PAYLOAD_V1",
         asset_id.as_ref(),
@@ -694,18 +858,261 @@ mod tests {
             .lock(1, 2, 11, 0, asset, owner, recipient, 100, 1000)
             .is_err());
         assert!(bridge.burn(transfer.message_id, 2).is_err());
-        assert!(bridge.unlock(transfer.message_id, 1).is_err());
+        assert!(bridge.unlock(transfer.message_id, 1, 0).is_err());
 
         let message = event.message.unwrap();
         bridge.mint(&message, 0).unwrap();
-        assert!(bridge.unlock(transfer.message_id, 1).is_err());
+        assert!(bridge.unlock(transfer.message_id, 1, 0).is_err());
         bridge.burn(transfer.message_id, 2).unwrap();
         // Regression: unlock must originate from the burn domain (target=2),
         // NOT the original lock source (1). Old code checked source_domain, so
         // Production (msg.source_domain = burn domain = 2) was always rejected.
-        assert!(bridge.unlock(transfer.message_id, 9).is_err());
-        assert!(bridge.unlock(transfer.message_id, 1).is_err()); // source domain ≠ burn domain
-        bridge.unlock(transfer.message_id, 2).unwrap(); // burn domain → succeeds
+        assert!(bridge.unlock(transfer.message_id, 9, 0).is_err());
+        assert!(bridge.unlock(transfer.message_id, 1, 0).is_err()); // source domain ≠ burn domain
+        bridge.unlock(transfer.message_id, 2, 0).unwrap(); // burn domain → succeeds
+    }
+
+    fn settled_round(bridge: &mut BridgeState, asset_seed: u8, unlock_height: u64) -> MessageId {
+        let asset = AssetId(hash_fields_bytes(&[&[asset_seed]]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, u64::MAX)
+            .unwrap();
+        let message = event.message.unwrap();
+        bridge.mint(&message, 0).unwrap();
+        bridge.burn(transfer.message_id, 2).unwrap();
+        bridge
+            .unlock(transfer.message_id, 2, unlock_height)
+            .unwrap();
+        transfer.message_id
+    }
+
+    /// A row that finished its lock/mint/burn/unlock chain is history, and
+    /// history leaves the table after the retention window.
+    ///
+    /// `transfers` had no removal path at all: every row ever created stayed
+    /// for the life of the chain, and `root()` hashed all of them on every
+    /// block. The row is kept for `SETTLED_RETENTION_BLOCKS` so a recent
+    /// settlement can still be read, then the block-apply sweep drops it.
+    #[test]
+    fn an_unlocked_transfer_leaves_the_table_after_the_retention_window() {
+        let mut bridge = BridgeState::new();
+        let id = settled_round(&mut bridge, 1, 500);
+        assert_eq!(bridge.transfer_count(), 1);
+
+        bridge.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS - 1);
+        assert!(
+            bridge.get_transfer(&id).is_some(),
+            "a settled row is readable for the whole retention window"
+        );
+        bridge.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS);
+        assert!(
+            bridge.get_transfer(&id).is_none(),
+            "a settled row is dropped once the window has passed"
+        );
+        assert_eq!(bridge.transfer_count(), 0);
+        assert!(
+            bridge.unlock(id, 2, 1).is_err(),
+            "a dropped row cannot be moved again"
+        );
+    }
+
+    /// An expired lock the sweep returned to `Active` is history too.
+    #[test]
+    fn an_expired_lock_leaves_the_table_after_the_retention_window() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"expiring"]));
+        let owner = Address::from([1u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, _) = bridge
+            .lock(1, 2, 10, 0, asset, owner, owner, 100, 300)
+            .unwrap();
+        let released = bridge.sweep_expired_locks(300);
+        assert_eq!(released, vec![(owner, Bud::new(100))]);
+        assert!(bridge.get_transfer(&transfer.message_id).is_some());
+        bridge.sweep_expired_locks(300 + SETTLED_RETENTION_BLOCKS);
+        assert!(bridge.get_transfer(&transfer.message_id).is_none());
+    }
+
+    /// Inventory is never dropped: a transfer still locked, minted or burned
+    /// is money in flight, however old it is.
+    #[test]
+    fn transfers_still_in_flight_are_never_dropped() {
+        let far = u64::MAX / 2;
+        let owner = Address::from([1u8; 32]);
+        let mut bridge = BridgeState::new();
+
+        let locked = AssetId(hash_fields_bytes(&[b"locked"]));
+        bridge.register_asset(locked, 1).unwrap();
+        let (t_locked, _) = bridge
+            .lock(1, 2, 10, 0, locked, owner, owner, 1, u64::MAX)
+            .unwrap();
+
+        let minted = AssetId(hash_fields_bytes(&[b"minted"]));
+        bridge.register_asset(minted, 1).unwrap();
+        let (t_minted, e) = bridge
+            .lock(1, 2, 11, 0, minted, owner, owner, 1, u64::MAX)
+            .unwrap();
+        bridge.mint(&e.message.unwrap(), 0).unwrap();
+
+        let burned = AssetId(hash_fields_bytes(&[b"burned"]));
+        bridge.register_asset(burned, 1).unwrap();
+        let (t_burned, e) = bridge
+            .lock(1, 2, 12, 0, burned, owner, owner, 1, u64::MAX)
+            .unwrap();
+        bridge.mint(&e.message.unwrap(), 0).unwrap();
+        bridge.burn(t_burned.message_id, 2).unwrap();
+
+        bridge.sweep_expired_locks(far);
+        for (what, id) in [
+            ("locked", t_locked.message_id),
+            ("minted", t_minted.message_id),
+            ("burned", t_burned.message_id),
+        ] {
+            assert!(
+                bridge.get_transfer(&id).is_some(),
+                "a {what} transfer must survive the sweep"
+            );
+        }
+        assert_eq!(bridge.transfer_count(), 3);
+    }
+
+    /// Dropping a row moves the root, so the drop has to happen at the same
+    /// height on every node. It runs in the block-apply sweep, keyed on the
+    /// height the row settled at; two states that settle and sweep at the
+    /// same heights agree, and a state that has not swept yet does not.
+    #[test]
+    fn dropping_settled_rows_is_deterministic_and_visible_in_the_root() {
+        let mut a = BridgeState::new();
+        let mut b = BridgeState::new();
+        settled_round(&mut a, 3, 500);
+        settled_round(&mut b, 3, 500);
+        assert_eq!(a.root(), b.root());
+        let before = a.root();
+
+        a.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS);
+        assert_ne!(
+            a.root(),
+            before,
+            "dropping the row must move the bridge root"
+        );
+        assert_ne!(
+            a.root(),
+            b.root(),
+            "a node that has not swept yet disagrees"
+        );
+        b.sweep_expired_locks(500 + SETTLED_RETENTION_BLOCKS);
+        assert_eq!(
+            a.root(),
+            b.root(),
+            "the same sweep at the same height agrees"
+        );
+        assert_eq!(a.transfer_count(), 0);
+    }
+
+    /// The retention window is long past what the replay store treats as
+    /// final, so a settled row can never be dropped while its message could
+    /// still be reorganised. The bound is checked at compile time; the
+    /// test pins the concrete number so a change to either constant is a
+    /// visible diff here as well.
+    #[test]
+    fn settled_retention_exceeds_the_replay_finality_depth() {
+        const {
+            assert!(
+                SETTLED_RETENTION_BLOCKS >= 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH
+            );
+        }
+        assert_eq!(SETTLED_RETENTION_BLOCKS, 10_000);
+    }
+
+    /// A persisted row without the settled queue is refused, and the queue
+    /// is part of the committed root.
+    ///
+    /// The row used to load through a fallback shape that left the queue
+    /// empty. The queue decides the height at which `drop_settled_rows`
+    /// removes a transfer leaf from `root()`, so a node that loaded such a
+    /// row kept rows its peers dropped and split from them at the first
+    /// retention cutoff. Now the shorter bincode row does not decode, the
+    /// JSON form without the field does not either, and two states with the
+    /// same rows and different queues have different roots today.
+    #[test]
+    fn a_state_without_the_settled_queue_is_refused_and_the_queue_is_committed() {
+        let mut bridge = BridgeState::new();
+        let id = settled_round(&mut bridge, 4, 500);
+        assert!(bridge.get_transfer(&id).is_some());
+
+        let empty = BridgeState::new();
+        let mut value = serde_json::to_value(&empty).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("settled_queue")
+            .expect("the field must be present to be removed");
+        assert!(
+            serde_json::from_value::<BridgeState>(value).is_err(),
+            "a JSON state without the queue must not load with an empty one"
+        );
+
+        // The older bincode row is exactly the current row minus its
+        // trailing map: bincode is positional and an empty `BTreeMap` is a
+        // zero `u64` length, so strip those eight bytes from a state whose
+        // queue is empty and the result is what the older build wrote.
+        let mut forgot_the_queue = bridge.clone();
+        forgot_the_queue.settled_queue.clear();
+        let current = bincode::serialize(&forgot_the_queue).unwrap();
+        let empty_map = 0u64.to_le_bytes();
+        assert!(current.ends_with(&empty_map));
+        let older = &current[..current.len() - empty_map.len()];
+        assert!(
+            bincode::deserialize::<BridgeState>(older).is_err(),
+            "the shorter bincode row must be refused"
+        );
+
+        // Same rows, different queue: different root, today, not at the cutoff.
+        assert_eq!(forgot_the_queue.transfers, bridge.transfers);
+        assert_ne!(forgot_the_queue.root(), bridge.root());
+        // The full round trip keeps the queue and the root.
+        let bytes = bincode::serialize(&bridge).unwrap();
+        let back: BridgeState = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.root(), bridge.root());
+        assert!(!back.settled_queue.is_empty());
+    }
+
+    /// The expiry queue is part of the committed root.
+    ///
+    /// It decides the height at which a `Locked` row becomes `Active`
+    /// again. Two states with the same rows and different queues agreed on
+    /// the root until that height and disagreed from it on; the queue is
+    /// hashed with its own tag so the disagreement is visible at once.
+    #[test]
+    fn expiry_queue_is_committed_in_the_root() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"expiry-asset"]));
+        let owner = Address::from([0x31u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        bridge
+            .lock(1, 2, 20, 0, asset, owner, owner, 5, 300)
+            .unwrap();
+
+        let mut forgot_the_queue = bridge.clone();
+        forgot_the_queue.expiry_queue.clear();
+        assert_eq!(forgot_the_queue.transfers, bridge.transfers);
+        assert_ne!(
+            forgot_the_queue.root(),
+            bridge.root(),
+            "same rows, different expiry queue: the roots must differ now"
+        );
+
+        let mut moved = bridge.clone();
+        let entries = moved.expiry_queue.remove(&300).unwrap();
+        moved.expiry_queue.insert(301, entries);
+        assert_ne!(
+            moved.root(),
+            bridge.root(),
+            "the height an entry expires at is part of the commitment"
+        );
     }
 
     /// Regression: mutating transfer amount without going through state
@@ -723,7 +1130,7 @@ mod tests {
         let root_before = bridge.root();
         // Forge: change amount in-place (simulates corrupted snapshot/memory).
         if let Some(t) = bridge.transfers.get_mut(&transfer.message_id) {
-            t.amount = t.amount.saturating_add(999);
+            t.amount = Bud::new(t.amount.get().saturating_add(999));
         }
         let root_after = bridge.root();
         assert_ne!(
@@ -735,7 +1142,7 @@ mod tests {
 
 #[cfg(test)]
 mod bridge_fee_split {
-    use super::{check_burn_matches_lock_domain, split_bridge_fee};
+    use super::{check_burn_matches_lock_domain, split_bridge_fee, split_bridge_fee_u128, Bud};
 
     const PPM_1_PCT: u64 = 10_000;
 
@@ -758,7 +1165,8 @@ mod bridge_fee_split {
             // `* 1` is the identity the old call sites carried; clippy is
             // Right that it does nothing, which is the point.
             let old_fee = amount / 100;
-            let (recipient, fee) = split_bridge_fee(amount, PPM_1_PCT, 10).expect("covers floor");
+            let (recipient, fee) =
+                split_bridge_fee_u128(amount, PPM_1_PCT, 10).expect("covers floor");
             assert!(fee > 0, "amount {amount} relayed for free");
             assert!(
                 fee >= old_fee,
@@ -774,11 +1182,11 @@ mod bridge_fee_split {
     #[test]
     fn splitting_a_transfer_never_reduces_total_fees() {
         let whole = 10_000u128;
-        let (_, single_fee) = split_bridge_fee(whole, PPM_1_PCT, 10).expect("covers floor");
+        let (_, single_fee) = split_bridge_fee_u128(whole, PPM_1_PCT, 10).expect("covers floor");
 
         for pieces in [2u128, 10, 100] {
             let piece = whole / pieces;
-            let (_, piece_fee) = split_bridge_fee(piece, PPM_1_PCT, 10).expect("covers floor");
+            let (_, piece_fee) = split_bridge_fee_u128(piece, PPM_1_PCT, 10).expect("covers floor");
             let total = piece_fee * pieces;
             assert!(
                 total >= single_fee,
@@ -792,7 +1200,8 @@ mod bridge_fee_split {
     /// Without this the fix could be a floor that swallows every transfer.
     #[test]
     fn large_transfers_still_pay_the_percentage() {
-        let (recipient, fee) = split_bridge_fee(1_000_000, PPM_1_PCT, 10).expect("covers floor");
+        let (recipient, fee) =
+            split_bridge_fee_u128(1_000_000, PPM_1_PCT, 10).expect("covers floor");
         assert_eq!(fee, 10_000, "1% of 1_000_000");
         assert_eq!(recipient, 990_000);
     }
@@ -801,21 +1210,41 @@ mod bridge_fee_split {
     #[test]
     fn an_amount_below_the_floor_is_refused() {
         assert!(
-            split_bridge_fee(10, PPM_1_PCT, 10).is_err(),
+            split_bridge_fee_u128(10, PPM_1_PCT, 10).is_err(),
             "equal to floor"
         );
-        assert!(split_bridge_fee(1, PPM_1_PCT, 10).is_err(), "below floor");
         assert!(
-            split_bridge_fee(11, PPM_1_PCT, 10).is_ok(),
+            split_bridge_fee_u128(1, PPM_1_PCT, 10).is_err(),
+            "below floor"
+        );
+        assert!(
+            split_bridge_fee_u128(11, PPM_1_PCT, 10).is_ok(),
             "just above floor"
         );
+    }
+
+    /// The u64 split is total on the whole u64 range: no narrowing, no
+    /// refusal at the top, value conserved. The u128 core stays for the
+    /// arithmetic; the balance-moving paths take this one.
+    #[test]
+    fn the_u64_split_covers_the_whole_range() {
+        for amount in [11u64, 1_000, u64::MAX - 1, u64::MAX] {
+            let (recipient, fee) =
+                split_bridge_fee(Bud::new(amount), PPM_1_PCT, 10).expect("covers floor");
+            assert_eq!(
+                u128::from(recipient.get()) + u128::from(fee.get()),
+                u128::from(amount),
+                "amount {amount} must conserve value"
+            );
+        }
     }
 
     /// The recipient is never credited more than arrived, and never nothing.
     #[test]
     fn value_is_conserved_and_the_recipient_is_never_zeroed() {
         for amount in [11u128, 100, 12_345, u128::from(u64::MAX)] {
-            let (recipient, fee) = split_bridge_fee(amount, PPM_1_PCT, 10).expect("covers floor");
+            let (recipient, fee) =
+                split_bridge_fee_u128(amount, PPM_1_PCT, 10).expect("covers floor");
             assert_eq!(recipient + fee, amount);
             assert!(recipient > 0, "amount {amount} left the recipient nothing");
         }

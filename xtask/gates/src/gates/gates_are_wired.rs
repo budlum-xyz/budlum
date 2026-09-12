@@ -475,12 +475,7 @@ fn check_fixture(
     expect_pass: bool,
     label: &str,
 ) -> Result<(), String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("budlum-gates-wired-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-wired")?;
     let _ = std::fs::create_dir_all(dir.join("ops/scripts"));
     let _ = std::fs::create_dir_all(dir.join(".github/workflows"));
     for name in script_names {

@@ -112,9 +112,11 @@ pub struct RegistryParams {
     /// Deliberate, hard-to-reverse economic action: the underlying `slash`
     /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
     /// Fully jails the offender. Per decision ("observe first,
-    /// Validate on live/testnet, then activate"), this stays OFF until an
-    /// Operator/governance explicitly enables it - the mechanism is fully wired
-    /// And tested, but never auto-activates. Set to `true` to enable.
+    /// Validate on live/testnet, then activate"), this stays OFF until
+    /// governance explicitly enables it - the mechanism is fully wired and
+    /// tested, but never auto-activates. Governance-settable: in
+    /// `GOVERNANCE_PARAMETER_WHITELIST`, applied by
+    /// `apply_registry_parameter_update` from the strings `true` / `false`.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
@@ -332,7 +334,7 @@ impl Default for RegistryParams {
             // Tolerated, low enough that sustained garbage-signature spam is
             // Caught within one epoch. Governance-tunable per network.
             max_invalid_votes_per_epoch: 20,
-            liveness_slashing_enabled: true,
+            liveness_slashing_enabled: false,
             // 1% - the rate the three hardcoded call sites already used, now
             // stated once and tunable.
             bridge_relayer_fee_ppm: 10_000,
@@ -722,5 +724,16 @@ mod tests {
         };
         let err = p.validate().expect_err("slash > scale must fail");
         assert!(err.contains("double_sign_slash_ratio_fixed"), "got: {err}");
+    }
+
+    /// The field's own documentation, the comment beside its default and the
+    /// epoch-close code (`OBSERVE mode by default`) all say liveness slashing
+    /// starts off. The value said `true`, so every fresh registry (and every
+    /// snapshot restore that fills the registry from `Default`) slashed and
+    /// jailed a validator after 20 missed epochs, which is what an honest
+    /// node's outage looks like. The default is the observe-only one.
+    #[test]
+    fn liveness_slashing_defaults_to_observe_only() {
+        assert!(!RegistryParams::default().liveness_slashing_enabled);
     }
 }
