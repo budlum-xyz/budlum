@@ -864,6 +864,12 @@ impl Blockchain {
         state.bridge_root = state.bridge_state.root();
         state.message_root = state.message_registry.root();
 
+        // The domain the identity gate runs under is the engine this node
+        // started with. Stamped here and at every site that replaces `state`
+        // wholesale, so a restart, a reorg replay, and a snapshot sync cannot
+        // disagree about a gate that decides writes inside blocks.
+        state.execution_domain = consensus.domain_kind();
+
         let mut bc = Blockchain {
             chain: chain_vec,
             consensus,
@@ -1853,6 +1859,20 @@ impl Blockchain {
                 None
             } else {
                 Some(self.state.ai_registry.state_root())
+            },
+            // The identity anchor on the same discipline: the registry's
+            // root is claimed only when the registry has state, and it is
+            // the registry's own fold (`identity.rs`), not a re-derivation
+            // here. Absent and zero must not share a digest: an empty
+            // registry says "nothing to check against", and folding it as
+            // Some(zeros) would wear the same header as a registry whose
+            // state happened to hash to zero. The presence tag in the V5
+            // fold keeps those two headers apart - the same lesson the
+            // account-state root learned under `identity_v1`.
+            identity_root: if self.state.identity.is_empty() {
+                None
+            } else {
+                Some(self.state.identity.root())
             },
         }
     }
@@ -4945,6 +4965,11 @@ impl Blockchain {
             } else {
                 AccountState::new()
             };
+            // The rebuild starts from a fresh state; carry the engine's
+            // domain over before re-executing blocks, or a reorg after an
+            // identity write would replay it as a refusal and fork the node
+            // off its own chain.
+            current_state.execution_domain = self.consensus.domain_kind();
             for block in &self.chain[fork_point..] {
                 current_state = Self::apply_block_effects(
                     &current_state,
@@ -5028,8 +5053,12 @@ impl Blockchain {
             return None;
         }
         let block = &self.chain[height as usize];
-        let state =
+        let mut state =
             Self::rebuild_state(&self.chain[..=height as usize], &self.genesis_config).ok()?;
+        // Same rule as the reorg path: a rebuild must replay identity writes
+        // under the same gate the chain applied them under, or the served
+        // snapshot disagrees with the canonical state root at that height.
+        state.execution_domain = self.consensus.domain_kind();
         let finalized_height = self.finalized_height.min(height);
         let finalized_hash = self
             .chain
@@ -5176,6 +5205,10 @@ impl Blockchain {
         }
 
         let mut snapshot_state = AccountState::from_snapshot(&snapshot);
+        // Snapshot loading replaces the whole state; the domain is not part
+        // of a snapshot (a peer's engine is not this node's), so re-stamp it
+        // from the local engine before the state goes live.
+        snapshot_state.execution_domain = self.consensus.domain_kind();
         let snapshot_state_root = snapshot_state.calculate_state_root();
         if !block.state_root.is_empty() && snapshot_state_root != block.state_root {
             return Err(format!(
@@ -5215,6 +5248,7 @@ impl Blockchain {
         }
 
         let mut v2_state = AccountState::from_snapshot_v2(v2);
+        v2_state.execution_domain = self.consensus.domain_kind();
         let state_root = v2_state.calculate_state_root();
         if !block.state_root.is_empty() && state_root != block.state_root {
             return Err(format!(
@@ -5771,10 +5805,7 @@ impl Blockchain {
             .get_manifest(&ticket.manifest_id)
             .cloned()
             .ok_or_else(|| {
-                format!(
-                    "manifest {} of ticket {ticket_id} vanished",
-                    ticket.manifest_id
-                )
+                format!("manifest {} of ticket {ticket_id} vanished", ticket.manifest_id)
             })?;
         let epochs = end_epoch.saturating_sub(start_epoch);
         if epochs == 0 {
@@ -5799,9 +5830,7 @@ impl Blockchain {
         // 1. Debit Payer (Client Escrow) — same shape as the open path.
         if total_fee > 0 {
             if self.state.get_balance(&payer) < total_fee {
-                return Err(format!(
-                    "Insufficient payer balance for deal fee {total_fee}"
-                ));
+                return Err(format!("Insufficient payer balance for deal fee {total_fee}"));
             }
             let account = self.state.get_or_create(&payer);
             account.balance = account.balance.saturating_sub(total_fee);
@@ -7450,9 +7479,7 @@ mod tests {
 
         // The operator exercises the seal path (bud_sealGlobalHeader).
         producer_chain.seal_global_header(None).expect("first seal");
-        producer_chain
-            .seal_global_header(None)
-            .expect("second seal");
+        producer_chain.seal_global_header(None).expect("second seal");
         assert_eq!(producer_chain.global_headers.len(), 2);
 
         let (block, _) = producer_chain

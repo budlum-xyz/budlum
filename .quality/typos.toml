@@ -132,6 +132,10 @@ formatin = "formatin"
 Formatin = "Formatin"
 
 # -- Proper names / technical terms ---------------------------------------
+# ser: serde's serialization module name (`serde::ser`, `toml::ser`) and a
+# three-letter label on two bincode `expect` calls. "set" is not what the word
+# means; renaming a module path to satisfy a spell-checker is the tail wagging.
+ser = "ser"
 Canva = "Canva"     # a product name (not Canvas)
 Groth = "Groth"     # the Groth16 zk-SNARK scheme (Jens Groth)
 LOD = "LOD"         # level of detail, the graphics term the culling module borrows

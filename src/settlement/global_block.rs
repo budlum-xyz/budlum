@@ -14,11 +14,14 @@ use serde::{Deserialize, Serialize};
 /// Tamper-evident at the global settlement layer.
 ///
 /// **Backward compatibility:** the domain-separation tag is
-/// `BDLM_GLOBAL_BLOCK_V4`. V2 separated pre- and post-storage-root headers,
-/// V3 added `ai_root`, and V4 encodes each optional root behind a presence
-/// byte so `None` and `Some([0; 32])` hash differently. Old serialized
-/// headers (without the fields) still deserialize with `storage_root: None`
-/// and `ai_root: None` thanks to `#[serde(default)]`.
+/// `BDLM_GLOBAL_BLOCK_V5`. V2 separated pre- and post-storage-root headers,
+/// V3 added `ai_root`, V4 encodes each optional root behind a presence byte
+/// so `None` and `Some([0; 32])` hash differently, and V5 added
+/// `identity_root`. Old serialized headers (without the fields) still
+/// deserialize with the optional roots `None` thanks to `#[serde(default)]`.
+/// V4->V5 follows the same pre-launch rule as V3->V4: there is no launched
+/// global-chain state to migrate, so the bump itself is the activation and
+/// one hash domain covers everything from the USL genesis forward.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalBlockHeader {
     pub version: u16,
@@ -63,6 +66,21 @@ pub struct GlobalBlockHeader {
     /// With any other root in this header.
     #[serde(default)]
     pub ai_root: Option<Hash32>,
+
+    /// Identity master-registry root (KIMLIK-MIMARI Q2: reuse the roots,
+    /// do not mint an anchor mechanism).
+    ///
+    /// `None`: the identity registry has no state, so it claims no anchor -
+    /// the same empty-gate that keeps `ai_root` honest, and for the same
+    /// reason: "no identity state" and "identity state hashing to zeros"
+    /// must not share a header. `Some(root)`: [`crate::registry::
+    /// IdentityRegistry::root`], the BTreeMap-ordered fold over DID records,
+    /// credential ids and the revocation set - the exact fold the account
+    /// state root commits under `identity_v1`, re-expressed at the
+    /// settlement layer so a verification-only domain can check a credential
+    /// against the finalized root without re-executing authority blocks.
+    #[serde(default)]
+    pub identity_root: Option<Hash32>,
 }
 
 impl GlobalBlockHeader {
@@ -86,9 +104,10 @@ impl GlobalBlockHeader {
         // version and activation height rather than overloading it.
         let storage_root_bytes = presence_tagged(self.storage_root);
         let ai_root_bytes = presence_tagged(self.ai_root);
+        let identity_root_bytes = presence_tagged(self.identity_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V4",
+            b"BDLM_GLOBAL_BLOCK_V5",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -103,6 +122,7 @@ impl GlobalBlockHeader {
             &self.settlement_finality_root,
             &storage_root_bytes,
             &ai_root_bytes,
+            &identity_root_bytes,
         ])
     }
 
@@ -131,6 +151,7 @@ mod tests {
             settlement_finality_root: [6u8; 32],
             storage_root: None,
             ai_root: None,
+            identity_root: None,
         }
     }
 
@@ -228,6 +249,46 @@ mod tests {
     }
 
     #[test]
+    fn identity_root_none_and_some_produce_different_hashes() {
+        let mut h_none = sample_header();
+        let mut h_some = sample_header();
+        h_some.identity_root = Some([42u8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes(),
+            "identity_root=None and Some(...) must produce different global hashes"
+        );
+        h_none.identity_root = Some([99u8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes(),
+            "different identity_root values must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn identity_root_default_deserializes_as_none() {
+        let h = sample_header();
+        let mut json_val: serde_json::Value = serde_json::to_value(&h).expect("serialize");
+        if let Some(obj) = json_val.as_object_mut() {
+            obj.remove("identity_root");
+        }
+        let decoded: GlobalBlockHeader = serde_json::from_value(json_val)
+            .expect("a header predating the field must load it as None");
+        assert_eq!(decoded.identity_root, None);
+    }
+
+    #[test]
+    fn identity_root_round_trip_serde() {
+        let mut h = sample_header();
+        h.identity_root = Some([123u8; 32]);
+        let json = serde_json::to_string(&h).expect("serialize");
+        let decoded: GlobalBlockHeader = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.identity_root, Some([123u8; 32]));
+        assert_eq!(decoded.calculate_hash_bytes(), h.calculate_hash_bytes());
+    }
+
+    #[test]
     fn absent_and_zero_roots_do_not_collide() {
         // `None` and `Some([0; 32])` are different headers and must not
         // share a hash, for either optional root.
@@ -236,6 +297,8 @@ mod tests {
         zero_storage.storage_root = Some([0u8; 32]);
         let mut zero_ai = sample_header();
         zero_ai.ai_root = Some([0u8; 32]);
+        let mut zero_identity = sample_header();
+        zero_identity.identity_root = Some([0u8; 32]);
         assert_ne!(
             none.calculate_hash_bytes(),
             zero_storage.calculate_hash_bytes()
@@ -244,6 +307,19 @@ mod tests {
         assert_ne!(
             zero_storage.calculate_hash_bytes(),
             zero_ai.calculate_hash_bytes()
+        );
+        // The new root plays by the same rule, and every pair stays apart.
+        assert_ne!(
+            none.calculate_hash_bytes(),
+            zero_identity.calculate_hash_bytes()
+        );
+        assert_ne!(
+            zero_ai.calculate_hash_bytes(),
+            zero_identity.calculate_hash_bytes()
+        );
+        assert_ne!(
+            zero_storage.calculate_hash_bytes(),
+            zero_identity.calculate_hash_bytes()
         );
     }
 }

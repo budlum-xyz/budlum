@@ -53,6 +53,14 @@ enum ProtoTransactionType {
     // domain commitment carries. Replaces the out-of-block nonce writes the
     // live commitment path used to perform (decision 50, C3).
     STATE_UPDATE = 44;
+    // Identity master-registry write: DID registration, credential
+    // issue/revoke, guardian-quorum recovery. The payload is the registry's
+    // own transaction struct; there is no domain field, because a caller
+    // that could declare "this is PoA" would manufacture write authority.
+    IDENTITY = 45;
+    // Social-fi vault folder mutation: ids only, ownership read from the
+    // NFT registry at every operation rather than carried here.
+    VAULT = 46;
 }
 
 message ProtoTransaction {
@@ -104,6 +112,8 @@ message ProtoTransaction {
         ProtoConsensusKeyRegistration register_consensus_keys = 47;
         ProtoHubAttestApp hub_attest_app = 48;
         ProtoStateUpdate state_update = 51;
+        ProtoIdentityTx identity = 52;
+        ProtoVaultTx vault = 53;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -414,6 +424,21 @@ message ProtoPollenAccessGrant {
 
 message ProtoPollenId {
     bytes id = 1;
+}
+
+// The identity transaction payload. Data is bincode-encoded canonical Rust
+// struct payload (registry::IdentityTx), the same convention as Pollen:
+// the wire carries the struct whole, while the signing preimage stays the
+// explicit field-by-field encoding in core::transaction::encode_identity_tx.
+message ProtoIdentityTx {
+    bytes data = 1;
+}
+
+// The vault transaction payload; bincode-encoded canonical Rust struct
+// payload, the Pollen/identity convention. The signing preimage stays the
+// explicit fixed-width encoding in core::transaction::encode_vault_tx.
+message ProtoVaultTx {
+    bytes data = 1;
 }
 
 message ProtoNetworkMessage {

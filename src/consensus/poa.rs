@@ -297,6 +297,13 @@ impl PoAEngine {
 }
 
 impl ConsensusEngine for PoAEngine {
+    /// The identity master registry opens writes on the PoA authority's
+    /// chain and nowhere else (KIMLIK-MIMARI §2). This is that declaration:
+    /// the gate reads it from the engine the node itself started with.
+    fn domain_kind(&self) -> crate::domain::ConsensusKind {
+        crate::domain::ConsensusKind::PoA
+    }
+
     fn preview_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
         let _ = self.prepare_common(block, state)?;
         Ok(())

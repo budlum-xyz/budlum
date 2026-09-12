@@ -367,6 +367,21 @@ pub enum TransactionType {
         domain_height: u64,
         state_updates: Vec<(Address, u64)>,
     },
+    /// Write to the identity master registry (`src/registry/identity.rs`):
+    /// DID registration, credential issue/revoke, guardian-quorum recovery.
+    ///
+    /// Carries the registry's own `IdentityTx` and nothing else. No domain
+    /// field is defined here: the executor's single arm supplies the kind
+    /// read from state, because a caller-declared "this is PoA" is authority
+    /// fabrication - the same refusal the domain-freeze path applies in
+    /// `chain/blockchain.rs`, applied at the identity door.
+    Identity(crate::registry::IdentityTx),
+    /// A folder mutation on the social-fi vault (`src/socialfi/vault.rs`).
+    ///
+    /// Ids only, like the identity door: no owner fields, no folder names -
+    /// what a folder is and what it may hold is `NftRegistry`'s and the
+    /// vault layer's own business, consulted at every operation.
+    Vault(crate::socialfi::VaultTx),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1141,6 +1156,15 @@ impl Transaction {
             // One lookup plus one write per state-update entry; priced like a
             // registry mutation, not a value transfer.
             TransactionType::StateUpdate { .. } => schedule.contract_call_gas * 2,
+            // Registry mutation for register/issue/revoke; recovery adds a
+            // quorum of ML-DSA verifications whose weight the door bounds by
+            // transaction size, not by a per-approval price. Priced like the
+            // registry arms beside it.
+            TransactionType::Identity(_) => schedule.contract_call_gas * 2,
+            // Same family of registry mutations: the vault ops read
+            // `NftRegistry` beside their own map, which is exactly what the
+            // registry arms already price.
+            TransactionType::Vault(_) => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1366,6 +1390,8 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::RegisterConsensusKeys(_) => 42,
         TransactionType::BudlumxyzAttestApp { .. } => 43,
         TransactionType::StateUpdate { .. } => 44,
+        TransactionType::Identity(_) => 45,
+        TransactionType::Vault(_) => 46,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1410,6 +1436,126 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
     encode_message_kind(&message.kind, out);
     put_u64(out, message.expiry_height);
 }
+/// Canonical preimage of a vault transaction. Fixed-width ids throughout -
+/// there is nothing variable-length to length-prefix here, and the
+/// operation tag is the only separation the shape needs (an id is an id in
+/// every arm, so `AddMember{1,2}` and `ExtractMember{1,2}` must not be able
+/// to sign for each other; the tag byte is what keeps them apart).
+fn encode_vault_tx(tx: &crate::socialfi::VaultTx, out: &mut Vec<u8>) {
+    match tx {
+        crate::socialfi::VaultTx::RegisterFolder { folder } => {
+            put_u8(out, 0);
+            put_u64(out, *folder);
+        }
+        crate::socialfi::VaultTx::CloseFolder { folder } => {
+            put_u8(out, 1);
+            put_u64(out, *folder);
+        }
+        crate::socialfi::VaultTx::AddMember { folder, member } => {
+            put_u8(out, 2);
+            put_u64(out, *folder);
+            put_u64(out, *member);
+        }
+        crate::socialfi::VaultTx::ExtractMember { folder, member } => {
+            put_u8(out, 3);
+            put_u64(out, *folder);
+            put_u64(out, *member);
+        }
+        crate::socialfi::VaultTx::MoveMember { from, to, member } => {
+            put_u8(out, 4);
+            put_u64(out, *from);
+            put_u64(out, *to);
+            put_u64(out, *member);
+        }
+    }
+}
+
+/// Canonical preimage of an identity transaction. Every pub field of every
+/// carried struct is written explicitly - nothing is bincode-ed here: bincode
+/// is the wire format, and the signature preimage is the consensus commitment
+/// (the `wire-fields-are-signed` gate enforces the coverage in both
+/// directions of drift).
+fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
+    match tx {
+        crate::registry::IdentityTx::Register { record } => {
+            put_u8(out, 0);
+            encode_identity_record(record, out);
+        }
+        crate::registry::IdentityTx::Issue { credential } => {
+            put_u8(out, 1);
+            encode_credential_commitment(credential, out);
+        }
+        crate::registry::IdentityTx::Revoke { credential } => {
+            put_u8(out, 2);
+            encode_credential_commitment(credential, out);
+        }
+        crate::registry::IdentityTx::Recover {
+            subject,
+            new_key,
+            approvals,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, subject.as_bytes());
+            put_fixed(out, new_key);
+            put_u64(out, approvals.len() as u64);
+            for approval in approvals {
+                put_bytes(out, &approval.public_key);
+                put_bytes(out, &approval.signature);
+            }
+        }
+    }
+}
+fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Vec<u8>) {
+    put_fixed(out, record.subject.as_bytes());
+    put_u64(out, record.methods.len() as u64);
+    for method in &record.methods {
+        put_fixed(out, &method.key_id);
+        // A closed set today: one scheme, one tag. When `MethodKind` grows,
+        // this match must grow with it - a new scheme folding into the old
+        // tag would sign two different records alike.
+        put_u8(
+            out,
+            match method.kind {
+                crate::registry::MethodKind::MlDsa87 => 0,
+            },
+        );
+        match method.revoked_at {
+            None => put_u8(out, 0),
+            Some(revoked_at) => {
+                put_u8(out, 1);
+                put_u64(out, revoked_at);
+            }
+        }
+    }
+    put_option_fixed32(out, record.credential_root);
+    put_u64(out, record.guardians.len() as u64);
+    for guardian in &record.guardians {
+        put_fixed(out, guardian.as_bytes());
+    }
+    put_u64(out, record.recovery_threshold as u64);
+}
+fn encode_credential_commitment(
+    credential: &crate::registry::CredentialCommitment,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, credential.issuer.as_bytes());
+    put_fixed(out, credential.subject.as_bytes());
+    put_string(out, &credential.schema);
+    put_u64(out, credential.fields.len() as u64);
+    for field in &credential.fields {
+        put_string(out, &field.name);
+        put_fixed(out, &field.commitment);
+    }
+    put_u64(out, credential.issued_at);
+    match credential.expires_at {
+        None => put_u8(out, 0),
+        Some(expires_at) => {
+            put_u8(out, 1);
+            put_u64(out, expires_at);
+        }
+    }
+}
+
 fn encode_pollen_asset(asset: &crate::pollen::DataAsset, out: &mut Vec<u8>) {
     put_fixed(out, &asset.asset_id.0);
     put_fixed(out, asset.owner.as_bytes());
@@ -1751,6 +1897,8 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                 put_u64(out, *nonce);
             }
         }
+        TransactionType::Identity(identity_tx) => encode_identity_tx(identity_tx, out),
+        TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
     }
 }
 
@@ -1769,6 +1917,234 @@ mod v29_signing_tests {
     }
 
     #[test]
+    /// Every field an identity transaction carries must reach the signing
+    /// preimage: flip one at a time, the hash must change. The
+    /// `wire-fields-are-signed` gate proves the encoder MENTIONS each field;
+    /// this proves the mention actually appends bytes. The issue/revoke pair
+    /// pins the operation tag: one struct, two meanings, and only the tag
+    /// distinguishes them.
+    #[test]
+    fn identity_preimage_covers_every_field_it_claims() {
+        use crate::registry::{
+            CredentialCommitment, FieldCommitment, GuardianApproval, IdentityRecord, IdentityTx,
+            MethodKind, VerificationMethod,
+        };
+        let base_record = IdentityRecord {
+            subject: test_addr_from_byte(1u8),
+            methods: vec![VerificationMethod {
+                key_id: [7u8; 32],
+                kind: MethodKind::MlDsa87,
+                revoked_at: None,
+            }],
+            credential_root: None,
+            guardians: vec![],
+            recovery_threshold: 0,
+        };
+        let base_credential = CredentialCommitment {
+            issuer: test_addr_from_byte(2u8),
+            subject: test_addr_from_byte(1u8),
+            schema: "kyc".to_string(),
+            fields: vec![FieldCommitment {
+                name: "age".to_string(),
+                commitment: [3u8; 32],
+            }],
+            issued_at: 10,
+            expires_at: Some(20),
+        };
+        let base_approval = GuardianApproval {
+            public_key: vec![4u8; 8],
+            signature: vec![5u8; 9],
+        };
+        let hash_of = |tx_type: TransactionType| -> String {
+            let mut tx = Transaction::new_with_fee(
+                test_addr_from_byte(1u8),
+                test_addr_from_byte(7u8),
+                0,
+                1,
+                0,
+                vec![],
+            );
+            tx.tx_type = tx_type;
+            tx.calculate_hash()
+        };
+        let register = |record: IdentityRecord| {
+            TransactionType::Identity(IdentityTx::Register { record })
+        };
+        let issue = |credential: CredentialCommitment| {
+            TransactionType::Identity(IdentityTx::Issue { credential })
+        };
+
+        let base_register = hash_of(register(base_record.clone()));
+        let mut r = base_record.clone();
+        r.subject = test_addr_from_byte(9u8);
+        assert_ne!(base_register, hash_of(register(r)), "subject");
+        let mut r = base_record.clone();
+        r.methods[0].key_id = [8u8; 32];
+        assert_ne!(base_register, hash_of(register(r)), "method key_id");
+        let mut r = base_record.clone();
+        r.methods[0].revoked_at = Some(5);
+        assert_ne!(base_register, hash_of(register(r)), "method revoked_at");
+        let mut r = base_record.clone();
+        r.methods.push(VerificationMethod {
+            key_id: [9u8; 32],
+            kind: MethodKind::MlDsa87,
+            revoked_at: None,
+        });
+        assert_ne!(base_register, hash_of(register(r)), "methods count");
+        let mut r = base_record.clone();
+        r.credential_root = Some([6u8; 32]);
+        assert_ne!(base_register, hash_of(register(r)), "credential_root");
+        let mut r = base_record.clone();
+        r.guardians = vec![test_addr_from_byte(4u8)];
+        assert_ne!(base_register, hash_of(register(r)), "guardians");
+        let mut r = base_record.clone();
+        r.recovery_threshold = 1;
+        assert_ne!(base_register, hash_of(register(r)), "recovery_threshold");
+
+        let base_issue = hash_of(issue(base_credential.clone()));
+        let mut c = base_credential.clone();
+        c.issuer = test_addr_from_byte(8u8);
+        assert_ne!(base_issue, hash_of(issue(c)), "issuer");
+        let mut c = base_credential.clone();
+        c.subject = test_addr_from_byte(9u8);
+        assert_ne!(base_issue, hash_of(issue(c)), "credential subject");
+        let mut c = base_credential.clone();
+        c.schema = "kyc2".to_string();
+        assert_ne!(base_issue, hash_of(issue(c)), "schema");
+        let mut c = base_credential.clone();
+        c.fields[0].name = "older".to_string();
+        assert_ne!(base_issue, hash_of(issue(c)), "field name");
+        let mut c = base_credential.clone();
+        c.fields[0].commitment = [4u8; 32];
+        assert_ne!(base_issue, hash_of(issue(c)), "field commitment");
+        let mut c = base_credential.clone();
+        c.issued_at = 11;
+        assert_ne!(base_issue, hash_of(issue(c)), "issued_at");
+        let mut c = base_credential.clone();
+        c.expires_at = None;
+        assert_ne!(base_issue, hash_of(issue(c)), "expires_at");
+
+        // Issue and Revoke carry the same struct; only the operation tag
+        // separates them. If the tag were dropped from the preimage, a
+        // signed revocation would verify as an issuance.
+        assert_ne!(
+            base_issue,
+            hash_of(TransactionType::Identity(IdentityTx::Revoke {
+                credential: base_credential.clone()
+            })),
+            "issue vs revoke is only the operation tag"
+        );
+
+        // The vault door's same-shape pair: AddMember and ExtractMember
+        // carry identical id tuples with opposite meanings, and a missing
+        // tag here would let a signed "put it in" be replayed as a
+        // "take it out".
+        use crate::socialfi::VaultTx;
+        let add = hash_of(TransactionType::Vault(VaultTx::AddMember {
+            folder: 1,
+            member: 2,
+        }));
+        let extract = hash_of(TransactionType::Vault(VaultTx::ExtractMember {
+            folder: 1,
+            member: 2,
+        }));
+        let close = hash_of(TransactionType::Vault(VaultTx::CloseFolder { folder: 1 }));
+        assert_ne!(add, extract, "add vs extract is only the operation tag");
+        assert_ne!(add, close, "folder-only ops must not alias membership ops");
+        // Field coverage: every id, in every position.
+        let add_moved = hash_of(TransactionType::Vault(VaultTx::AddMember {
+            folder: 1,
+            member: 3,
+        }));
+        assert_ne!(add, add_moved, "member must reach the preimage");
+        let move_ = hash_of(TransactionType::Vault(VaultTx::MoveMember {
+            from: 1,
+            to: 2,
+            member: 3,
+        }));
+        let move_other_target = hash_of(TransactionType::Vault(VaultTx::MoveMember {
+            from: 1,
+            to: 9,
+            member: 3,
+        }));
+        assert_ne!(move_, move_other_target, "move destination must reach it");
+        let move_other_source = hash_of(TransactionType::Vault(VaultTx::MoveMember {
+            from: 8,
+            to: 2,
+            member: 3,
+        }));
+        assert_ne!(move_, move_other_source, "move source must reach it");
+
+        let recover = |subject: Address,
+                       new_key: [u8; 32],
+                       approvals: Vec<GuardianApproval>| {
+            TransactionType::Identity(IdentityTx::Recover {
+                subject,
+                new_key,
+                approvals,
+            })
+        };
+        let base_recover = hash_of(recover(
+            test_addr_from_byte(1u8),
+            [9u8; 32],
+            vec![base_approval.clone()],
+        ));
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(8u8),
+                [9u8; 32],
+                vec![base_approval.clone()]
+            )),
+            "recover subject"
+        );
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [10u8; 32],
+                vec![base_approval.clone()]
+            )),
+            "new_key"
+        );
+        let mut other_key = base_approval.clone();
+        other_key.public_key = vec![4u8; 9];
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [9u8; 32],
+                vec![other_key]
+            )),
+            "approval public_key"
+        );
+        let mut other_sig = base_approval.clone();
+        other_sig.signature = vec![6u8; 9];
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [9u8; 32],
+                vec![other_sig]
+            )),
+            "approval signature"
+        );
+        assert_ne!(
+            base_recover,
+            hash_of(recover(test_addr_from_byte(1u8), [9u8; 32], vec![])),
+            "approval count zero"
+        );
+        assert_ne!(
+            base_recover,
+            hash_of(recover(
+                test_addr_from_byte(1u8),
+                [9u8; 32],
+                vec![base_approval.clone(), base_approval.clone()]
+            )),
+            "approval count two"
+        );
+    }
+
     fn nft_boost_payload_tampering_invalidates_signature() {
         let mut tx = signed_variant(TransactionType::NftBoost {
             nft_id: 7,

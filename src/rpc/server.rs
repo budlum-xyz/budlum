@@ -538,6 +538,15 @@ impl RpcServer {
             // B.U.D.: storage_root anchoring - null when no
             // Storage proofs in this block, 0x-prefixed hex when present.
             "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
+            // The two roots the fold gained after this list was written.
+            // A view that hides a field the consensus hash commits is a
+            // view callers reason on with half the truth; the header is
+            // the source and this function enumerates it. `aiRoot` was
+            // missing since the field itself landed - measured, not
+            // remembered - and `identityRoot` is not allowed to inherit
+            // that drift.
+            "aiRoot": h.ai_root.map(Self::bytes32_to_0x),
+            "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
         })
     }
 
@@ -3052,11 +3061,7 @@ impl BudlumApiServer for RpcServer {
             &request_id.to_le_bytes(),
         ]);
         let payer_sig = hex::decode(payer_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid payer_signature hex: {e}"),
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer_signature hex: {e}"), None::<()>)
         })?;
         let op_sig = hex::decode(operator_signature).map_err(|e| {
             ErrorObjectOwned::owned(
@@ -3067,8 +3072,8 @@ impl BudlumApiServer for RpcServer {
         })?;
         crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
             .map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
-        })?;
+                ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+            })?;
         crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
             .map_err(|e| {
                 ErrorObjectOwned::owned(
@@ -3479,6 +3484,105 @@ impl BudlumApiServer for RpcServer {
     async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
         let cid = self.chain.bns_resolve_content(name).await;
         Ok(cid.map(|c| format!("0x{}", hex::encode(c.0))))
+    }
+
+    async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let subject = crate::registry::address_of_did(&did).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "did must be `did:bud:<64 lowercase hex>`; malformed or uppercased DIDs are refused, not normalized",
+                None::<()>,
+            )
+        })?;
+        let Some((record, epoch)) = self.chain.identity_resolve(subject).await else {
+            return Ok(serde_json::json!(null));
+        };
+        Ok(serde_json::json!({
+            "did": did,
+            "subject": Self::to_0x_hash(record.subject.to_hex()),
+            "methods": record.methods.iter().map(|method| {
+                // An exhaustive match over `MethodKind`: when the registry
+                // grows a second scheme, this line fails to compile until the
+                // wire has a name for it - the same forcing the preimage
+                // encoder uses, because both would otherwise fold a new kind
+                // into the old name.
+                let kind = match method.kind {
+                    crate::registry::MethodKind::MlDsa87 => "ml-dsa-87",
+                };
+                serde_json::json!({
+                    "keyId": format!("0x{}", hex::encode(method.key_id)),
+                    "kind": kind,
+                    "revokedAt": method.revoked_at,
+                    "liveNow": method.is_live_at(epoch),
+                })
+            }).collect::<Vec<_>>(),
+            "credentialRoot": record.credential_root.map(|root| format!("0x{}", hex::encode(root))),
+            "guardians": record.guardians.iter()
+                .map(|guardian| Self::to_0x_hash(guardian.to_hex()))
+                .collect::<Vec<_>>(),
+            "recoveryThreshold": record.recovery_threshold,
+        }))
+    }
+
+    async fn identity_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = credential_id.strip_prefix("0x").unwrap_or(&credential_id);
+        let bytes = hex::decode(clean)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("Invalid credential id: {e}"), None::<()>))?;
+        if bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("credential id must be 32 bytes, got {}", bytes.len()),
+                None::<()>,
+            ));
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes);
+        let Some((credential, verdict)) = self.chain.identity_credential(id).await else {
+            return Ok(serde_json::json!(null));
+        };
+        Ok(serde_json::json!({
+            "id": format!("0x{}", hex::encode(id)),
+            "issuer": Self::to_0x_hash(credential.issuer.to_hex()),
+            "subject": Self::to_0x_hash(credential.subject.to_hex()),
+            "schema": credential.schema,
+            "fields": credential.fields.iter().map(|field| serde_json::json!({
+                "name": field.name,
+                "commitment": format!("0x{}", hex::encode(field.commitment)),
+            })).collect::<Vec<_>>(),
+            "root": format!("0x{}", hex::encode(credential.root())),
+            "issuedAt": credential.issued_at,
+            "expiresAt": credential.expires_at,
+            // The verdict is the registry's own `is_credential_valid`, moved
+            // verbatim: this view adds no opinion about validity, so it
+            // cannot drift from the rule the executor enforces.
+            "valid": verdict.is_ok(),
+            "refusal": verdict.as_ref().err().map(ToString::to_string),
+        }))
+    }
+
+    async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: String,
+        document: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = requester.strip_prefix("0x").unwrap_or(&requester);
+        let requester = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid requester address: {e}"), None::<()>)
+        })?;
+        match self
+            .chain
+            .identity_verify_presentation(receipt, requester, document)
+            .await
+        {
+            Ok(()) => Ok(serde_json::json!({ "valid": true })),
+            // A refused presentation is an answer a service can act on;
+            // only the call itself failing is an RPC error.
+            Err(reason) => Ok(serde_json::json!({ "valid": false, "reason": reason })),
+        }
     }
 
     async fn bns_resolve_subdomain(

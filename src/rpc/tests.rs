@@ -27,6 +27,10 @@ mod rpc_tests {
     async fn setup() -> (RpcServer, ChainHandle) {
         let consensus = Arc::new(PoWEngine::new(0));
         let blockchain = Blockchain::new(consensus, None, 45262, None);
+        setup_with_blockchain(blockchain).await
+    }
+
+    async fn setup_with_blockchain(blockchain: Blockchain) -> (RpcServer, ChainHandle) {
         let (chain_actor, chain) = ChainActor::new(blockchain);
         tokio::spawn(async move {
             chain_actor.run().await;
@@ -42,6 +46,235 @@ mod rpc_tests {
             ),
             chain,
         )
+    }
+
+    /// The whole identity read surface runs against this one fixture: a
+    /// registry holding a subject, an issuer, and one issued credential, and
+    /// a receipt produced by the presentation engine itself - not a mock of
+    /// one. Every refusal asserted below is the engine's own refusal,
+    /// surfaced through the RPC layer unchanged.
+    fn presentation_fixture() -> (
+        crate::registry::IdentityRegistry,
+        Address,
+        Address,
+        crate::registry::PresentationReceipt,
+        String,
+        [u8; 32],
+        crate::registry::CredentialCommitment,
+    ) {
+        use crate::registry::{
+            build_presentation, credential_id, field_commitment, value_digest_of,
+            CredentialCommitment, FieldCommitment, IdentityOp, IdentityRecord, IdentityRegistry,
+            MethodKind, SlotDisclosure, VerificationMethod,
+        };
+        let poa = crate::domain::ConsensusKind::PoA;
+        let subject = Address::from([1u8; 32]);
+        let issuer = Address::from([2u8; 32]);
+        let requester = Address::from([3u8; 32]);
+        let mut registry = IdentityRegistry::new();
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        subject,
+                        vec![VerificationMethod::new([7u8; 32], MethodKind::MlDsa87)],
+                        vec![issuer],
+                        1,
+                    )
+                    .expect("one method, one guardian, threshold one"),
+                },
+                0,
+            )
+            .expect("subject registration");
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        issuer,
+                        vec![VerificationMethod::new([8u8; 32], MethodKind::MlDsa87)],
+                        vec![],
+                        0,
+                    )
+                    .expect("issuer record"),
+                },
+                0,
+            )
+            .expect("issuer registration");
+        let salt = [0xA5u8; 32];
+        let credential = CredentialCommitment {
+            issuer,
+            subject,
+            schema: "kyc".to_string(),
+            fields: vec![FieldCommitment {
+                name: "age".to_string(),
+                commitment: field_commitment("kyc", "age", &salt, &value_digest_of("forty-two")),
+            }],
+            issued_at: 0,
+            expires_at: None,
+        };
+        let id = credential_id(&credential);
+        registry
+            .apply(&poa, IdentityOp::Issue { credential: credential.clone() }, 0)
+            .expect("issue against the seeded records");
+        let (filled, receipt) = build_presentation(
+            &registry,
+            &requester,
+            &subject,
+            "age: {{age}}",
+            &[SlotDisclosure {
+                slot: "age".to_string(),
+                credential_id: id,
+                field: "age".to_string(),
+                value: "forty-two".to_string(),
+                salt,
+            }],
+            0,
+        )
+        .expect("the fixture must fill");
+        (registry, subject, requester, receipt, filled, id, credential)
+    }
+
+    #[tokio::test]
+    async fn bud_identity_resolve_refuses_malformed_and_answers_null_for_absent() {
+        let (server, _chain) = setup().await;
+        let malformed = server.identity_resolve("did:bud:zz".to_string()).await;
+        assert_eq!(malformed.unwrap_err().code(), -32602);
+        let absent = server
+            .identity_resolve(crate::registry::did_of(&Address::from([9u8; 32])))
+            .await
+            .expect("a well-formed DID is a question, not an error");
+        assert!(absent.is_null(), "an unknown subject reads as absent: {absent}");
+    }
+
+    #[tokio::test]
+    async fn bud_identity_resolve_renders_the_record_and_refuses_the_cased_did() {
+        let (registry, subject, _requester, _receipt, _filled, _id, _credential) =
+            presentation_fixture();
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        blockchain.state.identity = registry;
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let value = server
+            .identity_resolve(crate::registry::did_of(&subject))
+            .await
+            .expect("a seeded subject resolves");
+        assert_eq!(value["recoveryThreshold"], 1);
+        assert_eq!(value["methods"][0]["kind"], "ml-dsa-87");
+        assert_eq!(value["methods"][0]["liveNow"], true);
+        assert!(
+            !value["credentialRoot"].is_null(),
+            "the issued credential must show up in the subject's record"
+        );
+        assert_eq!(value["guardians"].as_array().map(Vec::len), Some(1));
+
+        // The lowercase-only rule is the registry's and the RPC inherits it:
+        // an uppercased DID is refused, never normalized into a second key.
+        let upper = crate::registry::did_of(&subject)
+            .to_uppercase()
+            .replacen("DID:BUD:", "did:bud:", 1);
+        let err = server.identity_resolve(upper).await.unwrap_err();
+        assert_eq!(err.code(), -32602);
+    }
+
+    #[tokio::test]
+    async fn bud_identity_credential_verdict_follows_the_registry() {
+        let (registry, _subject, _requester, _receipt, _filled, id, _credential) =
+            presentation_fixture();
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        blockchain.state.identity = registry;
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let value = server
+            .identity_credential(format!("0x{}", hex::encode(id)))
+            .await
+            .expect("a valid id is a question");
+        assert_eq!(value["valid"], true);
+        assert_eq!(value["schema"], "kyc");
+        assert!(value["refusal"].is_null(), "no refusal rides a valid read");
+        assert_eq!(value["fields"][0]["name"], "age");
+
+        let unknown = server
+            .identity_credential(format!("0x{}", hex::encode([0xEEu8; 32])))
+            .await
+            .expect("an unknown id is an absent record, not a call error");
+        assert!(unknown.is_null());
+        let short = server.identity_credential("0x00".to_string()).await;
+        assert_eq!(short.unwrap_err().code(), -32602);
+    }
+
+    #[tokio::test]
+    async fn bud_identity_verify_presentation_binds_and_survives_a_revocation() {
+        let (mut registry, _subject, requester, receipt, filled, _id, credential) =
+            presentation_fixture();
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        blockchain.state.identity = registry.clone();
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let requester_hex = format!("0x{}", requester.to_hex());
+        let ok = server
+            .identity_verify_presentation(receipt.clone(), requester_hex.clone(), filled.clone())
+            .await
+            .expect("a good presentation is an answer, not an error");
+        assert_eq!(ok["valid"], true);
+
+        let repurposed = server
+            .identity_verify_presentation(
+                receipt.clone(),
+                requester_hex.clone(),
+                "age: forty-three".to_string(),
+            )
+            .await
+            .expect("a refusal is still an answer");
+        assert_eq!(repurposed["valid"], false);
+        assert!(
+            repurposed["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("different document")),
+            "the engine's own WrongDocument words, verbatim: {repurposed}"
+        );
+
+        let malformed_request = server
+            .identity_verify_presentation(
+                receipt.clone(),
+                "not-an-address".to_string(),
+                filled.clone(),
+            )
+            .await;
+        assert_eq!(malformed_request.unwrap_err().code(), -32602);
+
+        // The revocation door: the SAME receipt against a registry that has
+        // revoked in the meantime must turn yesterday's acceptance into
+        // today's refusal - that is the point of the read path existing at
+        // all, and it is the engine's rule, not an RPC-side opinion.
+        registry
+            .apply(
+                &crate::domain::ConsensusKind::PoA,
+                crate::registry::IdentityOp::Revoke {
+                    credential: credential.clone(),
+                },
+                0,
+            )
+            .expect("the issuer revokes its own credential");
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut revoked_chain = Blockchain::new(consensus, None, 45262, None);
+        revoked_chain.state.identity = registry;
+        let (revoked_server, _chain) = setup_with_blockchain(revoked_chain).await;
+        let after = revoked_server
+            .identity_verify_presentation(receipt, requester_hex, filled)
+            .await
+            .expect("revocation is an answer");
+        assert_eq!(after["valid"], false);
+        assert!(
+            after["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("is not usable")),
+            "the CredentialNotValid frame must survive: {after}"
+        );
     }
 
     /// `bud_estimateGas` must answer with a number this chain would charge.

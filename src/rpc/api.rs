@@ -1087,4 +1087,35 @@ pub trait BudlumApi {
     /// Fail-closed flags for scheduler, worker, proof, and settlement wiring.
     #[method(name = "bud_aiInferenceStats")]
     async fn ai_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The DID document of a `did:bud:<hex>` subject, as the master registry
+    /// holds it: methods with their revocation state AT THIS READ'S EPOCH,
+    /// the credential root, guardians, and the recovery threshold.
+    ///
+    /// A malformed DID is a refused call, an absent document is `null`: the
+    /// two answers must stay tellable apart or a consent screen cannot render
+    /// "not registered yet" differently from "typo".
+    #[method(name = "bud_identityResolve")]
+    async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// One credential commitment by id, with the registry's own validity
+    /// verdict at the current epoch. The commitment is what the chain holds;
+    /// the values were never on it.
+    #[method(name = "bud_identityCredential")]
+    async fn identity_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-verify a wallet's presentation receipt against the registry as it
+    /// stands now: the receiving service's door, where a revocation turns
+    /// yesterday's accepted document into today's refusal. `valid:false` is
+    /// an answer, not a call error - only an ill-formed request errors.
+    #[method(name = "bud_identityVerifyPresentation")]
+    async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: String,
+        document: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

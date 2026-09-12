@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod vault;
-pub use vault::{VaultError, VaultRegistry};
+pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NftRegistry {

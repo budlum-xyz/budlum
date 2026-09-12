@@ -452,7 +452,12 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// still true), identity enters the digest itself: a binary that did not know
 /// the field must not validate a snapshot whose revocation set it silently
 /// dropped, so the version gate is what makes the old code refuse cleanly.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+///
+/// Schema 6 adds the vault's folder registry on the same argument: folder
+/// memberships are digestive state - a node that dropped them would hand the
+/// screen a folder list that is not the chain's - so the field enters the
+/// digest under a `>= 6` gate and pre-vault pinned digests stay byte-exact.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -590,6 +595,16 @@ pub struct StateSnapshotV2 {
     /// verifying against the pinned digests that existed before identity.
     #[serde(default)]
     pub identity: Option<crate::registry::IdentityRegistry>,
+
+    /// The social-fi folder registry (schema-6 wave): which minted tokens
+    /// are folders, and what each holds.
+    ///
+    /// `#[serde(default)]` so pre-vault snapshots load; the field is
+    /// additionally outside the schema-5 digest (the `>= 6` gate in
+    /// `calculate_digest`), so snapshots written before folders keep
+    /// verifying against their pinned digests.
+    #[serde(default)]
+    pub vault: Option<crate::socialfi::VaultRegistry>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
@@ -760,6 +775,7 @@ impl StateSnapshotV2 {
             external_roots: Some(account_state.external_roots.clone()),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
+            vault: Some(account_state.vault.clone()),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -940,6 +956,14 @@ impl StateSnapshotV2 {
         //     a different hash, not a quietly-valid snapshot. ---
         if self.schema_version >= 5 {
             hash_opt_serializable(&mut hasher, &self.identity);
+        }
+        // --- The vault folder registry (schema-6 wave). The bump is again
+        //     the whole mechanism: at 5 the field cannot affect the digest
+        //     (pinned pre-vault hashes stay reproducible byte for byte), at
+        //     6 and above a node that dropped folder memberships produces a
+        //     different hash rather than a quietly-valid snapshot. ---
+        if self.schema_version >= 6 {
+            hash_opt_serializable(&mut hasher, &self.vault);
         }
 
         hasher.finalize().into()
@@ -1345,10 +1369,9 @@ mod tests {
 
         snapshot.schema_version = 99;
         let bytes_v99 = serde_json::to_vec(&snapshot).unwrap();
-        let max_note = format!("current max supported is {CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION}");
         assert!(StateSnapshotV2::from_bytes(&bytes_v99)
             .unwrap_err()
-            .contains(max_note.as_str()));
+            .contains("current max supported is 4"));
 
         snapshot.schema_version = 2;
         let report = snapshot.migration_report().unwrap();
@@ -1584,6 +1607,65 @@ mod tests {
             at4b.calculate_digest(),
             "a v4 digest must not notice a field that did not exist in v4"
         );
+    }
+
+    #[test]
+    fn schema6_digest_includes_vault_and_schema5_stays_exact() {
+        // The schema-5 wave's test, mirrored: the bump gates the field, so
+        // version 6 notices None-vs-Some(default) and version 5 cannot see
+        // the field at all - every pinned pre-vault digest stays exact.
+        let account_state = AccountState::new();
+        let mut at6 = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        at6.schema_version = 6;
+        let mut at6b = at6.clone();
+        at6.vault = None;
+        at6b.vault = Some(crate::socialfi::VaultRegistry::new());
+        assert_ne!(at6.calculate_digest(), at6b.calculate_digest());
+
+        let mut at5 = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        at5.schema_version = 5;
+        let mut at5b = at5.clone();
+        at5.vault = None;
+        at5b.vault = Some(crate::socialfi::VaultRegistry::new());
+        assert_eq!(
+            at5.calculate_digest(),
+            at5b.calculate_digest(),
+            "a v5 digest must not notice a field that did not exist in v5"
+        );
+    }
+
+    /// A v5 blob that carries identity but no vault key still loads: the
+    /// window covers it, the field defaults, and the seal verifies. This is
+    /// the shape of the upgrade path every live node will take.
+    #[test]
+    fn a_schema5_blob_loads_and_claims_no_vault_state() {
+        let mut account_state = AccountState::new();
+        account_state.tokenomics.community = 777;
+        let full = StateSnapshotV2::from_state(&account_state, legacy_params(51));
+        let blob = as_legacy_blob(&full, SCHEMA6_KEYS, 5);
+        let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 5);
+        assert!(
+            !obj.contains_key("vault"),
+            "the v5 source blob carries the vault key it must not"
+        );
+        assert!(
+            obj.contains_key("identity"),
+            "stripping the v5 field with it would test the wrong migration"
+        );
+
+        let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
+        assert_eq!(restored.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION);
+        assert!(
+            restored.vault.is_none(),
+            "a field the blob never carried came back as data - fabrication, not migration"
+        );
+        assert!(restored.identity.is_some(), "the v5 field must survive intact");
+        assert!(restored.verify());
+        let rebuilt = AccountState::from_snapshot_v2(&restored);
+        assert_eq!(rebuilt.tokenomics.community, 777);
+        assert!(rebuilt.vault.is_empty(), "restored state has no folders to show");
     }
 
     #[test]
@@ -2007,6 +2089,9 @@ mod tests {
     /// the KEY, not merely the value, and each legacy-blob test below drops
     /// this from its assembled blob to keep that premise true.
     const SCHEMA5_KEYS: &[&str] = &["identity"];
+    /// The schema-6 wave's key: dropped from every old-blob the trio
+    /// assembles, exactly as identity's was for the schema-5 wave.
+    const SCHEMA6_KEYS: &[&str] = &["vault"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -2154,6 +2239,8 @@ mod tests {
             "poa_onboarding",
             // identity registry (schema-5 wave: default-filled AND digested)
             "identity",
+            // vault folder registry (schema-6 wave: same discipline)
+            "vault",
             // the digest itself: recomputed when the version changes
             "snapshot_hash",
         ]
@@ -2182,13 +2269,17 @@ mod tests {
         params.finality_certificates = vec![schema2_cert()];
         let full = StateSnapshotV2::from_state(&account_state, params);
 
-        let blob = as_legacy_blob(&full, &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS].concat(), 2);
+        let blob = as_legacy_blob(
+            &full,
+            &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            2,
+        );
         // Premise: the blob really behaves like a schema-2 record - the new
         // field keys are absent as bytes.
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
-        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS].concat() {
+        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob contains a key it must not have: {key}"
@@ -2223,6 +2314,7 @@ mod tests {
                 && restored.external_roots.is_none()
                 && restored.proof_market.is_none()
                 && restored.identity.is_none()
+                && restored.vault.is_none()
                 && restored.manifest_signer.is_none()
                 && restored.manifest_signature.is_none(),
             "a field never present in the blob came back as data; that is not loss, it is fabrication"
@@ -2285,11 +2377,15 @@ mod tests {
         params.finality_certificates = vec![schema2_cert()];
         let full = StateSnapshotV2::from_state(&account_state, params);
 
-        let blob = as_legacy_blob(&full, &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS].concat(), 3);
+        let blob = as_legacy_blob(
+            &full,
+            &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            3,
+        );
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 3);
-        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS].concat() {
+        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob carries a v4 key it must not: {key}"
@@ -2304,6 +2400,10 @@ mod tests {
         assert!(
             restored.identity.is_none(),
             "the schema-5 identity field was fabricated from a blob that never carried it"
+        );
+        assert!(
+            restored.vault.is_none(),
+            "the schema-6 vault field was fabricated from a blob that never carried it"
         );
         // v2 + v3 alanlarinin tumu verisiyle tasindi.
         let mut preserved = SCHEMA2_FIELDS.to_vec();
@@ -2356,11 +2456,15 @@ mod tests {
         account_state.tokenomics.community = 777;
         let full = StateSnapshotV2::from_state(&account_state, legacy_params(64));
 
-        let blob = as_legacy_blob(&full, &[POA_ADMISSION_KEYS, SCHEMA5_KEYS].concat(), 4);
+        let blob = as_legacy_blob(
+            &full,
+            &[POA_ADMISSION_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            4,
+        );
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 4);
-        for key in &[POA_ADMISSION_KEYS, SCHEMA5_KEYS].concat() {
+        for key in &[POA_ADMISSION_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob carries an acceptance key it must not: {key}"
@@ -2383,6 +2487,10 @@ mod tests {
         assert!(
             restored.identity.is_none(),
             "the schema-5 identity field was fabricated from a v4 blob that never carried it"
+        );
+        assert!(
+            restored.vault.is_none(),
+            "the schema-6 vault field was fabricated from a v4 blob that never carried it"
         );
         assert!(restored.verify());
 

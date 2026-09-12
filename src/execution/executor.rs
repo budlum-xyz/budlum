@@ -754,6 +754,29 @@ impl Executor {
                 let (id, to): (u64, Address) = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
+                // Folder-lock rule: a membership is the token owner's claim
+                // about their own asset, and a transfer would turn it into
+                // a claim about somebody else's. Extract first, transfer
+                // after - one sentence a screen can render. A folder that
+                // still holds members cannot move either: the list does not
+                // belong to whoever holds the container's key.
+                if let Some(parent) = state.vault.referenced_by(id) {
+                    return Err(BudlumError::validation(
+                        "vault_member_locked",
+                        format!(
+                            "token {id} is listed in folder {parent}; extract it before transferring"
+                        ),
+                    ));
+                }
+                if state.vault.is_folder(id)
+                    && state.vault.open(id).is_some_and(|m| !m.is_empty())
+                {
+                    return Err(BudlumError::validation(
+                        "vault_folder_not_empty",
+                        format!("folder {id} still holds members; close it before transferring"),
+                    ));
+                }
+
                 state
                     .nft_registry
                     .transfer(id, &tx.from, to)
@@ -768,6 +791,29 @@ impl Executor {
             TransactionType::NftBurn => {
                 let id: u64 = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
+
+                // The same lock burns enforce as transfers, for the same
+                // reason seen from the other side: a burned token listed in
+                // a folder is a broken link on that folder's screen, and a
+                // folder cannot be reduced to nothing while it names other
+                // people's ids - `close_folder`'s emptiness rule, applied to
+                // the burn door.
+                if let Some(parent) = state.vault.referenced_by(id) {
+                    return Err(BudlumError::validation(
+                        "vault_member_locked",
+                        format!(
+                            "token {id} is listed in folder {parent}; extract it before burning"
+                        ),
+                    ));
+                }
+                if state.vault.is_folder(id)
+                    && state.vault.open(id).is_some_and(|m| !m.is_empty())
+                {
+                    return Err(BudlumError::validation(
+                        "vault_folder_not_empty",
+                        format!("folder {id} still holds members; close it before burning"),
+                    ));
+                }
 
                 let cid = state
                     .nft_registry
@@ -825,9 +871,9 @@ impl Executor {
 
                 // Vesting gate (audit 2026-09-09, E-1): the boost is a spend;
                 // read spendable before the mutable borrow of get_or_create.
-                let boost_total = amount.checked_add(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("cost_overflow", "boost cost overflow")
-                })?;
+                let boost_total = amount
+                    .checked_add(tx.fee)
+                    .ok_or_else(|| BudlumError::validation("cost_overflow", "boost cost overflow"))?;
                 let boost_spendable = state.spendable_balance(&tx.from);
                 if boost_spendable < boost_total {
                     return Err(BudlumError::validation(
@@ -2307,6 +2353,63 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::Identity(identity_tx) => {
+                // The single arm, delegating to the one body
+                // (`registry::execute_identity_tx`) that holds and has been
+                // tested at full depth for the sender-binding rules, the
+                // recovery quorum arithmetic, and every registry gate.
+                // Two things the door itself owes, and nothing more:
+                // identity writes commit state, they never move value -
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "identity_amount_must_be_zero",
+                        "an identity transaction commits state; an unspent amount would be silently burned",
+                    ));
+                }
+                // - and the domain is read from state, where the node's own
+                // engine put it, never from the transaction: a caller
+                // declaring "this is PoA" would be manufacturing write
+                // authority for the master registry.
+                crate::registry::execute_identity_tx(
+                    &mut state.identity,
+                    &tx.from,
+                    identity_tx.clone(),
+                    &state.execution_domain,
+                    state.epoch_index,
+                    tx.chain_id,
+                )
+                .map_err(|e| BudlumError::validation("identity_tx_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::Vault(vault_tx) => {
+                // One arm delegating to the tested body
+                // (`socialfi::execute_vault_tx`): every ownership reading
+                // and every structural refusal lives there. The frame owes
+                // the same thing the identity door owes - folders move
+                // ids, not value:
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "vault_amount_must_be_zero",
+                        "a vault transaction moves ids between folders; it cannot carry value",
+                    ));
+                }
+                crate::socialfi::execute_vault_tx(
+                    &mut state.vault,
+                    &state.nft_registry,
+                    &tx.from,
+                    vault_tx.clone(),
+                )
+                .map_err(|e| BudlumError::validation("vault_tx_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
         }
 
         Ok(())
@@ -2443,7 +2546,9 @@ mod tests {
     fn stake_arm_refuses_vesting_locked_funds() {
         use crate::core::account::AccountState;
         use crate::core::address::Address;
-        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::core::transaction::{
+            DEFAULT_CHAIN_ID, Transaction, TransactionType,
+        };
         use crate::execution::executor::Executor;
 
         let team = Address::from([7u8; 32]);
@@ -2468,7 +2573,7 @@ mod tests {
             team,
             Address::zero(),
             1_000, // stake amount
-            1,     // fee
+            1, // fee
             0,
             vec![],
             DEFAULT_CHAIN_ID,
@@ -2476,8 +2581,9 @@ mod tests {
         );
         tx.hash = tx.calculate_hash();
 
-        let err = Executor::apply_transaction_checked(&mut state, &tx)
-            .expect_err("vesting-locked stake must be refused");
+        let err =
+            Executor::apply_transaction_checked(&mut state, &tx)
+                .expect_err("vesting-locked stake must be refused");
         assert!(
             err.message().contains("stake_vesting_locked"),
             "unexpected error: {}",

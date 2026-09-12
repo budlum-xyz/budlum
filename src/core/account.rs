@@ -267,6 +267,21 @@ pub struct AccountState {
     /// revocations. Persisted through the snapshot's schema-5 field; the
     /// state root folds its `root()` only when non-empty, on the bns pattern.
     pub identity: crate::registry::IdentityRegistry,
+    /// Folder memberships over the NFT ids (`socialfi::vault`): the state
+    /// the folders live in, not a copy of the folders' contents. Persisted
+    /// through the snapshot's schema-6 field; the state root folds its
+    /// `root()` only when non-empty, on the identity pattern.
+    pub vault: crate::socialfi::VaultRegistry,
+    /// The consensus kind this state machine executes as.
+    ///
+    /// Read from the node's own engine at construction and re-read wherever
+    /// `state` is replaced wholesale (rebuild, snapshot apply) - never from a
+    /// transaction, never from a peer, and never snapshotted (each node
+    /// re-derives it from its own engine, so sync cannot smuggle a kind in).
+    /// The identity write gate consults this field, and it fails closed: a
+    /// state nobody wired is a plain PoS state, and the master registry
+    /// refuses writes there.
+    pub execution_domain: crate::domain::ConsensusKind,
     pub marketplace: crate::pollen::MarketplaceRegistry,
     pub budlumxyz: crate::budlumxyz::BudlumxyzRegistry,
     pub storage_registry: StorageRegistry,
@@ -382,6 +397,8 @@ impl AccountState {
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
+            vault: crate::socialfi::VaultRegistry::new(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             storage_registry: StorageRegistry::new(),
             ai_registry: crate::ai::registry::AiRegistry::new(),
@@ -435,6 +452,8 @@ impl AccountState {
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
+            vault: crate::socialfi::VaultRegistry::new(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
@@ -496,6 +515,8 @@ impl AccountState {
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
+            vault: crate::socialfi::VaultRegistry::new(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
@@ -575,6 +596,8 @@ impl AccountState {
             bns_registry: snapshot.bns_registry.clone().unwrap_or_default(),
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
             identity: snapshot.identity.clone().unwrap_or_default(),
+            vault: snapshot.vault.clone().unwrap_or_default(),
+            execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: snapshot.marketplace.clone().unwrap_or_default(),
             budlumxyz: snapshot.budlumxyz.clone().unwrap_or_default(),
             governance: snapshot.governance.clone().unwrap_or_default(),
@@ -2439,6 +2462,10 @@ impl AccountState {
             final_hasher.update(b"identity_v1");
             final_hasher.update(self.identity.root());
         }
+        if !self.vault.is_empty() {
+            final_hasher.update(b"vault_v1");
+            final_hasher.update(self.vault.root());
+        }
         final_hasher.update(b"pollen_v1");
         final_hasher.update(self.marketplace.root());
         if !self.budlumxyz.is_empty() {
@@ -3411,7 +3438,8 @@ mod tests {
 
         // executor.rs, `RelayerResult` arm: `external_roots.get(&domain) ==
         // Some(&declared_root)`.
-        let gate_holds = |s: &AccountState| s.external_roots.get(&domain) == Some(&declared_root);
+        let gate_holds =
+            |s: &AccountState| s.external_roots.get(&domain) == Some(&declared_root);
 
         // Unanchored: a relayer-declared root must not be accepted.
         assert!(!gate_holds(&state));
@@ -3449,6 +3477,36 @@ mod tests {
         ));
         let root_after_vesting = state.calculate_state_root();
         assert_ne!(root_after_reserve, root_after_vesting);
+    }
+
+    /// A non-empty vault must move the state root: "no folders" and "a
+    /// folder whose fold came out zero" may not share an anchor - the same
+    /// discipline the `identity_v1` fold introduced, and the gate that
+    /// makes the schema-6 snapshot argument true at the root level too.
+    #[test]
+    fn state_root_notices_a_non_empty_vault_and_only_that() {
+        let empty = AccountState::new().calculate_state_root();
+        let mut with_folders = AccountState::new();
+        with_folders.vault.register_folder(1).expect("fresh id");
+        let registered = with_folders.calculate_state_root();
+        assert_ne!(empty, registered, "a live folder must move the state root");
+        let mut added = with_folders.clone();
+        added
+            .vault
+            .add_member(1, 2)
+            .expect("the vault layer does not know owners; the door does");
+        assert_ne!(
+            registered,
+            added.calculate_state_root(),
+            "changing a folder's contents moves the root"
+        );
+        let mut closed = with_folders.clone();
+        closed.vault.close_folder(1).expect("empty folder closes");
+        assert_eq!(
+            closed.calculate_state_root(),
+            empty,
+            "a vault emptied again folds nothing, as at genesis: no tombstone in the root"
+        );
     }
 }
 
