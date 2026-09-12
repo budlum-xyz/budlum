@@ -117,6 +117,12 @@ impl EvmChainAdapter {
                     .into(),
             );
         }
+        if self.deposit_topic0 == [0u8; 32] {
+            return Err(
+                "EVM adapter has a zero deposit topic: placeholder event configuration cannot relay value"
+                    .into(),
+            );
+        }
         if self.required_confirmations == 0 {
             return Err(
                 "EVM adapter requires zero confirmations: a deposit from a block that can \
@@ -412,6 +418,8 @@ fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {
 
 #[cfg(test)]
 mod tests {
+    const TEST_DEPOSIT_TOPIC0: [u8; 32] = [0x11; 32];
+
     use super::*;
     use crate::cross_domain::evm::verify::fixtures;
 
@@ -451,7 +459,7 @@ mod tests {
     /// And a single-leaf tree is not accepted even when built by hand.
     #[test]
     fn a_single_leaf_tree_is_refused() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
         let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
         let proof = MerkleProof {
             leaf,
@@ -505,9 +513,16 @@ mod tests {
 
     #[test]
     fn a_bridge_address_with_the_wrong_shape_cannot_be_registered() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 19], DEFAULT_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 19], TEST_DEPOSIT_TOPIC0);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("exactly 20 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn a_zero_deposit_topic_cannot_be_registered() {
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
+        assert!(err.contains("zero deposit topic"), "got: {err}");
     }
 
     #[test]
@@ -534,7 +549,7 @@ mod tests {
     fn zero_confirmations_cannot_be_registered() {
         // A deposit from a block that can still be reorged away would be
         // minted against a transaction that did not happen.
-        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
         assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
 
         adapter.required_confirmations = 0;
@@ -549,8 +564,8 @@ mod tests {
     /// list rather than on the floor.
     #[test]
     fn verify_deposit_holds_the_configured_confirmation_floor() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
-        let topic0 = DEFAULT_DEPOSIT_TOPIC0;
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
+        let topic0 = TEST_DEPOSIT_TOPIC0;
         let emitter = vec![7u8; 20];
         let proof_with = |required: u32| EvmDepositProof {
             target_header: &[],
@@ -583,14 +598,14 @@ mod tests {
     #[test]
     fn a_configured_adapter_registers() {
         // The refusal has to stay narrow, or it is just a ban on Ethereum.
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
         assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
 
         let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
         registry
             .register(Box::new(EvmChainAdapter::new(
                 vec![7u8; 20],
-                DEFAULT_DEPOSIT_TOPIC0,
+                TEST_DEPOSIT_TOPIC0,
             )))
             .expect("a configured adapter must register");
     }
@@ -675,14 +690,14 @@ mod tests {
         let leaf_a = derive_receipt_leaf(tx_hash, &bridge_a);
         let leaf_b = derive_receipt_leaf(tx_hash, &bridge_b);
         assert_ne!(leaf_a, leaf_b);
-        let adapter_a = EvmChainAdapter::new(bridge_a.clone(), DEFAULT_DEPOSIT_TOPIC0);
+        let adapter_a = EvmChainAdapter::new(bridge_a.clone(), TEST_DEPOSIT_TOPIC0);
         let (proof, root) = proof_with_sibling(leaf_a);
         // Bridge A -> the leaf_a context is correct; it passes with adapter_a.
         assert!(adapter_a
             .verify_receipt_proof(&proof, &root, tx_hash)
             .is_ok());
         // Using bridge A's proof with bridge B's adapter is REJECTED.
-        let adapter_b = EvmChainAdapter::new(bridge_b, DEFAULT_DEPOSIT_TOPIC0);
+        let adapter_b = EvmChainAdapter::new(bridge_b, TEST_DEPOSIT_TOPIC0);
         let err = adapter_b
             .verify_receipt_proof(&proof, &root, tx_hash)
             .expect_err("cross-bridge proof must be rejected");
