@@ -570,21 +570,13 @@ async fn the_placeholder_transaction_hash_is_no_longer_reachable() {
     }
 }
 
-/// The adapter proof and the executor's result-fact leaf commit to different
-/// things, and neither side can satisfy the other.
-///
-/// - an adapter proves *"this receipt is under this external receipts root"*;
-/// - the executor requires *"this proof's leaf is `result_leaf()` of the
-///   declared Budlum-side facts, under a root present in `external_roots`"*.
-///
-/// A real Ethereum receipts root does not commit to Budlum's
-/// `BDLM_RELAYER_RESULT_V2` leaf, so an honest adapter observation is rejected
-/// by the executor. That is the correct direction to fail, but it means the
-/// bridge acceptance path is not merely unfinished, it is unsatisfiable as
-/// specified. This test pins that so the gap is closed by designing the
-/// anchor, not by loosening the executor until adapter output slips through.
+/// The adapter produces a real observation shape, but the executor refuses
+/// every Ethereum `RelayerResult` until it receives the full
+/// `DepositProofPackage` (header chain, receipts MPT and typed event binding).
+/// This is deliberately a refusal rather than an attempt to reinterpret an
+/// Ethereum receipts proof as the generic Budlum result-fact tree.
 #[tokio::test]
-async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
+async fn an_adapter_observation_hits_the_evm_package_refusal() {
     use crate::core::account::AccountState;
     use crate::execution::executor::Executor;
 
@@ -628,10 +620,11 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
         TransactionType::RelayerResult(result),
     );
     let err = Executor::apply_transaction(&mut state, &tx)
-        .expect_err("adapter proof must not satisfy the result-fact gate");
+        .expect_err("Ethereum adapter output must hit the full-package refusal");
     assert!(
-        err.contains("does not match the declared result facts"),
-        "err: {err}"
+        err.contains("relayer_evm_package_required")
+            || err.contains("full DepositProofPackage"),
+        "an Ethereum adapter result must hit the consensus package refusal: {err}"
     );
     assert_eq!(
         state.get_balance(&relayer),

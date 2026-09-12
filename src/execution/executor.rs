@@ -1006,6 +1006,20 @@ impl Executor {
                         "Transaction hash cannot be empty",
                     ));
                 }
+                // Ethereum receipts are not generic BDLM Merkle facts. Until
+                // the full DepositProofPackage (header chain + receipts MPT +
+                // typed receipt/event binding) is carried into this consensus
+                // path, accepting an Ethereum `RelayerResult` here would turn
+                // a custom result-fact proof into a false deposit claim. The
+                // EVM adapter already verifies the package off this path, but
+                // consensus must refuse the weaker wire shape rather than
+                // pretend that it consumed that verification.
+                if res.chain == crate::core::transaction::ExternalChain::Ethereum {
+                    return Err(BudlumError::validation(
+                        "relayer_evm_package_required",
+                        "Ethereum relay results require the full DepositProofPackage consensus path",
+                    ));
+                }
                 if res.receipt_proof.is_empty() {
                     return Err(BudlumError::validation(
                         "relayer_invalid_proof",

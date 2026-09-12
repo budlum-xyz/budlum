@@ -25,7 +25,11 @@ fn relayer_addr() -> Address {
 
 fn make_result(tx_hash: &str) -> RelayerExternalResult {
     RelayerExternalResult {
-        chain: ExternalChain::Ethereum,
+        // The generic result-fact gate is intentionally tested with a
+        // non-Ethereum custom chain. Ethereum must use the full
+        // DepositProofPackage path and is refused below until that path is
+        // wired into consensus.
+        chain: ExternalChain::Custom(0xC0DE),
         tx_hash: tx_hash.to_string(),
         success: true,
         message: None,
@@ -79,9 +83,32 @@ fn test_relayer_result_valid_merkle_proof_accepted() {
     };
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
     Executor::apply_transaction(&mut state, &tx).expect("anchored proof must pass");
     assert_eq!(state.get_balance(&relayer_addr()), 999);
+}
+
+#[test]
+fn ethereum_generic_result_is_refused_until_full_proof_package_is_wired() {
+    let mut state = AccountState::new();
+    state.add_balance(&relayer_addr(), 1_000);
+    let mut result = RelayerExternalResult {
+        chain: ExternalChain::Ethereum,
+        tx_hash: "0xREAL_HASH".to_string(),
+        success: true,
+        message: None,
+        receipt_proof: Vec::new(),
+        external_state_root: [0u8; 32],
+    };
+    seal_result_proof(&mut result);
+    state
+        .external_roots
+        .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
+    let tx = relayer_tx(result, 1);
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("Ethereum must not use the weaker generic result-fact proof");
+    assert_eq!(err.code(), "relayer_evm_package_required");
+    assert_eq!(state.get_balance(&relayer_addr()), 1_000);
 }
 
 #[test]
@@ -98,7 +125,7 @@ fn test_relayer_result_empty_sibling_path_is_rejected() {
     result.receipt_proof = bincode::serialize(&proof).expect("proof serialize");
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), result.external_state_root);
     let tx = relayer_tx(result, 1);
     let err = Executor::apply_transaction_checked(&mut state, &tx)
         .expect_err("a self-repeating leaf is not a receipt path");
@@ -114,7 +141,7 @@ fn test_relayer_result_tampered_facts_leaf_mismatch_rejected() {
     seal_result_proof(&mut res);
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), res.external_state_root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), res.external_state_root);
     // The proof was produced for other facts, so changing tx_hash afterwards has
     // to produce a leaf mismatch.
     res.tx_hash = "0xFORGED_HASH".to_string();
@@ -134,7 +161,7 @@ fn test_relayer_result_wrong_root_rejected() {
     let anchored_root = res.external_state_root;
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), anchored_root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), anchored_root);
     res.external_state_root = [0x42; 32];
     let tx = relayer_tx(res, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
@@ -164,7 +191,7 @@ fn test_relayer_result_empty_tx_hash_is_rejected() {
     seal_result_proof(&mut result);
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), result.external_state_root);
     let tx = relayer_tx(result, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("empty hash must reject");
     assert!(err.contains("Transaction hash cannot be empty"));
@@ -328,7 +355,7 @@ fn relayer_result_bridge_mint_is_bound_to_the_supply_ceiling() {
     };
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
 
     let err = Executor::apply_transaction(&mut state, &tx)
         .expect_err("a bridge mint above the supply ceiling must be refused");
@@ -403,7 +430,7 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
     };
     state
         .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), root);
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
 
     let err = Executor::apply_transaction(&mut state, &tx)
         .expect_err("a mint whose fee does not fit under the ceiling must be refused");
