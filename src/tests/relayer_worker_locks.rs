@@ -854,6 +854,10 @@ fn deposit_topic0() -> String {
     "0x".to_string() + &"bb".repeat(32)
 }
 
+fn deposit_topic0_bytes() -> [u8; 32] {
+    [0xbb; 32]
+}
+
 /// Half a bridge configuration is refused, not completed by guessing.
 ///
 /// A deposit log is matched on emitter address and topic0 together. Given one
@@ -964,7 +968,7 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
     registry
         .register(Box::new(EvmChainAdapter::new(
             vec![0xaa; 20],
-            deposit_topic0(),
+            deposit_topic0_bytes(),
         )))
         .expect("a properly configured adapter must register");
 
