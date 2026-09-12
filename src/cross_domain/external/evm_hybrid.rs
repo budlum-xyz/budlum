@@ -184,6 +184,9 @@ pub struct EvmHybridProof {
     pub g2_negated_signature: Vec<u8>,
     pub ml_dsa_public_key: Vec<u8>,
     pub ml_dsa_signature: Vec<u8>,
+    /// The exact EIP-8051 encoding used by these bytes. FIPS-204 and the ETH
+    /// variant are not interchangeable, even when their field sizes match.
+    pub ml_dsa_variant: MlDsaVariant,
     pub message_binding: MessageBinding,
     /// Number of zero and non-zero bytes in the ABI payload. The planner does
     /// not guess ABI padding; the caller supplies the exact encoded counts.
@@ -268,6 +271,10 @@ pub enum EvmPlanError {
     MissingChallengeWindow,
     #[error("the chain id is zero")]
     ZeroChainId,
+    #[error(
+        "the proof declares ML-DSA variant {variant:?}, but the chain did not probe that verifier"
+    )]
+    MlDsaVariantUnavailable { variant: MlDsaVariant },
 }
 
 /// A selected verification plan, suitable for a deployment report or a
@@ -323,6 +330,17 @@ pub fn plan_verification(
     proof.validate_shape()?;
     let bls = capabilities.bls_pairing;
     let pq = capabilities.has_ml_dsa();
+    if pq {
+        let variant_available = match proof.ml_dsa_variant {
+            MlDsaVariant::Fips204 => capabilities.ml_dsa_fips,
+            MlDsaVariant::Eip8051Eth => capabilities.ml_dsa_eth,
+        };
+        if !variant_available {
+            return Err(EvmPlanError::MlDsaVariantUnavailable {
+                variant: proof.ml_dsa_variant,
+            });
+        }
+    }
     let bound = !matches!(proof.message_binding, MessageBinding::Unbound);
     let mode = match (bls, pq) {
         (true, true) if bound => EvmVerificationMode::FullCryptographic,
@@ -347,7 +365,7 @@ pub fn plan_verification(
         .saturating_add(proof.calldata_gas(schedule));
     Ok(EvmVerificationPlan {
         mode,
-        ml_dsa_variant: capabilities.ml_dsa_variant(),
+        ml_dsa_variant: pq.then_some(proof.ml_dsa_variant),
         estimated_gas,
         challenge_window: if cryptographic { 0 } else { challenge_window },
         cryptographic,
@@ -373,6 +391,7 @@ mod tests {
             g2_negated_signature: point(256, 4),
             ml_dsa_public_key: point(1_952, 5),
             ml_dsa_signature: point(3_293, 6),
+            ml_dsa_variant: MlDsaVariant::Fips204,
             message_binding: binding,
             calldata_zero_bytes: 100,
             calldata_nonzero_bytes: 200,
@@ -422,6 +441,27 @@ mod tests {
         assert!(plan.is_immediate());
         assert_eq!(plan.challenge_window, 0);
         assert_eq!(plan.ml_dsa_variant, Some(MlDsaVariant::Fips204));
+    }
+
+    #[test]
+    fn a_fips_proof_is_not_run_through_only_the_eth_variant() {
+        let err = plan_verification(
+            EvmPrecompiles {
+                bls_pairing: true,
+                ml_dsa_fips: false,
+                ml_dsa_eth: true,
+            },
+            &proof(MessageBinding::ZkCircuit),
+            EvmGasSchedule::default(),
+            100,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            EvmPlanError::MlDsaVariantUnavailable {
+                variant: MlDsaVariant::Fips204
+            }
+        );
     }
 
     #[test]
