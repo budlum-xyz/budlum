@@ -163,7 +163,7 @@ pub enum ProbeOutcome {
     /// The probe could not be applied - for example a truncation longer than
     /// the payload. Recorded rather than skipped, because a probe that
     /// silently stops applying is a probe that stops protecting.
-    Unappliable { reason: String },
+    NotApplicable { reason: String },
 }
 
 impl ProbeOutcome {
@@ -232,14 +232,14 @@ fn outcome_label(outcome: &ProbeOutcome) -> String {
         ProbeOutcome::WrongRefusal { got, wanted } => {
             format!("wrong:{}!={}", got.as_str(), wanted.as_str())
         }
-        ProbeOutcome::Unappliable { .. } => "unappliable".to_string(),
+        ProbeOutcome::NotApplicable { .. } => "not applicable".to_string(),
     }
 }
 
 /// Applies a patch to an evidence sample, producing the corrupted copy.
 ///
 /// Returns the sample or a reason it could not be applied. Never panics and
-/// never silently does nothing: an unappliable patch is reported so the
+/// never silently does nothing: an not applicable patch is reported so the
 /// harness can record it.
 #[must_use]
 pub fn apply_patch(
@@ -290,7 +290,7 @@ pub fn run_probe(
     let corrupted = match apply_patch(golden, &probe.patch) {
         Ok(c) => c,
         Err(reason) => {
-            return ProbeOutcome::Unappliable { reason };
+            return ProbeOutcome::NotApplicable { reason };
         }
     };
     match adapter.verify(&corrupted, policy) {

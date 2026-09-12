@@ -175,7 +175,11 @@ impl SyncCommitteeUpdate {
 /// [`AdapterError::Malformed`] naming the offset, so a truncated or
 /// misaligned payload points at where it went wrong.
 pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError> {
-    fn slice(payload: &[u8], range: std::ops::Range<usize>, what: &str) -> Result<&[u8], AdapterError> {
+    fn slice<'a>(
+        payload: &'a [u8],
+        range: std::ops::Range<usize>,
+        what: &str,
+    ) -> Result<&'a [u8], AdapterError> {
         payload.get(range.clone()).ok_or(AdapterError::Malformed {
             offset: range.start,
             reason: format!("{what} is not present"),

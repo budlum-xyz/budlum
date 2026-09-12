@@ -29,7 +29,7 @@
 //!   own registration; none of it is a score computed by us.
 //! - **No fallback to "assume valid".** Every refusal path in this module
 //!   returns an error. There is no `unwrap_or(default)`, no
-//!   `unwrap_or_else(|| true)`, and no branch that treats an unparseable
+//!   `unwrap_or_else(|| true)`, and no branch that treats an unparsable
 //!   payload as an empty-but-acceptable one.
 //! - **No version drift.** An adapter declares the evidence versions it
 //!   accepts. An unknown version is a hard refusal, never a best-effort

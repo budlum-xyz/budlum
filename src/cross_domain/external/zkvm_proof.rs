@@ -93,7 +93,7 @@ impl ZkFinalityEvidence {
             .validate_shape()
             .map_err(|e| AdapterError::Malformed {
                 offset: 0,
-                reason: format!("envelope shape refused: {describe(&e)}"),
+                reason: format!("envelope shape refused: {}", describe(&e)),
             })?;
         Ok(decoded)
     }
@@ -435,7 +435,7 @@ mod tests {
     fn the_probe_set_is_offset_independent_and_covers_every_edge() {
         let probes = ZkVmFinalityAdapter::new("testnet").fault_probes();
         assert!(!probes.is_empty());
-        // Every probe must be appliable to a payload of any size, which is why
+        // Every probe must be applicable to a payload of any size, which is why
         // none of them uses a fixed interior offset beyond the first 16 bytes.
         for probe in &probes {
             match &probe.patch {
