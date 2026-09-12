@@ -118,15 +118,42 @@ pub struct SettlementRequest {
 /// know which of eight rules fired.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColdRefusal {
-    WrongChain { expected: u64, got: u64 },
-    HeightRolledBack { last_signed: u64, requested: u64 },
-    HeightAlreadySettled { height: u64 },
-    NonceReplayed { last_signed: u64, requested: u64 },
-    ValueAboveCeiling { ceiling: u128, requested: u128 },
-    EpochBudgetExceeded { spent: u128, requested: u128, budget: u128 },
-    KeyRotatedOut { current_epoch: u32, presented: u32 },
-    QuorumNotReached { required: u32, presented: u32 },
-    HeightAdvanceTooSmall { required: u64, actual: u64 },
+    WrongChain {
+        expected: u64,
+        got: u64,
+    },
+    HeightRolledBack {
+        last_signed: u64,
+        requested: u64,
+    },
+    HeightAlreadySettled {
+        height: u64,
+    },
+    NonceReplayed {
+        last_signed: u64,
+        requested: u64,
+    },
+    ValueAboveCeiling {
+        ceiling: u128,
+        requested: u128,
+    },
+    EpochBudgetExceeded {
+        spent: u128,
+        requested: u128,
+        budget: u128,
+    },
+    KeyRotatedOut {
+        current_epoch: u32,
+        presented: u32,
+    },
+    QuorumNotReached {
+        required: u32,
+        presented: u32,
+    },
+    HeightAdvanceTooSmall {
+        required: u64,
+        actual: u64,
+    },
 }
 
 impl ColdRefusal {
@@ -277,9 +304,7 @@ impl ColdWalletState {
                     self.budget_epoch = request.epoch;
                     self.epoch_spent_atoms = 0;
                 }
-                self.epoch_spent_atoms = self
-                    .epoch_spent_atoms
-                    .saturating_add(request.value_atoms);
+                self.epoch_spent_atoms = self.epoch_spent_atoms.saturating_add(request.value_atoms);
                 self.signed_count = self.signed_count.saturating_add(1);
                 Ok(payload)
             }
@@ -411,9 +436,7 @@ impl ColdWalletState {
         } else {
             0
         };
-        self.policy
-            .max_value_per_epoch_atoms
-            .saturating_sub(spent)
+        self.policy.max_value_per_epoch_atoms.saturating_sub(spent)
     }
 }
 
@@ -463,7 +486,13 @@ mod tests {
         let mut other = request(10, 1, 500);
         other.chain_id = 8;
         let err = cold.sign(&other, 1, 2).unwrap_err();
-        assert_eq!(err, ColdRefusal::WrongChain { expected: 7, got: 8 });
+        assert_eq!(
+            err,
+            ColdRefusal::WrongChain {
+                expected: 7,
+                got: 8
+            }
+        );
         assert_eq!(cold.signed_count, 0, "a refused request advanced a counter");
     }
 
@@ -509,7 +538,8 @@ mod tests {
         );
         assert_eq!(cold.rotations.len(), 1);
         assert_eq!(cold.rotations.first().map(|r| r.at_height), Some(100));
-        cold.sign(&request(10, 1, 500), 2, 2).expect("the new epoch signs");
+        cold.sign(&request(10, 1, 500), 2, 2)
+            .expect("the new epoch signs");
     }
 
     #[test]
@@ -584,7 +614,8 @@ mod tests {
         );
         // Exactly at the ceiling is allowed: the ceiling is a maximum, not a
         // threshold to stay under.
-        cold.sign(&request(10, 1, 1000), 1, 2).expect("at the ceiling");
+        cold.sign(&request(10, 1, 1000), 1, 2)
+            .expect("at the ceiling");
     }
 
     #[test]
@@ -594,7 +625,8 @@ mod tests {
         let mut cold = ColdWalletState::new(policy());
         cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
         cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
-        cold.sign(&request(30, 3, 1000), 1, 2).expect("3rd fills the budget");
+        cold.sign(&request(30, 3, 1000), 1, 2)
+            .expect("3rd fills the budget");
         assert_eq!(cold.budget_remaining(1), 0);
         let err = cold.sign(&request(40, 4, 1), 1, 2).unwrap_err();
         assert!(matches!(err, ColdRefusal::EpochBudgetExceeded { .. }));
@@ -603,9 +635,14 @@ mod tests {
     #[test]
     fn the_budget_resets_on_a_new_epoch() {
         let mut cold = ColdWalletState::new(policy());
-        cold.sign(&request(10, 1, 3000), 1, 2).expect("fills epoch 1");
+        cold.sign(&request(10, 1, 3000), 1, 2)
+            .expect("fills epoch 1");
         assert_eq!(cold.budget_remaining(1), 0);
-        assert_eq!(cold.budget_remaining(2), 3000, "a new epoch has a fresh budget");
+        assert_eq!(
+            cold.budget_remaining(2),
+            3000,
+            "a new epoch has a fresh budget"
+        );
         let mut next = request(20, 2, 3000);
         next.epoch = 2;
         cold.sign(&next, 1, 2).expect("epoch 2 has its own budget");
@@ -623,7 +660,11 @@ mod tests {
             bad.nonce = i;
             let _ = cold.sign(&bad, 1, 2);
         }
-        assert_eq!(cold.refusals.len(), 4, "the refusal log grew past its capacity");
+        assert_eq!(
+            cold.refusals.len(),
+            4,
+            "the refusal log grew past its capacity"
+        );
         assert!(cold.refusals.iter().all(|r| r.kind == "wrong-chain"));
     }
 
@@ -669,7 +710,8 @@ mod tests {
                 actual: 5
             }
         );
-        cold.sign(&request(110, 2, 500), 1, 2).expect("ten blocks later");
+        cold.sign(&request(110, 2, 500), 1, 2)
+            .expect("ten blocks later");
     }
 
     #[test]
@@ -678,7 +720,8 @@ mod tests {
         // `last_signed_height` of zero without guarding the "never signed" case
         // would make the first settlement on a fresh device look like a replay.
         let mut cold = ColdWalletState::new(policy());
-        cold.sign(&request(1, 1, 100), 1, 2).expect("a fresh device signs height 1");
+        cold.sign(&request(1, 1, 100), 1, 2)
+            .expect("a fresh device signs height 1");
         assert_eq!(cold.signed_count, 1);
     }
 }

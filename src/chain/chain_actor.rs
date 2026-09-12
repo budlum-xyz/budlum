@@ -2515,8 +2515,7 @@ impl ChainHandle {
         {
             return Err("chain actor closed".to_string());
         }
-        rx.await
-            .map_err(|_| "chain actor closed".to_string())?
+        rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
     pub async fn bns_set_storage(
@@ -3892,19 +3891,17 @@ impl ChainActor {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
                     }
-                    let _ = response.send(
-                        self.blockchain.accept_storage_reallocation_with_escrow(
-                            ticket_id,
-                            replacement_operator,
-                            payer,
-                            start_epoch,
-                            end_epoch,
-                            economics,
-                            &domain_params,
-                            merkle_proof,
-                            storage_root,
-                        ),
-                    );
+                    let _ = response.send(self.blockchain.accept_storage_reallocation_with_escrow(
+                        ticket_id,
+                        replacement_operator,
+                        payer,
+                        start_epoch,
+                        end_epoch,
+                        economics,
+                        &domain_params,
+                        merkle_proof,
+                        storage_root,
+                    ));
                 }
                 ChainCommand::RegisterStorageManifest { manifest, response } => {
                     if self.storage_economics_disabled_on_mainnet() {

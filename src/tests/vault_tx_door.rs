@@ -206,8 +206,15 @@ fn a_listed_token_cannot_be_transferred_or_burned_until_it_is_extracted() {
         ),
     )
     .unwrap();
-    apply(&mut state, nft_data_tx(alice, transfer, TransactionType::NftTransfer, 3)).unwrap();
-    assert_eq!(state.nft_registry.get_nft(token).map(|n| n.owner), Some(addr(7)));
+    apply(
+        &mut state,
+        nft_data_tx(alice, transfer, TransactionType::NftTransfer, 3),
+    )
+    .unwrap();
+    assert_eq!(
+        state.nft_registry.get_nft(token).map(|n| n.owner),
+        Some(addr(7))
+    );
 }
 
 #[test]

@@ -423,7 +423,10 @@ mod tests {
         // open_never_placed_ticket refuses an unknown manifest on purpose; the
         // helper built one locally without registering it, so the sweep could never
         // open the ticket the four acceptance tests are about.
-        blockchain.state.storage_registry.register_manifest(&manifest);
+        blockchain
+            .state
+            .storage_registry
+            .register_manifest(&manifest);
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
         let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);

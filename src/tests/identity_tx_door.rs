@@ -14,7 +14,9 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::domain::ConsensusKind;
 use crate::execution::executor::Executor;
-use crate::registry::{GuardianApproval, IdentityRecord, IdentityTx, MethodKind, VerificationMethod};
+use crate::registry::{
+    GuardianApproval, IdentityRecord, IdentityTx, MethodKind, VerificationMethod,
+};
 
 fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
     crate::crypto::primitives::KeyPair::from_seed(&[byte; 32]).expect("deterministic test keypair")
@@ -108,7 +110,10 @@ fn a_default_state_cannot_open_the_door_even_for_the_right_sender() {
     // refusal failing BEFORE the epilogue is what makes retries safe.
     assert_eq!(state.get_balance(&subject), 1_000);
     assert_eq!(state.get_nonce(&subject), 0);
-    assert!(state.identity.record(&subject).is_none(), "nothing was written");
+    assert!(
+        state.identity.record(&subject).is_none(),
+        "nothing was written"
+    );
 }
 
 #[test]
@@ -126,7 +131,10 @@ fn an_identity_transaction_carrying_value_is_refused_at_the_frame() {
     let err = Executor::apply_transaction_checked(&mut state, &tx)
         .expect_err("identity writes commit state; they never move value");
     assert_eq!(err.code(), "identity_amount_must_be_zero");
-    assert!(state.identity.record(&subject).is_none(), "and it wrote nothing");
+    assert!(
+        state.identity.record(&subject).is_none(),
+        "and it wrote nothing"
+    );
     assert_eq!(state.get_balance(&subject), 1_000, "and it took nothing");
 }
 

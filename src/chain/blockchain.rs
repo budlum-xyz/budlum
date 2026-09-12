@@ -5805,7 +5805,10 @@ impl Blockchain {
             .get_manifest(&ticket.manifest_id)
             .cloned()
             .ok_or_else(|| {
-                format!("manifest {} of ticket {ticket_id} vanished", ticket.manifest_id)
+                format!(
+                    "manifest {} of ticket {ticket_id} vanished",
+                    ticket.manifest_id
+                )
             })?;
         let epochs = end_epoch.saturating_sub(start_epoch);
         if epochs == 0 {
@@ -5830,7 +5833,9 @@ impl Blockchain {
         // 1. Debit Payer (Client Escrow) — same shape as the open path.
         if total_fee > 0 {
             if self.state.get_balance(&payer) < total_fee {
-                return Err(format!("Insufficient payer balance for deal fee {total_fee}"));
+                return Err(format!(
+                    "Insufficient payer balance for deal fee {total_fee}"
+                ));
             }
             let account = self.state.get_or_create(&payer);
             account.balance = account.balance.saturating_sub(total_fee);
@@ -7479,7 +7484,9 @@ mod tests {
 
         // The operator exercises the seal path (bud_sealGlobalHeader).
         producer_chain.seal_global_header(None).expect("first seal");
-        producer_chain.seal_global_header(None).expect("second seal");
+        producer_chain
+            .seal_global_header(None)
+            .expect("second seal");
         assert_eq!(producer_chain.global_headers.len(), 2);
 
         let (block, _) = producer_chain

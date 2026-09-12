@@ -3438,8 +3438,7 @@ mod tests {
 
         // executor.rs, `RelayerResult` arm: `external_roots.get(&domain) ==
         // Some(&declared_root)`.
-        let gate_holds =
-            |s: &AccountState| s.external_roots.get(&domain) == Some(&declared_root);
+        let gate_holds = |s: &AccountState| s.external_roots.get(&domain) == Some(&declared_root);
 
         // Unanchored: a relayer-declared root must not be accepted.
         assert!(!gate_holds(&state));

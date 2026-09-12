@@ -1656,16 +1656,25 @@ mod tests {
         );
 
         let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
-        assert_eq!(restored.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(
+            restored.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
         assert!(
             restored.vault.is_none(),
             "a field the blob never carried came back as data - fabrication, not migration"
         );
-        assert!(restored.identity.is_some(), "the v5 field must survive intact");
+        assert!(
+            restored.identity.is_some(),
+            "the v5 field must survive intact"
+        );
         assert!(restored.verify());
         let rebuilt = AccountState::from_snapshot_v2(&restored);
         assert_eq!(rebuilt.tokenomics.community, 777);
-        assert!(rebuilt.vault.is_empty(), "restored state has no folders to show");
+        assert!(
+            rebuilt.vault.is_empty(),
+            "restored state has no folders to show"
+        );
     }
 
     #[test]

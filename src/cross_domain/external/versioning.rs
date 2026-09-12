@@ -59,8 +59,7 @@ impl VersionWindow {
     /// Whether this window covers a claim at `height`.
     #[must_use]
     pub fn covers(&self, height: u64) -> bool {
-        height >= self.valid_from_height
-            && self.sunset_height.is_none_or(|sunset| height <= sunset)
+        height >= self.valid_from_height && self.sunset_height.is_none_or(|sunset| height <= sunset)
     }
 
     /// Whether this window is still open at `height` - the same question as
@@ -138,7 +137,9 @@ impl VersionPolicy {
         grace_heights: u64,
     ) -> Result<(), ForkError> {
         if old_version == new_version {
-            return Err(ForkError::SameVersion { version: new_version });
+            return Err(ForkError::SameVersion {
+                version: new_version,
+            });
         }
         if self.window(new_version).is_some() {
             return Err(ForkError::VersionAlreadyScheduled {
@@ -199,7 +200,9 @@ impl VersionPolicy {
                     "{} (window {}..{} does not cover height {height})",
                     evidence_version,
                     window.valid_from_height,
-                    window.sunset_height.map_or("open".to_string(), |s| s.to_string())
+                    window
+                        .sunset_height
+                        .map_or("open".to_string(), |s| s.to_string())
                 ),
             });
         }
@@ -246,9 +249,7 @@ pub enum ForkError {
     VersionAlreadyScheduled { version: u32 },
     #[error("the outgoing version {version} was never scheduled")]
     UnknownOldVersion { version: u32 },
-    #[error(
-        "a grace window of {requested} heights exceeds the domain's limit of {allowed}"
-    )]
+    #[error("a grace window of {requested} heights exceeds the domain's limit of {allowed}")]
     GraceTooWide { requested: u64, allowed: u64 },
     #[error(
         "version {version} only becomes valid at height {valid_from}, after the fork height {fork_height}"

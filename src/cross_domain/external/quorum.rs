@@ -401,12 +401,15 @@ mod tests {
     #[test]
     fn nobody_answering_is_not_the_same_as_too_few_answering() {
         let none = decide(&[], &policy(2));
-        assert!(matches!(
-            none,
-            QuorumOutcome::NoValidParticipants { .. }
-        ));
+        assert!(matches!(none, QuorumOutcome::NoValidParticipants { .. }));
         let few = decide(&[claim(1)], &policy(2));
-        assert!(matches!(few, QuorumOutcome::LowParticipants { valid: 1, required: 2 }));
+        assert!(matches!(
+            few,
+            QuorumOutcome::LowParticipants {
+                valid: 1,
+                required: 2
+            }
+        ));
     }
 
     #[test]
@@ -426,7 +429,14 @@ mod tests {
     fn a_tie_at_the_threshold_is_a_dispute_not_a_coin_flip() {
         // Three and three with a threshold of three. Picking either would be a
         // choice the evidence did not support.
-        let answers = [claim(0xaa), claim(0xaa), claim(0xaa), claim(0xbb), claim(0xbb), claim(0xbb)];
+        let answers = [
+            claim(0xaa),
+            claim(0xaa),
+            claim(0xaa),
+            claim(0xbb),
+            claim(0xbb),
+            claim(0xbb),
+        ];
         let outcome = decide(&answers, &policy(3));
         match outcome {
             QuorumOutcome::Dispute { groups } => {

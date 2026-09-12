@@ -1966,9 +1966,8 @@ mod v29_signing_tests {
             tx.tx_type = tx_type;
             tx.calculate_hash()
         };
-        let register = |record: IdentityRecord| {
-            TransactionType::Identity(IdentityTx::Register { record })
-        };
+        let register =
+            |record: IdentityRecord| TransactionType::Identity(IdentityTx::Register { record });
         let issue = |credential: CredentialCommitment| {
             TransactionType::Identity(IdentityTx::Issue { credential })
         };
@@ -2074,9 +2073,7 @@ mod v29_signing_tests {
         }));
         assert_ne!(move_, move_other_source, "move source must reach it");
 
-        let recover = |subject: Address,
-                       new_key: [u8; 32],
-                       approvals: Vec<GuardianApproval>| {
+        let recover = |subject: Address, new_key: [u8; 32], approvals: Vec<GuardianApproval>| {
             TransactionType::Identity(IdentityTx::Recover {
                 subject,
                 new_key,

@@ -385,7 +385,11 @@ pub fn disclosure_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Option<Disclo
     let mut index = leaf_index;
     let mut siblings = Vec::new();
     while level.len() > 1 {
-        let pair = if index.is_multiple_of(2) { index + 1 } else { index - 1 };
+        let pair = if index.is_multiple_of(2) {
+            index + 1
+        } else {
+            index - 1
+        };
         siblings.push(level.get(pair).copied().unwrap_or(level[index]));
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for chunk in level.chunks(2) {
@@ -1517,18 +1521,38 @@ mod tests {
 
         let (issued, _) = credential();
         with_record
-            .apply(&ConsensusKind::PoA, IdentityOp::Register { record: issuer_record() }, 100)
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: issuer_record(),
+                },
+                100,
+            )
             .unwrap();
         with_record
-            .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: issued.clone() }, 100)
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: issued.clone(),
+                },
+                100,
+            )
             .unwrap();
         let after_issue = with_record.root();
         assert_ne!(after_register, after_issue, "issuance must move the root");
 
         with_record
-            .apply(&ConsensusKind::PoA, IdentityOp::Revoke { credential: issued }, 150)
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Revoke { credential: issued },
+                150,
+            )
             .unwrap();
-        assert_ne!(after_issue, with_record.root(), "revocation must move the root");
+        assert_ne!(
+            after_issue,
+            with_record.root(),
+            "revocation must move the root"
+        );
 
         // A second node that reached the same state by applying the same ops
         // agrees without exchanging anything but the root:
@@ -1648,7 +1672,9 @@ mod tests {
         let err = execute_identity_tx(
             &mut registry,
             &other,
-            IdentityTx::Register { record: record.clone() },
+            IdentityTx::Register {
+                record: record.clone(),
+            },
             &ConsensusKind::PoA,
             100,
             1,
@@ -1663,7 +1689,9 @@ mod tests {
         execute_identity_tx(
             &mut registry,
             &record.subject,
-            IdentityTx::Register { record: record.clone() },
+            IdentityTx::Register {
+                record: record.clone(),
+            },
             &ConsensusKind::PoA,
             100,
             1,
@@ -1672,7 +1700,9 @@ mod tests {
         execute_identity_tx(
             &mut registry,
             &record.subject,
-            IdentityTx::Register { record: record.clone() },
+            IdentityTx::Register {
+                record: record.clone(),
+            },
             &ConsensusKind::PoA,
             100,
             1,
@@ -1730,7 +1760,9 @@ mod tests {
         execute_identity_tx(
             &mut registry,
             &credential.issuer,
-            IdentityTx::Revoke { credential: credential.clone() },
+            IdentityTx::Revoke {
+                credential: credential.clone(),
+            },
             &ConsensusKind::PoA,
             150,
             1,

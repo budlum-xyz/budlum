@@ -124,7 +124,10 @@ impl std::fmt::Display for FillError {
                 write!(f, "credential behind `{slot}` is not usable: {reason}")
             }
             Self::DisclosureMismatch { slot } => {
-                write!(f, "the disclosure for `{slot}` does not open a committed field")
+                write!(
+                    f,
+                    "the disclosure for `{slot}` does not open a committed field"
+                )
             }
             Self::WrongRequester => write!(f, "this receipt was made for a different requester"),
             Self::WrongDocument => write!(f, "this receipt was made for a different document"),
@@ -384,13 +387,12 @@ pub fn build_presentation(
     let filled = fill_template(template, disclosures)?;
     let mut entries = Vec::with_capacity(disclosures.len());
     for disclosure in disclosures {
-        let credential =
-            registry
-                .credential(&disclosure.credential_id)
-                .ok_or_else(|| FillError::CredentialNotValid {
-                    slot: disclosure.slot.clone(),
-                    reason: "unknown to the registry".to_string(),
-                })?;
+        let credential = registry
+            .credential(&disclosure.credential_id)
+            .ok_or_else(|| FillError::CredentialNotValid {
+                slot: disclosure.slot.clone(),
+                reason: "unknown to the registry".to_string(),
+            })?;
         if &credential.subject != subject {
             return Err(FillError::CredentialNotValid {
                 slot: disclosure.slot.clone(),
@@ -499,13 +501,12 @@ pub fn check_receipt(
         return Err(FillError::WrongDocument);
     }
     for entry in &receipt.entries {
-        let credential =
-            registry
-                .credential(&entry.credential_id)
-                .ok_or_else(|| FillError::CredentialNotValid {
-                    slot: entry.slot.clone(),
-                    reason: "gone from the registry".to_string(),
-                })?;
+        let credential = registry.credential(&entry.credential_id).ok_or_else(|| {
+            FillError::CredentialNotValid {
+                slot: entry.slot.clone(),
+                reason: "gone from the registry".to_string(),
+            }
+        })?;
         registry
             .is_credential_valid(&entry.credential_id, receipt.epoch)
             .map_err(|e| FillError::CredentialNotValid {
@@ -572,16 +573,18 @@ mod tests {
             salt: [2; 32],
         };
         let err = fill_template("A {{one}} B {{two}}", &[d("one", "1")]).unwrap_err();
-        assert!(matches!(err, FillError::MissingSlot { ref slot } if slot == "two"), "{err}");
+        assert!(
+            matches!(err, FillError::MissingSlot { ref slot } if slot == "two"),
+            "{err}"
+        );
         let err = fill_template("A {{one}}", &[d("one", "1"), d("extra", "x")]).unwrap_err();
-        assert!(matches!(err, FillError::UnknownSlot { ref slot } if slot == "extra"), "{err}");
+        assert!(
+            matches!(err, FillError::UnknownSlot { ref slot } if slot == "extra"),
+            "{err}"
+        );
         let err = fill_template("A {{one}}", &[d("one", "sneaky {{two}}")]).unwrap_err();
         assert!(matches!(err, FillError::ValueCarriesBraces { .. }), "{err}");
-        let filled = fill_template(
-            "A {{one}} B {{two}}",
-            &[d("two", "2"), d("one", "1")],
-        )
-        .unwrap();
+        let filled = fill_template("A {{one}} B {{two}}", &[d("two", "2"), d("one", "1")]).unwrap();
         assert_eq!(filled, "A 1 B 2", "disclosure order is not document order");
     }
 

@@ -34,7 +34,9 @@
 //! (`src/prover`), and an adapter that could also mint proofs would be a
 //! verifier that trusts itself.
 
-use crate::cross_domain::external::selftest::{BytePatch, ExpectedRefusal, FaultProbe, RefusalKind};
+use crate::cross_domain::external::selftest::{
+    BytePatch, ExpectedRefusal, FaultProbe, RefusalKind,
+};
 use crate::cross_domain::external::spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
@@ -87,11 +89,10 @@ impl ZkFinalityEvidence {
                 ),
             });
         }
-        let decoded: Self =
-            bincode::deserialize(payload).map_err(|e| AdapterError::Malformed {
-                offset: 0,
-                reason: format!("payload does not decode: {e}"),
-            })?;
+        let decoded: Self = bincode::deserialize(payload).map_err(|e| AdapterError::Malformed {
+            offset: 0,
+            reason: format!("payload does not decode: {e}"),
+        })?;
         decoded
             .envelope
             .validate_shape()
@@ -205,7 +206,9 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 return Err(AdapterError::DeclarationMismatch { field: "height" });
             }
             if evidence.declared_root != decoded.inputs.final_state_root {
-                return Err(AdapterError::DeclarationMismatch { field: "state_root" });
+                return Err(AdapterError::DeclarationMismatch {
+                    field: "state_root",
+                });
             }
         }
 
@@ -384,7 +387,9 @@ mod tests {
             declared_root: [0; 32],
             submitter: crate::core::address::Address([1; 32]),
         };
-        let err = adapter.verify(&evidence, &VerificationPolicy::proven(10)).unwrap_err();
+        let err = adapter
+            .verify(&evidence, &VerificationPolicy::proven(10))
+            .unwrap_err();
         assert!(matches!(
             err,
             AdapterError::UnsupportedEvidenceVersion { version: 2, .. }
@@ -405,7 +410,9 @@ mod tests {
             declared_root: [0; 32],
             submitter: crate::core::address::Address([1; 32]),
         };
-        let err = adapter.verify(&evidence, &VerificationPolicy::proven(10)).unwrap_err();
+        let err = adapter
+            .verify(&evidence, &VerificationPolicy::proven(10))
+            .unwrap_err();
         assert!(matches!(err, AdapterError::WrongAdapter { .. }));
     }
 
@@ -444,7 +451,11 @@ mod tests {
         for probe in &probes {
             match &probe.patch {
                 BytePatch::InPayload { offset, .. } => {
-                    assert!(*offset < 16, "probe `{}` depends on bincode layout", probe.name);
+                    assert!(
+                        *offset < 16,
+                        "probe `{}` depends on bincode layout",
+                        probe.name
+                    );
                 }
                 BytePatch::TruncatePayload { .. }
                 | BytePatch::DeclaredHeight { .. }
@@ -465,7 +476,9 @@ mod tests {
             "no probe attacks the state root binding"
         );
         assert!(
-            names.iter().any(|n| n.contains("corrupting the leading bytes")),
+            names
+                .iter()
+                .any(|n| n.contains("corrupting the leading bytes")),
             "no probe attacks the envelope itself"
         );
     }

@@ -159,7 +159,10 @@ pub enum ProbeOutcome {
     /// The adapter refused, but for a different rule than the probe pinned.
     /// Counted as a failure: an adapter that refuses for the wrong reason is
     /// usually refusing for an accidental one, and the accident will move.
-    WrongRefusal { got: RefusalKind, wanted: RefusalKind },
+    WrongRefusal {
+        got: RefusalKind,
+        wanted: RefusalKind,
+    },
     /// The probe could not be applied - for example a truncation longer than
     /// the payload. Recorded rather than skipped, because a probe that
     /// silently stops applying is a probe that stops protecting.
@@ -263,10 +266,7 @@ pub fn apply_patch(
         }
         BytePatch::TruncatePayload { keep } => {
             if *keep > out.payload.len() {
-                return Err(format!(
-                    "cannot keep {keep} of {} bytes",
-                    out.payload.len()
-                ));
+                return Err(format!("cannot keep {keep} of {} bytes", out.payload.len()));
             }
             out.payload.truncate(*keep);
         }

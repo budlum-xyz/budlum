@@ -382,7 +382,11 @@ impl RegenerationLedger {
     /// [`ReversionError::TargetNotCanonical`] when the next stage's commitment
     /// does not match, or [`ReversionError::TargetNotEarlier`] when the node is
     /// already at the last stage.
-    pub fn grow(&mut self, snapshot: &StageSnapshot, canonical: &dyn Fn(u64) -> Option<[u8; 32]>) -> Result<(), ReversionError> {
+    pub fn grow(
+        &mut self,
+        snapshot: &StageSnapshot,
+        canonical: &dyn Fn(u64) -> Option<[u8; 32]>,
+    ) -> Result<(), ReversionError> {
         if snapshot.stage <= self.stage {
             return Err(ReversionError::TargetNotEarlier {
                 from: self.stage,
@@ -493,11 +497,23 @@ mod tests {
         let mut ledger = RegenerationLedger::at(100, canonical(100).unwrap_or([0; 32]));
         ledger.stage = Stage::Ephyra;
         let err = ledger
-            .revert(&snapshot(Stage::Medusa, 200), Stress::Divergence, &ReversionPolicy::default(), &canonical)
+            .revert(
+                &snapshot(Stage::Medusa, 200),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
             .unwrap_err();
         assert!(matches!(err, ReversionError::TargetNotEarlier { .. }));
-        assert_eq!(ledger.stage, Stage::Ephyra, "a refused reversion changed the stage");
-        assert!(ledger.reversion_events.is_empty(), "a refused reversion was recorded");
+        assert_eq!(
+            ledger.stage,
+            Stage::Ephyra,
+            "a refused reversion changed the stage"
+        );
+        assert!(
+            ledger.reversion_events.is_empty(),
+            "a refused reversion was recorded"
+        );
     }
 
     #[test]
@@ -507,19 +523,35 @@ mod tests {
         let mut forged = snapshot(Stage::Polyp, 40);
         forged.commitment = [0xff; 32];
         let err = ledger
-            .revert(&forged, Stress::Divergence, &ReversionPolicy::default(), &canonical)
+            .revert(
+                &forged,
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
             .unwrap_err();
-        assert!(matches!(err, ReversionError::TargetNotCanonical { height: 40 }));
+        assert!(matches!(
+            err,
+            ReversionError::TargetNotCanonical { height: 40 }
+        ));
         assert_eq!(ledger.stage, Stage::Medusa);
         assert_eq!(ledger.height, 100);
-        assert!(ledger.reversion_events.is_empty(), "a refused reversion left a trace");
+        assert!(
+            ledger.reversion_events.is_empty(),
+            "a refused reversion left a trace"
+        );
     }
 
     #[test]
     fn a_canonical_target_is_accepted_and_the_ledger_moves() {
         let mut ledger = RegenerationLedger::at(100, canonical(100).unwrap_or([0; 32]));
         let event = ledger
-            .revert(&snapshot(Stage::Ephyra, 60), Stress::Divergence, &ReversionPolicy::default(), &canonical)
+            .revert(
+                &snapshot(Stage::Ephyra, 60),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
             .expect("a canonical target must be accepted");
         assert_eq!(ledger.stage, Stage::Ephyra);
         assert_eq!(ledger.height, 60);
@@ -536,9 +568,17 @@ mod tests {
         let mut ledger = RegenerationLedger::at(100, canonical(100).unwrap_or([0; 32]));
         let before = ledger.commitment;
         ledger
-            .revert(&snapshot(Stage::Ephyra, 100), Stress::RepairFailed, &ReversionPolicy::default(), &canonical)
+            .revert(
+                &snapshot(Stage::Ephyra, 100),
+                Stress::RepairFailed,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
             .expect("same height, earlier stage");
-        assert_eq!(ledger.commitment, before, "the reversion changed the node's identity");
+        assert_eq!(
+            ledger.commitment, before,
+            "the reversion changed the node's identity"
+        );
     }
 
     #[test]
@@ -549,9 +589,20 @@ mod tests {
             ..ReversionPolicy::default()
         };
         let err = ledger
-            .revert(&snapshot(Stage::Polyp, 10), Stress::Starvation, &policy, &canonical)
+            .revert(
+                &snapshot(Stage::Polyp, 10),
+                Stress::Starvation,
+                &policy,
+                &canonical,
+            )
             .unwrap_err();
-        assert!(matches!(err, ReversionError::TooManyStages { wanted: 2, limit: 1 }));
+        assert!(matches!(
+            err,
+            ReversionError::TooManyStages {
+                wanted: 2,
+                limit: 1
+            }
+        ));
     }
 
     #[test]
@@ -568,14 +619,30 @@ mod tests {
         for _ in 0..2 {
             ledger.stage = Stage::Medusa;
             ledger
-                .revert(&snapshot(Stage::Polyp, 10), Stress::Divergence, &policy, &canonical)
+                .revert(
+                    &snapshot(Stage::Polyp, 10),
+                    Stress::Divergence,
+                    &policy,
+                    &canonical,
+                )
                 .expect("within budget");
         }
         ledger.stage = Stage::Medusa;
         let err = ledger
-            .revert(&snapshot(Stage::Polyp, 10), Stress::Divergence, &policy, &canonical)
+            .revert(
+                &snapshot(Stage::Polyp, 10),
+                Stress::Divergence,
+                &policy,
+                &canonical,
+            )
             .unwrap_err();
-        assert!(matches!(err, ReversionError::LifetimeLimit { events: 2, limit: 2 }));
+        assert!(matches!(
+            err,
+            ReversionError::LifetimeLimit {
+                events: 2,
+                limit: 2
+            }
+        ));
     }
 
     #[test]
@@ -586,13 +653,23 @@ mod tests {
             ..ReversionPolicy::default()
         };
         let err = ledger
-            .revert(&snapshot(Stage::Polyp, 10), Stress::Divergence, &policy, &canonical)
+            .revert(
+                &snapshot(Stage::Polyp, 10),
+                Stress::Divergence,
+                &policy,
+                &canonical,
+            )
             .unwrap_err();
         assert!(matches!(err, ReversionError::FullReversionForbidden));
         // One stage is still fine: the policy forbids the earliest stage, not
         // reversion.
         ledger
-            .revert(&snapshot(Stage::Ephyra, 60), Stress::Divergence, &policy, &canonical)
+            .revert(
+                &snapshot(Stage::Ephyra, 60),
+                Stress::Divergence,
+                &policy,
+                &canonical,
+            )
             .expect("one stage back is not a full reversion");
     }
 
@@ -603,7 +680,11 @@ mod tests {
         let mut forged = snapshot(Stage::Ephyra, 60);
         forged.commitment = [0xee; 32];
         assert!(ledger.grow(&forged, &canonical).is_err());
-        assert_eq!(ledger.stage, Stage::Polyp, "a refused growth moved the node");
+        assert_eq!(
+            ledger.stage,
+            Stage::Polyp,
+            "a refused growth moved the node"
+        );
         ledger
             .grow(&snapshot(Stage::Ephyra, 60), &canonical)
             .expect("a canonical next stage must be accepted");
@@ -620,8 +701,12 @@ mod tests {
             max_events_per_lifetime: 1,
             ..ReversionPolicy::default()
         };
-        ledger.grow(&snapshot(Stage::Ephyra, 60), &canonical).expect("grow 1");
-        ledger.grow(&snapshot(Stage::Medusa, 100), &canonical).expect("grow 2");
+        ledger
+            .grow(&snapshot(Stage::Ephyra, 60), &canonical)
+            .expect("grow 1");
+        ledger
+            .grow(&snapshot(Stage::Medusa, 100), &canonical)
+            .expect("grow 2");
         assert_eq!(ledger.event_count(), 0, "growth was counted as a reversion");
         assert!(ledger.within_budget(&policy));
     }
@@ -635,9 +720,22 @@ mod tests {
             proofs_discarded: 60,
             records_refiled: 5,
         };
-        ledger.revert(&target, Stress::Divergence, &ReversionPolicy::default(), &canonical).expect("revert");
-        assert_eq!(ledger.total_reused, 45, "re-filed records are reused material");
-        assert_eq!(ledger.total_discarded, 60, "only proofs above the target are lost");
+        ledger
+            .revert(
+                &target,
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
+            .expect("revert");
+        assert_eq!(
+            ledger.total_reused, 45,
+            "re-filed records are reused material"
+        );
+        assert_eq!(
+            ledger.total_discarded, 60,
+            "only proofs above the target are lost"
+        );
     }
 
     #[test]
@@ -663,9 +761,18 @@ mod tests {
     fn reversion_needs_a_ratio_not_a_comparison() {
         // Reversion gives up heights, and that cost is in neither number. So the
         // bar is a ratio: repair has to be an order of magnitude worse.
-        assert!(reversion_beats_repair(1000, 100, 10, 1), "repair 10x worse: revert");
-        assert!(!reversion_beats_repair(900, 100, 10, 1), "repair only 9x worse: repair");
-        assert!(!reversion_beats_repair(u64::MAX, 1, 0, 0), "a zero denominator refuses the reversion");
+        assert!(
+            reversion_beats_repair(1000, 100, 10, 1),
+            "repair 10x worse: revert"
+        );
+        assert!(
+            !reversion_beats_repair(900, 100, 10, 1),
+            "repair only 9x worse: repair"
+        );
+        assert!(
+            !reversion_beats_repair(u64::MAX, 1, 0, 0),
+            "a zero denominator refuses the reversion"
+        );
         // Overflow must not flip the answer: a repair cost that big is already
         // larger than any regrowth cost.
         assert!(reversion_beats_repair(u64::MAX, 1, 10, 1));
@@ -687,7 +794,11 @@ mod tests {
     fn reversions_to_counts_downward_only() {
         assert_eq!(Stage::Medusa.reversions_to(Stage::Polyp), Some(2));
         assert_eq!(Stage::Medusa.reversions_to(Stage::Medusa), Some(0));
-        assert_eq!(Stage::Polyp.reversions_to(Stage::Medusa), None, "growing is not a reversion");
+        assert_eq!(
+            Stage::Polyp.reversions_to(Stage::Medusa),
+            None,
+            "growing is not a reversion"
+        );
         assert_eq!(Stage::Polyp.earlier(), None);
         assert_eq!(Stage::Medusa.later(), None);
     }

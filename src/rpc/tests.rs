@@ -116,7 +116,13 @@ mod rpc_tests {
         };
         let id = credential_id(&credential);
         registry
-            .apply(&poa, IdentityOp::Issue { credential: credential.clone() }, 0)
+            .apply(
+                &poa,
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
+                0,
+            )
             .expect("issue against the seeded records");
         let (filled, receipt) = build_presentation(
             &registry,
@@ -133,7 +139,9 @@ mod rpc_tests {
             0,
         )
         .expect("the fixture must fill");
-        (registry, subject, requester, receipt, filled, id, credential)
+        (
+            registry, subject, requester, receipt, filled, id, credential,
+        )
     }
 
     #[tokio::test]
@@ -145,7 +153,10 @@ mod rpc_tests {
             .identity_resolve(crate::registry::did_of(&Address::from([9u8; 32])))
             .await
             .expect("a well-formed DID is a question, not an error");
-        assert!(absent.is_null(), "an unknown subject reads as absent: {absent}");
+        assert!(
+            absent.is_null(),
+            "an unknown subject reads as absent: {absent}"
+        );
     }
 
     #[tokio::test]

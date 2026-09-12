@@ -130,7 +130,8 @@ impl DomainProfile {
     pub fn refusal_ratio(&self) -> (u64, u64) {
         (
             self.attestations_refused,
-            self.attestations_accepted.saturating_add(self.attestations_refused),
+            self.attestations_accepted
+                .saturating_add(self.attestations_refused),
         )
     }
 

@@ -75,7 +75,8 @@ impl ProverBond {
     /// sufficient would be the bug this whole module exists to prevent.
     #[must_use]
     pub fn is_sufficient(&self, current_ceiling_atoms: u128) -> bool {
-        self.bond_atoms >= required_bond_atoms(current_ceiling_atoms, BOND_RATIO_NUM, BOND_RATIO_DEN)
+        self.bond_atoms
+            >= required_bond_atoms(current_ceiling_atoms, BOND_RATIO_NUM, BOND_RATIO_DEN)
     }
 
     /// The live bond: what is actually there to lose.
@@ -88,7 +89,14 @@ impl ProverBond {
     /// less than requested if the bond is smaller than the penalty - a prover
     /// cannot lose more than they posted, and pretending otherwise would make
     /// the accounting lie.
-    pub fn slash(&mut self, at_height: u64, evidence_digest: [u8; 32], want_atoms: u128, challenger: Address, challenge_reward_atoms: u128) -> u128 {
+    pub fn slash(
+        &mut self,
+        at_height: u64,
+        evidence_digest: [u8; 32],
+        want_atoms: u128,
+        challenger: Address,
+        challenge_reward_atoms: u128,
+    ) -> u128 {
         let taken = self.bond_atoms.min(want_atoms);
         self.bond_atoms = self.bond_atoms.saturating_sub(taken);
         self.slashed_atoms = self.slashed_atoms.saturating_add(taken);
@@ -178,9 +186,7 @@ impl ChallengeReward {
     /// What the challenger of a `slashed_atoms` slashing receives.
     #[must_use]
     pub fn for_slash(&self, slashed_atoms: u128) -> u128 {
-        let part = slashed_atoms
-            .saturating_mul(u128::from(self.bps_of_slash))
-            / BPS_DEN;
+        let part = slashed_atoms.saturating_mul(u128::from(self.bps_of_slash)) / BPS_DEN;
         part.max(self.floor_atoms)
     }
 }

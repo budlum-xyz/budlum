@@ -38,11 +38,12 @@
 //! check would accept a committee of one signature, and nothing downstream
 //! could tell.
 
-use crate::cross_domain::external::selftest::{BytePatch, ExpectedRefusal, FaultProbe, RefusalKind};
+use crate::cross_domain::external::selftest::{
+    BytePatch, ExpectedRefusal, FaultProbe, RefusalKind,
+};
 use crate::cross_domain::external::spec::{
-    AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, FinalityKind,
-    ProofSystem, RawConsensusEvidence, SecurityBacking, TimeUnit, TrustModel,
-    VerificationPolicy,
+    AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, FinalityKind, ProofSystem,
+    RawConsensusEvidence, SecurityBacking, TimeUnit, TrustModel, VerificationPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -196,7 +197,11 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
             reason: format!("{what} is not {N} bytes"),
         })
     }
-    fn u64_at(payload: &[u8], range: std::ops::Range<usize>, what: &str) -> Result<u64, AdapterError> {
+    fn u64_at(
+        payload: &[u8],
+        range: std::ops::Range<usize>,
+        what: &str,
+    ) -> Result<u64, AdapterError> {
         let bytes = slice(payload, range, what)?;
         let arr = <[u8; 8]>::try_from(bytes).map_err(|_| AdapterError::Malformed {
             offset: 0,
@@ -208,7 +213,11 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
     if payload.len() != layout::LEN {
         return Err(AdapterError::Malformed {
             offset: payload.len(),
-            reason: format!("payload is {} bytes, expected {}", payload.len(), layout::LEN),
+            reason: format!(
+                "payload is {} bytes, expected {}",
+                payload.len(),
+                layout::LEN
+            ),
         });
     }
 
@@ -335,7 +344,9 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                 return Err(AdapterError::DeclarationMismatch { field: "height" });
             }
             if evidence.declared_root != update.state_root {
-                return Err(AdapterError::DeclarationMismatch { field: "state_root" });
+                return Err(AdapterError::DeclarationMismatch {
+                    field: "state_root",
+                });
             }
         }
 

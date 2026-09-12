@@ -136,7 +136,9 @@ impl VaultRegistry {
 
     #[must_use]
     pub fn contains(&self, folder: u64, member: u64) -> bool {
-        self.members.get(&folder).is_some_and(|m| m.contains(&member))
+        self.members
+            .get(&folder)
+            .is_some_and(|m| m.contains(&member))
     }
 
     /// Add one token to one folder, keeping the forest a forest.
@@ -186,12 +188,7 @@ impl VaultRegistry {
     /// folders, cycles, duplicates) checked BEFORE either list changes -
     /// a move that half-applied would be the token vanishing, which is the
     /// one failure this layer must not have.
-    pub fn move_member(
-        &mut self,
-        from: u64,
-        to: u64,
-        member: u64,
-    ) -> Result<(), VaultError> {
+    pub fn move_member(&mut self, from: u64, to: u64, member: u64) -> Result<(), VaultError> {
         if !self.folders.contains(&to) {
             return Err(VaultError::UnregisteredParent(to));
         }
@@ -299,14 +296,28 @@ pub enum VaultTx {
     /// Claim a minted token as a folder. The claimer must hold it: a folder
     /// is an NFT first, and a container that names a stranger's registration
     /// is the broken-links screen this family refuses.
-    RegisterFolder { folder: u64 },
+    RegisterFolder {
+        folder: u64,
+    },
     /// Retire a folder. The pure layer's structural refusals (`NonEmpty`,
     /// `Referenced`) stand untouched; this door adds one reading - that the
     /// sender holds the folder being closed.
-    CloseFolder { folder: u64 },
-    AddMember { folder: u64, member: u64 },
-    ExtractMember { folder: u64, member: u64 },
-    MoveMember { from: u64, to: u64, member: u64 },
+    CloseFolder {
+        folder: u64,
+    },
+    AddMember {
+        folder: u64,
+        member: u64,
+    },
+    ExtractMember {
+        folder: u64,
+        member: u64,
+    },
+    MoveMember {
+        from: u64,
+        to: u64,
+        member: u64,
+    },
 }
 
 /// Every id the payload names, in field order, and how many there are.
@@ -393,7 +404,11 @@ mod tests {
     #[test]
     fn a_folder_lists_what_a_screen_would_show_in_the_order_it_happened() {
         let (mut v, a, b) = two_folders();
-        assert_eq!(v.open(a), Some(&[][..]), "an empty folder is still openable");
+        assert_eq!(
+            v.open(a),
+            Some(&[][..]),
+            "an empty folder is still openable"
+        );
         v.add_member(a, 10).unwrap();
         v.add_member(a, 11).unwrap();
         v.add_member(b, 12).unwrap();
@@ -405,24 +420,39 @@ mod tests {
     #[test]
     fn the_forest_stays_a_forest() {
         let (mut v, a, b) = two_folders();
-        assert!(matches!(v.add_member(a, a), Err(VaultError::SelfMembership)));
+        assert!(matches!(
+            v.add_member(a, a),
+            Err(VaultError::SelfMembership)
+        ));
         v.add_member(a, b).unwrap(); // a contains b: legal nesting
         assert!(matches!(v.add_member(b, a), Err(VaultError::Cycle(x, y)) if x == b && y == a));
         // transitive: a->b->c, then c->a must refuse
         v.register_folder(3).unwrap();
         v.add_member(b, 3).unwrap();
         assert!(matches!(v.add_member(3, a), Err(VaultError::Cycle(x, y)) if x == 3 && y == a));
-        assert!(matches!(v.add_member(77, 5), Err(VaultError::UnregisteredParent(77))));
+        assert!(matches!(
+            v.add_member(77, 5),
+            Err(VaultError::UnregisteredParent(77))
+        ));
     }
 
     #[test]
     fn duplicates_and_extrusions_are_exact() {
         let (mut v, a, _b) = two_folders();
         v.add_member(a, 10).unwrap();
-        assert!(matches!(v.add_member(a, 10), Err(VaultError::AlreadyMember(10, 1))));
+        assert!(matches!(
+            v.add_member(a, 10),
+            Err(VaultError::AlreadyMember(10, 1))
+        ));
         v.extract_member(a, 10).unwrap();
-        assert!(matches!(v.extract_member(a, 10), Err(VaultError::NotMember(10, 1))));
-        assert!(matches!(v.extract_member(99, 10), Err(VaultError::UnknownFolder(99))));
+        assert!(matches!(
+            v.extract_member(a, 10),
+            Err(VaultError::NotMember(10, 1))
+        ));
+        assert!(matches!(
+            v.extract_member(99, 10),
+            Err(VaultError::UnknownFolder(99))
+        ));
     }
 
     #[test]
@@ -445,8 +475,14 @@ mod tests {
             Err(VaultError::SelfMembership)
         ));
         v.register_folder(3).unwrap();
-        assert!(matches!(v.move_member(b, 3, 42), Err(VaultError::NotMember(42, 1))));
-        assert!(v.contains(b, 10), "the failed move must have left 10 exactly where it was");
+        assert!(matches!(
+            v.move_member(b, 3, 42),
+            Err(VaultError::NotMember(42, 1))
+        ));
+        assert!(
+            v.contains(b, 10),
+            "the failed move must have left 10 exactly where it was"
+        );
     }
 
     #[test]
@@ -456,14 +492,26 @@ mod tests {
         assert!(matches!(v.close_folder(a), Err(VaultError::NonEmpty(1))));
         v.extract_member(a, 10).unwrap();
         v.close_folder(a).unwrap();
-        assert!(!v.is_folder(a), "closed means it is not a folder here anymore");
+        assert!(
+            !v.is_folder(a),
+            "closed means it is not a folder here anymore"
+        );
         // a leaf is not a folder, and closing it is that refusal, not another
-        assert!(matches!(v.close_folder(10), Err(VaultError::UnknownFolder(10))));
+        assert!(matches!(
+            v.close_folder(10),
+            Err(VaultError::UnknownFolder(10))
+        ));
         // an EMPTY folder another folder lists still cannot vanish: the
         // lister would open to a gap
         let (mut w, p, q) = two_folders();
         w.add_member(p, q).unwrap();
-        assert!(matches!(w.close_folder(q), Err(VaultError::Referenced { folder: 2, parent: 1 })));
+        assert!(matches!(
+            w.close_folder(q),
+            Err(VaultError::Referenced {
+                folder: 2,
+                parent: 1
+            })
+        ));
     }
 
     #[test]
@@ -579,17 +627,17 @@ mod tests {
             },
         )
         .expect_err("a folder cannot be stocked from a stranger's shelf");
-        assert!(matches!(err, VaultError::NotOwner { id, holder } if id == stolen && holder == mallory));
-        assert!(v.open(folder).is_some_and(|m| m.is_empty()), "refused before the write");
+        assert!(
+            matches!(err, VaultError::NotOwner { id, holder } if id == stolen && holder == mallory)
+        );
+        assert!(
+            v.open(folder).is_some_and(|m| m.is_empty()),
+            "refused before the write"
+        );
         // and minting a folder over somebody else's token is the same refusal
         // at the very first step: the door never trusts "I registered it".
         assert!(matches!(
-            execute_vault_tx(
-                &mut v,
-                &nfts,
-                &alice,
-                VaultTx::RegisterFolder { folder: a }
-            ),
+            execute_vault_tx(&mut v, &nfts, &alice, VaultTx::RegisterFolder { folder: a }),
             Err(VaultError::AlreadyFolder(_))
         ));
         assert!(matches!(
@@ -636,7 +684,8 @@ mod tests {
         )
         .unwrap();
         let mallory = Address::from([9u8; 32]);
-        nfts.transfer(a, &alice, mallory).expect("plain transfer out");
+        nfts.transfer(a, &alice, mallory)
+            .expect("plain transfer out");
         // Now extraction would strand the token in mallory's name...
         let err = execute_vault_tx(
             &mut v,
@@ -648,4 +697,3 @@ mod tests {
         assert!(matches!(err, VaultError::NotOwner { id, holder } if id == a && holder == mallory));
     }
 }
-

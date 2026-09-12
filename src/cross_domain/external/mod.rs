@@ -82,8 +82,8 @@ pub mod versioning;
 pub mod zkvm_proof;
 
 pub use ethereum::{
-    epoch_of_slot, has_supermajority, minimum_signers, participation, parse_update, period_of_slot,
-    bits_for, EthereumSyncAdapter, SyncCommitteeUpdate, BlsVerifier, BITVECTOR_BYTES,
+    bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
+    period_of_slot, BlsVerifier, EthereumSyncAdapter, SyncCommitteeUpdate, BITVECTOR_BYTES,
     EPOCHS_PER_SYNC_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
 };
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
@@ -106,7 +106,10 @@ pub use spec::{
     TimeUnit, TrustModel, VerificationPolicy,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
-pub use zkvm_proof::{ZkFinalityEvidence, ZkVmFinalityAdapter, EVIDENCE_VERSION as ZK_EVIDENCE_VERSION, MAX_PAYLOAD_BYTES as ZK_MAX_PAYLOAD_BYTES};
+pub use zkvm_proof::{
+    ZkFinalityEvidence, ZkVmFinalityAdapter, EVIDENCE_VERSION as ZK_EVIDENCE_VERSION,
+    MAX_PAYLOAD_BYTES as ZK_MAX_PAYLOAD_BYTES,
+};
 
 #[cfg(test)]
 mod tests {
@@ -207,7 +210,10 @@ mod tests {
     #[test]
     fn the_strict_policy_is_strict() {
         let p = VerificationPolicy::strict(100);
-        assert!(p.require_declared_match, "the default must require the match");
+        assert!(
+            p.require_declared_match,
+            "the default must require the match"
+        );
         assert_eq!(p.min_depth, 1);
         assert_eq!(p.now, 100);
     }
@@ -437,7 +443,10 @@ mod tests {
 
         let out = apply_patch(&golden, &BytePatch::DeclaredHeight { value: 5 }).unwrap();
         assert_eq!(out.declared_height, 5);
-        assert_eq!(out.payload, b"GOOD", "a height patch must not touch the payload");
+        assert_eq!(
+            out.payload, b"GOOD",
+            "a height patch must not touch the payload"
+        );
 
         assert!(apply_patch(&golden, &BytePatch::TruncatePayload { keep: 99 }).is_err());
     }
@@ -447,7 +456,8 @@ mod tests {
         // The bond covers the probe set, so an edit must be a new admission.
         let a = admit(&Tiny, &VerificationPolicy::strict(10));
         let mut b = a.clone();
-        b.probes.push(("one more".to_string(), ProbeOutcome::Accepted));
+        b.probes
+            .push(("one more".to_string(), ProbeOutcome::Accepted));
         assert_ne!(a.digest(), b.digest());
     }
 
@@ -466,7 +476,10 @@ mod tests {
 
         // Before the fork: only v1.
         assert!(policy.gate(1, 400).is_ok());
-        assert!(policy.gate(2, 400).is_err(), "v2 cannot exist before its fork");
+        assert!(
+            policy.gate(2, 400).is_err(),
+            "v2 cannot exist before its fork"
+        );
 
         // During grace: both, and the current version is the new one.
         assert!(policy.gate(1, 550).is_ok());
@@ -610,7 +623,11 @@ mod tests {
             history: Vec::new(),
         };
         let p = profile_of(&record);
-        assert_eq!(p.staleness(1_000_000), None, "never is not the same as stale");
+        assert_eq!(
+            p.staleness(1_000_000),
+            None,
+            "never is not the same as stale"
+        );
         assert!(!p.state.serves() || p.state == DomainState::Admitted);
     }
 
@@ -622,7 +639,11 @@ mod tests {
     fn the_bond_scales_with_the_ceiling_and_never_wraps() {
         assert_eq!(required_bond_atoms(0, BOND_RATIO_NUM, BOND_RATIO_DEN), 0);
         assert_eq!(required_bond_atoms(100, BOND_RATIO_NUM, BOND_RATIO_DEN), 10);
-        assert_eq!(required_bond_atoms(1, BOND_RATIO_NUM, BOND_RATIO_DEN), 1, "rounds up");
+        assert_eq!(
+            required_bond_atoms(1, BOND_RATIO_NUM, BOND_RATIO_DEN),
+            1,
+            "rounds up"
+        );
         // At the default 1/10 ratio the requirement for the largest ceiling is
         // the ceiling divided by ten - saturating arithmetic means the
         // numerator cannot overflow on the way there.
@@ -721,7 +742,11 @@ mod tests {
             floor_atoms: 50,
         };
         assert_eq!(c.for_slash(1_000), 100);
-        assert_eq!(c.for_slash(1), 50, "the floor makes small slashes worth reporting");
+        assert_eq!(
+            c.for_slash(1),
+            50,
+            "the floor makes small slashes worth reporting"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -808,7 +833,9 @@ mod tests {
         // signature. Without a verifier it must refuse, not approximate.
         let adapter = EthereumSyncAdapter::new("testnet", [0; 32], None);
         let evidence = sync_evidence(&adapter, 64, 128, 0);
-        let err = adapter.verify(&evidence, &VerificationPolicy::strict(1_000)).unwrap_err();
+        let err = adapter
+            .verify(&evidence, &VerificationPolicy::strict(1_000))
+            .unwrap_err();
         assert!(
             matches!(err, AdapterError::Unavailable { .. }),
             "an adapter with no crypto must refuse, got {err:?}"
@@ -817,8 +844,7 @@ mod tests {
 
     #[test]
     fn the_adapter_accepts_a_well_formed_update_with_a_verifier_installed() {
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let evidence = sync_evidence(&adapter, 64, 128, 0);
         let attestation = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -829,7 +855,9 @@ mod tests {
         assert_eq!(attestation.time_unit, TimeUnit::Epoch);
         // The load-bearing assertion in this file.
         match attestation.security {
-            SecurityBacking::SignatureSet { slashable, signers, .. } => {
+            SecurityBacking::SignatureSet {
+                slashable, signers, ..
+            } => {
                 assert!(!slashable, "sync committee signatures are not slashable");
                 assert_eq!(signers, SYNC_COMMITTEE_SIZE);
             }
@@ -839,8 +867,7 @@ mod tests {
 
     #[test]
     fn a_participation_one_short_of_the_threshold_is_refused() {
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let mut evidence = sync_evidence(&adapter, 64, 128, 0);
         evidence.payload[280..344].copy_from_slice(&bits_for(341));
         let err = adapter
@@ -854,8 +881,7 @@ mod tests {
 
     #[test]
     fn a_finalized_slot_ahead_of_the_attested_one_is_refused() {
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let evidence = sync_evidence(&adapter, 200, 128, 0);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -867,8 +893,7 @@ mod tests {
     fn a_period_that_does_not_match_the_slot_is_refused() {
         // The period is derived, not believed: otherwise one committee's
         // signature could be presented for another period.
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let evidence = sync_evidence(&adapter, 64, 128, 9);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -878,8 +903,7 @@ mod tests {
 
     #[test]
     fn a_lying_declaration_is_refused_when_the_policy_requires_the_match() {
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let mut evidence = sync_evidence(&adapter, 64, 128, 0);
         evidence.declared_height = 65;
         let err = adapter
@@ -893,8 +917,7 @@ mod tests {
 
     #[test]
     fn depth_and_age_come_from_the_caller_not_the_adapter() {
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let evidence = sync_evidence(&adapter, 64, 128, 0);
 
         let mut policy = VerificationPolicy::strict(1_000);
@@ -914,8 +937,7 @@ mod tests {
         // the harness must admit it. This is the check that the probe offsets
         // actually line up with the layout - a probe that patches the wrong
         // bytes would show up here as Accepted.
-        let adapter =
-            EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
         let golden = sync_evidence(&adapter, 64, 128, 0);
         let adapter = adapter.with_golden(golden);
         let report = admit(&adapter, &VerificationPolicy::strict(1_000));

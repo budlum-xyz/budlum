@@ -97,19 +97,42 @@ fn a_did_parses_in_one_spelling_only() {
     let a = addr(0xab);
     let did = did_of(&a);
     assert_eq!(did, format!("did:bud:{}", "ab".repeat(32)));
-    assert_eq!(address_of_did(&did), Some(a), "the canonical spelling must round-trip");
+    assert_eq!(
+        address_of_did(&did),
+        Some(a),
+        "the canonical spelling must round-trip"
+    );
 
     // Every near miss is a refusal, not a normalization: an accepted
     // alternate spelling is the same key stored under two identities.
     assert_eq!(address_of_did(&did.to_uppercase()), None);
-    assert_eq!(address_of_did(&format!("did:bud:{}", "aB".repeat(32))), None);
-    assert_eq!(address_of_did(&format!("{did} ")), None, "a trailing space is not a DID");
+    assert_eq!(
+        address_of_did(&format!("did:bud:{}", "aB".repeat(32))),
+        None
+    );
+    assert_eq!(
+        address_of_did(&format!("{did} ")),
+        None,
+        "a trailing space is not a DID"
+    );
     assert_eq!(address_of_did(&format!("{did}00")), None, "too long");
-    assert_eq!(address_of_did(&format!("did:bud:{}", "0".repeat(63))), None, "too short");
-    assert_eq!(address_of_did(&format!("did:bud:{}", "z".repeat(64))), None, "non-hex");
+    assert_eq!(
+        address_of_did(&format!("did:bud:{}", "0".repeat(63))),
+        None,
+        "too short"
+    );
+    assert_eq!(
+        address_of_did(&format!("did:bud:{}", "z".repeat(64))),
+        None,
+        "non-hex"
+    );
     assert_eq!(address_of_did("did:bud:"), None, "no hex at all");
     assert_eq!(address_of_did(""), None);
-    assert_eq!(address_of_did(&format!("did:example:{}", "0".repeat(64))), None, "wrong method");
+    assert_eq!(
+        address_of_did(&format!("did:example:{}", "0".repeat(64))),
+        None,
+        "wrong method"
+    );
 
     // The all-zero address is a real address, not a sentinel: it must parse.
     assert_eq!(
@@ -166,7 +189,11 @@ fn the_write_gate_answers_before_the_payload_is_read() {
         recovery_threshold: 0,
     };
     let err = registry
-        .apply(&ConsensusKind::PoW, IdentityOp::Register { record: broken }, 0)
+        .apply(
+            &ConsensusKind::PoW,
+            IdentityOp::Register { record: broken },
+            0,
+        )
         .unwrap_err();
     assert!(
         matches!(err, IdentityError::NotPoaDomain { .. }),
@@ -202,9 +229,7 @@ fn a_credential_id_is_content_derived_so_a_forged_issuer_reaches_nothing() {
     let err = execute_identity_tx(
         &mut registry,
         &addr(77),
-        IdentityTx::Revoke {
-            credential: forged,
-        },
+        IdentityTx::Revoke { credential: forged },
         &POA,
         200,
         1,
@@ -291,16 +316,20 @@ fn issuance_refuses_a_credential_from_the_future_or_born_dead() {
     let err = execute_identity_tx(
         &mut registry,
         &addr(9),
-        IdentityTx::Issue {
-            credential: future,
-        },
+        IdentityTx::Issue { credential: future },
         &POA,
         200,
         1,
     )
     .unwrap_err();
     assert!(
-        matches!(err, IdentityError::FromTheFuture { issued_at: 500, now: 200 }),
+        matches!(
+            err,
+            IdentityError::FromTheFuture {
+                issued_at: 500,
+                now: 200
+            }
+        ),
         "a credential dated ahead of the chain was accepted: {err:?}"
     );
 
@@ -316,7 +345,13 @@ fn issuance_refuses_a_credential_from_the_future_or_born_dead() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, IdentityError::ExpiredAtIssuance { issued_at: 100, expiry: 100 }),
+        matches!(
+            err,
+            IdentityError::ExpiredAtIssuance {
+                issued_at: 100,
+                expiry: 100
+            }
+        ),
         "a credential expiring at its own issuance was accepted: {err:?}"
     );
 }
@@ -389,7 +424,14 @@ fn quorum_counts_guardians_not_signatures() {
         .guardian_recovery(addr(1), [9; 32], &[addr(2)], 500)
         .unwrap_err();
     assert!(
-        matches!(err, IdentityError::QuorumShort { need: 2, got: 1, .. }),
+        matches!(
+            err,
+            IdentityError::QuorumShort {
+                need: 2,
+                got: 1,
+                ..
+            }
+        ),
         "the quorum check moved: {err:?}"
     );
     let untouched = registry.record(&addr(1)).unwrap();
@@ -405,7 +447,14 @@ fn quorum_counts_guardians_not_signatures() {
         .guardian_recovery(addr(1), [9; 32], &[addr(2), addr(2), addr(2)], 500)
         .unwrap_err();
     assert!(
-        matches!(err, IdentityError::QuorumShort { need: 2, got: 1, .. }),
+        matches!(
+            err,
+            IdentityError::QuorumShort {
+                need: 2,
+                got: 1,
+                ..
+            }
+        ),
         "three signatures from one guardian reached a quorum of two: {err:?}"
     );
 
@@ -415,7 +464,14 @@ fn quorum_counts_guardians_not_signatures() {
         .guardian_recovery(addr(1), [9; 32], &[addr(2), addr(77), addr(88)], 500)
         .unwrap_err();
     assert!(
-        matches!(err, IdentityError::QuorumShort { need: 2, got: 1, .. }),
+        matches!(
+            err,
+            IdentityError::QuorumShort {
+                need: 2,
+                got: 1,
+                ..
+            }
+        ),
         "non-guardians were counted toward the quorum: {err:?}"
     );
 
@@ -458,12 +514,19 @@ fn recovery_rotates_once_and_a_replay_meets_the_live_key() {
             .iter()
             .find(|m| m.key_id == [9; 32])
             .expect("the rotated-in method is present");
-        assert_eq!(old.revoked_at, Some(500), "the old key must die at the rotation epoch");
+        assert_eq!(
+            old.revoked_at,
+            Some(500),
+            "the old key must die at the rotation epoch"
+        );
         assert!(
             !old.is_live_at(500),
             "a key revoked at epoch N is still live at N"
         );
-        assert!(new.is_live_at(500), "the new key is not live at its own epoch");
+        assert!(
+            new.is_live_at(500),
+            "the new key is not live at its own epoch"
+        );
     }
 
     // Replaying the same approvals must not rotate a second time: the key is
@@ -486,7 +549,10 @@ fn a_record_cannot_be_built_past_its_own_guard_rules() {
     assert!(matches!(err, IdentityError::NoMethods { .. }), "{err:?}");
 
     let err = IdentityRecord::new(addr(1), vec![method(1), method(1)], vec![], 0).unwrap_err();
-    assert!(matches!(err, IdentityError::DuplicateKeyId { .. }), "{err:?}");
+    assert!(
+        matches!(err, IdentityError::DuplicateKeyId { .. }),
+        "{err:?}"
+    );
 
     let err = IdentityRecord::new(addr(1), vec![method(1)], vec![addr(1)], 1).unwrap_err();
     assert!(
@@ -502,7 +568,14 @@ fn a_record_cannot_be_built_past_its_own_guard_rules() {
 
     let err = IdentityRecord::new(addr(1), vec![method(1)], vec![addr(2)], 2).unwrap_err();
     assert!(
-        matches!(err, IdentityError::UnreachableQuorum { threshold: 2, guardians: 1, .. }),
+        matches!(
+            err,
+            IdentityError::UnreachableQuorum {
+                threshold: 2,
+                guardians: 1,
+                ..
+            }
+        ),
         "a quorum no guardian set could meet was accepted: {err:?}"
     );
 
@@ -565,14 +638,20 @@ fn multibyte_values_survive_and_the_grammar_refusals_still_bite() {
     assert_eq!(filled, "ad: ğüşöçİ🎉");
 
     // The rewrite tightened the walk; it must not have loosened the grammar.
-    assert!(matches!(
-        template_slots("ad: {{ad"),
-        Err(FillError::MalformedTemplate(_))
-    ), "an unclosed slot was accepted");
-    assert!(matches!(
-        template_slots("ad: }}"),
-        Err(FillError::MalformedTemplate(_))
-    ), "a stray closer was accepted");
+    assert!(
+        matches!(
+            template_slots("ad: {{ad"),
+            Err(FillError::MalformedTemplate(_))
+        ),
+        "an unclosed slot was accepted"
+    );
+    assert!(
+        matches!(
+            template_slots("ad: }}"),
+            Err(FillError::MalformedTemplate(_))
+        ),
+        "a stray closer was accepted"
+    );
     assert!(
         matches!(template_slots("ad: {{}}"), Err(FillError::EmptySlot)),
         "a nameless slot was accepted"

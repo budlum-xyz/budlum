@@ -21,8 +21,8 @@ use crate::cross_domain::external::profile::{DomainRecord, DomainState, StateEve
 use crate::cross_domain::external::prover::{DomainEconomics, ProverBond};
 use crate::cross_domain::external::selftest::AdmissionReport;
 use crate::cross_domain::external::spec::{
-    AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter,
-    FinalityAttestation, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
+    AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
+    RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
 use crate::cross_domain::external::versioning::VersionPolicy;
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,10 @@ impl DomainRegistration {
     /// The most recent accepted attestation, by height then version.
     #[must_use]
     pub fn latest_attestation(&self) -> Option<&FinalityAttestation> {
-        self.attestations.keys().max().and_then(|k| self.attestations.get(k))
+        self.attestations
+            .keys()
+            .max()
+            .and_then(|k| self.attestations.get(k))
     }
 }
 
@@ -322,7 +325,15 @@ impl ExternalDomainRegistry {
         let economics = reg.economics;
         let prover_bond = reg.provers.get(&evidence.submitter).cloned();
 
-        let refusal = self.check(adapter, &descriptor, &versions, &economics, prover_bond.as_ref(), evidence, policy);
+        let refusal = self.check(
+            adapter,
+            &descriptor,
+            &versions,
+            &economics,
+            prover_bond.as_ref(),
+            evidence,
+            policy,
+        );
 
         match refusal {
             Ok(attestation) => {
@@ -408,9 +419,9 @@ impl ExternalDomainRegistry {
         //    ceiling. Checked against the live bond, so a slashed prover stops
         //    serving without anybody having to remove them.
         let Some(bond) = prover else {
-            return Err(RegistryError::UnknownProver(hex(
-                evidence.submitter.as_bytes(),
-            )));
+            return Err(RegistryError::UnknownProver(hex(evidence
+                .submitter
+                .as_bytes())));
         };
         if !economics.admits(bond) {
             return Err(RegistryError::ProverUnderbonded {
@@ -419,7 +430,9 @@ impl ExternalDomainRegistry {
         }
 
         // 4. The adapter itself.
-        let attestation = adapter.verify(evidence, policy).map_err(RegistryError::Adapter)?;
+        let attestation = adapter
+            .verify(evidence, policy)
+            .map_err(RegistryError::Adapter)?;
 
         // 5. The attestation must agree with the evidence it claims to come
         //    from. An adapter that produces an attestation about a different
