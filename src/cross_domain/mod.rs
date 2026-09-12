@@ -14,8 +14,9 @@ pub use bridge_relayer::{BridgeRelayerPipeline, PipelineError};
 pub use chain_adapter::{AdapterError, AdapterRegistry, ChainAdapter};
 pub use event_tree::{DomainEvent, DomainEventKind, DomainEventTree, MerkleProof};
 pub use external::{
-    admit, profile_of, AdapterDescriptor, AdapterId, AdmissionReport, DomainEconomics, DomainKey,
-    DomainProfile, DomainRegistration, DomainState, EthereumSyncAdapter, ExternalDomainRegistry,
+    admit, decode_external_evidence, encode_external_evidence, profile_of, AdapterDescriptor,
+    AdapterId, AdmissionReport, DomainEconomics, DomainKey, DomainProfile, DomainRegistration,
+    DomainState, EthereumSyncAdapter, ExternalDomainFinalityBridge, ExternalDomainRegistry,
     ExternalFinalityAdapter, FaultProbe, FinalityAttestation, ProverBond, RawConsensusEvidence,
     RegistryError, SecurityBacking, VerificationPolicy, VersionPolicy,
 };

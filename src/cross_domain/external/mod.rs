@@ -71,6 +71,7 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod profile;
@@ -82,6 +83,10 @@ pub mod spec;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use domain_bridge::{
+    decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
+    EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+};
 pub use ethereum::{
     bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
     period_of_slot, BlsVerifier, EthereumSyncAdapter, SyncCommitteeUpdate, BITVECTOR_BYTES,
