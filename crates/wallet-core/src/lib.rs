@@ -92,6 +92,8 @@ pub enum WalletError {
     InvalidMnemonic(String),
     /// Invalid entropy size.
     InvalidEntropy(usize),
+    /// The mnemonic word count is not one of the supported BIP39 sizes.
+    InvalidWordCount(usize),
     /// Invalid seed.
     InvalidSeed,
     /// Invalid multisig policy.
@@ -116,6 +118,9 @@ impl std::fmt::Display for WalletError {
             WalletError::InvalidMnemonic(m) => write!(f, "invalid mnemonic: {m}"),
             WalletError::InvalidEntropy(n) => {
                 write!(f, "invalid entropy size: {n} bytes (expected 16 or 32)")
+            }
+            WalletError::InvalidWordCount(n) => {
+                write!(f, "invalid mnemonic word count: {n} (expected 12 or 24)")
             }
             WalletError::InvalidSeed => write!(f, "invalid seed"),
             WalletError::InvalidMultisigPolicy(m) => write!(f, "invalid multisig policy: {m}"),
@@ -959,7 +964,7 @@ impl Wallet {
         let entropy_len = match word_count {
             12 => 16, // 128 bit
             24 => 32, // 256 bit
-            _ => return Err(WalletError::InvalidEntropy(word_count * 4 / 3)),
+            _ => return Err(WalletError::InvalidWordCount(word_count)),
         };
 
         // Production CSPRNG: real random entropy via getrandom
@@ -1220,7 +1225,7 @@ impl Wallet {
     /// Sign a message. If TEE is enabled, requires a live runtime, seals the
     /// message, and requires an **attestation** binding the seal digest to
     /// the enclave measurement before signing (fail-closed otherwise). The
-    /// attestation's `report_data` is the SHA-256 of the sealed bytes, so a
+    /// attestation's `report_data` is the SHA3-256 of the sealed bytes, so a
     /// runtime that substitutes attacker-controlled sealed bytes cannot
     /// produce an attestation for the digest the wallet signs (HIGH,
     /// security audit).
@@ -1468,6 +1473,14 @@ mod tests {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
         assert_eq!(words.len(), 24, "must have 24 words");
+    }
+
+    #[test]
+    fn an_extreme_invalid_word_count_fails_without_arithmetic_overflow() {
+        let err = Wallet::generate(usize::MAX)
+            .err()
+            .expect("an extreme invalid word count must be refused");
+        assert!(matches!(err, WalletError::InvalidWordCount(usize::MAX)));
     }
 
     #[test]
