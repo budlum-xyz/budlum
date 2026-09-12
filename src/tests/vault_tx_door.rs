@@ -26,10 +26,7 @@ fn alice_state() -> (AccountState, Address, Vec<u64>) {
     let mut state = AccountState::new();
     state.add_balance(&alice, 1_000);
     let mut ids = Vec::new();
-    for (_i, tag) in ["folder-a", "token-1", "token-2", "folder-b"]
-        .iter()
-        .enumerate()
-    {
+    for tag in ["folder-a", "token-1", "token-2", "folder-b"].iter() {
         ids.push(
             state
                 .nft_registry

@@ -147,7 +147,6 @@ impl ExternalDomainRegistry {
         self.domains.get(key)
     }
 
-    #[must_use]
     pub fn domains(&self) -> impl Iterator<Item = &DomainRegistration> {
         self.domains.values()
     }
@@ -172,6 +171,7 @@ impl ExternalDomainRegistry {
     /// explicit because the same adapter can serve many external networks;
     /// deriving it from the version list would make every later submission
     /// miss the registration.
+    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &mut self,
         network: &str,
@@ -432,6 +432,7 @@ impl ExternalDomainRegistry {
 
     /// The checks, in order. Split out of [`Self::submit`] so the intake path
     /// above stays readable and the order is in one place.
+    #[allow(clippy::too_many_arguments)]
     fn check(
         &self,
         adapter: &dyn ExternalFinalityAdapter,
@@ -557,7 +558,7 @@ impl ExternalDomainRegistry {
     ///
     /// An unknown domain or prover, or an attestation that was never accepted
     /// - slashing for something that never landed would be a way to take a
-    /// bond without proving anything.
+    ///   bond without proving anything.
     pub fn slash(
         &mut self,
         domain: &DomainKey,

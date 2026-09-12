@@ -291,6 +291,7 @@ pub struct EvmVerificationPlan {
 impl EvmVerificationPlan {
     /// Returns whether this plan can be treated as immediate finality. The
     /// optimistic variants remain pending until the window is settled.
+    #[cfg(test)]
     #[must_use]
     fn is_immediate(&self) -> bool {
         self.cryptographic

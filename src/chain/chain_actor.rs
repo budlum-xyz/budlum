@@ -993,6 +993,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn accept_storage_reallocation(
         &self,
         ticket_id: u64,

@@ -2163,6 +2163,7 @@ mod v29_signing_tests {
         );
     }
 
+    #[test]
     fn nft_boost_payload_tampering_invalidates_signature() {
         let mut tx = signed_variant(TransactionType::NftBoost {
             nft_id: 7,

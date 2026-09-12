@@ -250,7 +250,6 @@ fn outcome_label(outcome: &ProbeOutcome) -> String {
 /// Returns the sample or a reason it could not be applied. Never panics and
 /// never silently does nothing: a patch that cannot be applied is reported so the
 /// harness can record it.
-#[must_use]
 pub fn apply_patch(
     evidence: &RawConsensusEvidence,
     patch: &BytePatch,

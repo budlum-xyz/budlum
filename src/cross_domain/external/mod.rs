@@ -829,7 +829,7 @@ mod tests {
         payload[48..56].copy_from_slice(&0u64.to_le_bytes());
         payload[56..88].copy_from_slice(&[0xbb; 32]);
         // full participation
-        payload[280..344].copy_from_slice(&vec![0xff; 64]);
+        payload[280..344].copy_from_slice(&[0xff; 64]);
         payload[344..376].copy_from_slice(&[0xcc; 32]);
 
         let update = parse_update(&payload).expect("a well-formed payload parses");
@@ -995,7 +995,7 @@ mod tests {
         payload[56..88].copy_from_slice(&[0xbb; 32]);
         payload[88..184].copy_from_slice(&[0x11; 96]);
         payload[184..280].copy_from_slice(&[0x22; 96]);
-        payload[280..344].copy_from_slice(&vec![0xff; 64]);
+        payload[280..344].copy_from_slice(&[0xff; 64]);
         payload[344..376].copy_from_slice(&[0xcc; 32]);
 
         let descriptor = adapter.descriptor();
