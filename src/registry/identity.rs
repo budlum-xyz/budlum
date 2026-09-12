@@ -214,7 +214,12 @@ impl IdentityRecord {
             });
         }
         for (i, method) in self.methods.iter().enumerate() {
-            if self.methods[..i].iter().any(|m| m.key_id == method.key_id) {
+            if self
+                .methods
+                .iter()
+                .take(i)
+                .any(|m| m.key_id == method.key_id)
+            {
                 return Err(IdentityError::DuplicateKeyId {
                     did: did_of(&self.subject),
                 });
@@ -226,7 +231,7 @@ impl IdentityRecord {
                     did: did_of(&self.subject),
                 });
             }
-            if self.guardians[..i].contains(guardian) {
+            if self.guardians.iter().take(i).any(|known| known == guardian) {
                 return Err(IdentityError::DuplicateGuardian {
                     did: did_of(&self.subject),
                 });

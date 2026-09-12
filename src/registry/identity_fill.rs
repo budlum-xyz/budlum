@@ -162,7 +162,9 @@ fn pieces(template: &str) -> Result<Vec<Piece<'_>>, FillError> {
             let close = after_open
                 .find("}}")
                 .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
-            let raw = &after_open[..close];
+            let raw = after_open
+                .get(..close)
+                .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
             if raw.trim().is_empty() {
                 return Err(FillError::EmptySlot);
             }
