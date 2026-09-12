@@ -992,9 +992,9 @@ const fn broadcast_certainly_did_not_happen(error: &AdapterError) -> bool {
 /// or the remote node having a bad minute.
 const fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
     match error {
-        AdapterError::UnsupportedChain(_) | AdapterError::ProofVerificationFailed(_) => {
-            RelayOutcome::Refused
-        }
+        AdapterError::UnsupportedChain(_)
+        | AdapterError::ProofVerificationFailed(_)
+        | AdapterError::DuplicateChainAdapter(_) => RelayOutcome::Refused,
         AdapterError::ConnectionFailed(_)
         | AdapterError::TransactionNotFound(_)
         | AdapterError::ProofGenerationFailed(_)
@@ -1172,6 +1172,10 @@ mod relay_outcomes {
         );
         assert_eq!(
             relay_outcome_for(&AdapterError::ProofVerificationFailed("leaf".into())),
+            RelayOutcome::Refused
+        );
+        assert_eq!(
+            relay_outcome_for(&AdapterError::DuplicateChainAdapter(ExternalChain::Ethereum)),
             RelayOutcome::Refused
         );
     }
