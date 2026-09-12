@@ -1047,6 +1047,12 @@ impl Executor {
                     .map_err(|e| {
                         BudlumError::validation("relayer_proof_malformed", e.to_string())
                     })?;
+                if proof.siblings.is_empty() {
+                    return Err(BudlumError::validation(
+                        "relayer_proof_path",
+                        "Receipt proof must contain a sibling path",
+                    ));
+                }
                 if proof.leaf != res.result_leaf() {
                     return Err(BudlumError::validation(
                         "relayer_leaf_mismatch",

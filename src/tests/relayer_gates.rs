@@ -34,16 +34,22 @@ fn make_result(tx_hash: &str) -> RelayerExternalResult {
     }
 }
 
-/// A single-leaf tree: leaf equals root with empty siblings - the same schema as
-/// the executor gate.
-fn seal_single_leaf(res: &mut RelayerExternalResult) {
+/// Build a two-leaf Merkle path for the result fact. A root equal to the leaf
+/// with no siblings is not evidence of a tree and is refused by the executor.
+fn seal_result_proof(res: &mut RelayerExternalResult) {
     let leaf = res.result_leaf();
+    let sibling = [0x5au8; 32];
+    let root = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_MERKLE_NODE_V1",
+        &leaf,
+        &sibling,
+    ]);
     let proof = MerkleProof {
         leaf,
         index: 0,
-        siblings: Vec::new(),
+        siblings: vec![sibling],
     };
-    res.external_state_root = leaf;
+    res.external_state_root = root;
     res.receipt_proof = bincode::serialize(&proof).expect("proof serialize");
 }
 
@@ -61,11 +67,11 @@ fn relayer_tx(res: RelayerExternalResult, fee: u64) -> Transaction {
 }
 
 #[test]
-fn test_relayer_result_valid_single_leaf_proof_accepted() {
+fn test_relayer_result_valid_merkle_proof_accepted() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
     let mut res = make_result("0xREAL_HASH");
-    seal_single_leaf(&mut res);
+    seal_result_proof(&mut res);
     let tx = relayer_tx(res, 1);
     let root = match &tx.tx_type {
         TransactionType::RelayerResult(result) => result.external_state_root,
@@ -79,11 +85,33 @@ fn test_relayer_result_valid_single_leaf_proof_accepted() {
 }
 
 #[test]
+fn test_relayer_result_empty_sibling_path_is_rejected() {
+    let mut state = AccountState::new();
+    state.add_balance(&relayer_addr(), 1_000);
+    let mut result = make_result("0xNO_PATH");
+    let proof = MerkleProof {
+        leaf: result.result_leaf(),
+        index: 0,
+        siblings: Vec::new(),
+    };
+    result.external_state_root = proof.leaf;
+    result.receipt_proof = bincode::serialize(&proof).expect("proof serialize");
+    state
+        .external_roots
+        .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
+    let tx = relayer_tx(result, 1);
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("a self-repeating leaf is not a receipt path");
+    assert_eq!(err.code(), "relayer_proof_path");
+    assert_eq!(state.get_balance(&relayer_addr()), 1_000);
+}
+
+#[test]
 fn test_relayer_result_tampered_facts_leaf_mismatch_rejected() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
     let mut res = make_result("0xREAL_HASH");
-    seal_single_leaf(&mut res);
+    seal_result_proof(&mut res);
     state
         .external_roots
         .insert(ExternalChain::Ethereum.domain_id(), res.external_state_root);
@@ -100,7 +128,7 @@ fn test_relayer_result_wrong_root_rejected() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
     let mut res = make_result("0xREAL_HASH");
-    seal_single_leaf(&mut res);
+    seal_result_proof(&mut res);
     // The finalized anchor is the original root; changing the submitted root
     // Must fail before any bridge/economic transition.
     let anchored_root = res.external_state_root;
@@ -133,7 +161,7 @@ fn test_relayer_result_empty_tx_hash_is_rejected() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
     let mut result = make_result("");
-    seal_single_leaf(&mut result);
+    seal_result_proof(&mut result);
     state
         .external_roots
         .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
@@ -292,7 +320,7 @@ fn relayer_result_bridge_mint_is_bound_to_the_supply_ceiling() {
 
     let mut res = make_result("0xLOCK_ON_ETHEREUM");
     res.message = Some(message);
-    seal_single_leaf(&mut res);
+    seal_result_proof(&mut res);
     let tx = relayer_tx(res, 1);
     let root = match &tx.tx_type {
         TransactionType::RelayerResult(result) => result.external_state_root,
@@ -367,7 +395,7 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
 
     let mut res = make_result("0xLOCK_ON_ETHEREUM_2");
     res.message = Some(message.clone());
-    seal_single_leaf(&mut res);
+    seal_result_proof(&mut res);
     let tx = relayer_tx(res, 1);
     let root = match &tx.tx_type {
         TransactionType::RelayerResult(result) => result.external_state_root,
