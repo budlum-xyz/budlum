@@ -215,6 +215,10 @@ pub enum ReversionError {
     /// recovery budget.
     #[error("invalid reversion policy: {rule}")]
     InvalidPolicy { rule: &'static str },
+    /// The serialized ledger is internally inconsistent and must not be used
+    /// as a recovery starting point.
+    #[error("invalid regeneration ledger: {rule}")]
+    InvalidLedger { rule: &'static str },
     /// The target stage is not earlier than the current one. Re-growth is a
     /// different operation and is not this one.
     #[error("cannot revert from {from:?} to {to:?}: the target is not an earlier stage")]
@@ -311,6 +315,40 @@ impl RegenerationLedger {
         }
     }
 
+    /// Validate a ledger restored from storage before it can drive recovery.
+    ///
+    /// Serialization preserves bytes, not provenance. Recomputing the audit
+    /// totals and checking event numbering prevents a tampered snapshot from
+    /// erasing prior damage or presenting a wrapped history as healthy.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.reversion_events.len() > MAX_REVERSION_EVENTS as usize {
+            return Err("reversion-history-over-capacity");
+        }
+        let mut reused = 0u64;
+        let mut discarded = 0u64;
+        let mut previous_event = 0u32;
+        for event in &self.reversion_events {
+            if event.event_number == 0 || event.event_number <= previous_event {
+                return Err("event-numbers-not-monotonic");
+            }
+            if event.from.reversions_to(event.to).is_none_or(|steps| steps == 0) {
+                return Err("event-stage-transition-invalid");
+            }
+            reused = reused
+                .checked_add(event.carried.proofs_reusable)
+                .and_then(|value| value.checked_add(event.carried.records_refiled))
+                .ok_or("reused-material-overflow")?;
+            discarded = discarded
+                .checked_add(event.carried.proofs_discarded)
+                .ok_or("discarded-material-overflow")?;
+            previous_event = event.event_number;
+        }
+        if reused != self.total_reused || discarded != self.total_discarded {
+            return Err("audit-totals-do-not-match-events");
+        }
+        Ok(())
+    }
+
     /// How many times this node has reverted.
     #[must_use]
     pub fn event_count(&self) -> u32 {
@@ -344,6 +382,9 @@ impl RegenerationLedger {
         policy: &ReversionPolicy,
         canonical: &dyn Fn(Stage, u64) -> Option<[u8; 32]>,
     ) -> Result<Reversion, ReversionError> {
+        if let Err(rule) = self.validate() {
+            return Err(ReversionError::InvalidLedger { rule });
+        }
         // 1. Ordering. Re-growth is not reversion and must not be smuggled in
         //    through this call.
         let Some(wanted) = self.stage.reversions_to(target.stage) else {
@@ -448,6 +489,9 @@ impl RegenerationLedger {
         snapshot: &StageSnapshot,
         canonical: &dyn Fn(Stage, u64) -> Option<[u8; 32]>,
     ) -> Result<(), ReversionError> {
+        if let Err(rule) = self.validate() {
+            return Err(ReversionError::InvalidLedger { rule });
+        }
         if snapshot.stage != self.stage.later().unwrap_or(self.stage) {
             return Err(ReversionError::GrowthNotNext {
                 from: self.stage,
@@ -576,6 +620,39 @@ mod tests {
             ledger.reversion_events.is_empty(),
             "a refused reversion was recorded"
         );
+    }
+
+    #[test]
+    fn a_tampered_audit_total_blocks_recovery_without_mutating_the_ledger() {
+        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut event = Reversion {
+            from: Stage::Medusa,
+            to: Stage::Ephyra,
+            stress: Stress::RepairFailed,
+            height_after: 60,
+            carried: Transdifferentiated {
+                proofs_reusable: 2,
+                proofs_discarded: 1,
+                records_refiled: 0,
+            },
+            event_number: 1,
+        };
+        ledger.reversion_events.push(event.clone());
+        ledger.total_reused = 0;
+        let err = ledger
+            .revert(
+                &snapshot(Stage::Ephyra, 60),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ReversionError::InvalidLedger { .. }));
+        assert_eq!(ledger.stage, Stage::Medusa);
+        // Keep the local event used as a real serialized shape in this test;
+        // the failed call must not rewrite it either.
+        event.event_number = ledger.reversion_events[0].event_number;
+        assert_eq!(event, ledger.reversion_events[0]);
     }
 
     #[test]
