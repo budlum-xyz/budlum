@@ -252,6 +252,7 @@ impl ExternalDomainRegistry {
                 versions,
                 admission_digest: admission.digest(),
                 attestations: BTreeMap::new(),
+                attestation_provers: BTreeMap::new(),
                 provers,
             },
         );
@@ -431,14 +432,10 @@ impl ExternalDomainRegistry {
         //    format. Without this check a replay would overwrite the first
         //    attestation while incrementing the accepted counter again.
         let domain = DomainKey::from_parts(&descriptor.id, &evidence.network);
-        if self
-            .domains
-            .get(&domain)
-            .is_some_and(|reg| {
-                reg.attestations
-                    .contains_key(&(evidence.declared_height, evidence.evidence_version))
-            })
-        {
+        if self.domains.get(&domain).is_some_and(|reg| {
+            reg.attestations
+                .contains_key(&(evidence.declared_height, evidence.evidence_version))
+        }) {
             return Err(RegistryError::DuplicateAttestation {
                 height: evidence.declared_height,
                 version: evidence.evidence_version,

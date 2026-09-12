@@ -9,7 +9,7 @@ on:
   pull_request:
     branches: [main, fix/architecture-tip-adlari]
   push:
-    branches: [main]
+    branches: [main, usl]
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:

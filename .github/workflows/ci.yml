@@ -192,6 +192,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Audit Guard aggregation (the gate itself must be alive)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/audit_guard.py --self-test
+          python3 .github/scripts/audit_guard.py
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
