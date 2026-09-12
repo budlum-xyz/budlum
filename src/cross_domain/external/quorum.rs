@@ -324,9 +324,16 @@ pub fn lead_is_unassailable(answers: &[Answer], policy: &QuorumPolicy, remaining
     }
     // The best any rival can reach is its current count plus every remaining
     // participant. If that still falls short of the leader, the leader holds.
-    let best_rival = groups
-        .get(1)
-        .map_or(0, |g| g.count.saturating_add(remaining));
+    //
+    // When there is no second group yet the answer is `remaining`, not zero:
+    // every participant still out could answer with the SAME new claim and
+    // form one rival group from nothing. Counting that as zero would report an
+    // unassailable lead whenever only one claim had arrived so far, which is
+    // exactly the case where waiting is most informative.
+    let best_rival = match groups.get(1) {
+        Some(second) => second.count.saturating_add(remaining),
+        None => remaining,
+    };
     // A tie is a dispute, so the rival must fall strictly short - reaching the
     // leader's count would produce a tie, which is not a win.
     best_rival < leader.count
