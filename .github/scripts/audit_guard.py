@@ -39,6 +39,24 @@ def workflow_text_audit(rel: str, text: str, errors: list[str]) -> None:
     if re.search(r"^\s*workflow_run\s*:", text, re.MULTILINE):
         fail(f"{rel}: workflow_run is forbidden in the audit surface", errors)
 
+    # The guard workflow is itself part of the review boundary. Removing its
+    # self-test, its real audit, or its fail-closed shell mode must turn this
+    # audit red rather than silently reducing coverage.
+    if rel.endswith("/.github/workflows/audit-guard.yml") or rel == ".github/workflows/audit-guard.yml":
+        if "audit_guard.py --self-test" not in text:
+            fail(f"{rel}: guard self-test is missing", errors)
+        if re.search(r"^\s*python3 \.github/scripts/audit_guard\.py\s*$", text, re.MULTILINE) is None:
+            fail(f"{rel}: real audit invocation is missing", errors)
+        if re.search(r"^\s*continue-on-error:\s*true\s*$", text, re.MULTILINE):
+            fail(f"{rel}: audit guard may not continue on error", errors)
+        if re.search(r"\|\|\s*true", text):
+            fail(f"{rel}: audit guard may not swallow failures", errors)
+    if rel.endswith("/.github/workflows/ci.yml") or rel == ".github/workflows/ci.yml":
+        if "python3 .github/scripts/audit_guard.py --self-test" not in text:
+            fail(f"{rel}: gates aggregator is missing Audit Guard self-test", errors)
+        if re.search(r"^\s*python3 \.github/scripts/audit_guard\.py\s*$", text, re.MULTILINE) is None:
+            fail(f"{rel}: gates aggregator is missing the real Audit Guard", errors)
+
     for line_no, line in enumerate(text.splitlines(), 1):
         match = USES_LINE.match(line)
         if not match:
@@ -169,7 +187,42 @@ jobs:
         workflow_text_audit(f"red-team/{name}.yml", mutant, errors)
         if not any(expected[name] in error for error in errors):
             raise AssertionError(f"red-team mutant passed unexpectedly: {name}: {errors}")
-    print("audit-guard red-team: PASS (6 mutations rejected)")
+
+    guard_clean = """
+permissions:
+  contents: read
+jobs:
+  audit-guard:
+    steps:
+      - run: |
+          set -euo pipefail
+          python3 .github/scripts/audit_guard.py --self-test
+      - run: |
+          set -euo pipefail
+          python3 .github/scripts/audit_guard.py
+"""
+    guard_mutants = {
+        "guard-self-test-removed": guard_clean.replace(
+            "          python3 .github/scripts/audit_guard.py --self-test\n", ""
+        ),
+        "guard-real-audit-removed": guard_clean.replace(
+            "          python3 .github/scripts/audit_guard.py\n", ""
+        ),
+        "guard-continue-open": guard_clean + "\n    continue-on-error: true\n",
+        "guard-swallowed-error": guard_clean + "\n          python3 audit_guard.py || true\n",
+    }
+    guard_expected = {
+        "guard-self-test-removed": "self-test is missing",
+        "guard-real-audit-removed": "real audit invocation is missing",
+        "guard-continue-open": "may not continue on error",
+        "guard-swallowed-error": "may not swallow failures",
+    }
+    for name, mutant in guard_mutants.items():
+        errors = []
+        workflow_text_audit(".github/workflows/audit-guard.yml", mutant, errors)
+        if not any(guard_expected[name] in error for error in errors):
+            raise AssertionError(f"guard mutant passed unexpectedly: {name}: {errors}")
+    print("audit-guard red-team: PASS (10 mutations rejected)")
 
 
 def self_test() -> None:
