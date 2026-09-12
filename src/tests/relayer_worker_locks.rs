@@ -965,13 +965,13 @@ fn a_bridge_address_of_the_wrong_length_is_refused() {
 /// truthful.
 #[tokio::test]
 async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
-    use crate::cross_domain::evm::adapter::{EvmChainAdapter, DEFAULT_DEPOSIT_TOPIC0};
+    use crate::cross_domain::evm::adapter::EvmChainAdapter;
 
     let mut registry = AdapterRegistry::new();
     registry
         .register(Box::new(EvmChainAdapter::new(
             vec![0xaa; 20],
-            DEFAULT_DEPOSIT_TOPIC0,
+            deposit_topic0(),
         )))
         .expect("a properly configured adapter must register");
 
