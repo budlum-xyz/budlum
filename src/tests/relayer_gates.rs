@@ -144,6 +144,20 @@ fn test_relayer_result_empty_tx_hash_is_rejected() {
 }
 
 #[test]
+fn test_relayer_result_oversized_proof_is_rejected_before_decode() {
+    let mut state = AccountState::new();
+    state.add_balance(&relayer_addr(), 1_000);
+    let mut result = make_result("0xOVERSIZED");
+    result.receipt_proof = vec![0u8; 4 * 1024 + 1];
+    result.external_state_root = [0x11; 32];
+    let tx = relayer_tx(result, 1);
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("oversized proof must reject");
+    assert_eq!(err.code(), "relayer_proof_malformed");
+    assert_eq!(state.get_balance(&relayer_addr()), 1_000);
+}
+
+#[test]
 fn test_relayer_result_empty_proof_and_zero_root_regressions() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);

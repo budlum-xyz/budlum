@@ -3,8 +3,14 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::error::{BudlumError, BudlumResult};
 use crate::execution::zkvm::{ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
-use bincode;
+use bincode::Options;
 use serde_json;
+
+/// Consensus accepts a Merkle receipt proof, not an unbounded byte stream.
+/// A valid path needs only a leaf, an index, a length and at most 64 sibling
+/// hashes; the bound leaves room for framing while preventing a length prefix
+/// from allocating attacker-sized memory during block execution.
+const MAX_RELAYER_RESULT_PROOF_BYTES: u64 = 4 * 1024;
 
 pub struct Executor;
 
@@ -1035,8 +1041,10 @@ impl Executor {
                 // reaches external_state_root. (Anchoring the root to the external
                 // finalize commitment is the EVM light-client job;
                 // this gate soundly verifies the proof chain itself.)
-                let proof: crate::cross_domain::event_tree::MerkleProof =
-                    bincode::deserialize(&res.receipt_proof).map_err(|e| {
+                let proof: crate::cross_domain::event_tree::MerkleProof = bincode::options()
+                    .with_limit(MAX_RELAYER_RESULT_PROOF_BYTES)
+                    .deserialize(&res.receipt_proof)
+                    .map_err(|e| {
                         BudlumError::validation("relayer_proof_malformed", e.to_string())
                     })?;
                 if proof.leaf != res.result_leaf() {
