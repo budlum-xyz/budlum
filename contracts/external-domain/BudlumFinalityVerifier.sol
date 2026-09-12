@@ -121,6 +121,16 @@ struct Challenge {
     bool resolved;
 }
 
+/// @notice A deployment-specific fraud-proof verifier. The optimistic path
+///         stays permissionless because anybody may call `challenge`; this
+///         interface is only the cryptographic predicate for the proof itself.
+interface IExternalFraudProofVerifier {
+    function verifyFraud(bytes32 attestationDigest, bytes calldata proof)
+        external
+        view
+        returns (bool);
+}
+
 contract BudlumFinalityVerifier {
     // ---------------------------------------------------------------------
     // Precompile addresses. Probed, never assumed.
@@ -162,6 +172,12 @@ contract BudlumFinalityVerifier {
     /// somebody notices; the number is a policy choice and is public.
     uint256 public immutable challengeWindow;
 
+    /// The verifier for a fraud proof in the optimistic regime. It is a
+    /// verifier contract, not an owner key: it cannot decide which domain is
+    /// good, it can only answer whether the submitted proof contradicts this
+    /// digest.
+    address public immutable fraudProofVerifier;
+
     /// The Budlum chain id this deployment serves.
     uint64 public immutable budlumChainId;
 
@@ -190,10 +206,24 @@ contract BudlumFinalityVerifier {
     error ChallengeWindowOpen(bytes32 digest, uint256 blocksLeft);
     error NoSuchChallenge(bytes32 digest);
     error ChallengeResolved(bytes32 digest);
+    error NoFraudProofVerifier();
+    error FraudProofRejected(bytes32 digest);
+    error NoChallengeWindow();
 
-    constructor(uint64 budlumChainId_, uint256 challengeWindow_) {
+    constructor(
+        uint64 budlumChainId_,
+        uint256 challengeWindow_,
+        address fraudProofVerifier_
+    ) {
+        if (fraudProofVerifier_ == address(0)) {
+            revert NoFraudProofVerifier();
+        }
+        if (challengeWindow_ == 0) {
+            revert NoChallengeWindow();
+        }
         budlumChainId = budlumChainId_;
         challengeWindow = challengeWindow_;
+        fraudProofVerifier = fraudProofVerifier_;
         // Pairing's ABI is 384 bytes per pair. A malformed one-pair probe
         // distinguishes the final pairing precompile from an early-draft
         // address that hosts a different BLS operation.
@@ -308,6 +338,39 @@ contract BudlumFinalityVerifier {
             resolved: false
         });
         emit AttestationOptimistic(digest, a.height, reason);
+    }
+
+    /// @notice Challenges an optimistic attestation with a cryptographic fraud
+    ///         proof. A rejected fraud proof leaves the window open, so a
+    ///         malformed challenge cannot grief settlement; a proven fraud
+    ///         permanently prevents settlement and clears reliance on the
+    ///         digest.
+    function challenge(bytes32 digest, bytes calldata fraudProof) external {
+        Challenge storage c = challenges[digest];
+        if (c.openedAt == 0) {
+            revert NoSuchChallenge(digest);
+        }
+        if (c.resolved) {
+            revert ChallengeResolved(digest);
+        }
+        uint256 elapsed = block.number - uint256(c.openedAt);
+        if (elapsed >= challengeWindow) {
+            revert ChallengeWindowOpen(digest, 0);
+        }
+        bool fraud;
+        try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraud(digest, fraudProof) returns (bool proven) {
+            fraud = proven;
+        } catch {
+            revert FraudProofRejected(digest);
+        }
+        if (!fraud) {
+            revert FraudProofRejected(digest);
+        }
+        c.challenger = msg.sender;
+        c.resolved = true;
+        accepted[digest] = false;
+        emit ChallengeOpened(digest, msg.sender);
+        emit ChallengeProven(digest, msg.sender, true);
     }
 
     /// @notice Accepts an optimistically held attestation once its window has
