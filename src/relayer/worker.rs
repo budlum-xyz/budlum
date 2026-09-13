@@ -1175,7 +1175,9 @@ mod relay_outcomes {
             RelayOutcome::Refused
         );
         assert_eq!(
-            relay_outcome_for(&AdapterError::DuplicateChainAdapter(ExternalChain::Ethereum)),
+            relay_outcome_for(&AdapterError::DuplicateChainAdapter(
+                ExternalChain::Ethereum
+            )),
             RelayOutcome::Refused
         );
     }

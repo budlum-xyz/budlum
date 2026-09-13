@@ -43,11 +43,7 @@ fn make_result(tx_hash: &str) -> RelayerExternalResult {
 fn seal_result_proof(res: &mut RelayerExternalResult) {
     let leaf = res.result_leaf();
     let sibling = [0x5au8; 32];
-    let root = crate::core::hash::hash_fields_bytes(&[
-        b"BDLM_MERKLE_NODE_V1",
-        &leaf,
-        &sibling,
-    ]);
+    let root = crate::core::hash::hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", &leaf, &sibling]);
     let proof = MerkleProof {
         leaf,
         index: 0,
@@ -101,9 +97,10 @@ fn ethereum_generic_result_is_refused_until_full_proof_package_is_wired() {
         external_state_root: [0u8; 32],
     };
     seal_result_proof(&mut result);
-    state
-        .external_roots
-        .insert(ExternalChain::Ethereum.domain_id(), result.external_state_root);
+    state.external_roots.insert(
+        ExternalChain::Ethereum.domain_id(),
+        result.external_state_root,
+    );
     let tx = relayer_tx(result, 1);
     let err = Executor::apply_transaction_checked(&mut state, &tx)
         .expect_err("Ethereum must not use the weaker generic result-fact proof");
@@ -123,9 +120,10 @@ fn test_relayer_result_empty_sibling_path_is_rejected() {
     };
     result.external_state_root = proof.leaf;
     result.receipt_proof = bincode::serialize(&proof).expect("proof serialize");
-    state
-        .external_roots
-        .insert(ExternalChain::Custom(0xC0DE).domain_id(), result.external_state_root);
+    state.external_roots.insert(
+        ExternalChain::Custom(0xC0DE).domain_id(),
+        result.external_state_root,
+    );
     let tx = relayer_tx(result, 1);
     let err = Executor::apply_transaction_checked(&mut state, &tx)
         .expect_err("a self-repeating leaf is not a receipt path");
@@ -139,9 +137,10 @@ fn test_relayer_result_tampered_facts_leaf_mismatch_rejected() {
     state.add_balance(&relayer_addr(), 1_000);
     let mut res = make_result("0xREAL_HASH");
     seal_result_proof(&mut res);
-    state
-        .external_roots
-        .insert(ExternalChain::Custom(0xC0DE).domain_id(), res.external_state_root);
+    state.external_roots.insert(
+        ExternalChain::Custom(0xC0DE).domain_id(),
+        res.external_state_root,
+    );
     // The proof was produced for other facts, so changing tx_hash afterwards has
     // to produce a leaf mismatch.
     res.tx_hash = "0xFORGED_HASH".to_string();
@@ -189,9 +188,10 @@ fn test_relayer_result_empty_tx_hash_is_rejected() {
     state.add_balance(&relayer_addr(), 1_000);
     let mut result = make_result("");
     seal_result_proof(&mut result);
-    state
-        .external_roots
-        .insert(ExternalChain::Custom(0xC0DE).domain_id(), result.external_state_root);
+    state.external_roots.insert(
+        ExternalChain::Custom(0xC0DE).domain_id(),
+        result.external_state_root,
+    );
     let tx = relayer_tx(result, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("empty hash must reject");
     assert!(err.contains("Transaction hash cannot be empty"));

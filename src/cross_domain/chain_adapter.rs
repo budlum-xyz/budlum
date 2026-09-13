@@ -203,7 +203,11 @@ impl AdapterRegistry {
     /// Whatever [`ChainAdapter::check_fit_for_relay`] reports.
     pub fn register(&mut self, adapter: Box<dyn ChainAdapter>) -> Result<(), AdapterError> {
         let chain = adapter.chain_type();
-        if self.adapters.iter().any(|existing| existing.chain_type() == chain) {
+        if self
+            .adapters
+            .iter()
+            .any(|existing| existing.chain_type() == chain)
+        {
             return Err(AdapterError::DuplicateChainAdapter(chain));
         }
         adapter.check_fit_for_relay()?;

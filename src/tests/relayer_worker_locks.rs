@@ -622,8 +622,7 @@ async fn an_adapter_observation_hits_the_evm_package_refusal() {
     let err = Executor::apply_transaction(&mut state, &tx)
         .expect_err("Ethereum adapter output must hit the full-package refusal");
     assert!(
-        err.contains("relayer_evm_package_required")
-            || err.contains("full DepositProofPackage"),
+        err.contains("relayer_evm_package_required") || err.contains("full DepositProofPackage"),
         "an Ethereum adapter result must hit the consensus package refusal: {err}"
     );
     assert_eq!(
