@@ -139,6 +139,8 @@ impl DomainProfile {
     /// produced an attestation - which is a different fact from "very stale",
     /// and is reported separately rather than as a large number.
     #[must_use]
+    /// WIRING: unwired - read by the operator RPC surface once external
+    /// domains are admitted; until then only this module's tests look at it.
     pub fn staleness(&self, now_height: u64) -> Option<u64> {
         self.last_verified_at
             .map(|then| now_height.saturating_sub(then))
@@ -147,6 +149,8 @@ impl DomainProfile {
     /// A single line for a display surface. Contains no evaluation: it is the
     /// facts, comma-separated, with units.
     #[must_use]
+    /// WIRING: unwired - the one-line profile is for the same operator
+    /// surface as `staleness`, behind the same admission decision.
     pub fn summary_line(&self) -> String {
         let (refused, attempts) = self.refusal_ratio();
         format!(

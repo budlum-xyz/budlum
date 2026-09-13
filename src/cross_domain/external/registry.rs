@@ -105,6 +105,8 @@ impl DomainRegistration {
 
     /// The most recent accepted attestation, by height then version.
     #[must_use]
+    /// WIRING: unwired - the consumer is the consensus binding that reads
+    /// the newest accepted attestation; the binding is not approved yet.
     pub fn latest_attestation(&self) -> Option<&FinalityAttestation> {
         self.attestations
             .keys()
@@ -138,6 +140,8 @@ impl ExternalDomainRegistry {
 
     /// Advances the registry's height. Monotonic by construction: a height
     /// that goes backwards would let a sunset window reopen.
+    /// WIRING: unwired - the block-import path drives the registry clock
+    /// once the registry is bound to consensus; nothing drives it today.
     pub fn set_height(&mut self, height: u64) {
         if height > self.height {
             self.height = height;

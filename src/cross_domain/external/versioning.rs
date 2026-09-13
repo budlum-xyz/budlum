@@ -113,6 +113,8 @@ impl VersionPolicy {
     /// schedule is empty or everything has sunset, which is itself a state a
     /// domain should not be in.
     #[must_use]
+    /// WIRING: unwired - evidence intake asks this at verify time once the
+    /// external tree is bound to consensus; only tests ask today.
     pub fn current_version_at(&self, height: u64) -> Option<u32> {
         self.windows
             .iter()
@@ -129,6 +131,8 @@ impl VersionPolicy {
     /// A fork into an already-known version, a fork height in the past
     /// relative to the version it replaces, or a grace window wider than the
     /// domain allows.
+    /// WIRING: unwired - fork scheduling is a governance action on the same
+    /// unapproved admission path; the rules are pinned by this module's tests.
     pub fn schedule_fork(
         &mut self,
         old_version: u32,

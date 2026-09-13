@@ -628,6 +628,8 @@ impl ColdWalletState {
     ///
     /// Returns the new epoch. The rotation is recorded with the height, because
     /// a rotation that cannot be tied to a point in the chain cannot be audited.
+    /// WIRING: unwired - key rotation is an operator action on the same
+    /// dormant cold-wallet path; refusal rules are pinned by this file's tests.
     pub fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
         if reason.is_empty() {
             return Err(RotationError::EmptyReason);
@@ -656,6 +658,8 @@ impl ColdWalletState {
 
     /// How much of this epoch's budget remains.
     #[must_use]
+    /// WIRING: unwired - the settlement executor consults the remaining
+    /// budget when cold-wallet flows go live; the ceiling is pinned by tests.
     pub fn budget_remaining(&self, epoch: u64) -> u128 {
         let spent = if epoch < self.budget_epoch {
             return 0;

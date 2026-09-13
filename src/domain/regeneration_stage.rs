@@ -529,6 +529,8 @@ impl RegenerationLedger {
     /// right answer, because anything shallower than necessary is re-growth
     /// nobody asked for and anything deeper leaves the damage in place.
     #[must_use]
+    /// WIRING: unwired - the node-health layer that chooses a reversion
+    /// target is not built; the selection rule is pinned here by tests.
     pub fn cheapest_target(
         &self,
         damaged_below: u64,
@@ -580,6 +582,8 @@ fn saturating_event_count(len: usize) -> u32 {
 /// repair to be an order of magnitude more expensive before heights are given
 /// up.
 #[must_use]
+/// WIRING: unwired - the same missing node-health layer is the caller that
+/// would compare repair against reversion; the economics are pinned by tests.
 pub fn reversion_beats_repair(
     repair_cost: u64,
     regrowth_cost: u64,

@@ -77,12 +77,12 @@ RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
-# hadolint ignore=DL3008
 # libpcre2-8-0 is listed explicitly although the base image already carries it:
 # the pinned bookworm-slim digest ships 10.42-1, which Trivy flags for
 # CVE-2026-86145 and CVE-2026-89161 (both HIGH, fixed in 10.42-1+deb12u1), and
 # an explicit install after `apt-get update` pulls the patched revision without
 # a blanket `apt-get upgrade` (hadolint DL3005).
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openssl \
