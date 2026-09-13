@@ -124,7 +124,11 @@ impl ColdWalletPolicy {
 impl Default for ColdWalletPolicy {
     fn default() -> Self {
         Self {
-            chain_id: 1,
+            // The canonical chain id, not a literal: a policy pinned to a
+            // number that matches no real chain would sign for nothing, and
+            // a literal `1` here is a wrongly bound public input the moment
+            // somebody deploys against it.
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             max_value_per_settlement_atoms: 0,
             max_value_per_epoch_atoms: 0,
             min_height_advance: 1,
@@ -306,7 +310,10 @@ impl std::fmt::Display for RotationError {
             Self::EpochExhausted => write!(f, "cold-wallet key epoch exhausted"),
             Self::EmptyReason => write!(f, "cold-wallet key rotation reason is empty"),
             Self::ReasonTooLong { bytes, maximum } => {
-                write!(f, "cold-wallet key rotation reason is {bytes} bytes; maximum is {maximum}")
+                write!(
+                    f,
+                    "cold-wallet key rotation reason is {bytes} bytes; maximum is {maximum}"
+                )
             }
         }
     }
@@ -882,26 +889,37 @@ mod tests {
 
     #[test]
     fn the_budget_resets_on_a_new_epoch() {
+        // The epoch budget (3000) is filled in ceiling-sized steps: a single
+        // 3000 request would trip the per-settlement ceiling (1000) first and
+        // the test would measure the wrong refusal.
         let mut cold = ColdWalletState::new(policy());
-        cold.sign(&request(10, 1, 3000), 1, 2)
-            .expect("fills epoch 1");
+        cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
+        cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
+        cold.sign(&request(30, 3, 1000), 1, 2)
+            .expect("3rd fills epoch 1");
         assert_eq!(cold.budget_remaining(1), 0);
         assert_eq!(
             cold.budget_remaining(2),
             3000,
             "a new epoch has a fresh budget"
         );
-        let mut next = request(20, 2, 3000);
+        let mut next = request(40, 4, 1000);
         next.epoch = 2;
         cold.sign(&next, 1, 2).expect("epoch 2 has its own budget");
-        assert_eq!(cold.epoch_spent_atoms, 3000);
+        assert_eq!(cold.budget_epoch, 2);
+        assert_eq!(cold.epoch_spent_atoms, 1000);
     }
 
     #[test]
     fn an_old_epoch_cannot_reset_the_budget() {
+        // Same fixture rule as above: the budget is filled under the
+        // per-settlement ceiling, in three steps.
         let mut cold = ColdWalletState::new(policy());
-        cold.sign(&request(10, 1, 3000), 1, 2).expect("fills epoch 1");
-        let mut old = request(20, 2, 1);
+        cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
+        cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
+        cold.sign(&request(30, 3, 1000), 1, 2)
+            .expect("3rd fills epoch 1");
+        let mut old = request(40, 4, 1);
         old.epoch = 0;
         let err = cold.sign(&old, 1, 2).unwrap_err();
         assert_eq!(

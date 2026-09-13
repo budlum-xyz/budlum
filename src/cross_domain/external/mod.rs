@@ -94,11 +94,10 @@ pub use ethereum::{
 };
 pub use evm_hybrid::{
     plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof, EvmPlanError,
-    EvmPrecompiles,
-    EvmVerificationMode, EvmVerificationPlan, MessageBinding, MlDsaVariant,
+    EvmPrecompiles, EvmVerificationMode, EvmVerificationPlan, MessageBinding, MlDsaVariant,
     PrecompileObservation, BLS_G1_ADD_ADDRESS, BLS_G1_MSM_ADDRESS, BLS_G2_ADD_ADDRESS,
-    BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS, BLS_MAP_FP_TO_G1_ADDRESS,
-    BLS_PAIRING_ADDRESS, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS, MAX_ML_DSA_FIELD_BYTES,
+    BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS, BLS_MAP_FP_TO_G1_ADDRESS, BLS_PAIRING_ADDRESS,
+    MAX_ML_DSA_FIELD_BYTES, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
 };
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
@@ -544,7 +543,11 @@ mod tests {
             ForkError::SameVersion { .. }
         ));
         assert!(matches!(
-            policy.schedule_fork(1, 9, 500, 10).unwrap_err(),
+            // The unknown version must be the *outgoing* one: `schedule_fork`
+            // looks the old version up in the windows and refuses when it was
+            // never scheduled. Passing the unknown number as the new version
+            // schedules it successfully, which is the opposite of the claim.
+            policy.schedule_fork(9, 2, 500, 10).unwrap_err(),
             ForkError::UnknownOldVersion { .. }
         ));
         policy.schedule_fork(1, 2, 500, 10).unwrap();
@@ -812,7 +815,8 @@ mod tests {
 
     #[test]
     fn a_payload_of_the_wrong_length_is_refused_at_the_door() {
-        let err = parse_update(&[0u8; crate::cross_domain::external::ethereum::layout::LEN - 1]).unwrap_err();
+        let err = parse_update(&[0u8; crate::cross_domain::external::ethereum::layout::LEN - 1])
+            .unwrap_err();
         assert!(matches!(err, AdapterError::Malformed { .. }));
         let err = parse_update(&[]).unwrap_err();
         assert!(matches!(err, AdapterError::Malformed { .. }));

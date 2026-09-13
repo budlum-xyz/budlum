@@ -338,7 +338,11 @@ impl CredentialCommitment {
                     schema: format!("field name `{}`", field.name),
                 });
             }
-            if self.fields[..i].iter().any(|f| f.name == field.name) {
+            // `take(i)` instead of `[..i]`: `i` comes from the enumerate so
+            // the range is in bounds today, but the indexing gate is right
+            // that a future edit to the loop would turn this into an abort;
+            // the iterator form cannot go out of range at all.
+            if self.fields.iter().take(i).any(|f| f.name == field.name) {
                 return Err(IdentityError::DuplicateField {
                     name: field.name.clone(),
                 });
@@ -1168,7 +1172,11 @@ mod tests {
         (
             FieldCommitment {
                 name: name.to_string(),
-                commitment: field_commitment("schema-v1", name, &salt, &value_digest),
+                // The schema is part of the commitment preimage, so the
+                // fixture must commit under the same schema the credential
+                // carries and the disclosure test verifies against. A
+                // mismatched literal here made every honest opening fail.
+                commitment: field_commitment("kycc-lite-v1", name, &salt, &value_digest),
             },
             salt,
         )

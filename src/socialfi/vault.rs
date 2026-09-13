@@ -475,9 +475,11 @@ mod tests {
             Err(VaultError::SelfMembership)
         ));
         v.register_folder(3).unwrap();
+        // The refusal names the folder the move claimed to take 42 *from*,
+        // which is `b` here - naming folder 1 asserted the wrong source.
         assert!(matches!(
             v.move_member(b, 3, 42),
-            Err(VaultError::NotMember(42, 1))
+            Err(VaultError::NotMember(42, folder)) if folder == b
         ));
         assert!(
             v.contains(b, 10),
@@ -636,8 +638,11 @@ mod tests {
         );
         // and minting a folder over somebody else's token is the same refusal
         // at the very first step: the door never trusts "I registered it".
+        // Re-registering the folder that already exists is the AlreadyFolder
+        // arm; token `a` was never registered, so registering it would have
+        // succeeded and the old assertion could never match.
         assert!(matches!(
-            execute_vault_tx(&mut v, &nfts, &alice, VaultTx::RegisterFolder { folder: a }),
+            execute_vault_tx(&mut v, &nfts, &alice, VaultTx::RegisterFolder { folder }),
             Err(VaultError::AlreadyFolder(_))
         ));
         assert!(matches!(

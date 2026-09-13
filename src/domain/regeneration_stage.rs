@@ -1,5 +1,11 @@
 //! Stage reversion: what a node does when in-place repair cannot save it.
 //!
+//! WIRING: unwired - the reversion ledger is driven by the node-health layer
+//! that decides *when* a node reverts, and that layer is not built; wiring the
+//! ledger from an arbitrary call site would let any code path claim a
+//! reversion happened. The rules are pinned by this module's tests until the
+//! health layer arrives.
+//!
 //! # The biological model, and why it is not decoration
 //!
 //! *Turritopsis dohrnii* does not heal. When it is injured, starved or
@@ -331,7 +337,11 @@ impl RegenerationLedger {
             if event.event_number == 0 || event.event_number <= previous_event {
                 return Err("event-numbers-not-monotonic");
             }
-            if event.from.reversions_to(event.to).is_none_or(|steps| steps == 0) {
+            if event
+                .from
+                .reversions_to(event.to)
+                .is_none_or(|steps| steps == 0)
+            {
                 return Err("event-stage-transition-invalid");
             }
             reused = reused
@@ -352,10 +362,7 @@ impl RegenerationLedger {
     /// How many times this node has reverted.
     #[must_use]
     pub fn event_count(&self) -> u32 {
-        // Saturating rather than a cast: the lifetime limit is checked against
-        // this number, and a cast that wrapped would let a node revert forever
-        // by overflowing past its own limit.
-        u32::try_from(self.reversion_events.len()).unwrap_or(u32::MAX)
+        saturating_event_count(self.reversion_events.len())
     }
 
     /// Whether this node is still within its reversion budget.
@@ -538,6 +545,21 @@ impl RegenerationLedger {
     }
 }
 
+/// Saturating rather than a cast: the lifetime limit is checked against this
+/// number, and a cast that wrapped would let a node revert forever by
+/// overflowing past its own limit.
+///
+/// A free function of the length so the saturation boundary is testable
+/// without materializing four billion ledger entries: the ASan job measured
+/// the old in-test loop at a 20 GiB allocation, which is an out-of-memory
+/// abort, not a measurement of the cast. Private on purpose - its only
+/// production caller is `event_count` in this file, and a `pub` here would
+/// be a newly idle item by the gate's own rule.
+#[must_use]
+fn saturating_event_count(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
 /// Whether a reversion is cheaper than repairing in place.
 ///
 /// The regeneration layer already has the analogous question for artifacts
@@ -573,8 +595,7 @@ pub fn reversion_beats_repair(
     // u128 holds the product of two u64 values without saturation. Saturating
     // u64 multiplication could turn two different comparisons into the same
     // MAX value and make the result depend on overflow rather than economics.
-    (repair_cost as u128) * (ratio_den as u128)
-        >= (regrowth_cost as u128) * (ratio_num as u128)
+    (repair_cost as u128) * (ratio_den as u128) >= (regrowth_cost as u128) * (ratio_num as u128)
 }
 
 #[cfg(test)]
@@ -600,7 +621,8 @@ mod tests {
         // Re-growth is a different operation. Letting it in through `revert`
         // would mean a node could claim a later stage by calling the recovery
         // path, which is the opposite of what a recovery path is for.
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         ledger.stage = Stage::Ephyra;
         let err = ledger
             .revert(
@@ -624,7 +646,8 @@ mod tests {
 
     #[test]
     fn a_tampered_audit_total_blocks_recovery_without_mutating_the_ledger() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let mut event = Reversion {
             from: Stage::Medusa,
             to: Stage::Ephyra,
@@ -657,7 +680,8 @@ mod tests {
 
     #[test]
     fn a_future_height_cannot_hide_inside_an_earlier_stage() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let err = ledger
             .revert(
                 &snapshot(Stage::Ephyra, 101),
@@ -680,7 +704,8 @@ mod tests {
     #[test]
     fn a_non_canonical_target_is_refused_and_leaves_no_trace() {
         // The refusal that keeps reversion from being a fork.
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let mut forged = snapshot(Stage::Polyp, 40);
         forged.commitment = [0xff; 32];
         let err = ledger
@@ -705,7 +730,8 @@ mod tests {
 
     #[test]
     fn a_canonical_target_is_accepted_and_the_ledger_moves() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let event = ledger
             .revert(
                 &snapshot(Stage::Ephyra, 60),
@@ -726,7 +752,8 @@ mod tests {
         // individual. Concretely, nothing in the ledger's identity fields is
         // rewritten by a reversion - the stage and height change, and that is
         // all. A counterparty holding this node's key still holds this node.
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let before = ledger.commitment;
         ledger
             .revert(
@@ -744,7 +771,8 @@ mod tests {
 
     #[test]
     fn the_depth_limit_refuses_a_restart_disguised_as_a_reversion() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let policy = ReversionPolicy {
             max_stages_per_event: 1,
             ..ReversionPolicy::default()
@@ -771,7 +799,8 @@ mod tests {
         // Repeated reversion is allowed - that is the whole biological point -
         // but a node doing it constantly is broken, and the difference matters
         // because the second case needs an operator.
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let policy = ReversionPolicy {
             max_events_per_lifetime: 2,
             max_stages_per_event: 2,
@@ -808,7 +837,8 @@ mod tests {
 
     #[test]
     fn full_reversion_can_be_forbidden_by_policy() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let policy = ReversionPolicy {
             allow_full_reversion: false,
             ..ReversionPolicy::default()
@@ -836,7 +866,8 @@ mod tests {
 
     #[test]
     fn growth_cannot_skip_a_stage_or_move_height_backwards() {
-        let mut ledger = RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
         ledger.stage = Stage::Polyp;
         let err = ledger
             .grow(&snapshot(Stage::Medusa, 100), &canonical)
@@ -857,7 +888,8 @@ mod tests {
 
     #[test]
     fn forged_material_cannot_wrap_the_reversion_audit() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let mut target = snapshot(Stage::Ephyra, 60);
         target.carried = Transdifferentiated {
             proofs_reusable: u64::MAX,
@@ -879,7 +911,8 @@ mod tests {
 
     #[test]
     fn re_growth_is_checked_against_the_canonical_chain_too() {
-        let mut ledger = RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
         ledger.stage = Stage::Polyp;
         let mut forged = snapshot(Stage::Ephyra, 60);
         forged.commitment = [0xee; 32];
@@ -899,7 +932,8 @@ mod tests {
     fn re_growth_is_not_counted_against_the_reversion_budget() {
         // The asymmetry is the point: growing is the normal path. A node that
         // reverts once and re-grows a hundred times is healthy, not broken.
-        let mut ledger = RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
         ledger.stage = Stage::Polyp;
         let policy = ReversionPolicy {
             max_events_per_lifetime: 1,
@@ -917,7 +951,8 @@ mod tests {
 
     #[test]
     fn material_is_reclassified_not_discarded() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let mut target = snapshot(Stage::Ephyra, 60);
         target.carried = Transdifferentiated {
             proofs_reusable: 40,
@@ -945,20 +980,40 @@ mod tests {
     #[test]
     fn the_event_counter_cannot_be_overflowed_past_the_limit() {
         // A cast that wrapped would let a node revert forever by overflowing
-        // past its own lifetime limit.
+        // past its own lifetime limit. The boundary is measured on the pure
+        // function: actually pushing u32::MAX ledger entries is a ~20 GiB
+        // allocation, which the ASan job refused as out-of-memory - that run
+        // measured the allocator, not the cast.
+        assert_eq!(saturating_event_count(0), 0);
+        let boundary = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        assert_eq!(
+            saturating_event_count(boundary),
+            u32::MAX,
+            "the exact boundary is representable and must not saturate early"
+        );
+        assert_eq!(
+            saturating_event_count(boundary.saturating_add(1)),
+            u32::MAX,
+            "one past the boundary saturates instead of wrapping to 0"
+        );
+        assert_eq!(saturating_event_count(usize::MAX), u32::MAX);
+        // And the budget check refuses at the saturated count, on a real
+        // (small) ledger driven through the same public surface.
         let mut ledger = RegenerationLedger::default();
-        for _ in 0..u32::MAX {
-            ledger.reversion_events.push(Reversion {
-                from: Stage::Medusa,
-                to: Stage::Polyp,
-                stress: Stress::Divergence,
-                height_after: 0,
-                carried: Transdifferentiated::default(),
-                event_number: 0,
-            });
-        }
-        assert_eq!(ledger.event_count(), u32::MAX);
-        assert!(!ledger.within_budget(&ReversionPolicy::default()));
+        let policy = ReversionPolicy {
+            max_events_per_lifetime: 1,
+            ..ReversionPolicy::default()
+        };
+        assert!(ledger.within_budget(&policy));
+        ledger.reversion_events.push(Reversion {
+            from: Stage::Medusa,
+            to: Stage::Polyp,
+            stress: Stress::Divergence,
+            height_after: 0,
+            carried: Transdifferentiated::default(),
+            event_number: 0,
+        });
+        assert!(!ledger.within_budget(&policy));
     }
 
     #[test]
@@ -980,12 +1035,16 @@ mod tests {
         // Overflow must not flip the answer: a repair cost that big is already
         // larger than any regrowth cost.
         assert!(reversion_beats_repair(u64::MAX, 1, 10, 1));
-        assert!(!reversion_beats_repair(100, 1, 1, 2), "a sub-unit ratio is invalid");
+        assert!(
+            !reversion_beats_repair(100, 1, 1, 2),
+            "a sub-unit ratio is invalid"
+        );
     }
 
     #[test]
     fn zero_or_unbounded_reversion_policies_fail_closed() {
-        let mut ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         let zero = ReversionPolicy {
             max_stages_per_event: 0,
             ..ReversionPolicy::default()
@@ -1024,9 +1083,18 @@ mod tests {
             Stage::Ephyra => Some(60),
             Stage::Polyp => Some(10),
         };
-        assert_eq!(ledger.cheapest_target(100, &stage_height), Some(Stage::Medusa));
-        assert_eq!(ledger.cheapest_target(101, &stage_height), Some(Stage::Medusa));
-        assert_eq!(ledger.cheapest_target(70, &stage_height), Some(Stage::Ephyra));
+        assert_eq!(
+            ledger.cheapest_target(100, &stage_height),
+            Some(Stage::Medusa)
+        );
+        assert_eq!(
+            ledger.cheapest_target(101, &stage_height),
+            Some(Stage::Medusa)
+        );
+        assert_eq!(
+            ledger.cheapest_target(70, &stage_height),
+            Some(Stage::Ephyra)
+        );
         // Damage above the current height cannot be cleared by any earlier
         // stage, so there is no target.
         assert_eq!(ledger.cheapest_target(0, &stage_height), None);

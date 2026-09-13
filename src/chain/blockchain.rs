@@ -5767,16 +5767,6 @@ impl Blockchain {
         storage_root: Option<crate::domain::Hash32>,
     ) -> Result<u64, String> {
         let now_unix = self.current_unix_secs();
-        if let Some(until) = self
-            .state
-            .storage_registry
-            .operator_cooldown_until(&replacement_operator, now_unix)
-        {
-            return Err(format!(
-                "operator {replacement_operator} missed a challenge and cannot take storage work until unix {until} ({} seconds left)",
-                until.saturating_sub(now_unix)
-            ));
-        }
 
         let ticket = self
             .state
@@ -5793,9 +5783,25 @@ impl Blockchain {
                 "reallocation ticket {ticket_id} is not open for acceptance"
             ));
         }
+        // The identity refusal precedes the cooldown refusal deliberately: the
+        // slash that opened this very ticket also starts the operator's
+        // cooldown, so the cooldown message would otherwise always shadow the
+        // more specific answer - "you are the operator this ticket replaces".
+        // A cooldown expires; being the slashed operator of the ticket does
+        // not, and the caller deserves the refusal that never goes away.
         if replacement_operator == ticket.slashed_operator {
             return Err(format!(
                 "operator {replacement_operator} is the slashed operator of ticket {ticket_id}"
+            ));
+        }
+        if let Some(until) = self
+            .state
+            .storage_registry
+            .operator_cooldown_until(&replacement_operator, now_unix)
+        {
+            return Err(format!(
+                "operator {replacement_operator} missed a challenge and cannot take storage work until unix {until} ({} seconds left)",
+                until.saturating_sub(now_unix)
             ));
         }
 

@@ -1369,9 +1369,13 @@ mod tests {
 
         snapshot.schema_version = 99;
         let bytes_v99 = serde_json::to_vec(&snapshot).unwrap();
+        // Derived from the constant, not written as a literal: a hard-coded
+        // "4" broke the moment the schema advanced to 6, and the error text
+        // already interpolates the constant on the production side.
+        let max_note = format!("current max supported is {CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION}");
         assert!(StateSnapshotV2::from_bytes(&bytes_v99)
             .unwrap_err()
-            .contains("current max supported is 4"));
+            .contains(max_note.as_str()));
 
         snapshot.schema_version = 2;
         let report = snapshot.migration_report().unwrap();

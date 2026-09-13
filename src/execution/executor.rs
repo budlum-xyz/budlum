@@ -2616,10 +2616,13 @@ mod tests {
 
         let err = Executor::apply_transaction_checked(&mut state, &tx)
             .expect_err("vesting-locked stake must be refused");
-        assert!(
-            err.message().contains("stake_vesting_locked"),
-            "unexpected error: {}",
-            err.message()
+        // The identifier lives in the error *code*; the message is the
+        // human sentence and does not repeat it. Asserting the code pins
+        // the refusal class without coupling the test to prose.
+        assert_eq!(
+            err.code(),
+            "stake_vesting_locked",
+            "unexpected error: {err}"
         );
         // Nothing moved: balance intact, no validator registered.
         assert_eq!(state.get_balance(&team), 5_000);
