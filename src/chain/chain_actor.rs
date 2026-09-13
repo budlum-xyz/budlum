@@ -161,7 +161,7 @@ pub enum ChainCommand {
     ),
     SubmitExternalEvidence(
         Box<crate::cross_domain::external::RawConsensusEvidence>,
-        oneshot::Sender<Result<crate::cross_domain::external::FinalityAttestation, String>>,
+        oneshot::Sender<Result<Option<crate::cross_domain::external::FinalityAttestation>, String>>,
     ),
     GetExternalDomainProfile(
         crate::cross_domain::external::DomainKey,
@@ -220,6 +220,10 @@ pub enum ChainCommand {
             Option<crate::cross_domain::external::QuorumPolicy>,
             Vec<crate::cross_domain::external::QuorumRound>,
         )>,
+    ),
+    GetExternalDomainRegistration(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
     BondProver(
         crate::core::address::Address,
@@ -1718,7 +1722,7 @@ impl ChainHandle {
     pub async fn submit_external_evidence(
         &self,
         evidence: crate::cross_domain::external::RawConsensusEvidence,
-    ) -> Result<crate::cross_domain::external::FinalityAttestation, String> {
+    ) -> Result<Option<crate::cross_domain::external::FinalityAttestation>, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -1898,6 +1902,20 @@ impl ChainHandle {
             .send(ChainCommand::GetExternalQuorumRounds(key, tx))
             .await;
         rx.await.unwrap_or((None, Vec::new()))
+    }
+
+    /// The full registration record of one external domain, with the
+    /// registry clock beside it.
+    pub async fn external_domain_registration(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> Option<(crate::cross_domain::external::DomainRegistration, u64)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainRegistration(key, tx))
+            .await;
+        rx.await.unwrap_or(None)
     }
 
     /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
@@ -3822,6 +3840,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetExternalQuorumRounds(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_quorum_rounds(&key));
+                }
+                ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
                 }
                 ChainCommand::BondProver(address, amount, res_tx) => {
                     let _ = res_tx.send(

@@ -1722,6 +1722,18 @@ impl Blockchain {
                         entry.spec.build(bls, None),
                         entry.policy.clone(),
                     );
+                    // The bridge was built from the stored spec; its adapter
+                    // identity must be the one the evidence named, or the
+                    // registry lookup and the verification would be about
+                    // two different adapters.
+                    if bridge.adapter_id() != evidence.adapter {
+                        return Err(format!(
+                            "Domain {} rebuilt adapter {} but the evidence names {}",
+                            commitment.domain_id,
+                            hex::encode(bridge.adapter_id().0),
+                            hex::encode(evidence.adapter.0)
+                        ));
+                    }
                     self.ensure_adapter_name(domain, bridge.adapter_name())?;
                     bridge.verify_finality(domain, commitment, proof)
                 } else if let Some(plugin) = self.plugin_registry.get(domain.id) {
@@ -2870,6 +2882,11 @@ impl Blockchain {
     /// Submits external-finality evidence through the intake and persists the
     /// accepted attestation (or the refusal counters - both are state).
     ///
+    /// Returns `Ok(None)` when the answer entered a quorum round that has
+    /// not decided yet: pending is a state, not an error, and collapsing it
+    /// into the error string would make a watcher retry something that
+    /// already succeeded.
+    ///
     /// # Errors
     ///
     /// Every refusal from `IntakeState::submit_evidence`, stringified.
@@ -2877,15 +2894,32 @@ impl Blockchain {
         &mut self,
         evidence: &crate::cross_domain::external::RawConsensusEvidence,
         bls: Option<Box<dyn crate::cross_domain::external::BlsVerifier>>,
-    ) -> Result<crate::cross_domain::external::FinalityAttestation, String> {
-        let result = self
-            .external_intake
-            .submit_evidence(evidence, bls)
-            .map_err(|e| e.to_string());
+    ) -> Result<Option<crate::cross_domain::external::FinalityAttestation>, String> {
+        let result = match self.external_intake.submit_evidence(evidence, bls) {
+            Ok(attestation) => Ok(Some(attestation)),
+            Err(crate::cross_domain::external::IntakeError::RoundPending) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        };
         // A refused submission also mutates state (refusal counters, fault
         // transitions), so persistence happens on both arms.
         self.persist_external_intake();
         result
+    }
+
+    /// The full registration record of one external domain - economics,
+    /// version windows, prover bonds, attestation book - together with the
+    /// registry clock, for the status surface. A clone, because the caller
+    /// is on the other side of the actor boundary.
+    #[must_use]
+    pub fn external_domain_registration(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> Option<(crate::cross_domain::external::DomainRegistration, u64)> {
+        let height = self.external_intake.registry.height();
+        self.external_intake
+            .registry
+            .domain(key)
+            .map(|reg| (reg.clone(), height))
     }
 
     /// The public profile of one registered external domain, together with
@@ -2990,7 +3024,28 @@ impl Blockchain {
         let mut versions = reg.versions.clone();
         versions
             .schedule_fork(old_version, new_version, fork_height, grace_heights)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e: crate::cross_domain::external::ForkError| {
+                // The refusal plus the operator's next step: a fork refusal
+                // is always about the schedule, and the fix differs by rule.
+                let hint = match e {
+                    crate::cross_domain::external::ForkError::SameVersion { .. }
+                    | crate::cross_domain::external::ForkError::VersionAlreadyScheduled {
+                        ..
+                    } => "pick an unused version number",
+                    crate::cross_domain::external::ForkError::UnknownOldVersion { .. }
+                    | crate::cross_domain::external::ForkError::OldVersionAlreadySunset {
+                        ..
+                    } => "fork from the currently live version",
+                    crate::cross_domain::external::ForkError::ForkHeightOverflow { .. }
+                    | crate::cross_domain::external::ForkError::ForkBeforeValidity { .. } => {
+                        "check the fork height against the schedule"
+                    }
+                    crate::cross_domain::external::ForkError::GraceTooWide { .. } => {
+                        "narrow the grace window to the domain's limit"
+                    }
+                };
+                format!("{e}; {hint}")
+            })?;
         // Write back through the entries map: the registry exposes no version
         // setter, and should not - the policy travels with the registration.
         // `register` owns the initial policy; a fork is the one sanctioned

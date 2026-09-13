@@ -1661,7 +1661,7 @@ impl BudlumApiServer for RpcServer {
             serde_json::from_value(evidence).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
             })?;
-        let attestation = self
+        let outcome = self
             .chain
             .submit_external_evidence(evidence)
             .await
@@ -1672,13 +1672,21 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 )
             })?;
-        serde_json::to_value(&attestation).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32603,
-                format!("Attestation serialization failed: {e}"),
-                None::<()>,
-            )
-        })
+        match outcome {
+            Some(attestation) => serde_json::to_value(&attestation).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Attestation serialization failed: {e}"),
+                    None::<()>,
+                )
+            }),
+            // The answer entered a quorum round that has not decided yet.
+            // Pending is a state, not an error: the watcher reads the round
+            // through bud_getExternalQuorumRound.
+            None => Ok(serde_json::json!({
+                "roundPending": true,
+            })),
+        }
     }
 
     async fn get_external_domain_profile(
@@ -1961,6 +1969,325 @@ impl BudlumApiServer for RpcServer {
             "rounds": to_val("Rounds", serde_json::to_value(&rounds))?,
             "progress": to_val("Progress", serde_json::to_value(&progresses))?,
             "retentionBlocks": crate::cross_domain::external::ROUND_RETENTION_BLOCKS,
+        }))
+    }
+
+    async fn encode_external_evidence(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::zkvm_proof::{EVIDENCE_VERSION, MAX_PAYLOAD_BYTES};
+        use crate::cross_domain::external::{
+            encode_external_evidence, RawConsensusEvidence, VersionPolicy, ZkFinalityEvidence,
+        };
+        #[derive(serde::Deserialize)]
+        struct Params {
+            /// Full BudZKVM finality claim material; when present, the
+            /// payload is its encoding and the version is the adapter's.
+            zk_evidence: Option<ZkFinalityEvidence>,
+            /// Raw payload hex for adapters whose payloads are built
+            /// elsewhere (e.g. a sync-committee update).
+            payload_hex: Option<String>,
+            adapter_name: String,
+            network: String,
+            evidence_version: Option<u32>,
+            declared_height: u64,
+            declared_root_hex: String,
+            submitter: String,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid encode request: {e}"), None::<()>)
+        })?;
+        let (payload, evidence_version) = match (&params.zk_evidence, &params.payload_hex) {
+            (Some(zk), None) => {
+                let payload = zk.encode().map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("Encoding refused: {e}"), None::<()>)
+                })?;
+                if payload.len() > MAX_PAYLOAD_BYTES {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!(
+                            "Encoded payload is {} bytes, above the {} cap the decoder enforces",
+                            payload.len(),
+                            MAX_PAYLOAD_BYTES
+                        ),
+                        None::<()>,
+                    ));
+                }
+                (payload, EVIDENCE_VERSION)
+            }
+            (None, Some(hex_payload)) => {
+                let clean = hex_payload.strip_prefix("0x").unwrap_or(hex_payload);
+                let payload = hex::decode(clean).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+                })?;
+                let version = params.evidence_version.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "A raw payload needs an explicit evidence_version",
+                        None::<()>,
+                    )
+                })?;
+                (payload, version)
+            }
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide exactly one of `zk_evidence` or `payload_hex`",
+                    None::<()>,
+                ));
+            }
+        };
+        let adapter = crate::cross_domain::external::AdapterId::from_name(&params.adapter_name);
+        let clean = params
+            .submitter
+            .strip_prefix("0x")
+            .unwrap_or(&params.submitter);
+        let submitter = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid submitter: {e}"), None::<()>)
+        })?;
+        let root_clean = params
+            .declared_root_hex
+            .strip_prefix("0x")
+            .unwrap_or(&params.declared_root_hex);
+        let root_bytes = hex::decode(root_clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid declared root: {e}"), None::<()>)
+        })?;
+        let declared_root: [u8; 32] = root_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Declared root must be 32 bytes", None::<()>)
+        })?;
+        let evidence = RawConsensusEvidence {
+            adapter,
+            evidence_version,
+            network: params.network.clone(),
+            payload,
+            declared_height: params.declared_height,
+            declared_root,
+            submitter,
+        };
+        // The consensus-domain carrier: the same encoding the finality
+        // dispatch decodes when an external domain backs a local one.
+        let carrier = encode_external_evidence(&evidence).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Carrier encoding refused: {e}"), None::<()>)
+        })?;
+        let carrier_bytes = serde_json::to_vec(&carrier).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("Carrier serialization failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        // The version policy a registrar would declare for a fresh domain:
+        // one window, this version, no sunset.
+        let starting_versions = VersionPolicy::single(adapter, evidence_version, 0);
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "evidence": to_val("Evidence", serde_json::to_value(&evidence))?,
+            "evidenceDigest": format!("0x{}", hex::encode(evidence.digest())),
+            "domainKey": format!(
+                "0x{}",
+                hex::encode(
+                    crate::cross_domain::external::DomainKey::from_parts(
+                        &adapter,
+                        &params.network
+                    )
+                    .as_bytes()
+                )
+            ),
+            "finalityCarrierJson": String::from_utf8_lossy(&carrier_bytes),
+            "startingVersionPolicy": to_val("Versions", serde_json::to_value(&starting_versions))?,
+            "limits": {
+                "zkMaxPayloadBytes": MAX_PAYLOAD_BYTES,
+                "zkEvidenceVersion": EVIDENCE_VERSION,
+            },
+        }))
+    }
+
+    async fn get_external_domain_status(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{
+            honesty_is_cheaper, profile_of, BOND_RATIO_DEN, BOND_RATIO_NUM, BOND_UNIT, BPS_DEN,
+        };
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((registration, clock_height)) = self.chain.external_domain_registration(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        let profile = profile_of(&registration.record);
+        let (refused, attempts) = profile.refusal_ratio();
+        let economics = registration.economics;
+        let ceiling = economics.routing_ceiling_atoms;
+        let versions = &registration.versions;
+        let windows: Vec<serde_json::Value> = versions
+            .windows
+            .iter()
+            .map(|w: &crate::cross_domain::external::VersionWindow| {
+                serde_json::json!({
+                    "version": w.version,
+                    "validFromHeight": w.valid_from_height,
+                    "sunsetHeight": w.sunset_height,
+                    "coversCurrentClock": w.covers(clock_height),
+                })
+            })
+            .collect();
+        let provers: Vec<serde_json::Value> = registration
+            .provers
+            .values()
+            .map(|bond| {
+                let slashings: Vec<serde_json::Value> = bond
+                    .slashings
+                    .iter()
+                    .map(|s: &crate::cross_domain::external::Slashing| {
+                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                serde_json::json!({
+                    "prover": format!("0x{}", hex::encode(bond.prover.as_bytes())),
+                    "bondAtoms": bond.bond_atoms.to_string(),
+                    "liveAtoms": bond.live_atoms().to_string(),
+                    "slashedAtoms": bond.slashed_atoms.to_string(),
+                    "sufficientForCurrentCeiling": bond.is_sufficient(ceiling),
+                    "accepted": bond.accepted,
+                    "refused": bond.refused,
+                    "slashings": slashings,
+                })
+            })
+            .collect();
+        let latest = registration.latest_attestation();
+        // "No backing yet" is a visible state, not an absent field: shown
+        // with the same value an adapter reports before its first cycle.
+        let last_backing = registration
+            .record
+            .last_backing
+            .unwrap_or_else(crate::cross_domain::external::no_backing);
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "summary": profile.summary_line(),
+            "profile": to_val("Profile", serde_json::to_value(&profile))?,
+            "registryClockHeight": clock_height,
+            "stalenessHeights": profile.staleness(clock_height),
+            "refusalRatio": { "refused": refused, "attempts": attempts },
+            "economics": {
+                "routingCeilingAtoms": ceiling.to_string(),
+                "requiredBondAtoms": economics.required_bond_atoms().to_string(),
+                "bondRatio": format!("{}/{}", BOND_RATIO_NUM, BOND_RATIO_DEN),
+                "bondUnit": BOND_UNIT,
+                "fee": {
+                    "baseAtoms": economics.fee.base_atoms.to_string(),
+                    "valueBps": economics.fee.value_bps,
+                    "bpsDenominator": BPS_DEN.to_string(),
+                    "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
+                },
+                "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
+                "unbondingHeights": economics.unbonding_heights,
+                // The registration-time inequality, re-evaluated live: lying
+                // at the ceiling must cost more than honest fees earn.
+                "honestyIsCheaperAtCeiling": honesty_is_cheaper(&economics, ceiling),
+            },
+            "versionPolicy": {
+                "windows": windows,
+                "maxGraceHeights": versions.max_grace_heights,
+                "acceptedList": versions.accepted_list(),
+                "currentVersionAtClock": versions.current_version_at(clock_height),
+            },
+            "provers": provers,
+            "latestAttestation": to_val("Attestation", serde_json::to_value(latest))?,
+            "lastBacking": to_val("Backing", serde_json::to_value(last_backing))?,
+            "attestationsHeld": registration.attestations.len(),
+            "admissionDigest": format!("0x{}", hex::encode(registration.admission_digest)),
+        }))
+    }
+
+    async fn replay_external_probes(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{apply_patch, run_probe, ProbeOutcome};
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((_profile, entry, descriptor)) = self.chain.get_external_domain_profile(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        // The same construction the intake uses: rebuild the adapter from
+        // the stored spec, with the stored golden, and run the adapter's own
+        // probes. Nothing here mutates the registry - this is the dry run.
+        let bls = matches!(
+            entry.spec,
+            crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+        )
+        .then(crate::cross_domain::external::IntakeState::production_bls);
+        let adapter = entry.spec.build(bls, Some(entry.golden.clone()));
+        let golden_verified = adapter.verify(&entry.golden, &entry.policy).is_ok();
+        let probes: Vec<serde_json::Value> = adapter
+            .fault_probes()
+            .iter()
+            .map(|probe| {
+                // The corrupted evidence itself, applied by the same patch
+                // engine the harness uses: its digest lets an operator
+                // replay the exact probe bytes against another node.
+                let corrupted_digest = apply_patch(&entry.golden, &probe.patch)
+                    .ok()
+                    .map(|corrupted| format!("0x{}", hex::encode(corrupted.digest())));
+                let outcome = run_probe(adapter.as_ref(), &entry.golden, probe, &entry.policy);
+                let (verdict, detail) = match &outcome {
+                    ProbeOutcome::Refused { kind } => ("refused", kind.as_str().to_string()),
+                    ProbeOutcome::Accepted => (
+                        "ACCEPTED-CORRUPTION",
+                        "the adapter accepted corrupted evidence".to_string(),
+                    ),
+                    ProbeOutcome::WrongRefusal { got, wanted } => (
+                        "wrong-refusal",
+                        format!("got {}, wanted {}", got.as_str(), wanted.as_str()),
+                    ),
+                    ProbeOutcome::NotApplicable { reason } => ("not-applicable", reason.clone()),
+                };
+                serde_json::json!({
+                    "name": probe.name,
+                    "verdict": verdict,
+                    "detail": detail,
+                    "corruptedEvidenceDigest": corrupted_digest,
+                    "passed": matches!(outcome, ProbeOutcome::Refused { .. }),
+                })
+            })
+            .collect();
+        let passed = probes
+            .iter()
+            .filter(|p| p["passed"].as_bool().unwrap_or(false))
+            .count();
+        let total = probes.len();
+        Ok(serde_json::json!({
+            "adapter": format!("0x{}", hex::encode(descriptor.id.0)),
+            "goldenVerified": golden_verified,
+            "probes": probes,
+            "passed": passed,
+            "total": total,
+            "wouldPassAdmission": golden_verified && passed == total,
         }))
     }
 

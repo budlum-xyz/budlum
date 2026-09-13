@@ -194,6 +194,44 @@ pub trait BudlumApi {
         domain_key_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Assembles submission material for an external domain from its parts,
+    /// without submitting anything. For the BudZKVM adapter it encodes a
+    /// `ZkFinalityEvidence` (envelope + public inputs + program) into the
+    /// adapter's payload and wraps the whole evidence into the raw finality
+    /// carrier used by consensus domains bridged through the external
+    /// framework. It also returns the starting version policy a registrar
+    /// would declare (`single`, version pinned to the adapter's constant)
+    /// and the payload cap the decoder enforces, so a registrar builds a
+    /// registration from this response instead of guessing constants.
+    #[method(name = "bud_encodeExternalEvidence")]
+    async fn encode_external_evidence(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The full status of one external domain: the registration record
+    /// (economics with the honesty arithmetic evaluated, version windows
+    /// with their liveness at the current clock, every prover bond with its
+    /// sufficiency and slashing history), the latest attestation, and the
+    /// profile's derived ratios. Everything the profile's one-line summary
+    /// compresses, uncompressed.
+    #[method(name = "bud_getExternalDomainStatus")]
+    async fn get_external_domain_status(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-runs one registered domain's fault probes against its stored
+    /// golden sample, without touching the registry: a dry run of the same
+    /// admission harness, reporting each probe's outcome by name. This is
+    /// how an operator checks "would this domain still pass admission"
+    /// before calling `bud_readmitExternalDomain`, which does mutate.
+    #[method(name = "bud_replayExternalProbes")]
+    async fn replay_external_probes(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Parses a sync-committee update payload without submitting it:
     /// the decoded fields, the participation arithmetic (count, threshold,
     /// supermajority verdict), the slot-to-epoch/period derivations and the
