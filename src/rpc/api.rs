@@ -194,6 +194,31 @@ pub trait BudlumApi {
         domain_key_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Parses a sync-committee update payload without submitting it:
+    /// the decoded fields, the participation arithmetic (count, threshold,
+    /// supermajority verdict), the slot-to-epoch/period derivations and the
+    /// byte layout the parser applied. This is the dry run an integrator
+    /// uses to see exactly what the Ethereum adapter would see, with the
+    /// same parser - not a lookalike.
+    #[method(name = "bud_inspectEthereumUpdate")]
+    async fn inspect_ethereum_update(
+        &self,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Plans verification of Budlum's hybrid finality proof on a target
+    /// EVM: which precompiles the probes proved, which mode that allows
+    /// (full cryptographic, half-challenge, optimistic), and the gas
+    /// estimate split into crypto and calldata. The planner refuses
+    /// malformed material and unbound message points; refusals name the
+    /// rule. Deployment tooling reads this from the node so the plan and
+    /// the node agree on the rules.
+    #[method(name = "bud_planEvmVerification")]
+    async fn plan_evm_verification(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_registerConsensusDomain")]
     async fn register_consensus_domain(
         &self,

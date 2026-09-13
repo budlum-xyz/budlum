@@ -1,10 +1,11 @@
 //! Deterministic planning for verifying Budlum's hybrid finality proof on an EVM.
 //!
-//! WIRING: unwired - the plan is consumed by the reverse (Budlum-on-EVM)
-//! deployment tooling, not by node consensus; no production module calls it
-//! yet because the contract-side verifier it plans for is not deployed, and
-//! wiring a gas-plan into consensus would assert facts about a chain this
-//! node cannot observe.
+//! WIRING: wired - the planner is served by the node's RPC surface
+//! (`bud_planEvmVerification` in `rpc/server.rs`): deployment tooling sends
+//! its probe observations and proof material to the node and receives the
+//! selected mode, the gas split and the named refusal, so the plan and the
+//! node agree on the rules. It stays out of consensus on purpose - a
+//! gas-plan for another chain is a deployment fact, not a consensus fact.
 //!
 //! This module does not pretend that a gas estimate is a cryptographic proof.
 //! It records the two facts that decide the reverse direction separately:

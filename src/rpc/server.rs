@@ -1964,6 +1964,224 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn inspect_ethereum_update(
+        &self,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::ethereum::layout;
+        use crate::cross_domain::external::SyncCommitteeUpdate;
+        use crate::cross_domain::external::{
+            bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update,
+            participation, period_of_slot, BITVECTOR_BYTES, EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+            SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+        };
+        let clean = payload_hex.strip_prefix("0x").unwrap_or(&payload_hex);
+        let payload = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+        })?;
+        // The same parser the adapter runs - not a lookalike. A refusal here
+        // is exactly the refusal a submission would get.
+        let update: SyncCommitteeUpdate = parse_update(&payload).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Update refused: {e}"), None::<()>)
+        })?;
+        let signers = participation(&update.participation_bits);
+        let threshold = minimum_signers();
+        let range = |r: &std::ops::Range<usize>| serde_json::json!([r.start, r.end]);
+        Ok(serde_json::json!({
+            "finalizedRoot": format!("0x{}", hex::encode(update.finalized_root)),
+            "finalizedSlot": update.finalized_slot,
+            "finalizedEpoch": epoch_of_slot(update.finalized_slot),
+            "attestedSlot": update.attested_slot,
+            "attestedEpoch": epoch_of_slot(update.attested_slot),
+            "declaredPeriod": update.period,
+            "derivedPeriod": period_of_slot(update.attested_slot),
+            "nextCommitteeRoot": format!("0x{}", hex::encode(update.next_committee_root)),
+            "stateRoot": format!("0x{}", hex::encode(update.state_root)),
+            "participation": {
+                "signers": signers,
+                "committeeSize": SYNC_COMMITTEE_SIZE,
+                "minimumSigners": threshold,
+                "hasSupermajority": has_supermajority(signers),
+                "bitvectorBytes": BITVECTOR_BYTES,
+                // The smallest passing bitvector, for integrators building
+                // boundary tests against the same arithmetic.
+                "thresholdBitvectorHex": format!("0x{}", hex::encode(bits_for(threshold))),
+            },
+            "constants": {
+                "slotsPerEpoch": SLOTS_PER_EPOCH,
+                "epochsPerSyncCommitteePeriod": EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+                "zkProofSystem": format!(
+                    "{:?}",
+                    crate::cross_domain::external::ethereum::ZK_PROOF_SYSTEM
+                ),
+            },
+            // The byte layout the parser applied, so an integrator can build
+            // a payload from this response alone instead of reading source.
+            "layout": {
+                "totalBytes": layout::LEN,
+                "finalizedRoot": range(&layout::FINALIZED_ROOT),
+                "finalizedSlot": range(&layout::FINALIZED_SLOT),
+                "attestedSlot": range(&layout::ATTESTED_SLOT),
+                "period": range(&layout::PERIOD),
+                "nextCommitteeRoot": range(&layout::NEXT_COMMITTEE_ROOT),
+                "aggregatePubkey": range(&layout::AGGREGATE_PUBKEY),
+                "signature": range(&layout::SIGNATURE),
+                "participationBits": range(&layout::PARTICIPATION_BITS),
+                "stateRoot": range(&layout::STATE_ROOT),
+            },
+        }))
+    }
+
+    async fn plan_evm_verification(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{
+            plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof,
+            EvmPrecompiles, PrecompileObservation, BLS_G1_ADD_ADDRESS, BLS_G1_MSM_ADDRESS,
+            BLS_G2_ADD_ADDRESS, BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS,
+            BLS_MAP_FP_TO_G1_ADDRESS, BLS_PAIRING_ADDRESS, MAX_ML_DSA_FIELD_BYTES,
+            ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
+        };
+        use crate::cross_domain::external::{
+            EvmPlanError, EvmVerificationMode, EvmVerificationPlan, MessageBinding, MlDsaVariant,
+        };
+        #[derive(serde::Deserialize)]
+        struct Params {
+            /// Raw probe results, converted by the planner itself so an
+            /// address list cannot be mistaken for a capability list.
+            observations: Option<Vec<PrecompileObservation>>,
+            /// Pre-derived capabilities, for callers that already probed.
+            capabilities: Option<EvmPrecompiles>,
+            proof: EvmHybridProof,
+            schedule: Option<EvmGasSchedule>,
+            challenge_window: u64,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid plan request: {e}"), None::<()>)
+        })?;
+        let schedule = params.schedule.unwrap_or_default();
+        // The refusal is surfaced with its rule named, and the deploy-vs-fix
+        // hint depends on which rule fired: a shape problem is the caller's
+        // encoding, a capability problem is the target chain's reality.
+        let refusal_hint = |e: &EvmPlanError| {
+            match e {
+            EvmPlanError::WrongPointLength { .. }
+            | EvmPlanError::BadMlDsaLength { .. }
+            | EvmPlanError::IdentityPoint
+            | EvmPlanError::ZeroChainId => "fix the proof encoding",
+            EvmPlanError::UnboundMessagePoint => {
+                "bind the message point (ZkCircuit or NativeHashToCurve) or drop to a challenge mode"
+            }
+            EvmPlanError::MissingChallengeWindow => "set a non-zero challenge window",
+            EvmPlanError::MlDsaVariantUnavailable { .. } => {
+                "probe the other ML-DSA address or switch the proof's variant"
+            }
+        }
+        };
+        let plan: EvmVerificationPlan = match (&params.observations, params.capabilities) {
+            (Some(observations), _) => plan_from_observations(
+                observations,
+                &params.proof,
+                schedule,
+                params.challenge_window,
+            ),
+            (None, Some(capabilities)) => plan_verification(
+                capabilities,
+                &params.proof,
+                schedule,
+                params.challenge_window,
+            ),
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either `observations` or `capabilities`",
+                    None::<()>,
+                ));
+            }
+        }
+        .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Plan refused: {e}; {}", refusal_hint(&e)),
+                None::<()>,
+            )
+        })?;
+        // A human-readable reading of the mode, so a deployment report does
+        // not require the enum's docs at hand. `FullCryptographic` is the
+        // only immediate finality; every other mode waits out a window.
+        let mode_meaning = match plan.mode {
+            EvmVerificationMode::FullCryptographic => "both halves verify now; immediate finality",
+            EvmVerificationMode::ClassicalOnlyChallenge => {
+                "BLS verifies now; the post-quantum half waits out the challenge window"
+            }
+            EvmVerificationMode::PostQuantumOnlyChallenge => {
+                "ML-DSA verifies now; the BLS half waits out the challenge window"
+            }
+            EvmVerificationMode::OptimisticChallenge => {
+                "no native verifier; the whole claim waits out the challenge window"
+            }
+        };
+        let binding_meaning = match params.proof.message_binding {
+            MessageBinding::ZkCircuit => "message point bound by a circuit",
+            MessageBinding::NativeHashToCurve => "message point bound by a native hash-to-curve",
+            MessageBinding::Unbound => "message point unbound - never full cryptographic",
+        };
+        let variant_name = |v: MlDsaVariant| match v {
+            MlDsaVariant::Fips204 => "FIPS-204",
+            MlDsaVariant::Eip8051Eth => "EIP-8051-ETH",
+        };
+        let capabilities = params
+            .observations
+            .as_deref()
+            .map(EvmPrecompiles::from_observations)
+            .or(params.capabilities);
+        let recognised: Vec<u64> = params
+            .observations
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|o| o.recognised())
+            .map(|o| o.address)
+            .collect();
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "plan": to_val("Plan", serde_json::to_value(&plan))?,
+            "modeMeaning": mode_meaning,
+            "bindingMeaning": binding_meaning,
+            "immediateFinality": plan.cryptographic,
+            "capabilities": to_val("Capabilities", serde_json::to_value(capabilities))?,
+            "postQuantumAvailable": capabilities.is_some_and(|c| c.has_ml_dsa()),
+            "postQuantumVariant": capabilities
+                .and_then(|c| c.ml_dsa_variant())
+                .map(variant_name),
+            "recognisedAddresses": recognised,
+            "calldataGas": params.proof.calldata_gas(schedule),
+            "limits": {
+                "maxMlDsaFieldBytes": MAX_ML_DSA_FIELD_BYTES,
+            },
+            "knownAddresses": {
+                "blsG1Add": BLS_G1_ADD_ADDRESS,
+                "blsG1Msm": BLS_G1_MSM_ADDRESS,
+                "blsG2Add": BLS_G2_ADD_ADDRESS,
+                "blsG2Msm": BLS_G2_MSM_ADDRESS,
+                "blsPairing": BLS_PAIRING_ADDRESS,
+                "blsMapFpToG1": BLS_MAP_FP_TO_G1_ADDRESS,
+                "blsMapFp2ToG2": BLS_MAP_FP2_TO_G2_ADDRESS,
+                "mlDsaFips": ML_DSA_FIPS_ADDRESS,
+                "mlDsaEth": ML_DSA_ETH_ADDRESS,
+            },
+        }))
+    }
+
     async fn register_sovereign_template(
         &self,
         template: crate::domain::SovereignDomainTemplate,
