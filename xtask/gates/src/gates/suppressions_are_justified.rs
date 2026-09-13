@@ -281,8 +281,8 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
-        count: 3,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+        count: 4,
+        reason: "consensus or storage entry points whose arguments are all required and none of which groups into a meaningful struct; the fourth is `accept_storage_reallocation_with_escrow`, whose ticket/operator/payer/epoch-window/economics/proof arguments each come from a different authority and bundling them would hide which fields a caller must supply",
     },
     Budget {
         file: "src/chain/blockchain.rs",
@@ -293,8 +293,14 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "src/chain/chain_actor.rs",
         lint: "clippy::too_many_arguments",
-        count: 3,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+        count: 4,
+        reason: "actor-boundary mirrors of the bridge lock/mint entry points; each argument crosses the channel as part of one message and none groups into a meaningful struct, so bundling them would hide which fields a caller must supply",
+    },
+    Budget {
+        file: "src/cross_domain/external/registry.rs",
+        lint: "clippy::too_many_arguments",
+        count: 2,
+        reason: "`register` takes the full admission surface (network, descriptor, bond, probes, height) and `check` re-verifies that same surface; both lists are load-bearing - dropping an argument silently narrows what admission covers - and a struct would let a caller omit a field by default",
     },
     Budget {
         file: "src/consensus/pos.rs",

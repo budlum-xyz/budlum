@@ -84,6 +84,19 @@ impl DomainKey {
     }
 }
 
+/// String map-key form, so `BTreeMap<DomainKey, _>` survives serde_json.
+/// A named key type carries its own impl next to its definition (the same
+/// convention `ContentId` and `AiRequestId` follow); the 64-hex form matches
+/// the bare `[u8; 32]` impl in `core::map_keys`.
+impl crate::core::map_keys::MapKey for DomainKey {
+    fn to_key_string(&self) -> String {
+        hex::encode(self.0)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        crate::core::map_keys::parse_hex32(s).map(Self)
+    }
+}
+
 /// What the external system hands over. `payload` is opaque to Budlum: only
 /// the adapter that declares itself for it knows how to read it. The two
 /// declared fields beside it exist so the network can index, deduplicate and

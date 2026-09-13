@@ -3355,7 +3355,7 @@ mod tests {
         assert_ne!(root_before, root_after);
     }
 
-    /// Holistic audit (2026-09-09, "her satır sorgula"): the governance
+    /// Holistic audit (2026-09-09, "question every line"): the governance
     /// unfreeze queue is applied at block close AFTER the commit, so at
     /// root time it can be non-empty and is consensus state. It MUST be
     /// bound to the state root: otherwise a restored snapshot could carry a

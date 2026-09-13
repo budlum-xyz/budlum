@@ -175,7 +175,13 @@ fn pieces(template: &str) -> Result<Vec<Piece<'_>>, FillError> {
                 return Err(FillError::MalformedTemplate(raw.to_string()));
             }
             out.push(Piece::Slot(raw));
-            rest = &after_open[close + 2..];
+            // `close` came from `find("}}")` on this same slice, so
+            // `close + 2` is on a char boundary and in bounds - but the
+            // indexing gate refuses raw slicing at runtime, and `get`
+            // preserves the fail-closed refusal if the walk above changes.
+            rest = after_open
+                .get(close + 2..)
+                .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
         } else if rest.starts_with("}}") {
             return Err(FillError::MalformedTemplate("stray `}}`".to_string()));
         } else {

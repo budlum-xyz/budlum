@@ -1,5 +1,11 @@
 //! Deterministic planning for verifying Budlum's hybrid finality proof on an EVM.
 //!
+//! WIRING: unwired - the plan is consumed by the reverse (Budlum-on-EVM)
+//! deployment tooling, not by node consensus; no production module calls it
+//! yet because the contract-side verifier it plans for is not deployed, and
+//! wiring a gas-plan into consensus would assert facts about a chain this
+//! node cannot observe.
+//!
 //! This module does not pretend that a gas estimate is a cryptographic proof.
 //! It records the two facts that decide the reverse direction separately:
 //!
@@ -204,7 +210,11 @@ impl EvmHybridProof {
         let points = [
             ("g1_hashed_message", self.g1_hashed_message.len(), 128usize),
             ("g1_generator", self.g1_generator.len(), 128usize),
-            ("g2_aggregate_pubkey", self.g2_aggregate_pubkey.len(), 256usize),
+            (
+                "g2_aggregate_pubkey",
+                self.g2_aggregate_pubkey.len(),
+                256usize,
+            ),
             (
                 "g2_negated_signature",
                 self.g2_negated_signature.len(),
@@ -354,12 +364,11 @@ pub fn plan_verification(
     if !cryptographic && challenge_window == 0 {
         return Err(EvmPlanError::MissingChallengeWindow);
     }
-    let crypto_gas = (if bls {
-        schedule.bls_pairing_budget
+    let crypto_gas = (if bls { schedule.bls_pairing_budget } else { 0 }).saturating_add(if pq {
+        schedule.ml_dsa_verify
     } else {
         0
-    })
-    .saturating_add(if pq { schedule.ml_dsa_verify } else { 0 });
+    });
     let estimated_gas = schedule
         .transaction_base
         .saturating_add(crypto_gas)

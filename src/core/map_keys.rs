@@ -27,6 +27,8 @@
 //! | `(DomainId, Address)` | `"<domain>:<address hex>"` |
 //! | `(DomainId, DomainId, Address)` | `"<src>:<dst>:<address hex>"` |
 //! | `(DomainId, u64, u64)` | `"<domain>:<height>:<index>"` |
+//! | `(u64, u32)` (height, evidence version) | `"<height>:<version>"` |
+//! | `DomainKey` | the inner 32 bytes as hex (impl in `external/spec.rs`) |
 //! | `(AiRequestId, [u8; 32])` | `"<request hex>:<hash hex>"` |
 //! | `(ContentId, ContentId)` | `"<content hex>:<shard hex>"` |
 //! | `ProofClaimKey` | `"<domain>:<target height>"` |
@@ -170,6 +172,19 @@ impl MapKey for (DomainId, u64, u64) {
             parse_uint(domain, "domain")?,
             parse_uint(height, "height")?,
             parse_uint(index, "index")?,
+        ))
+    }
+}
+
+impl MapKey for (u64, u32) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", self.0, self.1)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [height, version] = parts::<2>(s)?;
+        Ok((
+            parse_uint(height, "height")?,
+            parse_uint(version, "evidence version")?,
         ))
     }
 }

@@ -389,8 +389,12 @@ pub enum TransactionType {
     /// A folder mutation on the social-fi vault (`src/socialfi/vault.rs`).
     ///
     /// Ids only, like the identity door: no owner fields, no folder names -
-    /// what a folder is and what it may hold is `NftRegistry`'s and the
-    /// vault layer's own business, consulted at every operation.
+    /// what a folder is and what it may hold is the business of the nft
+    /// registry and the vault layer, consulted at every operation. (Named
+    /// in prose deliberately: the signing gate reads the enum body's
+    /// identifiers to resolve carried payload types, and a registry type
+    /// named in a doc comment here was resolved as if a transaction
+    /// carried the whole registry.)
     Vault(crate::socialfi::VaultTx),
 }
 

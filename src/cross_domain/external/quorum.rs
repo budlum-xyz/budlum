@@ -1,6 +1,12 @@
 //! Cross-prover agreement: when several provers carry the same external state
 //! and disagree, what the chain does about it.
 //!
+//! WIRING: unwired - the quorum rule fires from the registry's attestation
+//! path once vote-based domains are admitted; admission itself is behind the
+//! same consensus decision the bridge module documents, so today the rule is
+//! exercised by its own tests and nothing in production can reach a
+//! disagreement for it to resolve.
+//!
 //! # The gap this closes
 //!
 //! An adapter answers "is this evidence a valid proof under the declared

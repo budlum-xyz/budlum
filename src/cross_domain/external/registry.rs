@@ -86,12 +86,13 @@ pub struct DomainRegistration {
     /// Both keys, because during a fork window the same height can be
     /// attested under two versions and both are true statements about
     /// different formats.
+    #[serde(with = "crate::core::map_keys")]
     pub attestations: BTreeMap<(u64, u32), FinalityAttestation>,
     /// The prover that carried each accepted evidence digest. Keeping this
     /// beside the attestation makes slashing addressable to the actual
     /// carrier; accepting a proof and later charging an unrelated bond would
     /// turn permissionless registration into arbitrary confiscation.
-    #[serde(default)]
+    #[serde(default, with = "crate::core::map_keys")]
     pub attestation_provers: BTreeMap<[u8; 32], Address>,
     pub provers: BTreeMap<Address, ProverBond>,
 }
@@ -115,6 +116,7 @@ impl DomainRegistration {
 /// The registry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalDomainRegistry {
+    #[serde(with = "crate::core::map_keys")]
     domains: BTreeMap<DomainKey, DomainRegistration>,
     /// Height the registry is at, supplied by the caller on every mutating
     /// call. The registry has no clock of its own, for the same reason the

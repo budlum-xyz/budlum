@@ -84,7 +84,10 @@ fuzz_target!(|data: &[u8]| {
                     asset,
                     owner,
                     recipient,
-                    amount as u128,
+                    // `lock` takes the Bud u64 money type since the currency
+                    // unification (e414d66); the widening cast was a leftover
+                    // from the u128 signature and broke the fuzz build.
+                    amount,
                     expiry,
                 ) {
                     if let Some(ref msg) = event.message {

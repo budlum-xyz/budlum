@@ -10,6 +10,13 @@
 //! The bridge does not approve the external domain and does not compute a
 //! trust score. It only checks identity, versioned evidence, proof binding and
 //! the height/root that the local commitment is about.
+//!
+//! WIRING: unwired - the consensus step that registers this bridge as a
+//! `DomainFinalityAdapter` for a live local domain is a consensus-visible
+//! decision (which registry state feeds it, and how its attestation reaches
+//! the `GlobalBlockHeader` commitment) that must not be taken silently inside
+//! a framework module; until that step is designed and approved, the bridge
+//! is reached by its own tests and the executor path stays fail-closed.
 
 use crate::cross_domain::external::spec::{
     AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, VerificationPolicy,
@@ -76,10 +83,7 @@ impl ExternalDomainFinalityBridge {
     /// Convenience: kept for adapter registration. The descriptor is captured
     /// once so every later proof is checked against the same adapter identity.
     #[must_use]
-    pub fn new(
-        adapter: Box<dyn ExternalFinalityAdapter>,
-        policy: VerificationPolicy,
-    ) -> Self {
+    pub fn new(adapter: Box<dyn ExternalFinalityAdapter>, policy: VerificationPolicy) -> Self {
         let adapter_id = adapter.descriptor().id;
         Self {
             adapter,
@@ -117,7 +121,9 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         let attestation = self
             .adapter
             .verify(&evidence, &self.policy)
-            .map_err(|error| FinalityError(format!("external adapter refused evidence: {error}")))?;
+            .map_err(|error| {
+                FinalityError(format!("external adapter refused evidence: {error}"))
+            })?;
 
         if attestation.adapter != self.adapter_id || evidence.adapter != self.adapter_id {
             return Ok(FinalityStatus::Rejected(
@@ -179,7 +185,8 @@ mod tests {
             &self,
             evidence: &RawConsensusEvidence,
             _policy: &VerificationPolicy,
-        ) -> Result<FinalityAttestation, crate::cross_domain::external::spec::AdapterError> {
+        ) -> Result<FinalityAttestation, crate::cross_domain::external::spec::AdapterError>
+        {
             if evidence != &self.evidence {
                 return Err(
                     crate::cross_domain::external::spec::AdapterError::Malformed {
@@ -208,9 +215,7 @@ mod tests {
             })
         }
 
-        fn fault_probes(
-            &self,
-        ) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
+        fn fault_probes(&self) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
             Vec::new()
         }
     }
@@ -296,10 +301,8 @@ mod tests {
         let (adapter, domain, mut commitment) = fixture();
         let proof = encode_external_evidence(&adapter.evidence).expect("encode");
         commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
-        let bridge = ExternalDomainFinalityBridge::new(
-            Box::new(adapter),
-            VerificationPolicy::proven(100),
-        );
+        let bridge =
+            ExternalDomainFinalityBridge::new(Box::new(adapter), VerificationPolicy::proven(100));
         assert_eq!(
             bridge
                 .verify_finality(&domain, &commitment, &proof)
@@ -307,6 +310,8 @@ mod tests {
             FinalityStatus::Finalized
         );
         let wrong = FinalityProof::Raw(vec![0; 3]);
-        assert!(bridge.verify_finality(&domain, &commitment, &wrong).is_err());
+        assert!(bridge
+            .verify_finality(&domain, &commitment, &wrong)
+            .is_err());
     }
 }
