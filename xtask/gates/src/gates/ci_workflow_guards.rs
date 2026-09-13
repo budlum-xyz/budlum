@@ -284,8 +284,7 @@ pub fn self_test() -> Result<String, String> {
 
 /// Helper for self-test: check workflow text without touching the repo.
 fn check_workflow_path_text(text: &str, require_self_test: bool) -> Result<Vec<String>, String> {
-    let tmp = std::env::temp_dir().join(format!("bud-cwg-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let tmp = super::rust_literals::exclusive_scratch_dir("bud-cwg")?;
     let path = tmp.join("wf.yml");
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
     let res = check_workflow(&path, require_self_test);

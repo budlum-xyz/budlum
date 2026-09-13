@@ -70,6 +70,31 @@ pub struct VerifiedCheckpoint {
     pub set_hash: String,
     /// Epoch the finality certificate belonged to.
     pub epoch: u64,
+    /// The external chain's state root at `height` (64-hex), as recorded in the
+    /// finalized header. A consensus step anchors this via
+    /// `AccountState::anchor_external_root` so the relayer gate can validate
+    /// against it (AR-GE-6 / F-12). Carried here so the verified finality fact
+    /// survives past the verification call.
+    pub state_root: String,
+}
+
+impl VerifiedCheckpoint {
+    /// The external chain's state root at [`Self::height`], as a 32-byte digest
+    /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 / F-12).
+    ///
+    /// Returns `None` when the recorded root is not a canonical 32-byte digest:
+    /// such a value would be refused by the anchor (zero / malformed), so
+    /// surfacing `None` keeps the caller from anchoring garbage.
+    #[must_use]
+    pub fn external_root(&self) -> Option<crate::domain::types::Hash32> {
+        let bytes = hex::decode(&self.state_root).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut root = [0u8; 32];
+        root.copy_from_slice(&bytes);
+        Some(root)
+    }
 }
 
 /// Why a checkpoint failed light-client verification.
@@ -178,25 +203,9 @@ impl LightClient {
     /// export could lower `total_stake` and make a minority certificate pass
     /// the light-client quorum check.
     fn validate_snapshot_metadata(snapshot: &ValidatorSetSnapshot) -> Result<(), LightClientError> {
-        let computed_set_hash = ValidatorSetSnapshot::compute_hash(&snapshot.validators);
-        if snapshot.set_hash != computed_set_hash {
-            return Err(LightClientError::TrustBinding(format!(
-                "snapshot set hash {} != computed set hash {}",
-                snapshot.set_hash, computed_set_hash
-            )));
-        }
-        let computed_total_stake = snapshot
-            .validators
-            .iter()
-            .map(|validator| validator.stake)
-            .fold(0u64, u64::saturating_add);
-        if snapshot.total_stake != computed_total_stake {
-            return Err(LightClientError::TrustBinding(format!(
-                "snapshot total stake {} != computed total stake {}",
-                snapshot.total_stake, computed_total_stake
-            )));
-        }
-        Ok(())
+        snapshot
+            .validate_metadata()
+            .map_err(LightClientError::TrustBinding)
     }
 
     /// Verify a BLS finality certificate checkpoint against the trusted set.
@@ -256,6 +265,7 @@ impl LightClient {
             block_hash: header.hash.clone(),
             set_hash: cert.set_hash.clone(),
             epoch: cert.epoch,
+            state_root: header.state_root.clone(),
         })
     }
 
@@ -314,11 +324,13 @@ impl LightClient {
             .verify_against_snapshot(snapshot, None, None)
             .map_err(LightClientError::VerificationFailed)?;
 
-        let voted_stake: u64 = verified
+        // Summed exactly, like the threshold: a saturated partial sum met a
+        // saturated threshold once the stakes passed the `u64` range.
+        let voted_stake: u128 = verified
             .iter()
             .filter_map(|idx| snapshot.validators.get(*idx))
-            .map(|v| v.stake)
-            .fold(0u64, u64::saturating_add);
+            .map(|v| u128::from(v.stake))
+            .sum();
         if voted_stake < snapshot.quorum_stake() {
             return Err(LightClientError::VerificationFailed(format!(
                 "PQ quorum stake {} < required {}",
@@ -339,6 +351,7 @@ impl LightClient {
             block_hash: header.hash.clone(),
             set_hash: snapshot.set_hash.clone(),
             epoch: blob.epoch,
+            state_root: header.state_root.clone(),
         })
     }
 
@@ -527,9 +540,12 @@ mod tests {
         signers: usize,
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
-        let mut agg =
-            FinalityAggregator::new(snapshot.epoch, header.index, checkpoint_hash.clone());
-        agg.set_validator_snapshot(snapshot.clone());
+        let mut agg = FinalityAggregator::new(
+            snapshot.epoch,
+            header.index,
+            checkpoint_hash.clone(),
+            snapshot.clone(),
+        );
 
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let vote = Prevote {
@@ -679,6 +695,38 @@ mod tests {
         ));
     }
 
+    /// AR-GE-6 / F-12: a verified checkpoint exposes the external state root
+    /// as an anchorable Hash32; non-32-byte / non-hex roots are refused.
+    #[test]
+    fn verified_checkpoint_exposes_anchorable_external_root() {
+        let cp = VerifiedCheckpoint {
+            height: 5,
+            block_hash: "a".repeat(64),
+            set_hash: "b".repeat(64),
+            epoch: 2,
+            state_root: "c".repeat(64),
+        };
+        assert_eq!(cp.external_root(), Some([0xcc; 32]));
+
+        let short = VerifiedCheckpoint {
+            height: 5,
+            block_hash: "a".repeat(64),
+            set_hash: "b".repeat(64),
+            epoch: 2,
+            state_root: "c".repeat(62),
+        };
+        assert_eq!(short.external_root(), None);
+
+        let nonhex = VerifiedCheckpoint {
+            height: 5,
+            block_hash: "a".repeat(64),
+            set_hash: "b".repeat(64),
+            epoch: 2,
+            state_root: "zz".repeat(32),
+        };
+        assert_eq!(nonhex.external_root(), None);
+    }
+
     #[test]
     fn advance_rejects_regression_and_set_change() {
         let (snapshot, sks) = make_bls_snapshot(4, 1000);
@@ -704,6 +752,7 @@ mod tests {
                 block_hash: "0".repeat(64),
                 set_hash: snapshot.set_hash,
                 epoch: 1,
+                state_root: String::new(),
             }),
             Err(LightClientError::NotForward { .. })
         ));
@@ -716,6 +765,7 @@ mod tests {
                 block_hash: "1".repeat(64),
                 set_hash: "f".repeat(64),
                 epoch: 1,
+                state_root: String::new(),
             }),
             Err(LightClientError::SetChanged { .. })
         ));

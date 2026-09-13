@@ -152,9 +152,20 @@ fn main() -> ExitCode {
 
         match verified {
             Ok(verified) => {
+                // The anchorable external root (AR-GE-6 / F-12): the
+                // full-node consensus path anchors exactly this root via
+                // `AccountState::anchor_external_root` once the matching
+                // domain commitment finalizes, and the executor's relayer
+                // gate then matches relayer results against it. Printing it
+                // here lets an operator check the light-client side of that
+                // lifecycle against the full node.
+                let external_root = match verified.external_root() {
+                    Some(root) => format!("0x{}", hex::encode(root)),
+                    None => "-".to_string(),
+                };
                 println!(
-                    "CHECKPOINT VERIFIED height={} hash={} epoch={}",
-                    verified.height, verified.block_hash, verified.epoch
+                    "CHECKPOINT VERIFIED height={} hash={} epoch={} external_root={}",
+                    verified.height, verified.block_hash, verified.epoch, external_root
                 );
                 if let Err(e) = client.advance(&verified) {
                     eprintln!("cannot advance trust anchor: {e}");

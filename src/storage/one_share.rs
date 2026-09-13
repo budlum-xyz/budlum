@@ -135,8 +135,7 @@ impl OneShareRegistry {
         let mut view = SingleScreenView::assemble(profile, &self.endpoint_refs());
         view.device_is_server = self
             .admit_as_server()
-            .map(|a| a.is_device_the_server())
-            .unwrap_or(false);
+            .is_ok_and(|a| a.is_device_the_server());
         view
     }
 

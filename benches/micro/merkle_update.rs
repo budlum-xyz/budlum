@@ -9,7 +9,7 @@ fn main() {
     let account_count = 100_000;
     let mut state = AccountState::new();
 
-    println!("Initializing state with {} entries...", account_count);
+    println!("Initializing state with {account_count} entries...");
     for i in 0..account_count {
         let mut addr_bytes = [0u8; 32];
         addr_bytes[24..32].copy_from_slice(&(i as u64).to_be_bytes());
@@ -31,10 +31,7 @@ fn main() {
 
     let updates_per_block = 100;
     let blocks = 1000;
-    println!(
-        "Starting benchmark: {} blocks with {} updates each...",
-        blocks, updates_per_block
-    );
+    println!("Starting benchmark: {blocks} blocks with {updates_per_block} updates each...");
 
     let start_bench = Instant::now();
     for b in 0..blocks {
@@ -54,12 +51,12 @@ fn main() {
     let duration = start_bench.elapsed();
     let total_updates = blocks * updates_per_block;
 
-    println!("Total Time:       {:?}", duration);
+    println!("Total Time:       {duration:?}");
     println!("Avg per Block:    {:?}", duration / blocks as u32);
     println!("Avg per Update:   {:?}", duration / total_updates as u32);
     println!(
         "Throughput:       {:.2} updates/s",
-        total_updates as f64 / duration.as_secs_f64()
+        f64::from(total_updates) / duration.as_secs_f64()
     );
     println!("------------------------------------------------------------\n");
 }

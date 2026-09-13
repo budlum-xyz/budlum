@@ -1,6 +1,6 @@
 //! On-chain private transfer submit payload (public + spend linkage).
 
-use super::note_registry::NoteHash;
+use super::note_registry::{is_note_hash, NoteHash};
 use serde::{Deserialize, Serialize};
 
 /// Max inputs/outputs per private transfer (DoS bound).
@@ -46,6 +46,21 @@ impl PrivateTransferSubmit {
             return Err(format!(
                 "private transfer: exceeds MAX_PRIVATE_IO ({MAX_PRIVATE_IO})"
             ));
+        }
+        // Every hash here is a packed field element or it is not a note. See
+        // `is_note_hash` for why the registry must never see another shape.
+        let hashes = self
+            .spent_commitments
+            .iter()
+            .chain(&self.nullifiers)
+            .chain(&self.output_commitments);
+        for h in hashes {
+            if !is_note_hash(h) {
+                return Err(
+                    "private transfer: a commitment or nullifier is not a packed field element"
+                        .into(),
+                );
+            }
         }
         // The authorization signature can take one of two shapes: the older
         // Ed25519 (64 bytes) or ML-DSA-87 (4627 bytes). The length is only a
@@ -97,10 +112,10 @@ mod tests {
     use super::*;
 
     fn submit_with_sig(len: usize) -> PrivateTransferSubmit {
-        let nullifiers = vec![[1u8; 32]];
-        let outputs = vec![[2u8; 32]];
+        let nullifiers = vec![budlum_note_packing::hash_from_field(1)];
+        let outputs = vec![budlum_note_packing::hash_from_field(2)];
         PrivateTransferSubmit {
-            spent_commitments: vec![[3u8; 32]],
+            spent_commitments: vec![budlum_note_packing::hash_from_field(3)],
             nullifiers: nullifiers.clone(),
             output_commitments: outputs.clone(),
             authorization_sig: vec![0u8; len],
@@ -136,6 +151,23 @@ mod tests {
                 .validate_shape()
                 .expect_err("an invalid length has to be refused");
             assert!(err.contains("authorization_sig"), "{err}");
+        }
+    }
+    /// A hash that is not a packed field element is refused at the shape gate,
+    /// whichever of the three lists it sits in.
+    #[test]
+    fn a_hash_that_is_not_a_packed_element_is_refused() {
+        let mut foreign = budlum_note_packing::hash_from_field(9);
+        foreign[31] = 1;
+        for slot in 0..3 {
+            let mut sub = submit_with_sig(ED25519_AUTH_SIG_LEN);
+            match slot {
+                0 => sub.spent_commitments[0] = foreign,
+                1 => sub.nullifiers[0] = foreign,
+                _ => sub.output_commitments[0] = foreign,
+            }
+            let err = sub.validate_shape().unwrap_err();
+            assert!(err.contains("packed field element"), "slot {slot}: {err}");
         }
     }
 }

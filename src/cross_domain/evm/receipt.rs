@@ -149,9 +149,9 @@ impl EthReceipt {
     /// Bridge: `topic0` is an event signature such as
     /// keccak256("Deposit(address,uint256,bytes32,uint256)"); `emitter_address` is the bridge contract address.
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
-        self.logs.iter().find(|log| {
-            log.address == emitter && log.topics.first().map(|t| t == topic0).unwrap_or(false)
-        })
+        self.logs
+            .iter()
+            .find(|log| log.address == emitter && log.topics.first().is_some_and(|t| t == topic0))
     }
 }
 

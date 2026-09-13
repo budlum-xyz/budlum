@@ -106,7 +106,9 @@ pub fn operator_eligible(registry: &AiRegistry, operator: &Address) -> bool {
 ///
 /// # Errors
 ///
-/// Errors if the request carries no perception declaration or the model is not registered.
+/// Errors if the request carries no perception declaration, the model did
+/// not declare the modality, `input_ref` is a malformed Pollen reference or
+/// names another asset, or the commitment is not canonical.
 pub fn admit_inference_request(
     registry: &crate::ai::AiRegistry,
     req: &crate::ai::types::AiInferenceRequest,
@@ -130,8 +132,12 @@ pub fn admit_inference_request(
     perception
         .check_admissible(modalities)
         .map_err(|e| e.to_string())?;
-    if let Ok(Some(data_ref)) =
-        crate::pollen::data_rights::AiDataInputRef::decode(req.input_ref.as_slice())
+    // A reference that starts like a Pollen input_ref but does not decode is
+    // refused, not skipped: `Ok(None)` (no Pollen prefix) and `Err` used to
+    // take the same path, so a malformed reference passed with no asset
+    // comparison at all.
+    if let Some(data_ref) =
+        crate::pollen::data_rights::AiDataInputRef::decode(req.input_ref.as_slice())?
     {
         if data_ref.asset_id != perception.asset_id {
             return Err(
@@ -605,6 +611,24 @@ mod tests {
         let mut req = text_request(model_id, Some(text_perception()));
         req.input_ref = crate::ai::types::BoundedBytes::try_new(data_ref.encode()).unwrap();
         assert!(super::admit_inference_request(&registry, &req).is_err());
+    }
+
+    /// A reference with the Pollen prefix but the wrong length is malformed.
+    /// It used to pass admission with no asset comparison, because the decode
+    /// error was discarded on the same path as "not a Pollen reference".
+    #[test]
+    fn admit_rejects_a_malformed_pollen_input_ref() {
+        let mut registry = AiRegistry::new();
+        let model_id =
+            super::inference::register_ai_model(&mut registry, Address([1; 32]), [9u8; 32])
+                .unwrap();
+        let mut truncated = crate::pollen::data_rights::POLLEN_AI_INPUT_REF_PREFIX.to_vec();
+        truncated.extend_from_slice(&[7u8; 16]);
+        let mut req = text_request(model_id, Some(text_perception()));
+        req.input_ref = crate::ai::types::BoundedBytes::try_new(truncated.clone()).unwrap();
+        req.input_commitment = crate::ai::types::canonical_input_commitment(&truncated);
+        let err = super::admit_inference_request(&registry, &req).unwrap_err();
+        assert!(err.contains("Malformed Pollen AI input_ref"), "{err}");
     }
 
     #[test]

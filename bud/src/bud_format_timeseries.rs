@@ -21,7 +21,7 @@
 use sha3::{Digest, Sha3_256};
 
 pub const TS_MAGIC: [u8; 8] = *b"\xB5TSSR\0\0\0";
-pub const TS_VERSION: u8 = 1;
+pub const TS_VERSION: u8 = 2;
 pub const MAX_POINTS: usize = 100_000_000;
 
 /// The time series transform: `(ts, f64)` pairs into a stream of time deltas and
@@ -150,12 +150,14 @@ impl TimeSeriesColumnar {
                 let meaningful = 64 - lz - tz;
                 // The control bits would say whether the leading and trailing zero
                 // counts match the previous ones; kept simple here by always writing
-                // them.
+                // them. `x` is non-zero, so `meaningful` is 1..=64, and 64 does
+                // not fit the six-bit field: version 1 wrote `64 & 0x3F == 0`,
+                // the decoder took the "unchanged" branch, and the 64 payload
+                // bits it never consumed shifted every later point. The field
+                // now carries `meaningful - 1`, which is 0..=63.
                 w.write_bits(lz as u64, 6);
-                w.write_bits(meaningful as u64, 6);
-                if meaningful > 0 {
-                    w.write_bits(x >> tz, meaningful);
-                }
+                w.write_bits((meaningful - 1) as u64, 6);
+                w.write_bits(x >> tz, meaningful);
             }
             prev_ts = *ts;
             prev_value = *v;
@@ -192,20 +194,19 @@ impl TimeSeriesColumnar {
             }
             let ts = prev_ts.checked_add(delta)?;
             // The value XOR.
-            let v: f64;
-            if !r.read_bit()? {
-                v = prev_value;
-            } else {
+            let v = if r.read_bit()? {
                 let lz = r.read_bits(6)? as u8;
-                let meaningful = r.read_bits(6)? as u8;
-                if meaningful > 0 {
-                    let m = r.read_bits(meaningful)?;
-                    let x = m << (64 - lz - meaningful);
-                    v = f64::from_bits(prev_value.to_bits() ^ x);
-                } else {
-                    v = prev_value;
-                }
-            }
+                let meaningful = r.read_bits(6)? as u8 + 1;
+                // `lz + meaningful` is at most 64 for a stream the encoder
+                // wrote; a crafted stream can say more, and the shift below
+                // would then overflow. Refuse it rather than panic.
+                let shift = 64u8.checked_sub(lz.checked_add(meaningful)?)?;
+                let m = r.read_bits(meaningful)?;
+                // `shift` is below 64 here: `meaningful` is at least 1.
+                f64::from_bits(prev_value.to_bits() ^ (m << shift))
+            } else {
+                prev_value
+            };
             out.push((ts, v));
             prev_ts = ts;
             prev_value = v;
@@ -346,6 +347,22 @@ mod tests {
         }
         let col = TimeSeriesColumnar::encode(&series).expect("encode");
         assert_eq!(col.decode().unwrap(), series, "random values stay lossless");
+    }
+
+    /// A sign change with a one-bit mantissa difference makes the XOR of two
+    /// consecutive values set bit 63 and bit 0 at once: 64 meaningful bits.
+    /// Version 1 wrote that width as 0 and lost every point after it.
+    #[test]
+    fn a_sixty_four_bit_xor_survives_the_round_trip() {
+        let flipped = f64::from_bits(0xBFF0_0000_0000_0001);
+        assert_eq!(1.0f64.to_bits() ^ flipped.to_bits(), 0x8000_0000_0000_0001);
+        let pts = vec![(0, 1.0), (1, flipped), (2, 2.5), (3, -7.25), (4, 2.5)];
+        let enc = TimeSeriesColumnar::encode(&pts).unwrap();
+        assert_eq!(enc.decode().unwrap(), pts);
+        // The full-width case at both ends of the stream too.
+        let pts = vec![(0, -1.0), (1, f64::from_bits(0x3FF0_0000_0000_0001))];
+        let enc = TimeSeriesColumnar::encode(&pts).unwrap();
+        assert_eq!(enc.decode().unwrap(), pts);
     }
 
     #[test]

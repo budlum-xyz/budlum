@@ -37,6 +37,15 @@ impl AiModelId {
     }
 }
 
+impl crate::core::map_keys::MapKey for AiModelId {
+    fn to_key_string(&self) -> String {
+        self.to_hex()
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        crate::core::map_keys::parse_hex32(s).map(Self)
+    }
+}
+
 /// Canonical AI Inference Request Identifier (`[u8; 32]`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -50,6 +59,15 @@ impl AiRequestId {
 
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+}
+
+impl crate::core::map_keys::MapKey for AiRequestId {
+    fn to_key_string(&self) -> String {
+        self.to_hex()
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        crate::core::map_keys::parse_hex32(s).map(Self)
     }
 }
 
@@ -190,18 +208,24 @@ impl AiModelSpec {
         }
         if self.max_input_ref_bytes > MAX_INFERENCE_REF_BYTES as u64 {
             return Err(format!(
-                "max_input_ref_bytes exceeds allowed maximum {}",
-                MAX_INFERENCE_REF_BYTES
+                "max_input_ref_bytes exceeds allowed maximum {MAX_INFERENCE_REF_BYTES}"
             ));
         }
         if self.max_output_ref_bytes > MAX_INFERENCE_REF_BYTES as u64 {
             return Err(format!(
-                "max_output_ref_bytes exceeds allowed maximum {}",
-                MAX_INFERENCE_REF_BYTES
+                "max_output_ref_bytes exceeds allowed maximum {MAX_INFERENCE_REF_BYTES}"
             ));
         }
         if self.request_deadline_blocks == 0 || self.result_deadline_blocks == 0 {
             return Err("Deadlines must be >= 1 block".into());
+        }
+        if self.request_deadline_blocks > crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+            || self.result_deadline_blocks > crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+        {
+            return Err(format!(
+                "Deadline windows must be <= {} blocks",
+                crate::ai::registry::MAX_DEADLINE_HORIZON_BLOCKS
+            ));
         }
         // The execution_dims bounds: None means an old record (those cannot
         // ask for an execution proof, which is checked above). Some means at
@@ -1032,7 +1056,7 @@ impl AiAgentPaymentSettlement {
         } else {
             hasher.update(b"no_rid");
         }
-        hasher.update([self.require_proof as u8]);
+        hasher.update([u8::from(self.require_proof)]);
         hasher.update(self.submitted_at_block.to_le_bytes());
         hasher.update(self.expiry_block.to_le_bytes());
         hasher.update(self.settled_at_block.to_le_bytes());

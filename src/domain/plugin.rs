@@ -243,9 +243,9 @@ pub fn default_domain(
     let adapter_str: String = finality_adapter.into();
     let pow_parameters = if adapter_str == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
         Some(PoWDomainParameters {
-            min_difficulty_bits: 1,
+            min_difficulty_bits: 8,
             max_difficulty_bits: 120,
-            min_cumulative_work: 1,
+            min_cumulative_work: 6 * (1u128 << 8),
             max_headers: 4096,
         })
     } else {
@@ -273,6 +273,7 @@ pub fn default_domain(
         // A domain created by a plugin is also born closed to zk proofs.
         // Programs are added later, explicitly.
         zk_program_allowlist: Vec::new(),
+        plugin_code_hash: None,
         bridge_enabled: true,
         block_hash_scheme: RootScheme::BudlumBlockV2,
         state_root_scheme: RootScheme::BudlumBlockV2,

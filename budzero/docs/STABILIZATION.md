@@ -333,7 +333,7 @@ bud-vm: 6 unit tests + 2 fixture tests
 bud-compiler: 2 unit tests
 bud-state: 4 unit tests
 
-Total: 51 tests, 0 failures
+Total: 0 failures (the count moves with the tree; CI measures it)
 ```
 
 ---

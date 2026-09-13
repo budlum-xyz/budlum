@@ -97,6 +97,30 @@ A wrong match is safe: losslessness is independent of the type (Section 1).
 - The IMPLEMENTATION of this spec is the `bud_format_container` tests (roundtrip, tampering, bombs,
   a mini-fuzz); if the spec changes the tests must change too (the proof chain).
 
+### 6.1 Public API changes that break callers
+
+The `bud_core` crate sits on the 0.x line, so a breaking change is allowed but is written down here
+with what a downstream caller has to do.
+
+- `PdfStreamSplit::decode` returns `Option<Vec<u8>>` (it returned `Vec<u8>`). `None` means the
+  split's offsets do not fit its text, which only a hand-built or forged split can produce;
+  `from_blob` already refused such offsets, so a split that came off the wire cannot reach `None`.
+  Callers that previously wrote `split.decode()` now handle the `None` arm the same way they handle
+  a `from_blob` refusal: refuse the blob, do not pad or guess.
+- `TenantMultifileStore` deltas open with a framing version byte (`DELTA_VERSION`, `0x10`), and a
+  changed block is framed as `0x01 || len (u32 LE) || block`. `apply_delta` refuses a delta whose
+  first byte is not that version. A delta written by the earlier framing (`0x01 || block`, the
+  length implied by the chunk size, no version byte) starts with a block marker and is refused
+  rather than decoded under the new rule; no such delta was ever stored on chain (the multifile
+  blob carries chunks and chunk lists, deltas were only ever a return value), so no reader for it
+  is kept. A caller holding one recomputes it with `add_delta` from the two versions.
+- The engine shard pack (`engine_store(.., erasure = true)`) carries a SHA3-256 digest in front of
+  every shard (`BDLM_BUD_SHARD_V1`, 32 bytes, before the 4-byte length). `open_shard_pack` reads any
+  four shards whose digest still matches and refuses a pack with fewer than four; a pack written
+  without the digests is refused. There is no deployed pack in the old layout (the engine and its
+  erasure flag are not on any storage deal yet), so no migration is provided; a caller holding one
+  re-stores from the original bytes.
+
 ## 8. Lossless JSON columnar transform (bud_format_columnar, an invention - 2026-08-16)
 
 A transform BEFORE compression: an array of JSON records is split into column arrays (the values of

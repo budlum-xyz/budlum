@@ -224,7 +224,7 @@ mod tests {
         let mut digests = Vec::new();
         for seq in 0..3 {
             let d = enc.drop_at(seq);
-            let frame = pack_frame(&stream, &d);
+            let frame = pack_frame(&stream, &d).unwrap();
             let _ = frame;
             digests.push(frame_digest(&stream, seq, &d.to_bytes()));
         }

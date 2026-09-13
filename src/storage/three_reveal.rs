@@ -90,9 +90,12 @@ impl RevealSession {
     }
 
     /// Optical frame at `seq` (ephemeral).
-    #[must_use]
-    pub fn frame_at(&self, seq: u32) -> Vec<u8> {
-        self.emitter.frame_at(seq)
+    ///
+    /// # Errors
+    ///
+    /// A drop that does not fit one frame.
+    pub fn frame_at(&self, seq: u32) -> Result<Vec<u8>, RevealError> {
+        Ok(self.emitter.frame_at(seq)?)
     }
 
     /// Frames `seq_start..seq_start + count` with the fold a client checks them
@@ -140,7 +143,7 @@ mod tests {
         let (full, packed) = sample();
         let recipe = ThreeRecipe::Public(full.clone());
         let s = RevealSession::open(&recipe, None, &packed, false).unwrap();
-        assert!(!s.frame_at(0).is_empty());
+        assert!(!s.frame_at(0).unwrap().is_empty());
     }
 
     #[test]

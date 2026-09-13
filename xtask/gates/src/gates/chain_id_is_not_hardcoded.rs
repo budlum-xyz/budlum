@@ -54,13 +54,16 @@ fn strip_test_modules(text: &str) -> String {
         };
         let mut depth = 0usize;
         let mut end = None;
-        for (i, c) in after.char_indices().skip(brace) {
+        // `brace` is a byte offset; `skip(brace)` counted characters, so a
+        // wide character before the brace moved the start past it and the
+        // first `}` took `depth` below zero.
+        for (i, c) in after[brace..].char_indices() {
             if c == '{' {
                 depth += 1;
             } else if c == '}' {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    end = Some(i + 1);
+                    end = Some(brace + i + 1);
                     break;
                 }
             }
@@ -239,6 +242,15 @@ pub fn self_test() -> Result<String, String> {
     if !stripped.contains("fn c() {}") {
         return Err(String::from(
             "the brace counter ate code after the test module",
+        ));
+    }
+    // A wide character between the attribute and the brace: the old
+    // character-count skip started past the brace here and underflowed.
+    let wide = "#[cfg(test)] // \u{00f6}l\u{00e7}\u{00fc}m\nmod tests { let pi = P { chain_id: 1, }; }\nfn d() {}\n";
+    let stripped = strip_test_modules(wide);
+    if stripped.contains("chain_id: 1") || !stripped.contains("fn d() {}") {
+        return Err(String::from(
+            "a wide character before the test module brace broke the strip",
         ));
     }
 

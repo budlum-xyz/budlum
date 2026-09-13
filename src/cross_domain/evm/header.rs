@@ -44,6 +44,9 @@ pub enum HeaderError {
     /// The N-confirmation threshold was not met (too few confirmation
     /// headers).
     InsufficientConfirmations,
+    /// The caller demanded zero confirmations. A target with no header above
+    /// it can still be reorged away, so a zero window is not a window.
+    ZeroConfirmations,
 }
 
 impl std::fmt::Display for HeaderError {
@@ -55,6 +58,7 @@ impl std::fmt::Display for HeaderError {
             HeaderError::InsufficientConfirmations => {
                 write!(f, "header: insufficient confirmations")
             }
+            HeaderError::ZeroConfirmations => write!(f, "header: zero confirmations demanded"),
         }
     }
 }
@@ -114,11 +118,25 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
 /// above the target header and that their chain is canonical
 /// (parent_hash -> child.hash, number+1). Once the reorg window has passed, the
 /// target counts as finalized.
+///
+/// `required` is the caller's demand and it must be at least one: with zero
+/// the loop below runs over nothing and any decodable header "finalises"
+/// itself. The adapter holds the configured floor and refuses a proof that
+/// demands less than it before this function runs.
+///
+/// # Errors
+///
+/// `ZeroConfirmations` for a zero demand, `InsufficientConfirmations` when
+/// fewer headers than demanded were supplied, `ChainBroken` when a header
+/// does not link to the one below it by hash and by number.
 pub fn verify_chain(
     target: &EthHeader,
     confirmations: &[EthHeader],
     required: u32,
 ) -> Result<(), HeaderError> {
+    if required == 0 {
+        return Err(HeaderError::ZeroConfirmations);
+    }
     if (confirmations.len() as u32) < required {
         return Err(HeaderError::InsufficientConfirmations);
     }
@@ -128,7 +146,9 @@ pub fn verify_chain(
         if hdr.parent_hash != prev_hash {
             return Err(HeaderError::ChainBroken);
         }
-        if hdr.number != prev_number + 1 {
+        // `number` is decoded from relayer-supplied bytes; at `u64::MAX` a
+        // plain `+ 1` overflows, which is a panic on remote input.
+        if Some(hdr.number) != prev_number.checked_add(1) {
             return Err(HeaderError::ChainBroken);
         }
         prev_hash = hdr.hash;
@@ -243,6 +263,36 @@ mod tests {
         assert_eq!(
             verify_chain(&target, &[one], 64).unwrap_err(),
             HeaderError::InsufficientConfirmations
+        );
+    }
+
+    /// A zero demand is refused before any header is looked at. With the
+    /// old code `verify_chain(&target, &[], 0)` returned `Ok`, so a proof
+    /// that named zero confirmations finalised its own target.
+    #[test]
+    fn verify_chain_refuses_a_zero_demand() {
+        let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
+        let one = decode_header(&header_bytes(target.hash, 11, [0u8; 32])).unwrap();
+        assert_eq!(
+            verify_chain(&target, &[], 0).unwrap_err(),
+            HeaderError::ZeroConfirmations
+        );
+        assert_eq!(
+            verify_chain(&target, std::slice::from_ref(&one), 0).unwrap_err(),
+            HeaderError::ZeroConfirmations
+        );
+        assert!(verify_chain(&target, &[one], 1).is_ok());
+    }
+
+    /// A target at `u64::MAX` cannot have a child by number. The old
+    /// `prev_number + 1` overflowed here, a panic on relayer bytes.
+    #[test]
+    fn verify_chain_treats_a_number_at_the_ceiling_as_broken() {
+        let target = decode_header(&header_bytes([1u8; 32], u64::MAX, [0u8; 32])).unwrap();
+        let child = decode_header(&header_bytes(target.hash, 0, [0u8; 32])).unwrap();
+        assert_eq!(
+            verify_chain(&target, &[child], 1).unwrap_err(),
+            HeaderError::ChainBroken
         );
     }
 

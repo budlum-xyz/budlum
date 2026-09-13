@@ -49,14 +49,10 @@ pub fn check_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, St
 /// required test must pass, and the same log minus the first test must fail.
 /// This is the shell gate's self-test, one for one.
 pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let log = std::env::temp_dir().join(format!(
-        "budlum-gates-named-{}-{nanos}.log",
-        std::process::id()
-    ));
+    // The log lives in a directory this call created exclusively, so a
+    // pre-planted symlink at a guessable name cannot redirect the write.
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-named")?;
+    let log = dir.join("tests.log");
 
     let mut full = String::new();
     for n in tests {
@@ -64,7 +60,7 @@ pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
     }
     fs::write(&log, &full).map_err(|e| format!("cannot stage log: {e}"))?;
     if check_log(&log, tests, subject).is_err() {
-        let _ = fs::remove_file(&log);
+        let _ = fs::remove_dir_all(&dir);
         return Err(format!(
             "{subject} self-test: a log with every required test was rejected"
         ));
@@ -76,12 +72,12 @@ pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
     }
     fs::write(&log, &missing).map_err(|e| format!("cannot stage bad log: {e}"))?;
     if check_log(&log, tests, subject).is_ok() {
-        let _ = fs::remove_file(&log);
+        let _ = fs::remove_dir_all(&dir);
         return Err(format!(
             "{subject} self-test: a log missing a required test was accepted"
         ));
     }
 
-    let _ = fs::remove_file(&log);
+    let _ = fs::remove_dir_all(&dir);
     Ok(format!("{subject} gate self-test OK"))
 }

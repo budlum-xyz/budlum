@@ -37,10 +37,7 @@ async fn main() {
     });
 
     // 2. Pre-generate Transactions & Fund Accounts
-    println!(
-        "Generating {} unique senders and funding them...",
-        sender_count
-    );
+    println!("Generating {sender_count} unique senders and funding them...");
     let mut keypairs = Vec::new();
     for _ in 0..sender_count {
         let kp = KeyPair::generate().unwrap();
@@ -51,7 +48,7 @@ async fn main() {
         keypairs.push(kp);
     }
 
-    println!("Generating {} transactions...", tx_count);
+    println!("Generating {tx_count} transactions...");
     let start_gen = Instant::now();
 
     let txs: Vec<Transaction> = (0..tx_count)
@@ -70,7 +67,7 @@ async fn main() {
         })
         .collect();
     let gen_duration = start_gen.elapsed();
-    println!("Generation time: {:?}", gen_duration);
+    println!("Generation time: {gen_duration:?}");
 
     // 3. Measure INGEST TPS (Mempool Internal Throughput)
     println!("Starting Ingestion (Internal Channel)...");
@@ -129,15 +126,12 @@ async fn main() {
     // 5. Results
     println!("\n--------------------------------------------------");
     println!("BENCHMARK RESULTS (Internal Pipeline):");
-    println!(
-        "Total Transactions: {} (Failed Ingest: {})",
-        processed, ingest_failed
-    );
-    println!("Total Blocks:       {}", blocks);
+    println!("Total Transactions: {processed} (Failed Ingest: {ingest_failed})");
+    println!("Total Blocks:       {blocks}");
     println!("--------------------------------------------------");
-    println!("TX Generation:      {:?}", gen_duration);
-    println!("INGEST TPS (Int):   {:.2} tx/s", ingest_tps);
-    println!("EXECUTION TPS:      {:.2} tx/s", exec_tps);
+    println!("TX Generation:      {gen_duration:?}");
+    println!("INGEST TPS (Int):   {ingest_tps:.2} tx/s");
+    println!("EXECUTION TPS:      {exec_tps:.2} tx/s");
     if blocks > 0 {
         println!("Avg Block Build:   {:?}", exec_duration / blocks as u32);
     } else {

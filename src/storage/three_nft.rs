@@ -78,13 +78,13 @@ impl ThreeNftMeta {
             &self.recipe_commitment,
             self.video_commitment
                 .as_ref()
-                .map(|c| c.as_slice())
+                .map(<[u8; 32]>::as_slice)
                 .unwrap_or(&[]),
             &[self.visibility as u8],
             &[self.preview as u8],
             self.preview_content_id
                 .as_ref()
-                .map(|c| c.as_slice())
+                .map(<[u8; 32]>::as_slice)
                 .unwrap_or(&[]),
         ])
     }

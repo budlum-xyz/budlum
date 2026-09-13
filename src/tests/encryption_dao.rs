@@ -24,7 +24,6 @@ fn dao_encryption_policy_update_changes_state_root_without_decrypt_authority() {
     let proposer = addr(1);
     let mut state = AccountState::new();
     state.add_balance(&proposer, 100);
-    let before = state.calculate_state_root();
 
     state
         .governance
@@ -37,6 +36,11 @@ fn dao_encryption_policy_update_changes_state_root_without_decrypt_authority() {
         .unwrap();
     let proposal = state.governance.find_proposal_mut(0).unwrap();
     proposal.status = ProposalStatus::Passed;
+    // A passed proposal is executed only once its activation epoch has
+    // arrived. The chain is moved there before the root is measured, so the
+    // difference below is the executed policy and not the epoch counter.
+    state.epoch_index = proposal.activation_epoch();
+    let before = state.calculate_state_root();
 
     Executor::apply_block_checked(&mut state, &[], None).unwrap();
     assert_eq!(

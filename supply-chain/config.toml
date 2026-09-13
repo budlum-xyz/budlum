@@ -45,14 +45,13 @@ audit-as-crates-io = true
 [policy."libp2p-allow-block-list"]
 audit-as-crates-io = true
 
-# libp2p-connection-limits: git checkout'u 0.7.0 diyor, crates.io'da yayimlanmis
-# the highest version is 0.6.0. So this package has NO counterpart on crates.io; "count it as the same"
-# was not correct and cargo vet ran no scan at all. `false` counts the package as
-# first party: no crates.io audit is looked for, and its source is the commit in Cargo.lock
-# stays fixed by the pin. If a published 0.7.0 appears this can go back to
-# `true`.
+# libp2p-connection-limits: the git checkout says 0.7.0 while crates.io has
+# published up to 0.6.0. cargo-vet handles this precisely for a git
+# dependency: the base audit covers the published 0.6.0 and a delta audit
+# covers `0.6.0 -> 0.7.0@git:<rev>` (both recorded in audits.toml), so the
+# package stays under enforcement instead of being counted as first party.
 [policy."libp2p-connection-limits"]
-audit-as-crates-io = false
+audit-as-crates-io = true
 
 [policy."libp2p-core"]
 audit-as-crates-io = true

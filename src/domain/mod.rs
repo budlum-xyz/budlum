@@ -3,6 +3,7 @@ pub mod finality_adapter;
 pub mod fork_choice;
 pub mod plugin;
 pub mod plugin_registry;
+pub mod regeneration_stage;
 pub mod registry;
 pub mod sovereign;
 pub mod storage_deal;

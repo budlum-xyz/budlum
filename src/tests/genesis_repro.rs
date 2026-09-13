@@ -41,8 +41,7 @@ use std::sync::Arc;
 /// Yoksa `GenesisConfig::new` fallback'i.
 fn probe_chain(chain_id: u64) -> Vec<String> {
     let config = Network::from_chain_id(chain_id)
-        .map(GenesisConfig::for_network)
-        .unwrap_or_else(|| GenesisConfig::new(chain_id));
+        .map_or_else(|| GenesisConfig::new(chain_id), GenesisConfig::for_network);
 
     let block = config.build_genesis_block();
     let mut rebuilt_state = config.build_state();
@@ -127,6 +126,11 @@ mod tests {
 
         let digest = digest_of(&observations);
         println!("GENESIS_HASH={digest}");
+        // The devnet block-0 hash `ops/scripts/docker-smoke-mainnet.sh` pins
+        // as `DEVNET_GENESIS_HASH`; printed so a header-preimage change can
+        // be carried into the pin from this test's output.
+        let devnet = GenesisConfig::for_network(Network::Devnet).build_genesis_block();
+        println!("DEVNET_GENESIS_BLOCK_HASH={}", devnet.hash);
 
         // The false-green locks: the digest has a fixed length, and the
         // observation vector cannot pass silently without 4 chains times at least

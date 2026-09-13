@@ -91,6 +91,12 @@ fn parse(path: &Path, src: &str) -> Workflow {
 
     let mut current: Option<String> = None;
     let mut has_body = false;
+    // The indentation of the current job's `steps:` key, while one is open.
+    // A `uses:` is a step's when it sits under that key, whatever indentation
+    // YAML happens to give the list: `- uses:` at the same column as `steps:`
+    // is a valid sequence, and classifying by column alone read it as the
+    // job's own reusable-workflow call and skipped both step checks.
+    let mut steps_indent: Option<usize> = None;
 
     for (i, raw) in lines.iter().enumerate().skip(jobs_at + 1) {
         let line = raw.trim_end();
@@ -115,17 +121,24 @@ fn parse(path: &Path, src: &str) -> Workflow {
             wf.jobs.push(id.clone());
             current = Some(id);
             has_body = false;
+            steps_indent = None;
             continue;
         }
 
         let trimmed = line.trim_start();
         if trimmed.starts_with("steps:") {
             has_body = true;
+            steps_indent = Some(ind);
+            continue;
+        }
+        // Another job-level key at or left of `steps:` closes the step list.
+        if steps_indent.is_some_and(|s| ind < s || (ind == s && !trimmed.starts_with('-'))) {
+            steps_indent = None;
         }
         // A step is a list item, so its key arrives as `- uses:` rather than
         // `uses:`. Missing that read every step-level reference as absent,
         // which made the gate pass the exact file it was written for.
-        let after_dash = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        let after_dash = trimmed.strip_prefix('-').map_or(trimmed, str::trim_start);
         if let Some(rest) = after_dash.strip_prefix("uses:") {
             // An inline `# comment` is not part of the reference. Every pin
             // in this tree carries one naming the tag the SHA came from, so
@@ -139,9 +152,10 @@ fn parse(path: &Path, src: &str) -> Workflow {
                 .trim_matches('"')
                 .trim_matches('\'')
                 .to_string();
-            // A `uses:` two levels in from the job id is the job's own
-            // reusable-workflow call. Deeper than that, it is inside a step.
-            let job_level = ind <= job_indent + 2;
+            // Under an open `steps:` the reference is a step's, however it
+            // is indented. Outside one, at the job's own key depth, it is the
+            // job's reusable-workflow call.
+            let job_level = steps_indent.is_none() && ind <= job_indent + 2;
             if job_level {
                 has_body = true;
             }
@@ -400,13 +414,9 @@ fn self_test_classifiers(problems: &mut Vec<String>) {
     }
 }
 
-/// # Errors
-///
-/// The canaries that did not behave.
-pub fn self_test() -> Result<String, String> {
-    let mut problems: Vec<String> = Vec::new();
-    let root = Path::new("/tmp/does-not-exist");
-
+/// The step-level reusable-workflow canaries: the shape that killed
+/// extra-tooling.yml, in the two list layouts YAML accepts.
+fn self_test_step_level_workflow(problems: &mut Vec<String>, root: &Path) {
     // The shape that killed extra-tooling.yml: a reusable workflow under a
     // step. Must be refused.
     let killed = "\
@@ -425,6 +435,36 @@ jobs:
             "VACUOUS: a reusable workflow called from a step was accepted: {f:?}"
         ));
     }
+
+    // The same shape with the list at the column of `steps:`, which YAML
+    // allows, and with two spaces after the dash. Read by column alone this
+    // was the job's own call, and both step checks were skipped.
+    let same_column = "\
+name: X
+on: push
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+    -  uses: slsa-framework/slsa-github-generator/.github/workflows/generator.yml@v1.9.0
+";
+    let wf = parse(Path::new("x.yml"), same_column);
+    let f = findings_for(&wf, root);
+    if !f.iter().any(|x| x.contains("reusable workflow")) {
+        problems.push(format!(
+            "VACUOUS: a step sequence at the column of `steps:` was read as job level: {f:?}"
+        ));
+    }
+}
+
+/// # Errors
+///
+/// The canaries that did not behave.
+pub fn self_test() -> Result<String, String> {
+    let mut problems: Vec<String> = Vec::new();
+    let root = Path::new("/tmp/does-not-exist");
+
+    self_test_step_level_workflow(&mut problems, root);
 
     // The same reference at job level is legal and must pass.
     let legal = "\
@@ -513,8 +553,9 @@ jobs:
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
-        "workflow gate self-test OK: a reusable workflow called from a step, a workflow \
-         with no jobs, a job with no steps and a tag-pinned action are all refused; the \
+        "workflow gate self-test OK: a reusable workflow called from a step (also in a \
+         step list at the column of `steps:`), a workflow with no jobs, a job with no \
+         steps and a tag-pinned action are all refused; the \
          same reusable workflow at job level, a SHA-pinned action and a local action all \
          pass; a workflow in a nested `.github/workflows` is found and the root one is \
          not mistaken for it.",

@@ -255,7 +255,7 @@ fn shard_count_and_total_size_must_agree_with_the_shard_list() {
 fn duplicate_shard_indices_are_refused() {
     let mut m = coded_manifest();
     m.shards[1].index = m.shards[0].index;
-    m.total_size = m.shards.iter().map(|s| s.size as u64).sum();
+    m.total_size = m.shards.iter().map(|s| u64::from(s.size)).sum();
     m.manifest_id = manifest_id_from_parts_stored(
         &m.shards,
         &m.erasure,

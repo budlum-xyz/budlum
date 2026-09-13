@@ -237,15 +237,7 @@ pub fn self_test() -> Result<String, String> {
     let readme = read_file(&root, "README.md")?;
     let real =
         badge_count(&readme).ok_or_else(|| String::from("self-test needs a badge in README.md"))?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-badges-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-badges")?;
 
     let drifted = dir.join("drifted.log");
     let n: u64 = real.parse::<u64>().map_err(|e| e.to_string())? + 1;

@@ -25,6 +25,13 @@ pub const DAS_VERSION: u8 = 1;
 
 /// The Merkle root over a chunk list, domain-tagged (K38).
 pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
+    // No chunks, no tree: a domain-tagged empty root instead of `level[0]`
+    // on an empty vector.
+    if chunks.is_empty() {
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_DAS_EMPTY_V1");
+        return h.finalize().into();
+    }
     // The leaf hashes.
     let leaves: Vec<[u8; 32]> = chunks
         .iter()
@@ -157,8 +164,14 @@ impl DasSampler {
         if count == 0 || k == 0 {
             return vec![];
         }
-        let mut out = Vec::with_capacity(k);
-        let mut x = seed;
+        let mut out = Vec::with_capacity(k.min(count));
+        // xorshift has one fixed point: zero stays zero forever, and the loop
+        // below would then never collect a second index.
+        let mut x = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
         while out.len() < k.min(count) {
             x ^= x << 13;
             x ^= x >> 7;
@@ -290,6 +303,24 @@ mod tests {
         assert_eq!(a, b, "deterministic");
         let uniq: std::collections::HashSet<usize> = a.iter().cloned().collect();
         assert_eq!(uniq.len(), a.len(), "no collisions");
+    }
+
+    /// The two inputs that used to hang or panic: a zero seed (the xorshift
+    /// fixed point, so the index loop never advanced) and an empty chunk
+    /// list (`level[0]` on nothing).
+    #[test]
+    fn zero_seed_and_empty_input_are_handled() {
+        let idx = DasSampler::sample_indices(100, 10, 0);
+        assert_eq!(idx.len(), 10);
+        let uniq: std::collections::HashSet<usize> = idx.iter().cloned().collect();
+        assert_eq!(uniq.len(), 10);
+        let empty = das_root(&[]);
+        assert_ne!(empty, [0u8; 32]);
+        assert_ne!(
+            empty,
+            das_root(&[vec![]]),
+            "no chunks is not one empty chunk"
+        );
     }
 
     #[test]

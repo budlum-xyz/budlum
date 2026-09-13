@@ -76,20 +76,27 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Errors if one of the corrupt copies is not refused (a vacuous gate).
 pub fn self_test() -> Result<String, String> {
-    let dir = std::env::temp_dir().join("budlum-fixture-gate-self-test");
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-fixture-gate-self-test")?;
+    // Removed on every exit: a scenario that fails used to return early and
+    // leave the directory behind, one per run, in the temp root.
+    let result = scenarios(&dir);
     let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn scenarios(dir: &std::path::Path) -> Result<String, String> {
     std::fs::create_dir_all(dir.join("config/fixtures"))
         .map_err(|e| format!("the temporary directory could not be created: {e}"))?;
     let fixture = dir.join(FIXTURE_PATH);
 
     // (1) A missing file is refused.
-    if run(&dir).is_ok() {
+    if run(dir).is_ok() {
         return Err("a missing fixture file was not refused (vacuous)".into());
     }
 
     // (2) An empty or tiny file -> refused.
     std::fs::write(&fixture, "{}").map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
+    if run(dir).is_ok() {
         return Err("an empty fixture was not refused (vacuous)".into());
     }
 
@@ -103,7 +110,7 @@ pub fn self_test() -> Result<String, String> {
         ),
     )
     .map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
+    if run(dir).is_ok() {
         return Err("a fixture with a missing section was not refused (vacuous)".into());
     }
 
@@ -117,10 +124,9 @@ pub fn self_test() -> Result<String, String> {
         ),
     )
     .map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
+    if run(dir).is_ok() {
         return Err("a 0x-prefixed fixture was not refused (vacuous)".into());
     }
 
-    let _ = std::fs::remove_dir_all(&dir);
     Ok("fixture-integrity self-test: 4/4 refusal scenarios proved".into())
 }

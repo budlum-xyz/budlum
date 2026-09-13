@@ -17,8 +17,10 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams}
 use crate::cross_domain::MessageKind;
 use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
 use crate::registry::role::roles;
+use crate::storage::db::Storage;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tempfile::tempdir;
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
@@ -27,6 +29,15 @@ fn addr(b: u8) -> Address {
 fn fresh_chain() -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
     Blockchain::new(consensus, None, 45262, None)
+}
+
+/// The default is observe-only (`liveness_slashing_enabled = false`), so the
+/// end-to-end slashing tests opt in explicitly instead of relying on a default
+/// that a later change can flip underneath them.
+fn enable_liveness_slashing(bc: &mut Blockchain) {
+    let mut params = *bc.state.registry.params();
+    params.liveness_slashing_enabled = true;
+    bc.state.registry.set_params(params);
 }
 
 fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
@@ -379,6 +390,7 @@ fn liveness_slash_applied_through_blockchain_flow() {
     // End-to-end: reports generated at the chain level are routed through the
     // Existing report->slash flow and the target validator ends up slashed.
     let mut bc = fresh_chain();
+    enable_liveness_slashing(&mut bc);
     let v = addr(0x2A);
     bc.state.add_validator(v, 10_000);
     bc.state.sync_validator_registration(&v);
@@ -416,6 +428,7 @@ fn liveness_counter_resets_on_participation() {
 #[test]
 fn liveness_slash_uses_configured_rate() {
     let mut bc = fresh_chain();
+    enable_liveness_slashing(&mut bc);
     let v = addr(0x23);
     let stake = 10_000u64;
     bc.state.add_validator(v, stake);
@@ -451,4 +464,66 @@ fn liveness_does_not_affect_double_sign_flow() {
         .unwrap()
         .unwrap();
     assert_eq!(outcome.penalty, stake / 2);
+}
+
+// --- 4. Quarantine ledger persistence (E1 acceptance) ----------------------
+
+#[test]
+fn quarantine_ledger_rows_survive_restart_after_slash() {
+    let dir = tempdir().unwrap();
+    let db_path = dir
+        .path()
+        .join("quarantine.db")
+        .to_string_lossy()
+        .to_string();
+
+    let mut bc = Blockchain::new(
+        Arc::new(PoWEngine::new(0)),
+        Some(Storage::new(&db_path).unwrap()),
+        45262,
+        None,
+    );
+    let offender = addr(0x11);
+    let reporter = addr(0x12);
+    bc.state.add_balance(&offender, 1_000_000);
+    bc.state.bond_relayer(&offender, 10_000).unwrap();
+    bc.state.add_validator(offender, 10_000);
+    let fee = bc.state.registry.params().slashing_report_fee;
+    bc.state.add_balance(&reporter, fee);
+
+    bc.submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+        .unwrap()
+        .expect("validator should have been slashed");
+
+    // The slash lands in both ledgers before the node drops.
+    assert_eq!(bc.quarantine_ledger.quarantined_entities.len(), 1);
+    assert_eq!(bc.quarantine_ledger.alarms.len(), 1);
+    drop(bc);
+
+    // Same storage path, brand-new node: the rows must still be there.
+    let restarted = Blockchain::new(
+        Arc::new(PoWEngine::new(0)),
+        Some(Storage::new(&db_path).unwrap()),
+        45262,
+        None,
+    );
+    assert_eq!(restarted.quarantine_ledger.quarantined_entities.len(), 1);
+    assert_eq!(restarted.quarantine_ledger.alarms.len(), 1);
+    let entry = restarted
+        .quarantine_ledger
+        .quarantined_entities
+        .values()
+        .next()
+        .expect("quarantine row survived the restart");
+    assert!(matches!(
+        entry.reason,
+        crate::registry::QuarantineReason::OperatorSlash(_)
+    ));
+    let alarm = restarted
+        .quarantine_ledger
+        .alarms
+        .values()
+        .next()
+        .expect("alarm row survived the restart");
+    assert_eq!(alarm.severity, 3);
 }

@@ -258,12 +258,25 @@ deprecated_in_future = "allow"
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+# Cast lints (cast_possible_truncation / cast_possible_wrap /
+# cast_sign_loss): the pattern for this block is measured-then-deny, and the
+# measurement is already running - all three are clippy::pedantic members,
+# so the clippy-extra ratchet counts every one of them against
+# .github/clippy-extra-baseline.txt. They are deliberately not listed here
+# yet: entries in this table feed `cargo clippy -- -D warnings`, and an
+# unmeasured deny would turn CI red on a count nobody has read. The money
+# boundary stopped casting altogether when the bridge amount became u64;
+# each lint moves to deny when its ratchet count reaches zero.
 
 [profile.release]
 # Release hardening (research #196): panic=abort + overflow-checks + LTO +
 # codegen-units=1 + strip. panic=abort forbids unwinding (it narrows the
-# vulnerability surface), overflow-checks produces an error instead of a panic
-# on overflow, fat LTO plus a single codegen unit optimises the whole crate graph
+# vulnerability surface). overflow-checks makes arithmetic overflow panic
+# rather than wrap silently, and under panic=abort that panic terminates the
+# process. This is not something the release profile provides by default:
+# cargo turns the checks off in release builds unless the profile pins them,
+# which is why the field is stated here and held by the release-profile-pins
+# gate. fat LTO plus a single codegen unit optimises the whole crate graph
 # together (virtual function devirtualization, cross-crate inlining), and
 # strip removes the symbols (it shrinks the reverse engineering surface and
 # lowers the binary size). Build time grows but run time behaviour does not

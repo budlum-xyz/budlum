@@ -130,6 +130,16 @@ impl std::fmt::Display for ContentId {
     }
 }
 
+/// JSON map key: the same hex string `Display` prints.
+impl crate::core::map_keys::MapKey for ContentId {
+    fn to_key_string(&self) -> String {
+        hex::encode(self.0)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        crate::core::map_keys::parse_hex32(s).map(Self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

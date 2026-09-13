@@ -76,7 +76,7 @@ use crate::storage::three_visibility::{
     delete_implies_key_rotate, policy_for_upload, recipe_for_upload, UploadVisibility,
 };
 use crate::storage::transformed::{transform_content, CodecFlags, TransformError, TransformOpts};
-use crate::storage::{ContentId, ContentManifest};
+use crate::storage::{ContentId, ContentManifest, ShardRef};
 
 /// Largest body this path will encode in one call.
 ///
@@ -125,7 +125,10 @@ impl Default for EmitPolicy {
 pub struct FeedPreview {
     /// Content id of the durable packed container, the thing a publish stores.
     pub content_id: ContentId,
-    /// Provider commitment of that put (zeros when no manifest was supplied).
+    /// Provider commitment of that put (zeros when no manifest was supplied):
+    /// the packed container stored as the one shard of a manifest carrying
+    /// the supplied manifest's owner and encryption declaration, which is the
+    /// manifest a publish of this feed pins.
     pub provider_commitment: [u8; 32],
     /// Bytes in the packed container.
     pub packed_len: usize,
@@ -270,6 +273,9 @@ pub enum EmitError {
         /// Ceiling.
         limit: u16,
     },
+    /// The policy asked for zero-length blocks: nothing divides by it, and a
+    /// feed of empty blocks carries no body.
+    ZeroBlockLen,
     /// A drop's wire would not fit the frame header's bound.
     WireTooLarge {
         /// Wire length.
@@ -385,6 +391,9 @@ pub enum EmitError {
     Generate(GenerateError),
     /// The manifest's edition and source are not a legal pair.
     Edition(String),
+    /// The manifest a publish would pin over the packed container could not
+    /// be built.
+    Manifest(String),
     /// A Three-edition manifest names a sealed recipe: the seed is not on
     /// chain, so nobody but its holder can say what bytes this feed carries.
     SeedNotPublic,
@@ -438,6 +447,7 @@ impl std::fmt::Display for EmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "empty body"),
+            Self::ZeroBlockLen => write!(f, "block_len must be at least 1"),
             Self::TooLarge { len, limit } => {
                 write!(f, "body of {len} bytes over emit cap {limit}")
             }
@@ -513,6 +523,7 @@ impl std::fmt::Display for EmitError {
             Self::Meter(e) => write!(f, "meter: {e}"),
             Self::Generate(e) => write!(f, "generator: {e}"),
             Self::Edition(reason) => write!(f, "edition refuses: {reason}"),
+            Self::Manifest(reason) => write!(f, "publish manifest: {reason}"),
             Self::SeedNotPublic => write!(f, "sealed recipe: the seed is not on chain"),
             Self::RecipeOnlyEdition => {
                 write!(f, "edition Three carries no durable body to emit")
@@ -725,6 +736,12 @@ fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
         });
     }
     gate_codec(CodecKind::RawFrames)?;
+    // `div_ceil` by zero panics; a zero block length arrives from the RPC
+    // caller unchecked, so it is refused here, before the divide, as a
+    // request error rather than a worker panic.
+    if policy.block_len == 0 {
+        return Err(EmitError::ZeroBlockLen);
+    }
     let blok = usize::from(policy.block_len);
     let bloklar = len.saturating_add(THREE_PAYLOAD_HEADER_LEN).div_ceil(blok);
     let k = u16::try_from(bloklar).map_err(|_| EmitError::TooManyBlocks {
@@ -1014,7 +1031,7 @@ pub fn qr_feed_preview(
     if !rx2.is_complete() || rx2.finish_packed()? != pipe.packed {
         return Err(EmitError::ReassemblyMismatch);
     }
-    let frame0 = emitter.frame_at(0);
+    let frame0 = emitter.frame_at(0)?;
     if Some(&frame0) != pipe.frames.first() {
         return Err(EmitError::ReemitMismatch);
     }
@@ -1177,11 +1194,21 @@ pub fn qr_feed_preview(
 
     let (content_id, provider_commitment) = if let Some(manifest) = manifest {
         let mut scratch = InMemoryStorageProvider::with_operator(feed_id);
-        let receipt = scratch.put(manifest, &pipe.packed)?;
+        // A provider only takes bytes that are a shard of the manifest it is
+        // handed. What a publish stores is the packed container, so the
+        // commitment is measured against the manifest that publish pins: the
+        // container as the one shard, under the caller's owner and
+        // encryption declaration.
+        let publish_manifest =
+            ContentManifest::from_shards(vec![ShardRef::from_bytes(0, &pipe.packed)])
+                .map_err(EmitError::Manifest)?
+                .with_owner(manifest.owner)
+                .with_encryption(manifest.encryption);
+        let receipt = scratch.put(&publish_manifest, &pipe.packed)?;
         // The video blob is a rendering of bytes that already carry a
         // commitment. If a provider ever accepts it into a body slot, this path
         // has started handing out pixels-of-pixels.
-        match scratch.put(manifest, &encoded.video_blob) {
+        match scratch.put(&publish_manifest, &encoded.video_blob) {
             Err(StorageProviderError::DurableDerivative(ThreeBlobKind::QrVideo)) => {}
             Err(other) => return Err(EmitError::Provider(other)),
             Ok(_) => return Err(EmitError::DerivativeAccepted(ThreeBlobKind::QrVideo)),
@@ -1427,6 +1454,20 @@ mod tests {
         assert!(matches!(
             qr_feed_preview(&[], &EmitPolicy::default(), None),
             Err(EmitError::Empty)
+        ));
+        // A zero block length used to reach `div_ceil` and panic the
+        // request; it is a caller error and is reported as one.
+        let zero_policy = EmitPolicy {
+            block_len: 0,
+            ..EmitPolicy::default()
+        };
+        assert!(matches!(
+            qr_feed_preview(&body(64), &zero_policy, None),
+            Err(EmitError::ZeroBlockLen)
+        ));
+        assert!(matches!(
+            qr_feed_frames_burst(&body(64), &zero_policy, 0, 1),
+            Err(EmitError::ZeroBlockLen)
         ));
     }
 

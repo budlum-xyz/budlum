@@ -14,6 +14,27 @@
 //! The port keeps the shell gate's two-root call shape, its ANSI stripping
 //! (colour codes would split the "error:" regexes), its 240-line report
 //! excerpt, its infra/breakage classification and every canary.
+//!
+//! # The rustdoc is built here, under each checkout's own lock file
+//!
+//! `cargo semver-checks --baseline-root` builds the rustdoc JSON itself,
+//! in a placeholder project of its own, and runs `cargo update` there
+//! (upstream `data_generation/generate.rs`, "we have to run cargo update
+//! inside the newly-generated project"). The checkout's `Cargo.lock` is
+//! not consulted, so the comparison depended on whatever crates.io held
+//! at that minute. Measured on 2026-09-03: `tinyvec 1.13.0` was published
+//! at 21:13 UTC and does not compile (`cannot find macro vec`, upstream
+//! issue 225); the semver run at 21:30 went red with an infrastructure
+//! error while `Cargo.lock` still pinned `1.11.0` and every other job on
+//! the same commit, all of them `--locked`, stayed green. The 19:47 run on
+//! the previous commit had passed with the same source tree.
+//!
+//! Now the gate runs `cargo rustdoc --locked` inside each checkout, so the
+//! lock file that every other gate builds against is the one compared
+//! here too, and hands the two JSON files to `cargo semver-checks` with
+//! `--current-rustdoc` / `--baseline-rustdoc`. A stale lock file is an
+//! infrastructure error of this tree (fail-closed, as before), not a
+//! reason to resolve afresh.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,6 +106,7 @@ fn line_is_infra(line: &str) -> bool {
         || line.starts_with("error: could not compile")
         || line.starts_with("error: could not document")
         || line.starts_with("error: failed to build rustdoc")
+        || line.starts_with("error: failed to load rustdoc")
         || line.starts_with("error: no such command")
     {
         return true;
@@ -92,6 +114,7 @@ fn line_is_infra(line: &str) -> bool {
     contains_error_code(line)
         || line.contains("failed to parse lock file")
         || line.contains("no matching package")
+        || line.contains("cannot update the lock file")
 }
 
 /// The breakage class: a real report naming a removed or changed API.
@@ -214,21 +237,51 @@ pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
         exc = root.join(".github/semver-exceptions.txt");
     }
 
+    compare(&current, &baseline, &exc)
+}
+
+/// Build both rustdoc files and let cargo-semver-checks compare them.
+fn compare(current: &Path, baseline: &Path, exc: &Path) -> Verdict {
+    // Both rustdoc files are built here, each under its checkout's own
+    // `Cargo.lock` (see the module doc for the measured reason). A build
+    // failure is reported through the same classifier as before, so it is
+    // an infrastructure error that no exception can mask.
+    // Each side documents into its own target directory. Two checkouts that
+    // shared one (`CARGO_TARGET_DIR` in the environment, or a
+    // `build.target-dir` both read) wrote the same `doc/<package>.json`: the
+    // baseline build overwrote the current file and the tool compared the
+    // baseline with itself, so every removal passed. The same root passed
+    // twice is the identity canary and must still work, so the split is by
+    // role, not by path.
+    let current_json = match rustdoc_json(current, "semver-current") {
+        Ok(path) => path,
+        Err(report) => return classify_report(&report, exc),
+    };
+    let baseline_json = match rustdoc_json(baseline, "semver-baseline") {
+        Ok(path) => path,
+        Err(report) => return classify_report(&report, exc),
+    };
+    if current_json == baseline_json {
+        return Err(format!(
+            "error: running cargo-doc wrote both rustdoc files to one path ({})",
+            current_json.display()
+        ));
+    }
+
     // The shell ran `CARGO_TERM_COLOR=never cargo semver-checks
     // check-release -p budlum-core --baseline-root "$baseline"
-    // --default-features` inside the current root, merging stdout and stderr.
-    // `--default-features` is load-bearing: the all-features heuristic hits
-    // the pq-dilithium + pq-ml-dsa compile_error! lock, so the gate runs the
-    // crate-defined default set.
+    // --default-features` inside the current root, merging stdout and
+    // stderr. The feature set is now fixed by the rustdoc build above (the
+    // crate default: the all-features heuristic hits the pq-dilithium +
+    // pq-ml-dsa compile_error! lock), and the two files are handed over.
     let output = match Command::new("cargo")
         .arg("semver-checks")
         .arg("check-release")
-        .arg("-p")
-        .arg("budlum-core")
-        .arg("--baseline-root")
-        .arg(&baseline)
-        .arg("--default-features")
-        .current_dir(&current)
+        .arg("--current-rustdoc")
+        .arg(&current_json)
+        .arg("--baseline-rustdoc")
+        .arg(&baseline_json)
+        .current_dir(current)
         .env("CARGO_TERM_COLOR", "never")
         .output()
     {
@@ -248,23 +301,132 @@ pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
 
     if status == 0 {
         return Ok(String::from(
-            "SEMVER GATE: PASS - no public API breakage (budlum-core versus the baseline).",
+            "SEMVER GATE: PASS - no public API breakage (current versus the baseline).",
         ));
     }
     println!("::warning::cargo-semver-checks reported a breakage/error (exit={status}).");
-    classify_report(&report, &exc)
+    classify_report(&report, exc)
+}
+
+/// The flags cargo-semver-checks passes to rustdoc for its own builds
+/// (upstream `EXTRA_RUSTDOCFLAGS`): the JSON format it reads, private and
+/// hidden items included so lint queries can see them, lints capped so a
+/// warning in the tree cannot turn into a build failure here.
+const RUSTDOC_JSON_FLAGS: &str = "-Z unstable-options --output-format=json \
+     --document-private-items --document-hidden-items --cap-lints=allow";
+
+/// The package name in `root/Cargo.toml`: the first `name = "..."` line,
+/// which in a root manifest belongs to `[package]`.
+fn package_name(root: &Path) -> Result<String, String> {
+    let manifest = root.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).map_err(|e| {
+        format!(
+            "error: running cargo-metadata failed: {}: {e}",
+            manifest.display()
+        )
+    })?;
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| {
+            line.strip_prefix("name")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(str::trim)
+                .and_then(|v| v.strip_prefix('"'))
+                .and_then(|v| v.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            format!(
+                "error: running cargo-metadata failed: no package name in {}",
+                manifest.display()
+            )
+        })
+}
+
+/// Build the root package's rustdoc JSON inside `root`, under its own
+/// `Cargo.lock`, and return the file's path.
+///
+/// # Errors
+///
+/// Returns the build's combined output, prefixed with the same
+/// `error: running cargo-doc` line cargo-semver-checks prints for its own
+/// build failures, so `classify_report` files it as infrastructure.
+fn rustdoc_json(root: &Path, role: &str) -> Result<PathBuf, String> {
+    let package = package_name(root)?;
+    // The role names a sub-directory of the checkout's own target directory,
+    // so the two builds never share a `doc/` and a `CARGO_TARGET_DIR` set
+    // for both cannot merge them either: the flag wins over the variable.
+    let target = target_dir(root)?.join(role);
+    let output = Command::new("cargo")
+        .arg("rustdoc")
+        .arg("--locked")
+        .arg("--target-dir")
+        .arg(&target)
+        .arg("-p")
+        .arg(&package)
+        .arg("--lib")
+        .arg("--")
+        .args(RUSTDOC_JSON_FLAGS.split_whitespace())
+        .current_dir(root)
+        // `-Z` needs a nightly or the bootstrap switch; the CI pins a
+        // nightly, a stable toolchain elsewhere goes through the switch,
+        // exactly as cargo-semver-checks does for its own build.
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .map_err(|e| format!("error: running cargo-doc failed to start: {e}"))?;
+    let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
+    report.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(format!(
+            "error: running cargo-doc on crate '{package}' failed in {} (exit {}):\n{report}",
+            root.display(),
+            output.status.code().unwrap_or(1)
+        ));
+    }
+    let json = target
+        .join("doc")
+        .join(format!("{}.json", package.replace('-', "_")));
+    if !json.is_file() {
+        return Err(format!(
+            "error: failed to build rustdoc for crate {package}: {} is missing after a \
+             successful cargo rustdoc\n{report}",
+            json.display()
+        ));
+    }
+    Ok(json)
+}
+
+/// The target directory cargo uses for `root`, read from `cargo metadata`
+/// so a `CARGO_TARGET_DIR` or `build.target-dir` setting is honoured.
+fn target_dir(root: &Path) -> Result<PathBuf, String> {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--locked")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("error: running cargo-metadata failed to start: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "error: running cargo-metadata failed in {}:\n{}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let meta: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("error: running cargo-metadata gave unreadable JSON: {e}"))?;
+    meta.get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| String::from("error: running cargo-metadata gave no target_directory"))
 }
 
 fn scratch_dir() -> Result<PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-semver-{}-{nanos}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create scratch dir: {e}"))?;
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-semver")?;
     Ok(dir)
 }
 
@@ -309,6 +471,11 @@ pub fn self_test() -> Result<String, String> {
         "error: running cargo-metadata failed",
         "error: failed to build rustdoc",
         "error: no such command: `semver-checks`",
+        // The two lines the in-tree rustdoc build adds: a lock file that
+        // `--locked` refuses to rewrite, and a JSON file semver-checks
+        // cannot read. Both mean "unknown", never "no breakage".
+        "error: cannot update the lock file /x/Cargo.lock because --locked was passed",
+        "error: failed to load rustdoc from file at `/x/budlum_core.json`",
     ];
     for case in infra_cases {
         let report = format!("{case}\n--- failure struct_missing: pub struct removed\n");
@@ -349,11 +516,121 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    // The in-tree rustdoc path, measured on a fixture pair rather than
+    // trusted: a removed `pub fn` is reported as breakage, the same crate
+    // against itself passes, and a manifest that disagrees with its lock
+    // file is refused as infrastructure (the `--locked` promise). Skipped
+    // only where the tool itself is absent, and the message says so.
+    let live = if Command::new("cargo-semver-checks")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        if let Err(e) = live_canaries(&tmp, &empty_exc) {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(e);
+        }
+        "; live: a removed pub fn FAILs, an identical crate PASSes, a stale lock is infra, \
+         a shared target directory still finds the removal"
+    } else {
+        "; live pair skipped (cargo-semver-checks not installed here)"
+    };
+
     let _ = fs::remove_dir_all(&tmp);
-    Ok(String::from(
+    Ok(format!(
         "canary OK: a crash is not masked, unrecognised output is fail-closed, a breakage \
-         FAILs without an exception / PASSes with a justified one (the gate is not vacuous).",
+         FAILs without an exception / PASSes with a justified one (the gate is not vacuous){live}.",
     ))
+}
+
+/// Write a one-file library crate with a matching lock file.
+fn fixture_crate(dir: &Path, version: &str, body: &str) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"semver-canary\"\nversion = \"{version}\"\nedition = \"2021\"\n\n\
+             [lib]\npath = \"lib.rs\"\n"
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(dir.join("lib.rs"), body).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join("Cargo.lock"),
+        format!(
+            "# This file is automatically @generated by Cargo.\n# It is not intended for manual \
+             editing.\nversion = 4\n\n[[package]]\nname = \"semver-canary\"\nversion = \"{version}\"\n"
+        ),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn live_canaries(tmp: &Path, empty_exc: &Path) -> Result<(), String> {
+    let base = tmp.join("base");
+    let broken = tmp.join("broken");
+    let stale = tmp.join("stale");
+    fixture_crate(
+        &base,
+        "0.1.0",
+        "pub fn kept() -> u32 { 1 }\npub fn removed() -> u32 { 2 }\n",
+    )?;
+    fixture_crate(&broken, "0.1.1", "pub fn kept() -> u32 { 1 }\n")?;
+    fixture_crate(&stale, "0.1.0", "pub fn kept() -> u32 { 1 }\n")?;
+    // The manifest moves on, the lock file does not: `--locked` must refuse.
+    fs::write(
+        stale.join("Cargo.toml"),
+        "[package]\nname = \"semver-canary\"\nversion = \"0.2.0\"\nedition = \"2021\"\n\n\
+         [lib]\npath = \"lib.rs\"\n",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let report = match compare(&broken, &base, empty_exc) {
+        Ok(msg) => return Err(format!("live canary: a removed pub fn passed: {msg}")),
+        Err(report) => report,
+    };
+    if !report.contains("public API breakage with no exception") {
+        return Err(format!(
+            "live canary: a removed pub fn was refused for the wrong reason: {report}"
+        ));
+    }
+    if let Err(report) = compare(&base, &base, empty_exc) {
+        return Err(format!(
+            "live canary: a crate against itself failed: {report}"
+        ));
+    }
+    match compare(&stale, &base, empty_exc) {
+        Ok(msg) => return Err(format!("live canary: a stale lock file passed: {msg}")),
+        Err(report) if report.contains("INFRASTRUCTURE") => {}
+        Err(report) => {
+            return Err(format!(
+                "live canary: a stale lock file was refused for the wrong reason: {report}"
+            ))
+        }
+    }
+    // Both checkouts told to share one target directory: the removed pub fn
+    // must still be found. Before the per-role split the baseline build
+    // overwrote the current rustdoc file here and the tool compared the
+    // baseline with itself.
+    let shared = tmp.join("shared-target");
+    for dir in [&broken, &base] {
+        fs::create_dir_all(dir.join(".cargo")).map_err(|e| e.to_string())?;
+        fs::write(
+            dir.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = \"{}\"\n", shared.display()),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    match compare(&broken, &base, empty_exc) {
+        Ok(msg) => Err(format!(
+            "live canary: a removed pub fn passed when both checkouts shared a target \
+             directory: {msg}"
+        )),
+        Err(report) if report.contains("public API breakage with no exception") => Ok(()),
+        Err(report) => Err(format!(
+            "live canary: a removed pub fn under a shared target directory was refused for \
+             the wrong reason: {report}"
+        )),
+    }
 }
 
 #[cfg(test)]

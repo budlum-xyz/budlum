@@ -21,3 +21,10 @@
 crates/ai-inference/crates/ai-data/src/jsonl.rs	2
 crates/ai-inference/crates/ai-knowledge/src/embed.rs	1
 crates/ai-inference/crates/ai-tune/src/schema.rs	4
+# Recorded 2026-09-13, with the identity template filler: these two carry
+# Turkish because Turkish is what the line is about - the filler was rewritten
+# precisely because a byte-wise walk refused every template holding a
+# multi-byte character, and a title-case dotted-I name slot is the ordinary case the doc names
+# and the red-team test feeds through the walk.
+src/registry/identity_fill.rs	1
+src/tests/ported_slice_redteam.rs	5

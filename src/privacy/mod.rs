@@ -8,5 +8,5 @@
 mod note_registry;
 mod submit;
 
-pub use note_registry::L1NoteRegistry;
+pub use note_registry::{is_note_hash, L1NoteRegistry};
 pub use submit::{PrivateTransferSubmit, MAX_PRIVATE_IO};

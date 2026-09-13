@@ -145,14 +145,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-uncheck-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-uncheck")?;
     let _ = std::fs::create_dir_all(dir.join("src/domain"));
 
     let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    false\n}\nfn f() {\n    match (a, b) {\n        (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";

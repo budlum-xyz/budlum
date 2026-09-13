@@ -163,3 +163,95 @@ fn a_tampered_public_input_is_refused() {
         );
     }
 }
+
+/// A storage-writing program whose public input claims a **wrong** write
+/// digest must be refused, even when the wrong value is baked in before
+/// proving.
+///
+/// The tamper test above changes a public input *after* proving, so the
+/// refusal it measures comes from Fiat-Shamir: the verifier absorbs the
+/// public values and any change breaks the transcript. That test passes even
+/// for a field the AIR never constrains. Constraint (2b) is the only thing
+/// that refuses a digest chosen before proving, and it was measured
+/// (2026-09-03) to be a copy of the `final_state_root` binding, so a
+/// storage program with an all-zero digest proved and verified. This test
+/// bakes the wrong value in before proving and expects the AIR to refuse it.
+#[test]
+fn a_wrong_state_writes_digest_baked_in_before_proving_is_refused() {
+    let bytecode = vec![
+        inst(Opcode::Load, 1, 0, 0, 99),
+        inst(Opcode::SWrite, 0, 1, 0, 5),
+        inst(Opcode::Halt, 0, 0, 0, 0),
+    ];
+    let mut vm = Vm::new(1024);
+    let receipt = vm.run_receipt(&bytecode);
+    assert!(receipt.success, "the honest storage program must run");
+    assert_ne!(
+        receipt.state_writes_digest, [0u8; 32],
+        "a program that writes storage must produce a non-zero digest, or this \
+         test proves nothing"
+    );
+
+    let mut bytecode_bytes = Vec::with_capacity(bytecode.len() * 8);
+    for w in &bytecode {
+        bytecode_bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    let mut program_hash = [0u8; 32];
+    let mut k = Keccak::v256();
+    k.update(&bytecode_bytes);
+    k.finalize(&mut program_hash);
+
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
+    );
+
+    let honest = ExecutionPublicInputs {
+        chain_id: 1,
+        program_hash,
+        initial_state_root,
+        final_state_root: [0u8; 32],
+        sender: vm.context.sender,
+        nonce: vm.context.nonce,
+        block_height: vm.context.block_height,
+        gas_limit: vm.gas_limit,
+        gas_used: vm.gas_used,
+        exit_code: 0,
+        trace_len: vm.trace.len() as u64,
+        event_digest: bud_proof::event_digest_from_events(&receipt.events),
+        state_writes_digest: receipt.state_writes_digest,
+    };
+
+    // Control group: the honest digest proves and verifies.
+    let envelope = Prover::prove(&vm.trace, &honest, &bytecode)
+        .expect("the honest proof could not be produced");
+    Prover::verify(&envelope, &honest, &bytecode).expect("the honest storage proof was refused");
+
+    // A digest that says "no writes happened", chosen before proving.
+    let mut denies_writes = honest.clone();
+    denies_writes.state_writes_digest = [0u8; 32];
+    let refused = match Prover::prove(&vm.trace, &denies_writes, &bytecode) {
+        Err(_) => true,
+        Ok(envelope) => Prover::verify(&envelope, &denies_writes, &bytecode).is_err(),
+    };
+    assert!(
+        refused,
+        "a storage-writing program proved and verified with an all-zero write digest; \
+         the AIR does not bind `state_writes_digest`"
+    );
+
+    // A digest that is one bit away from the truth, chosen before proving.
+    let mut one_bit_off = honest.clone();
+    one_bit_off.state_writes_digest[0] ^= 1;
+    let refused = match Prover::prove(&vm.trace, &one_bit_off, &bytecode) {
+        Err(_) => true,
+        Ok(envelope) => Prover::verify(&envelope, &one_bit_off, &bytecode).is_err(),
+    };
+    assert!(
+        refused,
+        "a storage-writing program proved and verified with a wrong write digest baked \
+         in before proving; the AIR does not bind `state_writes_digest`"
+    );
+}

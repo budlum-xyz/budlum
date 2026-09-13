@@ -198,7 +198,7 @@ jobs:
         uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
 
   msrv:
-    name: MSRV check (1.94.0)
+    name: MSRV check (1.97.1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -328,7 +328,16 @@ jobs:
           fi
           echo "canary OK: the matrix caught the feature that breaks when enabled alone."
       - name: Feature matrix check
-        run: cargo hack check --each-feature --exclude-no-default-features --exclude-features pq-ml-dsa --locked
+        # `pq-ml-dsa` stays in the matrix: it is the feature the comment above
+        # says only this job compiles alone. `--each-feature` never combines
+        # two features, so the two PQ backends (mutually exclusive by the
+        # duplicate-definition refusal in crypto/primitives.rs) each go
+        # through singly. Without an `--exclude-features` list cargo-hack
+        # appends one extra `--all-features` run, and that run enables both
+        # backends at once; measured on 233c9b6, it failed with the duplicate
+        # definitions the refusal exists to produce. `--exclude-all-features`
+        # drops that one run and keeps every single-feature run.
+        run: cargo hack check --each-feature --exclude-no-default-features --exclude-all-features --locked
 
   hadolint:
     name: Hadolint (Dockerfile lint)
