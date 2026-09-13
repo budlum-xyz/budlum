@@ -1377,7 +1377,9 @@ mod integration_tests {
 
     #[test]
     fn test_v2_snapshot_preserves_consensus_metadata() {
-        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+        use crate::chain::snapshot::{
+            StateSnapshotV2, StateSnapshotV2Params, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
+        };
         use crate::core::account::AccountState;
 
         let mut state = AccountState::new();
@@ -1400,7 +1402,7 @@ mod integration_tests {
         };
 
         let v2 = StateSnapshotV2::from_state(&state, params);
-        assert_eq!(v2.schema_version, 4); // Bumped 3->4
+        assert_eq!(v2.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION);
         assert_eq!(v2.height, 200);
         assert_eq!(v2.epoch_index, 42);
         assert_eq!(v2.base_fee, 15);
@@ -1487,7 +1489,9 @@ mod integration_tests {
 
     #[test]
     fn test_v2_snapshot_serialization_roundtrip() {
-        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+        use crate::chain::snapshot::{
+            StateSnapshotV2, StateSnapshotV2Params, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
+        };
 
         let mut state = crate::core::account::AccountState::new();
         state.add_balance(&test_addr_from_byte(2u8), 7000);
@@ -1505,7 +1509,7 @@ mod integration_tests {
         let v2 = StateSnapshotV2::from_state(&state, params);
         let bytes = v2.to_bytes();
         let parsed = StateSnapshotV2::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.schema_version, 4); // Bumped 3->4
+        assert_eq!(parsed.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION);
         assert_eq!(parsed.height, 300);
         assert_eq!(parsed.chain_id, 42);
         assert!(parsed.verify());

@@ -1571,7 +1571,7 @@ impl Blockchain {
         // it relies on (the relayer-data-to-open trap stays closed).
         if !self.state.anchor_external_root(domain_id, state_root) {
             // Unreachable: the zero root was refused above. If this were
-            // ever reached, the commitment advanced without its anchor —
+            // ever reached, the commitment advanced without its anchor -
             // fail loud instead of trusting the invariant.
             return Err(format!(
                 "Domain {domain_id} height {domain_height}: anchor write failed after acceptance (invariant broken)"
@@ -5743,8 +5743,8 @@ impl Blockchain {
     ///
     /// The economic mirror of [`Self::open_storage_deal_with_escrow`] for
     /// the replacement placement: the placement is decided by the ticket,
-    /// not the caller — manifest, shard and replica come from the registry
-    /// record — while the escrow and the bond are debited by this layer and
+    /// not the caller - manifest, shard and replica come from the registry
+    /// record - while the escrow and the bond are debited by this layer and
     /// refunded on refusal, exactly like the original open.
     ///
     /// The registry's `accept_reallocation_ticket` keeps the one-shot
@@ -5836,7 +5836,7 @@ impl Blockchain {
         let total_fee = economics.total_fee(shard_bytes, epochs);
         let bond = economics.operator_bond;
 
-        // 1. Debit Payer (Client Escrow) — same shape as the open path.
+        // 1. Debit Payer (Client Escrow) - same shape as the open path.
         if total_fee > 0 {
             if self.state.get_balance(&payer) < total_fee {
                 return Err(format!(
@@ -5869,7 +5869,7 @@ impl Blockchain {
                 Ok(replacement_deal_id)
             }
             Err(e) => {
-                // Refund on refusal — mirroring the open path, where a
+                // Refund on refusal - mirroring the open path, where a
                 // refused deal never keeps the escrow or the bond.
                 if total_fee > 0 {
                     self.state

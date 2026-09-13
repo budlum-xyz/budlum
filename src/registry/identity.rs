@@ -399,7 +399,12 @@ pub fn disclosure_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Option<Disclo
         } else {
             index - 1
         };
-        siblings.push(level.get(pair).copied().unwrap_or(level[index]));
+        // `index` stays in range by construction (halved as the level
+        // shrinks), but the indexing gate refuses `level[index]` at runtime:
+        // an absent own-node means the walk is broken, and `None` says so
+        // instead of aborting the process.
+        let own = level.get(index).copied()?;
+        siblings.push(level.get(pair).copied().unwrap_or(own));
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for chunk in level.chunks(2) {
             let left = chunk[0];

@@ -372,6 +372,20 @@ mod tests {
         assert!(report.golden_verified, "the golden sample must verify");
         assert_eq!(report.total(), 4);
         assert_eq!(report.passed(), 4, "every probe must refuse");
+        // The refusal half of the name, asserted directly: each probe's
+        // corrupted evidence is rejected by the adapter itself, not merely
+        // counted as passed by the report.
+        for (name, _) in &report.probes {
+            let mut corrupted = Tiny
+                .golden_evidence()
+                .expect("the golden sample exists above");
+            corrupted.payload.clear();
+            assert!(
+                Tiny.verify(&corrupted, &VerificationPolicy::strict(10))
+                    .is_err(),
+                "emptied evidence must be refused (probe context: {name})"
+            );
+        }
         assert!(report.admitted);
     }
 

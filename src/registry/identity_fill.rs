@@ -200,8 +200,15 @@ fn pieces(template: &str) -> Result<Vec<Piece<'_>>, FillError> {
             } else {
                 stop
             };
-            out.push(Piece::Text(&rest[..take]));
-            rest = &rest[take..];
+            // `take` is either a `find` offset or one whole char's width, so
+            // the split is on a boundary - but the indexing gate refuses raw
+            // slicing at runtime, and `split_at_checked` keeps the refusal
+            // fail-closed if the arithmetic above ever changes.
+            let (text, tail) = rest
+                .split_at_checked(take)
+                .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
+            out.push(Piece::Text(text));
+            rest = tail;
         }
     }
     Ok(out)

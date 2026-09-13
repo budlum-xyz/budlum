@@ -493,6 +493,12 @@ mod tests {
         permissive.low_participants = LowParticipantsBehavior::AcceptMostCommon;
         permissive.dispute = DisputeBehavior::AcceptMostCommon;
         let outcome = decide(&[Answer::Infrastructure; 5], &permissive);
+        // The refusal in the name, asserted as a refusal: no claim may have
+        // been agreed, whatever else the outcome says.
+        assert!(
+            !matches!(outcome, QuorumOutcome::AgreedClaim { .. }),
+            "a preference promoted an infrastructure failure into a claim: {outcome:?}"
+        );
         assert!(
             matches!(outcome, QuorumOutcome::NoValidParticipants { .. }),
             "a preference promoted an infrastructure failure: {outcome:?}"

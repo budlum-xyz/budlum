@@ -1026,6 +1026,18 @@ impl Executor {
                         "Receipt proof cannot be empty",
                     ));
                 }
+                // The size ceiling is a plain length comparison, so it runs
+                // before every other check on the proof: an oversized blob is
+                // refused without an anchor lookup or a decode attempt ever
+                // seeing it.
+                if u64::try_from(res.receipt_proof.len()).unwrap_or(u64::MAX)
+                    > MAX_RELAYER_RESULT_PROOF_BYTES
+                {
+                    return Err(BudlumError::validation(
+                        "relayer_proof_malformed",
+                        "Receipt proof exceeds the size ceiling",
+                    ));
+                }
                 // Verify external_state_root non-zero
                 // (zero root = no state commitment, can't verify anything).
                 if res.external_state_root == [0u8; 32] {
@@ -1055,7 +1067,15 @@ impl Executor {
                 // reaches external_state_root. (Anchoring the root to the external
                 // finalize commitment is the EVM light-client job;
                 // this gate soundly verifies the proof chain itself.)
+                // Every producer of `receipt_proof` (the relayer worker, the
+                // chain adapter, the EVM adapter) writes `bincode::serialize`,
+                // which is fixint encoding. `bincode::options()` alone decodes
+                // varint, so a well-formed proof failed here with "slice had
+                // bytes remaining" - the decoder must speak the writers'
+                // encoding. Trailing bytes stay refused: a proof with padding
+                // is not the proof that was serialized.
                 let proof: crate::cross_domain::event_tree::MerkleProof = bincode::options()
+                    .with_fixint_encoding()
                     .with_limit(MAX_RELAYER_RESULT_PROOF_BYTES)
                     .deserialize(&res.receipt_proof)
                     .map_err(|e| {
@@ -1330,7 +1350,7 @@ impl Executor {
                         state.epoch_index,
                     )
                     .map_err(|e| BudlumError::validation("hub_register_refused", e.to_string()))?;
-                // Balance check before deduction — spendable, not raw
+                // Balance check before deduction - spendable, not raw
                 // (audit 2026-09-09, E-1): the register fee is a spend, so
                 // the vesting lock applies. Read before the mutable borrow
                 // of get_or_create (E0502).

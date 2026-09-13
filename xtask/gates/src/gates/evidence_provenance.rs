@@ -149,6 +149,15 @@ fn unexpected_slash_callers(root: &Path) -> Vec<String> {
         "src/core/account.rs",
         "src/execution/executor.rs",
         "src/registry/permissionless.rs",
+        // The external-domain registry's `slash` reads its own provenance
+        // before touching the bond: the evidence digest must belong to an
+        // attestation the registry itself accepted, and the named prover must
+        // be the recorded carrier of exactly that attestation - both checked
+        // in the registry's `slash` before `bond.slash` runs. The external
+        // tree is not yet bound to consensus (its adapter modules carry
+        // `WIRING: unwired` notes), so admitting the file here does not open
+        // a trusted-condition shortcut on any live path.
+        "src/cross_domain/external/registry.rs",
     ];
     let mut unexpected: Vec<String> = Vec::new();
     for (full, rel) in src_rs_files(root) {

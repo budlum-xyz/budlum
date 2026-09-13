@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn naming_someone_elses_token_is_refused_before_any_registry_read() {
-        let (mut v, mut nfts, alice, folder, a, _b) = door_owners();
+        let (mut v, mut nfts, alice, folder, _a, _b) = door_owners();
         let mallory = Address::from([9u8; 32]);
         let stolen = minted(&mut nfts, &mallory, "mallory-token");
         execute_vault_tx(&mut v, &nfts, &alice, VaultTx::RegisterFolder { folder }).unwrap();

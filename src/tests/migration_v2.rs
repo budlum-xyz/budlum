@@ -42,7 +42,10 @@ mod migration_tests {
         let report = old.migration_report().unwrap();
         assert!(report.migrated, "Schema-2 should trigger migration");
         assert_eq!(report.original_schema_version, 2);
-        assert_eq!(report.target_schema_version, 4);
+        assert_eq!(
+            report.target_schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
 
         // Load it with from_bytes; the schema is raised automatically.
         let bytes = serde_json::to_vec(&old).unwrap();
@@ -54,7 +57,10 @@ mod migration_tests {
         assert!(restored.validators.contains_key(&alice));
         assert_eq!(restored.height, 100);
         assert_eq!(restored.chain_id, 45262);
-        assert_eq!(restored.schema_version, 4);
+        assert_eq!(
+            restored.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
     }
 
     /// An unsupported schema has to be refused.
@@ -101,7 +107,10 @@ mod migration_tests {
         );
         let bytes = snapshot.to_bytes();
         let restored = StateSnapshotV2::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.schema_version, 4);
+        assert_eq!(
+            restored.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
         assert_eq!(restored.height, 50);
     }
 }

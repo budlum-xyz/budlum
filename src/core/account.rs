@@ -1851,8 +1851,8 @@ impl AccountState {
     /// lifecycle (AR-GE-6 / F-11). `external_roots` is the only source the
     /// relayer gate consults: a `RelayerResult` is accepted only when its
     /// declared `external_state_root` equals a finalized anchor. The write path
-    /// is **consensus-only** — it is driven by a light-client-verified finality
-    /// fact for the domain (AR-GE-6 / F-12) — and a relayer transaction can
+    /// is **consensus-only** - it is driven by a light-client-verified finality
+    /// fact for the domain (AR-GE-6 / F-12) - and a relayer transaction can
     /// never reach this method: the executor gate only reads `external_roots`.
     /// Keeping the write here, out of the relayer path, is what closes the
     /// relayer-data-to-open trap.
