@@ -155,6 +155,49 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Result<(), String>>,
     ),
+    RegisterExternalDomain(
+        Box<crate::cross_domain::external::RegistrationRequest>,
+        oneshot::Sender<Result<crate::cross_domain::external::DomainKey, String>>,
+    ),
+    SubmitExternalEvidence(
+        Box<crate::cross_domain::external::RawConsensusEvidence>,
+        oneshot::Sender<Result<crate::cross_domain::external::FinalityAttestation, String>>,
+    ),
+    GetExternalDomainProfile(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<
+            Option<(
+                crate::cross_domain::external::DomainProfile,
+                crate::cross_domain::external::IntakeEntry,
+                crate::cross_domain::external::AdapterDescriptor,
+            )>,
+        >,
+    ),
+    GetExternalDomainProfiles(
+        oneshot::Sender<Vec<(crate::cross_domain::external::DomainProfile, String)>>,
+    ),
+    GetExternalIntakeDigest(oneshot::Sender<Result<[u8; 32], String>>),
+    ReadmitExternalDomain(
+        crate::cross_domain::external::DomainKey,
+        String,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    ScheduleExternalFork {
+        key: crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    SlashExternalProver {
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: crate::core::address::Address,
+        response: oneshot::Sender<Result<(u128, u128), String>>,
+    },
     BondProver(
         crate::core::address::Address,
         u64,
@@ -1623,6 +1666,147 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::SubmitCrossDomainMessage(message, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Registers an external domain through the actor. The BLS verifier is
+    /// installed inside the actor (`IntakeState::production_bls`), never
+    /// carried over the channel: crypto configuration is the node's, not the
+    /// caller's.
+    pub async fn register_external_domain(
+        &self,
+        registration: crate::cross_domain::external::RegistrationRequest,
+    ) -> Result<crate::cross_domain::external::DomainKey, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterExternalDomain(
+                Box::new(registration),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Submits external-finality evidence through the actor.
+    pub async fn submit_external_evidence(
+        &self,
+        evidence: crate::cross_domain::external::RawConsensusEvidence,
+    ) -> Result<crate::cross_domain::external::FinalityAttestation, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitExternalEvidence(Box::new(evidence), tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Reads one external domain's public profile with its intake entry and
+    /// registered descriptor.
+    pub async fn get_external_domain_profile(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> Option<(
+        crate::cross_domain::external::DomainProfile,
+        crate::cross_domain::external::IntakeEntry,
+        crate::cross_domain::external::AdapterDescriptor,
+    )> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainProfile(key, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Reads every external domain's profile with its summary line.
+    pub async fn get_external_domain_profiles(
+        &self,
+    ) -> Vec<(crate::cross_domain::external::DomainProfile, String)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainProfiles(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// The deterministic digest of the whole external-intake state, for
+    /// cross-node comparison.
+    pub async fn get_external_intake_digest(&self) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalIntakeDigest(tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Re-runs admission for a faulted external domain.
+    pub async fn readmit_external_domain(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        reason: String,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ReadmitExternalDomain(key, reason, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Schedules an evidence-format fork for an external domain.
+    pub async fn schedule_external_fork(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ScheduleExternalFork {
+                key,
+                old_version,
+                new_version,
+                fork_height,
+                grace_heights,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Slashes the prover behind an accepted external attestation.
+    pub async fn slash_external_prover(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: crate::core::address::Address,
+    ) -> Result<(u128, u128), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SlashExternalProver {
+                key,
+                prover,
+                evidence_digest,
+                value_atoms,
+                challenger,
+                response: tx,
+            })
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -3463,6 +3647,78 @@ impl ChainActor {
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::RegisterExternalDomain(registration, res_tx) => {
+                    let request = *registration;
+                    let bls = matches!(
+                        request.spec,
+                        crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                    )
+                    .then(crate::cross_domain::external::IntakeState::production_bls);
+                    let _ = res_tx.send(self.blockchain.register_external_domain(request, bls));
+                }
+                ChainCommand::SubmitExternalEvidence(evidence, res_tx) => {
+                    let needs_bls = self
+                        .blockchain
+                        .external_intake
+                        .entries
+                        .get(&crate::cross_domain::external::DomainKey::from_parts(
+                            &evidence.adapter,
+                            &evidence.network,
+                        ))
+                        .is_some_and(|entry| {
+                            matches!(
+                                entry.spec,
+                                crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                            )
+                        });
+                    let bls =
+                        needs_bls.then(crate::cross_domain::external::IntakeState::production_bls);
+                    let _ = res_tx.send(self.blockchain.submit_external_evidence(&evidence, bls));
+                }
+                ChainCommand::GetExternalDomainProfile(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_profile(&key));
+                }
+                ChainCommand::GetExternalDomainProfiles(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_profiles());
+                }
+                ChainCommand::GetExternalIntakeDigest(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_intake.state_digest());
+                }
+                ChainCommand::ReadmitExternalDomain(key, reason, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.readmit_external_domain(&key, &reason));
+                }
+                ChainCommand::ScheduleExternalFork {
+                    key,
+                    old_version,
+                    new_version,
+                    fork_height,
+                    grace_heights,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.schedule_external_fork(
+                        &key,
+                        old_version,
+                        new_version,
+                        fork_height,
+                        grace_heights,
+                    ));
+                }
+                ChainCommand::SlashExternalProver {
+                    key,
+                    prover,
+                    evidence_digest,
+                    value_atoms,
+                    challenger,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.slash_external_prover(
+                        &key,
+                        prover,
+                        evidence_digest,
+                        value_atoms,
+                        challenger,
+                    ));
                 }
                 ChainCommand::BondProver(address, amount, res_tx) => {
                     let _ = res_tx.send(

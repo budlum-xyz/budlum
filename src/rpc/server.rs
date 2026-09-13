@@ -477,6 +477,21 @@ impl RpcServer {
         })
     }
 
+    /// Parses a 32-byte hex external-domain key. One helper, because five
+    /// endpoints read the same parameter and five inline copies would drift.
+    fn parse_external_domain_key(
+        domain_key_hex: &str,
+    ) -> Result<crate::cross_domain::external::DomainKey, ErrorObjectOwned> {
+        let clean = domain_key_hex.strip_prefix("0x").unwrap_or(domain_key_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid domain key: {e}"), None::<()>)
+        })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Domain key must be 32 bytes", None::<()>)
+        })?;
+        Ok(crate::cross_domain::external::DomainKey(key_bytes))
+    }
+
     fn to_0x_hash(h: String) -> String {
         if h.is_empty() {
             "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
@@ -1571,6 +1586,234 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({
             "domainId": domain_id,
             "domainRegistryRoot": registry_root,
+        }))
+    }
+
+    async fn register_external_domain(
+        &self,
+        registration: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: the bond figure in this build is a declared number,
+        // not a signed stake transfer, and only the operator may declare it.
+        self.require_operator("bud_registerExternalDomain")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            spec: crate::cross_domain::external::AdapterSpec,
+            policy: crate::cross_domain::external::VerificationPolicy,
+            /// Omitted economics default to the intake's conservative shape
+            /// at the given ceiling; explicit economics are taken as sent.
+            economics: Option<crate::cross_domain::external::DomainEconomics>,
+            routing_ceiling_atoms: Option<u128>,
+            versions: crate::cross_domain::external::VersionPolicy,
+            bond_atoms: u128,
+            poster: String,
+            golden: crate::cross_domain::external::RawConsensusEvidence,
+        }
+        let params: Params = serde_json::from_value(registration).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid registration: {e}"), None::<()>)
+        })?;
+        let clean = params.poster.strip_prefix("0x").unwrap_or(&params.poster);
+        let poster = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid poster address: {e}"), None::<()>)
+        })?;
+        let economics = match (params.economics, params.routing_ceiling_atoms) {
+            (Some(e), _) => e,
+            (None, Some(ceiling)) => {
+                crate::cross_domain::external::IntakeState::conservative_economics(ceiling)
+            }
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either economics or routing_ceiling_atoms",
+                    None::<()>,
+                ))
+            }
+        };
+        let key = self
+            .chain
+            .register_external_domain(crate::cross_domain::external::RegistrationRequest {
+                spec: params.spec,
+                policy: params.policy,
+                economics,
+                versions: params.versions,
+                bond_atoms: params.bond_atoms,
+                poster,
+                golden: params.golden,
+            })
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("External domain registration refused: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "domainKey": format!("0x{}", hex::encode(key.as_bytes())),
+        }))
+    }
+
+    async fn submit_external_evidence(
+        &self,
+        evidence: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let evidence: crate::cross_domain::external::RawConsensusEvidence =
+            serde_json::from_value(evidence).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
+            })?;
+        let attestation = self
+            .chain
+            .submit_external_evidence(evidence)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("External evidence refused: {e}"),
+                    None::<()>,
+                )
+            })?;
+        serde_json::to_value(&attestation).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("Attestation serialization failed: {e}"),
+                None::<()>,
+            )
+        })
+    }
+
+    async fn get_external_domain_profile(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((profile, entry, descriptor)) = self.chain.get_external_domain_profile(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "profile": to_val("Profile", serde_json::to_value(&profile))?,
+            "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
+            "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
+        }))
+    }
+
+    async fn get_external_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let profiles = self.chain.get_external_domain_profiles().await;
+        let items: Vec<serde_json::Value> = profiles
+            .into_iter()
+            .map(|(profile, summary)| {
+                serde_json::json!({
+                    "domainKey": format!("0x{}", hex::encode(profile.domain.as_bytes())),
+                    "summary": summary,
+                    "profile": serde_json::to_value(&profile).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "domains": items }))
+    }
+
+    async fn get_external_intake_digest(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let digest = self.chain.get_external_intake_digest().await.map_err(|e| {
+            ErrorObjectOwned::owned(-32603, format!("Intake digest failed: {e}"), None::<()>)
+        })?;
+        Ok(serde_json::json!({
+            "digest": format!("0x{}", hex::encode(digest)),
+        }))
+    }
+
+    async fn readmit_external_domain(
+        &self,
+        domain_key_hex: String,
+        reason: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_readmitExternalDomain")?;
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        self.chain
+            .readmit_external_domain(key, reason)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Readmission refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({ "readmitted": true }))
+    }
+
+    async fn schedule_external_fork(
+        &self,
+        domain_key_hex: String,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_scheduleExternalFork")?;
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        self.chain
+            .schedule_external_fork(key, old_version, new_version, fork_height, grace_heights)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Fork refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({ "scheduled": true }))
+    }
+
+    async fn slash_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_slashExternalProver")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            prover: String,
+            evidence_digest_hex: String,
+            value_atoms: u128,
+            challenger: String,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid slash request: {e}"), None::<()>)
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let parse_addr = |s: &str, what: &str| -> Result<Address, ErrorObjectOwned> {
+            let clean = s.strip_prefix("0x").unwrap_or(s);
+            Address::from_hex(clean).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid {what}: {e}"), None::<()>)
+            })
+        };
+        let prover = parse_addr(&params.prover, "prover address")?;
+        let challenger = parse_addr(&params.challenger, "challenger address")?;
+        let digest_clean = params
+            .evidence_digest_hex
+            .strip_prefix("0x")
+            .unwrap_or(&params.evidence_digest_hex);
+        let digest_bytes = hex::decode(digest_clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid evidence digest: {e}"), None::<()>)
+        })?;
+        let evidence_digest: [u8; 32] = digest_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Evidence digest must be 32 bytes", None::<()>)
+        })?;
+        let (taken, reward) = self
+            .chain
+            .slash_external_prover(key, prover, evidence_digest, params.value_atoms, challenger)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Slash refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "slashedAtoms": taken.to_string(),
+            "challengerRewardAtoms": reward.to_string(),
         }))
     }
 

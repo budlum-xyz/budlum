@@ -1,12 +1,13 @@
 //! The first concrete adapter: an Ethereum-type PoS chain, verified through its
 //! Altair sync committee.
 //!
-//! WIRING: unwired - this adapter goes live only through an admission into the
-//! external-domain registry and a consensus decision binding the registry to
-//! the executor's relay path; the executor currently refuses generic Ethereum
-//! relay results (`relayer_evm_package_required`) precisely because that
-//! wiring is not yet approved, so the adapter is reached by its own tests and
-//! the fault-probe selftests until it is.
+//! WIRING: wired - this adapter goes live through an admission into the
+//! external-domain registry, now bound to consensus as
+//! `Blockchain::external_intake` (`AdapterSpec::EthereumSync` builds it, the
+//! node's `PairingBls` supplies the pairing check). The executor still
+//! refuses generic Ethereum relay results (`relayer_evm_package_required`):
+//! relay execution and finality attestation are different powers, and this
+//! wiring grants only the second.
 //!
 //! # What the sync committee gives us, and what it does not
 //!

@@ -38,30 +38,26 @@
 //!
 //! # WIRING STATUS - read this before trusting anything below
 //!
-//! **Not yet driven from production code.** As of this commit the module is
-//! reachable only from its own tests. Nothing in `chain_actor`, `blockchain` or
-//! the RPC surface constructs an [`ExternalDomainRegistry`], calls [`admit`], or
-//! submits evidence through it.
+//! **Wired through [`intake`].** The two consensus decisions the earlier
+//! version of this notice deferred were made, in writing, in
+//! `intake.rs`'s module docs:
 //!
-//! That is a statement of fact with an expiry date, not a property of the text
-//! it sits next to - re-derive it before believing it. The check is
-//! `grep -rn 'ExternalDomainRegistry' src/ --include='*.rs'` and looking for a
-//! hit outside this directory and outside the `cross_domain` re-export.
+//! 1. The registry lives on `Blockchain` as `external_intake`
+//!    ([`IntakeState`]), persisted by the storage layer and clocked from
+//!    block commit.
+//! 2. An accepted attestation is committed through the intake's
+//!    deterministic state digest (`IntakeState::state_digest`, exposed as
+//!    `bud_getExternalIntakeDigest`); the `GlobalBlockHeader` gains a root
+//!    when the first real external domain earns one.
 //!
-//! Three consequences, and they matter more than they sound:
-//!
-//! - The framework's rules are **specified and tested**, not deployed. A domain
-//!   registered today would not be consulted by anything.
-//! - The `dead_pub_api` gate counts a `pub fn` nothing reaches as dead, and most
-//!   of this module would be counted that way - correctly. The gate is
-//!   registered at `xtask/gates/src/main.rs:1081` but is not invoked from any
-//!   workflow, so this does not fail CI. A red step that is absent is not a
-//!   green one, and saying so here is cheaper than letting the silence read as
-//!   a pass.
-//! - Wiring it means choosing where the registry lives in consensus state and
-//!   how an attestation becomes a `GlobalBlockHeader` commitment. Both are
-//!   consensus-visible decisions; making them silently inside a framework
-//!   module would be the wrong way to make them.
+//! The production entry points are `Blockchain::register_external_domain` /
+//! `submit_external_evidence` (behind `ChainCommand`s and the
+//! `bud_registerExternalDomain` / `bud_submitExternalEvidence` /
+//! `bud_getExternalDomains` RPC surface), and the
+//! `verify_domain_commitment_finality` dispatch reaches
+//! [`ExternalDomainFinalityBridge`] for a `Custom` domain bound to
+//! [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`]. Re-derive before believing, as
+//! always: `grep -rn 'external_intake' src/ --include='*.rs'`.
 //!
 //! # The rule underneath all six
 //!
@@ -74,6 +70,7 @@
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
+pub mod intake;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
@@ -99,6 +96,7 @@ pub use evm_hybrid::{
     BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS, BLS_MAP_FP_TO_G1_ADDRESS, BLS_PAIRING_ADDRESS,
     MAX_ML_DSA_FIELD_BYTES, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
 };
+pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, RegistrationRequest};
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
     honesty_is_cheaper, required_bond_atoms, ChallengeReward, DomainEconomics, ProverBond,

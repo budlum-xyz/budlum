@@ -1061,6 +1061,35 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    pub fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()> {
+        let val = encode(intake)?;
+        self.db.insert(b"EXTERNAL_INTAKE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>> {
+        if let Some(val) = self.db.get(b"EXTERNAL_INTAKE")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn save_quarantine_ledger(
         &self,
         ledger: &crate::registry::QuarantineLedger,
@@ -1778,6 +1807,19 @@ impl BlockchainStorage for Storage {
         ledger: &crate::registry::QuarantineLedger,
     ) -> std::io::Result<()> {
         Self::save_quarantine_ledger(self, ledger)
+    }
+
+    fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()> {
+        Self::save_external_intake(self, intake)
+    }
+
+    fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>> {
+        Self::load_external_intake(self)
     }
 
     fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {

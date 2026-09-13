@@ -135,6 +135,13 @@ pub struct Blockchain {
     /// Universal Relayer - permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
+    /// External-domain intake: the permissionless registry of finality
+    /// adapters for other systems (`cross_domain::external`), now resident in
+    /// consensus state. Its height clock is driven from block commit
+    /// (`IntakeState::on_block_committed`), and it is persisted through the
+    /// storage layer like `universal_relayer`. This is the wiring decision
+    /// the framework's module docs deferred: the registry lives here.
+    pub external_intake: crate::cross_domain::external::IntakeState,
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
     pub finality_aggregator: Option<FinalityAggregator>,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
@@ -708,6 +715,7 @@ impl Blockchain {
         let mut universal_relayer = UniversalRelayer::new(RelayerConfig::default());
         let mut proof_claims = crate::prover::ProofClaimRegistry::new();
         let mut quarantine_ledger = crate::registry::QuarantineLedger::new();
+        let mut external_intake = crate::cross_domain::external::IntakeState::new();
 
         if let Some(ref store) = storage {
             if let Ok(domains) = store.load_consensus_domains() {
@@ -841,6 +849,10 @@ impl Blockchain {
             if let Ok(Some(stored_quarantine_ledger)) = store.load_quarantine_ledger() {
                 quarantine_ledger = stored_quarantine_ledger;
             }
+
+            if let Ok(Some(stored_external_intake)) = store.load_external_intake() {
+                external_intake = stored_external_intake;
+            }
         }
 
         // The stored-state loads above run AFTER the block-replay loop and
@@ -896,6 +908,7 @@ impl Blockchain {
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger,
             universal_relayer,
+            external_intake,
             pending_slashing_evidence: Vec::new(),
             finality_aggregator: None,
             metrics: None,
@@ -1678,7 +1691,40 @@ impl Blockchain {
                 adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root)
             }
             ConsensusKind::Custom(_) => {
-                if let Some(plugin) = self.plugin_registry.get(domain.id) {
+                if domain.finality_adapter
+                    == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                {
+                    // A local domain whose finality is supplied by the
+                    // permissionless external framework. The proof envelope
+                    // names the external adapter and network; the intake owns
+                    // the rebuildable spec and the policy the domain was
+                    // admitted under. The bridge, not this dispatch, owns the
+                    // commitment/attestation matching rules.
+                    let evidence =
+                        crate::cross_domain::external::decode_external_evidence(proof)
+                            .map_err(|e| e.to_string())?;
+                    let key = crate::cross_domain::external::DomainKey::from_parts(
+                        &evidence.adapter,
+                        &evidence.network,
+                    );
+                    let Some(entry) = self.external_intake.entries.get(&key) else {
+                        return Err(format!(
+                            "Domain {} names an external adapter that is not registered",
+                            commitment.domain_id
+                        ));
+                    };
+                    let bls = matches!(
+                        entry.spec,
+                        crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                    )
+                    .then(crate::cross_domain::external::IntakeState::production_bls);
+                    let bridge = crate::cross_domain::external::ExternalDomainFinalityBridge::new(
+                        entry.spec.build(bls, None),
+                        entry.policy.clone(),
+                    );
+                    self.ensure_adapter_name(domain, bridge.adapter_name())?;
+                    bridge.verify_finality(domain, commitment, proof)
+                } else if let Some(plugin) = self.plugin_registry.get(domain.id) {
                     let fa = plugin.finality_adapter();
                     self.ensure_adapter_name(domain, fa.adapter_name())?;
                     fa.verify_finality(domain, commitment, proof)
@@ -2794,6 +2840,201 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_universal_relayer(&self.universal_relayer) {
                 tracing::error!(error = %e, "Failed to persist universal relayer state");
+            }
+        }
+    }
+
+    /// Registers an external domain in the consensus-resident intake and
+    /// persists the result. This is the production entry the framework's
+    /// module docs said must not be invented silently inside the framework:
+    /// it is here, on `Blockchain`, where every other consensus registry
+    /// mutation lives.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal from `IntakeState::register_domain`, stringified for the
+    /// actor boundary like the neighbouring methods.
+    pub fn register_external_domain(
+        &mut self,
+        request: crate::cross_domain::external::RegistrationRequest,
+        bls: Option<Box<dyn crate::cross_domain::external::BlsVerifier>>,
+    ) -> Result<crate::cross_domain::external::DomainKey, String> {
+        let key = self
+            .external_intake
+            .register_domain(request, bls)
+            .map_err(|e| e.to_string())?;
+        self.persist_external_intake();
+        Ok(key)
+    }
+
+    /// Submits external-finality evidence through the intake and persists the
+    /// accepted attestation (or the refusal counters - both are state).
+    ///
+    /// # Errors
+    ///
+    /// Every refusal from `IntakeState::submit_evidence`, stringified.
+    pub fn submit_external_evidence(
+        &mut self,
+        evidence: &crate::cross_domain::external::RawConsensusEvidence,
+        bls: Option<Box<dyn crate::cross_domain::external::BlsVerifier>>,
+    ) -> Result<crate::cross_domain::external::FinalityAttestation, String> {
+        let result = self
+            .external_intake
+            .submit_evidence(evidence, bls)
+            .map_err(|e| e.to_string());
+        // A refused submission also mutates state (refusal counters, fault
+        // transitions), so persistence happens on both arms.
+        self.persist_external_intake();
+        result
+    }
+
+    /// The public profile of one registered external domain, together with
+    /// the intake entry it was admitted under (spec, policy, admission
+    /// report) and the descriptor as registered. The entry travels with the
+    /// profile because "under which rules was this admitted" is the first
+    /// question a reader of the profile asks.
+    #[must_use]
+    pub fn external_domain_profile(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> Option<(
+        crate::cross_domain::external::DomainProfile,
+        crate::cross_domain::external::IntakeEntry,
+        crate::cross_domain::external::AdapterDescriptor,
+    )> {
+        let profile = self
+            .external_intake
+            .registry
+            .domain(key)
+            .map(|reg| crate::cross_domain::external::profile_of(&reg.record))?;
+        let entry = self.external_intake.entries.get(key)?.clone();
+        let descriptor = self.external_intake.descriptor_of(key)?;
+        Some((profile, entry, descriptor))
+    }
+
+    /// Every registered external domain's profile, with the summary line the
+    /// RPC surface prints. The profile module is deliberately judgement-free;
+    /// this is the one place production iterates it.
+    #[must_use]
+    pub fn external_domain_profiles(
+        &self,
+    ) -> Vec<(crate::cross_domain::external::DomainProfile, String)> {
+        self.external_intake
+            .registry
+            .domains()
+            .map(|reg| {
+                let profile = crate::cross_domain::external::profile_of(&reg.record);
+                let line = profile.summary_line();
+                (profile, line)
+            })
+            .collect()
+    }
+
+    /// Re-runs admission for a faulted external domain and, when it passes,
+    /// hands the fresh report to the framework's `readmit`. The golden sample
+    /// and spec come from the stored entry: readmission proves the adapter
+    /// still refuses what it must, not that somebody re-uploaded new rules.
+    ///
+    /// # Errors
+    ///
+    /// The intake's admission refusals and the registry's readmit refusals,
+    /// stringified for the actor boundary.
+    pub fn readmit_external_domain(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        reason: &str,
+    ) -> Result<(), String> {
+        let Some(entry) = self.external_intake.entries.get(key) else {
+            return Err("no external domain is registered under this key".to_string());
+        };
+        let bls = matches!(
+            entry.spec,
+            crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+        )
+        .then(crate::cross_domain::external::IntakeState::production_bls);
+        let adapter = entry.spec.build(bls, Some(entry.golden.clone()));
+        let admission = crate::cross_domain::external::admit(adapter.as_ref(), &entry.policy);
+        let result = self
+            .external_intake
+            .registry
+            .readmit(key, &admission, reason)
+            .map_err(|e| e.to_string());
+        if result.is_ok() {
+            if let Some(entry) = self.external_intake.entries.get_mut(key) {
+                entry.admission = admission;
+            }
+        }
+        self.persist_external_intake();
+        result
+    }
+
+    /// Schedules an evidence-format fork for a registered external domain.
+    /// The version policy is consensus state; a fork that only lived in an
+    /// operator's config file would let two nodes disagree about which
+    /// evidence version is valid at a height.
+    ///
+    /// # Errors
+    ///
+    /// `ForkError` from the policy, stringified, or an unknown domain.
+    pub fn schedule_external_fork(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<(), String> {
+        let Some(reg) = self.external_intake.registry.domain(key) else {
+            return Err("no external domain is registered under this key".to_string());
+        };
+        let mut versions = reg.versions.clone();
+        versions
+            .schedule_fork(old_version, new_version, fork_height, grace_heights)
+            .map_err(|e| e.to_string())?;
+        // Write back through the entries map: the registry exposes no version
+        // setter, and should not - the policy travels with the registration.
+        // `register` owns the initial policy; a fork is the one sanctioned
+        // later mutation, and it lands here in consensus state.
+        let current = versions.current_version_at(self.chain.len() as u64);
+        tracing::info!(
+            domain = %hex::encode(key.as_bytes()),
+            accepted = %versions.accepted_list(),
+            ?current,
+            "external domain evidence fork scheduled"
+        );
+        self.external_intake.set_version_policy(key, versions)?;
+        self.persist_external_intake();
+        Ok(())
+    }
+
+    /// Slashes the prover that carried a specific accepted attestation, after
+    /// a successful challenge. Returns `(taken, challenger_reward)`.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals - unknown domain/prover, digest not accepted,
+    /// carrier mismatch - stringified.
+    pub fn slash_external_prover(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        prover: Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), String> {
+        let result = self
+            .external_intake
+            .registry
+            .slash(key, prover, evidence_digest, value_atoms, challenger)
+            .map_err(|e| e.to_string());
+        self.persist_external_intake();
+        result
+    }
+
+    fn persist_external_intake(&self) {
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_external_intake(&self.external_intake) {
+                tracing::error!(error = %e, "Failed to persist external intake state");
             }
         }
     }
@@ -4288,6 +4529,11 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        // The external-domain registry's clock is the local chain height, and
+        // block commit is the only place that may advance it: a clock driven
+        // from anywhere else would let sunset windows drift between replay
+        // and live operation.
+        self.external_intake.on_block_committed(block.index);
         if block.slashing_evidence.is_some() {
             self.pending_slashing_evidence.clear();
         }
@@ -4601,8 +4847,12 @@ impl Blockchain {
 
         // Counter and tx-type metrics must be read before `push` consumes the block.
         let applied_tx_count = block.transactions.len() as u64;
+        let committed_index = block.index;
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        // Same clock rule as the other commit path: block commit drives the
+        // external-domain registry height, nothing else does.
+        self.external_intake.on_block_committed(committed_index);
 
         if let Some(last_block) = self.chain.last() {
             // Call record_block_with_chain first (chain-aware hooks like PoW difficulty adjustment)
@@ -6608,6 +6858,7 @@ impl Clone for Blockchain {
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger: self.quarantine_ledger.clone(),
             universal_relayer: self.universal_relayer.clone(),
+            external_intake: self.external_intake.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
             finality_aggregator: None,
             metrics: self.metrics.clone(),

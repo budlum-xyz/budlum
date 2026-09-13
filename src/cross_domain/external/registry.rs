@@ -105,8 +105,9 @@ impl DomainRegistration {
 
     /// The most recent accepted attestation, by height then version.
     #[must_use]
-    /// WIRING: unwired - the consumer is the consensus binding that reads
-    /// the newest accepted attestation; the binding is not approved yet.
+    /// WIRING: wired - the consensus binding (`intake`) owns this registry
+    /// as `Blockchain::external_intake`; the newest accepted attestation is
+    /// part of the persisted, digest-committed state.
     pub fn latest_attestation(&self) -> Option<&FinalityAttestation> {
         self.attestations
             .keys()
@@ -140,8 +141,8 @@ impl ExternalDomainRegistry {
 
     /// Advances the registry's height. Monotonic by construction: a height
     /// that goes backwards would let a sunset window reopen.
-    /// WIRING: unwired - the block-import path drives the registry clock
-    /// once the registry is bound to consensus; nothing drives it today.
+    /// WIRING: wired - the block-import path drives the registry clock
+    /// through `IntakeState::on_block_committed` on both commit paths.
     pub fn set_height(&mut self, height: u64) {
         if height > self.height {
             self.height = height;
@@ -297,6 +298,40 @@ impl ExternalDomainRegistry {
     ///
     /// An unknown domain, a failed admission, or a report identical to the one
     /// already registered.
+    /// Replaces a domain's version policy. The one sanctioned later mutation
+    /// of a registration: an evidence-format fork. The caller (the consensus
+    /// intake) is expected to have built the new policy by
+    /// `VersionPolicy::schedule_fork` on the stored one, so consistency was
+    /// already enforced; this still refuses a policy for a different adapter,
+    /// because that is not a fork, it is a swap.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, an inconsistent policy, or one naming another
+    /// adapter.
+    pub fn set_version_policy(
+        &mut self,
+        domain: &DomainKey,
+        versions: VersionPolicy,
+    ) -> Result<(), RegistryError> {
+        let Some(reg) = self.domains.get_mut(domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        if versions.adapter != reg.record.descriptor.id {
+            return Err(RegistryError::DescriptorMismatch {
+                expected: hex(&reg.record.descriptor.id.0),
+                found: hex(&versions.adapter.0),
+            });
+        }
+        if !versions.is_consistent() {
+            return Err(RegistryError::InvalidVersionPolicy);
+        }
+        reg.record.accepted_evidence_versions =
+            versions.windows.iter().map(|w| w.version).collect();
+        reg.versions = versions;
+        Ok(())
+    }
+
     pub fn readmit(
         &mut self,
         domain: &DomainKey,

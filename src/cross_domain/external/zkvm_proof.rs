@@ -1,9 +1,8 @@
 //! A domain whose finality is *proven*, not voted: the BudZKVM adapter.
 //!
-//! WIRING: unwired - like every adapter in this tree, it becomes reachable
-//! through registry admission plus the consensus binding documented in
-//! `domain_bridge`; neither is approved yet, so the adapter is reached by its
-//! own tests and the executor path stays fail-closed.
+//! WIRING: wired - like every adapter in this tree, it is reachable through
+//! registry admission (`AdapterSpec::ZkVm` in the consensus-resident intake)
+//! plus the finality dispatch documented in `domain_bridge`.
 //!
 //! # Why this adapter exists
 //!

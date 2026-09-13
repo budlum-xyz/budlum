@@ -85,6 +85,76 @@ pub trait BudlumApi {
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Registers a permissionless external domain: adapter spec in, admission
+    /// self-test run, bond checked, and the domain becomes submittable.
+    /// Operator-only for the same reason `bud_registerConsensusDomain` is -
+    /// this build's economics move no signed stake yet, and an unsigned bond
+    /// number from an anonymous caller is not a bond.
+    #[method(name = "bud_registerExternalDomain")]
+    async fn register_external_domain(
+        &self,
+        registration: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Submits external-finality evidence to a registered external domain.
+    /// Returns the accepted attestation, or the named refusal.
+    #[method(name = "bud_submitExternalEvidence")]
+    async fn submit_external_evidence(
+        &self,
+        evidence: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Reads one external domain's public profile: state, trust model, bond,
+    /// accept/refuse history - the facts, with units, judgement left to the
+    /// reader.
+    #[method(name = "bud_getExternalDomainProfile")]
+    async fn get_external_domain_profile(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Lists every registered external domain's profile, each with the
+    /// one-line summary the profile module renders.
+    #[method(name = "bud_getExternalDomains")]
+    async fn get_external_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The deterministic digest of the external-intake state. Two nodes that
+    /// applied the same registrations and attestations return the same value;
+    /// this is the cross-node commitment until the header earns a root (see
+    /// `cross_domain::external::intake`).
+    #[method(name = "bud_getExternalIntakeDigest")]
+    async fn get_external_intake_digest(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-runs admission for a faulted external domain against its stored
+    /// golden sample and probes. Operator-only.
+    #[method(name = "bud_readmitExternalDomain")]
+    async fn readmit_external_domain(
+        &self,
+        domain_key_hex: String,
+        reason: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Schedules an evidence-format fork for an external domain. Operator-only.
+    #[method(name = "bud_scheduleExternalFork")]
+    async fn schedule_external_fork(
+        &self,
+        domain_key_hex: String,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Slashes the prover that carried an accepted external attestation,
+    /// paying the challenger from the penalty. Operator-only in this build:
+    /// the challenge game's dispute transcript is not yet a signed
+    /// transaction type.
+    #[method(name = "bud_slashExternalProver")]
+    async fn slash_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_registerConsensusDomain")]
     async fn register_consensus_domain(
         &self,

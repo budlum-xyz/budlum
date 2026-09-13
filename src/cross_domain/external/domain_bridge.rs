@@ -11,12 +11,12 @@
 //! trust score. It only checks identity, versioned evidence, proof binding and
 //! the height/root that the local commitment is about.
 //!
-//! WIRING: unwired - the consensus step that registers this bridge as a
-//! `DomainFinalityAdapter` for a live local domain is a consensus-visible
-//! decision (which registry state feeds it, and how its attestation reaches
-//! the `GlobalBlockHeader` commitment) that must not be taken silently inside
-//! a framework module; until that step is designed and approved, the bridge
-//! is reached by its own tests and the executor path stays fail-closed.
+//! WIRING: wired - `Blockchain::verify_domain_commitment_finality` constructs
+//! this bridge for a `ConsensusKind::Custom` domain whose `finality_adapter`
+//! is [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`], rebuilding the adapter from the
+//! consensus-resident intake entry (`external_intake`) and the policy the
+//! domain was admitted under. The registry state that feeds it and the
+//! commitment path are documented in `intake.rs`.
 
 use crate::cross_domain::external::spec::{
     AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, VerificationPolicy,
