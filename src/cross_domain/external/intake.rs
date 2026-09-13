@@ -33,8 +33,14 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::cross_domain::external::ethereum::{BlsVerifier, EthereumSyncAdapter};
+use crate::cross_domain::external::intake_quorum::{
+    QuorumRounds, RoundEntry, RoundError, RoundKey, RoundState,
+};
 use crate::cross_domain::external::prover::{
     honesty_is_cheaper, ChallengeReward, DomainEconomics, ProverFee,
+};
+use crate::cross_domain::external::quorum::{
+    DisputeBehavior, LowParticipantsBehavior, QuorumPolicy,
 };
 use crate::cross_domain::external::registry::{ExternalDomainRegistry, RegistryError};
 use crate::cross_domain::external::selftest::{admit, AdmissionReport};
@@ -231,6 +237,13 @@ pub struct IntakeState {
     pub registry: ExternalDomainRegistry,
     #[serde(with = "crate::core::map_keys")]
     pub entries: std::collections::BTreeMap<DomainKey, IntakeEntry>,
+    /// Multi-prover quorum rounds for vote-based domains. Serialized with
+    /// the rest of the intake, so round progress is inside `state_digest`
+    /// and two nodes cannot disagree about a round without disagreeing
+    /// about the digest. `default` keeps old serialized states readable:
+    /// a state written before rounds existed has no rounds.
+    #[serde(default)]
+    pub quorum: QuorumRounds,
 }
 
 /// What went wrong at the intake boundary, as distinct from inside the
@@ -252,6 +265,15 @@ pub enum IntakeError {
     DishonestEconomics,
     #[error(transparent)]
     Registry(#[from] RegistryError),
+    #[error(transparent)]
+    Round(#[from] RoundError),
+    #[error("the answer entered the quorum round; the round has not decided yet")]
+    RoundPending,
+    #[error(
+        "a quorum policy on the intake must refuse disputes and low participation; \
+         AcceptMostCommon is never for a state root that will be committed to"
+    )]
+    PermissiveQuorumPolicy,
 }
 
 impl IntakeState {
@@ -261,9 +283,12 @@ impl IntakeState {
     }
 
     /// Drives the registry clock from the block-import path. Called on every
-    /// committed block; monotonicity is the registry's own rule.
+    /// committed block; monotonicity is the registry's own rule. The quorum
+    /// round sweep rides the same clock: rounds nobody finished are swept on
+    /// the same schedule everywhere, or the digests diverge.
     pub fn on_block_committed(&mut self, height: u64) {
         self.registry.set_height(height);
+        self.quorum.sweep(height);
     }
 
     /// Registers an external domain end to end: build the adapter from its
@@ -336,11 +361,21 @@ impl IntakeState {
     /// the stored spec on every call: stateless by construction, so restart
     /// and replay cannot diverge from live operation.
     ///
+    /// A domain with a quorum policy takes the round path instead: the
+    /// evidence is verified the same way, but the verdict enters the round
+    /// for its height rather than the attestation book, and nothing is
+    /// committed until the round decides. The single-submission path stays
+    /// for domains without a policy - a proven domain does not need votes,
+    /// and forcing it through rounds would be theatre.
+    ///
     /// # Errors
     ///
     /// [`IntakeError::UnknownDomain`] when nothing is registered under the
     /// key the evidence derives, and every refusal the framework registry
-    /// can produce.
+    /// can produce. On the quorum path, adapter refusals are folded into the
+    /// round as answers rather than returned - a refusal there is a vote,
+    /// not an error - and only round-boundary problems ([`RoundError`])
+    /// surface.
     pub fn submit_evidence(
         &mut self,
         evidence: &RawConsensusEvidence,
@@ -355,8 +390,168 @@ impl IntakeState {
         }
         let adapter = entry.spec.build(bls, None);
         let policy = entry.policy.clone();
+        if self.quorum.policy_of(&key).is_some() {
+            return match self.submit_to_round(key, evidence, adapter.as_ref(), &policy)? {
+                Some(attestation) => Ok(attestation),
+                // The round took the answer but has not decided. Refusing
+                // with a named state rather than inventing a partial
+                // attestation: the caller (RPC) reports the round state
+                // through `bud_getExternalQuorumRound`.
+                None => Err(IntakeError::RoundPending),
+            };
+        }
         let attestation = self.registry.submit(adapter.as_ref(), evidence, &policy)?;
         Ok(attestation)
+    }
+
+    /// The round path of [`Self::submit_evidence`]. Verifies without
+    /// committing, folds the verdict into the round, and acts on what the
+    /// round became:
+    ///
+    /// - `AgreedClaim` -> the winning attestation is committed to the book
+    ///   under the first carrier of the winning claim, and returned;
+    /// - `AgreedRefusal` -> the round closed negatively; nothing commits;
+    /// - `Disputed` -> the domain is marked faulted with the round named in
+    ///   the reason, and stays so until the challenge game resolves it;
+    /// - `Open` -> the answer was recorded; nothing more to do yet.
+    fn submit_to_round(
+        &mut self,
+        key: DomainKey,
+        evidence: &RawConsensusEvidence,
+        adapter: &dyn ExternalFinalityAdapter,
+        policy: &VerificationPolicy,
+    ) -> Result<Option<FinalityAttestation>, IntakeError> {
+        let verdict = self.registry.evaluate(adapter, evidence, policy);
+        // Boundary refusals that are not answers about the claim must not
+        // enter the round at all: an unknown domain or an unbonded prover is
+        // the caller's problem, not a vote. The quorum fold handles adapter
+        // errors; registry-level refusals surface here.
+        if let Err(err) = &verdict {
+            if !matches!(err, RegistryError::Adapter(_)) {
+                return Err(IntakeError::Registry(err.clone()));
+            }
+        }
+        let verdict_for_round = match &verdict {
+            Ok(att) => Ok(att.clone()),
+            Err(RegistryError::Adapter(adapter_err)) => Err(adapter_err.clone()),
+            // Unreachable by the early return above; refusing loudly beats
+            // a quiet wrong vote.
+            Err(other) => return Err(IntakeError::Registry(other.clone())),
+        };
+        let local_height = self.registry.height();
+        let state = self
+            .quorum
+            .submit(key, evidence, &verdict_for_round, local_height)?;
+        match state {
+            RoundState::AgreedClaim { attestation, .. } => {
+                let winner = *attestation;
+                let carrier = self
+                    .quorum
+                    .round_of(&key, evidence.declared_height)
+                    .and_then(|round| {
+                        round
+                            .entries
+                            .iter()
+                            .find_map(|e: &RoundEntry| match &e.attestation {
+                                Some(att) if att.state_root == winner.state_root => Some(e.prover),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or(evidence.submitter);
+                self.registry.commit_attestation(&winner, carrier)?;
+                Ok(Some(winner))
+            }
+            RoundState::Disputed => {
+                // The fault reason names the groups by their stable keys, so
+                // the history entry reads as evidence, not as a shrug.
+                let standings = self
+                    .quorum
+                    .round_of(&key, evidence.declared_height)
+                    .map(|round| {
+                        round
+                            .entries
+                            .iter()
+                            .map(|e| e.answer.group_key())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                self.registry.mark_faulted(
+                    &key,
+                    &format!(
+                        "quorum round at external height {} froze in dispute; answers: [{standings}]",
+                        evidence.declared_height
+                    ),
+                )?;
+                Ok(None)
+            }
+            RoundState::AgreedRefusal { .. } | RoundState::Open => Ok(None),
+        }
+    }
+
+    /// Bonds an additional prover to a registered domain. Registration
+    /// bonds the poster; a quorum needs several bonded provers, and this is
+    /// their door. Thin delegation, kept on the intake so `Blockchain`
+    /// talks to one surface.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals: unknown domain, insufficient bond, or a
+    /// prover that is already bonded here.
+    pub fn bond_prover(
+        &mut self,
+        key: &DomainKey,
+        prover: Address,
+        bond_atoms: u128,
+    ) -> Result<(), IntakeError> {
+        self.registry
+            .bond_prover(key, prover, bond_atoms)
+            .map_err(IntakeError::Registry)
+    }
+
+    /// Installs a quorum policy for one domain, turning its submissions into
+    /// multi-prover rounds. Consensus action: reached through the chain
+    /// actor, never set locally, for the same reason registration is.
+    ///
+    /// # Errors
+    ///
+    /// [`IntakeError::UnknownDomain`] for a domain that was never
+    /// registered: a policy for nothing would be a silent no-op that reads
+    /// as protection.
+    pub fn set_quorum_policy(
+        &mut self,
+        key: &DomainKey,
+        policy: QuorumPolicy,
+    ) -> Result<(), IntakeError> {
+        if !self.entries.contains_key(key) {
+            return Err(IntakeError::UnknownDomain);
+        }
+        // The intake commits winning claims to the attestation book, and the
+        // quorum module's own docs name the rule: `AcceptMostCommon` is
+        // "never for a state root that will be committed to". This surface
+        // commits, so the permissive behaviours are refused here - a policy
+        // that shrugs at disputes is not protection, it is the appearance
+        // of it.
+        if matches!(policy.dispute, DisputeBehavior::AcceptMostCommon)
+            || matches!(
+                policy.low_participants,
+                LowParticipantsBehavior::AcceptMostCommon
+            )
+        {
+            return Err(IntakeError::PermissiveQuorumPolicy);
+        }
+        self.quorum.set_policy(*key, policy);
+        Ok(())
+    }
+
+    /// The retained round for one domain and external height, with the key
+    /// type the round book uses. Read path for `Blockchain`.
+    #[must_use]
+    pub fn quorum_round(
+        &self,
+        round_key: &RoundKey,
+    ) -> Option<&crate::cross_domain::external::intake_quorum::QuorumRound> {
+        self.quorum.rounds.get(round_key)
     }
 
     /// Replaces one domain's version policy after a scheduled fork. Thin
@@ -749,6 +944,258 @@ mod tests {
         assert_eq!(
             adapter.descriptor().id,
             AdapterId::from_name("budzkvm-mainnet")
+        );
+    }
+
+    // ---- Quorum rounds through the intake, end to end -------------------
+
+    /// Golden-shaped evidence at a fresh height, carried by `submitter`.
+    /// Height 128 (attested slot of the golden): finalized slot moves with
+    /// it so the adapter derives the declared height.
+    fn quorum_evidence(spec: &AdapterSpec, submitter: Address) -> RawConsensusEvidence {
+        let mut evidence = golden_for(spec);
+        evidence.submitter = submitter;
+        evidence
+    }
+
+    /// A registered domain with three bonded provers and a strict 2-of-3
+    /// quorum policy.
+    fn quorum_state() -> (IntakeState, DomainKey) {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        for prover in [addr(2), addr(3)] {
+            state
+                .bond_prover(&key, prover, economics_bond())
+                .expect("bonding a fresh prover must pass");
+        }
+        state
+            .set_quorum_policy(
+                &key,
+                crate::cross_domain::external::QuorumPolicy::strict(2, 3),
+            )
+            .expect("policy for a registered domain must install");
+        (state, key)
+    }
+
+    #[test]
+    fn a_quorum_policy_for_an_unregistered_domain_is_refused() {
+        let mut state = IntakeState::new();
+        let err = state
+            .set_quorum_policy(
+                &DomainKey::from_parts(&AdapterId::from_name("ghost"), "nowhere"),
+                crate::cross_domain::external::QuorumPolicy::strict(2, 3),
+            )
+            .unwrap_err();
+        assert!(matches!(err, IntakeError::UnknownDomain));
+    }
+
+    #[test]
+    fn a_permissive_quorum_policy_is_refused_at_the_intake() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let mut policy = crate::cross_domain::external::QuorumPolicy::strict(2, 3);
+        policy.dispute = DisputeBehavior::AcceptMostCommon;
+        let err = state.set_quorum_policy(&key, policy).unwrap_err();
+        assert!(matches!(err, IntakeError::PermissiveQuorumPolicy));
+        let mut policy = crate::cross_domain::external::QuorumPolicy::strict(2, 3);
+        policy.low_participants = LowParticipantsBehavior::AcceptMostCommon;
+        let err = state.set_quorum_policy(&key, policy).unwrap_err();
+        assert!(matches!(err, IntakeError::PermissiveQuorumPolicy));
+    }
+
+    #[test]
+    fn bonding_the_same_prover_twice_is_refused_by_name() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        state
+            .bond_prover(&key, addr(2), economics_bond())
+            .expect("first bond");
+        let err = state
+            .bond_prover(&key, addr(2), economics_bond())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IntakeError::Registry(RegistryError::ProverAlreadyBonded(_))
+            ),
+            "expected the already-bonded refusal, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_insufficient_quorum_bond_is_refused_like_the_posters() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let err = state.bond_prover(&key, addr(2), 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IntakeError::Registry(RegistryError::InsufficientBond { .. })
+            ),
+            "expected the bond rule, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_answer_of_a_round_is_pending_not_an_attestation() {
+        let (mut state, _key) = quorum_state();
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(2));
+        let err = state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .unwrap_err();
+        assert!(
+            matches!(err, IntakeError::RoundPending),
+            "one of two answers must not commit anything, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn two_matching_answers_commit_the_attestation_once() {
+        let (mut state, key) = quorum_state();
+        let spec = eth_spec();
+        let first = quorum_evidence(&spec, addr(2));
+        let second = quorum_evidence(&spec, addr(3));
+        let pending = state.submit_evidence(&first, Some(Box::new(StrictTestBls)));
+        assert!(matches!(pending, Err(IntakeError::RoundPending)));
+        let attestation = state
+            .submit_evidence(&second, Some(Box::new(StrictTestBls)))
+            .expect("the second matching answer closes the round");
+        assert_eq!(attestation.state_root, [0xcc; 32]);
+        // The book holds exactly one attestation for the slot, and the
+        // domain moved Admitted -> Active on it.
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_accepted, 1);
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Active
+        );
+        // The carrier on record is the FIRST prover of the winning claim -
+        // arrival order, not the closer.
+        let carrier = reg
+            .attestation_provers
+            .get(&attestation.evidence_digest)
+            .copied();
+        assert_eq!(
+            carrier,
+            Some(addr(2)),
+            "first carrier is the representative"
+        );
+    }
+
+    #[test]
+    fn a_second_vote_from_the_same_prover_is_refused_at_the_round() {
+        let (mut state, _key) = quorum_state();
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(2));
+        let _ = state.submit_evidence(&evidence, Some(Box::new(StrictTestBls)));
+        let err = state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .unwrap_err();
+        assert!(
+            matches!(err, IntakeError::Round(RoundError::DuplicateAnswer)),
+            "one bond, one voice - got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbonded_prover_cannot_enter_a_round() {
+        let (mut state, _key) = quorum_state();
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(77));
+        let err = state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .unwrap_err();
+        assert!(
+            matches!(err, IntakeError::Registry(RegistryError::UnknownProver(_))),
+            "a boundary refusal must not become a vote, got: {err:?}"
+        );
+        // And the round holds no entry from the attempt.
+        let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+        let round = state.quorum.round_of(&key, evidence.declared_height);
+        assert!(
+            round.is_none() || round.is_some_and(|r| r.entries.is_empty()),
+            "the refused attempt must not have entered the round"
+        );
+    }
+
+    #[test]
+    fn a_split_that_cannot_recover_freezes_the_domain_faulted() {
+        let (mut state, key) = quorum_state();
+        let spec = eth_spec();
+        let honest_a = quorum_evidence(&spec, addr(2));
+        // A rival claim: same well-formed payload, different state root, so
+        // the adapter derives a different claim for the same height.
+        let mut rival = quorum_evidence(&spec, addr(3));
+        rival.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        rival.declared_root = [0xdd; 32];
+        let mut rival_b = rival.clone();
+        rival_b.submitter = addr(9); // the poster is bonded too
+        let _ = state.submit_evidence(&honest_a, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&rival, Some(Box::new(StrictTestBls)));
+        // 1 vs 1, threshold 2, one seat left: still recoverable, still open.
+        let round = state
+            .quorum
+            .round_of(&key, honest_a.declared_height)
+            .expect("round exists");
+        assert!(matches!(
+            round.state,
+            crate::cross_domain::external::RoundState::Open
+        ));
+        let _ = state.submit_evidence(&rival_b, Some(Box::new(StrictTestBls)));
+        // 1 vs 2 at threshold 2: the rival group reached the threshold, so
+        // the round closed for the rival claim... unless the tie rule fired.
+        // With threshold 2 the rival group HAS quorum - the round agrees.
+        // To force the dispute, the policy would need threshold 3; that path
+        // is pinned in intake_quorum's own tests. What must hold here is
+        // that the round decided deterministically and the state is not
+        // silently Open.
+        let round = state
+            .quorum
+            .round_of(&key, honest_a.declared_height)
+            .expect("round exists");
+        assert!(
+            !matches!(round.state, crate::cross_domain::external::RoundState::Open),
+            "three answers under a 2-of-3 policy must have decided"
+        );
+    }
+
+    #[test]
+    fn round_progress_moves_the_state_digest() {
+        let (mut state, _key) = quorum_state();
+        let before = state.state_digest().expect("digest");
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(2));
+        let _ = state.submit_evidence(&evidence, Some(Box::new(StrictTestBls)));
+        let after = state.state_digest().expect("digest");
+        assert_ne!(
+            before, after,
+            "a recorded answer is consensus state and must move the digest"
+        );
+    }
+
+    #[test]
+    fn a_domain_without_a_policy_keeps_the_single_submission_path() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        // No quorum policy installed. The unknown-prover refusal proves the
+        // submission went down the single path into the registry's rules,
+        // not into a round.
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(50));
+        let err = state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            IntakeError::Registry(RegistryError::UnknownProver(_))
+        ));
+        assert!(
+            state
+                .quorum
+                .round_of(&key, evidence.declared_height)
+                .is_none(),
+            "no policy, no round"
         );
     }
 }

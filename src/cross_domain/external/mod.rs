@@ -71,6 +71,7 @@ pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod intake;
+pub mod intake_quorum;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
@@ -97,6 +98,10 @@ pub use evm_hybrid::{
     MAX_ML_DSA_FIELD_BYTES, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
 };
 pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, RegistrationRequest};
+pub use intake_quorum::{
+    QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
+    ROUND_RETENTION_BLOCKS,
+};
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
     honesty_is_cheaper, required_bond_atoms, ChallengeReward, DomainEconomics, ProverBond,

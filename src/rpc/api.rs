@@ -155,6 +155,45 @@ pub trait BudlumApi {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Bonds an additional prover to a registered external domain, so a
+    /// quorum policy has more than one slashable voice. Operator-only for
+    /// the same reason registration is: this build's economics move no
+    /// signed stake yet.
+    #[method(name = "bud_bondExternalProver")]
+    async fn bond_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. From then on submissions enter rounds keyed by external
+    /// height; nothing commits until enough bonded provers carry the same
+    /// claim, and a dispute freezes the domain for the challenge game.
+    /// Operator-only for the same reason registration is.
+    #[method(name = "bud_setExternalQuorumPolicy")]
+    async fn set_external_quorum_policy(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Reads the quorum round for one external height of one domain: its
+    /// state, every recorded answer, and who gave it. This is where a
+    /// submitter whose evidence returned "round pending" watches the round.
+    #[method(name = "bud_getExternalQuorumRound")]
+    async fn get_external_quorum_round(
+        &self,
+        domain_key_hex: String,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Lists every retained quorum round of one domain with the policy they
+    /// run under, oldest external height first.
+    #[method(name = "bud_getExternalQuorumRounds")]
+    async fn get_external_quorum_rounds(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_registerConsensusDomain")]
     async fn register_consensus_domain(
         &self,

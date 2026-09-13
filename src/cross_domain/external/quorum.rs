@@ -1,11 +1,14 @@
 //! Cross-prover agreement: when several provers carry the same external state
 //! and disagree, what the chain does about it.
 //!
-//! WIRING: unwired - the quorum rule fires from the registry's attestation
-//! path once vote-based domains are admitted; admission itself is behind the
-//! same consensus decision the bridge module documents, so today the rule is
-//! exercised by its own tests and nothing in production can reach a
-//! disagreement for it to resolve.
+//! WIRING: wired - `intake_quorum::QuorumRounds` runs these rules on the
+//! consensus intake. A domain with an installed `QuorumPolicy` (installed
+//! through `Blockchain::set_external_quorum_policy`, reached by the
+//! `bud_setExternalQuorumPolicy` RPC) sends every submission through a round
+//! keyed by external height; [`decide`] is called as answers accumulate and
+//! the round's state transitions are what `IntakeState::submit_to_round`
+//! acts on - commit on `AgreedClaim`, freeze the domain `Faulted` on a
+//! permanent dispute.
 //!
 //! # The gap this closes
 //!

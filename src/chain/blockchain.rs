@@ -3031,6 +3031,87 @@ impl Blockchain {
         result
     }
 
+    /// Bonds an additional prover to a registered external domain, so a
+    /// quorum policy has more than one slashable voice to count. Consensus
+    /// state, persisted like every other intake mutation.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals, stringified for the actor boundary.
+    pub fn bond_external_prover(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        prover: Address,
+        bond_atoms: u128,
+    ) -> Result<(), String> {
+        let result = self
+            .external_intake
+            .bond_prover(key, prover, bond_atoms)
+            .map_err(|e| e.to_string());
+        self.persist_external_intake();
+        result
+    }
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. From then on, evidence for that domain enters rounds keyed by
+    /// external height and nothing is committed until a round decides; a
+    /// round frozen in dispute marks the domain faulted for the challenge
+    /// game. Consensus state, persisted like every other intake mutation.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, stringified for the actor boundary.
+    pub fn set_external_quorum_policy(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        policy: crate::cross_domain::external::QuorumPolicy,
+    ) -> Result<(), String> {
+        let result = self
+            .external_intake
+            .set_quorum_policy(key, policy)
+            .map_err(|e| e.to_string());
+        self.persist_external_intake();
+        result
+    }
+
+    /// The quorum round for one external height of one domain, if any. Read
+    /// path for the RPC surface: a submitter whose evidence returned
+    /// "round pending" reads the round here to see what it is waiting for.
+    #[must_use]
+    pub fn external_quorum_round(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+        height: u64,
+    ) -> Option<crate::cross_domain::external::QuorumRound> {
+        self.external_intake
+            .quorum_round(&crate::cross_domain::external::RoundKey {
+                domain: *key,
+                height,
+            })
+            .cloned()
+    }
+
+    /// Every retained quorum round of one domain, oldest external height
+    /// first, with the domain's policy beside them.
+    #[must_use]
+    pub fn external_quorum_rounds(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> (
+        Option<crate::cross_domain::external::QuorumPolicy>,
+        Vec<crate::cross_domain::external::QuorumRound>,
+    ) {
+        let policy = self.external_intake.quorum.policy_of(key).copied();
+        let rounds = self
+            .external_intake
+            .quorum
+            .rounds_of(key)
+            .into_iter()
+            .cloned()
+            .collect();
+        (policy, rounds)
+    }
+
     fn persist_external_intake(&self) {
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_external_intake(&self.external_intake) {

@@ -54,6 +54,8 @@ pub enum RegistryError {
     ProverUnderbonded { live: u128 },
     #[error("the prover {0} has no bond with this domain")]
     UnknownProver(String),
+    #[error("the prover {0} already holds a bond with this domain")]
+    ProverAlreadyBonded(String),
     #[error("prover {found} did not carry the accepted attestation; its carrier was {expected}")]
     AttestationProverMismatch { expected: String, found: String },
     #[error("an attestation at height {height} already exists from evidence version {version}")]
@@ -469,6 +471,165 @@ impl ExternalDomainRegistry {
                 Err(err)
             }
         }
+    }
+
+    /// Verification without commitment: the same checks [`Self::submit`]
+    /// runs, none of its bookkeeping. The quorum path needs this split -
+    /// each prover's evidence must be judged when it arrives, but nothing
+    /// may enter the attestation book until the round decides, because a
+    /// stored attestation is a fact and a round that has not decided has
+    /// not produced one.
+    ///
+    /// # Errors
+    ///
+    /// Any [`RegistryError`], exactly as [`Self::submit`] would refuse.
+    /// Counters are NOT updated; the round's own entries are the record.
+    pub fn evaluate(
+        &self,
+        adapter: &dyn ExternalFinalityAdapter,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+    ) -> Result<FinalityAttestation, RegistryError> {
+        let domain = DomainKey::from_parts(&adapter.descriptor().id, &evidence.network);
+        let Some(reg) = self.domains.get(&domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        let descriptor = reg.record.descriptor.clone();
+        let versions = reg.versions.clone();
+        let economics = reg.economics;
+        let prover_bond = reg.provers.get(&evidence.submitter).cloned();
+        self.check(
+            adapter,
+            &descriptor,
+            &versions,
+            &economics,
+            prover_bond.as_ref(),
+            evidence,
+            policy,
+        )
+    }
+
+    /// Commits a round-winning attestation to the domain's book. The quorum
+    /// path's counterpart to the bookkeeping half of [`Self::submit`]: the
+    /// attestation was already verified through [`Self::evaluate`] when its
+    /// evidence arrived, and the round has since decided for it.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, or an attestation already held for the same
+    /// height/version slot - the duplicate rule holds on this path too.
+    pub fn commit_attestation(
+        &mut self,
+        attestation: &FinalityAttestation,
+        submitter: Address,
+    ) -> Result<(), RegistryError> {
+        let height = self.height;
+        let Some(reg) = self.domains.get_mut(&attestation.domain) else {
+            return Err(RegistryError::UnknownDomain(hex(attestation
+                .domain
+                .as_bytes())));
+        };
+        let slot = (attestation.height, attestation.evidence_version);
+        if reg.attestations.contains_key(&slot) {
+            return Err(RegistryError::DuplicateAttestation {
+                height: attestation.height,
+                version: attestation.evidence_version,
+            });
+        }
+        reg.attestations.insert(slot, attestation.clone());
+        reg.attestation_provers
+            .insert(attestation.evidence_digest, submitter);
+        reg.record.attestations_accepted = reg.record.attestations_accepted.saturating_add(1);
+        reg.record.last_accepted_height = Some(attestation.height);
+        reg.record.last_verified_at = Some(height);
+        reg.record.last_backing = Some(attestation.security);
+        if reg.record.state == DomainState::Admitted {
+            reg.record.state = DomainState::Active;
+            reg.record.history.push(StateEvent {
+                at_height: height,
+                from: DomainState::Admitted,
+                to: DomainState::Active,
+                reason: "first accepted attestation (quorum)".to_string(),
+            });
+        }
+        if let Some(bond) = reg.provers.get_mut(&submitter) {
+            bond.accepted = bond.accepted.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Bonds an additional prover to a registered domain. Registration bonds
+    /// the poster; a quorum is several bonded provers, and this is how the
+    /// others post theirs. The same sufficiency rule as at registration:
+    /// the bond must cover the domain's routing ceiling, because a quorum
+    /// of insufficient bonds is a quorum of unslashable voices.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, an insufficient bond, or a prover that already
+    /// holds a bond here - topping up is a different operation from
+    /// bonding, and conflating them would let a slashed prover quietly
+    /// reset its history.
+    pub fn bond_prover(
+        &mut self,
+        domain: &DomainKey,
+        prover: Address,
+        bond_atoms: u128,
+    ) -> Result<(), RegistryError> {
+        let Some(reg) = self.domains.get_mut(domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        let required = reg.economics.required_bond_atoms();
+        if bond_atoms < required {
+            return Err(RegistryError::InsufficientBond {
+                required,
+                posted: bond_atoms,
+            });
+        }
+        if reg.provers.contains_key(&prover) {
+            return Err(RegistryError::ProverAlreadyBonded(hex(prover.as_bytes())));
+        }
+        reg.provers.insert(
+            prover,
+            ProverBond {
+                prover,
+                bond_atoms,
+                ceiling_atoms: reg.economics.routing_ceiling_atoms,
+                slashed_atoms: 0,
+                slashings: Vec::new(),
+                accepted: 0,
+                refused: 0,
+            },
+        );
+        Ok(())
+    }
+
+    /// Marks a domain faulted with a stated reason, if it currently serves.
+    /// The quorum path calls this when a round freezes in dispute: two
+    /// bonded provers carrying different finalised headers at the same
+    /// height is exactly the situation the fault state describes, and the
+    /// domain must stop serving until the challenge game resolves it.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain. Already-faulted and non-serving states are not
+    /// errors - the fault is recorded once, not stacked.
+    pub fn mark_faulted(&mut self, domain: &DomainKey, reason: &str) -> Result<(), RegistryError> {
+        let height = self.height;
+        let Some(reg) = self.domains.get_mut(domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        if reg.record.state != DomainState::Faulted && reg.record.state.serves() {
+            let from = reg.record.state;
+            reg.record.state = DomainState::Faulted;
+            reg.record.history.push(StateEvent {
+                at_height: height,
+                from,
+                to: DomainState::Faulted,
+                reason: reason.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// The checks, in order. Split out of [`Self::submit`] so the intake path

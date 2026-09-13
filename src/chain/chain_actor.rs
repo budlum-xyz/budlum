@@ -198,6 +198,29 @@ pub enum ChainCommand {
         challenger: crate::core::address::Address,
         response: oneshot::Sender<Result<(u128, u128), String>>,
     },
+    SetExternalQuorumPolicy(
+        crate::cross_domain::external::DomainKey,
+        crate::cross_domain::external::QuorumPolicy,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    BondExternalProver(
+        crate::cross_domain::external::DomainKey,
+        crate::core::address::Address,
+        u128,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    GetExternalQuorumRound(
+        crate::cross_domain::external::DomainKey,
+        u64,
+        oneshot::Sender<Option<crate::cross_domain::external::QuorumRound>>,
+    ),
+    GetExternalQuorumRounds(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<(
+            Option<crate::cross_domain::external::QuorumPolicy>,
+            Vec<crate::cross_domain::external::QuorumRound>,
+        )>,
+    ),
     BondProver(
         crate::core::address::Address,
         u64,
@@ -1810,6 +1833,71 @@ impl ChainHandle {
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. Evidence for that domain then goes through rounds: nothing
+    /// commits until enough bonded provers carry the same claim.
+    pub async fn set_external_quorum_policy(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        policy: crate::cross_domain::external::QuorumPolicy,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SetExternalQuorumPolicy(key, policy, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Bonds an additional prover to a registered external domain.
+    pub async fn bond_external_prover(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        bond_atoms: u128,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondExternalProver(
+                key, prover, bond_atoms, tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// The quorum round for one external height of one domain, if retained.
+    pub async fn external_quorum_round(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        height: u64,
+    ) -> Option<crate::cross_domain::external::QuorumRound> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalQuorumRound(key, height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Every retained quorum round of one domain, with its policy.
+    pub async fn external_quorum_rounds(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> (
+        Option<crate::cross_domain::external::QuorumPolicy>,
+        Vec<crate::cross_domain::external::QuorumRound>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalQuorumRounds(key, tx))
+            .await;
+        rx.await.unwrap_or((None, Vec::new()))
     }
 
     /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
@@ -3719,6 +3807,21 @@ impl ChainActor {
                         value_atoms,
                         challenger,
                     ));
+                }
+                ChainCommand::SetExternalQuorumPolicy(key, policy, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.set_external_quorum_policy(&key, policy));
+                }
+                ChainCommand::BondExternalProver(key, prover, bond_atoms, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .bond_external_prover(&key, prover, bond_atoms),
+                    );
+                }
+                ChainCommand::GetExternalQuorumRound(key, height, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_quorum_round(&key, height));
+                }
+                ChainCommand::GetExternalQuorumRounds(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_quorum_rounds(&key));
                 }
                 ChainCommand::BondProver(address, amount, res_tx) => {
                     let _ = res_tx.send(

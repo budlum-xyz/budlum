@@ -1817,6 +1817,153 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn bond_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_bondExternalProver")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            prover: String,
+            bond_atoms: u128,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid bond request: {e}"), None::<()>)
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let clean = params.prover.strip_prefix("0x").unwrap_or(&params.prover);
+        let prover = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid prover address: {e}"), None::<()>)
+        })?;
+        self.chain
+            .bond_external_prover(key, prover, params.bond_atoms)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Bond refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "bonded": true,
+            "prover": format!("0x{}", hex::encode(prover.as_bytes())),
+            "bondAtoms": params.bond_atoms.to_string(),
+        }))
+    }
+
+    async fn set_external_quorum_policy(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_setExternalQuorumPolicy")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            /// Optional full policy. When absent, `agreement_threshold` and
+            /// `max_participants` build the strict form - refuse on dispute,
+            /// refuse on low participation - which is the only form fit for
+            /// a state root that will be committed to.
+            policy: Option<crate::cross_domain::external::QuorumPolicy>,
+            agreement_threshold: Option<usize>,
+            max_participants: Option<usize>,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid quorum policy request: {e}"),
+                None::<()>,
+            )
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let policy = match (params.policy, params.agreement_threshold) {
+            (Some(policy), _) => policy,
+            (None, Some(threshold)) => {
+                let max = params.max_participants.unwrap_or(threshold);
+                crate::cross_domain::external::QuorumPolicy::strict(threshold, max)
+            }
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either `policy` or `agreement_threshold`",
+                    None::<()>,
+                ));
+            }
+        };
+        if policy.agreement_threshold == 0 || policy.max_participants < policy.agreement_threshold {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Quorum policy must have threshold >= 1 and max_participants >= threshold",
+                None::<()>,
+            ));
+        }
+        self.chain
+            .set_external_quorum_policy(key, policy)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Quorum policy refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "installed": true,
+            "agreementThreshold": policy.agreement_threshold,
+            "maxParticipants": policy.max_participants,
+        }))
+    }
+
+    async fn get_external_quorum_round(
+        &self,
+        domain_key_hex: String,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let (policy, _) = self.chain.external_quorum_rounds(key).await;
+        let Some(round) = self.chain.external_quorum_round(key, height).await else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No quorum round is retained for this domain and height",
+                None::<()>,
+            ));
+        };
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        let progress = policy.map(|p| round.progress(&p));
+        Ok(serde_json::json!({
+            "round": to_val("Round", serde_json::to_value(&round))?,
+            "progress": to_val("Progress", serde_json::to_value(progress))?,
+        }))
+    }
+
+    async fn get_external_quorum_rounds(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let (policy, rounds) = self.chain.external_quorum_rounds(key).await;
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        let progresses: Vec<Option<crate::cross_domain::external::RoundProgress>> = rounds
+            .iter()
+            .map(|round| policy.as_ref().map(|p| round.progress(p)))
+            .collect();
+        Ok(serde_json::json!({
+            "policy": to_val("Policy", serde_json::to_value(policy))?,
+            "rounds": to_val("Rounds", serde_json::to_value(&rounds))?,
+            "progress": to_val("Progress", serde_json::to_value(&progresses))?,
+            "retentionBlocks": crate::cross_domain::external::ROUND_RETENTION_BLOCKS,
+        }))
+    }
+
     async fn register_sovereign_template(
         &self,
         template: crate::domain::SovereignDomainTemplate,
