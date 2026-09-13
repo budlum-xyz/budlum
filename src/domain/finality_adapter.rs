@@ -1262,8 +1262,7 @@ mod tests {
         );
         assert!(
             matches!(non_pow, Err(_) | Ok(FinalityStatus::Rejected(_))),
-            "non-PoW proof must be rejected, got: {:?}",
-            non_pow
+            "non-PoW proof must be rejected, got: {non_pow:?}"
         );
     }
 

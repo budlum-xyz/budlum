@@ -112,8 +112,7 @@ impl MerkleTrie {
         let leaf_hash = self
             .leaves
             .get(address)
-            .map(|(b, n)| hash_leaf(address, *b, *n))
-            .unwrap_or([0u8; 32]);
+            .map_or([0u8; 32], |(b, n)| hash_leaf(address, *b, *n));
 
         let mut siblings = Vec::with_capacity(TRIE_DEPTH);
         let mut directions = Vec::with_capacity(TRIE_DEPTH);
@@ -475,7 +474,7 @@ mod tests {
         let mut a = MerkleTrie::new();
         let mut b = MerkleTrie::new();
         let entries: Vec<_> = (0..50)
-            .map(|i| (addr(i), (i as u64) * 100, i as u64))
+            .map(|i| (addr(i), u64::from(i) * 100, u64::from(i)))
             .collect();
         for (x, y, z) in &entries {
             a.insert(x, *y, *z);
@@ -488,12 +487,12 @@ mod tests {
     fn hundred_accounts_deterministic() {
         let mut a = MerkleTrie::new();
         for i in 0..100u8 {
-            a.insert(&addr(i), (i as u64) * 1000, i as u64);
+            a.insert(&addr(i), u64::from(i) * 1000, u64::from(i));
         }
         let r1 = a.root();
         let mut b = MerkleTrie::new();
         for i in (0..100u8).rev() {
-            b.insert(&addr(i), (i as u64) * 1000, i as u64);
+            b.insert(&addr(i), u64::from(i) * 1000, u64::from(i));
         }
         assert_eq!(r1, b.root());
     }

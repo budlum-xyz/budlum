@@ -84,9 +84,8 @@ mod zk_finality_fail_open_regression {
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
             "ZkFinalityAdapter::verify_finality must NEVER return Finalized or Pending. \
-             Got: {:?}. This is a regression - ZK finality must only \
-             resolve via verify_finality_with_claim with ProofClaimRegistry.",
-            result
+             Got: {result:?}. This is a regression - ZK finality must only \
+             resolve via verify_finality_with_claim with ProofClaimRegistry."
         );
     }
 
@@ -112,8 +111,7 @@ mod zk_finality_fail_open_regression {
 
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
-            "ZK finality with no accepted claim must be Rejected, got: {:?}",
-            result
+            "ZK finality with no accepted claim must be Rejected, got: {result:?}"
         );
     }
 
@@ -146,8 +144,7 @@ mod zk_finality_fail_open_regression {
 
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
-            "ZK finality with claim/commitment root mismatch must be Rejected, got: {:?}",
-            result
+            "ZK finality with claim/commitment root mismatch must be Rejected, got: {result:?}"
         );
     }
 
@@ -175,8 +172,7 @@ mod zk_finality_fail_open_regression {
 
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
-            "ZK finality with proof/claim root mismatch must be Rejected, got: {:?}",
-            result
+            "ZK finality with proof/claim root mismatch must be Rejected, got: {result:?}"
         );
     }
 
@@ -229,8 +225,7 @@ mod zk_finality_fail_open_regression {
             .expect("should return Ok");
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
-            "ZK finality with wrong domain_id must be Rejected, got: {:?}",
-            result
+            "ZK finality with wrong domain_id must be Rejected, got: {result:?}"
         );
 
         // Wrong height
@@ -249,8 +244,7 @@ mod zk_finality_fail_open_regression {
             .expect("should return Ok");
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
-            "ZK finality with wrong height must be Rejected, got: {:?}",
-            result
+            "ZK finality with wrong height must be Rejected, got: {result:?}"
         );
     }
 }

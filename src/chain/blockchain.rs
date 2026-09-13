@@ -353,8 +353,7 @@ impl Blockchain {
 
         let resolved_genesis_config = genesis_config.unwrap_or_else(|| {
             Network::from_chain_id(chain_id)
-                .map(GenesisConfig::for_network)
-                .unwrap_or_else(|| GenesisConfig::new(chain_id))
+                .map_or_else(|| GenesisConfig::new(chain_id), GenesisConfig::for_network)
         });
         let bootstrap_domains = resolved_genesis_config
             .bootstrap_consensus_domains()
@@ -1820,8 +1819,7 @@ impl Blockchain {
         let previous_global_hash = self
             .global_headers
             .last()
-            .map(GlobalBlockHeader::calculate_hash_bytes)
-            .unwrap_or([0u8; 32]);
+            .map_or([0u8; 32], GlobalBlockHeader::calculate_hash_bytes);
 
         let settlement_window = self.settlement_finality_window();
         let settlement_finality_root = if settlement_window.is_empty() {
@@ -4189,8 +4187,7 @@ impl Blockchain {
         let previous_hash = self
             .chain
             .last()
-            .map(|block| block.hash.clone())
-            .unwrap_or_else(|| "0".repeat(64));
+            .map_or_else(|| "0".repeat(64), |block| block.hash.clone());
         let valid_txs = self.collect_block_transactions();
         let mut block = Block::new_with_chain_id(index, previous_hash, valid_txs, self.chain_id);
         if !self.pending_slashing_evidence.is_empty() {
@@ -4198,7 +4195,7 @@ impl Blockchain {
         }
         block.producer = Some(producer_address);
         let slot_ms = crate::core::chain_config::slot_ms_for_chain_id(self.chain_id);
-        block.timestamp = self.genesis_time + (index as u128 * slot_ms as u128);
+        block.timestamp = self.genesis_time + (u128::from(index) * u128::from(slot_ms));
         block.validator_set_hash = self.get_validator_set_hash();
 
         if self
@@ -4336,7 +4333,7 @@ impl Blockchain {
 
         self.mempool
             .add_transaction(transaction.clone())
-            .map_err(|e| format!("Mempool error: {:?}", e))?;
+            .map_err(|e| format!("Mempool error: {e:?}"))?;
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_mempool_tx(&transaction) {
                 tracing::error!(
@@ -4803,8 +4800,7 @@ impl Blockchain {
 
         if reorg_depth > MAX_REORG_DEPTH {
             return Err(format!(
-                "Reorg depth {} exceeds max {}",
-                reorg_depth, MAX_REORG_DEPTH
+                "Reorg depth {reorg_depth} exceeds max {MAX_REORG_DEPTH}"
             ));
         }
 
@@ -5063,8 +5059,7 @@ impl Blockchain {
         let finalized_hash = self
             .chain
             .get(finalized_height as usize)
-            .map(|block| block.hash.clone())
-            .unwrap_or_else(|| self.finalized_hash.clone());
+            .map_or_else(|| self.finalized_hash.clone(), |block| block.hash.clone());
 
         // Produce V2 snapshot with full consensus metadata
         let genesis_hash = self
@@ -5578,10 +5573,10 @@ impl Blockchain {
     }
 
     pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
-        self.finality_aggregator
-            .as_ref()
-            .map(|agg| agg.get_state())
-            .unwrap_or_else(crate::chain::finality::AggregatorState::inactive)
+        self.finality_aggregator.as_ref().map_or_else(
+            crate::chain::finality::AggregatorState::inactive,
+            super::finality::FinalityAggregator::get_state,
+        )
     }
 
     pub fn consensus(&self) -> &dyn ConsensusEngine {
@@ -5734,7 +5729,7 @@ impl Blockchain {
                         .try_add_balance(&operator, economics.operator_bond)
                         .map_err(|e| format!("deal bond refund overflow: {e}"))?;
                 }
-                Err(format!("open_deal failed: {:?}", e))
+                Err(format!("open_deal failed: {e:?}"))
             }
         }
     }
@@ -6400,8 +6395,7 @@ impl Blockchain {
                 .state
                 .storage_registry
                 .get_deal(deal_id)
-                .map(|deal| deal.operator)
-                .unwrap_or_else(Address::zero);
+                .map_or_else(Address::zero, |deal| deal.operator);
             if let Ok(result) = self
                 .state
                 .storage_registry
@@ -7062,8 +7056,7 @@ mod tests {
         for domain_id in 1..=4 {
             assert!(
                 blockchain.domain_registry.get(domain_id).is_some(),
-                "bootstrap domain {} must be registered during startup",
-                domain_id
+                "bootstrap domain {domain_id} must be registered during startup"
             );
         }
         assert_eq!(
@@ -7775,8 +7768,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let stake_before = blockchain
         .state
         .get_validator(&alice_pub)
-        .map(|v| v.stake)
-        .unwrap_or(0);
+        .map_or(0, |v| v.stake);
     // Drive the slashing path with the configured DoubleSign
     // Ratio (7%) - the same ratio that `apply_system_effects`
     // Reads from `RegistryParams` for on-chain
@@ -7795,8 +7787,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let stake_after = blockchain
         .state
         .get_validator(&alice_pub)
-        .map(|v| v.stake)
-        .unwrap_or(0);
+        .map_or(0, |v| v.stake);
 
     // The configured DoubleSign ratio is 7% - so the slash
     // Must be ~7% of `stake_before`, NOT 10% (the historical
@@ -7808,10 +7799,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let diff = expected_slash.abs_diff(actual_slash);
     assert!(
         diff <= stake_before / 100,
-        "slash must follow the configured 7% ratio, expected ~{}, got {} (diff {})",
-        expected_slash,
-        actual_slash,
-        diff
+        "slash must follow the configured 7% ratio, expected ~{expected_slash}, got {actual_slash} (diff {diff})"
     );
 }
 

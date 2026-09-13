@@ -43,14 +43,14 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PipelineError::Bridge(e) => write!(f, "bridge error: {}", e),
-            PipelineError::Relayer(e) => write!(f, "relayer error: {}", e),
-            PipelineError::MessageRegistry(e) => write!(f, "message registry: {}", e),
+            PipelineError::Bridge(e) => write!(f, "bridge error: {e}"),
+            PipelineError::Relayer(e) => write!(f, "relayer error: {e}"),
+            PipelineError::MessageRegistry(e) => write!(f, "message registry: {e}"),
             PipelineError::UnexpectedMessageKind { expected, got } => {
-                write!(f, "expected message kind {}, got {}", expected, got)
+                write!(f, "expected message kind {expected}, got {got}")
             }
             PipelineError::NoEventTree(domain) => {
-                write!(f, "no event tree for domain {}", domain)
+                write!(f, "no event tree for domain {domain}")
             }
             PipelineError::MissingCorrelationId => {
                 write!(f, "correlated message is missing its correlation id")
@@ -304,7 +304,9 @@ impl BridgeRelayerPipeline {
 
     /// Get the event tree root for a domain (for proof generation).
     pub fn event_tree_root(&self, domain: DomainId) -> Option<Hash32> {
-        self.event_trees.get(&domain).map(|t| t.root())
+        self.event_trees
+            .get(&domain)
+            .map(super::event_tree::DomainEventTree::root)
     }
 
     /// Generate a Merkle proof for an event at a given index in a domain's tree.

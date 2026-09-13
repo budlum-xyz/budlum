@@ -649,9 +649,7 @@ impl GenesisConfig {
     }
 
     fn validator_stake(&self) -> u64 {
-        Network::from_chain_id(self.chain_id)
-            .map(|network| network.min_stake())
-            .unwrap_or(1)
+        Network::from_chain_id(self.chain_id).map_or(1, |network| network.min_stake())
     }
 }
 
@@ -878,7 +876,7 @@ mod tests {
         let seeded = ceremony.build_state();
         assert_eq!(
             seeded.circulating_supply(),
-            crate::tokenomics::BUD_TOTAL_SUPPLY as u128
+            u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY)
         );
         assert_eq!(seeded.burn_reserve_address, Some(addresses.burn_reserve));
         assert_eq!(seeded.get_balance(&reserved.community), 0);
@@ -889,7 +887,7 @@ mod tests {
         assert_eq!(dev_state.burn_reserve_address, Some(reserved.burn_reserve));
         assert_eq!(
             dev_state.circulating_supply(),
-            crate::tokenomics::BUD_TOTAL_SUPPLY as u128
+            u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY)
         );
     }
 

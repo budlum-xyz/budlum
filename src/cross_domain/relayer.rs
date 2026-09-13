@@ -49,13 +49,13 @@ impl std::fmt::Display for RelayerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RelayerError::NotActiveRelayer(addr) => {
-                write!(f, "address {} is not an active relayer", addr)
+                write!(f, "address {addr} is not an active relayer")
             }
             RelayerError::AlreadyRelayed(id) => {
                 write!(f, "message {} already relayed", hex::encode(id))
             }
             RelayerError::InvalidProof(reason) => {
-                write!(f, "invalid relay proof: {}", reason)
+                write!(f, "invalid relay proof: {reason}")
             }
             RelayerError::Expired {
                 message_id,
@@ -74,13 +74,9 @@ impl std::fmt::Display for RelayerError {
                 write!(f, "transfer {} in invalid state for relay", hex::encode(id),)
             }
             RelayerError::SourceDomainMismatch { expected, got } => {
-                write!(
-                    f,
-                    "source domain mismatch: expected {}, got {}",
-                    expected, got
-                )
+                write!(f, "source domain mismatch: expected {expected}, got {got}")
             }
-            RelayerError::Other(msg) => write!(f, "relay error: {}", msg),
+            RelayerError::Other(msg) => write!(f, "relay error: {msg}"),
         }
     }
 }

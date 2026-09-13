@@ -243,8 +243,7 @@ impl PoaMembershipRegistry {
     pub fn is_authorized(&self, domain: DomainId, account: &Address) -> bool {
         self.members
             .get(&(domain, *account))
-            .map(PoaMember::is_authorized)
-            .unwrap_or(false)
+            .is_some_and(PoaMember::is_authorized)
     }
 
     pub fn get(&self, domain: DomainId, account: &Address) -> Option<&PoaMember> {

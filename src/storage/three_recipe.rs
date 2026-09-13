@@ -236,11 +236,7 @@ impl VideoRecipe {
             &self.repair_permillage.to_le_bytes(),
             &[self.payload_kind],
             &[u8::from(self.transform.apply_zlib)],
-            &[self
-                .transform
-                .force_class
-                .map(|c| c as u8)
-                .unwrap_or(u8::MAX)],
+            &[self.transform.force_class.map_or(u8::MAX, |c| c as u8)],
         ])
     }
 

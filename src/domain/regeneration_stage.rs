@@ -599,7 +599,8 @@ pub fn reversion_beats_repair(
     // u128 holds the product of two u64 values without saturation. Saturating
     // u64 multiplication could turn two different comparisons into the same
     // MAX value and make the result depend on overflow rather than economics.
-    (repair_cost as u128) * (ratio_den as u128) >= (regrowth_cost as u128) * (ratio_num as u128)
+    u128::from(repair_cost) * u128::from(ratio_den)
+        >= u128::from(regrowth_cost) * u128::from(ratio_num)
 }
 
 #[cfg(test)]

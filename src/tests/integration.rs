@@ -460,7 +460,7 @@ mod integration_tests {
             blockchain
                 .pending_finality_certs
                 .get(&cert.checkpoint_height)
-                .map(|certs| certs.len()),
+                .map(std::vec::Vec::len),
             Some(1)
         );
 
@@ -1083,8 +1083,7 @@ mod integration_tests {
             let bit_idx = idx % 8;
             assert!(
                 cert.bitmap[byte_idx] & (1 << bit_idx) != 0,
-                "Validator {} should be in bitmap",
-                i
+                "Validator {i} should be in bitmap"
             );
         }
     }
@@ -1250,8 +1249,7 @@ mod integration_tests {
         let result = cert.verify(&snapshot);
         assert!(
             result.is_err(),
-            "Tampered cert should fail verification, got: {:?}",
-            result
+            "Tampered cert should fail verification, got: {result:?}"
         );
     }
 

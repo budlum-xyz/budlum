@@ -210,7 +210,7 @@ impl BudlumxyzRegistry {
             let name_bytes = app.name.as_bytes();
             hasher.update((name_bytes.len() as u64).to_le_bytes());
             hasher.update(name_bytes);
-            hasher.update([app.developer_attested as u8, app.verified as u8]);
+            hasher.update([u8::from(app.developer_attested), u8::from(app.verified)]);
             let category_tag = match app.category.clone() {
                 AppCategory::SocialFi => 0u8,
                 AppCategory::DeFi => 1u8,

@@ -633,7 +633,7 @@ mod tests {
             matches!(err, VaultError::NotOwner { id, holder } if id == stolen && holder == mallory)
         );
         assert!(
-            v.open(folder).is_some_and(|m| m.is_empty()),
+            v.open(folder).is_some_and(<[u64]>::is_empty),
             "refused before the write"
         );
         // and minting a folder over somebody else's token is the same refusal

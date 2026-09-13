@@ -92,11 +92,8 @@ impl ViewGrant {
             ViewPolicy::NamedGrantee => 2u8,
             ViewPolicy::PublicKeyId => 3u8,
         }];
-        let grantee = self.grantee.map(|a| *a.as_bytes()).unwrap_or([0u8; 32]);
-        let revoked = self
-            .revoked_epoch
-            .map(|e| e.to_le_bytes())
-            .unwrap_or([0u8; 8]);
+        let grantee = self.grantee.map_or([0u8; 32], |a| *a.as_bytes());
+        let revoked = self.revoked_epoch.map_or([0u8; 8], u64::to_le_bytes);
         hash_fields_bytes(&[
             b"BDLM_VIEW_GRANT_V1",
             &grant_id,

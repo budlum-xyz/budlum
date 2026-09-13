@@ -386,10 +386,7 @@ mod tests {
             }
             .encode(),
         ];
-        let bytecode: Vec<u8> = program
-            .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
-            .collect();
+        let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
 
         let receipt = ZkVmExecutor::execute_bytecode(
             &bytecode,
@@ -437,10 +434,7 @@ mod tests {
                 }
                 .encode(),
             ];
-            let bytecode: Vec<u8> = program
-                .into_iter()
-                .flat_map(|instruction| instruction.to_le_bytes())
-                .collect();
+            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
 
             let err = ZkVmExecutor::execute_bytecode(
                 &bytecode,
@@ -541,10 +535,7 @@ mod tests {
             }
             .encode(),
         ];
-        let bytecode: Vec<u8> = program
-            .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
-            .collect();
+        let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
 
         // Ungated decoding still works.
         let receipt_normal =
@@ -588,10 +579,7 @@ mod tests {
             }
             .encode(),
         ];
-        let bytecode: Vec<u8> = program
-            .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
-            .collect();
+        let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
         let receipt = ZkVmExecutor::execute_bytecode(
             &bytecode,
             DEFAULT_CONTRACT_GAS_LIMIT,

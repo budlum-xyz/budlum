@@ -249,9 +249,9 @@ impl StorageEconomicsParams {
     /// value returned here, so a saturated total is refused at that check
     /// rather than silently becoming a small number.
     pub fn total_fee(&self, shard_bytes: u64, epochs: u64) -> u64 {
-        let scaled = (self.fee_per_byte_epoch as u128)
-            .saturating_mul(shard_bytes as u128)
-            .saturating_mul(epochs as u128);
+        let scaled = u128::from(self.fee_per_byte_epoch)
+            .saturating_mul(u128::from(shard_bytes))
+            .saturating_mul(u128::from(epochs));
         u64::try_from(scaled.div_ceil(FEE_RATE_SCALE)).unwrap_or(u64::MAX)
     }
 }
@@ -925,7 +925,7 @@ impl std::fmt::Display for StorageError {
             Self::UnknownShard {
                 manifest_id,
                 shard_id,
-            } => write!(f, "shard {} not in manifest {}", shard_id, manifest_id),
+            } => write!(f, "shard {shard_id} not in manifest {manifest_id}"),
             Self::InvalidManifest { reason } => {
                 write!(f, "manifest rejected: {reason}")
             }
@@ -1799,7 +1799,7 @@ impl StorageRegistry {
                 end: end_epoch,
             });
         }
-        if (economics.operator_bond as u128) < (domain_params.min_operator_bond as u128) {
+        if u128::from(economics.operator_bond) < u128::from(domain_params.min_operator_bond) {
             return Err(StorageError::InsufficientBond {
                 required: domain_params.min_operator_bond,
                 provided: economics.operator_bond,
@@ -3275,8 +3275,7 @@ impl StorageRegistry {
     pub fn permanence_floor(&self, manifest_id: ContentId) -> u32 {
         self.manifests
             .get(&manifest_id)
-            .map(|m| m.erasure.k.max(1))
-            .unwrap_or(PERMANENCE_FLOOR_DEFAULT)
+            .map_or(PERMANENCE_FLOOR_DEFAULT, |m| m.erasure.k.max(1))
     }
 
     /// B.U.D.: validate merkle proof format.

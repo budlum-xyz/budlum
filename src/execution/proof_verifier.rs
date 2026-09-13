@@ -222,7 +222,7 @@ impl ProofVerifier {
         Self::validate_envelope_structure(envelope)?;
 
         // 4. Gas check
-        let verification_gas = (envelope.degree_bits as u64) * GAS_PER_DEGREE_BIT;
+        let verification_gas = u64::from(envelope.degree_bits) * GAS_PER_DEGREE_BIT;
         if verification_gas > gas_limit {
             return Err(ProofVerifyError::GasExceeded {
                 required: verification_gas,
@@ -361,7 +361,7 @@ mod tests {
             }
             .encode(),
         ];
-        program.into_iter().flat_map(|w| w.to_le_bytes()).collect()
+        program.into_iter().flat_map(u64::to_le_bytes).collect()
     }
 
     fn real_bundle() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {

@@ -716,10 +716,7 @@ impl Node {
                 "mDNS was requested but this production/default build excludes the p2p-mdns feature; continuing with mDNS disabled"
             );
         }
-        let mobile_mode = sharding_config
-            .as_ref()
-            .map(|c| c.mobile_mode)
-            .unwrap_or(false);
+        let mobile_mode = sharding_config.as_ref().is_some_and(|c| c.mobile_mode);
 
         let shard_manager =
             sharding_config.map(|config| Arc::new(bud_node::ShardManager::new(peer_id, config)));
@@ -1092,7 +1089,7 @@ impl Node {
         }
         if security.persist_banned_peers && self.banned_peer_db.is_none() {
             self.banned_peer_db = Some(std::path::PathBuf::from(
-                format!("./data/{:?}/banned-peers.json", network).to_lowercase(),
+                format!("./data/{network:?}/banned-peers.json").to_lowercase(),
             ));
         }
         // Unlike the ban list, this one defaults on for every network. A ban
@@ -1857,9 +1854,7 @@ impl Node {
                                        m.p2p_peers_connected.set(count as i64);
                                        let mean_quality = self
                                            .gossip_dedup
-                                           .lock()
-                                           .map(|d| d.mean_peer_score_i64())
-                                           .unwrap_or_else(|p| p.into_inner().mean_peer_score_i64());
+                                           .lock().map_or_else(|p| p.into_inner().mean_peer_score_i64(), |d| d.mean_peer_score_i64());
                                        m.peer_connection_quality.set(mean_quality);
                                    }
                                    info!("Connected to {peer_id}, Peers: {count}");
@@ -1939,12 +1934,10 @@ impl Node {
                                            .set(self.peer_count.load(Ordering::SeqCst) as i64);
                                        let (scored, mean_quality) = self
                                            .gossip_dedup
-                                           .lock()
-                                           .map(|d| (d.scored_peer_count(), d.mean_peer_score_i64()))
-                                           .unwrap_or_else(|p| {
+                                           .lock().map_or_else(|p| {
                                                let d = p.into_inner();
                                                (d.scored_peer_count(), d.mean_peer_score_i64())
-                                           });
+                                           }, |d| (d.scored_peer_count(), d.mean_peer_score_i64()));
                                        m.gossip_scored_peers
                                            .set(i64::try_from(scored).unwrap_or(i64::MAX));
                                        m.peer_connection_quality.set(mean_quality);

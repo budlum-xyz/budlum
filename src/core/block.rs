@@ -415,7 +415,7 @@ impl Block {
             self.index,
             self.producer
                 .as_ref()
-                .map(|producer| producer.to_string())
+                .map(std::string::ToString::to_string)
                 .unwrap_or_default()
         );
     }
@@ -433,7 +433,7 @@ impl Block {
             self.index,
             self.producer
                 .as_ref()
-                .map(|p| p.to_string())
+                .map(std::string::ToString::to_string)
                 .unwrap_or_default(),
             signer.backend_name()
         );

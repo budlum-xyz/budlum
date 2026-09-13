@@ -56,8 +56,14 @@ impl Network {
     pub fn bootnodes(&self) -> Vec<String> {
         match self {
             Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_BOOTNODES),
-            Network::Testnet => TESTNET_BOOTNODES.iter().map(|s| s.to_string()).collect(),
-            Network::Devnet => DEVNET_BOOTNODES.iter().map(|s| s.to_string()).collect(),
+            Network::Testnet => TESTNET_BOOTNODES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            Network::Devnet => DEVNET_BOOTNODES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 
@@ -66,7 +72,7 @@ impl Network {
             Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_FALLBACK_BOOTNODES),
             Network::Testnet => TESTNET_FALLBACK_BOOTNODES
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             Network::Devnet => Vec::new(),
         }
@@ -75,7 +81,10 @@ impl Network {
     pub fn dns_seeds(&self) -> Vec<String> {
         match self {
             Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_DNS_SEEDS),
-            Network::Testnet => TESTNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect(),
+            Network::Testnet => TESTNET_DNS_SEEDS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             Network::Devnet => Vec::new(),
         }
     }
@@ -231,25 +240,21 @@ impl std::fmt::Display for Network {
 pub const EPOCH_LEN: u64 = 100;
 
 pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
-    Network::from_chain_id(chain_id)
-        .map(|network| network.epoch_len())
-        .unwrap_or(EPOCH_LEN)
+    Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
 }
 
 pub const SLOT_MS: u64 = 1000;
 
 pub fn slot_ms_for_chain_id(chain_id: u64) -> u64 {
-    Network::from_chain_id(chain_id)
-        .map(|network| network.slot_ms())
-        .unwrap_or(SLOT_MS)
+    Network::from_chain_id(chain_id).map_or(SLOT_MS, |network| network.slot_ms())
 }
 
 pub const FINALITY_CHECKPOINT_INTERVAL: u64 = 10;
 
 pub fn finality_checkpoint_interval_for_chain_id(chain_id: u64) -> u64 {
-    Network::from_chain_id(chain_id)
-        .map(|network| network.consensus_params().finality_checkpoint_interval)
-        .unwrap_or(FINALITY_CHECKPOINT_INTERVAL)
+    Network::from_chain_id(chain_id).map_or(FINALITY_CHECKPOINT_INTERVAL, |network| {
+        network.consensus_params().finality_checkpoint_interval
+    })
 }
 
 pub const FINALITY_QUORUM_NUMERATOR: u64 = 2;
@@ -479,13 +484,18 @@ mod tests {
         // F7: the compiled mainnet constants have to contain a placeholder and
         // have to be caught by the guard. This prevents a repeat of the guard
         // bypass regression in c953049.
-        let compiled_bootnodes: Vec<String> =
-            MAINNET_BOOTNODES.iter().map(|s| s.to_string()).collect();
+        let compiled_bootnodes: Vec<String> = MAINNET_BOOTNODES
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert!(
             first_placeholder_peer(&compiled_bootnodes).is_some(),
             "Compiled MAINNET_BOOTNODES must be detected as placeholder (fail-closed guard active)"
         );
-        let compiled_dns: Vec<String> = MAINNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect();
+        let compiled_dns: Vec<String> = MAINNET_DNS_SEEDS
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert!(
             first_placeholder_peer(&compiled_dns).is_some(),
             "Compiled MAINNET_DNS_SEEDS must be detected as placeholder"

@@ -765,9 +765,7 @@ impl PermissionlessRegistry {
     }
 
     pub fn is_active(&self, account: &Address, role: RoleId) -> bool {
-        self.get(account, role)
-            .map(Registration::is_active)
-            .unwrap_or(false)
+        self.get(account, role).is_some_and(Registration::is_active)
     }
 
     pub fn active_members(&self, role: RoleId) -> Vec<&Registration> {
@@ -865,7 +863,7 @@ impl PermissionlessRegistry {
             .values()
             .filter(|r| r.role == role && r.is_active())
             .map(|r| r.stake)
-            .fold(0u64, |acc, s| acc.saturating_add(s))
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Total bonded stake represented only by this registry, excluding a
@@ -877,7 +875,7 @@ impl PermissionlessRegistry {
             .values()
             .filter(|registration| registration.role != excluded_role)
             .fold(0u128, |total, registration| {
-                total.saturating_add(registration.stake as u128)
+                total.saturating_add(u128::from(registration.stake))
             })
     }
 
@@ -1156,7 +1154,7 @@ mod tests {
         );
         assert!(
             reg.get(&a, roles::RELAYER)
-                .is_some_and(|r| r.is_slashable()),
+                .is_some_and(super::Registration::is_slashable),
             "the bond is still locked, so responsibility continues"
         );
     }

@@ -35,7 +35,7 @@ fn nft_mint_table_distinct_ids() {
     let mut ids = Vec::new();
     for i in 1..=10u8 {
         let id = r
-            .mint(addr(i), cid(i), i as u64, None)
+            .mint(addr(i), cid(i), u64::from(i), None)
             .expect("an incrementing counter cannot collide");
         ids.push(id);
     }
@@ -80,7 +80,7 @@ fn bns_register_duplicate_live_name_rejected() {
 fn market_create_offer_table() {
     let mut r = MarketplaceRegistry::new();
     for i in 1..=10u8 {
-        let id = r.create_offer(addr(i), cid(i), i as u64).unwrap();
+        let id = r.create_offer(addr(i), cid(i), u64::from(i)).unwrap();
         assert!(r.get_offer(id).is_some(), "created offer {id} missing");
     }
 }

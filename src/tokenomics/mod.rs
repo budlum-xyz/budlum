@@ -98,7 +98,7 @@ impl VestingSchedule {
             return self.total;
         }
         // Linear from start (not from cliff): cumulative == total * elapsed/duration.
-        ((self.total as u128 * elapsed as u128) / self.duration_epochs as u128) as u64
+        ((u128::from(self.total) * u128::from(elapsed)) / u128::from(self.duration_epochs)) as u64
     }
 
     /// Amount still locked at `epoch`.
@@ -268,9 +268,9 @@ impl TokenomicsParams {
         // through this function re-deriving it. Devnet keeps its own
         // deterministic (faster) payout cadence through its own
         // `epochs_per_year` value.
-        let annual_yield = (validator_stake as u128
-            * self.validator_annual_yield_ratio_fixed as u128)
-            / FIXED_POINT_SCALE as u128;
+        let annual_yield = (u128::from(validator_stake)
+            * u128::from(self.validator_annual_yield_ratio_fixed))
+            / u128::from(FIXED_POINT_SCALE);
         let epochs_per_year = u128::from(self.epochs_per_year.max(1));
         let epoch_yield = annual_yield / epochs_per_year;
         u64::try_from(epoch_yield).unwrap_or(u64::MAX)
@@ -278,14 +278,15 @@ impl TokenomicsParams {
 
     pub fn annual_burn_amount(&self) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        ((self.burn_reserve as u128 * self.annual_burn_ratio_fixed as u128)
-            / FIXED_POINT_SCALE as u128) as u64
+        ((u128::from(self.burn_reserve) * u128::from(self.annual_burn_ratio_fixed))
+            / u128::from(FIXED_POINT_SCALE)) as u64
     }
 
     /// The metabolic burn taken from a single `fee`.
     pub fn metabolic_burn(&self, fee: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        ((fee as u128 * self.tx_fee_burn_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64
+        ((u128::from(fee) * u128::from(self.tx_fee_burn_ratio_fixed))
+            / u128::from(FIXED_POINT_SCALE)) as u64
     }
 }
 
@@ -751,7 +752,8 @@ mod tests {
         assert_eq!(p.total(), BUD_TOTAL_SUPPLY);
 
         // Genesis validation reward pool must sit in the ADR-001 8-12% band.
-        let pool_pct = DEFAULT_VALIDATION_REWARD_POOL as u128 * 100 / BUD_TOTAL_SUPPLY as u128;
+        let pool_pct =
+            u128::from(DEFAULT_VALIDATION_REWARD_POOL) * 100 / u128::from(BUD_TOTAL_SUPPLY);
         assert!(
             (8..=12).contains(&pool_pct),
             "validation reward pool {pool_pct}% outside ADR-001 8-12% band"

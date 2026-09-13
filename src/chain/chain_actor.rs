@@ -2860,8 +2860,7 @@ impl ChainActor {
                         .storage_registry
                         .deals_for_manifest(manifest_id)
                         .first()
-                        .map(|d| d.domain_id)
-                        .unwrap_or(0);
+                        .map_or(0, |d| d.domain_id);
                     if let Some(ticket_id) = self
                         .blockchain
                         .state
@@ -3400,7 +3399,7 @@ impl ChainActor {
                     let header = self.blockchain.build_global_header(None);
                     let info = serde_json::json!({
                         "globalHeight": self.blockchain.global_headers.len(),
-                        "latestGlobalHash": self.blockchain.global_headers.last().map(|h| h.calculate_hash()),
+                        "latestGlobalHash": self.blockchain.global_headers.last().map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash),
                         "pendingGlobalHash": header.calculate_hash(),
                         "domainRegistryRoot": hex::encode(header.domain_registry_root),
                         "domainCommitmentRoot": hex::encode(header.domain_commitment_root),
@@ -3680,8 +3679,7 @@ impl ChainActor {
                         .blockchain
                         .pruning_manager
                         .as_ref()
-                        .map(|pm| pm.min_blocks_to_keep < 1000)
-                        .unwrap_or(false);
+                        .is_some_and(|pm| pm.min_blocks_to_keep < 1000);
                     let res = serde_json::json!({
                         "current_height": height,
                         "finalized_height": finalized,
@@ -3833,12 +3831,9 @@ impl ChainActor {
                     let _ = res_tx.send(self.blockchain.seal_global_header(None));
                 }
                 ChainCommand::FlushStorage(res_tx) => {
-                    let res = self
-                        .blockchain
-                        .storage
-                        .as_ref()
-                        .map(|storage| storage.flush_batch().map_err(|e| e.to_string()))
-                        .unwrap_or(Ok(0));
+                    let res = self.blockchain.storage.as_ref().map_or(Ok(0), |storage| {
+                        storage.flush_batch().map_err(|e| e.to_string())
+                    });
                     let _ = res_tx.send(res);
                 }
                 // ─── B.U.D.: Storage operations ─────

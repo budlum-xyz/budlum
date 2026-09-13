@@ -266,8 +266,7 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
             let proxies = rpc
                 .and_then(|r| r.get("trusted_proxies"))
                 .and_then(toml::Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0);
+                .map_or(0, Vec::len);
             assert!(
                 proxies > 0,
                 "{file} is a {profile} profile behind a reverse proxy and must name it in \

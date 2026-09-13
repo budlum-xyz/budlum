@@ -194,7 +194,10 @@ impl Mempool {
         //
         // A replacement (same sender, same nonce) frees its own slot and needs
         // no eviction at all, so a full pool must not refuse it.
-        let sender_count = self.by_sender.get(&tx.from).map_or(0, |v| v.len());
+        let sender_count = self
+            .by_sender
+            .get(&tx.from)
+            .map_or(0, std::collections::BTreeMap::len);
         let existing_hash = self.find_tx_by_sender_nonce(&tx.from, tx.nonce);
 
         if let Some(existing_hash) = existing_hash.as_ref() {
@@ -213,8 +216,8 @@ impl Mempool {
             // cheap DoS vector). Now: bump = max(1, ceil(fee * pct / 100)),
             // and the replacement fee MUST exceed the old fee. The
             // intermediate computation uses u128 against overflow.
-            let bump =
-                (existing.tx.fee as u128 * self.config.rbf_bump_percent as u128).div_ceil(100);
+            let bump = (u128::from(existing.tx.fee) * u128::from(self.config.rbf_bump_percent))
+                .div_ceil(100);
             let min_new_fee = existing
                 .tx
                 .fee
@@ -335,7 +338,7 @@ impl Mempool {
             .unwrap_or_default()
             .as_millis();
 
-        let ttl_ms = self.config.tx_ttl_secs as u128 * 1000;
+        let ttl_ms = u128::from(self.config.tx_ttl_secs) * 1000;
         let expired: Vec<String> = self
             .transactions
             .iter()
@@ -1059,7 +1062,12 @@ mod tests {
             pool.add_transaction(mk(&kp_b, n, 1)).expect("B within cap");
         }
         assert_eq!(pool.transactions.len(), 4, "pool should be full");
-        assert_eq!(pool.by_sender.get(&a).map_or(0, |v| v.len()), 2);
+        assert_eq!(
+            pool.by_sender
+                .get(&a)
+                .map_or(0, std::collections::BTreeMap::len),
+            2
+        );
 
         // A is at its cap. A high fee may win eviction, but it must not buy a
         // third slot for a sender that already holds two.
@@ -1071,7 +1079,10 @@ mod tests {
             "unexpected error: {err:?}"
         );
         assert!(
-            pool.by_sender.get(&a).map_or(0, |v| v.len()) <= 2,
+            pool.by_sender
+                .get(&a)
+                .map_or(0, std::collections::BTreeMap::len)
+                <= 2,
             "A holds more than max_per_sender after a rejected admission"
         );
     }
@@ -1202,7 +1213,9 @@ mod tests {
         assert_eq!(pool.transactions.len(), 2, "replacement changed the size");
         let b = crate::core::address::Address::from(kp_b.public_key_bytes());
         assert_eq!(
-            pool.by_sender.get(&b).map_or(0, |v| v.len()),
+            pool.by_sender
+                .get(&b)
+                .map_or(0, std::collections::BTreeMap::len),
             1,
             "the replacement evicted an unrelated sender"
         );

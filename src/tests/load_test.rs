@@ -242,8 +242,7 @@ async fn test_chaos_v2_differential_vm_oracle() {
     // Differential Assert
     assert_eq!(
         zkvm_result, rust_result,
-        "ZKVM result {} must match Rust Oracle {}",
-        zkvm_result, rust_result
+        "ZKVM result {zkvm_result} must match Rust Oracle {rust_result}"
     );
     println!("DIFFERENTIAL VM TEST SUCCESS: ZKVM == Rust Oracle");
 }

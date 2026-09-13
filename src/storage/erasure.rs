@@ -541,7 +541,7 @@ impl ReedSolomon {
 
         let len = present[live[0]]
             .as_ref()
-            .map(|s| s.len())
+            .map(std::vec::Vec::len)
             .unwrap_or_default();
         if len == 0 {
             return Err(ErasureError::ShardMismatch(
@@ -549,7 +549,10 @@ impl ReedSolomon {
             ));
         }
         for &i in &live {
-            let got = present[i].as_ref().map(|s| s.len()).unwrap_or_default();
+            let got = present[i]
+                .as_ref()
+                .map(std::vec::Vec::len)
+                .unwrap_or_default();
             if got != len {
                 return Err(ErasureError::ShardMismatch(format!(
                     "shard {i} is {got} bytes but the first survivor is {len}"

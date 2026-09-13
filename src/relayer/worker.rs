@@ -430,7 +430,7 @@ impl RelayerWorker {
         }
         error!(
             request,
-            external_tx = pending.result.as_ref().map(|r| r.tx_hash.as_str()).unwrap_or("unknown"),
+            external_tx = pending.result.as_ref().map_or("unknown", |r| r.tx_hash.as_str()),
             chain = ?pending.result.as_ref().map(|r| r.chain),
             "Relayer: the request behind a verified external result could not be read \
              back from the chain for the whole failure budget; the result is dropped \

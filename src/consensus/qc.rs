@@ -183,8 +183,7 @@ impl QcBlob {
 
         if estimated_size > MAX_QC_BLOB_BYTES {
             return Err(format!(
-                "QcBlob too large: {} bytes (max: {})",
-                estimated_size, MAX_QC_BLOB_BYTES
+                "QcBlob too large: {estimated_size} bytes (max: {MAX_QC_BLOB_BYTES})"
             ));
         }
         Ok(())
@@ -1037,8 +1036,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.contains("Duplicate PQ signature"),
-            "error must surface the deduplication rationale, got: {}",
-            err
+            "error must surface the deduplication rationale, got: {err}"
         );
 
         // The same call without the duplicate must succeed and
@@ -1053,8 +1051,7 @@ mod tests {
         for idx in 0..4 {
             assert!(
                 verified.contains(&idx),
-                "expected validator index {} in verified set",
-                idx
+                "expected validator index {idx} in verified set"
             );
         }
     }

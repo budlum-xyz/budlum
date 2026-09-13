@@ -87,14 +87,14 @@ impl NftRegistry {
 
     pub fn update_luminance(&mut self, id: u64, delta_mcd: i64) -> Result<(), NftError> {
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
-        let mut new_val = nft.luminance as i128 + delta_mcd as i128;
+        let mut new_val = i128::from(nft.luminance) + i128::from(delta_mcd);
         if new_val < 0 {
             new_val = 0;
         }
         // Clamp to u64::MAX. This used to be an `as u64` truncation, which
         // overflowed silently on a large delta_mcd.
-        if new_val > u64::MAX as i128 {
-            new_val = u64::MAX as i128;
+        if new_val > i128::from(u64::MAX) {
+            new_val = i128::from(u64::MAX);
         }
         nft.luminance = new_val as u64;
         Ok(())

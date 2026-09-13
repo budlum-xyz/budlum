@@ -290,7 +290,7 @@ fn somebody_elses_folder_reaches_the_frame_as_a_vault_refusal() {
     .expect_err("bob does not hold alice's folder");
     assert!(err.contains("vault_tx_failed"), "{err}");
     assert!(
-        state.vault.open(ids[0]).is_some_and(|m| m.is_empty()),
+        state.vault.open(ids[0]).is_some_and(<[u64]>::is_empty),
         "the refusal wrote nothing"
     );
     assert_eq!(state.get_balance(&bob), 100, "and took nothing");

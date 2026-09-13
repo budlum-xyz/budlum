@@ -208,14 +208,12 @@ impl AiModelSpec {
         }
         if self.max_input_ref_bytes > MAX_INFERENCE_REF_BYTES as u64 {
             return Err(format!(
-                "max_input_ref_bytes exceeds allowed maximum {}",
-                MAX_INFERENCE_REF_BYTES
+                "max_input_ref_bytes exceeds allowed maximum {MAX_INFERENCE_REF_BYTES}"
             ));
         }
         if self.max_output_ref_bytes > MAX_INFERENCE_REF_BYTES as u64 {
             return Err(format!(
-                "max_output_ref_bytes exceeds allowed maximum {}",
-                MAX_INFERENCE_REF_BYTES
+                "max_output_ref_bytes exceeds allowed maximum {MAX_INFERENCE_REF_BYTES}"
             ));
         }
         if self.request_deadline_blocks == 0 || self.result_deadline_blocks == 0 {
@@ -1058,7 +1056,7 @@ impl AiAgentPaymentSettlement {
         } else {
             hasher.update(b"no_rid");
         }
-        hasher.update([self.require_proof as u8]);
+        hasher.update([u8::from(self.require_proof)]);
         hasher.update(self.submitted_at_block.to_le_bytes());
         hasher.update(self.expiry_block.to_le_bytes());
         hasher.update(self.settled_at_block.to_le_bytes());

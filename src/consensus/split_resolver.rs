@@ -45,11 +45,7 @@ impl SplitCandidate {
         match chain.last() {
             Some(block) => SplitCandidate {
                 block_hash: block.calculate_hash_bytes(),
-                proposer: block
-                    .producer
-                    .as_ref()
-                    .map(|p| *p.as_bytes())
-                    .unwrap_or([0u8; 32]),
+                proposer: block.producer.as_ref().map_or([0u8; 32], |p| *p.as_bytes()),
                 height: block.index,
                 weight: score,
             },

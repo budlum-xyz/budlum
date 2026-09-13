@@ -216,8 +216,7 @@ impl Executor {
 
                 let stake_amount = tx.amount;
                 let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map(|network| network.min_stake())
-                    .unwrap_or(1);
+                    .map_or(1, |network| network.min_stake());
                 let validator = state.get_validator_mut(&tx.from);
 
                 if let Some(v) = validator {
@@ -262,8 +261,7 @@ impl Executor {
                     .map_err(|error| BudlumError::validation("invalid_consensus_keys", error))?;
 
                 let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map(|network| network.min_stake())
-                    .unwrap_or(1);
+                    .map_or(1, |network| network.min_stake());
                 let validator = state.get_validator_mut(&tx.from).ok_or_else(|| {
                     BudlumError::validation(
                         "validator_not_bonded",
@@ -1365,8 +1363,7 @@ impl Executor {
                     return Err(BudlumError::validation(
                         "insufficient_funds",
                         format!(
-                            "Hub registration requires {}, spendable balance: {}",
-                            hub_total, hub_spendable
+                            "Hub registration requires {hub_total}, spendable balance: {hub_spendable}"
                         ),
                     ));
                 }
@@ -1431,8 +1428,7 @@ impl Executor {
                     return Err(BudlumError::validation(
                         "insufficient_funds",
                         format!(
-                            "AI registration requires {total}, spendable balance: {}",
-                            ai_spendable
+                            "AI registration requires {total}, spendable balance: {ai_spendable}"
                         ),
                     ));
                 }
@@ -1501,10 +1497,7 @@ impl Executor {
                 if spendable < ai_total {
                     return Err(BudlumError::validation(
                         "insufficient_funds",
-                        format!(
-                            "AI inference requires {}, spendable: {}",
-                            ai_total, spendable
-                        ),
+                        format!("AI inference requires {ai_total}, spendable: {spendable}"),
                     ));
                 }
                 let sender = state.get_or_create(&tx.from);

@@ -166,8 +166,7 @@ pub trait ConsensusEngine: Send + Sync {
             let interval = block.timestamp - prev.timestamp;
             if interval < MIN_BLOCK_INTERVAL_MS {
                 return Err(ConsensusError(format!(
-                    "Block produced too fast. Min interval: {} ms, Got: {} ms",
-                    MIN_BLOCK_INTERVAL_MS, interval
+                    "Block produced too fast. Min interval: {MIN_BLOCK_INTERVAL_MS} ms, Got: {interval} ms"
                 )));
             }
         }

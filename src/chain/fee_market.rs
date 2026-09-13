@@ -88,14 +88,14 @@ pub fn next_base_fee(parent_base_fee: u64, parent_gas_used: u64, params: FeeMark
         .target_gas
         .saturating_mul(params.elasticity_multiplier.max(1));
     let parent_gas_used = parent_gas_used.min(gas_limit);
-    let parent = parent_base_fee as i128;
-    let gas_delta = parent_gas_used as i128 - params.target_gas as i128;
-    let denom = params.target_gas as i128 * params.base_fee_max_change_denominator as i128;
+    let parent = i128::from(parent_base_fee);
+    let gas_delta = i128::from(parent_gas_used) - i128::from(params.target_gas);
+    let denom = i128::from(params.target_gas) * i128::from(params.base_fee_max_change_denominator);
     let adjustment = parent.saturating_mul(gas_delta) / denom.max(1);
     let next = parent
         .saturating_add(adjustment)
-        .max(params.min_base_fee as i128);
-    next.min(u64::MAX as i128) as u64
+        .max(i128::from(params.min_base_fee));
+    next.min(i128::from(u64::MAX)) as u64
 }
 
 /// Split a fee bid into burned base fee and proposer priority fee.

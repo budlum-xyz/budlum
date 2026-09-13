@@ -52,29 +52,29 @@ impl std::fmt::Display for AdapterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AdapterError::UnsupportedChain(chain) => {
-                write!(f, "unsupported chain: {:?}", chain)
+                write!(f, "unsupported chain: {chain:?}")
             }
             AdapterError::ConnectionFailed(msg) => {
-                write!(f, "connection failed: {}", msg)
+                write!(f, "connection failed: {msg}")
             }
             AdapterError::TransactionNotFound(hash) => {
-                write!(f, "transaction not found: {}", hash)
+                write!(f, "transaction not found: {hash}")
             }
             AdapterError::ProofGenerationFailed(msg) => {
-                write!(f, "proof generation failed: {}", msg)
+                write!(f, "proof generation failed: {msg}")
             }
             AdapterError::ProofVerificationFailed(msg) => {
-                write!(f, "proof verification failed: {}", msg)
+                write!(f, "proof verification failed: {msg}")
             }
             AdapterError::SubmissionFailed(msg) => {
-                write!(f, "submission failed: {}", msg)
+                write!(f, "submission failed: {msg}")
             }
             AdapterError::ConfirmationTimeout => {
                 write!(f, "confirmation timeout")
             }
-            AdapterError::Other(msg) => write!(f, "adapter error: {}", msg),
+            AdapterError::Other(msg) => write!(f, "adapter error: {msg}"),
             AdapterError::DuplicateChainAdapter(chain) => {
-                write!(f, "duplicate adapter for chain: {:?}", chain)
+                write!(f, "duplicate adapter for chain: {chain:?}")
             }
         }
     }
@@ -220,7 +220,7 @@ impl AdapterRegistry {
         self.adapters
             .iter()
             .find(|a| &a.chain_type() == chain)
-            .map(|a| a.as_ref())
+            .map(std::convert::AsRef::as_ref)
     }
 
     /// Check if a chain is supported.

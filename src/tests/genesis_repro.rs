@@ -41,8 +41,7 @@ use std::sync::Arc;
 /// Yoksa `GenesisConfig::new` fallback'i.
 fn probe_chain(chain_id: u64) -> Vec<String> {
     let config = Network::from_chain_id(chain_id)
-        .map(GenesisConfig::for_network)
-        .unwrap_or_else(|| GenesisConfig::new(chain_id));
+        .map_or_else(|| GenesisConfig::new(chain_id), GenesisConfig::for_network);
 
     let block = config.build_genesis_block();
     let mut rebuilt_state = config.build_state();

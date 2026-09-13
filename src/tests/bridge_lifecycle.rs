@@ -312,8 +312,7 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
     let err = result.unwrap_err();
     assert!(
         err.contains("forgery gate") || err.contains("expected_block_hash"),
-        "error message must surface the forgery-gate rationale, got: {}",
-        err
+        "error message must surface the forgery-gate rationale, got: {err}"
     );
 
     // And the same gate must apply to the unlock path.
@@ -336,7 +335,6 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
     let unlock_err = unlock_result.unwrap_err();
     assert!(
         unlock_err.contains("forgery gate") || unlock_err.contains("expected_block_hash"),
-        "unlock error message must surface the forgery-gate rationale, got: {}",
-        unlock_err
+        "unlock error message must surface the forgery-gate rationale, got: {unlock_err}"
     );
 }

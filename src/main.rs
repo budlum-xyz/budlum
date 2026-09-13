@@ -243,8 +243,10 @@ async fn main() {
             println!("Private key saved to: {key_output}");
         }
         let network_defaults = budlum_core::core::chain_config::Network::from_chain_id(chain_id)
-            .map(budlum_core::chain::genesis::GenesisConfig::for_network)
-            .unwrap_or_else(|| budlum_core::chain::genesis::GenesisConfig::new(chain_id));
+            .map_or_else(
+                || budlum_core::chain::genesis::GenesisConfig::new(chain_id),
+                budlum_core::chain::genesis::GenesisConfig::for_network,
+            );
 
         if allocations.is_empty() {
             allocations = network_defaults.allocations.clone();
@@ -583,7 +585,7 @@ async fn main() {
     println!("Network: {network}");
     println!("Chain ID: {chain_id}");
     println!("Port: {port}");
-    println!("Consensus: {:?}", consensus_type);
+    println!("Consensus: {consensus_type:?}");
     println!("Privacy: {:?}", config.privacy);
     println!("DB Path: {}", config.db_path);
     println!(
@@ -1078,7 +1080,7 @@ async fn main() {
 
     if consensus_type == ConsensusType::PoA {
         if !poa_validators.is_empty() {
-            println!("Initializing PoA validators: {:?}", poa_validators);
+            println!("Initializing PoA validators: {poa_validators:?}");
         } else {
             println!("No validators configured!");
         }

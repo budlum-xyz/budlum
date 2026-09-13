@@ -438,12 +438,13 @@ impl PoSEngine {
         }
 
         // Threshold = (stake * VRF_BASE_PROB * u64::MAX) / (total_stake * FIXED_POINT_SCALE)
-        let base_threshold = (stake as u128).saturating_mul(u64::MAX as u128) / total_stake as u128;
+        let base_threshold =
+            u128::from(stake).saturating_mul(u128::from(u64::MAX)) / u128::from(total_stake);
 
-        let threshold =
-            (base_threshold.saturating_mul(VRF_BASE_PROB as u128)) / FIXED_POINT_SCALE as u128;
+        let threshold = (base_threshold.saturating_mul(u128::from(VRF_BASE_PROB)))
+            / u128::from(FIXED_POINT_SCALE);
 
-        if threshold >= u64::MAX as u128 {
+        if threshold >= u128::from(u64::MAX) {
             u64::MAX
         } else {
             threshold as u64
@@ -478,7 +479,7 @@ impl PoSEngine {
                 })
             }).collect::<Vec<_>>(),
             "slashing_evidence": *self.slashing_evidence.read().map_err(|_| "Lock error".to_string())?,
-            "epoch_seed": epoch_seed.iter().map(|b| *b as u64).collect::<Vec<_>>(),
+            "epoch_seed": epoch_seed.iter().map(|b| u64::from(*b)).collect::<Vec<_>>(),
         });
         serde_json::to_vec(&state).map_err(|e| format!("Serialization error: {e}"))
     }
@@ -514,13 +515,20 @@ impl PoSEngine {
                 .write()
                 .map_err(|_| "Lock error".to_string())?;
             for cp in checkpoints_data {
-                let block_index = cp.get("block_index").and_then(|i| i.as_u64()).unwrap_or(0);
+                let block_index = cp
+                    .get("block_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
                 let block_hash = cp
                     .get("block_hash")
                     .and_then(|h| h.as_str())
                     .unwrap_or("")
                     .to_string();
-                let timestamp = cp.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0) as u128;
+                let timestamp = u128::from(
+                    cp.get("timestamp")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                );
                 checkpoints.push(Checkpoint {
                     block_index,
                     block_hash,
@@ -830,7 +838,7 @@ impl ConsensusEngine for PoSEngine {
         "PoS"
     }
     fn signer(&self) -> Option<&dyn ConsensusSigner> {
-        self.signer.as_ref().map(|s| s.as_ref())
+        self.signer.as_ref().map(std::convert::AsRef::as_ref)
     }
     fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
         self.validator_keys

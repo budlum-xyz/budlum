@@ -30,10 +30,7 @@ mod zkvm_tests {
     }
 
     fn bytecode(program: Vec<u64>) -> Vec<u8> {
-        program
-            .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
-            .collect()
+        program.into_iter().flat_map(u64::to_le_bytes).collect()
     }
 
     fn logging_program(value: i32) -> Vec<u8> {

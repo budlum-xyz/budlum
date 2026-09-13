@@ -499,19 +499,13 @@ impl PeerManager {
         warn!("Peer {} banned for {:?}", peer_id, BAN_DURATION);
     }
     pub fn is_banned(&self, peer_id: &PeerId) -> bool {
-        self.peers
-            .get(peer_id)
-            .map(|s| s.is_banned())
-            .unwrap_or(false)
+        self.peers.get(peer_id).is_some_and(PeerScore::is_banned)
     }
     pub fn get_score(&self, peer_id: &PeerId) -> i32 {
         self.peers.get(peer_id).map_or(0, |s| s.score)
     }
     pub fn is_handshaked(&self, peer_id: &PeerId) -> bool {
-        self.peers
-            .get(peer_id)
-            .map(|s| s.handshaked)
-            .unwrap_or(false)
+        self.peers.get(peer_id).is_some_and(|s| s.handshaked)
     }
     pub fn set_handshaked(&mut self, peer_id: &PeerId, status: bool) {
         let Some(score) = self.get_or_create(peer_id) else {
@@ -666,8 +660,7 @@ pub struct PersistedBan {
 fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -740,13 +733,12 @@ mod tests {
         assert!(manager.is_banned(&peer));
         let remaining = manager
             .get_peer_info(&peer)
-            .and_then(|s| s.ban_remaining())
+            .and_then(super::PeerScore::ban_remaining)
             .expect("remaining ban");
         // Allow a few seconds of slack for test runtime.
         assert!(
             remaining.as_secs() <= 60 && remaining.as_secs() >= 55,
-            "remaining should be ~60s, got {:?}",
-            remaining
+            "remaining should be ~60s, got {remaining:?}"
         );
         // Persisted snapshot must carry the same absolute expiry.
         let persisted = manager.get_persisted_banned_peers();

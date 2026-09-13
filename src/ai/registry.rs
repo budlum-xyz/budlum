@@ -452,8 +452,7 @@ impl AiRegistry {
         let response_blocks = result.submitted_at_block.saturating_sub(
             self.requests
                 .get(&result.request_id)
-                .map(|r| r.submitted_at_block)
-                .unwrap_or(0),
+                .map_or(0, |r| r.submitted_at_block),
         );
         self.verifier_qos
             .entry(result.verifier)
@@ -737,12 +736,10 @@ impl AiRegistry {
                 }
                 // Check if deadline + retention has passed
                 let model = self.models.get(&req.model_id);
-                let result_deadline = model
-                    .map(|m| {
-                        req.submitted_at_block
-                            .saturating_add(m.result_deadline_blocks)
-                    })
-                    .unwrap_or(0);
+                let result_deadline = model.map_or(0, |m| {
+                    req.submitted_at_block
+                        .saturating_add(m.result_deadline_blocks)
+                });
                 let effective_deadline = std::cmp::max(req.deadline_block, result_deadline);
                 current_block > effective_deadline.saturating_add(retention_blocks)
             })
@@ -983,15 +980,14 @@ impl AiRegistry {
             let Some(request) = self.requests.get(request_id) else {
                 return false;
             };
-            let result_deadline = self
-                .models
-                .get(&request.model_id)
-                .map(|model| {
-                    request
-                        .submitted_at_block
-                        .saturating_add(model.result_deadline_blocks)
-                })
-                .unwrap_or(request.deadline_block);
+            let result_deadline =
+                self.models
+                    .get(&request.model_id)
+                    .map_or(request.deadline_block, |model| {
+                        request
+                            .submitted_at_block
+                            .saturating_add(model.result_deadline_blocks)
+                    });
             current_block <= request.deadline_block.max(result_deadline)
         });
         if has_open_result {
@@ -1160,8 +1156,7 @@ impl AiRegistry {
             .max()
             .unwrap_or(DEFAULT_OPERATOR_CEILING);
         Some(format!(
-            "effort tier {} exceeds every declared operator ceiling (deepest {})",
-            tier, best
+            "effort tier {tier} exceeds every declared operator ceiling (deepest {best})"
         ))
     }
 
@@ -1445,8 +1440,7 @@ impl AiRegistry {
         let output_ref = entries
             .iter()
             .find(|r| r.output_commitment == output_commitment)
-            .map(|r| r.output_ref.clone())
-            .unwrap_or_else(BoundedBytes::empty);
+            .map_or_else(BoundedBytes::empty, |r| r.output_ref.clone());
         let finalized_at_block = entries
             .iter()
             .map(|r| r.submitted_at_block)
@@ -1529,8 +1523,7 @@ impl AiRegistry {
         // Epochs × 100 blocks/epoch ≈ 5_256_000 blocks from current_block).
         if payment.expiry_block > current_block.saturating_add(MAX_DEADLINE_HORIZON_BLOCKS) {
             return Err(format!(
-                "Agent payment: expiry_block too far in the future (max {} blocks from current)",
-                MAX_DEADLINE_HORIZON_BLOCKS
+                "Agent payment: expiry_block too far in the future (max {MAX_DEADLINE_HORIZON_BLOCKS} blocks from current)"
             ));
         }
         if payment.is_expired(current_block) {

@@ -355,8 +355,7 @@ impl CustodyLedger {
                             .user_held
                             .iter()
                             .find(|(id, _)| *id == content_id)
-                            .map(|(_, b)| *b)
-                            .unwrap_or(0);
+                            .map_or(0, |(_, b)| *b);
                         let held_next = held_now
                             .saturating_add(d.user_held_bytes)
                             .saturating_sub(replaced);

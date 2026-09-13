@@ -41,7 +41,7 @@ fn register_domain_allowing(bc: &mut Blockchain, id: u32, program: &[u64]) {
     let mut domain = crate::domain::plugin::default_domain(
         id,
         crate::domain::ConsensusKind::Zk,
-        45262 + id as u64,
+        45262 + u64::from(id),
         "zk-proof-verification",
         0,
     );
@@ -79,7 +79,7 @@ fn sample_bytecode() -> Vec<u8> {
         }
         .encode(),
     ];
-    program.into_iter().flat_map(|i| i.to_le_bytes()).collect()
+    program.into_iter().flat_map(u64::to_le_bytes).collect()
 }
 
 fn real_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {

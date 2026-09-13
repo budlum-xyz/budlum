@@ -2294,9 +2294,9 @@ mod tests {
 
             let proto_tx = pb::ProtoTransaction::from(&tx);
             let decoded_tx = Transaction::try_from(proto_tx.clone())
-                .unwrap_or_else(|e| panic!("Failed to decode {:?}: {}", tx_type, e));
+                .unwrap_or_else(|e| panic!("Failed to decode {tx_type:?}: {e}"));
 
-            assert_eq!(tx, decoded_tx, "Mismatch on roundtrip for {:?}", tx_type);
+            assert_eq!(tx, decoded_tx, "Mismatch on roundtrip for {tx_type:?}");
             assert_eq!(tx.hash, decoded_tx.hash);
         }
     }

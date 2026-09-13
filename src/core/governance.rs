@@ -371,8 +371,8 @@ impl Proposal {
             return;
         }
         // Use u128 to prevent overflow in the quorum calculation
-        let total_votes = (self.votes_for as u128) + (self.votes_against as u128);
-        let quorum_threshold = (total_stake as u128) * (quorum_pct as u128);
+        let total_votes = u128::from(self.votes_for) + u128::from(self.votes_against);
+        let quorum_threshold = u128::from(total_stake) * u128::from(quorum_pct);
         let reached_quorum = total_votes * 100 >= quorum_threshold;
         if reached_quorum && self.votes_for > self.votes_against {
             self.status = ProposalStatus::Passed;
@@ -516,8 +516,7 @@ impl GovernanceState {
         const MAX_PROPOSAL_DURATION: u64 = 100_000; // Maximum 100,000 epochs
         if !(MIN_PROPOSAL_DURATION..=MAX_PROPOSAL_DURATION).contains(&duration) {
             return Err(format!(
-                "Proposal duration must be between {} and {} epochs",
-                MIN_PROPOSAL_DURATION, MAX_PROPOSAL_DURATION
+                "Proposal duration must be between {MIN_PROPOSAL_DURATION} and {MAX_PROPOSAL_DURATION} epochs"
             ));
         }
 

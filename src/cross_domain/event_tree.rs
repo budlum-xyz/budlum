@@ -48,8 +48,7 @@ impl DomainEvent {
         let message_id = self
             .message
             .as_ref()
-            .map(|message| message.message_id)
-            .unwrap_or([0u8; 32]);
+            .map_or([0u8; 32], |message| message.message_id);
 
         hash_fields_bytes(&[
             b"BDLM_DOMAIN_EVENT_V1",
@@ -147,7 +146,7 @@ mod tests {
             target_domain: 2,
             source_height: 9,
             event_index: index,
-            nonce: index as u64,
+            nonce: u64::from(index),
             sender: Address::from([1u8; 32]),
             recipient: Address::from([2u8; 32]),
             payload_hash,

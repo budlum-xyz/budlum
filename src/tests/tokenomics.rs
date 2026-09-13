@@ -35,7 +35,7 @@ fn genesis_state() -> (AccountState, TokenomicsAddresses) {
 fn genesis_total_supply_is_100m_and_distribution_matches() {
     let (state, addrs) = genesis_state();
     // Total supply is exactly 100M * 10^6.
-    assert_eq!(state.circulating_supply(), BUD_TOTAL_SUPPLY as u128);
+    assert_eq!(state.circulating_supply(), u128::from(BUD_TOTAL_SUPPLY));
     assert_eq!(BUD_TOTAL_SUPPLY, bud(100_000_000));
 
     // Per-category amounts match the approved distribution.
@@ -130,7 +130,7 @@ fn burn_strictly_reduces_supply_no_mint_offset() {
 
     assert!(burned > 0);
     // Supply decreased by EXACTLY the burned amount, nothing minted it back.
-    assert_eq!(after, before - burned as u128);
+    assert_eq!(after, before - u128::from(burned));
     assert!(after < before);
 }
 
@@ -167,7 +167,7 @@ fn metabolic_burn_removes_fee_fraction_on_block_apply() {
 
     // Validator income is exclusively fee - metabolic burn; no block emission.
     let supply_after = state.circulating_supply();
-    assert_eq!(supply_after, supply_before - expected_burn as u128);
+    assert_eq!(supply_after, supply_before - u128::from(expected_burn));
     assert!(expected_burn > 0, "1% of 10_000 must be non-zero");
     assert_eq!(state.get_balance(&producer), fee - expected_burn);
 }
@@ -199,7 +199,7 @@ fn genesis_build_state_seeds_bud_distribution_via_real_flow() {
     assert_eq!(state.get_balance(&addrs.burn_reserve), bud(40_000_000));
     assert_eq!(state.get_balance(&addrs.team), bud(20_000_000));
     // Supply includes the full 100M (genesis had no other allocations for devnet).
-    assert_eq!(state.circulating_supply(), BUD_TOTAL_SUPPLY as u128);
+    assert_eq!(state.circulating_supply(), u128::from(BUD_TOTAL_SUPPLY));
     // Burn reserve + team vesting are wired into state.
     assert_eq!(state.burn_reserve_address, Some(addrs.burn_reserve));
     assert!(state.team_vesting.is_some());
@@ -286,7 +286,7 @@ fn timed_burn_fires_via_real_epoch_advance() {
     // Supply dropped by exactly the burn.
     assert_eq!(
         state.circulating_supply(),
-        BUD_TOTAL_SUPPLY as u128 - per_year as u128
+        u128::from(BUD_TOTAL_SUPPLY) - u128::from(per_year)
     );
 }
 

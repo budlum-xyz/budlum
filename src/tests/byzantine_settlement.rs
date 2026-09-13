@@ -402,7 +402,7 @@ mod byzantine_settlement_tests {
                 let pow = default_domain(
                     i,
                     ConsensusKind::PoW,
-                    45262 + i as u64,
+                    45262 + u64::from(i),
                     "pow-header-chain-v1",
                     0,
                 );
@@ -422,17 +422,17 @@ mod byzantine_settlement_tests {
             let addr_idx = i % 100;
             let nonce = (i / 100) + 1;
 
-            let mut block = Block::new(i as u64, format!("hash_{i}"), vec![]);
+            let mut block = Block::new(u64::from(i), format!("hash_{i}"), vec![]);
             block.state_root = format!("state_{i}");
             block.tx_root = block.calculate_tx_root();
             block.hash = block.calculate_hash();
 
             let domain = node_a.domain_registry.get(domain_id).unwrap();
             let mut com =
-                DomainCommitment::from_block(domain, &block, [0u8; 32], [0u8; 32], i as u64)
+                DomainCommitment::from_block(domain, &block, [0u8; 32], [0u8; 32], u64::from(i))
                     .unwrap();
             com.state_updates
-                .insert(accounts[addr_idx as usize], nonce as u64);
+                .insert(accounts[addr_idx as usize], u64::from(nonce));
             commitments.push(com);
         }
 
@@ -481,8 +481,7 @@ mod byzantine_settlement_tests {
             assert_eq!(
                 node_a.state.get_nonce(addr),
                 node_b.state.get_nonce(addr),
-                "Determinism failed for account {:?}",
-                addr
+                "Determinism failed for account {addr:?}"
             );
         }
     }
@@ -953,8 +952,7 @@ mod byzantine_settlement_tests {
             assert_eq!(
                 expected_hash,
                 hi_header.calculate_hash(),
-                "node {} failed convergence under random gossip chaos",
-                i
+                "node {i} failed convergence under random gossip chaos"
             );
         }
         // C3 (decision 50): the nonce moves at execution, not at accept. Apply

@@ -39,10 +39,10 @@ mod tests {
         let from = source
             .find(start)
             .unwrap_or_else(|| panic!("the arm `{start}` must exist"));
-        let to = source[from..]
-            .find(end)
-            .map(|at| from + at)
-            .unwrap_or_else(|| panic!("the arm `{end}` must follow `{start}`"));
+        let to = source[from..].find(end).map_or_else(
+            || panic!("the arm `{end}` must follow `{start}`"),
+            |at| from + at,
+        );
         &source[from..to]
     }
 

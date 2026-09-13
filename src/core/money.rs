@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn try_from_accepts_the_whole_u64_range_and_refuses_one_more() {
         assert_eq!(Bud::try_from(0u128), Ok(Bud::new(0)));
-        assert_eq!(Bud::try_from(u64::MAX as u128), Ok(Bud::new(u64::MAX)));
+        assert_eq!(Bud::try_from(u128::from(u64::MAX)), Ok(Bud::new(u64::MAX)));
         assert_eq!(
             Bud::try_from(u128::from(u64::MAX) + 1),
             Err("bud amount exceeds u64::MAX"),

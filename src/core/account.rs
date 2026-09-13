@@ -857,8 +857,9 @@ impl AccountState {
     pub fn required_ai_bond(&self, chain_id: u64) -> u64 {
         let registry_floor = self.registry.params().min_stake;
         crate::core::chain_config::Network::from_chain_id(chain_id)
-            .map(|network| network.min_stake().max(registry_floor))
-            .unwrap_or(registry_floor)
+            .map_or(registry_floor, |network| {
+                network.min_stake().max(registry_floor)
+            })
     }
 
     /// Bond a signed sender into the permissionless AI inference layer operator role.
@@ -1031,10 +1032,7 @@ impl AccountState {
     }
 
     pub fn get_balance(&self, public_key: &Address) -> u64 {
-        self.accounts
-            .get(public_key)
-            .map(|a| a.balance)
-            .unwrap_or(0)
+        self.accounts.get(public_key).map_or(0, |a| a.balance)
     }
     pub fn get_nonce(&self, public_key: &Address) -> u64 {
         self.accounts.get(public_key).map_or(0, |a| a.nonce)
@@ -2008,7 +2006,7 @@ impl AccountState {
     pub fn circulating_supply(&self) -> u128 {
         self.accounts
             .values()
-            .fold(0u128, |acc, a| acc + a.balance as u128)
+            .fold(0u128, |acc, a| acc + u128::from(a.balance))
     }
 
     /// Total $BUD locked in validator stake, including inactive/jailed validators.
@@ -2019,14 +2017,14 @@ impl AccountState {
     pub fn total_staked_supply(&self) -> u128 {
         self.validators
             .values()
-            .fold(0u128, |acc, v| acc + v.stake as u128)
+            .fold(0u128, |acc, v| acc + u128::from(v.stake))
     }
 
     /// Total $BUD in unbonding limbo.
     pub fn total_unbonding_supply(&self) -> u128 {
         self.unbonding_queue
             .iter()
-            .fold(0u128, |acc, e| acc + e.amount as u128)
+            .fold(0u128, |acc, e| acc + u128::from(e.amount))
     }
 
     /// Total non-validator role bonds held by the permissionless registry.
@@ -2052,9 +2050,9 @@ impl AccountState {
 
     /// Remaining headroom under the fixed 100M cap.
     pub fn supply_capacity_remaining(&self) -> u64 {
-        let cap = crate::tokenomics::BUD_TOTAL_SUPPLY as u128;
+        let cap = u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY);
         cap.saturating_sub(self.total_bud_committed())
-            .min(u64::MAX as u128) as u64
+            .min(u128::from(u64::MAX)) as u64
     }
 
     /// Burn `amount` from `address`: reduce its balance and credit it NOWHERE,
@@ -2345,9 +2343,9 @@ impl AccountState {
             let mut h = Sha256::new();
             h.update(addr.0);
             h.update(val.stake.to_le_bytes());
-            h.update([val.active as u8]);
-            h.update([val.slashed as u8]);
-            h.update([val.jailed as u8]);
+            h.update([u8::from(val.active)]);
+            h.update([u8::from(val.slashed)]);
+            h.update([u8::from(val.jailed)]);
             h.update(val.jail_until.to_le_bytes());
             h.update(val.last_proposed_block.unwrap_or(0).to_le_bytes());
             h.update(val.votes_for.to_le_bytes());
@@ -2967,7 +2965,7 @@ mod tests {
 
         // The distributed amount must NEVER cross the supply cap.
         assert!(
-            after_supply <= crate::tokenomics::BUD_TOTAL_SUPPLY as u128,
+            after_supply <= u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY),
             "the supply cap was crossed: {} > {}",
             after_supply,
             crate::tokenomics::BUD_TOTAL_SUPPLY
@@ -2975,7 +2973,7 @@ mod tests {
 
         // At least some reward must have been distributed, if the cap was not
         // already reached.
-        if before_supply < crate::tokenomics::BUD_TOTAL_SUPPLY as u128 {
+        if before_supply < u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY) {
             // If the test passes, a reward was distributed.
         }
     }

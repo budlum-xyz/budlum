@@ -532,7 +532,7 @@ fn encode_action(action: &RelayerActionKind, hasher: &mut Sha256) {
             payload_hash,
         } => {
             hasher.update([0u8]);
-            hasher.update(format!("{:?}", chain).as_bytes());
+            hasher.update(format!("{chain:?}").as_bytes());
             hasher.update((target_address.len() as u64).to_le_bytes());
             hasher.update(target_address.as_bytes());
             hasher.update(payload_hash);

@@ -12,8 +12,7 @@ pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, String> {
     if data.len() > MAX_GATEWAY_CONTENT_BYTES {
         return Err(format!(
-            "gateway content from {source} exceeds {} bytes",
-            MAX_GATEWAY_CONTENT_BYTES
+            "gateway content from {source} exceeds {MAX_GATEWAY_CONTENT_BYTES} bytes"
         ));
     }
     Ok(data)
@@ -255,9 +254,7 @@ impl BudGateway {
             "Content {}:{} not available in local storage, local B.U.D. store, or remote P2P peers.",
             hex::encode(&storage_root[..8]),
             resolved
-                .content_id
-                .map(|c| hex::encode(&c.as_bytes()[..4]))
-                .unwrap_or_else(|| "none".to_string())
+                .content_id.map_or_else(|| "none".to_string(), |c| hex::encode(&c.as_bytes()[..4]))
         ))
     }
 

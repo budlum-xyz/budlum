@@ -107,7 +107,7 @@ fn signed_ai_bond_debits_balance_and_registers_role8() {
     assert_eq!(state.accounts.get(&operator).expect("account").nonce, 1);
     assert_eq!(
         state.total_bud_committed(),
-        committed_before - fee as u128,
+        committed_before - u128::from(fee),
         "bonded principal must remain in the committed-supply denominator"
     );
 }
@@ -386,7 +386,7 @@ fn conflicting_signed_result_commits_evidence_and_burns_only_role8_bond() {
     );
     assert_eq!(
         state.total_bud_committed(),
-        committed_before_slash - bond_amount as u128 - fee as u128
+        committed_before_slash - u128::from(bond_amount) - u128::from(fee)
     );
     assert!(!state
         .ai_registry

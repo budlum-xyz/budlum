@@ -108,9 +108,7 @@ mod tests {
             // The burn must not exceed the fee.
             assert!(
                 metabolic_burn <= fee,
-                "Metabolic burn ({}) should not exceed fee ({})",
-                metabolic_burn,
-                fee
+                "Metabolic burn ({metabolic_burn}) should not exceed fee ({fee})"
             );
 
             // Annual burn = burn_reserve * annual_ratio / FIXED_POINT_SCALE
@@ -150,26 +148,19 @@ mod tests {
             assert_eq!(
                 unlocked + locked,
                 total,
-                "Unlocked ({}) + locked ({}) should equal total ({})",
-                unlocked,
-                locked,
-                total
+                "Unlocked ({unlocked}) + locked ({locked}) should equal total ({total})"
             );
 
             // Unlocked must never exceed the total.
             assert!(
                 unlocked <= total,
-                "Unlocked ({}) should not exceed total ({})",
-                unlocked,
-                total
+                "Unlocked ({unlocked}) should not exceed total ({total})"
             );
 
             // Locked must never be negative - it is a u64 so it cannot be, but verify it.
             assert!(
                 locked <= total,
-                "Locked ({}) should not exceed total ({})",
-                locked,
-                total
+                "Locked ({locked}) should not exceed total ({total})"
             );
         }
 
@@ -193,9 +184,9 @@ mod tests {
                 params.calculate_epoch_reward(stake.saturating_add(1)) >= reward,
                 "the reward must not decrease with stake"
             );
-            let annual_yield = (stake as u128 * params.validator_annual_yield_ratio_fixed as u128)
-                / crate::core::chain_config::FIXED_POINT_SCALE as u128;
-            let paid = reward as u128 * params.epochs_per_year as u128;
+            let annual_yield = (u128::from(stake) * u128::from(params.validator_annual_yield_ratio_fixed))
+                / u128::from(crate::core::chain_config::FIXED_POINT_SCALE);
+            let paid = u128::from(reward) * u128::from(params.epochs_per_year);
             assert!(
                 paid <= annual_yield,
                 "a year of epoch rewards ({paid}) exceeds the annual yield ({annual_yield})"

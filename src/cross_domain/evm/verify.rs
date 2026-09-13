@@ -413,7 +413,7 @@ pub(crate) mod fixtures {
         let mut conf_headers = Vec::new();
         let mut prev_hash = target_hash;
         for offset in 1..=n_conf {
-            let h = header_rlp(prev_hash, 100 + offset as u64, receipts_root);
+            let h = header_rlp(prev_hash, 100 + u64::from(offset), receipts_root);
             prev_hash = keccak256(&h);
             conf_headers.push(h);
         }
@@ -428,7 +428,7 @@ pub(crate) mod fixtures {
     }
 
     pub(crate) fn conf_refs(f: &Fixture) -> Vec<&[u8]> {
-        f.conf_headers.iter().map(|v| v.as_slice()).collect()
+        f.conf_headers.iter().map(std::vec::Vec::as_slice).collect()
     }
 }
 

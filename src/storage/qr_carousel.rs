@@ -1361,8 +1361,7 @@ mod tests {
         assert_eq!(
             failures, 0,
             "{failures}/12 trials failed to recover at {drop_permille} permille loss \
-             within a {}-frame budget for k={k}",
-            budget
+             within a {budget}-frame budget for k={k}"
         );
     }
 

@@ -68,11 +68,11 @@ pub enum CryptoError {
 impl std::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CryptoError::KeyGeneration(s) => write!(f, "Key generation error: {}", s),
-            CryptoError::Signing(s) => write!(f, "Signing error: {}", s),
-            CryptoError::Verification(s) => write!(f, "Verification error: {}", s),
-            CryptoError::Io(s) => write!(f, "I/O error: {}", s),
-            CryptoError::InvalidKey(s) => write!(f, "Invalid key: {}", s),
+            CryptoError::KeyGeneration(s) => write!(f, "Key generation error: {s}"),
+            CryptoError::Signing(s) => write!(f, "Signing error: {s}"),
+            CryptoError::Verification(s) => write!(f, "Verification error: {s}"),
+            CryptoError::Io(s) => write!(f, "I/O error: {s}"),
+            CryptoError::InvalidKey(s) => write!(f, "Invalid key: {s}"),
             CryptoError::PlaintextDiskKeysForbiddenOnMainnet => write!(
                 f,
                 "CRITICAL: loading plaintext BLS/PQ secret keys directly from disk is forbidden on Mainnet without HSM protection"

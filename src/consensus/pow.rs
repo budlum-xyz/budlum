@@ -131,7 +131,7 @@ impl PoWEngine {
             .config
             .target_block_time
             .saturating_mul(self.config.adjustment_interval);
-        let ratio_scaled = (expected_time as u128 * 100) / (actual_time_sn as u128).max(1);
+        let ratio_scaled = (u128::from(expected_time) * 100) / u128::from(actual_time_sn).max(1);
         let ratio_capped = ratio_scaled.clamp(25, 400);
         ((current as u128 * ratio_capped) / 100).clamp(1, 32) as usize
     }
@@ -251,7 +251,7 @@ impl PoWEngine {
         *self
             .current_difficulty
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn meets_difficulty_at(hash_hex: &str, difficulty: usize) -> bool {
@@ -312,7 +312,7 @@ impl PoWEngine {
             .config
             .target_block_time
             .saturating_mul(self.config.adjustment_interval);
-        let ratio_scaled = (expected_time as u128 * 100) / actual_time.max(1);
+        let ratio_scaled = (u128::from(expected_time) * 100) / actual_time.max(1);
         let ratio_capped = ratio_scaled.clamp(25, 400);
         ((current as u128 * ratio_capped) / 100).clamp(1, 32) as usize
     }
@@ -627,8 +627,7 @@ mod tests {
         let diff_after_record = engine.get_difficulty();
         assert!(
             (1..=32).contains(&diff_after_record),
-            "adjusted difficulty must be within [1, 32] clamp, got {}",
-            diff_after_record
+            "adjusted difficulty must be within [1, 32] clamp, got {diff_after_record}"
         );
     }
 
@@ -651,9 +650,9 @@ mod tests {
             let mut b = Block::new(i, prev_hash, vec![]);
             // Alternate fast and slow stretches so the retarget goes both ways.
             b.timestamp = if (i / 3) % 2 == 0 {
-                i as u128 * 1_000
+                u128::from(i) * 1_000
             } else {
-                i as u128 * 90_000
+                u128::from(i) * 90_000
             };
             b.hash = b.calculate_hash();
             chain.push(b);

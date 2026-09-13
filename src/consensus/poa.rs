@@ -419,7 +419,7 @@ impl ConsensusEngine for PoAEngine {
         "PoA"
     }
     fn signer(&self) -> Option<&dyn ConsensusSigner> {
-        self.signer.as_ref().map(|s| s.as_ref())
+        self.signer.as_ref().map(std::convert::AsRef::as_ref)
     }
     fn info(&self) -> String {
         format!(

@@ -10,14 +10,11 @@ fn main() {
     println!("----------------------------------------------------------");
 
     let count = 100_000;
-    println!("Generating {} keypairs and signatures...", count);
+    println!("Generating {count} keypairs and signatures...");
 
     let kp = KeyPair::generate().unwrap();
     let sample_count = 1000;
-    println!(
-        "Generating {} unique samples to avoid cache bias...",
-        sample_count
-    );
+    println!("Generating {sample_count} unique samples to avoid cache bias...");
 
     let samples: Vec<(Vec<u8>, [u8; 64])> = (0..sample_count)
         .map(|i| {
@@ -29,7 +26,7 @@ fn main() {
 
     let pk_bytes = kp.public_key_bytes();
 
-    println!("Starting verification loop ({} total iterations)...", count);
+    println!("Starting verification loop ({count} total iterations)...");
     let start = Instant::now();
 
     for i in 0..count {
@@ -44,8 +41,8 @@ fn main() {
     let duration = start.elapsed();
     let ops_per_sec = count as f64 / duration.as_secs_f64();
 
-    println!("Total Time:       {:?}", duration);
+    println!("Total Time:       {duration:?}");
     println!("Avg per Verify:   {:?}", duration / count as u32);
-    println!("Throughput:       {:.2} verify/s", ops_per_sec);
+    println!("Throughput:       {ops_per_sec:.2} verify/s");
     println!("----------------------------------------------------------\n");
 }

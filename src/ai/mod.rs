@@ -4651,8 +4651,7 @@ mod tests {
         // Should rank higher (better payment reliability)
         assert!(
             ranking[0].0 == a1,
-            "a1 should be first in ranking: got {:?}",
-            ranking
+            "a1 should be first in ranking: got {ranking:?}"
         );
         assert!(ranking[0].1 > ranking[1].1);
     }

@@ -167,9 +167,9 @@ mod tests {
         for key in validator_keys {
             let v = &s.validators[key];
             h.update(v.stake.to_le_bytes());
-            h.update([v.active as u8]);
-            h.update([v.slashed as u8]);
-            h.update([v.jailed as u8]);
+            h.update([u8::from(v.active)]);
+            h.update([u8::from(v.slashed)]);
+            h.update([u8::from(v.jailed)]);
             h.update(v.jail_until.to_le_bytes());
             h.update(&v.bls_public_key);
             h.update(&v.pop_signature);

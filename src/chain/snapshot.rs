@@ -82,9 +82,9 @@ impl StateSnapshot {
             hasher.update(key.0);
             let v = &self.validators[key];
             hasher.update(v.stake.to_le_bytes());
-            hasher.update([v.active as u8]);
-            hasher.update([v.slashed as u8]);
-            hasher.update([v.jailed as u8]);
+            hasher.update([u8::from(v.active)]);
+            hasher.update([u8::from(v.slashed)]);
+            hasher.update([u8::from(v.jailed)]);
             hasher.update(v.jail_until.to_le_bytes());
             // Length-prefixed; see `crate::crypto::key_set_preimage` for the
             // re-splitting collision the raw concatenation allowed.
@@ -127,7 +127,7 @@ impl StateSnapshot {
 
     pub fn chunk(&self, chunk_size: usize) -> Vec<Vec<u8>> {
         let data = self.to_bytes();
-        data.chunks(chunk_size).map(|c| c.to_vec()).collect()
+        data.chunks(chunk_size).map(<[u8]>::to_vec).collect()
     }
 }
 #[derive(Clone)]
@@ -257,14 +257,8 @@ impl PruningManager {
         }
         let mut snapshots: Vec<_> = fs::read_dir(dir)
             .map_err(|e| format!("Failed to read snapshot dir: {e}"))?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .map(|e| e == "json")
-                    .unwrap_or(false)
-            })
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
             .collect();
         if snapshots.is_empty() {
             return Ok(None);
@@ -365,14 +359,8 @@ impl PruningManager {
         }
         let mut snapshots: Vec<_> = fs::read_dir(dir)
             .map_err(|e| format!("Failed to read snapshot dir: {e}"))?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .map(|e| e == "json")
-                    .unwrap_or(false)
-            })
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
             .collect();
         if snapshots.is_empty() {
             return Ok(None);
@@ -848,9 +836,9 @@ impl StateSnapshotV2 {
             hasher.update(key.0);
             let v = &self.validators[key];
             hasher.update(v.stake.to_le_bytes());
-            hasher.update([v.active as u8]);
-            hasher.update([v.slashed as u8]);
-            hasher.update([v.jailed as u8]);
+            hasher.update([u8::from(v.active)]);
+            hasher.update([u8::from(v.slashed)]);
+            hasher.update([u8::from(v.jailed)]);
             hasher.update(v.jail_until.to_le_bytes());
             // Length-prefixed. This digest is what a syncing node checks a
             // downloaded snapshot against, and `Validator` crosses the wire

@@ -438,7 +438,7 @@ impl RpcServer {
     }
 
     fn to_hex(n: u64) -> String {
-        format!("0x{:x}", n)
+        format!("0x{n:x}")
     }
 
     fn ai_readiness_json(chain_id: u64, active_bonded_operators: usize) -> serde_json::Value {
@@ -522,7 +522,7 @@ impl RpcServer {
 
     fn global_header_to_json(h: crate::settlement::GlobalBlockHeader) -> serde_json::Value {
         serde_json::json!({
-            "version": Self::to_hex(h.version as u64),
+            "version": Self::to_hex(u64::from(h.version)),
             "globalHeight": Self::to_hex(h.global_height),
             "hash": Self::bytes32_to_0x(h.calculate_hash_bytes()),
             "previousGlobalHash": Self::bytes32_to_0x(h.previous_global_hash),
@@ -745,13 +745,10 @@ fn request_came_from_trusted_proxy<B>(config: &RpcSecurityConfig, req: &HttpRequ
     let Some(remote_ip) = extract_direct_client_ip(req) else {
         return false;
     };
-    config.trusted_proxies.iter().any(|allowed| {
-        allowed == "*"
-            || allowed
-                .parse::<IpAddr>()
-                .map(|ip| ip == remote_ip)
-                .unwrap_or(false)
-    })
+    config
+        .trusted_proxies
+        .iter()
+        .any(|allowed| allowed == "*" || allowed.parse::<IpAddr>().is_ok_and(|ip| ip == remote_ip))
 }
 
 fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
@@ -1406,7 +1403,7 @@ impl BudlumApiServer for RpcServer {
         if let Err(e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Transaction too large: {:?}", e),
+                format!("Transaction too large: {e:?}"),
                 None::<()>,
             ));
         }
@@ -1463,7 +1460,7 @@ impl BudlumApiServer for RpcServer {
         if let Err(_e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Transaction too large: {:?}", _e),
+                format!("Transaction too large: {_e:?}"),
                 None::<()>,
             ));
         }
@@ -1570,8 +1567,7 @@ impl BudlumApiServer for RpcServer {
         let info = self.chain.get_settlement_info().await;
         let registry_root = info["domainRegistryRoot"]
             .as_str()
-            .map(|root| format!("0x{root}"))
-            .unwrap_or_else(|| "0x".to_string());
+            .map_or_else(|| "0x".to_string(), |root| format!("0x{root}"));
         Ok(serde_json::json!({
             "domainId": domain_id,
             "domainRegistryRoot": registry_root,
@@ -1964,8 +1960,7 @@ impl BudlumApiServer for RpcServer {
             .chain
             .get_registry_member(addr, role)
             .await
-            .map(|r| r.is_active())
-            .unwrap_or(false);
+            .is_some_and(|r| r.is_active());
         Ok(serde_json::json!({
             "address": Self::to_0x_hash(addr.to_hex()),
             "role": "relayer",
@@ -1991,8 +1986,7 @@ impl BudlumApiServer for RpcServer {
             .chain
             .get_registry_member(addr, role)
             .await
-            .map(|r| r.is_active())
-            .unwrap_or(false);
+            .is_some_and(|r| r.is_active());
         Ok(serde_json::json!({
             "address": Self::to_0x_hash(addr.to_hex()),
             "role": "prover",
@@ -2590,8 +2584,7 @@ impl BudlumApiServer for RpcServer {
         let key_id = parse_hex32_field(&key_id, "key_id")?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
 
         // The viewer is whoever signed the claim, never a field. Before this,
         // `viewer` was a string the caller typed, so any caller could name a
@@ -2701,8 +2694,7 @@ impl BudlumApiServer for RpcServer {
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         // The grant is asked again on every frame call. A session was checked
         // once at open and then served until its TTL, so a grant revoked on
         // chain kept serving frames for up to the whole TTL. The scope is
