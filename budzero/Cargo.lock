@@ -368,10 +368,10 @@ dependencies = [
  "p3-goldilocks",
  "p3-keccak",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.6.3",
  "p3-merkle-tree",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "postcard",
  "serde",
  "serde_json",
@@ -2354,10 +2354,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84d5d5e1ecf2c80b09b48ce870e8abd08b643454101c5dc9d0fd71bfbd78224d"
 dependencies = [
  "p3-field",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.6.3",
  "p3-monty-31",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "tracing",
 ]
 
@@ -2373,7 +2373,7 @@ dependencies = [
  "p3-field",
  "p3-matrix",
  "p3-multilinear-util",
- "p3-util",
+ "p3-util 0.6.3",
  "serde",
 ]
 
@@ -2386,8 +2386,8 @@ dependencies = [
  "itertools 0.15.0",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.6.3",
+ "p3-util 0.6.3",
  "spin 0.12.2",
  "tracing",
 ]
@@ -2400,8 +2400,8 @@ checksum = "53db75d38e04fc255826f388eca9d05976733dc9754aa3db411bc9ea1a37c1a0"
 dependencies = [
  "itertools 0.15.0",
  "num-bigint 0.5.1",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.6.3",
+ "p3-util 0.6.3",
  "paste",
  "rand 0.10.1",
  "serde",
@@ -2420,8 +2420,8 @@ dependencies = [
  "p3-dft",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.6.3",
+ "p3-util 0.6.3",
  "rand 0.10.1",
  "serde",
  "spin 0.12.2",
@@ -2443,7 +2443,7 @@ dependencies = [
  "p3-poseidon1",
  "p3-poseidon2",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "paste",
  "rand 0.10.1",
  "serde",
@@ -2457,7 +2457,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae50c8c37eb847c660298fb275e53c025c49b2623a8cfabf67f5322258b2b4db"
 dependencies = [
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "tiny-keccak",
 ]
 
@@ -2469,8 +2469,8 @@ checksum = "473eb920c446a6f4536e0d3528fbdca2a23c0e24e1d0d7767452e6d385dd335c"
 dependencies = [
  "itertools 0.15.0",
  "p3-field",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.6.3",
+ "p3-util 0.6.3",
  "rand 0.10.1",
  "serde",
  "tracing",
@@ -2483,6 +2483,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6fddfd435f96394769414cf5590b77058aa506659bf20d6592e9d1989e04440"
 
 [[package]]
+name = "p3-maybe-rayon"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "486d6396b0d22274f862a6c5987bb25f9ea61b34f21b54c23a2ee53f2d8c20ea"
+
+[[package]]
 name = "p3-mds"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2491,7 +2497,7 @@ dependencies = [
  "p3-dft",
  "p3-field",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "rand 0.10.1",
 ]
 
@@ -2505,9 +2511,9 @@ dependencies = [
  "p3-commit",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.6.3",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "rand 0.10.1",
  "serde",
  "spin 0.12.2",
@@ -2526,12 +2532,12 @@ dependencies = [
  "p3-dft",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.6.3",
  "p3-mds",
  "p3-poseidon1",
  "p3-poseidon2",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "paste",
  "rand 0.10.1",
  "serde",
@@ -2548,8 +2554,8 @@ dependencies = [
  "itertools 0.15.0",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.6.3",
+ "p3-util 0.6.3",
  "rand 0.10.1",
  "serde",
  "tracing",
@@ -2576,7 +2582,7 @@ dependencies = [
  "p3-field",
  "p3-mds",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.6.3",
  "rand 0.10.1",
 ]
 
@@ -2588,7 +2594,7 @@ checksum = "2015ea80cad969b6aabf27a04884286fe1354393b166d968ee0d80a95126b2a4"
 dependencies = [
  "itertools 0.15.0",
  "p3-field",
- "p3-util",
+ "p3-util 0.6.3",
  "serde",
 ]
 
@@ -2598,6 +2604,16 @@ version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c5466fc40e6df89d3b291a2eff16b33e68e8571207790370137ec18090aadab"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "p3-util"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e020b468e9188da32310d8c876225e5183df105a1970368df97f8a76b85dcc5b"
+dependencies = [
+ "p3-maybe-rayon 0.7.0",
  "serde",
 ]
 
