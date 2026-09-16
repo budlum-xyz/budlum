@@ -54,7 +54,6 @@ bud/src/bud_format.rs	struct	RatioCandidate
 bud/src/bud_format_autozstd.rs	const	AUTOZ_MAGIC
 bud/src/bud_format_autozstd.rs	enum	ZstdDecision
 bud/src/bud_format_autozstd.rs	fn	autoz_digest
-bud/src/bud_format_autozstd.rs	fn	decide
 bud/src/bud_format_av2.rs	const	AV2_CURRENT
 bud/src/bud_format_av2.rs	const	AV2_MAGIC
 bud/src/bud_format_av2.rs	fn	av2_digest
@@ -269,7 +268,6 @@ bud/src/bud_format_hw.rs	fn	tier_get
 bud/src/bud_format_hw.rs	struct	MediaTier
 bud/src/bud_format_integration.rs	fn	assign
 bud/src/bud_format_integration.rs	fn	assigned_shards_count
-bud/src/bud_format_integration.rs	fn	decide
 bud/src/bud_format_integration.rs	fn	displaced_shards
 bud/src/bud_format_integration.rs	fn	k_bud_assignment
 bud/src/bud_format_integration.rs	fn	k_bud_erasure
@@ -1036,7 +1034,6 @@ crates/wallet-core/src/lib.rs	type	SignatureBytes
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash3
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash_state
-crates/wallet-core/src/privacy_transfer.rs	fn	validate_conservation
 crates/wallet-core/src/privacy_transfer.rs	struct	PrivateNoteOutput
 crates/wallet-core/src/tee.rs	struct	TeeAttestation
 crates/wallet-core/src/tee.rs	struct	UnavailableTeeQuoteVerifier
@@ -1421,7 +1418,6 @@ src/cross_domain/evm/rlp.rs	struct	RlpBytes
 src/cross_domain/evm/sync_committee.rs	const	BLS_PUBKEY_LEN
 src/cross_domain/evm/sync_committee.rs	const	BLS_SIGNATURE_LEN
 src/cross_domain/evm/sync_committee.rs	const	PARTICIPATION_THRESHOLD
-src/cross_domain/evm/sync_committee.rs	const	SYNC_COMMITTEE_SIZE
 src/cross_domain/evm/sync_committee.rs	fn	participation_count
 src/cross_domain/evm/sync_committee.rs	fn	rotate_period
 src/cross_domain/evm/verify.rs	struct	SyncAttestation
@@ -1485,7 +1481,6 @@ src/domain/finality_adapter.rs	fn	poa_authority_set_hash
 src/domain/finality_adapter.rs	fn	poa_commit_signing_message
 src/domain/finality_adapter.rs	fn	pow_min_difficulty_bits
 src/domain/finality_adapter.rs	fn	required_signatures
-src/domain/finality_adapter.rs	struct	FinalityError
 src/domain/finality_adapter.rs	struct	PoAAuthoritySignature
 src/domain/finality_adapter.rs	struct	PoWHeader
 src/domain/fork_choice.rs	enum	DomainFinalityStatus
@@ -1529,7 +1524,6 @@ src/domain/storage_deal.rs	const	OPENER_BOND_PER_KIB
 src/domain/storage_deal.rs	const	PERMANENCE_FLOOR_DEFAULT
 src/domain/storage_deal.rs	const	REALLOCATION_ACCEPTANCE_EPOCHS
 src/domain/storage_deal.rs	const	RENEWAL_WINDOW_EPOCHS
-src/domain/storage_deal.rs	fn	accept_reallocation_ticket
 src/domain/storage_deal.rs	fn	access_estimate
 src/domain/storage_deal.rs	fn	all_results
 src/domain/storage_deal.rs	fn	answer_challenge
@@ -1539,7 +1533,6 @@ src/domain/storage_deal.rs	fn	declare_self_host_policy
 src/domain/storage_deal.rs	fn	derive_challenge_range
 src/domain/storage_deal.rs	fn	derive_coding_audit
 src/domain/storage_deal.rs	fn	get_challenge
-src/domain/storage_deal.rs	fn	get_reallocation_ticket
 src/domain/storage_deal.rs	fn	lifecycle_state
 src/domain/storage_deal.rs	fn	live_shard_count
 src/domain/storage_deal.rs	fn	may_hold_primary
@@ -1874,7 +1867,6 @@ src/sharding/mod.rs	fn	tx_destination_shard
 src/sharding/mod.rs	fn	tx_source_shard
 src/sharding/mod.rs	struct	ShardId
 src/storage/assignment.rs	enum	AssignmentError
-src/storage/assignment.rs	fn	assign_object
 src/storage/assignment.rs	fn	displaced_shards
 src/storage/content_id.rs	const	DEFAULT_CHUNK_SIZE_BYTES
 src/storage/content_id.rs	fn	of_subrange
@@ -1944,7 +1936,6 @@ src/storage/living_threshold.rs	const	MAX_OBJECT_BYTES
 src/storage/living_threshold.rs	const	NANOS_PER_SECOND
 src/storage/living_threshold.rs	enum	ThresholdError
 src/storage/living_threshold.rs	fn	break_even_rate_scaled
-src/storage/living_threshold.rs	fn	decide
 src/storage/living_threshold.rs	fn	one_reproduction_picodollars
 src/storage/living_threshold.rs	struct	Lever
 src/storage/living_threshold.rs	struct	OperatorRates
