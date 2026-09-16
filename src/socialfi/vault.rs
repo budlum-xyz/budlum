@@ -1,9 +1,9 @@
 //! Folders over the NFT registry: containers that hold tokens, not copies.
 //!
-//! WIRING: unwired - the executor's social-folder transaction arm (the door
-//! this module's docs describe: ownership questions stay with NftRegistry
-//! and the executor) is the production caller; the forest, membership and
-//! move/refusal invariants are pinned by this file's tests.
+//! WIRING: the remaining entry points go live through the executor's
+//! social-folder transaction arm (the door this module's docs describe:
+//! ownership questions stay with NftRegistry and the executor); the forest,
+//! membership and move/refusal invariants are pinned by this file's tests.
 //!
 //! The user-facing model is the file manager, moved onto the chain: a folder
 //! behaves like an NFT (it is registered, anchored, owned - ownership lives
