@@ -43,24 +43,15 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use super::guards_reachable::strip_test_mods;
 
 const BASELINE_FILE: &str = ".github/dead-pub-api-baseline.txt";
 const CORPUS_DIRS: &[&str] = &[
-    "src",
-    "crates",
-    "examples",
-    "benches",
-    "budzero",
-    "xtask",
-    "ops",
-    ".github",
-    "config",
-    "proto",
+    "src", "crates", "examples", "benches", "budzero", "xtask", "ops", ".github", "config", "proto",
 ];
 const CORPUS_EXT: &[&str] = &["rs", "toml", "yml", "md", "sh", "py", "json"];
 const EXEMPT_TOKENS: &[&str] = &["WIRING:", "Convenience:", "exposed for"];
@@ -223,10 +214,7 @@ fn scan(root: &Path) -> Surface {
             text.clone()
         };
         for_each_token(&scan_text, &mut |name| {
-            *surface
-                .references
-                .entry(name.to_string())
-                .or_insert(0) += 1;
+            *surface.references.entry(name.to_string()).or_insert(0) += 1;
         });
         if !is_candidate_file(&rel) {
             continue;
@@ -399,27 +387,38 @@ pub fn self_test() -> Result<String, String> {
     write_fixture(dir.join("src/lib.rs"), orphan)?;
     write_fixture(baseline.clone(), recorded)?;
     if run(&dir).is_err() {
-        return Err(fail("canary: a recorded dead function still failed the gate"));
+        return Err(fail(
+            "canary: a recorded dead function still failed the gate",
+        ));
     }
 
     // A second unreached function has to grow the set, not the tolerance.
     let grown = format!("{orphan}pub fn second_orphan() -> u8 {{\n    1\n}}\n");
     write_fixture(dir.join("src/lib.rs"), &grown)?;
     if run(&dir).is_ok() {
-        return Err(fail("canary: new dead public api passed against a stale baseline"));
+        return Err(fail(
+            "canary: new dead public api passed against a stale baseline",
+        ));
     }
 
     // Wiring one up is allowed; leaving the baseline loose is not. Both entries
     // are recorded first, so the only thing left to complain about is the stale one.
     let wired = format!("{orphan}pub fn second_orphan() -> u8 {{\n    lonely_helper(1)\n}}\n");
     write_fixture(dir.join("src/lib.rs"), &wired)?;
-    write_fixture(baseline.clone(), "src/lib.rs:lonely_helper\nsrc/lib.rs:second_orphan\n")?;
+    write_fixture(
+        baseline.clone(),
+        "src/lib.rs:lonely_helper\nsrc/lib.rs:second_orphan\n",
+    )?;
     if run(&dir).is_ok() {
-        return Err(fail("canary: a baseline that names a wired-up function did not nag"));
+        return Err(fail(
+            "canary: a baseline that names a wired-up function did not nag",
+        ));
     }
     write_fixture(baseline.clone(), "src/lib.rs:second_orphan\n")?;
     if run(&dir).is_err() {
-        return Err(fail("canary: a call site was not seen, so the entry could not be dropped"));
+        return Err(fail(
+            "canary: a call site was not seen, so the entry could not be dropped",
+        ));
     }
 
     // The exemption token, and only the token: the helper is still uncalled.
@@ -440,7 +439,9 @@ pub fn self_test() -> Result<String, String> {
     .concat();
     write_fixture(dir.join("src/lib.rs"), naked)?;
     if run(&dir).is_ok() {
-        return Err(fail("canary: an undecorated dead function passed an empty baseline"));
+        return Err(fail(
+            "canary: an undecorated dead function passed an empty baseline",
+        ));
     }
 
     // A caller that exists only inside `#[cfg(test)]` is not wiring.
@@ -453,7 +454,9 @@ pub fn self_test() -> Result<String, String> {
     write_fixture(dir.join("src/lib.rs"), &tested)?;
     write_fixture(baseline.clone(), "src/lib.rs:test_only\n")?;
     if run(&dir).is_err() {
-        return Err(fail("canary: a test-module caller was treated as a production call"));
+        return Err(fail(
+            "canary: a test-module caller was treated as a production call",
+        ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
