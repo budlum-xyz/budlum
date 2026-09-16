@@ -221,7 +221,7 @@ impl GossipDedup {
 
     /// Get the score for a peer.
     pub fn peer_score(&self, peer: &libp2p::PeerId) -> f64 {
-        self.peer_scores.get(peer).map(|s| s.score).unwrap_or(0.0)
+        self.peer_scores.get(peer).map_or(0.0, |s| s.score)
     }
 
     /// Get all peers below the minimum score threshold.

@@ -223,6 +223,10 @@ pub struct ConsensusDomain {
     /// left this domain completely undefended.
     #[serde(default)]
     pub zk_program_allowlist: Vec<Hash32>,
+    /// E2: The code hash of the custom plugin allowed to execute/validate this domain.
+    /// When kind is `ConsensusKind::Custom(_)`, the plugin must match this committed hash.
+    #[serde(default)]
+    pub plugin_code_hash: Option<Hash32>,
 }
 
 impl ConsensusDomain {
@@ -234,6 +238,8 @@ impl ConsensusDomain {
         self.operator.is_some() && self.operator_bond >= minimum_bond
     }
 }
+
+pub const MAX_STATE_UPDATES: usize = 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainCommitment {

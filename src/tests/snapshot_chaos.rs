@@ -167,9 +167,9 @@ mod tests {
         for key in validator_keys {
             let v = &s.validators[key];
             h.update(v.stake.to_le_bytes());
-            h.update([v.active as u8]);
-            h.update([v.slashed as u8]);
-            h.update([v.jailed as u8]);
+            h.update([u8::from(v.active)]);
+            h.update([u8::from(v.slashed)]);
+            h.update([u8::from(v.jailed)]);
             h.update(v.jail_until.to_le_bytes());
             h.update(&v.bls_public_key);
             h.update(&v.pop_signature);
@@ -459,9 +459,9 @@ mod tests {
         // Root (transfers) is left UNCHANGED; only bridge_state
         // Serde binding (which also covers expiry_queue) must catch this.
         let mut bs = snap.bridge_state.clone().unwrap_or_default();
-        let bogus_mid: [u8; 32] = [0x24u8; 32];
+        let bogus_sender = Address::from([0x24u8; 32]);
         bs.replay
-            .mark_processed_at(bogus_mid, 0)
+            .mark_processed_at(1, 2, &bogus_sender, 7, 0)
             .expect("mark processed");
         snap.bridge_state = Some(bs);
 

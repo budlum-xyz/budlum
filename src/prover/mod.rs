@@ -206,6 +206,20 @@ pub struct ProofClaimKey {
     pub target_height: u64,
 }
 
+/// JSON map key: `"<domain>:<target height>"`.
+impl crate::core::map_keys::MapKey for ProofClaimKey {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", self.domain_id, self.target_height)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [domain, height] = crate::core::map_keys::parts::<2>(s)?;
+        Ok(Self {
+            domain_id: crate::core::map_keys::parse_uint(domain, "domain")?,
+            target_height: crate::core::map_keys::parse_uint(height, "target height")?,
+        })
+    }
+}
+
 /// A recorded, verified proof claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedProofClaim {
@@ -273,6 +287,7 @@ impl std::error::Error for ProofError {}
 /// Registry of accepted proof claims implementing the "first valid wins" policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProofClaimRegistry {
+    #[serde(with = "crate::core::map_keys")]
     claims: BTreeMap<ProofClaimKey, AcceptedProofClaim>,
 }
 

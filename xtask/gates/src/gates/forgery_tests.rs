@@ -72,8 +72,13 @@ fn body_of(blob: &str, name: &str) -> Option<String> {
     let start = blob.find(&needle)?;
     let rest = &blob[start + needle.len()..];
     let open = rest.find('{')? + start + needle.len();
+    // The scan starts after the opening brace, which `depth` already
+    // counts. Starting on it counted the brace twice, so the body's own
+    // `}` never brought the depth back to zero, the scan ran to the end of
+    // the blob and returned `None`, and the caller took `None` as "skip":
+    // no required test's body was ever checked for a refusal.
     let mut depth = 1i32;
-    let mut i = open;
+    let mut i = open + 1;
     let b = blob.as_bytes();
     while i < b.len() {
         match b[i] {
@@ -91,32 +96,19 @@ fn body_of(blob: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Drop comments, string literals and char literals, so an assertion named
+/// in a message or a comment does not count as an assertion made.
+///
+/// The scrub is the shared [`rust_literals::scrub`](crate::gates::rust_literals::scrub):
+/// ordinary, byte and raw strings (`r#"..."#`, hash count matched), char
+/// literals against lifetimes, nested block comments, then line comments.
+/// This gate carried its own scanner that knew only quoted strings and
+/// `//`, so a raw string `r#"x" is_err() "x"#` left `is_err()` in the code
+/// it read, and a test whose executable assertion was `is_ok()` passed as a
+/// refusal test; an apostrophe in a comment once swallowed the code after
+/// it the same way. One scanner, with those cases as its tests, is the fix.
 fn strip_strings(text: &str) -> String {
-    let mut out = String::new();
-    let b = text.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'"' || b[i] == b'\'' {
-            let q = b[i];
-            out.push(if q == b'"' { '"' } else { '\'' });
-            i += 1;
-            while i < b.len() {
-                if b[i] == b'\\' && i + 1 < b.len() {
-                    i += 2;
-                    continue;
-                }
-                if b[i] == q {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-        } else {
-            out.push(b[i] as char);
-            i += 1;
-        }
-    }
-    out
+    crate::gates::rust_literals::scrub(text)
 }
 
 /// # Errors
@@ -128,6 +120,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(format!("no .rs sources under {}/budzero", root.display()));
     }
     let mut problems: Vec<String> = Vec::new();
+    // Literals and comments go first, over the whole blob: a `}` inside a
+    // string would otherwise close a body early, and the assertion tokens
+    // are matched against code only.
+    let blob = strip_strings(&blob);
 
     for name in REQUIRED {
         // `#[test] fn <name>(`
@@ -155,7 +151,6 @@ pub fn run(root: &Path) -> Result<String, String> {
         let Some(body) = body_of(&blob, name) else {
             continue;
         };
-        let body = strip_strings(&body);
         let delegates = body.contains(helper);
         let asserts_failure = body.contains("is_err()")
             || body.contains("expect_err")
@@ -189,11 +184,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-ft-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ft")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
     let mut good = String::new();
@@ -220,8 +211,93 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a name carrying no #[test] passed"));
     }
+    // A test that tampers and then asserts success is coverage on paper:
+    // its body has to be read, and read to its own closing brace, or this
+    // check is a no-op. It was one, for as long as the body scan started on
+    // the opening brace and never returned a body.
+    let paper = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    let r = tamper();\n    assert!(r.is_ok());\n}",
+    );
+    assert_ne!(paper, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), paper).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a required test that asserts success after tampering passed",
+        ));
+    }
+    // An apostrophe in a comment is not a quote. One before the assertion
+    // used to open a "char literal" that ran to the next apostrophe and hid
+    // the `is_err()` behind it.
+    let apostrophe = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    // the row's successor\n    let r = tamper();\n    \
+         assert!(r.is_err());\n    let _ = 'x';\n}",
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), apostrophe)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: an apostrophe in a comment hid the refusal assertion that followed it",
+        ));
+    }
+    // A refusal token inside a block comment is not an assertion. The
+    // comment is nested, as Rust allows, so a scanner that stops at the
+    // first `*/` would leave the tail of it in the code.
+    let commented = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    /* is_err() /* nested */ still a comment */\n    \
+         let r = tamper();\n    assert!(r.is_ok());\n}",
+    );
+    assert_ne!(
+        commented, good,
+        "the fixture must contain the rewritten test"
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), commented)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a refusal token inside a block comment passed as an assertion",
+        ));
+    }
+    // A refusal token inside a raw string is data. The literal carries a
+    // quote of its own, so a scanner that knows only `"` strings ends the
+    // literal early and reads the token as code.
+    let raw = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    let r = tamper();\n    \
+         let _ = r#\"x\" is_err() \"x\"#;\n    assert!(r.is_ok());\n}",
+    );
+    assert_ne!(raw, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), raw).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a refusal token inside a raw string passed as an assertion",
+        ));
+    }
+    // A brace inside a string does not end the body: the assertion after
+    // it is still read, so a real refusal test with such a string passes.
+    let braced = good.replace(
+        "fn rejects_a_forged_difference() {\n    assert!(prove_fails_after_tamper());\n}",
+        "fn rejects_a_forged_difference() {\n    let label = \"}\";\n    let r = tamper();\n    \
+         assert!(r.is_err(), \"{label}\");\n}",
+    );
+    assert_ne!(braced, good, "the fixture must contain the rewritten test");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), braced).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a brace inside a string cut the body before its refusal assertion",
+        ));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "forgery-tests canary OK: with a test it PASSes and without one it FAILs.",
+        "forgery-tests canary OK: with a test it PASSes, without one it FAILs, a test \
+         asserting success after tampering FAILs, refusal tokens in a block comment or a \
+         raw string FAIL, and a brace inside a string does not cut a body.",
     ))
 }

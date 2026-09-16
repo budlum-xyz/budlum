@@ -358,7 +358,7 @@ mod distributed_settlement_tests {
         // Bound to the commitment so the rejection is specifically about depth
         // ("not finalized"), not the head-hash binding.
         let proof2 = FinalityProof::PoWHeaderChain { headers: vec![] };
-        com2.finality_proof_hash = hash_finality_proof(&proof2);
+        com2.finality_proof_hash = hash_finality_proof(&proof2).unwrap();
 
         let res2 = n
             .chain_handle

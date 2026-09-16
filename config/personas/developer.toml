@@ -3,7 +3,7 @@
 
 [network]
 profile = "devnet"
-chain_id = 1337
+chain_id = 45262
 genesis_file = "./config/devnet-genesis.json"
 
 [node]

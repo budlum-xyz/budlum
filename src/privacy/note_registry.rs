@@ -22,6 +22,28 @@ pub const MAX_LIVE_COMMITMENTS: usize = 65_536;
 /// At 262144 entries × 32 bytes = 8MB - bounded memory for consensus replay protection.
 pub const MAX_SPENT_NULLIFIERS: usize = 262_144;
 
+/// Whether `h` is a hash the note pipeline could have produced: a canonical
+/// Goldilocks field element in the low eight bytes, little-endian, and zero
+/// above.
+///
+/// Every legitimate commitment and nullifier has this shape. The wallet packs
+/// its Poseidon outputs with `hash_from_field`, and a Poseidon output is below
+/// the prime, so a hash of any other shape is either an upstream bug or a
+/// submitter probing, and the honest answer to both is a refusal at the
+/// transaction boundary, before the registry sees it.
+///
+/// The registry itself compares whole hashes and would keep two hashes that
+/// differ only in a high byte apart. The trouble is the other view of the same
+/// set: the zkVM relay speaks field elements (`SpentSet::is_spent(u64)`), and
+/// `field_from_hash` drops the high bytes on the way there, so two hashes that
+/// agree on the low half read back as one element. With only packed hashes
+/// admitted, the two views cannot disagree about what is spent.
+#[must_use]
+pub fn is_note_hash(h: &NoteHash) -> bool {
+    budlum_note_packing::is_packed(h)
+        && budlum_note_packing::is_canonical_field(budlum_note_packing::field_from_hash(h))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct L1NoteRegistry {
     live_commitments: BTreeSet<NoteHash>,
@@ -319,6 +341,25 @@ mod tests {
         r.insert_note(b)
             .expect("b is a different note and must be insertable");
         assert_eq!(r.live_count(), 2);
+    }
+
+    /// The boundary check admits exactly the packed, canonical shape.
+    #[test]
+    fn only_a_packed_canonical_element_is_a_note_hash() {
+        let packed = budlum_note_packing::hash_from_field(7);
+        assert!(is_note_hash(&packed));
+
+        let mut high_byte = packed;
+        high_byte[31] = 1;
+        assert!(!is_note_hash(&high_byte), "a high byte set is not packed");
+
+        let too_large = budlum_note_packing::hash_from_field(budlum_note_packing::GOLDILOCKS_P);
+        assert!(
+            !is_note_hash(&too_large),
+            "the prime itself is not a canonical element"
+        );
+        let largest = budlum_note_packing::hash_from_field(budlum_note_packing::GOLDILOCKS_P - 1);
+        assert!(is_note_hash(&largest));
     }
 
     #[test]

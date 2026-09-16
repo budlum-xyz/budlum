@@ -252,6 +252,14 @@ impl ProofEnvelope {
                     value.len()
                 )));
             }
+            // The relay report signs these as NUL-terminated ASCII. A NUL
+            // or any other control character inside one would let two
+            // distinct metadata tuples share one payload and one signature.
+            if !value.bytes().all(|b| b.is_ascii() && !b.is_ascii_control()) {
+                return Err(VerifyError::InvalidEnvelope(format!(
+                    "{name} contains a byte outside printable ASCII"
+                )));
+            }
         }
         if self.degree_bits > 64 {
             return Err(VerifyError::InvalidEnvelope(format!(
@@ -352,6 +360,26 @@ mod envelope_bounds_tests {
             env.validate_shape(),
             Err(VerifyError::InvalidEnvelope(_))
         ));
+    }
+
+    /// `backend = "a\0b", p3_version = ""` and `backend = "a", p3_version
+    /// = "b"` would sign to the same NUL-delimited payload; the shape check
+    /// refuses the first before any report is signed.
+    #[test]
+    fn metadata_with_control_or_non_ascii_bytes_is_rejected() {
+        for bad in [
+            "a\0b",
+            "tab\there",
+            "plonky3\n",
+            "Plonky3-Keccak-Goldilocks\u{e9}",
+        ] {
+            let mut env = valid_envelope();
+            env.fri_params_id = bad.to_string();
+            assert!(
+                matches!(env.validate_shape(), Err(VerifyError::InvalidEnvelope(_))),
+                "{bad:?} must be refused"
+            );
+        }
     }
 
     #[test]

@@ -18,6 +18,22 @@ pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     }
     hasher.finalize().into()
 }
+
+/// Encode an optional 32-byte root for a hash preimage so that `None` and
+/// `Some([0; 32])` stay distinct: one presence byte, then the root or zeros.
+///
+/// Shared by the block and global-block header preimages, which used to
+/// fold an absent root and a present all-zero root into the same 32 zero
+/// bytes, so two distinct headers hashed (and signed) identically.
+#[must_use]
+pub fn presence_tagged(root: Option<[u8; 32]>) -> [u8; 33] {
+    let mut tagged = [0u8; 33];
+    if let Some(root) = root {
+        tagged[0] = 1;
+        tagged[1..].copy_from_slice(&root);
+    }
+    tagged
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,12 @@ const TESTS: &[&str] = &[
     "mixed_domain_candidates_rejected",
     "domain_lifecycle_requires_freeze_before_retire",
     "retired_domain_is_terminal",
+    // F-2 tie-break locks: equal-weight forks must resolve to one
+    // deterministic winner on every consensus family, and a reorg must
+    // never replace a tip with itself.
+    "pow_equal_work_picks_one_side_in_both_directions",
+    "poa_equal_length_picks_one_side_in_both_directions",
+    "an_identical_tip_never_replaces_itself",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

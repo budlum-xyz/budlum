@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.97.1"
 publish = false
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 [package.metadata]
 cargo-fuzz = true

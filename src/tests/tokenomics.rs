@@ -23,7 +23,7 @@ fn genesis_state() -> (AccountState, TokenomicsAddresses) {
     let params = TokenomicsParams::default();
     let addrs = TokenomicsAddresses::reserved();
     let mut state = AccountState::new();
-    for (addr, amount) in genesis_allocations(&params, &addrs) {
+    for (addr, amount) in genesis_allocations(&params, &addrs).unwrap() {
         state.add_balance(&addr, amount);
     }
     (state, addrs)
@@ -35,7 +35,7 @@ fn genesis_state() -> (AccountState, TokenomicsAddresses) {
 fn genesis_total_supply_is_100m_and_distribution_matches() {
     let (state, addrs) = genesis_state();
     // Total supply is exactly 100M * 10^6.
-    assert_eq!(state.circulating_supply(), BUD_TOTAL_SUPPLY as u128);
+    assert_eq!(state.circulating_supply(), u128::from(BUD_TOTAL_SUPPLY));
     assert_eq!(BUD_TOTAL_SUPPLY, bud(100_000_000));
 
     // Per-category amounts match the approved distribution.
@@ -130,7 +130,7 @@ fn burn_strictly_reduces_supply_no_mint_offset() {
 
     assert!(burned > 0);
     // Supply decreased by EXACTLY the burned amount, nothing minted it back.
-    assert_eq!(after, before - burned as u128);
+    assert_eq!(after, before - u128::from(burned));
     assert!(after < before);
 }
 
@@ -167,7 +167,7 @@ fn metabolic_burn_removes_fee_fraction_on_block_apply() {
 
     // Validator income is exclusively fee - metabolic burn; no block emission.
     let supply_after = state.circulating_supply();
-    assert_eq!(supply_after, supply_before - expected_burn as u128);
+    assert_eq!(supply_after, supply_before - u128::from(expected_burn));
     assert!(expected_burn > 0, "1% of 10_000 must be non-zero");
     assert_eq!(state.get_balance(&producer), fee - expected_burn);
 }
@@ -199,7 +199,7 @@ fn genesis_build_state_seeds_bud_distribution_via_real_flow() {
     assert_eq!(state.get_balance(&addrs.burn_reserve), bud(40_000_000));
     assert_eq!(state.get_balance(&addrs.team), bud(20_000_000));
     // Supply includes the full 100M (genesis had no other allocations for devnet).
-    assert_eq!(state.circulating_supply(), BUD_TOTAL_SUPPLY as u128);
+    assert_eq!(state.circulating_supply(), u128::from(BUD_TOTAL_SUPPLY));
     // Burn reserve + team vesting are wired into state.
     assert_eq!(state.burn_reserve_address, Some(addrs.burn_reserve));
     assert!(state.team_vesting.is_some());
@@ -286,7 +286,7 @@ fn timed_burn_fires_via_real_epoch_advance() {
     // Supply dropped by exactly the burn.
     assert_eq!(
         state.circulating_supply(),
-        BUD_TOTAL_SUPPLY as u128 - per_year as u128
+        u128::from(BUD_TOTAL_SUPPLY) - u128::from(per_year)
     );
 }
 
@@ -544,6 +544,22 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
     assert_eq!(state.get_balance(&booster), 10_000_000 - boost_amount - 100);
 }
 
+/// The mainnet template seeds no $BUD distribution until the ceremony
+/// addresses are set (marker accounts must not enter the mainnet state
+/// root). These tests measure the epoch arithmetic of the burn reserve and
+/// the team cliff, so they run the template with ceremony addresses.
+fn mainnet_state_with_distribution() -> AccountState {
+    let mut genesis = crate::chain::genesis::mainnet_genesis();
+    genesis.tokenomics_addresses = Some(TokenomicsAddresses {
+        community: test_addr_from_byte(0xC1),
+        liquidity: test_addr_from_byte(0xC2),
+        ecosystem: test_addr_from_byte(0xC3),
+        team: test_addr_from_byte(0xC4),
+        burn_reserve: test_addr_from_byte(0xC5),
+    });
+    genesis.build_state()
+}
+
 /// One epoch boundary must not expire a one-year cliff.
 ///
 /// `spendable_balance` read the team schedule at
@@ -562,7 +578,7 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
 /// `spendable_balance` gates transfers (`executor.rs`), so this was spendable.
 #[test]
 fn one_epoch_close_does_not_expire_the_team_cliff() {
-    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let mut state = mainnet_state_with_distribution();
     let (team, schedule) = state.team_vesting.expect("mainnet vests the team");
 
     assert_eq!(schedule.start_epoch, 0, "schedule is genesis-relative");
@@ -590,7 +606,7 @@ fn one_epoch_close_does_not_expire_the_team_cliff() {
 /// unlocks anything.
 #[test]
 fn the_team_cliff_still_opens_after_its_epochs_elapse() {
-    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let mut state = mainnet_state_with_distribution();
     let (team, schedule) = state.team_vesting.expect("mainnet vests the team");
 
     state.epoch_index = schedule.cliff_epochs;
@@ -620,7 +636,7 @@ fn the_team_cliff_still_opens_after_its_epochs_elapse() {
 ///     reserve balance 40000000000000 -> 0
 #[test]
 fn one_epoch_close_does_not_drain_the_burn_reserve() {
-    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let mut state = mainnet_state_with_distribution();
     let reserve = state
         .burn_reserve_address
         .expect("mainnet configures a burn reserve");
@@ -646,7 +662,7 @@ fn one_epoch_close_does_not_drain_the_burn_reserve() {
 /// The annual burn must still fire once a year of epochs elapses.
 #[test]
 fn the_annual_burn_still_fires_after_a_year_of_epochs() {
-    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let mut state = mainnet_state_with_distribution();
     let reserve = state
         .burn_reserve_address
         .expect("mainnet configures a burn reserve");

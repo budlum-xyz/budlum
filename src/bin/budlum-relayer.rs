@@ -19,7 +19,10 @@
 //!
 //! - **EthToBud:** the Ethereum RPC `eth_getLogs` gives a deposit event, which
 //!   becomes an MPT and header chain proof, submitted to Budlum through
-//!   `bud_submitRelayProof`, behind the registry gate and the stake.
+//!   `bud_submitRelayProof`, behind the registry gate and the stake. The
+//!   binary checks the gate before it starts this direction; the node checks
+//!   it again on every submission. Slashing reports come from consensus, the
+//!   relayer files none.
 //! - **BudToEth:** a Budlum burn event plus a finality proof becomes a
 //!   `claimUnlock` transaction to the Ethereum bridge contract.
 //!
@@ -51,9 +54,6 @@ pub struct RelayerConfig {
     /// The relayer's Budlum address, in hex, 32 bytes, optionally 0x-prefixed.
     /// The stake is checked for the RELAYER role in the permissionless registry.
     pub relayer_address: String,
-    /// Optional: the relayer private key path or hex, an HSM later. For now it is
-    /// only logged.
-    pub relayer_key_hint: Option<String>,
     /// The poll interval, in seconds.
     pub poll_interval_secs: u64,
     /// Used for the minimum stake check; the default is 1000.
@@ -88,7 +88,6 @@ impl Default for RelayerConfig {
             direction: RelayDirection::EthToBud,
             required_confirmations: 64,
             relayer_address: "0x0".to_string(),
-            relayer_key_hint: None,
             poll_interval_secs: 10,
             min_stake: 1000,
         }
@@ -209,27 +208,6 @@ impl BudlumClient {
     ) -> Result<serde_json::Value, String> {
         let params = serde_json::json!([message_id, relayer_addr, proof_json, source_domain]);
         self.rpc_call("bud_submitRelayProof", params).await
-    }
-
-    /// Slashing report submit - bud_submitSlashingReport
-    /// Tag: relayer_invalid_proof → MaliciousBehaviour %100
-    pub async fn submit_slashing_report_for_invalid_relay(
-        &self,
-        offender: &str,
-        reason: &str,
-        reporter: &str,
-    ) -> Result<serde_json::Value, String> {
-        // Build SlashingReport JSON matching Rust struct:
-        // { offender, role: 3, proof: { Other: { tag: "relayer_invalid_proof", data: <bytes> } }, provenance: "ConsensusVerified", reporter: Some(...) }
-        let report = serde_json::json!({
-            "offender": offender,
-            "role": 3,
-            "proof": { "Other": { "tag": "relayer_invalid_proof", "data": reason.as_bytes().to_vec() } },
-            "provenance": "ConsensusVerified",
-            "reporter": reporter
-        });
-        self.rpc_call("bud_submitSlashingReport", serde_json::json!([report]))
-            .await
     }
 }
 
@@ -425,9 +403,14 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
                     .clone();
             }
             "--relayer-key" => {
-                i += 1;
-                config.relayer_key_hint =
-                    Some(args.get(i).ok_or("--relayer-key requires a value")?.clone());
+                // The flag used to accept a key value on the command line and
+                // then never use it. A secret in `argv` is visible in the
+                // process list and shell history; the relayer signs nothing
+                // today, so the flag is refused rather than silently kept.
+                return Err(String::from(
+                    "--relayer-key is not accepted: the relayer holds no signing key, and a \
+                     key would not be taken from the command line",
+                ));
             }
             "--poll-interval" => {
                 i += 1;
@@ -473,7 +456,6 @@ fn print_usage() {
     eprintln!("  --budlum-rpc <URL>         Budlum RPC endpoint");
     eprintln!("  --bridge-address <ADDR>    Ethereum bridge contract address");
     eprintln!("  --relayer-address <ADDR>   Relayer's Budlum address (hex, for registry check)");
-    eprintln!("  --relayer-key <HINT>       Optional private key hint / path (HSM future)");
     eprintln!("  --direction <DIR>          eth-to-bud (F10.2) | bud-to-eth (F10.5)");
     eprintln!("  --confirmations <N>        N-confirmation threshold (default: 64)");
     eprintln!("  --poll-interval <S>        Poll interval seconds (default: 10)");
@@ -547,29 +529,49 @@ async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConf
     }
 }
 
-/// Production loop - EthToBud direction
-async fn run_eth_to_bud_loop(config: RelayerConfig) {
+/// Production loop - EthToBud direction.
+///
+/// This is the submitting direction, so the registry gate is enforced here:
+/// a relayer that is not bonded (or whose bond cannot be checked) does not
+/// start. The node refuses its submissions anyway; starting would only poll
+/// Ethereum for deposits nobody can relay.
+///
+/// The first scan window starts at the Ethereum head. The loop does not
+/// begin until the head height is known: with an unknown head the first
+/// `eth_getLogs` would span block 1 to the tip without a topic filter, which
+/// public providers reject, and the relayer would stall on its first poll.
+async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
     let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
 
-    let _active = check_relayer_active(&budlum_client, &config).await;
-
-    let mut last_block: u64 = 0;
-    // Init last_block from current eth block minus confirmations
-    match eth_client.get_block_number().await {
-        Ok(bn) => {
-            last_block = bn.saturating_sub(config.required_confirmations as u64);
-            eprintln!(
-                "EthToBud: starting from block {} (current {} - {} conf)",
-                last_block, bn, config.required_confirmations
-            );
-        }
-        Err(e) => {
-            eprintln!("EthToBud: get_block_number failed ({e}), starting from 0");
-        }
+    if !check_relayer_active(&budlum_client, &config).await {
+        return Err(format!(
+            "relayer {} is not an active bonded relayer; bond via bud_registryBondRelayer \
+             (RoleId 3 RELAYER, >= {} $BUD) before relaying",
+            config.relayer_address, config.min_stake
+        ));
     }
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
+    let mut last_block: u64 = loop {
+        interval.tick().await;
+        match eth_client.get_block_number().await {
+            Ok(bn) => {
+                let start = bn.saturating_sub(config.required_confirmations as u64);
+                eprintln!(
+                    "EthToBud: starting from block {} (current {} - {} conf)",
+                    start, bn, config.required_confirmations
+                );
+                break start;
+            }
+            Err(e) => {
+                eprintln!(
+                    "EthToBud: get_block_number failed ({e}), waiting for the head before scanning"
+                );
+            }
+        }
+    };
+
     loop {
         interval.tick().await;
         // 1. Get latest finalized block (N-conf)
@@ -634,23 +636,16 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
                     );
                 }
                 Err(e) => {
+                    // The node decides whether a proof was invalid and the
+                    // consensus helper produces the slashing report. The
+                    // relayer never files a report against itself: a
+                    // transport error or a node-side failure used to match
+                    // a substring test here and send a self-report that
+                    // would burn the relayer's own bond.
                     eprintln!(
                         "EthToBud: submit_relay_proof failed for {}: {e}",
                         dep.tx_hash
                     );
-                    // Slashing scenario: if we submitted invalid proof, we would be slashed.
-                    // If we detect another relayer's invalid proof, we submit slashing report.
-                    if e.contains("invalid") || e.contains("proof") {
-                        eprintln!("EthToBud: detected invalid proof - would trigger slashing (relayer_invalid_proof tag)");
-                        // Example slashing report (reporter = our relayer)
-                        let _ = budlum_client
-                            .submit_slashing_report_for_invalid_relay(
-                                &relayer_addr,
-                                &format!("invalid deposit proof for tx {}: {}", dep.tx_hash, e),
-                                &relayer_addr,
-                            )
-                            .await;
-                    }
                 }
             }
         }
@@ -695,7 +690,11 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
     // only produced the appearance that "the Ethereum side is wired". Holding a
     // client when there is no submission path implies a capability that does not
     // exist.
-    let _active = check_relayer_active(&budlum_client, &config).await;
+    //
+    // Nothing is submitted in this direction, so the registry gate is
+    // advisory here: the check reports the bond state and the scan runs
+    // either way. The submitting direction enforces it.
+    let _ = check_relayer_active(&budlum_client, &config).await;
 
     eprintln!(
         "BudToEth: scanning for burn events. Submission to Ethereum is NOT available \
@@ -704,7 +703,8 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
     );
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
-    let mut last_scanned: Option<u64> = None;
+    // `None` until the first head is read, then the next height to scan.
+    let mut next_height: Option<u64> = None;
     let mut total_burns: u64 = 0;
 
     loop {
@@ -720,12 +720,15 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
 
         // First pass starts at the head: replaying the whole chain on every
         // restart would hammer the node and re-report burns already seen.
-        let from = match last_scanned {
-            Some(prev) if head > prev => prev + 1,
-            Some(_) => continue, // no new block
-            None => head,
-        };
+        let from = *next_height.get_or_insert(head);
+        if from > head {
+            continue; // no new block
+        }
 
+        // The cursor advances only past heights that were really scanned. A
+        // failed block ends the pass and the next tick retries from that
+        // height, so one RPC failure cannot drop a burn from the report
+        // forever.
         for height in from..=head {
             match burn_events_in_block(&budlum_client, height).await {
                 Ok(burns) => {
@@ -737,11 +740,16 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
                              missing (RFC F10.5b). Total seen: {total_burns}"
                         );
                     }
+                    next_height = Some(height + 1);
                 }
-                Err(e) => eprintln!("BudToEth: block {height} scan failed: {e}"),
+                Err(e) => {
+                    eprintln!(
+                        "BudToEth: block {height} scan failed: {e}; retrying from it next tick"
+                    );
+                    break;
+                }
             }
         }
-        last_scanned = Some(head);
     }
 }
 
@@ -827,14 +835,23 @@ fn main() -> ExitCode {
         }
     };
 
-    rt.block_on(async {
+    let outcome = rt.block_on(async {
         match config.direction {
             RelayDirection::EthToBud => run_eth_to_bud_loop(config).await,
-            RelayDirection::BudToEth => run_bud_to_eth_loop(config).await,
+            RelayDirection::BudToEth => {
+                run_bud_to_eth_loop(config).await;
+                Ok(())
+            }
         }
     });
 
-    ExitCode::SUCCESS
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("budlum-relayer: refusing to start: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -938,14 +955,6 @@ mod tests {
         assert!(cfg.min_stake >= 1000);
         // RoleId 3 = RELAYER
         assert_eq!(cfg.min_stake, 1000);
-    }
-
-    #[test]
-    fn slashing_tag_for_relayer_invalid_proof() {
-        // Slashing: Other tag = relayer_invalid_proof → MaliciousBehaviour 100%
-        let tag = "relayer_invalid_proof";
-        assert_eq!(tag, "relayer_invalid_proof");
-        // This tag maps to MaliciousBehaviour in evidence.rs
     }
 
     #[test]

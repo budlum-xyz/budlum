@@ -135,17 +135,13 @@ the prompt.
 ### Names of products read during research
 
 Some of the designs here were reached by reading other projects. No code was
-copied and no dependency was added, and the names of those projects do not
-appear in the tree either. This is not etiquette. A variant called after another
-product tells a reader the tree depends on it: they check its licence against
-ours and reason about upgrades to something we never link. Naming the same
-variant for what it selects - an engine that pages experts off disk - describes
-our own system instead of someone else's, and loses nothing.
-
-The `no-upstream-brands` gate keeps it that way, and exempts `LICENSE.md`,
-`NOTICE.md` and `THIRD-PARTY.md`. A gate that forbade attribution would push the
-project toward a licence violation in order to stay green; if a dependency is
-ever genuinely added, its name belongs in exactly those files.
+copied and no dependency was added. Those projects are named where
+attribution belongs, in `docs/NOTICE` and `docs/PROVENANCE_NOTES.md`, with
+what was taken and what was not. Types and variants in the tree are named for
+what they select - an engine that pages experts off disk - because a variant
+called after another product tells a reader the tree depends on it: they
+check its licence against ours and reason about upgrades to something we
+never link.
 
 ## On-device residency
 

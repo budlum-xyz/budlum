@@ -504,7 +504,7 @@ mod tests {
         let fold = |reads: &[(u64, u64)]| -> u64 {
             let mut acc: u128 = 0;
             for (i, (a, v)) in reads.iter().enumerate() {
-                let t = ((*a as u128) * GAMMA + *v as u128) % P;
+                let t = (u128::from(*a) * GAMMA + u128::from(*v)) % P;
                 acc = if i == 0 { t } else { (acc * BETA + t) % P };
             }
             acc as u64
@@ -517,11 +517,11 @@ mod tests {
         let (a0, v0) = (16u64, 9u64);
         let (a1, v1) = (24u64, (P - 9) as u64);
         let a2 = 32u64;
-        let t0 = ((a0 as u128) * GAMMA + v0 as u128) % P;
-        let t1 = ((a1 as u128) * GAMMA + v1 as u128) % P;
+        let t0 = (u128::from(a0) * GAMMA + u128::from(v0)) % P;
+        let t1 = (u128::from(a1) * GAMMA + u128::from(v1)) % P;
         let partial = (t0 * BETA + t1) % P;
-        let t2 = (target as u128 + P - (partial * BETA) % P) % P;
-        let v2 = (t2 + P - ((a2 as u128) * GAMMA) % P) % P;
+        let t2 = (u128::from(target) + P - (partial * BETA) % P) % P;
+        let v2 = (t2 + P - (u128::from(a2) * GAMMA) % P) % P;
 
         let forged = [(a0, v0), (a1, v1), (a2, v2 as u64)];
         assert_eq!(

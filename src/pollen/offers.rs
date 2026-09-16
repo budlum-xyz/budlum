@@ -823,7 +823,7 @@ impl MarketplaceRegistry {
             hasher.update(offer.seller.0);
             hasher.update(offer.cid.0);
             hasher.update(offer.price.to_le_bytes());
-            hasher.update([offer.active as u8]);
+            hasher.update([u8::from(offer.active)]);
         }
         for (asset_id, asset) in &self.data_assets {
             hasher.update(b"asset");

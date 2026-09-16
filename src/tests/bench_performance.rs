@@ -150,8 +150,8 @@ async fn bench_high_tps() {
     // The saturating behaviour auditable in a print-only context.
     let avg_tx_per_block = total_tx_processed.checked_div(blocks_count).unwrap_or(0);
     println!("Avg TX per Block:     {avg_tx_per_block}");
-    println!("Total Processing Time: {:?}", bench_duration);
-    println!("CORE THROUGHPUT (TPS): {:.2} tx/s", tps);
+    println!("Total Processing Time: {bench_duration:?}");
+    println!("CORE THROUGHPUT (TPS): {tps:.2} tx/s");
     println!("----------------------------------------------------------");
     println!("Note: This TPS includes full signature verification, nonce checks,");
     println!("balance updates, and O(log N) Incremental Merkle Tree root calculation.");

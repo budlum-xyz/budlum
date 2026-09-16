@@ -414,18 +414,8 @@ impl Pkcs11Signer {
     /// Report configured vendor-native + fallback capabilities.
     #[must_use]
     pub fn vendor_capabilities(&self) -> Pkcs11VendorCapabilities {
-        let bls_sw = self
-            .bls_key
-            .lock()
-            .ok()
-            .map(|g| g.is_some())
-            .unwrap_or(false);
-        let pq_sw = self
-            .pq_key
-            .lock()
-            .ok()
-            .map(|g| g.is_some())
-            .unwrap_or(false);
+        let bls_sw = self.bls_key.lock().ok().is_some_and(|g| g.is_some());
+        let pq_sw = self.pq_key.lock().ok().is_some_and(|g| g.is_some());
         Pkcs11VendorCapabilities {
             bls_vendor_mechanism: self.bls_mechanism,
             pq_vendor_mechanism: self.pq_mechanism,
@@ -790,14 +780,13 @@ pub fn validate_vendor_mechanism(
 ) -> Result<&Pkcs11VendorCapability, String> {
     if mechanism_id < CKM_VENDOR_DEFINED {
         return Err(format!(
-            "mechanism 0x{:08X} is not vendor-defined",
-            mechanism_id
+            "mechanism 0x{mechanism_id:08X} is not vendor-defined"
         ));
     }
     capabilities
         .iter()
         .find(|c| c.mechanism_id == mechanism_id)
-        .ok_or_else(|| format!("unknown vendor mechanism 0x{:08X}", mechanism_id))
+        .ok_or_else(|| format!("unknown vendor mechanism 0x{mechanism_id:08X}"))
 }
 
 #[cfg(test)]

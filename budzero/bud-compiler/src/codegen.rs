@@ -30,6 +30,13 @@ pub struct Codegen {
     error: Option<CompileError>,
     unpatched_calls: Vec<(usize, String)>,
     struct_layouts: std::collections::HashMap<String, Vec<String>>,
+    /// The declared type of every struct field, by struct and field name:
+    /// what lets `b.a.q` resolve `a` to its struct and `q` to that struct's
+    /// layout rather than to whichever layout happens to name a `q`.
+    struct_field_types:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// The declared return type of every function, so `f().x` resolves.
+    function_returns: std::collections::HashMap<String, String>,
 }
 
 impl Default for Codegen {
@@ -47,6 +54,8 @@ impl Codegen {
             error: None,
             unpatched_calls: Vec::new(),
             struct_layouts: std::collections::HashMap::new(),
+            struct_field_types: std::collections::HashMap::new(),
+            function_returns: std::collections::HashMap::new(),
         }
     }
 
@@ -58,6 +67,8 @@ impl Codegen {
             error: None,
             unpatched_calls: Vec::new(),
             struct_layouts: std::collections::HashMap::new(),
+            struct_field_types: std::collections::HashMap::new(),
+            function_returns: std::collections::HashMap::new(),
         }
     }
 
@@ -65,10 +76,18 @@ impl Codegen {
         // Populate struct layouts
         for s in &contract.structs {
             let mut fields = Vec::new();
+            let mut types = std::collections::HashMap::new();
             for f in &s.fields {
                 fields.push(f.name.clone());
+                types.insert(f.name.clone(), f.ty.clone());
             }
             self.struct_layouts.insert(s.name.clone(), fields);
+            self.struct_field_types.insert(s.name.clone(), types);
+        }
+        for f in &contract.functions {
+            if let Some(ret) = &f.return_type {
+                self.function_returns.insert(f.name.clone(), ret.clone());
+            }
         }
 
         self.emit(Opcode::Load, 31, 0, 0, crate::HEAP_BASE); // Initialize heap ptr!
@@ -537,6 +556,20 @@ impl Codegen {
         match expr {
             Expr::StructLiteral(name, _) => Some(name.clone()),
             Expr::Ident(name) => scope.get(name).and_then(|vi| vi.struct_type.clone()),
+            // `b.a.q`: the type of `b.a` is the declared type of field `a`
+            // in `b`'s struct, when that type is itself a struct.
+            Expr::FieldAccess(base, field) => {
+                let base_type = self.expr_struct_type(base, scope)?;
+                let field_type = self.struct_field_types.get(&base_type)?.get(field)?;
+                self.struct_layouts
+                    .contains_key(field_type)
+                    .then(|| field_type.clone())
+            }
+            // `f().x`: the declared return type of `f`, when it is a struct.
+            Expr::Call(name, _) => {
+                let ret = self.function_returns.get(name)?;
+                self.struct_layouts.contains_key(ret).then(|| ret.clone())
+            }
             _ => None,
         }
     }
@@ -761,19 +794,25 @@ impl Codegen {
                             0
                         }
                     },
-                    // Unknown base type (e.g. a nested `a.b.c` whose
-                    // Intermediate field type is not tracked): keep the
-                    // Legacy scan so behaviour is unchanged for the cases
-                    // Sema has already validated.
+                    // The base's type is not known to be a struct. This
+                    // used to fall back to a scan over every layout for
+                    // the first one naming the field, which guessed the
+                    // offset and, `HashMap` iteration being unordered,
+                    // guessed differently from one run to the next: two
+                    // nodes compiling the same contract could disagree on
+                    // the program hash. A nested access is resolved above
+                    // through the declared field types; what reaches here
+                    // is a field read the compiler cannot place, and that
+                    // is refused rather than guessed.
                     None => {
-                        let mut offset = 0;
-                        for fields in self.struct_layouts.values() {
-                            if let Some(idx) = fields.iter().position(|f| f == field) {
-                                offset = idx * 8;
-                                break;
-                            }
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "Field '{}' read on a value whose struct type is not known; \
+                                 the layout cannot be resolved",
+                                field
+                            )));
                         }
-                        offset
+                        0
                     }
                 };
 

@@ -23,7 +23,10 @@ use sha3::{Digest, Sha3_256};
 #[derive(Debug, Clone)]
 pub struct BudProductionRecord {
     pub format_codec: FormatCodec,
-    pub pipe: &'static str, // "structural+zstd19", "json-columnar-exact", ...
+    /// "structural+zstd19", "json-columnar-exact", ... Owned: `from_blob`
+    /// reads it from an untrusted record, and a `&'static str` there meant
+    /// `Box::leak` on every parse, forged blobs included.
+    pub pipe: String,
     pub original_len: u64,
     pub stored_len: u64,
     pub payload_root: [u8; 32], // content_id(original), the K3 anchor
@@ -37,7 +40,7 @@ impl BudProductionRecord {
 
     pub fn new(
         format_codec: FormatCodec,
-        pipe: &'static str,
+        pipe: &str,
         original: &[u8],
         stored_len: u64,
         ts_unix: u64,
@@ -50,7 +53,7 @@ impl BudProductionRecord {
         };
         BudProductionRecord {
             format_codec,
-            pipe,
+            pipe: pipe.to_string(),
             original_len: original.len() as u64,
             stored_len,
             payload_root: root,
@@ -144,7 +147,7 @@ impl BudProductionRecord {
         }
         let rec = BudProductionRecord {
             format_codec,
-            pipe: Box::leak(pipe.into_boxed_str()),
+            pipe,
             original_len,
             stored_len,
             payload_root,
@@ -201,6 +204,22 @@ mod tests {
         let rec3 =
             BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 121, 42);
         assert_ne!(rec.record_hash(), rec3.record_hash());
+    }
+
+    /// A forged blob with a long pipe name is refused, and the pipe it
+    /// carried belongs to the record, not to a `Box::leak` that outlived the
+    /// refusal. The owned field is what makes this testable at all: with
+    /// `&'static str` every parse, accepted or not, kept its allocation.
+    #[test]
+    fn a_rejected_blob_does_not_retain_its_pipe() {
+        let rec = BudProductionRecord::new(FormatCodec::Json, &"p".repeat(4096), b"abc", 3, 1);
+        let mut blob = rec.to_blob();
+        let last = blob.len() - 1;
+        blob[last] ^= 1; // break the record hash
+        assert!(BudProductionRecord::from_blob(&blob).is_none());
+        let back = BudProductionRecord::from_blob(&rec.to_blob()).expect("intact blob parses");
+        assert_eq!(back.pipe, rec.pipe);
+        assert_eq!(back.pipe.len(), 4096);
     }
 
     #[test]

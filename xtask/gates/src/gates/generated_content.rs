@@ -151,11 +151,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-gen-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-gen")?;
     let _ = std::fs::create_dir_all(dir.join("src/storage"));
 
     let good = "enum BudStorageEdition { Classic, Three }\nfn admits_body() {}\nfn check_source() {}\nconst TAG: &[u8] = b\"BUD_EDITION_3\";\nfn generate_and_verify() {\n    let id = ContentId::of(&bytes);\n    if id != expected { return IdMismatch; }\n}\nfn draw_thing(meter: &mut Meter) -> Vec<u8> {\n    meter.charge(1)?;\n    vec![]\n}\n";

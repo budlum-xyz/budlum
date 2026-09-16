@@ -93,8 +93,8 @@ impl BudlumToml {
     ///
     /// # Errors
     ///
-    /// Returns `Io` when the file cannot be read or is over the ceiling for a
-    /// control file, `Parse` when it is not valid TOML.
+    /// Returns `Read` when the file cannot be read or is over the ceiling for
+    /// a control file, `Parse` when it is not valid TOML.
     pub fn load(path: &std::path::Path) -> Result<Self, BudlumTomlError> {
         // Bounded: a `budlum.toml` is hand-written configuration. The path
         // comes from the developer's working directory, so the size of this
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn budlum_toml_missing_file_returns_io_error() {
+    fn budlum_toml_missing_file_returns_read_error() {
         let result = BudlumToml::load(std::path::Path::new("/nonexistent/budlum.toml"));
         assert!(matches!(result, Err(BudlumTomlError::Read { .. })));
     }

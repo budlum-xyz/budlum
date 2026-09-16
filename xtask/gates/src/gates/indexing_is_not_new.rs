@@ -131,13 +131,17 @@ fn strip_test_modules(text: &str) -> String {
         };
         let mut depth = 0usize;
         let mut end = None;
-        for (i, c) in after.char_indices().skip(brace) {
+        // `brace` is a byte offset; iterate from that byte. Skipping that
+        // many chars instead overshot the brace whenever a multi-byte
+        // character stood before it, and the first `}` then took `depth`
+        // below zero.
+        for (i, c) in after[brace..].char_indices() {
             if c == '{' {
                 depth += 1;
             } else if c == '}' {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    end = Some(i + 1);
+                    end = Some(brace + i + 1);
                     break;
                 }
             }

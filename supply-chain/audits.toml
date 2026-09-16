@@ -137,3 +137,15 @@ version = "0.6.1"
 criteria = "safe-to-deploy"
 who = "Lubo's Ruler <ayazkussann@gmail.com>"
 notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.libp2p-connection-limits]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "connection-count NetworkBehaviour, 772 lines in one file; reviewed the published 0.6.0 source: no build script, no unsafe, no filesystem, network, process or environment access; it only counts pending/established connection ids per direction and per peer against optional u32 limits and returns ConnectionDenied when a limit is reached"
+
+[[audits.libp2p-connection-limits]]
+delta = "0.6.0 -> 0.7.0@git:38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "diffed the crates.io 0.6.0 tarball against misc/connection-limits at the pinned rust-libp2p commit: the version bump, an MSRV raise to 1.88 (PR 6273), rustfmt import reordering in lib.rs and the tests module, and rand moving to a workspace dev-dependency; no functional change"

@@ -1943,8 +1943,8 @@ mod tests {
     ) {
         let mut vm = Vm::new(64);
         setup(&mut vm);
-        let _receipt = vm.run_receipt(&program);
-        assert!(_receipt.success);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
 
         tamper(&mut vm.trace);
 
@@ -1982,7 +1982,9 @@ mod tests {
             exit_code: 0,
             trace_len: vm.trace.len() as u64,
             event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
+            // The honest digest, so a tampered storage test fails on the
+            // tampering it names and not on a digest mismatch.
+            state_writes_digest: receipt.state_writes_digest,
         };
 
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
@@ -5918,7 +5920,9 @@ mod tests {
             exit_code: 0,
             trace_len: vm.trace.len() as u64,
             event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
+            // The honest digest: the refusal below has to come from the
+            // redirected slot, not from constraint (2b) seeing a zero digest.
+            state_writes_digest: receipt.state_writes_digest,
         };
 
         let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);

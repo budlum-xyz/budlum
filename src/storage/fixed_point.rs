@@ -35,9 +35,10 @@ pub const fn fixed_from_int(v: i32) -> i64 {
 
 /// Convert fixed point back to an integer.
 ///
-/// Truncates towards zero, the same direction on every input, because a
-/// rounding rule that depends on sign is a rounding rule two
-/// implementations can get differently.
+/// Rounds towards negative infinity (floor): `>>` on a signed value is an
+/// arithmetic shift, so `fixed_to_int(-1)` is `-1`, not `0`. One direction on
+/// every input, because a rounding rule that depends on sign is a rounding
+/// rule two implementations can get differently.
 #[must_use]
 pub fn fixed_to_int(v: i64) -> i32 {
     // Saturating rather than a plain cast. A fixed-point value larger than

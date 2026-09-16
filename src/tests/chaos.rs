@@ -113,7 +113,7 @@ mod chaos_tests {
         }
 
         let result = chain_a.try_reorg(chain_b.chain.clone());
-        println!("Reorg result: {:?}", result);
+        println!("Reorg result: {result:?}");
 
         assert!(result.is_err(), "Deep reorg should be rejected with Err");
         assert!(result.unwrap_err().contains("exceeds max"));
@@ -153,8 +153,8 @@ mod chaos_tests {
                 .lock(
                     1,
                     2,
-                    100 + i as u64,
-                    i as u32,
+                    100 + u64::from(i),
+                    u32::from(i),
                     asset,
                     owner,
                     recipient,
@@ -198,7 +198,7 @@ mod chaos_tests {
                 target_domain: 2,
                 source_height: 500,
                 event_index: i,
-                nonce: i as u64,
+                nonce: u64::from(i),
                 sender: owner,
                 recipient,
                 payload_hash,
@@ -323,7 +323,7 @@ mod chaos_tests {
 
         let make_commitment = |domain: &crate::domain::ConsensusDomain, height: u64, seed: u8| {
             let mut block = Block::new(height, "bb".repeat(32), vec![]);
-            block.state_root = format!("{:02x}", seed).repeat(32);
+            block.state_root = format!("{seed:02x}").repeat(32);
             block.tx_root = block.calculate_tx_root();
             block.hash = block.calculate_hash();
             DomainCommitment::from_block(domain, &block, [seed; 32], [seed + 1; 32], 0).unwrap()
@@ -375,8 +375,8 @@ mod chaos_tests {
             }
 
             for domain in domains {
-                let mut block = Block::new(domain.id as u64, "cc".repeat(32), vec![]);
-                block.timestamp = 1_000 + domain.id as u128;
+                let mut block = Block::new(u64::from(domain.id), "cc".repeat(32), vec![]);
+                block.timestamp = 1_000 + u128::from(domain.id);
                 block.state_root = format!("{:02x}", domain.id).repeat(32);
                 block.tx_root = block.calculate_tx_root();
                 block.hash = block.calculate_hash();
@@ -492,7 +492,7 @@ mod chaos_tests {
             block.hash = block.calculate_hash();
             let mut commitment =
                 DomainCommitment::from_block(domain, &block, [1u8; 32], [2u8; 32], 0).unwrap();
-            commitment.finality_proof_hash = hash_finality_proof(proof);
+            commitment.finality_proof_hash = hash_finality_proof(proof).unwrap();
             commitment
         };
 
@@ -526,12 +526,12 @@ mod chaos_tests {
             let recipient = Address::from([round.saturating_add(33); 32]);
             bridge.register_asset(asset, 1).unwrap();
             let (_transfer, _event) = bridge
-                .lock(1, 2, round as u64, 0, asset, owner, recipient, 1, 1000)
+                .lock(1, 2, u64::from(round), 0, asset, owner, recipient, 1, 1000)
                 .unwrap();
             blockchain.state.bridge_state = bridge.clone();
 
             let header = blockchain.seal_global_header(None).unwrap();
-            assert_eq!(header.global_height, round as u64);
+            assert_eq!(header.global_height, u64::from(round));
             assert_eq!(header.previous_global_hash, previous_hash);
             previous_hash = header.calculate_hash_bytes();
         }
@@ -589,7 +589,7 @@ mod chaos_tests {
                 DomainCommitment::from_block(&pow_domain, &block_pow, [1u8; 32], [2u8; 32], i)
                     .unwrap();
             let pow_proof = FinalityProof::PoWHeaderChain { headers: vec![] };
-            pow_com.finality_proof_hash = hash_finality_proof(&pow_proof);
+            pow_com.finality_proof_hash = hash_finality_proof(&pow_proof).unwrap();
             prev_pow = block_pow.hash.clone();
             commitments_to_submit.push((pow_com, pow_proof));
 
@@ -617,7 +617,7 @@ mod chaos_tests {
                     total_stake: 100,
                 },
             };
-            pos_com.finality_proof_hash = hash_finality_proof(&pos_proof);
+            pos_com.finality_proof_hash = hash_finality_proof(&pos_proof).unwrap();
             prev_pos = block_pos.hash.clone();
             commitments_to_submit.push((pos_com, pos_proof));
 
@@ -632,7 +632,7 @@ mod chaos_tests {
                 authorities: vec![],
                 signatures: vec![],
             };
-            poa_com.finality_proof_hash = hash_finality_proof(&poa_proof);
+            poa_com.finality_proof_hash = hash_finality_proof(&poa_proof).unwrap();
             prev_poa = block_poa.hash.clone();
             commitments_to_submit.push((poa_com, poa_proof));
 
@@ -799,8 +799,7 @@ mod chaos_tests {
             );
             assert!(
                 duplicate_mint_result.is_err(),
-                "Replay attack should be prevented for transfer {}",
-                i
+                "Replay attack should be prevented for transfer {i}"
             );
         }
 

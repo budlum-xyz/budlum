@@ -156,8 +156,12 @@ fn getenv_usize(key: &str, default: usize) -> usize {
 }
 
 fn main() -> ExitCode {
-    let batches = getenv_usize("TIMING_SAFE_BATCHES", 64);
-    let iters = getenv_usize("TIMING_SAFE_ITERS", 4096);
+    // One batch has no variance to compare (`variance` divides by len - 1),
+    // and zero iterations produce empty samples; with either, Welch's t
+    // degenerates to NaN and every later comparison passes silently,
+    // turning the gate into an unconditional PASS. Floor both.
+    let batches = getenv_usize("TIMING_SAFE_BATCHES", 64).max(2);
+    let iters = getenv_usize("TIMING_SAFE_ITERS", 4096).max(1);
 
     // A deterministic 64-byte API key (in the x-api-key length class).
     let mut rng = XorShift(0xB0D1_0CA7_5EED_1234);

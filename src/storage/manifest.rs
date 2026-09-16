@@ -184,21 +184,6 @@ impl std::fmt::Display for ContentEncryption {
     }
 }
 
-/// A content manifest - the on-chain commitment to a sharded piece of
-/// Content. `manifest_id` is the canonical identity of the whole piece; it
-/// Is computed deterministically from the shard list and the erasure scheme,
-/// So two clients sharding the same content the same way always produce the
-/// Same `manifest_id`.
-///
-/// This doc used to say the id derived from `(owner, total_size, shards)`. It
-/// Never did: [`manifest_id_from_parts_stored`] reads the shards and the scheme and
-/// Nothing else. The sentence read as a binding, so anyone counting what the
-/// Id protects counted `owner` among them. What each remaining field is or is
-/// Not inside the commitment is now recorded on the field itself.
-///
-/// The `owner` field arrived with F01, so that data ownership is provable on
-/// chain, as a data owner identity. `#[serde(default)]` keeps older snapshots
-/// and JSON backward compatible, where a zero owner means "unspecified".
 /// Redundancy scheme for an object: any `k` of `n` shards reconstruct it.
 ///
 /// Replication is the degenerate case `k = n = shard_count`, where losing one
@@ -311,14 +296,38 @@ impl ErasureScheme {
 
 impl Default for ErasureScheme {
     fn default() -> Self {
-        // A manifest written before erasure coding has no scheme field; the
-        // serde default has to mean "replication", which is what those
-        // manifests actually were.
+        // A manifest written before erasure coding has no scheme field. The
+        // serde default cannot see the shard list, so it stands for "absent":
+        // `ContentManifest`'s wire form turns it into replication over the
+        // shards actually listed. For a single shard it already is that
+        // scheme, and against several shards it was never valid (`n` must
+        // equal the shard count), so nothing legitimate is rewritten.
         Self { k: 1, n: 1 }
     }
 }
 
+/// A content manifest - the on-chain commitment to a sharded piece of
+/// content. `manifest_id` is the canonical identity of the whole piece; it
+/// is computed deterministically from the shard list, the erasure scheme,
+/// the sizes and the declared provenance, so two clients sharding the same
+/// content the same way always produce the same `manifest_id`.
+///
+/// This doc used to say the id derived from `(owner, total_size, shards)`. It
+/// never did: [`manifest_id_from_parts_stored`] reads the shards, the scheme,
+/// the encryption claim and the two sizes, and nothing else. The sentence
+/// read as a binding, so anyone counting what the id protects counted
+/// `owner` among them. What each remaining field is or is not inside the
+/// commitment is recorded on the field itself.
+///
+/// The `owner` field arrived with F01, so that data ownership is provable on
+/// chain, as a data owner identity. `#[serde(default)]` keeps older snapshots
+/// and JSON backward compatible, where a zero owner means "unspecified".
+///
+/// A manifest written before erasure coding carries no `erasure` field. It
+/// deserializes as replication over however many shards it lists, which is
+/// what those manifests were (see `ContentManifestWire`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ContentManifestWire")]
 pub struct ContentManifest {
     pub manifest_id: ContentId,
     /// F01: the address of the content owner. A zero address marks an older,
@@ -449,7 +458,70 @@ pub struct ContentManifest {
     pub encryption: ContentEncryption,
 }
 
+/// The serde form of [`ContentManifest`]: the same fields in the same shape,
+/// no legacy repair. `From` turns the `erasure` sentinel (the field default
+/// `{k: 1, n: 1}`, which a self-describing format supplies when the field is
+/// absent) into replication over the listed shard count, so a pre-erasure
+/// manifest with several shards comes back as what it was instead of a
+/// scheme `validate_untrusted` refuses against any multi-shard list.
+///
+/// The field is typed exactly as on `ContentManifest`, not as an `Option`:
+/// bincode has no notion of an absent field and reads whatever shape the
+/// struct declares, so a wire type with a different shape would decode the
+/// first byte of `k` as an `Option` tag and refuse every stored registry row.
+#[derive(Deserialize)]
+struct ContentManifestWire {
+    manifest_id: ContentId,
+    #[serde(default)]
+    owner: crate::core::address::Address,
+    #[serde(default)]
+    dictionary_id: Option<ContentId>,
+    total_size: u64,
+    shard_count: u32,
+    shards: Vec<ShardRef>,
+    #[serde(default)]
+    erasure: ErasureScheme,
+    #[serde(default)]
+    source: crate::storage::generated::ContentSource,
+    #[serde(default)]
+    edition: crate::storage::generated::BudStorageEdition,
+    #[serde(default)]
+    content_size: u64,
+    #[serde(default)]
+    encryption: ContentEncryption,
+}
+
+impl From<ContentManifestWire> for ContentManifest {
+    fn from(w: ContentManifestWire) -> Self {
+        let shard_count = w.shard_count;
+        Self {
+            manifest_id: w.manifest_id,
+            owner: w.owner,
+            dictionary_id: w.dictionary_id,
+            total_size: w.total_size,
+            shard_count,
+            shards: w.shards,
+            erasure: if w.erasure == ErasureScheme::default() && shard_count != 1 {
+                Self::fill_legacy_erasure(shard_count)
+            } else {
+                w.erasure
+            },
+            source: w.source,
+            edition: w.edition,
+            content_size: w.content_size,
+            encryption: w.encryption,
+        }
+    }
+}
+
 impl ContentManifest {
+    /// The scheme a manifest written before erasure coding meant: plain
+    /// replication over the shards it lists. Applied on deserialization when
+    /// the `erasure` field carries the absent sentinel.
+    const fn fill_legacy_erasure(shard_count: u32) -> ErasureScheme {
+        ErasureScheme::replication(shard_count)
+    }
+
     /// Build a manifest from a pre-computed set of shards. Validates that
     /// The shard list is non-empty, indices are unique, sizes are non-zero,
     /// And the total size matches the sum of shard sizes.
@@ -666,6 +738,14 @@ impl ContentManifest {
             ));
         }
         let mut seen = std::collections::BTreeSet::new();
+        // Placement and storage challenges key shards by content id, not by
+        // index. Inside a parity code word two shards sharing one content id
+        // are one stored blob answering for two indices: its holder owes one
+        // shard's duty and would collect for two, and the "redundancy" those
+        // two indices claim does not exist. Refuse the code word. Pure
+        // replication (no parity) may repeat content legitimately, so the
+        // rule applies only when n exceeds k.
+        let mut seen_ids = std::collections::BTreeSet::new();
         let mut total: u64 = 0;
         for s in &self.shards {
             if s.size == 0 {
@@ -673,6 +753,12 @@ impl ContentManifest {
             }
             if !seen.insert(s.index) {
                 return Err(format!("Duplicate shard index {}", s.index));
+            }
+            if self.erasure.n > self.erasure.k && !seen_ids.insert(s.shard_id) {
+                return Err(format!(
+                    "Shard {} repeats the content id of another shard in the same code word",
+                    s.index
+                ));
             }
             total = total
                 .checked_add(u64::from(s.size))
@@ -1047,6 +1133,29 @@ mod tests {
         assert!(ContentManifest::from_shards(vec![]).is_err());
     }
 
+    /// Two shards of one parity code word cannot share a content id: they
+    /// would be one stored blob answering for two indices, paid twice for
+    /// one duty. The all-zero object is the canonical producer of such a
+    /// code word.
+    #[test]
+    fn a_code_word_cannot_repeat_a_shard_content_id() {
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let encoded = crate::storage::erasure::encode_object(&[0u8; 4], scheme)
+            .expect("all-zero object encodes");
+        let manifest = encoded.to_manifest().expect("manifest builds");
+        let err = manifest
+            .validate_untrusted()
+            .expect_err("identical shards collapse into one placement identity");
+        assert!(err.contains("repeats the content id"), "{err}");
+
+        // Pure replication may repeat content: two identical chunks are two
+        // real copies, not one blob claiming two duties.
+        let replicated = ContentManifest::from_bytes_sliced(b"abcdabcd", 4).expect("slices");
+        assert_eq!(replicated.shards.len(), 2);
+        assert_eq!(replicated.shards[0].shard_id, replicated.shards[1].shard_id);
+        assert!(replicated.validate_untrusted().is_ok());
+    }
+
     #[test]
     fn empty_data_rejected() {
         assert!(ContentManifest::from_bytes_sliced(&[], 4).is_err());
@@ -1263,7 +1372,55 @@ mod tests {
         let m: ContentManifest =
             serde_json::from_str(json).expect("a pre-erasure manifest must still parse");
         assert_eq!(m.shards[0].kind, ShardKind::Data);
-        assert_eq!(m.erasure, ErasureScheme::default());
+        assert_eq!(m.erasure, ErasureScheme::replication(1));
         assert_eq!(m.erasure.loss_tolerance(), 0);
+    }
+
+    /// A pre-erasure manifest with several shards was replication over all
+    /// of them. The field default `{k: 1, n: 1}` said otherwise and
+    /// `validate_untrusted` refused every such manifest; the wire form now
+    /// fills replication over the listed shard count.
+    #[test]
+    fn a_legacy_multi_shard_manifest_deserialises_as_replication() {
+        let m = ContentManifest::from_bytes_sliced(b"legacy-multi-shard-body-bytes", 8).unwrap();
+        assert!(m.shard_count >= 2, "the case under test has several shards");
+        let mut json = serde_json::to_value(&m).unwrap();
+        json.as_object_mut().unwrap().remove("erasure");
+        let back: ContentManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.erasure, ErasureScheme::replication(m.shard_count));
+        back.validate_untrusted()
+            .expect("a legacy multi-shard manifest must still validate");
+        assert_eq!(back.manifest_id, m.manifest_id);
+
+        // A manifest that names its scheme keeps it.
+        let coded = serde_json::to_string(&m).unwrap();
+        let same: ContentManifest = serde_json::from_str(&coded).unwrap();
+        assert_eq!(same, m);
+    }
+
+    /// The registry stores manifests with bincode, which has no absent
+    /// fields: the wire form must read exactly the bytes the manifest
+    /// writes. An erasure-coded manifest (k below n) and a replicated one
+    /// both round-trip byte for byte.
+    #[test]
+    fn a_manifest_round_trips_through_bincode() {
+        let replicated =
+            ContentManifest::from_bytes_sliced(b"bincode-round-trip-replicated", 8).unwrap();
+        let bytes = bincode::serialize(&replicated).unwrap();
+        let back: ContentManifest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, replicated);
+
+        let mut coded = replicated.clone();
+        coded.erasure = ErasureScheme {
+            k: 2,
+            n: coded.shard_count,
+        };
+        let bytes = bincode::serialize(&coded).unwrap();
+        let back: ContentManifest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(
+            back.erasure, coded.erasure,
+            "a named scheme is kept as written"
+        );
+        assert_eq!(back, coded);
     }
 }

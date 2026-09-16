@@ -68,7 +68,12 @@ list turns that into a rule and the `budscan-patchset` gate measures it in CI.
 not `URI_DANGEROUS_TO_LOAD` and not `URI_IS_LOCAL_RESOURCE` either: it is an
 ordinary loadable scheme carrying its own origin (`bud://<name>`). Content is
 written to the channel **after** the `budscan` core has verified it; unverified
-bytes never enter the channel at all.
+bytes never enter the channel at all. Bytes that verified but whose route did
+not (`claim only`, `transport only`) are shown under an opaque principal, not
+under the name's origin: what an unproven resolution served must not read or
+speak as the name. The C ABI the C++ calls (`budscan_ffi.h`) is part of the
+patch, so the two classes compile against declarations, not against names the
+linker happens to resolve.
 
 **`address-bar-verification-badge.patch`**: writes the verification strength
 into the address bar. There are four values (`verified`, `transport only`,

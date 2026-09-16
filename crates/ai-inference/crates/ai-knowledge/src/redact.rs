@@ -228,7 +228,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
         .char_indices()
         .rev()
         .find(|(_, c)| !matches!(c, ',' | ';' | ')' | '}' | ']' | ' ' | '\t'))
-        .map_or(0, |(i, _)| i + 1);
+        .map_or(0, |(i, c)| i + c.len_utf8());
     let tail = &value_part[value_end..];
     let value = &value_part[..value_end];
 
@@ -340,6 +340,21 @@ mod tests {
         let r = redact_text(&input);
         assert!(r.text().contains(REDACTION_TOKEN));
         assert!(!r.text().contains(&secret));
+        assert!(r.report().changed());
+    }
+
+    /// The value end is a byte offset: one past the last character, so a
+    /// multi-byte last character needs its own width added, not one. With
+    /// `i + 1` the slice landed inside the character and the redactor
+    /// panicked on the record instead of storing it.
+    #[test]
+    fn a_multibyte_value_is_redacted_without_panicking() {
+        let secret = "de\u{011f}er\u{015f}\u{015f}";
+        let input = format!("api_key: {secret},");
+        let r = redact_text(&input);
+        assert!(r.text().contains(REDACTION_TOKEN));
+        assert!(!r.text().contains(secret));
+        assert!(r.text().ends_with(','), "the punctuation after the value stays");
         assert!(r.report().changed());
     }
 

@@ -63,10 +63,12 @@ mod gates {
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
+    pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
     pub mod content_encryption_is_declared_and_bound;
     pub mod coverage;
     pub mod cross_table_checks;
+    pub mod dead_pub_api;
     pub mod derived_content;
     pub mod docker_toolchain;
     pub mod domain_tags;
@@ -85,6 +87,7 @@ mod gates {
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
+    pub mod genesis_schema;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
@@ -92,6 +95,7 @@ mod gates {
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
+    pub mod license_consistency;
     pub mod lock_failures;
     pub mod logup_multipliers;
     pub mod master_derivation;
@@ -99,6 +103,7 @@ mod gates {
     pub mod mermaid;
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
     pub mod network_hardening_gate;
@@ -109,6 +114,7 @@ mod gates {
     pub mod no_unicode_dashes;
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
+    pub mod one_house_guards;
     pub mod paid_content;
     pub mod parallel_execution;
     pub mod pinned_downloads;
@@ -122,6 +128,7 @@ mod gates {
     pub mod regeneration;
     pub mod rejection_tests;
     pub mod relay;
+    pub mod release_profile_pins;
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
@@ -129,6 +136,7 @@ mod gates {
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
+    pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
     pub mod slash_expression;
     pub mod source_reading;
@@ -484,12 +492,11 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "no-upstream-brands",
+        name: "serialize-map-keys-are-strings",
         replaces: None,
-        run: gates::no_upstream_brands::run,
+        run: gates::serialize_map_keys_are_strings::run,
         run_args: None,
-        self_test: gates::no_upstream_brands::self_test,
-
+        self_test: gates::serialize_map_keys_are_strings::self_test,
         run_log: None,
     },
     Gate {
@@ -506,6 +513,14 @@ const GATES: &[Gate] = &[
         run: gates::no_unicode_dashes::run,
         run_args: None,
         self_test: gates::no_unicode_dashes::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-upstream-brands",
+        replaces: None,
+        run: gates::no_upstream_brands::run,
+        run_args: None,
+        self_test: gates::no_upstream_brands::self_test,
         run_log: None,
     },
     Gate {
@@ -647,6 +662,34 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "genesis-schema",
+        replaces: None,
+        run: gates::genesis_schema::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::genesis_schema::self_test,
+    },
+    Gate {
+        name: "module-coverage",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "module-coverage reads a coverage report; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::module_coverage::run),
+        run_args: None,
+        self_test: gates::module_coverage::self_test,
+    },
+    Gate {
+        name: "license-consistency",
+        replaces: None,
+        run: gates::license_consistency::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::license_consistency::self_test,
     },
     Gate {
         name: "tree-pin",
@@ -1033,6 +1076,14 @@ const GATES: &[Gate] = &[
         self_test: gates::guards_reachable::self_test,
     },
     Gate {
+        name: "dead-public-api-is-ratcheted",
+        replaces: None,
+        run: gates::dead_pub_api::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::dead_pub_api::self_test,
+    },
+    Gate {
         name: "cross-table-checks-use-last-row",
         replaces: Some("check-cross-table-checks-use-last-row.sh"),
         run: gates::cross_table_checks::run,
@@ -1186,6 +1237,30 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::fixture_integrity::self_test,
     },
+    Gate {
+        name: "consensus-state-only-changes-in-blocks",
+        replaces: None,
+        run: gates::consensus_state_only_changes_in_blocks::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::consensus_state_only_changes_in_blocks::self_test,
+    },
+    Gate {
+        name: "release-profile-pins",
+        replaces: None,
+        run: gates::release_profile_pins::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::release_profile_pins::self_test,
+    },
+    Gate {
+        name: "one-house-guards",
+        replaces: None,
+        run: gates::one_house_guards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::one_house_guards::self_test,
+    },
 ];
 
 fn usage() -> String {
@@ -1250,12 +1325,15 @@ fn main() {
             return;
         }
         // `--all` and a bare `--self-test` both mean every gate; the flag was
-        // already read above, so the two arms are one. Gates that take a log
-        // path or positional roots are left out: they cannot run without
-        // their argument, and their CI steps call them directly.
+        // already read above, so the two arms are one. On the run path the
+        // gates that take a log path or positional roots are left out: they
+        // cannot run without their argument, and their CI steps call them
+        // directly. A canary takes no argument, so the self-test path keeps
+        // them; filtered there too, `--all --self-test` reported success
+        // while about twenty gates had proven nothing.
         Some(&"--all" | &"--self-test") => GATES
             .iter()
-            .filter(|g| g.run_log.is_none() && g.run_args.is_none())
+            .filter(|g| self_test || (g.run_log.is_none() && g.run_args.is_none()))
             .collect(),
         Some(name) => {
             if let Some(g) = GATES.iter().find(|g| g.name == *name) {

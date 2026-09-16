@@ -135,11 +135,24 @@ impl PactRegistry {
         if self.pacts.is_empty() {
             return [0u8; 32];
         }
+        // Every field of every pact is in the preimage. V1 hashed only `id`
+        // and `commitment`, so `recipe_hash`, `seed`, `residual_commitment`,
+        // `byte_budget` and `mode_flag` could change under a root that still
+        // verified; a residual-only pact and a pure-production pact with the
+        // same id and commitment were one root. The count in front of the
+        // pacts and the fixed width of every field keep the encoding
+        // injective.
         let mut h = Sha3_256::new();
-        h.update(b"BUDLUM_PACT_REGISTRY_V1");
+        h.update(b"BUDLUM_PACT_REGISTRY_V2");
+        h.update((self.pacts.len() as u64).to_le_bytes());
         for p in &self.pacts {
             h.update(p.id);
+            h.update(p.recipe_hash);
+            h.update(p.seed);
             h.update(p.commitment);
+            h.update(p.residual_commitment);
+            h.update(p.byte_budget.to_le_bytes());
+            h.update([p.mode_flag]);
         }
         h.finalize().into()
     }
@@ -235,6 +248,36 @@ mod tests {
         );
         reg.root = [0xAA; 32];
         assert!(reg.verify_root().is_err());
+    }
+
+    /// Every pact field is under the root: an edit to any of the five fields
+    /// the V1 root left out is refused by `verify_root`.
+    #[test]
+    fn every_pact_field_is_bound_by_the_root() {
+        let base = || {
+            let mut reg = PactRegistry::new();
+            reg.add_pact(
+                Pact::new([1u8; 32], [3u8; 32], [4u8; 32], [2u8; 32], [5u8; 32], 10, 1)
+                    .expect("valid pact"),
+            );
+            reg
+        };
+        assert!(base().verify_root().is_ok());
+        let edits: [fn(&mut Pact); 5] = [
+            |p| p.recipe_hash = [9u8; 32],
+            |p| p.seed = [9u8; 32],
+            |p| p.residual_commitment = [9u8; 32],
+            |p| p.byte_budget = 11,
+            |p| p.mode_flag = 2,
+        ];
+        for edit in edits {
+            let mut reg = base();
+            edit(&mut reg.pacts[0]);
+            assert!(
+                reg.verify_root().is_err(),
+                "an edited pact field passed under the old root"
+            );
+        }
     }
 
     #[test]

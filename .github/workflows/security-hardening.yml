@@ -16,6 +16,11 @@ on:
   schedule:
     - cron: "30 5 * * 1"   # weekly, Monday 05:30 UTC
   workflow_dispatch:
+    inputs:
+      since:
+        description: "Commit or ref the mutants job diffs against (default: a week ago)"
+        required: false
+        default: ""
 
 concurrency:
   group: security-hardening-${{ github.ref }}
@@ -83,6 +88,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The diff below reaches back a week of history; the default
+          # depth of one has no second commit to diff against.
+          fetch-depth: 0
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
@@ -148,24 +156,46 @@ jobs:
             exit 1
           fi
       # `--in-diff`: mutating the whole tree on every run takes hours and yields
-      # findings about code a PR did not change. This branch's diff is inspected,
-      # so the question becomes "is this change tested", which is the only
-      # answerable question.
+      # findings about code nobody changed. This workflow runs on a schedule
+      # and by hand, never on a pull request, so `github.base_ref` is always
+      # empty here; the earlier `origin/${BASE_REF}...` form resolved to
+      # `origin/main...main`, an empty diff, and `--in-diff` selected no
+      # mutants. The job was green while measuring nothing, the same vacuity
+      # the canary above guards against in the tool itself.
       #
-      # The branch name is not expanded into the shell with `${{ }}`. A branch
-      # name can contain almost anything and an expression expanding inside `run:`
-      # runs that text as a command: a branch name carrying `$(...)` executes code
-      # in this step. zizmor reported this as template-injection with high
-      # confidence and was right. The value passes through an environment variable
-      # and the shell reads it as quoted data.
-      - name: Extract the diff
+      # The diff is now the week since the previous scheduled run (the cron
+      # is weekly), or since a caller-provided ref on manual dispatch. An
+      # empty diff is a pass with an explicit statement, never a silent one,
+      # and a non-empty diff that selects no mutant is reported as such by
+      # cargo-mutants itself.
+      #
+      # No workflow expression is expanded inside `run:`; the values pass
+      # through environment variables and the shell reads them as quoted data.
+      - name: Extract the diff (the week since the last scheduled run)
         env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
+          SINCE: ${{ github.event.inputs.since || '' }}
         run: |
           set -euo pipefail
-          git diff "origin/${BASE_REF}..." > /tmp/pr.diff || git diff HEAD~1 > /tmp/pr.diff
-      - name: cargo mutants (code touched by this change)
-        run: cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
+          if [ -n "$SINCE" ]; then
+            base="$SINCE"
+          else
+            base="$(git rev-list -n 1 --before='7 days ago' HEAD)"
+          fi
+          if [ -z "$base" ]; then
+            echo "no commit older than a week on this branch; diffing the whole history"
+            base="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
+          fi
+          echo "diff base: $base"
+          git diff "$base"...HEAD -- 'src/**/*.rs' > /tmp/pr.diff
+          wc -l /tmp/pr.diff
+      - name: cargo mutants (code touched in the last week)
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/pr.diff ]; then
+            echo "no Rust change under src/ in the last week: nothing to mutate, and this line is the record of it."
+            exit 0
+          fi
+          cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
@@ -267,6 +297,11 @@ jobs:
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
         with:
           toolchain: nightly
+          # `-Zbuild-std` rebuilds the standard library from source; without
+          # this component the canary stops at "Cargo.lock does not exist,
+          # unable to build with the standard library" before TSan ever runs
+          # (that is what the 2026-08-31 scheduled run died on).
+          components: rust-src
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
@@ -307,8 +342,15 @@ jobs:
           EOF
           cd /tmp/tsan-canary
           export RUSTFLAGS="-Zsanitizer=thread"
-          if cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu 2>&1 \
-             | tee /tmp/tsan-canary.log | grep -q "WARNING: ThreadSanitizer"; then
+          # Capture the output into a file first: under `set -euo pipefail` a
+          # non-zero exit anywhere in the pipeline decides the condition, and
+          # TSan exits non-zero precisely when it finds the race. The pipeline
+          # form made a successful catch read as a failed canary.
+          set +e
+          cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu \
+            > /tmp/tsan-canary.log 2>&1
+          set -e
+          if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-canary.log; then
             echo "canary OK: TSan caught the deliberately written race."
           else
             echo "CANARY FAILED: TSan could not catch a data race, so even a clean report" >&2

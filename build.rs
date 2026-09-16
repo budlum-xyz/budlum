@@ -9,9 +9,8 @@ fn main() {
     // Find protoc: PROTOC env > known locations > PATH. In the Docker image
     // prost-build could not find it on PATH and said "Could not find protoc"
     // (docker-smoke); it is passed explicitly via Config::protoc_executable.
-    let protoc = std::env::var("PROTOC")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
+    let protoc = std::env::var("PROTOC").map_or_else(
+        |_| {
             for cand in [
                 "/usr/bin/protoc",
                 "/usr/local/bin/protoc",
@@ -23,7 +22,9 @@ fn main() {
                 }
             }
             std::path::PathBuf::from("protoc")
-        });
+        },
+        std::path::PathBuf::from,
+    );
 
     // For Buf's STANDARD PACKAGE_DIRECTORY_MATCH rule the file moved under
     // proto/budlum/network/ (the package name did not change, so no wire

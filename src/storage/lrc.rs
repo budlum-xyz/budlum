@@ -109,7 +109,15 @@ impl std::error::Error for LrcError {}
 /// Deliberately a description rather than the bytes. Placement, the coding
 /// audit and repair all need to agree on which shards belong together, and a
 /// second copy of that agreement is a second thing that can drift.
+///
+/// Deserialization goes through [`LrcLayout::new_lrc_group`]: the fields are
+/// public to read, and a layout that arrives over the wire with zero groups
+/// or zero data shards would divide by zero in `single_repair_reads`,
+/// `local_group_of` and `lrc_overhead_per_mille`, and overflow
+/// `lrc_total_shards`, so the same checks the constructor applies are
+/// applied to the wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "LrcLayoutWire")]
 pub struct LrcLayout {
     /// Data shards in the group, drawn from many objects.
     pub data_shards: u32,
@@ -118,6 +126,22 @@ pub struct LrcLayout {
     pub local_groups: u32,
     /// Global parity shards, computed over all data shards.
     pub global_parity: u32,
+}
+
+/// The unchecked wire form of [`LrcLayout`]; `TryFrom` runs the constructor.
+#[derive(serde::Deserialize)]
+struct LrcLayoutWire {
+    data_shards: u32,
+    local_groups: u32,
+    global_parity: u32,
+}
+
+impl TryFrom<LrcLayoutWire> for LrcLayout {
+    type Error = LrcError;
+
+    fn try_from(wire: LrcLayoutWire) -> Result<Self, LrcError> {
+        Self::new_lrc_group(wire.data_shards, wire.local_groups, wire.global_parity)
+    }
 }
 
 impl LrcLayout {
@@ -322,6 +346,31 @@ mod tests {
     ///
     /// The multiplier is the number this module exists to produce. A layout
     /// that cannot produce it honestly is refused.
+    /// A layout on the wire is checked like a constructed one: zero groups,
+    /// zero data shards and an oversize group are refused at deserialize
+    /// time instead of dividing by zero later.
+    #[test]
+    fn a_deserialized_layout_is_validated() {
+        let good = LrcLayout::new_lrc_group(10, 2, 4).unwrap();
+        let json = serde_json::to_string(&good).unwrap();
+        let back: LrcLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, good);
+        for bad in [
+            r#"{"data_shards":10,"local_groups":0,"global_parity":4}"#,
+            r#"{"data_shards":0,"local_groups":1,"global_parity":4}"#,
+            r#"{"data_shards":4294967295,"local_groups":1,"global_parity":4294967295}"#,
+            r#"{"data_shards":9,"local_groups":4,"global_parity":1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<LrcLayout>(bad).is_err(),
+                "{bad} must not deserialize"
+            );
+        }
+        let bytes = bincode::serialize(&good).unwrap();
+        let back: LrcLayout = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, good);
+    }
+
     #[test]
     fn a_layout_with_an_empty_local_group_is_refused() {
         assert!(
