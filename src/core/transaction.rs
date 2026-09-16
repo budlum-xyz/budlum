@@ -51,6 +51,10 @@ pub const SIGNATURE_VERSION_V6: u32 = 6;
 /// selects whether this verifier exists; this identifier selects the exact
 /// algorithm and encoding on the wire. Missing or different values refuse at
 /// admission instead of being guessed from key length.
+///
+/// WIRING: consumed cross-file by the identity verification-method encoding
+/// (`registry::identity`, MethodKind::MlDsa87) when the identity transaction
+/// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
 /// The address of a multisig account: the ML-DSA profile, owner set and threshold.

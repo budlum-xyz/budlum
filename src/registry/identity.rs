@@ -29,6 +29,12 @@
 //! no block access, and pretending otherwise would wire the anchor into the
 //! wrong door.
 //!
+//! WIRING: the identity transaction door (the executor's
+//! `TransactionType::Identity` arm, the did:bud RPC resolver and the
+//! signature-checking doors) is the production caller of this registry. Until
+//! that slice lands, the rules are pinned by this module's tests, and the
+//! per-item notes below keep naming the door where it is more specific.
+//!
 //! # What "verified" can honestly mean off-chain
 //!
 //! [`IdentityRegistry::is_credential_valid`] answers "was this credential

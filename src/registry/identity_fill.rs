@@ -1,5 +1,10 @@
 //! Consent-bound document fill: the half of a credential that gets *used*.
 //!
+//! WIRING: production use arrives through the identity transaction door that
+//! opens [`crate::registry::identity`] (the executor arm and the did:bud RPC
+//! resolver). Until that slice lands, the fill, receipt and refusal rules are
+//! pinned by this module's tests.
+//!
 //! The registry (see [`crate::registry::identity`]) answers "what did this
 //! subject commit to". This module answers the question a wallet actually
 //! faces: a document names slots ("legal_name", "birth_date"), the holder's

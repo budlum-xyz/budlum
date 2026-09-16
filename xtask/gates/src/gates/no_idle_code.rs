@@ -30,6 +30,15 @@
 //! line; the gate reports stale entries so the file cannot rot into a
 //! permanent excuse.
 //!
+//! # Documented-unwired exemption
+//!
+//! Same convention as `dead_pub_api`: a `WIRING:`, `Convenience:` or
+//! `exposed for` line within the fourteen lines above the item, or one in the
+//! module's header doc block, records the door that will call the item. The
+//! exemption is counted in the report rather than hidden, and the note
+//! belongs to whoever reviews the diff: prose is visible, and an unwired
+//! item without the note is still the finding.
+//!
 //! # What counts as a reference
 //!
 //! Any mention of the name in another production `.rs` file, after the file
@@ -104,6 +113,19 @@ const VACUITY_FLOOR: usize = 200;
 
 /// How many findings are printed before the list is summarised.
 const MAX_REPORTED: usize = 40;
+
+/// Exemption tokens, same convention as `dead_pub_api`: a `WIRING:`,
+/// `Convenience:` or `exposed for` line above the declaration (within
+/// [`EXEMPT_LOOKBACK`] lines), or one in the module's header doc block, names
+/// the door that will call the item. The exemption is visible: exempted items
+/// are counted in the report, and an idle item without the note is still the
+/// finding.
+const EXEMPT_TOKENS: &[&str] = &["WIRING:", "Convenience:", "exposed for"];
+
+/// How far above a declaration an exemption note is read as belonging to it.
+/// Fourteen because that is what the audit used, and a reviewer has to read
+/// the sentence next to the item, not a paragraph pages away.
+const EXEMPT_LOOKBACK: usize = 14;
 
 /// Report every finding instead of the first [`MAX_REPORTED`], so the output
 /// can be turned into a baseline. See the note on the same helper in
@@ -687,6 +709,84 @@ fn bare_const_name(rest: &str) -> Option<String> {
     }
 }
 
+/// The documented-unwired exemption of one file: whether the module header
+/// names a door, and which declarations carry their own note.
+struct Exempt {
+    module: bool,
+    names: BTreeSet<String>,
+}
+
+/// Read one file's exemption from its original text, before any scrubbing
+/// erases the doc comments the exemption lives in.
+///
+/// A module-level note is a token line inside the header doc block at the top
+/// of the file. An item-level note is a token line within the
+/// [`EXEMPT_LOOKBACK`] lines above the `pub` declaration it belongs to. Names
+/// found here are matched against the scan's own declaration names, so an
+/// approximation in this reader can only exempt an item the scan itself
+/// reported.
+fn exemptions_in(text: &str) -> Exempt {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut module = false;
+    for line in &lines {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with("//!") || t.starts_with("#![") {
+            if EXEMPT_TOKENS.iter().any(|tok| t.contains(tok)) {
+                module = true;
+            }
+            continue;
+        }
+        break;
+    }
+    let mut names = BTreeSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let Some(mut rest) = t.strip_prefix("pub ") else {
+            continue;
+        };
+        // Skip a visibility restriction, then the modifiers, in the same
+        // spirit as the scan's own extractor.
+        if rest.starts_with('(') {
+            let Some(close) = rest.find(')') else {
+                continue;
+            };
+            rest = rest[close + 1..].trim_start();
+        }
+        for kw in ["async ", "const ", "unsafe ", "default "] {
+            if let Some(r) = rest.strip_prefix(kw) {
+                rest = r.trim_start();
+            }
+        }
+        let rest = rest
+            .trim_start_matches("fn ")
+            .trim_start_matches("struct ")
+            .trim_start_matches("enum ")
+            .trim_start_matches("trait ")
+            .trim_start_matches("type ")
+            .trim_start_matches("static ");
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if ident.is_empty()
+            || !ident
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            continue;
+        }
+        let from = i.saturating_sub(EXEMPT_LOOKBACK);
+        let noted = lines[from..i]
+            .iter()
+            .any(|l| EXEMPT_TOKENS.iter().any(|tok| l.contains(tok)));
+        if noted {
+            names.insert(ident);
+        }
+    }
+    Exempt { module, names }
+}
+
 fn walk_rs(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(root) else {
         return;
@@ -729,6 +829,10 @@ struct Scan {
     /// whichever one a mention would have meant. Ambiguity stops mattering when
     /// the count of mentions is zero.
     unreached_ambiguous: Vec<Item>,
+    /// Item keys of idle items carrying a documented-unwired exemption: kept
+    /// out of the failure set but counted, so the note is a map, not an
+    /// eraser.
+    exempt_keys: BTreeSet<String>,
 }
 
 fn scan(root: &Path) -> Scan {
@@ -742,6 +846,7 @@ fn scan(root: &Path) -> Scan {
 
     let mut scrubbed: BTreeMap<String, String> = BTreeMap::new();
     let mut imports: BTreeMap<String, Imports> = BTreeMap::new();
+    let mut exemptions: BTreeMap<String, Exempt> = BTreeMap::new();
     for path in &files {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
@@ -754,6 +859,7 @@ fn scan(root: &Path) -> Scan {
         let prose_free = strip_comments_and_strings(&strip_cfg_test(&text));
         let s = strip_use_statements(&prose_free);
         imports.insert(rel.clone(), imports_in(&prose_free));
+        exemptions.insert(rel.clone(), exemptions_in(&text));
         scrubbed.insert(rel, s);
     }
 
@@ -810,11 +916,21 @@ fn scan(root: &Path) -> Scan {
     }
     idle.sort();
     unreached_ambiguous.sort();
+    let mut exempt_keys = BTreeSet::new();
+    for item in idle.iter().chain(unreached_ambiguous.iter()) {
+        let Some(ex) = exemptions.get(&item.file) else {
+            continue;
+        };
+        if ex.module || ex.names.contains(&item.name) {
+            exempt_keys.insert(item.key());
+        }
+    }
     Scan {
         idle,
         total_items,
         ambiguous,
         unreached_ambiguous,
+        exempt_keys,
     }
 }
 
@@ -864,6 +980,17 @@ pub fn run(root: &Path) -> Result<String, String> {
         .copied()
         .filter(|i| !baseline.contains(&i.key()))
         .collect();
+    // A documented-unwired item is staged, not lost: the note names the door,
+    // the count below keeps the note visible, and the item returns here the
+    // moment the note is removed without the caller arriving.
+    let documented = new_idle
+        .iter()
+        .filter(|i| scan_result.exempt_keys.contains(&i.key()))
+        .count();
+    let new_idle: Vec<&Item> = new_idle
+        .into_iter()
+        .filter(|i| !scan_result.exempt_keys.contains(&i.key()))
+        .collect();
 
     // A baseline entry that is no longer idle has been wired up or deleted.
     // Reporting it is what keeps the file shrinking instead of rotting.
@@ -886,6 +1013,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
         msg.push_str(BASELINE_PATH);
         msg.push('.');
+        msg.push_str(
+            " If the caller has a name and a plan instead, say so where a reviewer reads \\\n             the item: a `WIRING:` line above it (or in the module header) documents the \\\n             door and keeps this list for the undocumented.",
+        );
         return Err(msg);
     }
 
@@ -908,13 +1038,15 @@ pub fn run(root: &Path) -> Result<String, String> {
     Ok(format!(
         "No new idle code: {} public items, {} idle on the baseline ({} of them \
          under a name more than one file defines), {} ambiguous items skipped as \
-         genuinely undecidable.",
+         genuinely undecidable, {} documented-unwired exempted (the WIRING: \
+         notes name the doors).",
         scan_result.total_items,
         current.len(),
         scan_result.unreached_ambiguous.len(),
         scan_result
             .ambiguous
-            .saturating_sub(scan_result.unreached_ambiguous.len())
+            .saturating_sub(scan_result.unreached_ambiguous.len()),
+        documented
     ))
 }
 
@@ -1403,6 +1535,83 @@ fn char_literal_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The documented-unwired exemption, both ways: a note next to the item or in
+/// the module header settles it; an expired or foreign note does not.
+///
+/// # Errors
+/// Returns the first canary that misbehaves.
+fn wiring_exemption_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
+    // An item-level WIRING: note above the declaration is a named door.
+    if !accepts_with(
+        clean,
+        tmp,
+        "wiring_item",
+        &[(
+            "src/staged.rs",
+            "/// WIRING: driven by the health layer when that slice lands.\npub fn staged_helper() -> u32 { 8 }\n",
+        )],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: an item with a WIRING: note above it was reported idle",
+        ));
+    }
+
+    // A module-header WIRING: note settles the whole staged file.
+    if !accepts_with(
+        clean,
+        tmp,
+        "wiring_module",
+        &[(
+            "src/staged_mod.rs",
+            "//! A staged slice, waiting on its door.\n//!\n//! WIRING: the intake quorum slice is the production caller.\n\npub fn staged_whole_module() -> u32 { 9 }\n",
+        )],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a module-header WIRING: note did not settle the module",
+        ));
+    }
+
+    // A note too far above the item has expired: the audit's window is
+    // fourteen lines, not wherever the word last occurred.
+    if accepts_with(
+        clean,
+        tmp,
+        "wiring_expired",
+        &[(
+            "src/expired_note.rs",
+            "/// WIRING: this note is more than fourteen lines away.\n//\n//\n//\n//\n//\n//\n//\n//\n//\n//\n//\n//\n//\n//\n//\npub fn note_expired() -> u32 { 1 }\n",
+        )],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a WIRING: note older than the lookback window exempted its item",
+        ));
+    }
+
+    // A header note in one file does not settle an item in another.
+    if accepts_with(
+        clean,
+        tmp,
+        "wiring_foreign",
+        &[
+            (
+                "src/has_note.rs",
+                "//! WIRING: this file names its own staged items.\npub fn noted_here() -> u32 { 2 }\n",
+            ),
+            ("src/no_note.rs", "pub fn not_covered_elsewhere() -> u32 { 3 }\n"),
+        ],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a module header in one file exempted an item in another",
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
     let clean = tmp.join("clean");
@@ -1444,6 +1653,7 @@ pub fn self_test() -> Result<String, String> {
 
     not_a_caller_canaries(&clean, &tmp)?;
     import_canaries(&clean, &tmp)?;
+    wiring_exemption_canaries(&clean, &tmp)?;
 
     // The control group: a real caller must clear the finding, or the gate is
     // simply always red and teaches nothing.
@@ -1521,6 +1731,7 @@ pub fn self_test() -> Result<String, String> {
          test-only and prose FAIL, a real caller PASSes, a used alias PASSes and an unused, \
          re-exported or commented one FAILs, a privately imported trait PASSes and a re-exported \
          or test-imported one FAILs, baseline exempts, stale baseline FAILs, an unmentioned \
-         ambiguous name FAILs, a mentioned one PASSes, empty tree FAILs).",
+         ambiguous name FAILs, a mentioned one PASSes, empty tree FAILs, a WIRING: note \
+         PASSes at item and module level, an expired or foreign note FAILs).",
     ))
 }
