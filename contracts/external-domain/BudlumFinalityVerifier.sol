@@ -187,6 +187,12 @@ contract BudlumFinalityVerifier {
     /// Open challenges, by attestation digest.
     mapping(bytes32 => Challenge) public challenges;
 
+    /// Digests a fraud proof has disproved. Once set this is terminal:
+    /// `verify` refuses the digest forever, so `settle` can never accept it
+    /// after the fact. A per-challenge record is ephemeral (the struct is
+    /// rewritten when a window opens); the fraud verdict must outlive it.
+    mapping(bytes32 => bool) public fraudulent;
+
     /// Which regime this deployment detected at construction. Stored so a
     /// reader can tell whether the verifier is cryptographic or optimistic
     /// without reading the bytecode.
@@ -206,6 +212,7 @@ contract BudlumFinalityVerifier {
     error ChallengeWindowOpen(bytes32 digest, uint256 blocksLeft);
     error NoSuchChallenge(bytes32 digest);
     error ChallengeResolved(bytes32 digest);
+    error AlreadyFraudulent(bytes32 digest);
     error NoFraudProofVerifier();
     error FraudProofRejected(bytes32 digest);
     error NoChallengeWindow();
@@ -300,6 +307,16 @@ contract BudlumFinalityVerifier {
         if (accepted[digest]) {
             revert AlreadyAccepted(digest);
         }
+        if (fraudulent[digest]) {
+            revert AlreadyFraudulent(digest);
+        }
+        if (challenges[digest].openedAt != 0) {
+            // A digest gets one window: re-verifying would overwrite the
+            // challenge record, reset `openedAt`, and postpone `settle`
+            // indefinitely (and before the `fraudulent` guard, would revive
+            // a fraud-proven attestation).
+            revert ChallengeWindowOpen(digest, 0);
+        }
 
         bytes32 root = signingRoot(a);
 
@@ -368,6 +385,7 @@ contract BudlumFinalityVerifier {
         }
         c.challenger = msg.sender;
         c.resolved = true;
+        fraudulent[digest] = true;
         accepted[digest] = false;
         emit ChallengeOpened(digest, msg.sender);
         emit ChallengeProven(digest, msg.sender, true);
