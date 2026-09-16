@@ -94,9 +94,16 @@ jobs:
         env:
           SEMVER_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
           # Root cause (closed, 2026-07-21): the rustdoc-json death came not from
-# nightly but from the --all-features heuristic - the pq-dilithium + pq-ml-dsa
-# compile_error! lock. Fix: the semver gate runs with --default-features.
-# The nightly pin remains mandatory for rustdoc-json's -Z requirement.
+          # nightly but from the --all-features heuristic - the pq-dilithium + pq-ml-dsa
+          # compile_error! lock. The gate builds the crate default feature set.
+          # Root cause (closed, 2026-09-03): `--baseline-root` let cargo-semver-checks
+          # build both rustdocs in a placeholder project of its own, after a fresh
+          # `cargo update` there, so a crates.io release that does not compile
+          # (tinyvec 1.13.0, 21:13 UTC) turned this job red while Cargo.lock still
+          # pinned 1.11.0 and every `--locked` job on the same commit was green. The
+          # gate now runs `cargo rustdoc --locked` inside each checkout and passes the
+          # two JSON files with --current-rustdoc / --baseline-rustdoc.
+          # The nightly pin remains mandatory for rustdoc-json's -Z requirement.
           RUSTUP_TOOLCHAIN: nightly-2026-07-19
           CARGO_BUILD_JOBS: "2"
           RUSTFLAGS: "-C debuginfo=0"

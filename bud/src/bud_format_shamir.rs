@@ -10,8 +10,15 @@
 //! information. The field is GF(2^8), the same `Gf8` pattern as in
 //! `bud_format_erasure`, with polynomial interpolation.
 //!
-//! The code is `#![forbid(unsafe_code)]`, deterministic - seed to shares - and
-//! panic-free.
+//! The code is `#![forbid(unsafe_code)]` and panic-free. Splitting is
+//! randomised: the k-1 polynomial coefficients come from the operating
+//! system's random source on every call, so the same seed splits into
+//! different shares each time. It used to derive them from a fixed PRNG
+//! seeded only by the byte index; coefficients that carry no secret and no
+//! randomness are public, and since GF(2^8) addition is XOR a single share
+//! then gives the byte back as `f(x) XOR (c1 x + c2 x^2 + ...)`. The
+//! threshold was 1-of-n. `one_share_reveals_nothing` measures the property
+//! the module claims. Combining is deterministic as before.
 
 #![forbid(unsafe_code)]
 
@@ -77,19 +84,18 @@ impl ShamirShare {
             return None;
         }
         let gf = Gf8::new();
-        // k-1 random coefficients per byte, derived deterministically from the
-        // seed and the index.
+        let ncoeff = k.saturating_sub(1);
         let mut shares = vec![(0u8, vec![0u8; 32]); n];
+        let mut rng = rand_core::OsRng;
         for byte in 0..32 {
             let s = secret[byte];
-            // k-1 coefficients from a deterministic PRNG over seed and byte.
-            let mut coeffs = [0u8; 32];
-            let mut x = 0x5A17_u64.wrapping_mul(byte as u64 + 1).wrapping_add(0xB0D);
-            for c in 0..k.saturating_sub(1) {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                coeffs[c] = (x & 0xFF) as u8;
+            // k-1 uniformly random coefficients per byte. The buffer is sized
+            // by k, not fixed at 32: a fixed buffer indexed by k-1 was an
+            // out-of-bounds write (an abort under `panic = "abort"`) for any
+            // threshold of 34 or more, and MAX_SHARES allows 255.
+            let mut coeffs = vec![0u8; ncoeff];
+            if ncoeff > 0 {
+                rand_core::RngCore::try_fill_bytes(&mut rng, &mut coeffs).ok()?;
             }
             // The polynomial value at each x in 1..n:
             // f(x) = s + c1*x + c2*x^2 + ...
@@ -97,8 +103,8 @@ impl ShamirShare {
                 let xb = xi as u8;
                 let mut val = s;
                 let mut xpow = xb;
-                for c in 0..k.saturating_sub(1) {
-                    val = gf.add(val, gf.mul(coeffs[c], xpow));
+                for &coeff in &coeffs {
+                    val = gf.add(val, gf.mul(coeff, xpow));
                     xpow = gf.mul(xpow, xb);
                 }
                 shares[xi - 1].0 = xb;
@@ -201,6 +207,57 @@ mod tests {
         // 5 shares rebuild it as well.
         let all = ShamirShare::combine(&shares, 3).expect("all shares");
         assert_eq!(all, secret);
+    }
+
+    /// The property the module claims: k-1 shares carry no information about
+    /// the secret. With secret-independent coefficients this failed in the
+    /// strongest way (one share determined the byte); with random ones two
+    /// splits of the same secret give unrelated shares, and one share of a
+    /// (2, n) split is a uniform byte that combining alone cannot invert.
+    #[test]
+    fn one_share_reveals_nothing() {
+        let secret = [0x42u8; 32];
+        let a = ShamirShare::split(&secret, 2, 3).unwrap();
+        let b = ShamirShare::split(&secret, 2, 3).unwrap();
+        assert_ne!(
+            a[0].1, b[0].1,
+            "two splits of one secret must not agree on a share"
+        );
+        // The old derivation made share x=1 of byte 0 equal to
+        // secret ^ c1 with a public c1; the same public c1 no longer explains
+        // the share. Measure over many splits: the first share byte is not a
+        // constant function of the secret.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            seen.insert(ShamirShare::split(&secret, 2, 3).unwrap()[0].1[0]);
+        }
+        assert!(
+            seen.len() > 8,
+            "share bytes must vary across splits, got {seen:?}"
+        );
+        // And the threshold still holds: any 2 of the 3 rebuild the secret.
+        for combo in [[0usize, 1], [1, 2], [0, 2]] {
+            let chosen: Vec<(u8, Vec<u8>)> = combo.iter().map(|&i| a[i].clone()).collect();
+            assert_eq!(ShamirShare::combine(&chosen, 2).unwrap(), secret);
+        }
+    }
+
+    /// A threshold above 33 used to write past a fixed 32-byte coefficient
+    /// buffer. The buffer follows k now; the largest legal (k, n) splits and
+    /// rebuilds without an abort.
+    #[test]
+    fn large_thresholds_split_and_rebuild() {
+        let secret = [0xA5u8; 32];
+        for (k, n) in [(34usize, 40usize), (100, 120), (255, 255)] {
+            let shares = ShamirShare::split(&secret, k, n).unwrap();
+            assert_eq!(shares.len(), n);
+            assert_eq!(
+                ShamirShare::combine(&shares[..k], k).unwrap(),
+                secret,
+                "k={k} n={n}"
+            );
+            assert!(ShamirShare::combine(&shares[..k - 1], k).is_none());
+        }
     }
 
     #[test]

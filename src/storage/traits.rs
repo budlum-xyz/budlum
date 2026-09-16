@@ -192,6 +192,34 @@ pub trait BlockchainStorage: Send + Sync {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()>;
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>>;
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()>;
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>>;
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,

@@ -31,7 +31,9 @@ fn recovering_from_a_poisoned_lock_preserves_the_state() {
 
     let poisoner = Arc::clone(&shared);
     let handle = std::thread::spawn(move || {
-        let mut guard = poisoner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = poisoner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.push(4);
         panic!("deliberate panic while holding the lock");
     });
@@ -45,7 +47,9 @@ fn recovering_from_a_poisoned_lock_preserves_the_state() {
         "the lock must actually be poisoned, or this test proves nothing"
     );
 
-    let recovered = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let recovered = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         *recovered,
         vec![1, 2, 3, 4],

@@ -121,7 +121,7 @@ The bytecode produced in the CLI and the L1 transaction payload format therefore
 
 Congratulations. Starting from scratch you have designed a full-fledged ZKVM that defines its own instruction set, runs code, and proves the result correct cryptographically.
 
-**Completed (31/31 opcodes in production, 51 tests, 0 failures):**
+**Completed (every opcode constrained; the mainnet-gated ones stay off until activation; the test count is measured by CI, not recorded here):**
 * the AIR constraints of every opcode are done (comparison 64-bit decomposition, bitwise algebraic equivalence, Poseidon4 hash, storage STORAGE_BASE memory LogUp, poseidon4-based VerifyMerkle),
 * `postcard` serialization (bounded, DoS protected),
 * structured tracing across the whole pipeline with `RUST_LOG=info`,

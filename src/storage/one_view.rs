@@ -117,7 +117,7 @@ impl SingleScreenView {
         for item in &self.items {
             h.update(item.content_id.0);
             h.update(item.size.to_le_bytes());
-            h.update([item.critical as u8, item.custody.mode as u8]);
+            h.update([u8::from(item.critical), item.custody.mode as u8]);
         }
         h.finalize().into()
     }

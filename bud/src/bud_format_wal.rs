@@ -91,12 +91,17 @@ pub fn wal_restore(t: &[u8]) -> Option<Vec<Vec<u8>>> {
     pos += 1;
     let mut out = Vec::with_capacity(n);
     for l in lens {
-        let l = l as usize;
-        if t.len() < pos + l {
-            return None;
-        }
-        out.push(t[pos..pos + l].to_vec());
-        pos += l;
+        // A length is attacker-controlled too. `pos + l` with `l` near
+        // `usize::MAX` wrapped in a release build, the `t.len() < pos + l`
+        // guard then passed, and the slice `t[pos..pos + l]` panicked with an
+        // inverted range; in a debug build the addition itself panicked. The
+        // end is computed checked and compared against the input, so an
+        // absurd length is a refusal and not an abort.
+        let l = usize::try_from(l).ok()?;
+        let end = pos.checked_add(l)?;
+        let rec = t.get(pos..end)?;
+        out.push(rec.to_vec());
+        pos = end;
     }
     Some(out)
 }
@@ -126,6 +131,32 @@ mod tests {
             }
             let _ = wal_restore(&t);
         }
+    }
+
+    /// One record whose length varint says `u64::MAX`: 21 bytes in, and the
+    /// old `pos + l` wrapped past the guard into a panicking slice.
+    #[test]
+    fn an_inflated_record_length_is_refused() {
+        let mut t = b"WAL1|".to_vec();
+        t.extend_from_slice(&1u32.to_le_bytes());
+        t.push(0xF1);
+        t.extend_from_slice(&varint(u64::MAX));
+        t.push(0xF2);
+        assert_eq!(t.len(), 21);
+        assert!(
+            wal_restore(&t).is_none(),
+            "a record longer than the input is refused"
+        );
+        // A length one past the input end is refused too, not just the absurd one.
+        let mut t = b"WAL1|".to_vec();
+        t.extend_from_slice(&1u32.to_le_bytes());
+        t.push(0xF1);
+        t.extend_from_slice(&varint(4));
+        t.push(0xF2);
+        t.extend_from_slice(b"abc");
+        assert!(wal_restore(&t).is_none());
+        t.push(b'd');
+        assert_eq!(wal_restore(&t).unwrap(), vec![b"abcd".to_vec()]);
     }
 
     #[test]

@@ -68,14 +68,24 @@ jobs:
           format: sarif
           output: trivy-image.sarif
           exit-code: "0"
-          ignore-unfixed: true
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
       - name: Trivy IMAGE SARIF yukle (Security sekmesi)
         if: always()
         uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
-      - name: Trivy IMAGE gate (smoke image; CRITICAL/HIGH = fail)
+      # The SARIF step above reports every advisory, fixed or not, so the
+      # Security tab shows the whole picture. This gate blocks only on
+      # advisories with a fixed version: measured on 233c9b6 with unfixed
+      # advisories included, the bookworm-slim base carried 69 CRITICAL/HIGH
+      # findings (perl-base, util-linux, curl, zlib1g) and not one of them had
+      # a fix in Debian stable. A gate that cannot be satisfied by any change
+      # in this tree is not a gate; it is the first step towards `|| true`.
+      # The fixable ones still turn the job red.
+      - name: Trivy IMAGE gate (smoke image; fixable CRITICAL/HIGH = fail)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
@@ -84,14 +94,17 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+      # Both scripts print the node or container log themselves when they
+      # fail; the old `|| docker logs budlum-mainnet-smoke-$$` here named a
+      # container that never existed and read nothing.
       - name: Run RPC smoke (devnet)
         run: |
           chmod +x ops/scripts/smoke_rpc.sh
-          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18546 ./ops/scripts/smoke_rpc.sh || (cat /tmp/budlum-smoke-db/node.log 2>/dev/null; exit 1)
-      - name: Run Docker mainnet smoke
+          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18546 ./ops/scripts/smoke_rpc.sh
+      - name: Run Docker smoke (mainnet refuses, devnet boots)
         run: |
           chmod +x ops/scripts/docker-smoke-mainnet.sh
-          ./ops/scripts/docker-smoke-mainnet.sh || (docker logs budlum-mainnet-smoke-$$ 2>/dev/null; exit 1)
+          ./ops/scripts/docker-smoke-mainnet.sh
 
   devnet-multinode-smoke:
     name: Devnet Multi-Node Smoke (4x PoS mesh + metrics + operator-RPC izolasyon)

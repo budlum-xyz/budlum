@@ -128,10 +128,20 @@ pub struct Blockchain {
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
+    /// Durable K3/K4 alarm & quarantine ledger (E1). Node-local and persisted
+    /// through the storage layer; deliberately not folded into the state root
+    /// (see `registry/quarantine_ledger.rs`).
+    pub quarantine_ledger: crate::registry::QuarantineLedger,
     /// Universal Relayer - permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
-    pub settlement_finality_hashes: Vec<crate::domain::Hash32>,
+    /// External-domain intake: the permissionless registry of finality
+    /// adapters for other systems (`cross_domain::external`), now resident in
+    /// consensus state. Its height clock is driven from block commit
+    /// (`IntakeState::on_block_committed`), and it is persisted through the
+    /// storage layer like `universal_relayer`. This is the wiring decision
+    /// the framework's module docs deferred: the registry lives here.
+    pub external_intake: crate::cross_domain::external::IntakeState,
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
     pub finality_aggregator: Option<FinalityAggregator>,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
@@ -159,6 +169,7 @@ pub struct Blockchain {
     /// Append-only in-memory event log consumed by RPC/gossip/reporting layers.
     pub storage_economics_events: Vec<StorageEconomicsEvent>,
 }
+
 impl Blockchain {
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
@@ -202,6 +213,12 @@ impl Blockchain {
                         .min(u128::try_from(i64::MAX).unwrap_or(u128::MAX)),
                 )
                 .unwrap_or(i64::MAX),
+            );
+            m.bridge_transfer_rows
+                .set(i64::try_from(self.state.bridge_state.transfer_count()).unwrap_or(i64::MAX));
+            m.storage_reallocation_rows.set(
+                i64::try_from(self.state.storage_registry.reallocation_ticket_count())
+                    .unwrap_or(i64::MAX),
             );
             if let Some(ref store) = self.storage {
                 if let Ok(bytes) = store.size_on_disk() {
@@ -343,8 +360,7 @@ impl Blockchain {
 
         let resolved_genesis_config = genesis_config.unwrap_or_else(|| {
             Network::from_chain_id(chain_id)
-                .map(GenesisConfig::for_network)
-                .unwrap_or_else(|| GenesisConfig::new(chain_id))
+                .map_or_else(|| GenesisConfig::new(chain_id), GenesisConfig::for_network)
         });
         let bootstrap_domains = resolved_genesis_config
             .bootstrap_consensus_domains()
@@ -355,6 +371,56 @@ impl Blockchain {
                 #[cfg(test)]
                 panic!("Invalid genesis bootstrap domain configuration: {e}");
             });
+        // The genesis names the PQ scheme the chain launched with; a binary
+        // built for the other one would join and then reject every peer's
+        // validator registration as a malformed key. Checked here, on every
+        // path that builds a chain, not only when a genesis file is passed
+        // on the command line.
+        if let Err(e) = resolved_genesis_config.validate_pq_scheme() {
+            error!("CRITICAL ERROR: {e}");
+            #[cfg(not(test))]
+            std::process::exit(1);
+            #[cfg(test)]
+            panic!("Genesis PQ scheme mismatch: {e}");
+        }
+        // Same treatment for the token distribution: a genesis whose
+        // allocations do not sum to the fixed supply seeds no distribution
+        // at all, and a chain built on it would look healthy while every
+        // account it should have funded stays empty.
+        if let Err(e) = resolved_genesis_config.validate_tokenomics_supply() {
+            error!("CRITICAL ERROR: {e}");
+            #[cfg(not(test))]
+            std::process::exit(1);
+            #[cfg(test)]
+            panic!("Genesis tokenomics supply mismatch: {e}");
+        }
+        // A chain id that names a real network gets the full ceremony on
+        // top of the individual checks above: chain-id agreement,
+        // block-reward agreement, validator-list and consensus-key rules,
+        // and the mainnet-specific address, authority and PoW-parameter
+        // gates. Without this, a built-in per-network genesis that drifted
+        // from its ceremony would still build a chain here, while
+        // `main.rs` refuses the identical configuration passed as a file.
+        // The ceremony is DECLARED by `tokenomics_addresses`: a config that
+        // names the ceremony accounts must pass the full ceremony here, no
+        // exceptions. The pre-launch per-network skeletons ship without
+        // that declaration (the ceremony addresses arrive at launch), so
+        // they get a loud warning instead of a refusal.
+        if let Some(network) = Network::from_chain_id(chain_id) {
+            if resolved_genesis_config.tokenomics_addresses.is_some() {
+                if let Err(e) = resolved_genesis_config.validate_consensus_ceremony(network) {
+                    error!("CRITICAL ERROR: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Genesis ceremony validation failed: {e}");
+                }
+            } else {
+                warn!(
+                    "known network {network:?} genesis declares no ceremony tokenomics                      addresses; the consensus ceremony is NOT validated for this chain"
+                );
+            }
+        }
 
         let mut state = resolved_genesis_config.build_state();
 
@@ -648,6 +714,8 @@ impl Blockchain {
         let _message_registry = CrossDomainMessageRegistry::new();
         let mut universal_relayer = UniversalRelayer::new(RelayerConfig::default());
         let mut proof_claims = crate::prover::ProofClaimRegistry::new();
+        let mut quarantine_ledger = crate::registry::QuarantineLedger::new();
+        let mut external_intake = crate::cross_domain::external::IntakeState::new();
 
         if let Some(ref store) = storage {
             if let Ok(domains) = store.load_consensus_domains() {
@@ -716,27 +784,48 @@ impl Blockchain {
                         warn!("Skipping invalid stored domain commitment: {e}");
                         continue;
                     }
+                    // C3 (decision 50): the commitment registry is durable, but
+                    // the account nonce is not restored from it. The nonce only
+                    // moves when a block commits the StateUpdateTx and the block
+                    // replay re-executes it; writing it here would be an
+                    // out-of-block mutation of consensus state.
                     if let Err(e) = domain_commitment_registry.insert(commitment.clone()) {
                         warn!("Skipping duplicate stored domain commitment: {e}");
-                    } else {
-                        for (addr, new_nonce) in &commitment.state_updates {
-                            if *new_nonce > state.get_nonce(addr) {
-                                let account = state.get_or_create(addr);
-                                account.nonce = *new_nonce;
-                            }
-                        }
                     }
                 }
             }
 
-            if let Ok(Some(stored_bridge_state)) = store.load_bridge_state() {
-                state.bridge_state = stored_bridge_state;
+            // A bridge or registry row that does not decode is a database
+            // from another build, not an empty one. Starting with a fresh
+            // bridge state or registry over a chain whose blocks committed
+            // to the stored one would produce roots no peer accepts, so the
+            // node stops and says which row it could not read.
+            match store.load_bridge_state() {
+                Ok(Some(stored_bridge_state)) => state.bridge_state = stored_bridge_state,
+                Ok(None) => {}
+                Err(e) => {
+                    error!("CRITICAL ERROR: stored bridge state is unreadable: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Stored bridge state is unreadable: {e}");
+                }
             }
             if let Ok(Some(stored_universal_relayer)) = store.load_universal_relayer() {
                 universal_relayer = stored_universal_relayer;
             }
-            if let Ok(Some(stored_storage_registry)) = store.load_storage_registry() {
-                state.storage_registry = stored_storage_registry;
+            match store.load_storage_registry() {
+                Ok(Some(stored_storage_registry)) => {
+                    state.storage_registry = stored_storage_registry;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!("CRITICAL ERROR: stored storage registry is unreadable: {e}");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Stored storage registry is unreadable: {e}");
+                }
             }
             if let Ok(Some(stored_proof_claims)) = store.load_proof_claim_registry() {
                 proof_claims = stored_proof_claims;
@@ -755,6 +844,14 @@ impl Blockchain {
                     }
                 }
                 state.message_registry = registry;
+            }
+
+            if let Ok(Some(stored_quarantine_ledger)) = store.load_quarantine_ledger() {
+                quarantine_ledger = stored_quarantine_ledger;
+            }
+
+            if let Ok(Some(stored_external_intake)) = store.load_external_intake() {
+                external_intake = stored_external_intake;
             }
         }
 
@@ -777,6 +874,12 @@ impl Blockchain {
         // Stalls (liveness / fork-choice split).
         state.bridge_root = state.bridge_state.root();
         state.message_root = state.message_registry.root();
+
+        // The domain the identity gate runs under is the engine this node
+        // started with. Stamped here and at every site that replaces `state`
+        // wholesale, so a restart, a reorg replay, and a snapshot sync cannot
+        // disagree about a gate that decides writes inside blocks.
+        state.execution_domain = consensus.domain_kind();
 
         let mut bc = Blockchain {
             chain: chain_vec,
@@ -803,8 +906,9 @@ impl Blockchain {
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
+            quarantine_ledger,
             universal_relayer,
-            settlement_finality_hashes: Vec::new(),
+            external_intake,
             pending_slashing_evidence: Vec::new(),
             finality_aggregator: None,
             metrics: None,
@@ -1108,6 +1212,19 @@ impl Blockchain {
             ));
         }
 
+        // A Custom domain delegates its finality decision to a plugin, and a
+        // plugin is consensus code. The code hash is the only thing that binds
+        // a Custom domain's rule change to a committed value, so a Custom
+        // domain that declares no hash has no verifiable rule at all. The
+        // byte-level comparison (declared hash vs computed hash) waits for the
+        // plugin byte loader; until then the hash is mandatory at declaration.
+        if matches!(domain.kind, ConsensusKind::Custom(_)) && domain.plugin_code_hash.is_none() {
+            return Err(format!(
+                "Custom domain {} must declare a plugin_code_hash",
+                domain.id
+            ));
+        }
+
         Ok(())
     }
 
@@ -1217,6 +1334,23 @@ impl Blockchain {
                         tracing::error!(error = %e, "Failed to persist consensus domain");
                     }
                 }
+                {
+                    let target =
+                        crate::registry::QuarantineLedger::domain_target(commitment.domain_id);
+                    self.record_quarantine_event(
+                        target,
+                        crate::registry::QuarantineReason::Equivocation(format!(
+                            "conflict at domain height {}",
+                            commitment.domain_height
+                        )),
+                        "DOMAIN_EQUIVOCATION",
+                        &format!(
+                            "domain {} equivocation at height {}",
+                            commitment.domain_id, commitment.domain_height
+                        ),
+                        4,
+                    );
+                }
                 return Err(format!(
                     "Equivocation or invalid sequence detected for domain {} height {}",
                     commitment.domain_id, commitment.domain_height
@@ -1251,6 +1385,23 @@ impl Blockchain {
                     if let Err(e) = store.save_consensus_domain(d_mut) {
                         tracing::error!(error = %e, "Failed to persist consensus domain");
                     }
+                }
+                {
+                    let target =
+                        crate::registry::QuarantineLedger::domain_target(commitment.domain_id);
+                    self.record_quarantine_event(
+                        target,
+                        crate::registry::QuarantineReason::Equivocation(format!(
+                            "conflict at domain height {}",
+                            commitment.domain_height
+                        )),
+                        "DOMAIN_EQUIVOCATION",
+                        &format!(
+                            "domain {} equivocation at height {}",
+                            commitment.domain_id, commitment.domain_height
+                        ),
+                        4,
+                    );
                 }
                 return Err(format!(
                     "Equivocation or invalid sequence detected for domain {} height {}",
@@ -1291,15 +1442,53 @@ impl Blockchain {
         &self,
         commitment: &DomainCommitment,
     ) -> Result<(), String> {
+        if commitment.state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
+            return Err(format!(
+                "Too many state updates in domain commitment: {} > {}",
+                commitment.state_updates.len(),
+                crate::domain::types::MAX_STATE_UPDATES
+            ));
+        }
         for (addr, new_nonce) in &commitment.state_updates {
-            if *new_nonce <= self.state.get_nonce(addr) {
+            let current = self.state.get_nonce(addr);
+            if *new_nonce <= current {
                 return Err(format!(
                     "Commitment nonce invariant violation for domain {} height {}",
                     commitment.domain_id, commitment.domain_height
                 ));
             }
+            if *new_nonce >= u64::MAX - 1000 {
+                return Err(format!(
+                    "Commitment nonce suspiciously near u64::MAX for domain {} addr {}",
+                    commitment.domain_id, addr
+                ));
+            }
         }
         Ok(())
+    }
+
+    /// Record a consensus-integrity event in the durable quarantine ledger and
+    /// persist it. The ledger is node-local (not in the state root); see
+    /// `registry/quarantine_ledger.rs` for why committing it would fork honest
+    /// nodes.
+    fn record_quarantine_event(
+        &mut self,
+        target: crate::domain::types::Hash32,
+        reason: crate::registry::QuarantineReason,
+        code: &str,
+        message: &str,
+        severity: u8,
+    ) {
+        let height = self.chain.len() as u64;
+        self.quarantine_ledger
+            .quarantine_entity(target, reason, height);
+        self.quarantine_ledger
+            .record_alarm(code, message, height, severity);
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_quarantine_ledger(&self.quarantine_ledger) {
+                tracing::error!(error = %e, "Failed to persist quarantine ledger");
+            }
+        }
     }
 
     fn apply_pending_commitments(
@@ -1344,10 +1533,12 @@ impl Blockchain {
 
                 self.validate_commitment_state_updates(&com)?;
 
-                for (addr, new_nonce) in &com.state_updates {
-                    let account = self.state.get_or_create(addr);
-                    account.nonce = *new_nonce;
-                }
+                // The nonce writes a commitment carries no longer happen here,
+                // out of block. They travel in the signed StateUpdateTx and are
+                // applied inside block execution by the executor's StateUpdate
+                // arm (C3, decision 50). The domain registry advancement stays:
+                // it is committed via `domain_registry_root`, not the account
+                // state root, and moves in a later slice of the refactor.
 
                 let d_mut = self
                     .domain_registry
@@ -1370,7 +1561,81 @@ impl Blockchain {
         proof: FinalityProof,
     ) -> Result<(), String> {
         self.verify_domain_commitment_finality(&commitment, &proof)?;
-        self.accept_domain_commitment(commitment)
+        let domain_id = commitment.domain_id;
+        let domain_height = commitment.domain_height;
+        let state_root = commitment.state_root;
+        // AR-GE-6: a zero state root anchors nothing, and the relayer gate
+        // already rejects zero roots on the result side, so such a
+        // commitment could only advance a domain that can never satisfy the
+        // gate. Refused before anything moves (fail-closed).
+        if state_root == [0u8; 32] {
+            return Err(format!(
+                "Domain {domain_id} height {domain_height}: zero state root, no external-root anchor written (fail-closed)"
+            ));
+        }
+        self.accept_domain_commitment(commitment)?;
+        // AR-GE-6: the only production writer of the consensus-owned
+        // external-root registry. The anchor lands only after the domain's
+        // own adapter has proven finality AND the commitment was accepted,
+        // so a rejected or equivocal commitment never leaves an orphan
+        // anchor behind. The executor's relayer gate reads `external_roots`
+        // exclusively, so a relayer transaction can never mint the anchor
+        // it relies on (the relayer-data-to-open trap stays closed).
+        if !self.state.anchor_external_root(domain_id, state_root) {
+            // Unreachable: the zero root was refused above. If this were
+            // ever reached, the commitment advanced without its anchor -
+            // fail loud instead of trusting the invariant.
+            return Err(format!(
+                "Domain {domain_id} height {domain_height}: anchor write failed after acceptance (invariant broken)"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build the signed `StateUpdateTx` that carries a verified commitment's
+    /// nonce writes into the mempool (C3, decision 50). Signed by the local
+    /// consensus signer, so the transaction is a normal V4 Ed25519 transaction
+    /// paying the base fee from the signer's account. Read-only: it does not
+    /// mutate state; the caller decides whether to enqueue it.
+    pub fn build_state_update_transaction(
+        &self,
+        commitment: &DomainCommitment,
+    ) -> Result<Transaction, String> {
+        let signer = self.consensus.signer().ok_or_else(|| {
+            "No consensus signer available to build a state update transaction".to_string()
+        })?;
+        let from = signer.address();
+        let nonce = self.state.get_nonce(&from);
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            self.state.base_fee,
+            nonce,
+            Vec::new(),
+            self.chain_id,
+            crate::core::transaction::TransactionType::StateUpdate {
+                domain_id: commitment.domain_id,
+                domain_height: commitment.domain_height,
+                state_updates: commitment
+                    .state_updates
+                    .iter()
+                    .map(|(addr, n)| (*addr, *n))
+                    .collect(),
+            },
+        );
+        // V4 Ed25519: the signer backend signs a 32-byte hash, and `from` is
+        // the legacy Ed25519 public key itself.
+        tx.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
+        tx.signer_public_key = Vec::new();
+        tx.authorization = None;
+        let signing_hash = tx.signing_hash();
+        let signature = signer
+            .sign_block(&signing_hash)
+            .map_err(|e| format!("State update transaction signing failed: {e}"))?;
+        tx.signature = Some(signature);
+        tx.hash = tx.calculate_hash();
+        Ok(tx)
     }
 
     pub fn verify_domain_commitment_finality(
@@ -1379,7 +1644,7 @@ impl Blockchain {
         proof: &FinalityProof,
     ) -> Result<(), String> {
         let domain = self.validate_domain_commitment_metadata(commitment)?;
-        let expected_proof_hash = hash_finality_proof(proof);
+        let expected_proof_hash = hash_finality_proof(proof).map_err(|e| e.to_string())?;
         if commitment.finality_proof_hash != expected_proof_hash {
             return Err(format!(
                 "Finality proof hash mismatch for domain {} height {}",
@@ -1426,7 +1691,52 @@ impl Blockchain {
                 adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root)
             }
             ConsensusKind::Custom(_) => {
-                if let Some(plugin) = self.plugin_registry.get(domain.id) {
+                if domain.finality_adapter
+                    == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                {
+                    // A local domain whose finality is supplied by the
+                    // permissionless external framework. The proof envelope
+                    // names the external adapter and network; the intake owns
+                    // the rebuildable spec and the policy the domain was
+                    // admitted under. The bridge, not this dispatch, owns the
+                    // commitment/attestation matching rules.
+                    let evidence =
+                        crate::cross_domain::external::decode_external_evidence(proof)
+                            .map_err(|e| e.to_string())?;
+                    let key = crate::cross_domain::external::DomainKey::from_parts(
+                        &evidence.adapter,
+                        &evidence.network,
+                    );
+                    let Some(entry) = self.external_intake.entries.get(&key) else {
+                        return Err(format!(
+                            "Domain {} names an external adapter that is not registered",
+                            commitment.domain_id
+                        ));
+                    };
+                    let bls = matches!(
+                        entry.spec,
+                        crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                    )
+                    .then(crate::cross_domain::external::IntakeState::production_bls);
+                    let bridge = crate::cross_domain::external::ExternalDomainFinalityBridge::new(
+                        entry.spec.build(bls, None),
+                        entry.policy.clone(),
+                    );
+                    // The bridge was built from the stored spec; its adapter
+                    // identity must be the one the evidence named, or the
+                    // registry lookup and the verification would be about
+                    // two different adapters.
+                    if bridge.adapter_id() != evidence.adapter {
+                        return Err(format!(
+                            "Domain {} rebuilt adapter {} but the evidence names {}",
+                            commitment.domain_id,
+                            hex::encode(bridge.adapter_id().0),
+                            hex::encode(evidence.adapter.0)
+                        ));
+                    }
+                    self.ensure_adapter_name(domain, bridge.adapter_name())?;
+                    bridge.verify_finality(domain, commitment, proof)
+                } else if let Some(plugin) = self.plugin_registry.get(domain.id) {
                     let fa = plugin.finality_adapter();
                     self.ensure_adapter_name(domain, fa.adapter_name())?;
                     fa.verify_finality(domain, commitment, proof)
@@ -1528,17 +1838,52 @@ impl Blockchain {
         Ok(())
     }
 
+    /// The settlement finality window: the hashes of checkpoint blocks that
+    /// are buried at least the finality horizon deep, and no deeper than
+    /// the settled-row retention.
+    ///
+    /// Derived from the chain prefix on every read, never stored. The
+    /// previous `settlement_finality_hashes` field had no production
+    /// writer at all, so the settlement root folded into the state root
+    /// was always the empty-tree root (F-7, dead-feature illusion). Wiring
+    /// a writer that appended on finality-certificate arrival would have
+    /// traded the dead input for a consensus race: two honest nodes that
+    /// finalized the same checkpoint at different moments would fold
+    /// different windows into the same block's state root and split.
+    /// Burial depth is a pure function of the blocks both nodes already
+    /// hold, so every node derives the same window for the same tip.
+    fn settlement_finality_window(&self) -> Vec<crate::domain::Hash32> {
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        if self.chain.is_empty() {
+            return Vec::new();
+        }
+        let tip = (self.chain.len() - 1) as u64;
+        // Only the retention band can matter; scanning it keeps the cost
+        // bounded by the window, not by the chain length.
+        let oldest =
+            tip.saturating_sub(crate::cross_domain::bridge::SETTLED_RETENTION_BLOCKS) as usize;
+        crate::chain::finality::settlement_finality_window_from(
+            self.chain[oldest..]
+                .iter()
+                .enumerate()
+                .map(|(i, block)| ((oldest + i) as u64, block.hash.as_str())),
+            interval,
+            tip,
+        )
+    }
+
     pub fn build_global_header(&self, proposer: Option<Address>) -> GlobalBlockHeader {
         let previous_global_hash = self
             .global_headers
             .last()
-            .map(GlobalBlockHeader::calculate_hash_bytes)
-            .unwrap_or([0u8; 32]);
+            .map_or([0u8; 32], GlobalBlockHeader::calculate_hash_bytes);
 
-        let settlement_finality_root = if self.settlement_finality_hashes.is_empty() {
+        let settlement_window = self.settlement_finality_window();
+        let settlement_finality_root = if settlement_window.is_empty() {
             merkle_root(&[])
         } else {
-            merkle_root(&self.settlement_finality_hashes)
+            merkle_root(&settlement_window)
         };
 
         // B.U.D.: storage_root is computed from any verified
@@ -1570,6 +1915,20 @@ impl Blockchain {
                 None
             } else {
                 Some(self.state.ai_registry.state_root())
+            },
+            // The identity anchor on the same discipline: the registry's
+            // root is claimed only when the registry has state, and it is
+            // the registry's own fold (`identity.rs`), not a re-derivation
+            // here. Absent and zero must not share a digest: an empty
+            // registry says "nothing to check against", and folding it as
+            // Some(zeros) would wear the same header as a registry whose
+            // state happened to hash to zero. The presence tag in the V5
+            // fold keeps those two headers apart - the same lesson the
+            // account-state root learned under `identity_v1`.
+            identity_root: if self.state.identity.is_empty() {
+                None
+            } else {
+                Some(self.state.identity.root())
             },
         }
     }
@@ -1701,17 +2060,15 @@ impl Blockchain {
             }
         }
 
-        self.state
-            .bridge_state
-            .mint(&message, self.chain.len() as u64)
-            .map_err(|e| e.to_string())?;
-
-        // Q9: Deduct relayer fee from arriving asset if inbound to Budlum
+        // Amounts and the ceiling are settled before the bridge state moves:
+        // after `mint` the replay id is spent and the transfer reads as
+        // minted, so a refusal there would consume the lock and credit
+        // nothing, or only the recipient.
         let transfer = self
             .state
             .bridge_state
             .get_transfer(&message.message_id)
-            .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
+            .ok_or_else(|| "Unknown bridge transfer for mint".to_string())?
             .clone();
 
         // Fee comes out of the arriving asset, which is what lets a user
@@ -1726,16 +2083,20 @@ impl Blockchain {
         )
         .map_err(|e| e.to_string())?;
 
-        // Security: prevent u128 -> u64 truncation.
-        // Check BOTH final_amount AND fee for u64 overflow.
-        if final_amount > u64::MAX as u128 {
-            return Err(
-                "Bridge amount exceeds maximum representable balance (u64 overflow)".into(),
-            );
-        }
-        if fee > u64::MAX as u128 {
-            return Err("Bridge fee exceeds maximum representable balance (u64 overflow)".into());
-        }
+        // The split legs arrive as Bud, the money type: bounded by
+        // construction, crossing to a balance as u64 in plain sight.
+        let minted = final_amount
+            .get()
+            .checked_add(fee.get())
+            .ok_or_else(|| "Bridge amount exceeds maximum representable balance".to_string())?;
+        self.state
+            .ensure_mint_headroom(minted)
+            .map_err(|e| format!("Bridge mint: {e}"))?;
+
+        self.state
+            .bridge_state
+            .mint(&message, self.chain.len() as u64)
+            .map_err(|e| e.to_string())?;
 
         // Credit the recipient and the relayer
         // Using try_add_balance to prevent silent u64 overflow capping.
@@ -1744,10 +2105,10 @@ impl Blockchain {
         // `try_mint_balance` checks the fixed ceiling; the fee comes from the same
         // mint and is subject to the same ceiling.
         self.state
-            .try_mint_balance(&transfer.recipient, final_amount as u64)
+            .try_mint_balance(&transfer.recipient, final_amount.get())
             .map_err(|e| format!("Bridge mint (recipient): {e}"))?;
         self.state
-            .try_mint_balance(&relayer, fee as u64)
+            .try_mint_balance(&relayer, fee.get())
             .map_err(|e| format!("Bridge mint fee (relayer): {e}"))?;
 
         if let Some(store) = &self.storage {
@@ -1795,7 +2156,7 @@ impl Blockchain {
         asset_id: crate::cross_domain::AssetId,
         owner: Address,
         recipient: Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<(crate::cross_domain::BridgeTransfer, DomainEvent), String> {
         for domain_id in [source_domain, target_domain] {
@@ -1816,6 +2177,22 @@ impl Blockchain {
         if expiry_height <= source_height {
             return Err("Bridge transfer expiry must be after source height".into());
         }
+        // Debit the owner's balance when locking a bridge transfer. The
+        // balance is validated *before* `bridge_state.lock()` inserts the
+        // transfer into the in-memory ledger: a refusal after the insert
+        // would leave a lock record for a transfer that never debited the
+        // owner (memory/disk divergence, and a sweep would later refund
+        // units that were never locked). Without the debit itself the owner
+        // retains the locked amount while the recipient also receives it on
+        // the target domain, creating BUD out of thin air (inflation bug).
+        // The sweep_expired_locks path already refunds the owner on expiry,
+        // so this debit is the corresponding credit-side bookkeeping.
+        let owner_balance = self.state.get_balance(&owner);
+        if owner_balance < amount {
+            return Err(format!(
+                "Insufficient balance for bridge lock: owner has {owner_balance}, needed {amount}"
+            ));
+        }
         let result = self
             .state
             .bridge_state
@@ -1831,27 +2208,8 @@ impl Blockchain {
                 expiry_height,
             )
             .map_err(|e| e.to_string())?;
-
-        // Debit the owner's balance when locking bridge
-        // Transfer. Without this, the owner retains the locked amount while
-        // The recipient also receives it on the target domain, creating BUD
-        // Out of thin air (inflation bug). The sweep_expired_locks path
-        // Already refunds the owner on expiry, so this debit is the
-        // Corresponding credit-side bookkeeping.
-        if amount > u64::MAX as u128 {
-            return Err(
-                "Bridge transfer amount exceeds maximum representable balance (u64 overflow)"
-                    .into(),
-            );
-        }
-        let owner_balance = self.state.get_balance(&owner);
-        if owner_balance < amount as u64 {
-            return Err(format!(
-                "Insufficient balance for bridge lock: owner has {owner_balance}, needed {amount}"
-            ));
-        }
         let owner_account = self.state.get_or_create(&owner);
-        owner_account.balance = owner_account.balance.saturating_sub(amount as u64);
+        owner_account.balance = owner_account.balance.saturating_sub(amount);
 
         if let Some(store) = &self.storage {
             store
@@ -2025,15 +2383,18 @@ impl Blockchain {
         if transfer.owner != message.recipient {
             return Err("Verified bridge burn recipient mismatch".into());
         }
-        let expected_payload_hash =
-            crate::cross_domain::bridge::bridge_payload_hash(transfer.asset_id, transfer.amount);
+        let expected_payload_hash = crate::cross_domain::bridge::bridge_payload_hash(
+            transfer.asset_id,
+            transfer.amount.get(),
+        );
         if message.payload_hash != expected_payload_hash {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
 
+        let settled_height = self.chain.len() as u64;
         self.state
             .bridge_state
-            .unlock(transfer_id, message.source_domain)
+            .unlock(transfer_id, message.source_domain, settled_height)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
@@ -2253,6 +2614,26 @@ impl Blockchain {
             return Err(format!(
                 "proof claims {spent} gas used against a declared limit of {declared_limit}"
             ));
+        }
+
+        // 1g. The committed root has to be the value the proof constrains.
+        //
+        // `final_state_root` becomes the domain's `last_committed_hash` below,
+        // and bridge verification reads it as the domain's root. The AIR does
+        // not derive that field from the trace: it binds it to itself
+        // (`plonky3_air.rs`, constraint (2)), so a prover may put any 32 bytes
+        // there and still hold a valid proof. The field the AIR does derive
+        // from the execution is `state_writes_digest` (constraint (2b), the
+        // SWrite chain). `build_public_inputs` sets the two equal; a submission
+        // where they differ was produced by something else and would commit a
+        // root nothing proved. Refused before the fee, like the other shape
+        // checks: the submitter has not asked the chain to verify anything yet.
+        let pi = &submission.public_inputs;
+        if pi.final_state_root != pi.state_writes_digest {
+            return Err(
+                "zk proof final_state_root is not the proven state_writes_digest; the committed root must be the value the circuit binds"
+                    .to_string(),
+            );
         }
 
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
@@ -2475,6 +2856,325 @@ impl Blockchain {
         }
     }
 
+    /// Registers an external domain in the consensus-resident intake and
+    /// persists the result. This is the production entry the framework's
+    /// module docs said must not be invented silently inside the framework:
+    /// it is here, on `Blockchain`, where every other consensus registry
+    /// mutation lives.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal from `IntakeState::register_domain`, stringified for the
+    /// actor boundary like the neighbouring methods.
+    pub fn register_external_domain(
+        &mut self,
+        request: crate::cross_domain::external::RegistrationRequest,
+        bls: Option<Box<dyn crate::cross_domain::external::BlsVerifier>>,
+    ) -> Result<crate::cross_domain::external::DomainKey, String> {
+        let key = self
+            .external_intake
+            .register_domain(request, bls)
+            .map_err(|e| e.to_string())?;
+        self.persist_external_intake();
+        Ok(key)
+    }
+
+    /// Submits external-finality evidence through the intake and persists the
+    /// accepted attestation (or the refusal counters - both are state).
+    ///
+    /// Returns `Ok(None)` when the answer entered a quorum round that has
+    /// not decided yet: pending is a state, not an error, and collapsing it
+    /// into the error string would make a watcher retry something that
+    /// already succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal from `IntakeState::submit_evidence`, stringified.
+    pub fn submit_external_evidence(
+        &mut self,
+        evidence: &crate::cross_domain::external::RawConsensusEvidence,
+        bls: Option<Box<dyn crate::cross_domain::external::BlsVerifier>>,
+    ) -> Result<Option<crate::cross_domain::external::FinalityAttestation>, String> {
+        let result = match self.external_intake.submit_evidence(evidence, bls) {
+            Ok(attestation) => Ok(Some(attestation)),
+            Err(crate::cross_domain::external::IntakeError::RoundPending) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        };
+        // A refused submission also mutates state (refusal counters, fault
+        // transitions), so persistence happens on both arms.
+        self.persist_external_intake();
+        result
+    }
+
+    /// The full registration record of one external domain - economics,
+    /// version windows, prover bonds, attestation book - together with the
+    /// registry clock, for the status surface. A clone, because the caller
+    /// is on the other side of the actor boundary.
+    #[must_use]
+    pub fn external_domain_registration(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> Option<(crate::cross_domain::external::DomainRegistration, u64)> {
+        let height = self.external_intake.registry.height();
+        self.external_intake
+            .registry
+            .domain(key)
+            .map(|reg| (reg.clone(), height))
+    }
+
+    /// The public profile of one registered external domain, together with
+    /// the intake entry it was admitted under (spec, policy, admission
+    /// report) and the descriptor as registered. The entry travels with the
+    /// profile because "under which rules was this admitted" is the first
+    /// question a reader of the profile asks.
+    #[must_use]
+    pub fn external_domain_profile(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> Option<(
+        crate::cross_domain::external::DomainProfile,
+        crate::cross_domain::external::IntakeEntry,
+        crate::cross_domain::external::AdapterDescriptor,
+    )> {
+        let profile = self
+            .external_intake
+            .registry
+            .domain(key)
+            .map(|reg| crate::cross_domain::external::profile_of(&reg.record))?;
+        let entry = self.external_intake.entries.get(key)?.clone();
+        let descriptor = self.external_intake.descriptor_of(key)?;
+        Some((profile, entry, descriptor))
+    }
+
+    /// Every registered external domain's profile, with the summary line the
+    /// RPC surface prints. The profile module is deliberately judgement-free;
+    /// this is the one place production iterates it.
+    #[must_use]
+    pub fn external_domain_profiles(
+        &self,
+    ) -> Vec<(crate::cross_domain::external::DomainProfile, String)> {
+        self.external_intake
+            .registry
+            .domains()
+            .map(|reg| {
+                let profile = crate::cross_domain::external::profile_of(&reg.record);
+                let line = profile.summary_line();
+                (profile, line)
+            })
+            .collect()
+    }
+
+    /// Re-runs admission for a faulted external domain and, when it passes,
+    /// hands the fresh report to the framework's `readmit`. The golden sample
+    /// and spec come from the stored entry: readmission proves the adapter
+    /// still refuses what it must, not that somebody re-uploaded new rules.
+    ///
+    /// # Errors
+    ///
+    /// The intake's admission refusals and the registry's readmit refusals,
+    /// stringified for the actor boundary.
+    pub fn readmit_external_domain(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        reason: &str,
+    ) -> Result<(), String> {
+        let Some(entry) = self.external_intake.entries.get(key) else {
+            return Err("no external domain is registered under this key".to_string());
+        };
+        let bls = matches!(
+            entry.spec,
+            crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+        )
+        .then(crate::cross_domain::external::IntakeState::production_bls);
+        let adapter = entry.spec.build(bls, Some(entry.golden.clone()));
+        let admission = crate::cross_domain::external::admit(adapter.as_ref(), &entry.policy);
+        let result = self
+            .external_intake
+            .registry
+            .readmit(key, &admission, reason)
+            .map_err(|e| e.to_string());
+        if result.is_ok() {
+            if let Some(entry) = self.external_intake.entries.get_mut(key) {
+                entry.admission = admission;
+            }
+        }
+        self.persist_external_intake();
+        result
+    }
+
+    /// Schedules an evidence-format fork for a registered external domain.
+    /// The version policy is consensus state; a fork that only lived in an
+    /// operator's config file would let two nodes disagree about which
+    /// evidence version is valid at a height.
+    ///
+    /// # Errors
+    ///
+    /// `ForkError` from the policy, stringified, or an unknown domain.
+    pub fn schedule_external_fork(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<(), String> {
+        let Some(reg) = self.external_intake.registry.domain(key) else {
+            return Err("no external domain is registered under this key".to_string());
+        };
+        let mut versions = reg.versions.clone();
+        versions
+            .schedule_fork(old_version, new_version, fork_height, grace_heights)
+            .map_err(|e: crate::cross_domain::external::ForkError| {
+                // The refusal plus the operator's next step: a fork refusal
+                // is always about the schedule, and the fix differs by rule.
+                let hint = match e {
+                    crate::cross_domain::external::ForkError::SameVersion { .. }
+                    | crate::cross_domain::external::ForkError::VersionAlreadyScheduled {
+                        ..
+                    } => "pick an unused version number",
+                    crate::cross_domain::external::ForkError::UnknownOldVersion { .. }
+                    | crate::cross_domain::external::ForkError::OldVersionAlreadySunset {
+                        ..
+                    } => "fork from the currently live version",
+                    crate::cross_domain::external::ForkError::ForkHeightOverflow { .. }
+                    | crate::cross_domain::external::ForkError::ForkBeforeValidity { .. } => {
+                        "check the fork height against the schedule"
+                    }
+                    crate::cross_domain::external::ForkError::GraceTooWide { .. } => {
+                        "narrow the grace window to the domain's limit"
+                    }
+                };
+                format!("{e}; {hint}")
+            })?;
+        // Write back through the entries map: the registry exposes no version
+        // setter, and should not - the policy travels with the registration.
+        // `register` owns the initial policy; a fork is the one sanctioned
+        // later mutation, and it lands here in consensus state.
+        let current = versions.current_version_at(self.chain.len() as u64);
+        tracing::info!(
+            domain = %hex::encode(key.as_bytes()),
+            accepted = %versions.accepted_list(),
+            ?current,
+            "external domain evidence fork scheduled"
+        );
+        self.external_intake.set_version_policy(key, versions)?;
+        self.persist_external_intake();
+        Ok(())
+    }
+
+    /// Slashes the prover that carried a specific accepted attestation, after
+    /// a successful challenge. Returns `(taken, challenger_reward)`.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals - unknown domain/prover, digest not accepted,
+    /// carrier mismatch - stringified.
+    pub fn slash_external_prover(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        prover: Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), String> {
+        let result = self
+            .external_intake
+            .registry
+            .slash(key, prover, evidence_digest, value_atoms, challenger)
+            .map_err(|e| e.to_string());
+        self.persist_external_intake();
+        result
+    }
+
+    /// Bonds an additional prover to a registered external domain, so a
+    /// quorum policy has more than one slashable voice to count. Consensus
+    /// state, persisted like every other intake mutation.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals, stringified for the actor boundary.
+    pub fn bond_external_prover(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        prover: Address,
+        bond_atoms: u128,
+    ) -> Result<(), String> {
+        let result = self
+            .external_intake
+            .bond_prover(key, prover, bond_atoms)
+            .map_err(|e| e.to_string());
+        self.persist_external_intake();
+        result
+    }
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. From then on, evidence for that domain enters rounds keyed by
+    /// external height and nothing is committed until a round decides; a
+    /// round frozen in dispute marks the domain faulted for the challenge
+    /// game. Consensus state, persisted like every other intake mutation.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, stringified for the actor boundary.
+    pub fn set_external_quorum_policy(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        policy: crate::cross_domain::external::QuorumPolicy,
+    ) -> Result<(), String> {
+        let result = self
+            .external_intake
+            .set_quorum_policy(key, policy)
+            .map_err(|e| e.to_string());
+        self.persist_external_intake();
+        result
+    }
+
+    /// The quorum round for one external height of one domain, if any. Read
+    /// path for the RPC surface: a submitter whose evidence returned
+    /// "round pending" reads the round here to see what it is waiting for.
+    #[must_use]
+    pub fn external_quorum_round(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+        height: u64,
+    ) -> Option<crate::cross_domain::external::QuorumRound> {
+        self.external_intake
+            .quorum_round(&crate::cross_domain::external::RoundKey {
+                domain: *key,
+                height,
+            })
+            .cloned()
+    }
+
+    /// Every retained quorum round of one domain, oldest external height
+    /// first, with the domain's policy beside them.
+    #[must_use]
+    pub fn external_quorum_rounds(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> (
+        Option<crate::cross_domain::external::QuorumPolicy>,
+        Vec<crate::cross_domain::external::QuorumRound>,
+    ) {
+        let policy = self.external_intake.quorum.policy_of(key).copied();
+        let rounds = self
+            .external_intake
+            .quorum
+            .rounds_of(key)
+            .into_iter()
+            .cloned()
+            .collect();
+        (policy, rounds)
+    }
+
+    fn persist_external_intake(&self) {
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_external_intake(&self.external_intake) {
+                tracing::error!(error = %e, "Failed to persist external intake state");
+            }
+        }
+    }
+
     /// Submit a relay proof from a relayer.
     ///
     /// Validates the Merkle proof against the source domain's event tree,
@@ -2521,7 +3221,14 @@ impl Blockchain {
         // Process the relay through the Universal Relayer
         let message = self
             .universal_relayer
-            .process_relay(message_id, relayer, proof, event_tree_root, current_height)
+            .process_relay(
+                message_id,
+                relayer,
+                proof,
+                source_domain,
+                event_tree_root,
+                current_height,
+            )
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_universal_relayer(&self.universal_relayer) {
@@ -2532,16 +3239,13 @@ impl Blockchain {
         // Integrate BridgeState transition
         match message.kind {
             MessageKind::BridgeLock => {
-                self.state
-                    .bridge_state
-                    .mint(&message, current_height)
-                    .map_err(|e| e.to_string())?;
-                // Deduct relayer fee (Decision 9: 1%)
+                // Same order as the verified-event path: amounts and ceiling
+                // first, bridge state second, credits last.
                 let transfer = self
                     .state
                     .bridge_state
                     .get_transfer(&message.message_id)
-                    .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
+                    .ok_or_else(|| "Unknown bridge transfer for mint".to_string())?
                     .clone();
 
                 let params = *self.state.registry.params();
@@ -2552,28 +3256,28 @@ impl Blockchain {
                 )
                 .map_err(|e| e.to_string())?;
 
-                // Security: prevent u128 -> u64 truncation.
-                // Check BOTH final_amount AND fee for u64 overflow.
-                if final_amount > u64::MAX as u128 {
-                    return Err(format!(
-                        "Bridge amount {final_amount} exceeds maximum representable balance"
-                    ));
-                }
-                if fee > u64::MAX as u128 {
-                    return Err(format!(
-                        "Bridge fee {fee} exceeds maximum representable balance"
-                    ));
-                }
+                // Money-typed split in, u64 legs out at the balance
+                // boundary: no narrowing exists here.
+                let minted = final_amount.get().checked_add(fee.get()).ok_or_else(|| {
+                    "Bridge amount exceeds maximum representable balance".to_string()
+                })?;
+                self.state
+                    .ensure_mint_headroom(minted)
+                    .map_err(|e| format!("Bridge relay mint: {e}"))?;
+                self.state
+                    .bridge_state
+                    .mint(&message, current_height)
+                    .map_err(|e| e.to_string())?;
 
                 // Try_add_balance for relay bridge mint
                 // The same supply creation, the second entry coming from the
                 // relayer pipeline. Both entries must be bound to the same gate:
                 // if one is bound and the other forgotten, the ceiling holds only half.
                 self.state
-                    .try_mint_balance(&transfer.recipient, final_amount as u64)
+                    .try_mint_balance(&transfer.recipient, final_amount.get())
                     .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
                 self.state
-                    .try_mint_balance(&relayer, fee as u64)
+                    .try_mint_balance(&relayer, fee.get())
                     .map_err(|e| format!("Bridge relay mint fee (relayer): {e}"))?;
             }
             MessageKind::BridgeBurn => {
@@ -2603,7 +3307,7 @@ impl Blockchain {
                 .map_err(|e| e.to_string())?;
                 self.state
                     .bridge_state
-                    .unlock(transfer_id, message.source_domain)
+                    .unlock(transfer_id, message.source_domain, current_height)
                     .map_err(|e| e.to_string())?;
                 let transfer = self
                     .state
@@ -2622,23 +3326,16 @@ impl Blockchain {
                 )
                 .map_err(|e| e.to_string())?;
 
-                // Security: prevent u128 -> u64 truncation.
-                // Check BOTH final_amount AND fee for u64 overflow.
-                if final_amount > u64::MAX as u128 {
-                    return Err(format!(
-                        "Unlock amount {final_amount} exceeds maximum balance"
-                    ));
-                }
-                if fee > u64::MAX as u128 {
-                    return Err(format!("Unlock fee {fee} exceeds maximum balance"));
-                }
-
-                // Try_add_balance for relay bridge unlock
+                // The unlock path and the mint path share the same
+                // money-typed split, so the old asymmetry (the mint side
+                // refused a fee over u64::MAX and this side narrowed it
+                // with a cast) cannot exist: both legs are Bud before they
+                // reach a balance.
                 self.state
-                    .try_add_balance(&transfer.owner, final_amount as u64)
+                    .try_add_balance(&transfer.owner, final_amount.get())
                     .map_err(|e| format!("Bridge relay unlock overflow (owner): {e}"))?;
                 self.state
-                    .try_add_balance(&relayer, fee as u64)
+                    .try_add_balance(&relayer, fee.get())
                     .map_err(|e| format!("Bridge relay unlock fee overflow (relayer): {e}"))?;
             }
             _ => {
@@ -2661,6 +3358,22 @@ impl Blockchain {
     /// Get the number of pending relays.
     pub fn pending_relay_count(&self) -> usize {
         self.universal_relayer.pending_count()
+    }
+
+    /// Height-keyed retention for the universal relayer, run once per
+    /// applied block from both commit paths. The relayer is persisted
+    /// separately from the account state, so the sweep writes it back when
+    /// something was dropped; a node that skipped the write would reload
+    /// the old maps and sweep them to the same result on its next block.
+    fn sweep_retired_relays(&mut self, current_height: u64) {
+        if self.universal_relayer.sweep_retired(current_height) == 0 {
+            return;
+        }
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_universal_relayer(&self.universal_relayer) {
+                tracing::error!(error = %e, "Failed to persist swept universal relayer state");
+            }
+        }
     }
 
     /// Get expired relays for slashing.
@@ -2773,6 +3486,17 @@ impl Blockchain {
                     if let Some(ref m) = self.metrics {
                         m.slashing_events_total.inc();
                     }
+                    let target = *report.offender.as_bytes();
+                    self.record_quarantine_event(
+                        target,
+                        crate::registry::QuarantineReason::OperatorSlash(format!(
+                            "role {}",
+                            report.role
+                        )),
+                        "OPERATOR_SLASH",
+                        &format!("offender slashed (role {})", report.role),
+                        3,
+                    );
                 }
                 Ok(outcome)
             }
@@ -3474,6 +4198,7 @@ impl Blockchain {
         temp_state.current_block_height = self.chain.len() as u64;
         let mut included = std::collections::HashSet::new();
         let mut progress = true;
+        let mut contract_calls: u64 = 0;
 
         while progress && valid_txs.len() < crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
             progress = false;
@@ -3487,7 +4212,17 @@ impl Blockchain {
                 if temp_state.validate_transaction(tx).is_err() {
                     continue;
                 }
+                // The producer keeps to the block's contract gas budget, so
+                // the block it builds passes the check every validator runs
+                // in `apply_block_checked`; a call past the budget waits.
+                let is_call = tx.tx_type == crate::core::transaction::TransactionType::ContractCall;
+                if is_call && Executor::check_contract_call_count(contract_calls + 1).is_err() {
+                    continue;
+                }
                 if Executor::apply_transaction_checked(&mut temp_state, tx).is_ok() {
+                    if is_call {
+                        contract_calls += 1;
+                    }
                     valid_txs.push(tx.clone());
                     included.insert(tx.hash.clone());
                     progress = true;
@@ -3791,14 +4526,11 @@ impl Blockchain {
     fn apply_bridge_sweep_to_state(
         state: &mut AccountState,
         current_height: u64,
-    ) -> Result<Vec<(Address, u128)>, String> {
+    ) -> Result<Vec<(Address, crate::core::money::Bud)>, String> {
         let released = state.bridge_state.sweep_expired_locks(current_height);
         for (owner, amount) in &released {
-            let refund_amount = u64::try_from(*amount).map_err(|_| {
-                format!("Bridge sweep refund for {owner} exceeds u64::MAX: {amount}")
-            })?;
             state
-                .try_add_balance(owner, refund_amount)
+                .try_add_balance(owner, amount.get())
                 .map_err(|error| format!("Bridge sweep refund overflow for {owner}: {error}"))?;
         }
         Ok(released)
@@ -3806,7 +4538,10 @@ impl Blockchain {
 
     /// Compatibility API. Canonical block execution invokes the same sweep on
     /// The prospective state before root calculation and durable commit.
-    pub fn apply_bridge_sweep(&mut self, current_height: u64) -> Vec<(Address, u128)> {
+    pub fn apply_bridge_sweep(
+        &mut self,
+        current_height: u64,
+    ) -> Vec<(Address, crate::core::money::Bud)> {
         let mut prospective = self.state.clone();
         match Self::apply_bridge_sweep_to_state(&mut prospective, current_height) {
             Ok(released) => {
@@ -3829,8 +4564,7 @@ impl Blockchain {
         let previous_hash = self
             .chain
             .last()
-            .map(|block| block.hash.clone())
-            .unwrap_or_else(|| "0".repeat(64));
+            .map_or_else(|| "0".repeat(64), |block| block.hash.clone());
         let valid_txs = self.collect_block_transactions();
         let mut block = Block::new_with_chain_id(index, previous_hash, valid_txs, self.chain_id);
         if !self.pending_slashing_evidence.is_empty() {
@@ -3838,7 +4572,7 @@ impl Blockchain {
         }
         block.producer = Some(producer_address);
         let slot_ms = crate::core::chain_config::slot_ms_for_chain_id(self.chain_id);
-        block.timestamp = self.genesis_time + (index as u128 * slot_ms as u128);
+        block.timestamp = self.genesis_time + (u128::from(index) * u128::from(slot_ms));
         block.validator_set_hash = self.get_validator_set_hash();
 
         if self
@@ -3860,17 +4594,24 @@ impl Blockchain {
         };
         committed_state.bridge_root = committed_state.bridge_state.root();
         committed_state.message_root = committed_state.message_registry.root();
-        let settlement_root = if self.settlement_finality_hashes.is_empty() {
+        let settlement_window = self.settlement_finality_window();
+        let settlement_root = if settlement_window.is_empty() {
             merkle_root(&[])
         } else {
-            merkle_root(&self.settlement_finality_hashes)
+            merkle_root(&settlement_window)
         };
         committed_state.settlement_root = settlement_root;
-        committed_state.global_header_summary = self
-            .global_headers
-            .last()
-            .map(|h| h.calculate_hash_bytes())
-            .unwrap_or([0u8; 32]);
+        // Canonical (zero) global header summary in the state root (audit
+        // 2026-09-09, F-3): the last sealed header is node-local operator
+        // state. Until H-10 carries the commitment into the L1 block,
+        // hashing the node's own seal into the root made the root
+        // irreproducible by every other node - a guaranteed self-fork the
+        // moment an operator seals. The validation paths
+        // (validate_candidate_chain / try_reorg) already use the empty
+        // canonical value; production now matches them. The sealed chain
+        // stays committed via its own previous_global_hash chain +
+        // persistence.
+        committed_state.global_header_summary = [0u8; 32];
         block.state_root = committed_state.calculate_state_root();
         if self.sharding.is_active_at(block.index) {
             block.shards_root = Some(crate::sharding::shards_commitment(
@@ -3914,6 +4655,7 @@ impl Blockchain {
         self.state = committed_state;
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
+        self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
 
@@ -3923,6 +4665,11 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        // The external-domain registry's clock is the local chain height, and
+        // block commit is the only place that may advance it: a clock driven
+        // from anywhere else would let sunset windows drift between replay
+        // and live operation.
+        self.external_intake.on_block_committed(block.index);
         if block.slashing_evidence.is_some() {
             self.pending_slashing_evidence.clear();
         }
@@ -3968,7 +4715,7 @@ impl Blockchain {
 
         self.mempool
             .add_transaction(transaction.clone())
-            .map_err(|e| format!("Mempool error: {:?}", e))?;
+            .map_err(|e| format!("Mempool error: {e:?}"))?;
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_mempool_tx(&transaction) {
                 tracing::error!(
@@ -4171,17 +4918,18 @@ impl Blockchain {
         if block.index > 0 {
             commit_state.bridge_root = commit_state.bridge_state.root();
             commit_state.message_root = commit_state.message_registry.root();
-            let settlement_root = if self.settlement_finality_hashes.is_empty() {
+            let settlement_window = self.settlement_finality_window();
+            let settlement_root = if settlement_window.is_empty() {
                 merkle_root(&[])
             } else {
-                merkle_root(&self.settlement_finality_hashes)
+                merkle_root(&settlement_window)
             };
             commit_state.settlement_root = settlement_root;
-            commit_state.global_header_summary = self
-                .global_headers
-                .last()
-                .map(|h| h.calculate_hash_bytes())
-                .unwrap_or([0u8; 32]);
+            // Canonical (zero) global header summary - the same rule the
+            // producer applies (audit 2026-09-09, F-3): the sealed header is
+            // node-local operator state and must not enter the reproducible
+            // state root until H-10 carries the commitment in the block.
+            commit_state.global_header_summary = [0u8; 32];
             let computed_root = commit_state.calculate_state_root();
             if computed_root != block.state_root {
                 return Err(format!(
@@ -4223,6 +4971,7 @@ impl Blockchain {
         self.state = commit_state;
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
+        self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
         self.mempool.set_min_fee(self.state.base_fee);
@@ -4234,8 +4983,12 @@ impl Blockchain {
 
         // Counter and tx-type metrics must be read before `push` consumes the block.
         let applied_tx_count = block.transactions.len() as u64;
+        let committed_index = block.index;
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        // Same clock rule as the other commit path: block commit drives the
+        // external-domain registry height, nothing else does.
+        self.external_intake.on_block_committed(committed_index);
 
         if let Some(last_block) = self.chain.last() {
             // Call record_block_with_chain first (chain-aware hooks like PoW difficulty adjustment)
@@ -4433,8 +5186,7 @@ impl Blockchain {
 
         if reorg_depth > MAX_REORG_DEPTH {
             return Err(format!(
-                "Reorg depth {} exceeds max {}",
-                reorg_depth, MAX_REORG_DEPTH
+                "Reorg depth {reorg_depth} exceeds max {MAX_REORG_DEPTH}"
             ));
         }
 
@@ -4487,7 +5239,6 @@ impl Blockchain {
         self.global_headers = Vec::new();
         self.pending_finality_certs = BTreeMap::new();
         self.pending_slashing_evidence = Vec::new();
-        self.settlement_finality_hashes = Vec::new();
         self.universal_relayer = UniversalRelayer::new(RelayerConfig::default());
         self.proof_claims = crate::prover::ProofClaimRegistry::new();
         self.pending_storage_root = None;
@@ -4531,13 +5282,6 @@ impl Blockchain {
                     }
                     if let Err(e) = self.domain_commitment_registry.insert(commitment.clone()) {
                         warn!("Skipping duplicate commitment during reorg: {e}");
-                    } else {
-                        for (addr, new_nonce) in &commitment.state_updates {
-                            if *new_nonce > self.state.get_nonce(addr) {
-                                let account = self.state.get_or_create(addr);
-                                account.nonce = *new_nonce;
-                            }
-                        }
                     }
                 }
             }
@@ -4603,6 +5347,11 @@ impl Blockchain {
             } else {
                 AccountState::new()
             };
+            // The rebuild starts from a fresh state; carry the engine's
+            // domain over before re-executing blocks, or a reorg after an
+            // identity write would replay it as a refusal and fork the node
+            // off its own chain.
+            current_state.execution_domain = self.consensus.domain_kind();
             for block in &self.chain[fork_point..] {
                 current_state = Self::apply_block_effects(
                     &current_state,
@@ -4686,14 +5435,17 @@ impl Blockchain {
             return None;
         }
         let block = &self.chain[height as usize];
-        let state =
+        let mut state =
             Self::rebuild_state(&self.chain[..=height as usize], &self.genesis_config).ok()?;
+        // Same rule as the reorg path: a rebuild must replay identity writes
+        // under the same gate the chain applied them under, or the served
+        // snapshot disagrees with the canonical state root at that height.
+        state.execution_domain = self.consensus.domain_kind();
         let finalized_height = self.finalized_height.min(height);
         let finalized_hash = self
             .chain
             .get(finalized_height as usize)
-            .map(|block| block.hash.clone())
-            .unwrap_or_else(|| self.finalized_hash.clone());
+            .map_or_else(|| self.finalized_hash.clone(), |block| block.hash.clone());
 
         // Produce V2 snapshot with full consensus metadata
         let genesis_hash = self
@@ -4834,6 +5586,10 @@ impl Blockchain {
         }
 
         let mut snapshot_state = AccountState::from_snapshot(&snapshot);
+        // Snapshot loading replaces the whole state; the domain is not part
+        // of a snapshot (a peer's engine is not this node's), so re-stamp it
+        // from the local engine before the state goes live.
+        snapshot_state.execution_domain = self.consensus.domain_kind();
         let snapshot_state_root = snapshot_state.calculate_state_root();
         if !block.state_root.is_empty() && snapshot_state_root != block.state_root {
             return Err(format!(
@@ -4873,6 +5629,7 @@ impl Blockchain {
         }
 
         let mut v2_state = AccountState::from_snapshot_v2(v2);
+        v2_state.execution_domain = self.consensus.domain_kind();
         let state_root = v2_state.calculate_state_root();
         if !block.state_root.is_empty() && state_root != block.state_root {
             return Err(format!(
@@ -5189,23 +5946,23 @@ impl Blockchain {
     pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         let epoch =
             checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
-        let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
         // The aggregator is always started for the current epoch, so the set
         // is known by construction; `build_validator_snapshot` is the same
         // value the lookup would return.
         let snapshot = self
             .validator_snapshot_for_epoch(epoch)
             .unwrap_or_else(|| self.build_validator_snapshot(epoch));
-        aggregator.set_validator_snapshot(snapshot);
+        let aggregator =
+            FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
     }
 
     pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
-        self.finality_aggregator
-            .as_ref()
-            .map(|agg| agg.get_state())
-            .unwrap_or_else(crate::chain::finality::AggregatorState::inactive)
+        self.finality_aggregator.as_ref().map_or_else(
+            crate::chain::finality::AggregatorState::inactive,
+            super::finality::FinalityAggregator::get_state,
+        )
     }
 
     pub fn consensus(&self) -> &dyn ConsensusEngine {
@@ -5358,7 +6115,154 @@ impl Blockchain {
                         .try_add_balance(&operator, economics.operator_bond)
                         .map_err(|e| format!("deal bond refund overflow: {e}"))?;
                 }
-                Err(format!("open_deal failed: {:?}", e))
+                Err(format!("open_deal failed: {e:?}"))
+            }
+        }
+    }
+
+    /// B.U.D.: On-chain acceptance of a reallocation (repair) ticket.
+    ///
+    /// The economic mirror of [`Self::open_storage_deal_with_escrow`] for
+    /// the replacement placement: the placement is decided by the ticket,
+    /// not the caller - manifest, shard and replica come from the registry
+    /// record - while the escrow and the bond are debited by this layer and
+    /// refunded on refusal, exactly like the original open.
+    ///
+    /// The registry's `accept_reallocation_ticket` keeps the one-shot
+    /// guarantee (a filled ticket refuses a second acceptance) and the
+    /// merkle envelope stays mandatory, so a replacement cannot claim a
+    /// shard it cannot prove. Until this path existed, a repair ticket
+    /// opened by the maintenance sweep could never be filled on-chain:
+    /// the trigger ran, and the acceptance was test-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_storage_reallocation_with_escrow(
+        &mut self,
+        ticket_id: u64,
+        replacement_operator: Address,
+        payer: Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: &crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let now_unix = self.current_unix_secs();
+
+        let ticket = self
+            .state
+            .storage_registry
+            .get_reallocation_ticket(ticket_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown reallocation ticket {ticket_id}"))?;
+        if !matches!(
+            ticket.status,
+            crate::domain::storage_deal::ReallocationStatus::Pending
+                | crate::domain::storage_deal::ReallocationStatus::UnderReplicated
+        ) {
+            return Err(format!(
+                "reallocation ticket {ticket_id} is not open for acceptance"
+            ));
+        }
+        // The identity refusal precedes the cooldown refusal deliberately: the
+        // slash that opened this very ticket also starts the operator's
+        // cooldown, so the cooldown message would otherwise always shadow the
+        // more specific answer - "you are the operator this ticket replaces".
+        // A cooldown expires; being the slashed operator of the ticket does
+        // not, and the caller deserves the refusal that never goes away.
+        if replacement_operator == ticket.slashed_operator {
+            return Err(format!(
+                "operator {replacement_operator} is the slashed operator of ticket {ticket_id}"
+            ));
+        }
+        if let Some(until) = self
+            .state
+            .storage_registry
+            .operator_cooldown_until(&replacement_operator, now_unix)
+        {
+            return Err(format!(
+                "operator {replacement_operator} missed a challenge and cannot take storage work until unix {until} ({} seconds left)",
+                until.saturating_sub(now_unix)
+            ));
+        }
+
+        let manifest = self
+            .state
+            .storage_registry
+            .get_manifest(&ticket.manifest_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "manifest {} of ticket {ticket_id} vanished",
+                    ticket.manifest_id
+                )
+            })?;
+        let epochs = end_epoch.saturating_sub(start_epoch);
+        if epochs == 0 {
+            return Err("Deal duration must be > 0".into());
+        }
+        // The ticket decides the placement; the bytes come from the
+        // manifest, the same source `open_deal` records below prices from.
+        let shard_bytes = u64::from(
+            manifest
+                .shard(&ticket.shard_id)
+                .ok_or_else(|| {
+                    format!(
+                        "shard {:?} is not part of manifest {:?}",
+                        ticket.shard_id, ticket.manifest_id
+                    )
+                })?
+                .size,
+        );
+        let total_fee = economics.total_fee(shard_bytes, epochs);
+        let bond = economics.operator_bond;
+
+        // 1. Debit Payer (Client Escrow) - same shape as the open path.
+        if total_fee > 0 {
+            if self.state.get_balance(&payer) < total_fee {
+                return Err(format!(
+                    "Insufficient payer balance for deal fee {total_fee}"
+                ));
+            }
+            let account = self.state.get_or_create(&payer);
+            account.balance = account.balance.saturating_sub(total_fee);
+        }
+        // 2. Lock Operator Bond.
+        if bond > 0 {
+            if self.state.get_balance(&replacement_operator) < bond {
+                return Err(format!("Insufficient operator balance for bond {bond}"));
+            }
+            let account = self.state.get_or_create(&replacement_operator);
+            account.balance = account.balance.saturating_sub(bond);
+        }
+        match self.state.storage_registry.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+            merkle_proof,
+            storage_root,
+        ) {
+            Ok(replacement_deal_id) => {
+                self.persist_storage_registry()?;
+                Ok(replacement_deal_id)
+            }
+            Err(e) => {
+                // Refund on refusal - mirroring the open path, where a
+                // refused deal never keeps the escrow or the bond.
+                if total_fee > 0 {
+                    self.state
+                        .try_add_balance(&payer, total_fee)
+                        .map_err(|e| format!("deal fee refund overflow: {e}"))?;
+                }
+                if bond > 0 {
+                    self.state
+                        .try_add_balance(&replacement_operator, bond)
+                        .map_err(|e| format!("deal bond refund overflow: {e}"))?;
+                }
+                Err(format!("accept_reallocation_ticket failed: {e:?}"))
             }
         }
     }
@@ -5877,8 +6781,7 @@ impl Blockchain {
                 .state
                 .storage_registry
                 .get_deal(deal_id)
-                .map(|deal| deal.operator)
-                .unwrap_or_else(Address::zero);
+                .map_or_else(Address::zero, |deal| deal.operator);
             if let Ok(result) = self
                 .state
                 .storage_registry
@@ -6089,8 +6992,9 @@ impl Clone for Blockchain {
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),
+            quarantine_ledger: self.quarantine_ledger.clone(),
             universal_relayer: self.universal_relayer.clone(),
-            settlement_finality_hashes: self.settlement_finality_hashes.clone(),
+            external_intake: self.external_intake.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
             finality_aggregator: None,
             metrics: self.metrics.clone(),
@@ -6108,6 +7012,99 @@ impl Clone for Blockchain {
 mod tests {
     use super::*;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
+
+    /// Decode helper for the window tests.
+    fn h32(hex_str: &str) -> crate::domain::Hash32 {
+        let bytes = hex::decode(hex_str).expect("test hashes are hex");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
+    /// F-7: the settlement finality window is a pure function of the chain
+    /// prefix. A checkpoint enters only once it is buried a finality
+    /// horizon deep, and leaves once it is older than the settled-row
+    /// retention; the genesis height, non-checkpoint heights and malformed
+    /// hashes never enter.
+    #[test]
+    fn settlement_window_buries_checkpoints_behind_the_horizon() {
+        let hash_of = |h: u64| {
+            let mut bytes = [0u8; 32];
+            bytes[0..8].copy_from_slice(&h.to_be_bytes());
+            hex::encode(bytes)
+        };
+        let interval = 10u64;
+        let entries: Vec<(u64, String)> = (0..1501u64).map(|h| (h, hash_of(h))).collect();
+
+        // tip 1500: checkpoints 10..=500 are buried at least the horizon
+        // (1000); 510 and everything shallower are not; the genesis height
+        // and every non-checkpoint height are skipped; the retention floor
+        // saturates at 0, so nothing rotates out yet.
+        let window = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        assert_eq!(window.len(), 50);
+        assert_eq!(window[0], h32(&hash_of(10)));
+        assert_eq!(window[49], h32(&hash_of(500)));
+
+        // A malformed hash at a checkpoint height is skipped
+        // deterministically: every node holds the same string and derives
+        // the same (shorter) window.
+        let mut malformed = entries.clone();
+        malformed[300].1 = String::from("not-hex");
+        let window = crate::chain::finality::settlement_finality_window_from(
+            malformed.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        assert_eq!(window.len(), 49);
+
+        // tip 12000: horizon 11000, retention floor 2000. Checkpoints
+        // 2000..=11000 stay; 10..=1990 have rotated out; 11010 is not
+        // buried yet.
+        let entries: Vec<(u64, String)> = (0..12001u64).map(|h| (h, hash_of(h))).collect();
+        let window = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            12000,
+        );
+        assert_eq!(window.len(), 901);
+        assert_eq!(window[0], h32(&hash_of(2000)));
+        assert_eq!(window[900], h32(&hash_of(11000)));
+
+        // Before any checkpoint can be buried a full horizon deep, the
+        // window is empty: the settlement input starts out honest.
+        let entries: Vec<(u64, String)> = (0..1000u64).map(|h| (h, hash_of(h))).collect();
+        assert!(crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            999,
+        )
+        .is_empty());
+
+        // The same inputs always derive the same window, and a zero
+        // interval cannot invent checkpoints.
+        let entries: Vec<(u64, String)> = (0..1501u64).map(|h| (h, hash_of(h))).collect();
+        let first = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        let second = crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            interval,
+            1500,
+        );
+        assert_eq!(first, second);
+        assert!(crate::chain::finality::settlement_finality_window_from(
+            entries.iter().map(|(h, s)| (*h, s.as_str())),
+            0,
+            1500,
+        )
+        .is_empty());
+    }
     use crate::consensus::PoWEngine;
     use crate::crypto::primitives::KeyPair;
     use crate::storage::db::Storage;
@@ -6446,8 +7443,7 @@ mod tests {
         for domain_id in 1..=4 {
             assert!(
                 blockchain.domain_registry.get(domain_id).is_some(),
-                "bootstrap domain {} must be registered during startup",
-                domain_id
+                "bootstrap domain {domain_id} must be registered during startup"
             );
         }
         assert_eq!(
@@ -6457,6 +7453,44 @@ mod tests {
                 .expect("bft bootstrap domain")
                 .finality_adapter,
             "bft-quorum-commit"
+        );
+    }
+
+    /// A known-network genesis that DECLARES the ceremony accounts but
+    /// drifts from them is refused at the chain boundary, fail-closed.
+    #[test]
+    fn declared_ceremony_that_fails_validation_is_refused_at_startup() {
+        let build = || {
+            let mut config = crate::chain::genesis::mainnet_genesis();
+            config.tokenomics_addresses = Some(crate::tokenomics::TokenomicsAddresses {
+                community: Address::from([0xC1; 32]),
+                liquidity: Address::from([0xC2; 32]),
+                ecosystem: Address::from([0xC3; 32]),
+                team: Address::from([0xC4; 32]),
+                burn_reserve: Address::from([0xC5; 32]),
+            });
+            // Supply stays balanced (that gate runs first and panics on its
+            // own message); the skeleton's validator roster is what the
+            // ceremony refuses once the addresses are declared.
+            let consensus = Arc::new(PoWEngine::new(0));
+            let _ = Blockchain::new_with_genesis(
+                consensus,
+                None,
+                Network::Mainnet.chain_id().value(),
+                None,
+                Some(config),
+            );
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(build));
+        let err = outcome.expect_err("a declared-but-broken ceremony must be refused at startup");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("Genesis ceremony validation failed"),
+            "the refusal must carry the ceremony banner, got: {msg}"
         );
     }
 
@@ -6820,6 +7854,37 @@ mod tests {
             .expect("peer must accept a self-produced mainnet block");
     }
 
+    /// Audit 2026-09-09, F-3: an operator sealing global headers must not
+    /// fork the node. The last sealed header is node-local operator state;
+    /// hashing it into the state root made the producer's root irreproducible
+    /// by unsealed peers (and inconsistent with the reorg paths, which
+    /// validate against the empty canonical value). Regression: a producer
+    /// that has sealed produces a block an unsealed peer accepts.
+    #[test]
+    fn sealed_global_header_does_not_fork_peer_state_root() {
+        let chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let producer = Address::from([0xABu8; 32]);
+        let mut producer_chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, chain_id, None);
+
+        // The operator exercises the seal path (bud_sealGlobalHeader).
+        producer_chain.seal_global_header(None).expect("first seal");
+        producer_chain
+            .seal_global_header(None)
+            .expect("second seal");
+        assert_eq!(producer_chain.global_headers.len(), 2);
+
+        let (block, _) = producer_chain
+            .produce_block(producer)
+            .expect("producer should create a block after sealing");
+
+        let mut receiver = Blockchain::new(Arc::new(PoWEngine::new(0)), None, chain_id, None);
+        receiver
+            .validate_and_add_block(block)
+            .expect("peer without any sealed global header must accept the block");
+    }
+
     #[test]
     fn test_historical_snapshot_rebuilds_state_at_height() {
         let consensus = Arc::new(PoWEngine::new(0));
@@ -7090,8 +8155,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let stake_before = blockchain
         .state
         .get_validator(&alice_pub)
-        .map(|v| v.stake)
-        .unwrap_or(0);
+        .map_or(0, |v| v.stake);
     // Drive the slashing path with the configured DoubleSign
     // Ratio (7%) - the same ratio that `apply_system_effects`
     // Reads from `RegistryParams` for on-chain
@@ -7110,8 +8174,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let stake_after = blockchain
         .state
         .get_validator(&alice_pub)
-        .map(|v| v.stake)
-        .unwrap_or(0);
+        .map_or(0, |v| v.stake);
 
     // The configured DoubleSign ratio is 7% - so the slash
     // Must be ~7% of `stake_before`, NOT 10% (the historical
@@ -7123,10 +8186,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let diff = expected_slash.abs_diff(actual_slash);
     assert!(
         diff <= stake_before / 100,
-        "slash must follow the configured 7% ratio, expected ~{}, got {} (diff {})",
-        expected_slash,
-        actual_slash,
-        diff
+        "slash must follow the configured 7% ratio, expected ~{expected_slash}, got {actual_slash} (diff {diff})"
     );
 }
 

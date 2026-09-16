@@ -228,8 +228,7 @@ fn guest_builder_emits_no_branches() {
         .expect("builder must exist");
     let builder_end = src[builder_start..]
         .find("\npub fn matmul_program_hash")
-        .map(|o| builder_start + o)
-        .unwrap_or(src.len());
+        .map_or(src.len(), |o| builder_start + o);
     let body = &src[builder_start..builder_end];
     for branch in ["Opcode::Jnz", "Opcode::Jmp", "Opcode::Call", "Opcode::Ret"] {
         assert!(

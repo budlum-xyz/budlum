@@ -240,7 +240,7 @@ mod tests {
                 .split(CodecKind::RawFrames, &blob)
                 .unwrap_err(),
             CodecError::BadFrameCount {
-                count: u32::MAX as u64
+                count: u64::from(u32::MAX)
             }
         );
     }

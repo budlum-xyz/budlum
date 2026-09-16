@@ -113,7 +113,7 @@ fn speedup(serial: Duration, pool: Duration) -> f64 {
 
 fn main() {
     let data = corpus();
-    let bytes: usize = data.iter().map(|c| c.len()).sum();
+    let bytes: usize = data.iter().map(std::vec::Vec::len).sum();
 
     let (serial_time, serial_out) = measure(&data, |d| d.iter().map(|c| pack_one(c)).collect());
     let (pool_time, pool_out) = measure(&data, |d| d.par_iter().map(|c| pack_one(c)).collect());
@@ -126,7 +126,7 @@ fn main() {
         );
         exit(2);
     }
-    let packed: usize = serial_out.iter().map(|p| p.len()).sum();
+    let packed: usize = serial_out.iter().map(std::vec::Vec::len).sum();
     println!(
         "ratio_rayon: {COUNT} chunks of {CHUNK} B, {bytes} B in, {packed} B packed, {REPEAT} \
          repetitions, fastest reported"

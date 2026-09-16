@@ -85,6 +85,178 @@ pub trait BudlumApi {
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Registers a permissionless external domain: adapter spec in, admission
+    /// self-test run, bond checked, and the domain becomes submittable.
+    /// Operator-only for the same reason `bud_registerConsensusDomain` is -
+    /// this build's economics move no signed stake yet, and an unsigned bond
+    /// number from an anonymous caller is not a bond.
+    #[method(name = "bud_registerExternalDomain")]
+    async fn register_external_domain(
+        &self,
+        registration: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Submits external-finality evidence to a registered external domain.
+    /// Returns the accepted attestation, or the named refusal.
+    #[method(name = "bud_submitExternalEvidence")]
+    async fn submit_external_evidence(
+        &self,
+        evidence: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Reads one external domain's public profile: state, trust model, bond,
+    /// accept/refuse history - the facts, with units, judgement left to the
+    /// reader.
+    #[method(name = "bud_getExternalDomainProfile")]
+    async fn get_external_domain_profile(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Lists every registered external domain's profile, each with the
+    /// one-line summary the profile module renders.
+    #[method(name = "bud_getExternalDomains")]
+    async fn get_external_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The deterministic digest of the external-intake state. Two nodes that
+    /// applied the same registrations and attestations return the same value;
+    /// this is the cross-node commitment until the header earns a root (see
+    /// `cross_domain::external::intake`).
+    #[method(name = "bud_getExternalIntakeDigest")]
+    async fn get_external_intake_digest(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-runs admission for a faulted external domain against its stored
+    /// golden sample and probes. Operator-only.
+    #[method(name = "bud_readmitExternalDomain")]
+    async fn readmit_external_domain(
+        &self,
+        domain_key_hex: String,
+        reason: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Schedules an evidence-format fork for an external domain. Operator-only.
+    #[method(name = "bud_scheduleExternalFork")]
+    async fn schedule_external_fork(
+        &self,
+        domain_key_hex: String,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Slashes the prover that carried an accepted external attestation,
+    /// paying the challenger from the penalty. Operator-only in this build:
+    /// the challenge game's dispute transcript is not yet a signed
+    /// transaction type.
+    #[method(name = "bud_slashExternalProver")]
+    async fn slash_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Bonds an additional prover to a registered external domain, so a
+    /// quorum policy has more than one slashable voice. Operator-only for
+    /// the same reason registration is: this build's economics move no
+    /// signed stake yet.
+    #[method(name = "bud_bondExternalProver")]
+    async fn bond_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. From then on submissions enter rounds keyed by external
+    /// height; nothing commits until enough bonded provers carry the same
+    /// claim, and a dispute freezes the domain for the challenge game.
+    /// Operator-only for the same reason registration is.
+    #[method(name = "bud_setExternalQuorumPolicy")]
+    async fn set_external_quorum_policy(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Reads the quorum round for one external height of one domain: its
+    /// state, every recorded answer, and who gave it. This is where a
+    /// submitter whose evidence returned "round pending" watches the round.
+    #[method(name = "bud_getExternalQuorumRound")]
+    async fn get_external_quorum_round(
+        &self,
+        domain_key_hex: String,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Lists every retained quorum round of one domain with the policy they
+    /// run under, oldest external height first.
+    #[method(name = "bud_getExternalQuorumRounds")]
+    async fn get_external_quorum_rounds(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Assembles submission material for an external domain from its parts,
+    /// without submitting anything. For the BudZKVM adapter it encodes a
+    /// `ZkFinalityEvidence` (envelope + public inputs + program) into the
+    /// adapter's payload and wraps the whole evidence into the raw finality
+    /// carrier used by consensus domains bridged through the external
+    /// framework. It also returns the starting version policy a registrar
+    /// would declare (`single`, version pinned to the adapter's constant)
+    /// and the payload cap the decoder enforces, so a registrar builds a
+    /// registration from this response instead of guessing constants.
+    #[method(name = "bud_encodeExternalEvidence")]
+    async fn encode_external_evidence(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The full status of one external domain: the registration record
+    /// (economics with the honesty arithmetic evaluated, version windows
+    /// with their liveness at the current clock, every prover bond with its
+    /// sufficiency and slashing history), the latest attestation, and the
+    /// profile's derived ratios. Everything the profile's one-line summary
+    /// compresses, uncompressed.
+    #[method(name = "bud_getExternalDomainStatus")]
+    async fn get_external_domain_status(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-runs one registered domain's fault probes against its stored
+    /// golden sample, without touching the registry: a dry run of the same
+    /// admission harness, reporting each probe's outcome by name. This is
+    /// how an operator checks "would this domain still pass admission"
+    /// before calling `bud_readmitExternalDomain`, which does mutate.
+    #[method(name = "bud_replayExternalProbes")]
+    async fn replay_external_probes(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Parses a sync-committee update payload without submitting it:
+    /// the decoded fields, the participation arithmetic (count, threshold,
+    /// supermajority verdict), the slot-to-epoch/period derivations and the
+    /// byte layout the parser applied. This is the dry run an integrator
+    /// uses to see exactly what the Ethereum adapter would see, with the
+    /// same parser - not a lookalike.
+    #[method(name = "bud_inspectEthereumUpdate")]
+    async fn inspect_ethereum_update(
+        &self,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Plans verification of Budlum's hybrid finality proof on a target
+    /// EVM: which precompiles the probes proved, which mode that allows
+    /// (full cryptographic, half-challenge, optimistic), and the gas
+    /// estimate split into crypto and calldata. The planner refuses
+    /// malformed material and unbound message points; refusals name the
+    /// rule. Deployment tooling reads this from the node so the plan and
+    /// the node agree on the rules.
+    #[method(name = "bud_planEvmVerification")]
+    async fn plan_evm_verification(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_registerConsensusDomain")]
     async fn register_consensus_domain(
         &self,
@@ -436,6 +608,15 @@ pub trait BudlumApi {
     /// refused here, not at the viewer. The returned session id is served by
     /// `bud_storageRevealFrames`; sessions are capped at
     /// `MAX_REVEAL_SESSIONS` and expire after `REVEAL_SESSION_TTL_SECS`.
+    ///
+    /// The viewer is not a field: `viewer_claim` is
+    /// `{viewerPublicKey, signature, issuedAt}`, an ML-DSA-87 signature by the
+    /// viewer's own key over `view_claim_digest(content, viewer, key_id,
+    /// owner, payload_commitment(packed), issuedAt)`. The viewer address is
+    /// derived from the key, so a caller cannot name a grantee it is not; a
+    /// claim older than `VIEW_CLAIM_MAX_AGE_SECS` is refused. `owner` is
+    /// checked against the owner the chain recorded for `content_id` and a
+    /// mismatch is refused by name (`-32006`) before any grant is looked up.
     #[method(name = "bud_storageOpenReveal")]
     async fn storage_open_reveal(
         &self,
@@ -443,7 +624,7 @@ pub trait BudlumApi {
         recipe: serde_json::Value,
         full_public: Option<serde_json::Value>,
         packed: String,
-        viewer: String,
+        viewer_claim: serde_json::Value,
         owner: String,
         key_id: String,
         meter_budget: Option<u64>,
@@ -491,6 +672,27 @@ pub trait BudlumApi {
         operator: String,
         payer: String,
         replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Accept a reallocation (repair) ticket: the replacement operator
+    /// opens the replacement deal for the ticket's slot, paying the same
+    /// escrow and bond shape as the original open. The placement (manifest,
+    /// shard, replica) is decided by the ticket, not the caller.
+    #[method(name = "bud_storageAcceptReallocation")]
+    async fn storage_accept_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: String,
+        payer: String,
         start_epoch: u64,
         end_epoch: u64,
         economics: crate::domain::storage_deal::StorageEconomicsParams,
@@ -851,8 +1053,6 @@ pub trait BudlumApi {
     #[method(name = "bud_aiGetModel")]
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a model registration transaction.
-    #[method(name = "bud_aiRegisterModel")]
     /// Prepare an AI model registration transaction template.
     ///
     /// The governance-tunable registration fee
@@ -860,12 +1060,10 @@ pub trait BudlumApi {
     /// `tx.amount`; the template sets amount 0 - the caller signs the final
     /// amount. Below-fee registrations are rejected atomically by the
     /// executor (`ai_model_register_fee_insufficient`).
-    /// Register an AI model (template; the governance-tunable registration
-    /// fee must be attached as tx.amount - see `ai_model_register_fee`).
     ///
-    /// The modality bits (`ModalitySet`). Absent means the old behaviour
-    /// (`text_only`). 0 reads nothing (`none` - a deliberate refusal). 1 is
-    /// text.
+    /// `modality_bits` carries the modality bits (`ModalitySet`). Absent
+    /// means the old behaviour (`text_only`). 0 reads nothing (`none` - a
+    /// deliberate refusal). 1 is text.
     #[method(name = "bud_aiRegisterModel")]
     async fn ai_register_model(
         &self,
@@ -1061,4 +1259,35 @@ pub trait BudlumApi {
     /// Fail-closed flags for scheduler, worker, proof, and settlement wiring.
     #[method(name = "bud_aiInferenceStats")]
     async fn ai_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The DID document of a `did:bud:<hex>` subject, as the master registry
+    /// holds it: methods with their revocation state AT THIS READ'S EPOCH,
+    /// the credential root, guardians, and the recovery threshold.
+    ///
+    /// A malformed DID is a refused call, an absent document is `null`: the
+    /// two answers must stay tellable apart or a consent screen cannot render
+    /// "not registered yet" differently from "typo".
+    #[method(name = "bud_identityResolve")]
+    async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// One credential commitment by id, with the registry's own validity
+    /// verdict at the current epoch. The commitment is what the chain holds;
+    /// the values were never on it.
+    #[method(name = "bud_identityCredential")]
+    async fn identity_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Re-verify a wallet's presentation receipt against the registry as it
+    /// stands now: the receiving service's door, where a revocation turns
+    /// yesterday's accepted document into today's refusal. `valid:false` is
+    /// an answer, not a call error - only an ill-formed request errors.
+    #[method(name = "bud_identityVerifyPresentation")]
+    async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: String,
+        document: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

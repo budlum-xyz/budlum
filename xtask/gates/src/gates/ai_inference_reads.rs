@@ -171,14 +171,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-ai_inference-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ai_inference")?;
     let _ = std::fs::create_dir_all(dir.join("src/ai_inference"));
 
     let good = "pub enum PerceptionKind {\n    Text,\n    Image,\n    Video,\n    Audio,\n}\npub const MAX_TEXT_INPUT_BYTES: u64 = 1;\npub const MAX_IMAGE_INPUT_PIXELS: u64 = 1;\npub const MAX_AUDIO_INPUT_MILLIS: u64 = 1;\npub const MAX_VIDEO_INPUT_FRAMES: u64 = 1;\npub fn perception_unit(k: PerceptionKind) -> &'static str {\n    match k {\n        PerceptionKind::Text => \"bytes\",\n        PerceptionKind::Image => \"pixels\",\n        PerceptionKind::Audio => \"milliseconds\",\n        PerceptionKind::Video => \"frames\",\n    }\n}\npub fn none() -> Self { Self(0) }\npub const ModalityNotDeclared: u8 = 1;\npub fn needs_decoder(k: PerceptionKind) -> bool {\n    !matches!(k, Self::Text)\n}\n";

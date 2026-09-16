@@ -104,7 +104,9 @@ impl std::error::Error for PoaMembershipError {}
 /// Both are keyed by `(domain, account)` so PoA domains are independent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PoaMembershipRegistry {
+    #[serde(with = "crate::core::map_keys")]
     admins: BTreeMap<(DomainId, Address), ()>,
+    #[serde(with = "crate::core::map_keys")]
     members: BTreeMap<(DomainId, Address), PoaMember>,
 }
 
@@ -241,8 +243,7 @@ impl PoaMembershipRegistry {
     pub fn is_authorized(&self, domain: DomainId, account: &Address) -> bool {
         self.members
             .get(&(domain, *account))
-            .map(PoaMember::is_authorized)
-            .unwrap_or(false)
+            .is_some_and(PoaMember::is_authorized)
     }
 
     pub fn get(&self, domain: DomainId, account: &Address) -> Option<&PoaMember> {

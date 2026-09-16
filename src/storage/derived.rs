@@ -89,10 +89,11 @@
 //! # What is actually stored
 //!
 //! A [`DerivedSpec`]: the master's id, the box in block units, and which
-//! transform. Forty-two bytes, against the several kilobytes an independently
-//! encoded crop costs. The multiplier rounds to zero, the same as a generated
-//! object, and for the same reason: what is kept is a description. A prefix
-//! spends seventeen more on its span, see [`DERIVED_PREFIX_SPEC_BYTES`].
+//! transform. [`DERIVED_SPEC_BYTES`] (58) against the several kilobytes an
+//! independently encoded crop costs. The multiplier rounds to zero, the same
+//! as a generated object, and for the same reason: what is kept is a
+//! description. A prefix spends seventeen more on its span, see
+//! [`DERIVED_PREFIX_SPEC_BYTES`].
 //!
 //! # Verification is the same one sentence as everywhere else
 //!
@@ -602,7 +603,14 @@ impl DerivedSpec {
     /// to correct: 40% of objects and 0.1% of bytes are the same measurement,
     /// and either one on its own misleads.
     pub const fn stored_versus_independent(&self, independent_bytes: u64) -> (u64, u64) {
-        (DERIVED_SPEC_BYTES, independent_bytes)
+        // A prefix carries its span, so it is the larger record; quoting the
+        // plain spec size for it understated the stored cost by the span.
+        let stored = if self.prefix.is_some() {
+            DERIVED_PREFIX_SPEC_BYTES
+        } else {
+            DERIVED_SPEC_BYTES
+        };
+        (stored, independent_bytes)
     }
 }
 
@@ -982,6 +990,11 @@ mod tests {
         let (stored, independent) = spec().stored_versus_independent(1_209);
         assert_eq!(stored, DERIVED_SPEC_BYTES);
         assert_eq!(independent, 1_209);
+        let (prefix_stored, _) = prefix_spec().stored_versus_independent(1_209);
+        assert_eq!(
+            prefix_stored, DERIVED_PREFIX_SPEC_BYTES,
+            "a prefix quotes the record that carries its span"
+        );
         assert!(
             stored * 20 < independent,
             "the description must be at least an order of magnitude smaller, \

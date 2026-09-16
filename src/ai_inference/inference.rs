@@ -156,7 +156,12 @@ mod tests {
             1,
             1000,
             &grant,
-            None,
+            Some(crate::ai_inference::perception::PerceptionRequest {
+                asset_id: crate::pollen::AssetId([9; 32]),
+                content_id: crate::storage::content_id::ContentId([7; 32]),
+                kind: crate::ai_inference::perception::PerceptionKind::Text,
+                declared_units: 18,
+            }),
         )
         .expect("build request");
         assert!(req.verify_id(), "canonical request_id must verify");

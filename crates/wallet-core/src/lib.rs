@@ -92,6 +92,8 @@ pub enum WalletError {
     InvalidMnemonic(String),
     /// Invalid entropy size.
     InvalidEntropy(usize),
+    /// The mnemonic word count is not one of the supported BIP39 sizes.
+    InvalidWordCount(usize),
     /// Invalid seed.
     InvalidSeed,
     /// Invalid multisig policy.
@@ -116,6 +118,9 @@ impl std::fmt::Display for WalletError {
             WalletError::InvalidMnemonic(m) => write!(f, "invalid mnemonic: {m}"),
             WalletError::InvalidEntropy(n) => {
                 write!(f, "invalid entropy size: {n} bytes (expected 16 or 32)")
+            }
+            WalletError::InvalidWordCount(n) => {
+                write!(f, "invalid mnemonic word count: {n} (expected 12 or 24)")
             }
             WalletError::InvalidSeed => write!(f, "invalid seed"),
             WalletError::InvalidMultisigPolicy(m) => write!(f, "invalid multisig policy: {m}"),
@@ -959,7 +964,7 @@ impl Wallet {
         let entropy_len = match word_count {
             12 => 16, // 128 bit
             24 => 32, // 256 bit
-            _ => return Err(WalletError::InvalidEntropy(word_count * 4 / 3)),
+            _ => return Err(WalletError::InvalidWordCount(word_count)),
         };
 
         // Production CSPRNG: real random entropy via getrandom
@@ -1220,7 +1225,7 @@ impl Wallet {
     /// Sign a message. If TEE is enabled, requires a live runtime, seals the
     /// message, and requires an **attestation** binding the seal digest to
     /// the enclave measurement before signing (fail-closed otherwise). The
-    /// attestation's `report_data` is the SHA-256 of the sealed bytes, so a
+    /// attestation's `report_data` is the SHA3-256 of the sealed bytes, so a
     /// runtime that substitutes attacker-controlled sealed bytes cannot
     /// produce an attestation for the digest the wallet signs (HIGH,
     /// security audit).
@@ -1321,16 +1326,37 @@ impl Wallet {
             ));
         }
 
-        let outputs = privacy_transfer::build_outputs(&req)?;
-        // Security audit (HIGH): it was not verified that the input note belongs to THIS
-        // wallet - a note carrying another wallet's recipient_tag
-        // harcanabiliyordu (cross-wallet spending). Notun recipient tag'i
-        // must be derived from this wallet's address.
-        let wallet_tag = crate::privacy_crypto::address_to_recipient_tag(&self.address());
+        // Security audit (HIGH): the input note and the change output both
+        // have to be bound to THIS wallet before any output is built. Checking
+        // only the input still lets a compromised caller redirect the change
+        // tag to an attacker-controlled recipient.
+        req.validate_conservation()?;
+        let wallet_address = self.address();
+        let wallet_tag = crate::privacy_crypto::address_to_recipient_tag(&wallet_address);
         if req.input.recipient_tag != wallet_tag {
             return Err(WalletError::InvalidPrivateTransfer(
                 "input note recipient tag does not match this wallet's address".into(),
             ));
+        }
+        let change = req.input.amount - req.send_amount;
+        if change > 0 && req.change_recipient_tag != Some(wallet_tag) {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "change recipient tag does not match this wallet's address".into(),
+            ));
+        }
+        let mut outputs = privacy_transfer::build_outputs(&req)?;
+        if change > 0 {
+            // `build_outputs` is also used by low-level tests and intentionally
+            // accepts only a tag. The wallet is the authority that knows the
+            // actual self address, so replace the placeholder before the
+            // intent becomes externally visible.
+            if let Some(change_output) = outputs.get_mut(1) {
+                change_output.recipient = wallet_address;
+            } else {
+                return Err(WalletError::InvalidPrivateTransfer(
+                    "change amount produced no change output".into(),
+                ));
+            }
         }
         let nullifier_fe = req.input.nullifier();
         let nullifiers = vec![hash_from_field(nullifier_fe)];
@@ -1339,7 +1365,10 @@ impl Wallet {
             .map(|o| hash_from_field(o.commitment()))
             .collect();
         let sum_in = req.input.amount;
-        let sum_out: u64 = outputs.iter().map(|o| o.amount).sum();
+        let sum_out = outputs.iter().try_fold(0u64, |sum, output| {
+            sum.checked_add(output.amount)
+                .ok_or_else(|| WalletError::InvalidPrivateTransfer("output amount overflow".into()))
+        })?;
         if sum_in != sum_out {
             return Err(WalletError::InvalidPrivateTransfer(format!(
                 "sum conservation broken: in={sum_in} out={sum_out}"
@@ -1386,7 +1415,12 @@ impl Wallet {
                 self.next_blinding_counter
             )));
         }
-        self.next_blinding_counter = blinding_counter.saturating_add(1);
+        let next_counter = blinding_counter.checked_add(1).ok_or_else(|| {
+            WalletError::InvalidPrivateTransfer(
+                "blinding counter exhausted; refusing to reuse the final counter".into(),
+            )
+        })?;
+        self.next_blinding_counter = next_counter;
         let blinding = derive_blinding(&self.seed, blinding_counter);
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
@@ -1439,6 +1473,14 @@ mod tests {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
         assert_eq!(words.len(), 24, "must have 24 words");
+    }
+
+    #[test]
+    fn an_extreme_invalid_word_count_fails_without_arithmetic_overflow() {
+        let err = Wallet::generate(usize::MAX)
+            .err()
+            .expect("an extreme invalid word count must be refused");
+        assert!(matches!(err, WalletError::InvalidWordCount(usize::MAX)));
     }
 
     #[test]
@@ -2148,6 +2190,19 @@ mod tests {
     /// spend. The caller picks the counter, so the wallet has to be the one
     /// that refuses a counter it already handed out.
     #[test]
+    fn the_final_blinding_counter_cannot_be_reused_after_overflow() {
+        let mut w = Wallet::from_entropy(&[0x34u8; 16]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+        // The failed attempt did not mutate the cursor; the wallet still
+        // refuses the exhausted value rather than treating saturation as a
+        // fresh counter.
+        let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+    }
+
+    #[test]
     fn a_reused_blinding_counter_is_refused() {
         let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
@@ -2213,6 +2268,27 @@ mod tests {
             .unwrap();
         assert_eq!(intent.output_commitments.len(), 2);
         assert_eq!(intent.sum_out, 100);
+        assert_eq!(intent.outputs[1].recipient, w.address());
+    }
+
+    #[test]
+    fn d2_wallet_change_cannot_be_redirected_by_a_foreign_tag() {
+        let mut w = Wallet::from_entropy(&[0x45u8; 16]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
+        let input = w.note_input_from_receive(100, blinding).unwrap();
+        let req = PrivateTransferRequest {
+            input,
+            to: [0xCEu8; 32],
+            send_amount: 60,
+            output_blinding: 11,
+            change_recipient_tag: Some(address_to_recipient_tag(&[0xEFu8; 32])),
+            change_blinding: Some(12),
+        };
+        let err = w
+            .build_private_transfer(req, &w.default_tee_runtime())
+            .unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }
 
     #[test]

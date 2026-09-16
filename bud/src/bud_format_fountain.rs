@@ -11,9 +11,23 @@ use sha3::{Digest, Sha3_256};
 
 pub const LT_MAGIC: [u8; 8] = *b"\xB5LT01\0\0\0";
 
+/// The most blocks one LT stream covers: `lt_decode` solves over a `u64`
+/// mask with a `k <= 16` bound, and the encoder's distinct-pick bookkeeping
+/// is a 64-slot table. Encoding more than the decoder can ever solve would
+/// produce symbols nobody can open.
+const LT_MAX_BLOCKS: usize = 16;
+
 /// Produce n symbols from k blocks (deterministic - seeded generator).
+///
+/// Every block must have the same length: a symbol is the XOR of its chosen
+/// blocks, sized by the first block, so a shorter block would be zero-padded
+/// on encode and come back padded on decode, and a longer one would be cut.
 pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>, Vec<usize>)>> {
-    if blocks.is_empty() || n == 0 {
+    if blocks.is_empty() || n == 0 || blocks.len() > LT_MAX_BLOCKS {
+        return None;
+    }
+    let blen = blocks[0].len();
+    if blen == 0 || blocks.iter().any(|b| b.len() != blen) {
         return None;
     }
     let k = blocks.len();
@@ -65,7 +79,7 @@ pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>
 
 /// Recover the data from the collected symbols (forward elimination + back substitution; k <= 16).
 pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<u8>>> {
-    if k == 0 || k > 16 || symbols.is_empty() {
+    if k == 0 || k > LT_MAX_BLOCKS || symbols.is_empty() {
         return None;
     }
     let blen = symbols[0].0.len();
@@ -286,5 +300,13 @@ mod tests {
         assert!(lt_encode(&[vec![1u8]], 0, 1).is_none());
         assert!(lt_decode(&[], 0).is_none());
         assert!(lt_decode(&[], 17).is_none());
+        // Blocks of unequal length: the XOR would silently pad or truncate.
+        assert!(lt_encode(&[vec![1u8, 2], vec![3u8]], 4, 1).is_none());
+        assert!(lt_encode(&[vec![], vec![]], 4, 1).is_none());
+        // More blocks than the decoder can solve: refused at encode time.
+        let too_many = vec![vec![7u8; 4]; LT_MAX_BLOCKS + 1];
+        assert!(lt_encode(&too_many, 40, 1).is_none());
+        let just_enough = vec![vec![7u8; 4]; LT_MAX_BLOCKS];
+        assert!(lt_encode(&just_enough, 40, 1).is_some());
     }
 }

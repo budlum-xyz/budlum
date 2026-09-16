@@ -1,0 +1,131 @@
+# Rust Quality: the Rust-level inspections the other twenty workflows do not run.
+#
+# WHAT IS MISSING (as of 2026-09-09, checked against every file in
+# .github/workflows/):
+#
+#   - ThreadSanitizer. miri.yml runs Miri and ASan over the crypto paths;
+#     neither detects data races (Miri's borrow checker is single-threaded
+#     by design, ASan is memory errors). The chain actor, the relayer
+#     pipeline and the p2p layer all carry real threads.
+#   - Clippy drift on the NEXT stable toolchain. The pin is 1.97.1 and
+#     ci.yml clippy runs under exactly that pin - which is why three new
+#     1.98 lints surfaced on a developer machine before anyone saw them in
+#     CI. A weekly clippy on latest stable fails BEFORE the pin bump
+#     becomes a surprise, and the fix is a deliberate choice: clean the
+#     lint or bump the pin, never silently wait.
+#   - Publisher visibility. cargo-vet answers "did a human vouch for this
+#     version", cargo-audit/OSV/Grype answer "is it vulnerable",
+#     cargo-deny answers "is the license acceptable". Nothing answers "WHO
+#     publishes the dependencies, and how many parties is that". The
+#     2024-25 supply-chain incidents were all single-publisher trust
+#     failures; the number is a report, not a verdict.
+#
+# WHY SCHEDULED, NOT PER-PUSH: all three are expensive (TSan multiplies
+# test time, drift builds against a moving toolchain, the publisher report
+# downloads a database), and per-push Rust coverage already lives in
+# ci.yml (fmt, clippy, tests, feature matrix, rustdoc, cargo-deny). This
+# workflow adds the weekly depth, not the daily breadth.
+
+name: Rust Quality
+
+on:
+  schedule:
+    - cron: "0 6 * * 2" # weekly, Tuesday 06:00 UTC (Monday 05:30 is security-hardening)
+  workflow_dispatch:
+
+concurrency:
+  group: rust-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tsan:
+    name: ThreadSanitizer (data races)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly; -Zsanitizer is nightly-only)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-tsan
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo test under ThreadSanitizer
+        # The explicit --target is required for sanitizer flags to apply.
+        # Default test-threads: races only exist under real concurrency, so
+        # the suite runs with the runner's parallelism, not --test-threads=1.
+        # TSan multiplies runtime; the 90-minute timeout is the honest
+        # budget for a weekly run of the lib suite.
+        run: |
+          set -euo pipefail
+          RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test --lib --target x86_64-unknown-linux-gnu 2>&1 | tee /tmp/tsan.log
+          if grep -qE "WARNING: ThreadSanitizer: (data race|thread leak)" /tmp/tsan.log; then
+            echo "ThreadSanitizer reported findings (see the log above)"
+            exit 1
+          fi
+          echo "ThreadSanitizer clean: no data races, no thread leaks."
+
+  next-stable:
+    name: Clippy drift (next stable toolchain)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (latest stable, NOT the pin)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo clippy on latest stable (deny warnings)
+        # Same command ci.yml runs under the pin, on a moving toolchain.
+        # A failure here means the NEXT pin bump will fail CI: fix the new
+        # lints now, or schedule the pin bump with eyes open. This job is
+        # an early warning, never a silent one: it blocks, it does not
+        # report-and-pass.
+        run: cargo clippy --all-targets -- -D warnings
+
+  publishers:
+    name: cargo supply-chain (publisher visibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install cargo-supply-chain (locked, as cargo-mutants is installed)
+        run: cargo install cargo-supply-chain --locked
+      - name: Publisher report (who publishes the dependency tree)
+        # A report, not a verdict: the same shape as the binary-size job in
+        # extra-tooling.yml. The summary lands on the run page; the number
+        # that matters is "distinct publishers", read next to "known
+        # auditors" from cargo-vet.
+        run: |
+          set -euo pipefail
+          cargo supply-chain update
+          {
+            echo "## Dependency publishers"
+            echo
+            cargo supply-chain crates
+          } >> "$GITHUB_STEP_SUMMARY"

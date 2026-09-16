@@ -94,6 +94,9 @@
 - [84. Where a guarantee lives](#84-where-a-guarantee-lives)
 - [85. A gate that panics is a gate that stopped checking](#85-a-gate-that-panics-is-a-gate-that-stopped-checking)
 - [86. When ambiguity stops being a reason to skip](#86-when-ambiguity-stops-being-a-reason-to-skip)
+- [87. A metric that is never written is a dashboard lie](#87-a-metric-that-is-never-written-is-a-dashboard-lie)
+- [88. B.U.D. edition Three holds no body](#88-bud-edition-three-holds-no-body)
+- [89. The root the chain commits is the root the circuit binds](#89-the-root-the-chain-commits-is-the-root-the-circuit-binds)
 
 ## 1. Overall system architecture
 
@@ -3927,3 +3930,103 @@ case, so every pre-edition id stays bit-identical. `Three` binds
 `Hybrid` and `Derived` at registration and at `validate_untrusted`. The
 generated-content gate pins the enum, `admits_body`, `check_source` and the
 commitment tag so the pair cannot silently disappear.
+
+## 89. The root the chain commits is the root the circuit binds
+
+Section 55 said `final_state_root` is recorded for conflict detection and not compared against the
+domain's real root. That was an honest boundary; this section is about the field itself.
+
+`ExecutionPublicInputs` carries two 32-byte fields that describe the outcome of a run.
+`state_writes_digest` is a Poseidon chain over every `SWrite` the program executed, in order, and the
+AIR derives it from the trace: the accumulator starts at zero, advances only on `SWrite` rows and is
+compared against `public[48..56]` on the last real row (constraint (2b)). `final_state_root` is not
+derived from anything. The prover writes it into the last row and the AIR compares that row against
+`public[18..26]` (constraint (2)); a value that only has to equal itself is a value the prover
+chooses.
+
+```mermaid
+flowchart LR
+  T["Execution trace: SWrite rows"] --> Acc["Poseidon accumulator, AIR-carried"]
+  Acc --> SWD["state_writes_digest = public[48..56]  (derived)"]
+  P["Prover"] --> FSR["final_state_root = public[18..26]  (asserted)"]
+  SWD --> Eq{"1g: equal?"}
+  FSR --> Eq
+  Eq -->|"no"| Rej["Refused before the fee"]
+  Eq -->|"yes"| Commit["domain.last_committed_hash = final_state_root"]
+```
+
+### What was measured
+
+Two things, on 2026-09-03.
+
+First, constraint (2b) in `plonky3_air.rs` had the right comment and the wrong body: it compared
+`COL_FINAL_ROOT_0` against `public[18..26]`, a copy of constraint (2). A program that wrote storage
+proved and verified with an all-zero `state_writes_digest`, and with a digest one bit away from the
+truth. The existing tamper tests did not see it because they alter a public input **after** proving,
+and Fiat-Shamir refuses any such change regardless of what the AIR constrains. Only a wrong value
+chosen **before** proving reaches the constraint; `soundness_negatives.rs` now bakes one in, and that
+test fails against the old body.
+
+Second, `submit_zk_proof` stored `final_state_root` as the domain's `last_committed_hash` without
+asking whether it was the proven value. `build_public_inputs` sets `final_state_root` equal to
+`state_writes_digest`, so every proof the chain's own prover produces carries the equality; a
+submission built by anything else could carry a proof of one transition and commit the root of
+another.
+
+### The two halves
+
+The chain does not trust the equality to hold; it checks it. Gate 1g refuses a submission whose
+`final_state_root` differs from its `state_writes_digest`, before the fee like the other shape checks
+(1b through 1f). With (2b) fixed, the value that reaches `last_committed_hash` is one the circuit
+derived from the execution.
+
+The AIR half changes the constraint set, so the BudZero source pins moved with it and every proof
+produced under the old constraints is refused by the new verifier; there is no deployed chain
+carrying such proofs. The alternative, deriving `final_state_root` inside the circuit as a hash of
+the initial root and the digest, was considered and set aside: it changes the meaning of a field the
+chain and the bridge already read, and the equality gives the same guarantee without a migration.
+
+## 90. The relayer verifies the deposit, not a path
+
+Section 68 fixed what `EvmChainAdapter::verify_deposit` returned; section 69 fixed what the trait
+path `verify_receipt_proof` accepted. Neither changed which of the two the relayer ran. The worker
+decoded a bare `MerkleProof` out of every observation and called `verify_receipt_proof`: a Merkle
+path against a receipts root the observation itself declared, with a leaf bound to the transaction
+hash and the bridge address. No header chain, no confirmation window, no receipt status, no deposit
+log. `verify_deposit` did all of that and had no caller; a test in `adapter.rs` pinned the gap by
+name and the unwired-guards baseline carried it with a note that wiring it was "a bridge-design
+question, not a call site".
+
+It became a call site the moment `--evm-bridge-address` let an operator register the adapter. From
+then on a configured node ran the weaker check on real deposits and the file's own header went on
+calling the other one the real safe path.
+
+### What changed
+
+`ChainAdapter` gained `verify_observation(&RelayerExternalResult)`. The default is the old
+behaviour, a bincode `MerkleProof` through `verify_receipt_proof`, so the test adapters that model a
+chain as a single Merkle tree keep working. The EVM adapter overrides it:
+
+- `receipt_proof` must decode as a `DepositProofPackage`: target header, confirmation headers, MPT
+  nodes, receipt key, transaction hash. A bare `MerkleProof` is refused with a message that names
+  what is missing.
+- The package is borrowed as an `EvmDepositProof` with the **adapter's** bridge address, deposit
+  topic and confirmation floor. The package does not carry those three, so a relayer cannot choose
+  which contract's log to match or how deep a reorg to survive.
+- `verify_deposit` runs, and three bindings follow it: the package's transaction hash is the
+  observation's, the `receiptsRoot` the header chain proves is the `external_state_root` the
+  observation declares (the root the executor will look up in `external_roots`), and `success`
+  agrees with the receipt status the verifier already required to be true.
+
+The worker calls `verify_observation` and no longer decodes a proof itself. The unwired-guards
+baseline went from four to three, and the test that pinned the gap was replaced by one that pins
+the wiring: the worker must not go back to reading a Merkle path, and the override must keep
+delegating to the one verifier.
+
+### What did not change
+
+The offline adapter still cannot produce an observation; `generate_receipt_proof` refuses, so a
+node with the bridge configured and no RPC-backed proof assembler signs nothing, as before. The
+executor's own gate is untouched: a `RelayerResult` still needs its root in the finalized
+`external_roots` registry, which no relayer can write. `verify_observation` is the relayer refusing
+to sign a lie; it is not the chain accepting a truth.

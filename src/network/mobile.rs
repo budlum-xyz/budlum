@@ -208,7 +208,7 @@ impl StorageStatus {
 }
 
 /// The challenge policy, tuned automatically to the battery state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChallengePolicy {
     /// The most challenges accepted per epoch.
     pub max_challenges_per_epoch: u32,
@@ -236,9 +236,12 @@ impl ChallengePolicy {
     /// node accepting no challenges and no proof tasks has nothing to gossip
     /// about and needs only enough peers to follow the chain; one running at
     /// full power carries the server budget.
+    ///
+    /// `server_budget` is a ceiling, not a floor: no mode may hold more peers
+    /// than the node was configured for, so each fixed budget is capped by it.
     #[must_use]
     pub const fn peer_budget(mode: PowerMode, server_budget: usize) -> usize {
-        match mode {
+        let wanted = match mode {
             PowerMode::Full => server_budget,
             PowerMode::Normal => 20,
             PowerMode::PowerSaving => 10,
@@ -246,6 +249,11 @@ impl ChallengePolicy {
             // blocks, or it stops being a node rather than becoming a frugal
             // one.
             PowerMode::Critical => 4,
+        };
+        if wanted < server_budget {
+            wanted
+        } else {
+            server_budget
         }
     }
 
@@ -284,8 +292,12 @@ impl ChallengePolicy {
     }
 
     /// The default policy, for normal mode.
+    /// The policy a fresh profile starts with: the one its battery,
+    /// [`BatteryStatus::full`], calls for. Deriving it keeps a new profile
+    /// consistent with `validate`, which refuses a policy that disagrees
+    /// with the battery mode.
     pub fn default_policy() -> Self {
-        Self::from_power_mode(PowerMode::Normal)
+        Self::from_power_mode(BatteryStatus::full().power_mode())
     }
 }
 
@@ -355,6 +367,14 @@ impl MobileNodeProfile {
         self.network.validate()?;
         self.storage.validate()?;
         self.nat_status.validate()?;
+        // `can_accept_tasks` trusts the stored policy, so a policy that the
+        // battery mode does not call for would enable work the battery state
+        // must disable. The policy is derived, never chosen.
+        if self.challenge_policy != ChallengePolicy::from_power_mode(self.battery.power_mode()) {
+            return Err(
+                "MobileNodeProfile challenge_policy does not match the battery mode".into(),
+            );
+        }
         if self.last_seen_epoch == u64::MAX {
             return Err("MobileNodeProfile last_seen_epoch sentinel invalid".into());
         }
@@ -393,9 +413,21 @@ impl MobileNodeProfile {
     }
 
     /// Updates the NAT state.
-    pub fn update_nat(&mut self, nat_type: NatType, public_ip: bool) {
-        self.network.nat_type = nat_type;
-        self.network.public_ip = public_ip;
+    ///
+    /// # Errors
+    ///
+    /// The candidate network state is validated before anything is written,
+    /// so `NatType::None` without a public address, which `NetworkStatus`
+    /// refuses, leaves the profile unchanged instead of being recorded and
+    /// then reported as hole-punched.
+    pub fn update_nat(&mut self, nat_type: NatType, public_ip: bool) -> Result<(), String> {
+        let candidate = NetworkStatus {
+            nat_type,
+            public_ip,
+            ..self.network.clone()
+        };
+        candidate.validate()?;
+        self.network = candidate;
 
         // Symmetric NAT means a relay is required
         if nat_type == NatType::Symmetric && !public_ip {
@@ -407,6 +439,7 @@ impl MobileNodeProfile {
         }
 
         self.nat_status.nat_detected = true;
+        Ok(())
     }
 
     pub fn set_relay_address(&mut self, relay_address: String) -> Result<(), String> {
@@ -457,7 +490,26 @@ mod tests {
     fn mobile_profile_default_policy() {
         let profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         assert!(profile.can_accept_tasks());
-        assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 50);
+        // A fresh profile carries a charging battery, and the policy is the
+        // one that battery calls for, not a fixed Normal table.
+        assert_eq!(profile.battery.power_mode(), PowerMode::Full);
+        assert_eq!(
+            profile.challenge_policy,
+            ChallengePolicy::from_power_mode(PowerMode::Full)
+        );
+        assert!(profile.validate().is_ok());
+    }
+
+    /// A stored policy the battery mode does not call for is refused: the
+    /// policy is derived from the battery, never chosen.
+    #[test]
+    fn a_policy_that_disagrees_with_the_battery_is_refused() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        profile.try_update_battery(5, false, 10).unwrap();
+        assert_eq!(profile.battery.power_mode(), PowerMode::Critical);
+        assert!(profile.validate().is_ok());
+        profile.challenge_policy = ChallengePolicy::from_power_mode(PowerMode::Full);
+        assert!(profile.validate().unwrap_err().contains("challenge_policy"));
     }
 
     #[test]
@@ -487,7 +539,8 @@ mod tests {
     #[test]
     fn update_battery_adjusts_policy() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
-        assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 50);
+        // A fresh profile is charging, so it starts on the Full policy.
+        assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 100);
 
         // Pil kritik
         profile.update_battery(5, false, 15).unwrap();
@@ -517,7 +570,7 @@ mod tests {
     #[test]
     fn nat_symmetric_requires_relay() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
-        profile.update_nat(NatType::Symmetric, false);
+        profile.update_nat(NatType::Symmetric, false).unwrap();
         assert!(profile.nat_status.using_relay);
         assert!(!profile.nat_status.hole_punched);
     }
@@ -525,9 +578,23 @@ mod tests {
     #[test]
     fn nat_public_ip_no_relay() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
-        profile.update_nat(NatType::None, true);
+        profile.update_nat(NatType::None, true).unwrap();
         assert!(!profile.nat_status.using_relay);
         assert!(profile.nat_status.hole_punched);
+    }
+
+    /// `NatType::None` without a public address is a contradiction the
+    /// network state refuses; the update leaves the profile untouched.
+    #[test]
+    fn a_contradictory_nat_update_leaves_the_profile_unchanged() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        let before = profile.network.clone();
+        assert!(profile.update_nat(NatType::None, false).is_err());
+        assert_eq!(profile.network.nat_type, before.nat_type);
+        assert_eq!(profile.network.public_ip, before.public_ip);
+        assert!(!profile.nat_status.nat_detected);
+        assert!(!profile.nat_status.hole_punched);
+        assert!(profile.validate().is_ok());
     }
 
     #[test]
@@ -591,7 +658,7 @@ mod tests {
     #[test]
     fn relay_address_required_for_symmetric_nat_profile() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
-        profile.update_nat(NatType::Symmetric, false);
+        profile.update_nat(NatType::Symmetric, false).unwrap();
         assert!(profile.validate().unwrap_err().contains("relay_address"));
         profile
             .set_relay_address("relay.budlum.local:4001".into())

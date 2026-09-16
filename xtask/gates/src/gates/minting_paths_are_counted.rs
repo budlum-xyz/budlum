@@ -25,7 +25,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// The source files that are checked.
-const SOURCES: &[&str] = &["src/chain/blockchain.rs", "src/core/account.rs"];
+const SOURCES: &[&str] = &[
+    "src/chain/blockchain.rs",
+    "src/core/account.rs",
+    "src/execution/executor.rs",
+];
 
 /// The only function that checks the ceiling.
 const MINT_FN: &str = "try_mint_balance";
@@ -41,11 +45,24 @@ const MOVE_FN: &str = "try_add_balance";
 const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     (
         "src/chain/blockchain.rs",
-        11,
+        13,
         "bridge unlock and refund (existing locked money is returned), \
          storage deal refunds and operator bond refunds (money that was \
          already owed), and fee distribution (splitting a fee that was already paid). \
-         None of these create new supply.",
+         The two calls that raised the count from 11: the payer-fee refund on a \
+         failed bond lock in the reallocation escrow (returning a fee just \
+         debited in the same call), and `refund_opener_bond` (returning a \
+         challenge bond the opener posted earlier). Both put back money this \
+         ledger already took; none of these create new supply.",
+    ),
+    (
+        "src/execution/executor.rs",
+        3,
+        "bridge unlock inside a RelayerResult (the owner's locked money is \
+         returned and the relayer's cut is carved out of that same refund) and \
+         the producer's share of a transaction fee that was already paid. The \
+         bridge mint inside a RelayerResult is not on this list: it creates \
+         supply and goes through `try_mint_balance`.",
     ),
     (
         "src/core/account.rs",

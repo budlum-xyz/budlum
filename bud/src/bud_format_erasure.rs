@@ -97,8 +97,10 @@ impl CauchyMds {
     ///
     /// x runs 0..p-1 and y runs p..p+k-1, a deterministic choice.
     fn cauchy(&self, i: usize, j: usize) -> Option<u8> {
-        // x_i = i, y_j = k + j; addition in GF is XOR.
-        let denom = (i as u8) ^ ((self.k + j) as u8);
+        // x_i = i (i < p), y_j = p + j (j < k); addition in GF is XOR. The
+        // offset is `p`, not `k`: with `y_j = k + j` and `p > k`, x_k equalled
+        // y_0, the denominator was zero, and every encode failed.
+        let denom = (i as u8) ^ ((self.p + j) as u8);
         self.gf.inv(denom)
     }
 
@@ -317,6 +319,20 @@ mod tests {
             mds.encode(&[vec![1u8; 4]]).is_none(),
             "exactly k shards are required"
         );
+    }
+
+    /// More parity than data (`p > k`): the x and y point sets used to
+    /// overlap, so `encode` returned `None` for every such layout.
+    #[test]
+    fn more_parity_than_data_encodes_and_repairs() {
+        let mds = CauchyMds::new(2, 5).expect("2 + 5 shards");
+        let data = vec![vec![1u8, 2, 3, 4], vec![9u8, 8, 7, 6]];
+        let shards = mds.encode(&data).expect("p > k encodes");
+        assert_eq!(shards.len(), 7);
+        // Lose both data shards and one parity; two parity shards rebuild.
+        let survivors: Vec<(usize, Vec<u8>)> = vec![(4, shards[4].clone()), (6, shards[6].clone())];
+        let back = mds.decode(&survivors).expect("rebuilt from parity");
+        assert_eq!(back, data);
     }
 
     #[test]

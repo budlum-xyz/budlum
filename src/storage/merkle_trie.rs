@@ -112,8 +112,7 @@ impl MerkleTrie {
         let leaf_hash = self
             .leaves
             .get(address)
-            .map(|(b, n)| hash_leaf(address, *b, *n))
-            .unwrap_or([0u8; 32]);
+            .map_or([0u8; 32], |(b, n)| hash_leaf(address, *b, *n));
 
         let mut siblings = Vec::with_capacity(TRIE_DEPTH);
         let mut directions = Vec::with_capacity(TRIE_DEPTH);
@@ -197,7 +196,25 @@ impl AccountProofBundle {
     /// This is the weakest useful check: it says the bundle is internally
     /// consistent. A caller that wants a claim about chain state must compare
     /// `root` against a root it obtained some other way.
+    ///
+    /// The account fields are bound to the leaf: a present claim must
+    /// recompute to `proof.leaf_hash` from `(address, balance, nonce)`, and an
+    /// absent claim must carry the empty leaf with zero fields. Checking only
+    /// the path from `leaf_hash` to `root` left `present`, `balance` and
+    /// `nonce` free, so a bundle could carry a valid path under altered
+    /// values, or report a present account as absent.
     pub fn verify_self_consistent(&self) -> bool {
+        let expected_leaf = if self.present {
+            hash_leaf(&self.proof.address, self.balance, self.nonce)
+        } else {
+            if self.balance != 0 || self.nonce != 0 {
+                return false;
+            }
+            [0u8; 32]
+        };
+        if self.proof.leaf_hash != expected_leaf {
+            return false;
+        }
         self.proof.verify(&self.root)
     }
 }
@@ -457,7 +474,7 @@ mod tests {
         let mut a = MerkleTrie::new();
         let mut b = MerkleTrie::new();
         let entries: Vec<_> = (0..50)
-            .map(|i| (addr(i), (i as u64) * 100, i as u64))
+            .map(|i| (addr(i), u64::from(i) * 100, u64::from(i)))
             .collect();
         for (x, y, z) in &entries {
             a.insert(x, *y, *z);
@@ -470,12 +487,12 @@ mod tests {
     fn hundred_accounts_deterministic() {
         let mut a = MerkleTrie::new();
         for i in 0..100u8 {
-            a.insert(&addr(i), (i as u64) * 1000, i as u64);
+            a.insert(&addr(i), u64::from(i) * 1000, u64::from(i));
         }
         let r1 = a.root();
         let mut b = MerkleTrie::new();
         for i in (0..100u8).rev() {
-            b.insert(&addr(i), (i as u64) * 1000, i as u64);
+            b.insert(&addr(i), u64::from(i) * 1000, u64::from(i));
         }
         assert_eq!(r1, b.root());
     }
@@ -552,6 +569,49 @@ mod tests {
         assert_ne!(
             lied_leaf, bundle.proof.leaf_hash,
             "the balance field is not bound to the proof"
+        );
+        assert!(
+            !bundle.verify_self_consistent(),
+            "the bundle's own check must catch the altered balance"
+        );
+    }
+
+    /// Every account field is bound: an altered nonce, a present account
+    /// relabelled absent, and an absent account relabelled present all fail
+    /// the bundle's own check.
+    #[test]
+    fn altered_account_fields_fail_the_bundles_own_check() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let honest = prove_account(entries.clone(), &addr(1));
+        assert!(honest.verify_self_consistent());
+
+        let mut nonce = honest.clone();
+        nonce.nonce = 7;
+        assert!(!nonce.verify_self_consistent(), "nonce is bound");
+
+        let mut hidden = honest.clone();
+        hidden.present = false;
+        hidden.balance = 0;
+        hidden.nonce = 0;
+        assert!(
+            !hidden.verify_self_consistent(),
+            "a present account cannot be reported absent"
+        );
+
+        let absent = prove_account(entries, &addr(9));
+        assert!(absent.verify_self_consistent());
+        let mut invented = absent.clone();
+        invented.present = true;
+        invented.balance = 5;
+        assert!(
+            !invented.verify_self_consistent(),
+            "an absent account cannot be reported present"
+        );
+        let mut nonzero_absent = absent;
+        nonzero_absent.balance = 5;
+        assert!(
+            !nonzero_absent.verify_self_consistent(),
+            "an absent claim carries zero fields"
         );
     }
 

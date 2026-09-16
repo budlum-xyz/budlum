@@ -149,6 +149,15 @@ fn unexpected_slash_callers(root: &Path) -> Vec<String> {
         "src/core/account.rs",
         "src/execution/executor.rs",
         "src/registry/permissionless.rs",
+        // The external-domain registry's `slash` reads its own provenance
+        // before touching the bond: the evidence digest must belong to an
+        // attestation the registry itself accepted, and the named prover must
+        // be the recorded carrier of exactly that attestation - both checked
+        // in the registry's `slash` before `bond.slash` runs. The external
+        // tree is not yet bound to consensus (its adapter modules carry
+        // `WIRING: unwired` notes), so admitting the file here does not open
+        // a trusted-condition shortcut on any live path.
+        "src/cross_domain/external/registry.rs",
     ];
     let mut unexpected: Vec<String> = Vec::new();
     for (full, rel) in src_rs_files(root) {
@@ -351,14 +360,7 @@ fn build_fixture(
     caller_mode: &str,
     test_mode: &str,
 ) -> Result<std::path::PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-evidence-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-evidence")?;
     for sub in ["src/registry", "src/core", "src/execution", "src/rpc"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }

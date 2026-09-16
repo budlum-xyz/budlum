@@ -41,7 +41,7 @@ fn register_domain_allowing(bc: &mut Blockchain, id: u32, program: &[u64]) {
     let mut domain = crate::domain::plugin::default_domain(
         id,
         crate::domain::ConsensusKind::Zk,
-        45262 + id as u64,
+        45262 + u64::from(id),
         "zk-proof-verification",
         0,
     );
@@ -79,7 +79,7 @@ fn sample_bytecode() -> Vec<u8> {
         }
         .encode(),
     ];
-    program.into_iter().flat_map(|i| i.to_le_bytes()).collect()
+    program.into_iter().flat_map(u64::to_le_bytes).collect()
 }
 
 fn real_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
@@ -632,6 +632,52 @@ fn gas_used_above_the_declared_limit_is_refused() {
     );
     // The refusal comes before the fee: a refused proof does not touch the balance.
     assert_eq!(bc.state.get_balance(&sender), before);
+}
+
+/// 1g: the committed root has to be the value the proof constrains.
+///
+/// `final_state_root` becomes the domain's `last_committed_hash`; the AIR binds
+/// it only to itself, so a prover can put anything there. The proven value is
+/// `state_writes_digest`. A submission where the two differ is refused before the
+/// fee, and the domain record does not move.
+#[test]
+fn a_final_root_that_is_not_the_proven_write_digest_is_refused() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x03);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+    let before = bc.state.get_balance(&sender);
+    assert_eq!(
+        pi.final_state_root, pi.state_writes_digest,
+        "the producer must set the two equal, or this test measures the producer"
+    );
+
+    let mut forged = pi.clone();
+    forged.final_state_root[0] ^= 0xFF;
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &forged, &program))
+        .expect_err("a root the circuit does not constrain must not be committed");
+    assert!(
+        err.contains("state_writes_digest"),
+        "the refusal must name the proven field: {err}"
+    );
+    assert_eq!(
+        bc.state.get_balance(&sender),
+        before,
+        "a shape refusal does not charge the fee"
+    );
+    let d = bc.domain_registry.get(1).expect("the domain is registered");
+    assert_ne!(
+        d.last_committed_hash, forged.final_state_root,
+        "the forged root must not become the domain's root"
+    );
+    assert!(
+        bc.proof_claims.is_empty(),
+        "a refused submission must not leave a claim behind"
+    );
 }
 
 /// Spending exactly at the ceiling is accepted: the bound was not exceeded.

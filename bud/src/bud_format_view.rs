@@ -153,6 +153,12 @@ impl CompiledView {
         if d != bytes[payload_len..] {
             return None;
         }
+        // Only the payload is parsed from here on. Reading against the whole
+        // buffer let a string length run into the digest bytes, so `pos`
+        // could land exactly on `bytes.len()` and the flag read after the
+        // sample string indexed one past the end. The digest is no secret
+        // (its domain is a constant), so a crafted blob reached that read.
+        let bytes = &bytes[..payload_len];
         let record_count = u64::from_le_bytes(bytes[9..17].try_into().ok()?);
         let key_count = u16::from_le_bytes([bytes[17], bytes[18]]) as usize;
         if key_count > 512 {
@@ -163,13 +169,10 @@ impl CompiledView {
         for _ in 0..key_count {
             let key = read_str(bytes, &mut pos)?.to_string();
             let type_name = read_str(bytes, &mut pos)?.to_string();
-            if bytes.len() < pos + 8 + 1 {
-                return None;
-            }
-            let unique_values = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
+            let unique_values = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
             pos += 8;
             let sample = read_str(bytes, &mut pos)?.to_string();
-            let optional = bytes[pos] != 0;
+            let optional = *bytes.get(pos)? != 0;
             pos += 1;
             keys.push(KeySchema {
                 key,
@@ -180,6 +183,11 @@ impl CompiledView {
             });
         }
         let summary = read_str(bytes, &mut pos)?.to_string();
+        // Every payload byte is accounted for: bytes after the summary would
+        // be covered by the digest and still mean nothing.
+        if pos != payload_len {
+            return None;
+        }
         Some(CompiledView {
             record_count,
             keys,
@@ -203,16 +211,11 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
 }
 
 fn read_str<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a str> {
-    if bytes.len() < *pos + 4 {
-        return None;
-    }
-    let len = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().ok()?) as usize;
-    *pos += 4;
-    if bytes.len() < *pos + len {
-        return None;
-    }
-    let s = std::str::from_utf8(&bytes[*pos..*pos + len]).ok()?;
-    *pos += len;
+    let len = u32::from_le_bytes(bytes.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
+    let start = *pos + 4;
+    let end = start.checked_add(len)?;
+    let s = std::str::from_utf8(bytes.get(start..end)?).ok()?;
+    *pos = end;
     Some(s)
 }
 
@@ -283,6 +286,41 @@ mod tests {
         assert!(CompiledView::from_blob(&extra).is_none());
         // A short input.
         assert!(CompiledView::from_blob(&[0u8; 10]).is_none());
+    }
+
+    /// A blob whose sample string is declared long enough to run into the
+    /// digest, re-signed so the digest verifies. The flag byte after that
+    /// string used to be read one past the end of the buffer.
+    #[test]
+    fn a_string_running_into_the_digest_is_refused_not_a_panic() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&VIEW_MAGIC);
+        payload.push(VIEW_VERSION);
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        push_str(&mut payload, "k");
+        push_str(&mut payload, "string");
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        // The sample claims 32 bytes: exactly the digest that follows.
+        payload.extend_from_slice(&32u32.to_le_bytes());
+        let mut h = Sha3_256::new();
+        h.update(CompiledView::DOMAIN);
+        h.update(&payload);
+        let d: [u8; 32] = h.finalize().into();
+        let mut blob = payload;
+        blob.extend_from_slice(&d);
+        assert!(CompiledView::from_blob(&blob).is_none());
+        // Trailing payload bytes after the summary are refused as well.
+        let view = CompiledView::compile(&sample_json()).unwrap();
+        let mut blob = view.to_blob();
+        blob.truncate(blob.len() - 32);
+        blob.push(0);
+        let mut h = Sha3_256::new();
+        h.update(CompiledView::DOMAIN);
+        h.update(&blob);
+        let d: [u8; 32] = h.finalize().into();
+        blob.extend_from_slice(&d);
+        assert!(CompiledView::from_blob(&blob).is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Print canonical network genesis hashes (operator helper).
 //!
 //! ```bash
-//! Cargo run --example print_genesis_hash
+//! cargo run --example print_genesis_hash
 //! ```
 fn main() {
     use budlum_core::chain::genesis::{devnet_genesis, mainnet_genesis, testnet_genesis};

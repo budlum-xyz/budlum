@@ -438,7 +438,7 @@ impl RpcServer {
     }
 
     fn to_hex(n: u64) -> String {
-        format!("0x{:x}", n)
+        format!("0x{n:x}")
     }
 
     fn ai_readiness_json(chain_id: u64, active_bonded_operators: usize) -> serde_json::Value {
@@ -471,10 +471,25 @@ impl RpcServer {
                     "treasury_percent": 5,
                 },
             },
-            "data_layer": "requester-bound Pollen AccessGrant checks live; grant builder issues to requester (F-12 closed)",
+            "data_layer": "requester-bound Pollen AccessGrant checks live; the grant builder issues to the requester",
             "verification_level": "structural_envelope_checks_only",
-            "verification_level_note": "results are not STARK-proven (F-05); full_execution_proof_verification remains false",
+            "verification_level_note": "results are not STARK-proven; full_execution_proof_verification remains false",
         })
+    }
+
+    /// Parses a 32-byte hex external-domain key. One helper, because five
+    /// endpoints read the same parameter and five inline copies would drift.
+    fn parse_external_domain_key(
+        domain_key_hex: &str,
+    ) -> Result<crate::cross_domain::external::DomainKey, ErrorObjectOwned> {
+        let clean = domain_key_hex.strip_prefix("0x").unwrap_or(domain_key_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid domain key: {e}"), None::<()>)
+        })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Domain key must be 32 bytes", None::<()>)
+        })?;
+        Ok(crate::cross_domain::external::DomainKey(key_bytes))
     }
 
     fn to_0x_hash(h: String) -> String {
@@ -522,7 +537,7 @@ impl RpcServer {
 
     fn global_header_to_json(h: crate::settlement::GlobalBlockHeader) -> serde_json::Value {
         serde_json::json!({
-            "version": Self::to_hex(h.version as u64),
+            "version": Self::to_hex(u64::from(h.version)),
             "globalHeight": Self::to_hex(h.global_height),
             "hash": Self::bytes32_to_0x(h.calculate_hash_bytes()),
             "previousGlobalHash": Self::bytes32_to_0x(h.previous_global_hash),
@@ -538,6 +553,15 @@ impl RpcServer {
             // B.U.D.: storage_root anchoring - null when no
             // Storage proofs in this block, 0x-prefixed hex when present.
             "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
+            // The two roots the fold gained after this list was written.
+            // A view that hides a field the consensus hash commits is a
+            // view callers reason on with half the truth; the header is
+            // the source and this function enumerates it. `aiRoot` was
+            // missing since the field itself landed - measured, not
+            // remembered - and `identityRoot` is not allowed to inherit
+            // that drift.
+            "aiRoot": h.ai_root.map(Self::bytes32_to_0x),
+            "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
         })
     }
 
@@ -736,13 +760,10 @@ fn request_came_from_trusted_proxy<B>(config: &RpcSecurityConfig, req: &HttpRequ
     let Some(remote_ip) = extract_direct_client_ip(req) else {
         return false;
     };
-    config.trusted_proxies.iter().any(|allowed| {
-        allowed == "*"
-            || allowed
-                .parse::<IpAddr>()
-                .map(|ip| ip == remote_ip)
-                .unwrap_or(false)
-    })
+    config
+        .trusted_proxies
+        .iter()
+        .any(|allowed| allowed == "*" || allowed.parse::<IpAddr>().is_ok_and(|ip| ip == remote_ip))
 }
 
 fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
@@ -989,10 +1010,32 @@ fn grant_auth_error(e: crate::storage::GrantAuthError) -> ErrorObjectOwned {
 fn parse_grant_auth(
     v: Option<&serde_json::Value>,
 ) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
-    let Some(v) = v else {
+    parse_signed_key_object(v, "authorization", "ownerPublicKey")
+}
+
+/// Parses a viewer's reveal claim: `{"viewerPublicKey": "0x…", "signature":
+/// "0x…", "issuedAt": n}`. The same shape as a grant authorisation, under the
+/// name of the role that signs it: the key is the viewer's, and a client that
+/// sends the owner's key under `ownerPublicKey` here is told which field is
+/// missing instead of getting a signature refusal it cannot explain.
+fn parse_view_claim(
+    claim: &serde_json::Value,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    parse_signed_key_object(Some(claim), "viewerClaim", "viewerPublicKey")
+}
+
+/// The shared reader behind [`parse_grant_auth`] and [`parse_view_claim`]: a
+/// JSON object carrying an ML-DSA-87 public key under `key_field` and a
+/// `signature`, both hex. `label` names the object in every refusal.
+fn parse_signed_key_object(
+    v: Option<&serde_json::Value>,
+    label: &str,
+    key_field: &str,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    let Some(v) = v.filter(|v| v.is_object()) else {
         return Err(ErrorObjectOwned::owned(
             -32602,
-            "authorization object required: ownerPublicKey + signature",
+            format!("{label} object required: {key_field} + signature"),
             None::<()>,
         ));
     };
@@ -1003,20 +1046,19 @@ fn parse_grant_auth(
             .ok_or_else(|| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("authorization.{k} must be a hex string"),
+                    format!("{label}.{k} must be a hex string"),
                     None::<()>,
                 )
             })?;
-        hex::decode(ham.strip_prefix("0x").unwrap_or(ham)).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("authorization.{k}: {e}"), None::<()>)
-        })
+        hex::decode(ham.strip_prefix("0x").unwrap_or(ham))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("{label}.{k}: {e}"), None::<()>))
     };
     let owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN] =
-        al("ownerPublicKey")?.try_into().map_err(|_| {
+        al(key_field)?.try_into().map_err(|_| {
             ErrorObjectOwned::owned(
                 -32602,
                 format!(
-                    "authorization.ownerPublicKey must be {} bytes",
+                    "{label}.{key_field} must be {} bytes",
                     crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN
                 ),
                 None::<()>,
@@ -1027,6 +1069,77 @@ fn parse_grant_auth(
         owner_key,
         signature,
     })
+}
+
+/// Check a viewer's signed claim to open a reveal session and return the
+/// address it speaks for.
+///
+/// The claim is `{viewerPublicKey, signature, issuedAt}` in the same shape as
+/// a grant authorisation (the viewer signs with its own wallet key). The
+/// address is derived from the key, the signature is checked over
+/// [`crate::storage::view_claim_digest`] of this exact request, and a claim
+/// older than [`crate::storage::VIEW_CLAIM_MAX_AGE_SECS`] is refused. A
+/// claim dated in the future is refused too, so a
+/// caller cannot pre-sign claims that come alive later.
+/// The `owner` field of a reveal request against the owner the chain
+/// recorded for the content. A recorded owner that is somebody else is
+/// refused by name; content with no recorded owner is left to the grant
+/// lookup, which opens nothing sealed for it.
+fn check_claimed_owner(
+    recorded: Option<Address>,
+    claimed: &Address,
+) -> Result<(), ErrorObjectOwned> {
+    match recorded {
+        Some(recorded) if recorded != *claimed => Err(ErrorObjectOwned::owned(
+            -32006,
+            "reveal: owner is not the recorded owner of this content",
+            None::<()>,
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn verify_view_claim(
+    claim: &serde_json::Value,
+    content_id: &crate::storage::ContentId,
+    key_id: &[u8; 32],
+    owner: &Address,
+    packed: &[u8],
+    now: u64,
+) -> Result<Address, ErrorObjectOwned> {
+    let auth = parse_view_claim(claim)?;
+    let issued_at = claim
+        .get("issuedAt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "viewerClaim.issuedAt must be unix seconds",
+                None::<()>,
+            )
+        })?;
+    let max_age = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
+    if issued_at > now || issued_at.saturating_add(max_age) < now {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!(
+                "viewerClaim.issuedAt {issued_at} is in the future or more than {max_age} s older than {now}"
+            ),
+            None::<()>,
+        ));
+    }
+    let viewer = auth.derived_owner().map_err(grant_auth_error)?;
+    let payload_commitment = crate::storage::payload_commitment(packed);
+    let digest = crate::storage::view_claim_digest(
+        content_id,
+        &viewer,
+        key_id,
+        owner,
+        &payload_commitment,
+        issued_at,
+    );
+    auth.verify(&digest, &viewer).map_err(grant_auth_error)?;
+    Ok(viewer)
 }
 
 /// Map a reveal-gateway refusal to a JSON-RPC error. Each refusal kind gets
@@ -1050,6 +1163,11 @@ fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjec
         RevealGatewayError::SessionLimit { max } => ErrorObjectOwned::owned(
             -32003,
             format!("reveal: session table full ({max})"),
+            None::<()>,
+        ),
+        RevealGatewayError::Revoked { id } => ErrorObjectOwned::owned(
+            -32005,
+            format!("reveal: session {id} grant revoked"),
             None::<()>,
         ),
         RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
@@ -1146,6 +1264,7 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
 fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
     let code = match &e {
         crate::storage::emit::EmitError::Empty
+        | crate::storage::emit::EmitError::ZeroBlockLen
         | crate::storage::emit::EmitError::TooLarge { .. }
         | crate::storage::emit::EmitError::BurstTooWide { .. }
         | crate::storage::emit::EmitError::FrameOutOfRange { .. }
@@ -1299,7 +1418,7 @@ impl BudlumApiServer for RpcServer {
         if let Err(e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Transaction too large: {:?}", e),
+                format!("Transaction too large: {e:?}"),
                 None::<()>,
             ));
         }
@@ -1356,7 +1475,7 @@ impl BudlumApiServer for RpcServer {
         if let Err(_e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Transaction too large: {:?}", _e),
+                format!("Transaction too large: {_e:?}"),
                 None::<()>,
             ));
         }
@@ -1463,11 +1582,930 @@ impl BudlumApiServer for RpcServer {
         let info = self.chain.get_settlement_info().await;
         let registry_root = info["domainRegistryRoot"]
             .as_str()
-            .map(|root| format!("0x{root}"))
-            .unwrap_or_else(|| "0x".to_string());
+            .map_or_else(|| "0x".to_string(), |root| format!("0x{root}"));
         Ok(serde_json::json!({
             "domainId": domain_id,
             "domainRegistryRoot": registry_root,
+        }))
+    }
+
+    async fn register_external_domain(
+        &self,
+        registration: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: the bond figure in this build is a declared number,
+        // not a signed stake transfer, and only the operator may declare it.
+        self.require_operator("bud_registerExternalDomain")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            spec: crate::cross_domain::external::AdapterSpec,
+            policy: crate::cross_domain::external::VerificationPolicy,
+            /// Omitted economics default to the intake's conservative shape
+            /// at the given ceiling; explicit economics are taken as sent.
+            economics: Option<crate::cross_domain::external::DomainEconomics>,
+            routing_ceiling_atoms: Option<u128>,
+            versions: crate::cross_domain::external::VersionPolicy,
+            bond_atoms: u128,
+            poster: String,
+            golden: crate::cross_domain::external::RawConsensusEvidence,
+        }
+        let params: Params = serde_json::from_value(registration).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid registration: {e}"), None::<()>)
+        })?;
+        let clean = params.poster.strip_prefix("0x").unwrap_or(&params.poster);
+        let poster = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid poster address: {e}"), None::<()>)
+        })?;
+        let economics = match (params.economics, params.routing_ceiling_atoms) {
+            (Some(e), _) => e,
+            (None, Some(ceiling)) => {
+                crate::cross_domain::external::IntakeState::conservative_economics(ceiling)
+            }
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either economics or routing_ceiling_atoms",
+                    None::<()>,
+                ))
+            }
+        };
+        let key = self
+            .chain
+            .register_external_domain(crate::cross_domain::external::RegistrationRequest {
+                spec: params.spec,
+                policy: params.policy,
+                economics,
+                versions: params.versions,
+                bond_atoms: params.bond_atoms,
+                poster,
+                golden: params.golden,
+            })
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("External domain registration refused: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "domainKey": format!("0x{}", hex::encode(key.as_bytes())),
+        }))
+    }
+
+    async fn submit_external_evidence(
+        &self,
+        evidence: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let evidence: crate::cross_domain::external::RawConsensusEvidence =
+            serde_json::from_value(evidence).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
+            })?;
+        let outcome = self
+            .chain
+            .submit_external_evidence(evidence)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("External evidence refused: {e}"),
+                    None::<()>,
+                )
+            })?;
+        match outcome {
+            Some(attestation) => serde_json::to_value(&attestation).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Attestation serialization failed: {e}"),
+                    None::<()>,
+                )
+            }),
+            // The answer entered a quorum round that has not decided yet.
+            // Pending is a state, not an error: the watcher reads the round
+            // through bud_getExternalQuorumRound.
+            None => Ok(serde_json::json!({
+                "roundPending": true,
+            })),
+        }
+    }
+
+    async fn get_external_domain_profile(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((profile, entry, descriptor)) = self.chain.get_external_domain_profile(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "profile": to_val("Profile", serde_json::to_value(&profile))?,
+            "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
+            "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
+        }))
+    }
+
+    async fn get_external_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let profiles = self.chain.get_external_domain_profiles().await;
+        let items: Vec<serde_json::Value> = profiles
+            .into_iter()
+            .map(|(profile, summary)| {
+                serde_json::json!({
+                    "domainKey": format!("0x{}", hex::encode(profile.domain.as_bytes())),
+                    "summary": summary,
+                    "profile": serde_json::to_value(&profile).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "domains": items }))
+    }
+
+    async fn get_external_intake_digest(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let digest = self.chain.get_external_intake_digest().await.map_err(|e| {
+            ErrorObjectOwned::owned(-32603, format!("Intake digest failed: {e}"), None::<()>)
+        })?;
+        Ok(serde_json::json!({
+            "digest": format!("0x{}", hex::encode(digest)),
+        }))
+    }
+
+    async fn readmit_external_domain(
+        &self,
+        domain_key_hex: String,
+        reason: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_readmitExternalDomain")?;
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        self.chain
+            .readmit_external_domain(key, reason)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Readmission refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({ "readmitted": true }))
+    }
+
+    async fn schedule_external_fork(
+        &self,
+        domain_key_hex: String,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_scheduleExternalFork")?;
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        self.chain
+            .schedule_external_fork(key, old_version, new_version, fork_height, grace_heights)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Fork refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({ "scheduled": true }))
+    }
+
+    async fn slash_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_slashExternalProver")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            prover: String,
+            evidence_digest_hex: String,
+            value_atoms: u128,
+            challenger: String,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid slash request: {e}"), None::<()>)
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let parse_addr = |s: &str, what: &str| -> Result<Address, ErrorObjectOwned> {
+            let clean = s.strip_prefix("0x").unwrap_or(s);
+            Address::from_hex(clean).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid {what}: {e}"), None::<()>)
+            })
+        };
+        let prover = parse_addr(&params.prover, "prover address")?;
+        let challenger = parse_addr(&params.challenger, "challenger address")?;
+        let digest_clean = params
+            .evidence_digest_hex
+            .strip_prefix("0x")
+            .unwrap_or(&params.evidence_digest_hex);
+        let digest_bytes = hex::decode(digest_clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid evidence digest: {e}"), None::<()>)
+        })?;
+        let evidence_digest: [u8; 32] = digest_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Evidence digest must be 32 bytes", None::<()>)
+        })?;
+        let (taken, reward) = self
+            .chain
+            .slash_external_prover(key, prover, evidence_digest, params.value_atoms, challenger)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Slash refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "slashedAtoms": taken.to_string(),
+            "challengerRewardAtoms": reward.to_string(),
+        }))
+    }
+
+    async fn bond_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_bondExternalProver")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            prover: String,
+            bond_atoms: u128,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid bond request: {e}"), None::<()>)
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let clean = params.prover.strip_prefix("0x").unwrap_or(&params.prover);
+        let prover = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid prover address: {e}"), None::<()>)
+        })?;
+        self.chain
+            .bond_external_prover(key, prover, params.bond_atoms)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Bond refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "bonded": true,
+            "prover": format!("0x{}", hex::encode(prover.as_bytes())),
+            "bondAtoms": params.bond_atoms.to_string(),
+        }))
+    }
+
+    async fn set_external_quorum_policy(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_setExternalQuorumPolicy")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            /// Optional full policy. When absent, `agreement_threshold` and
+            /// `max_participants` build the strict form - refuse on dispute,
+            /// refuse on low participation - which is the only form fit for
+            /// a state root that will be committed to.
+            policy: Option<crate::cross_domain::external::QuorumPolicy>,
+            agreement_threshold: Option<usize>,
+            max_participants: Option<usize>,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid quorum policy request: {e}"),
+                None::<()>,
+            )
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let policy = match (params.policy, params.agreement_threshold) {
+            (Some(policy), _) => policy,
+            (None, Some(threshold)) => {
+                let max = params.max_participants.unwrap_or(threshold);
+                crate::cross_domain::external::QuorumPolicy::strict(threshold, max)
+            }
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either `policy` or `agreement_threshold`",
+                    None::<()>,
+                ));
+            }
+        };
+        if policy.agreement_threshold == 0 || policy.max_participants < policy.agreement_threshold {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Quorum policy must have threshold >= 1 and max_participants >= threshold",
+                None::<()>,
+            ));
+        }
+        self.chain
+            .set_external_quorum_policy(key, policy)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Quorum policy refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "installed": true,
+            "agreementThreshold": policy.agreement_threshold,
+            "maxParticipants": policy.max_participants,
+        }))
+    }
+
+    async fn get_external_quorum_round(
+        &self,
+        domain_key_hex: String,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let (policy, _) = self.chain.external_quorum_rounds(key).await;
+        let Some(round) = self.chain.external_quorum_round(key, height).await else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No quorum round is retained for this domain and height",
+                None::<()>,
+            ));
+        };
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        let progress = policy.map(|p| round.progress(&p));
+        Ok(serde_json::json!({
+            "round": to_val("Round", serde_json::to_value(&round))?,
+            "progress": to_val("Progress", serde_json::to_value(progress))?,
+        }))
+    }
+
+    async fn get_external_quorum_rounds(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let (policy, rounds) = self.chain.external_quorum_rounds(key).await;
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        let progresses: Vec<Option<crate::cross_domain::external::RoundProgress>> = rounds
+            .iter()
+            .map(|round| policy.as_ref().map(|p| round.progress(p)))
+            .collect();
+        Ok(serde_json::json!({
+            "policy": to_val("Policy", serde_json::to_value(policy))?,
+            "rounds": to_val("Rounds", serde_json::to_value(&rounds))?,
+            "progress": to_val("Progress", serde_json::to_value(&progresses))?,
+            "retentionBlocks": crate::cross_domain::external::ROUND_RETENTION_BLOCKS,
+        }))
+    }
+
+    async fn encode_external_evidence(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::zkvm_proof::{EVIDENCE_VERSION, MAX_PAYLOAD_BYTES};
+        use crate::cross_domain::external::{
+            encode_external_evidence, RawConsensusEvidence, VersionPolicy, ZkFinalityEvidence,
+        };
+        #[derive(serde::Deserialize)]
+        struct Params {
+            /// Full BudZKVM finality claim material; when present, the
+            /// payload is its encoding and the version is the adapter's.
+            zk_evidence: Option<ZkFinalityEvidence>,
+            /// Raw payload hex for adapters whose payloads are built
+            /// elsewhere (e.g. a sync-committee update).
+            payload_hex: Option<String>,
+            adapter_name: String,
+            network: String,
+            evidence_version: Option<u32>,
+            declared_height: u64,
+            declared_root_hex: String,
+            submitter: String,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid encode request: {e}"), None::<()>)
+        })?;
+        let (payload, evidence_version) = match (&params.zk_evidence, &params.payload_hex) {
+            (Some(zk), None) => {
+                let payload = zk.encode().map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("Encoding refused: {e}"), None::<()>)
+                })?;
+                if payload.len() > MAX_PAYLOAD_BYTES {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!(
+                            "Encoded payload is {} bytes, above the {} cap the decoder enforces",
+                            payload.len(),
+                            MAX_PAYLOAD_BYTES
+                        ),
+                        None::<()>,
+                    ));
+                }
+                (payload, EVIDENCE_VERSION)
+            }
+            (None, Some(hex_payload)) => {
+                let clean = hex_payload.strip_prefix("0x").unwrap_or(hex_payload);
+                let payload = hex::decode(clean).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+                })?;
+                let version = params.evidence_version.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "A raw payload needs an explicit evidence_version",
+                        None::<()>,
+                    )
+                })?;
+                (payload, version)
+            }
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide exactly one of `zk_evidence` or `payload_hex`",
+                    None::<()>,
+                ));
+            }
+        };
+        let adapter = crate::cross_domain::external::AdapterId::from_name(&params.adapter_name);
+        let clean = params
+            .submitter
+            .strip_prefix("0x")
+            .unwrap_or(&params.submitter);
+        let submitter = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid submitter: {e}"), None::<()>)
+        })?;
+        let root_clean = params
+            .declared_root_hex
+            .strip_prefix("0x")
+            .unwrap_or(&params.declared_root_hex);
+        let root_bytes = hex::decode(root_clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid declared root: {e}"), None::<()>)
+        })?;
+        let declared_root: [u8; 32] = root_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Declared root must be 32 bytes", None::<()>)
+        })?;
+        let evidence = RawConsensusEvidence {
+            adapter,
+            evidence_version,
+            network: params.network.clone(),
+            payload,
+            declared_height: params.declared_height,
+            declared_root,
+            submitter,
+        };
+        // The consensus-domain carrier: the same encoding the finality
+        // dispatch decodes when an external domain backs a local one.
+        let carrier = encode_external_evidence(&evidence).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Carrier encoding refused: {e}"), None::<()>)
+        })?;
+        let carrier_bytes = serde_json::to_vec(&carrier).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("Carrier serialization failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        // The version policy a registrar would declare for a fresh domain:
+        // one window, this version, no sunset.
+        let starting_versions = VersionPolicy::single(adapter, evidence_version, 0);
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "evidence": to_val("Evidence", serde_json::to_value(&evidence))?,
+            "evidenceDigest": format!("0x{}", hex::encode(evidence.digest())),
+            "domainKey": format!(
+                "0x{}",
+                hex::encode(
+                    crate::cross_domain::external::DomainKey::from_parts(
+                        &adapter,
+                        &params.network
+                    )
+                    .as_bytes()
+                )
+            ),
+            "finalityCarrierJson": String::from_utf8_lossy(&carrier_bytes),
+            "startingVersionPolicy": to_val("Versions", serde_json::to_value(&starting_versions))?,
+            "limits": {
+                "zkMaxPayloadBytes": MAX_PAYLOAD_BYTES,
+                "zkEvidenceVersion": EVIDENCE_VERSION,
+            },
+        }))
+    }
+
+    async fn get_external_domain_status(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{
+            honesty_is_cheaper, profile_of, BOND_RATIO_DEN, BOND_RATIO_NUM, BOND_UNIT, BPS_DEN,
+        };
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((registration, clock_height)) = self.chain.external_domain_registration(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        let profile = profile_of(&registration.record);
+        let (refused, attempts) = profile.refusal_ratio();
+        let economics = registration.economics;
+        let ceiling = economics.routing_ceiling_atoms;
+        let versions = &registration.versions;
+        let windows: Vec<serde_json::Value> = versions
+            .windows
+            .iter()
+            .map(|w: &crate::cross_domain::external::VersionWindow| {
+                serde_json::json!({
+                    "version": w.version,
+                    "validFromHeight": w.valid_from_height,
+                    "sunsetHeight": w.sunset_height,
+                    "coversCurrentClock": w.covers(clock_height),
+                })
+            })
+            .collect();
+        let provers: Vec<serde_json::Value> = registration
+            .provers
+            .values()
+            .map(|bond| {
+                let slashings: Vec<serde_json::Value> = bond
+                    .slashings
+                    .iter()
+                    .map(|s: &crate::cross_domain::external::Slashing| {
+                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                serde_json::json!({
+                    "prover": format!("0x{}", hex::encode(bond.prover.as_bytes())),
+                    "bondAtoms": bond.bond_atoms.to_string(),
+                    "liveAtoms": bond.live_atoms().to_string(),
+                    "slashedAtoms": bond.slashed_atoms.to_string(),
+                    "sufficientForCurrentCeiling": bond.is_sufficient(ceiling),
+                    "accepted": bond.accepted,
+                    "refused": bond.refused,
+                    "slashings": slashings,
+                })
+            })
+            .collect();
+        let latest = registration.latest_attestation();
+        // "No backing yet" is a visible state, not an absent field: shown
+        // with the same value an adapter reports before its first cycle.
+        let last_backing = registration
+            .record
+            .last_backing
+            .unwrap_or_else(crate::cross_domain::external::no_backing);
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "summary": profile.summary_line(),
+            "profile": to_val("Profile", serde_json::to_value(&profile))?,
+            "registryClockHeight": clock_height,
+            "stalenessHeights": profile.staleness(clock_height),
+            "refusalRatio": { "refused": refused, "attempts": attempts },
+            "economics": {
+                "routingCeilingAtoms": ceiling.to_string(),
+                "requiredBondAtoms": economics.required_bond_atoms().to_string(),
+                "bondRatio": format!("{}/{}", BOND_RATIO_NUM, BOND_RATIO_DEN),
+                "bondUnit": BOND_UNIT,
+                "fee": {
+                    "baseAtoms": economics.fee.base_atoms.to_string(),
+                    "valueBps": economics.fee.value_bps,
+                    "bpsDenominator": BPS_DEN.to_string(),
+                    "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
+                },
+                "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
+                "unbondingHeights": economics.unbonding_heights,
+                // The registration-time inequality, re-evaluated live: lying
+                // at the ceiling must cost more than honest fees earn.
+                "honestyIsCheaperAtCeiling": honesty_is_cheaper(&economics, ceiling),
+            },
+            "versionPolicy": {
+                "windows": windows,
+                "maxGraceHeights": versions.max_grace_heights,
+                "acceptedList": versions.accepted_list(),
+                "currentVersionAtClock": versions.current_version_at(clock_height),
+            },
+            "provers": provers,
+            "latestAttestation": to_val("Attestation", serde_json::to_value(latest))?,
+            "lastBacking": to_val("Backing", serde_json::to_value(last_backing))?,
+            "attestationsHeld": registration.attestations.len(),
+            "admissionDigest": format!("0x{}", hex::encode(registration.admission_digest)),
+        }))
+    }
+
+    async fn replay_external_probes(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{apply_patch, run_probe, ProbeOutcome};
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((_profile, entry, descriptor)) = self.chain.get_external_domain_profile(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        // The same construction the intake uses: rebuild the adapter from
+        // the stored spec, with the stored golden, and run the adapter's own
+        // probes. Nothing here mutates the registry - this is the dry run.
+        let bls = matches!(
+            entry.spec,
+            crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+        )
+        .then(crate::cross_domain::external::IntakeState::production_bls);
+        let adapter = entry.spec.build(bls, Some(entry.golden.clone()));
+        let golden_verified = adapter.verify(&entry.golden, &entry.policy).is_ok();
+        let probes: Vec<serde_json::Value> = adapter
+            .fault_probes()
+            .iter()
+            .map(|probe| {
+                // The corrupted evidence itself, applied by the same patch
+                // engine the harness uses: its digest lets an operator
+                // replay the exact probe bytes against another node.
+                let corrupted_digest = apply_patch(&entry.golden, &probe.patch)
+                    .ok()
+                    .map(|corrupted| format!("0x{}", hex::encode(corrupted.digest())));
+                let outcome = run_probe(adapter.as_ref(), &entry.golden, probe, &entry.policy);
+                let (verdict, detail) = match &outcome {
+                    ProbeOutcome::Refused { kind } => ("refused", kind.as_str().to_string()),
+                    ProbeOutcome::Accepted => (
+                        "ACCEPTED-CORRUPTION",
+                        "the adapter accepted corrupted evidence".to_string(),
+                    ),
+                    ProbeOutcome::WrongRefusal { got, wanted } => (
+                        "wrong-refusal",
+                        format!("got {}, wanted {}", got.as_str(), wanted.as_str()),
+                    ),
+                    ProbeOutcome::NotApplicable { reason } => ("not-applicable", reason.clone()),
+                };
+                serde_json::json!({
+                    "name": probe.name,
+                    "verdict": verdict,
+                    "detail": detail,
+                    "corruptedEvidenceDigest": corrupted_digest,
+                    "passed": matches!(outcome, ProbeOutcome::Refused { .. }),
+                })
+            })
+            .collect();
+        let passed = probes
+            .iter()
+            .filter(|p| p["passed"].as_bool().unwrap_or(false))
+            .count();
+        let total = probes.len();
+        Ok(serde_json::json!({
+            "adapter": format!("0x{}", hex::encode(descriptor.id.0)),
+            "goldenVerified": golden_verified,
+            "probes": probes,
+            "passed": passed,
+            "total": total,
+            "wouldPassAdmission": golden_verified && passed == total,
+        }))
+    }
+
+    async fn inspect_ethereum_update(
+        &self,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::ethereum::layout;
+        use crate::cross_domain::external::SyncCommitteeUpdate;
+        use crate::cross_domain::external::{
+            bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update,
+            participation, period_of_slot, BITVECTOR_BYTES, EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+            SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+        };
+        let clean = payload_hex.strip_prefix("0x").unwrap_or(&payload_hex);
+        let payload = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+        })?;
+        // The same parser the adapter runs - not a lookalike. A refusal here
+        // is exactly the refusal a submission would get.
+        let update: SyncCommitteeUpdate = parse_update(&payload).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Update refused: {e}"), None::<()>)
+        })?;
+        let signers = participation(&update.participation_bits);
+        let threshold = minimum_signers();
+        let range = |r: &std::ops::Range<usize>| serde_json::json!([r.start, r.end]);
+        Ok(serde_json::json!({
+            "finalizedRoot": format!("0x{}", hex::encode(update.finalized_root)),
+            "finalizedSlot": update.finalized_slot,
+            "finalizedEpoch": epoch_of_slot(update.finalized_slot),
+            "attestedSlot": update.attested_slot,
+            "attestedEpoch": epoch_of_slot(update.attested_slot),
+            "declaredPeriod": update.period,
+            "derivedPeriod": period_of_slot(update.attested_slot),
+            "nextCommitteeRoot": format!("0x{}", hex::encode(update.next_committee_root)),
+            "stateRoot": format!("0x{}", hex::encode(update.state_root)),
+            "participation": {
+                "signers": signers,
+                "committeeSize": SYNC_COMMITTEE_SIZE,
+                "minimumSigners": threshold,
+                "hasSupermajority": has_supermajority(signers),
+                "bitvectorBytes": BITVECTOR_BYTES,
+                // The smallest passing bitvector, for integrators building
+                // boundary tests against the same arithmetic.
+                "thresholdBitvectorHex": format!("0x{}", hex::encode(bits_for(threshold))),
+            },
+            "constants": {
+                "slotsPerEpoch": SLOTS_PER_EPOCH,
+                "epochsPerSyncCommitteePeriod": EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+                "zkProofSystem": format!(
+                    "{:?}",
+                    crate::cross_domain::external::ethereum::ZK_PROOF_SYSTEM
+                ),
+            },
+            // The byte layout the parser applied, so an integrator can build
+            // a payload from this response alone instead of reading source.
+            "layout": {
+                "totalBytes": layout::LEN,
+                "finalizedRoot": range(&layout::FINALIZED_ROOT),
+                "finalizedSlot": range(&layout::FINALIZED_SLOT),
+                "attestedSlot": range(&layout::ATTESTED_SLOT),
+                "period": range(&layout::PERIOD),
+                "nextCommitteeRoot": range(&layout::NEXT_COMMITTEE_ROOT),
+                "aggregatePubkey": range(&layout::AGGREGATE_PUBKEY),
+                "signature": range(&layout::SIGNATURE),
+                "participationBits": range(&layout::PARTICIPATION_BITS),
+                "stateRoot": range(&layout::STATE_ROOT),
+            },
+        }))
+    }
+
+    async fn plan_evm_verification(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{
+            plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof,
+            EvmPrecompiles, PrecompileObservation, BLS_G1_ADD_ADDRESS, BLS_G1_MSM_ADDRESS,
+            BLS_G2_ADD_ADDRESS, BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS,
+            BLS_MAP_FP_TO_G1_ADDRESS, BLS_PAIRING_ADDRESS, MAX_ML_DSA_FIELD_BYTES,
+            ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
+        };
+        use crate::cross_domain::external::{
+            EvmPlanError, EvmVerificationMode, EvmVerificationPlan, MessageBinding, MlDsaVariant,
+        };
+        #[derive(serde::Deserialize)]
+        struct Params {
+            /// Raw probe results, converted by the planner itself so an
+            /// address list cannot be mistaken for a capability list.
+            observations: Option<Vec<PrecompileObservation>>,
+            /// Pre-derived capabilities, for callers that already probed.
+            capabilities: Option<EvmPrecompiles>,
+            proof: EvmHybridProof,
+            schedule: Option<EvmGasSchedule>,
+            challenge_window: u64,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid plan request: {e}"), None::<()>)
+        })?;
+        let schedule = params.schedule.unwrap_or_default();
+        // The refusal is surfaced with its rule named, and the deploy-vs-fix
+        // hint depends on which rule fired: a shape problem is the caller's
+        // encoding, a capability problem is the target chain's reality.
+        let refusal_hint = |e: &EvmPlanError| {
+            match e {
+            EvmPlanError::WrongPointLength { .. }
+            | EvmPlanError::BadMlDsaLength { .. }
+            | EvmPlanError::IdentityPoint
+            | EvmPlanError::ZeroChainId => "fix the proof encoding",
+            EvmPlanError::UnboundMessagePoint => {
+                "bind the message point (ZkCircuit or NativeHashToCurve) or drop to a challenge mode"
+            }
+            EvmPlanError::MissingChallengeWindow => "set a non-zero challenge window",
+            EvmPlanError::MlDsaVariantUnavailable { .. } => {
+                "probe the other ML-DSA address or switch the proof's variant"
+            }
+        }
+        };
+        let plan: EvmVerificationPlan = match (&params.observations, params.capabilities) {
+            (Some(observations), _) => plan_from_observations(
+                observations,
+                &params.proof,
+                schedule,
+                params.challenge_window,
+            ),
+            (None, Some(capabilities)) => plan_verification(
+                capabilities,
+                &params.proof,
+                schedule,
+                params.challenge_window,
+            ),
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either `observations` or `capabilities`",
+                    None::<()>,
+                ));
+            }
+        }
+        .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Plan refused: {e}; {}", refusal_hint(&e)),
+                None::<()>,
+            )
+        })?;
+        // A human-readable reading of the mode, so a deployment report does
+        // not require the enum's docs at hand. `FullCryptographic` is the
+        // only immediate finality; every other mode waits out a window.
+        let mode_meaning = match plan.mode {
+            EvmVerificationMode::FullCryptographic => "both halves verify now; immediate finality",
+            EvmVerificationMode::ClassicalOnlyChallenge => {
+                "BLS verifies now; the post-quantum half waits out the challenge window"
+            }
+            EvmVerificationMode::PostQuantumOnlyChallenge => {
+                "ML-DSA verifies now; the BLS half waits out the challenge window"
+            }
+            EvmVerificationMode::OptimisticChallenge => {
+                "no native verifier; the whole claim waits out the challenge window"
+            }
+        };
+        let binding_meaning = match params.proof.message_binding {
+            MessageBinding::ZkCircuit => "message point bound by a circuit",
+            MessageBinding::NativeHashToCurve => "message point bound by a native hash-to-curve",
+            MessageBinding::Unbound => "message point unbound - never full cryptographic",
+        };
+        let variant_name = |v: MlDsaVariant| match v {
+            MlDsaVariant::Fips204 => "FIPS-204",
+            MlDsaVariant::Eip8051Eth => "EIP-8051-ETH",
+        };
+        let capabilities = params
+            .observations
+            .as_deref()
+            .map(EvmPrecompiles::from_observations)
+            .or(params.capabilities);
+        let recognised: Vec<u64> = params
+            .observations
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|o| o.recognised())
+            .map(|o| o.address)
+            .collect();
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "plan": to_val("Plan", serde_json::to_value(&plan))?,
+            "modeMeaning": mode_meaning,
+            "bindingMeaning": binding_meaning,
+            "immediateFinality": plan.cryptographic,
+            "capabilities": to_val("Capabilities", serde_json::to_value(capabilities))?,
+            "postQuantumAvailable": capabilities.is_some_and(|c| c.has_ml_dsa()),
+            "postQuantumVariant": capabilities
+                .and_then(|c| c.ml_dsa_variant())
+                .map(variant_name),
+            "recognisedAddresses": recognised,
+            "calldataGas": params.proof.calldata_gas(schedule),
+            "limits": {
+                "maxMlDsaFieldBytes": MAX_ML_DSA_FIELD_BYTES,
+            },
+            "knownAddresses": {
+                "blsG1Add": BLS_G1_ADD_ADDRESS,
+                "blsG1Msm": BLS_G1_MSM_ADDRESS,
+                "blsG2Add": BLS_G2_ADD_ADDRESS,
+                "blsG2Msm": BLS_G2_MSM_ADDRESS,
+                "blsPairing": BLS_PAIRING_ADDRESS,
+                "blsMapFpToG1": BLS_MAP_FP_TO_G1_ADDRESS,
+                "blsMapFp2ToG2": BLS_MAP_FP2_TO_G2_ADDRESS,
+                "mlDsaFips": ML_DSA_FIPS_ADDRESS,
+                "mlDsaEth": ML_DSA_ETH_ADDRESS,
+            },
         }))
     }
 
@@ -1525,6 +2563,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<String, ErrorObjectOwned> {
         let hash = hex::encode(payload.leaf_hash());
         let payload_clone = payload.clone();
+        let commitment = payload.commitment.clone();
 
         self.chain
             .submit_verified_domain_commitment(payload)
@@ -1536,6 +2575,27 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 )
             })?;
+
+        // C3 (decision 50): the commitment's nonce writes travel in a signed
+        // StateUpdateTx, enqueued here so they apply inside block execution.
+        // The commitment broadcast below keeps the domain registry in sync
+        // across peers until that advancement moves in-block too.
+        match self.chain.build_state_update_transaction(commitment).await {
+            Ok(tx) => {
+                let tx_clone = tx.clone();
+                self.chain.add_transaction(tx).await.map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("State update transaction rejected: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                self.node.broadcast_tx_sync(tx_clone);
+            }
+            Err(e) => {
+                tracing::warn!("Could not build state update transaction: {e}");
+            }
+        }
 
         self.node
             .broadcast_verified_domain_commitment_sync(payload_clone);
@@ -1731,6 +2791,15 @@ impl BudlumApiServer for RpcServer {
         proof: crate::cross_domain::event_tree::MerkleProof,
         source_domain: crate::domain::types::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Audit 2026-09-09 (E-7): this RPC applies consensus state changes
+        // OUTSIDE block execution (bridge mint/unlock + balance credits via
+        // Blockchain::submit_relay_proof), so a public-listener caller would
+        // fork the node against the network. All five sibling bridge-mutating
+        // RPCs (mint/burn/unlock x3) carry this operator gate; this one did
+        // not. The consensus-correct rework (verify + ledger record only, with
+        // settlement via the on-chain RelayerResult transaction) is logged as
+        // an open design item; until it lands the gate is the minimum.
+        self.require_operator("bud_submitRelayProof")?;
         let clean_addr = relayer.strip_prefix("0x").unwrap_or(&relayer);
         let relayer_addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid relayer address: {e}"), None::<()>)
@@ -1826,8 +2895,7 @@ impl BudlumApiServer for RpcServer {
             .chain
             .get_registry_member(addr, role)
             .await
-            .map(|r| r.is_active())
-            .unwrap_or(false);
+            .is_some_and(|r| r.is_active());
         Ok(serde_json::json!({
             "address": Self::to_0x_hash(addr.to_hex()),
             "role": "relayer",
@@ -1853,8 +2921,7 @@ impl BudlumApiServer for RpcServer {
             .chain
             .get_registry_member(addr, role)
             .await
-            .map(|r| r.is_active())
-            .unwrap_or(false);
+            .is_some_and(|r| r.is_active());
         Ok(serde_json::json!({
             "address": Self::to_0x_hash(addr.to_hex()),
             "role": "prover",
@@ -2308,11 +3375,36 @@ impl BudlumApiServer for RpcServer {
         // event is filed under, so a sink sees who spoke rather than a caller's
         // claim about it.
         let actor = auth.derived_owner().map_err(grant_auth_error)?;
+        // Bump the revoke generation BEFORE the chain mutation: a frame or
+        // open call whose grant question is in flight right now would
+        // otherwise apply a stale `true` after this revoke commits. The
+        // bump invalidates every in-flight answer; the reveal paths refuse
+        // and retry against the new state. A revoke that fails below keeps
+        // the bump - one harmless retry is the price of closing the race.
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.bump_revoke_generation();
+        }
         let revoked = self
             .chain
             .revoke_view_grant(grant_id, auth, at_epoch)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        // The frame path asks the chain again before every emit, but it asks
+        // without the gateway lock and applies the answer under it. A revoke
+        // that landed between those two steps was served once more on the
+        // stale `true`. Dropping this content's grant-backed sessions here,
+        // once the chain has revoked, leaves a racing frame call nothing to
+        // emit from. After the revoke, not before: an unauthorised revoke
+        // attempt must not be able to close other viewers' sessions.
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.drop_sessions_for_content(&revoked.content_id);
+        }
         // A revoke that only reaches the ledger leaves every product surface
         // holding the session key it was promised. The hook is where that word is
         // passed on: a headless node discards it, a gateway installs its own
@@ -2406,7 +3498,7 @@ impl BudlumApiServer for RpcServer {
         recipe: serde_json::Value,
         full_public: Option<serde_json::Value>,
         packed: String,
-        viewer: String,
+        viewer_claim: serde_json::Value,
         owner: String,
         key_id: String,
         meter_budget: Option<u64>,
@@ -2422,14 +3514,45 @@ impl BudlumApiServer for RpcServer {
         };
         let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
-        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>))?;
         let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
         let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        // The viewer is whoever signed the claim, never a field. Before this,
+        // `viewer` was a string the caller typed, so any caller could name a
+        // grantee and have this node build frames for content it holds no
+        // grant on. The derived address is what the grant lookup asks about.
+        let viewer = verify_view_claim(&viewer_claim, &content_id, &key_id, &owner, &packed, now)?;
+
+        // `owner` is a claim in the request; the chain holds who owns this
+        // content. A claim naming another address is refused here by name.
+        // The registry's `may_view` refuses it too, but silently, as a
+        // `false` grant, so a caller naming itself owner of somebody else's
+        // sealed content saw a generic refusal and an honest owner with a
+        // typo in the field saw the same one. Content with no recorded
+        // owner keeps the registry's answer: no grant, sealed refused.
+        let recorded = self
+            .chain
+            .confidential_owner(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        check_claimed_owner(recorded, &owner)?;
 
         // The grant decision is the chain's; the gateway re-enforces it on the
         // sealed path, but the authority that owns the registry answers it.
+        // Read the revoke generation first: a revoke that starts while this
+        // question is in flight invalidates the answer, and the comparison
+        // under the gateway lock below refuses the open instead of admitting
+        // a session on a pre-revoke `true`.
+        let generation = {
+            let gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.revoke_generation()
+        };
         let grant_allows = self
             .chain
             .may_view_content(content_id, viewer, key_id, owner)
@@ -2446,13 +3569,16 @@ impl BudlumApiServer for RpcServer {
             key_id,
             meter_budget,
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        if gw.revoke_generation() != generation {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                "reveal: a revoke started while the grant was being checked; retry the call",
+                None::<()>,
+            ));
+        }
         // Reclaim TTL-dead rows before admission so a burst of opens cannot
         // be wedged by corpses, then refuse fast at the cap with its own
         // code instead of paying for an open that admission would refuse.
@@ -2503,13 +3629,47 @@ impl BudlumApiServer for RpcServer {
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
+        // The grant is asked again on every frame call. A session was checked
+        // once at open and then served until its TTL, so a grant revoked on
+        // chain kept serving frames for up to the whole TTL. The scope is
+        // read under the lock, the chain is asked without it, and the answer
+        // is applied under the lock again; a session closed in between is
+        // reported as unknown, which is what it is.
+        let (scope, generation): (Option<crate::storage::GrantScope>, u64) = {
+            let gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            let scope = gw
+                .grant_scope(session_id)
+                .map_err(reveal_gateway_rpc_error)?;
+            (scope, gw.revoke_generation())
+        };
+        let grant_allows = match scope {
+            None => true,
+            Some(scope) => self
+                .chain
+                .may_view_content(scope.content_id, scope.viewer, scope.key_id, scope.owner)
+                .await
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?,
+        };
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        // A revoke that started while the chain was being asked invalidates
+        // the answer above: the session may already be dropped and the grant
+        // it reports may be the pre-revoke one. Refuse the stale answer and
+        // make the caller retry against the new state instead of emitting
+        // frames on it.
+        if gw.revoke_generation() != generation {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                "reveal: a revoke started while the grant was being checked; retry the call",
+                None::<()>,
+            ));
+        }
         let (frames, fold) = gw
-            .emit_frames(session_id, seq_start, count, now)
+            .emit_frames(session_id, seq_start, count, now, grant_allows)
             .map_err(reveal_gateway_rpc_error)?;
         let frames_hex: Vec<String> = frames.iter().map(hex::encode).collect();
         Ok(serde_json::json!({
@@ -2781,6 +3941,106 @@ impl BudlumApiServer for RpcServer {
             "dealId": deal_id,
             "status": "Active",
             "operator": operator,
+        }))
+    }
+
+    async fn storage_accept_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: String,
+        payer: String,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid replacement operator hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
+        })?;
+
+        // The caller must prove control of BOTH addresses this call debits:
+        // the payer's escrow and the replacement operator's bond. The
+        // signed message binds every parameter that changes the debit; the
+        // placement (manifest, shard, replica, bytes) is derived by the
+        // chain from the ticket, so a signature cannot be replayed against
+        // a different slot. Same pattern as BUD_OPEN_DEAL_V1.
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ACCEPT_REALLOCATION_V1",
+            &ticket_id.to_le_bytes(),
+            op_addr.as_bytes(),
+            payer_addr.as_bytes(),
+            &start_epoch.to_le_bytes(),
+            &end_epoch.to_le_bytes(),
+            &economics.fee_per_byte_epoch.to_le_bytes(),
+            &economics.operator_bond.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        let payer_sig = hex::decode(payer_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid payer_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let op_sig = hex::decode(operator_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid operator signature: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let replacement_deal_id = self
+            .chain
+            .accept_storage_reallocation(
+                ticket_id,
+                op_addr,
+                payer_addr,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("accept_reallocation failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(serde_json::json!({
+            "ticketId": ticket_id,
+            "replacementDealId": replacement_deal_id,
+            "status": "ActiveReplacement",
+            "operator": replacement_operator,
         }))
     }
 
@@ -3155,6 +4415,110 @@ impl BudlumApiServer for RpcServer {
     async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
         let cid = self.chain.bns_resolve_content(name).await;
         Ok(cid.map(|c| format!("0x{}", hex::encode(c.0))))
+    }
+
+    async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let subject = crate::registry::address_of_did(&did).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "did must be `did:bud:<64 lowercase hex>`; malformed or uppercased DIDs are refused, not normalized",
+                None::<()>,
+            )
+        })?;
+        let Some((record, epoch)) = self.chain.identity_resolve(subject).await else {
+            return Ok(serde_json::json!(null));
+        };
+        Ok(serde_json::json!({
+            "did": did,
+            "subject": Self::to_0x_hash(record.subject.to_hex()),
+            "methods": record.methods.iter().map(|method| {
+                // An exhaustive match over `MethodKind`: when the registry
+                // grows a second scheme, this line fails to compile until the
+                // wire has a name for it - the same forcing the preimage
+                // encoder uses, because both would otherwise fold a new kind
+                // into the old name.
+                let kind = match method.kind {
+                    crate::registry::MethodKind::MlDsa87 => "ml-dsa-87",
+                };
+                serde_json::json!({
+                    "keyId": format!("0x{}", hex::encode(method.key_id)),
+                    "kind": kind,
+                    "revokedAt": method.revoked_at,
+                    "liveNow": method.is_live_at(epoch),
+                })
+            }).collect::<Vec<_>>(),
+            "credentialRoot": record.credential_root.map(|root| format!("0x{}", hex::encode(root))),
+            "guardians": record.guardians.iter()
+                .map(|guardian| Self::to_0x_hash(guardian.to_hex()))
+                .collect::<Vec<_>>(),
+            "recoveryThreshold": record.recovery_threshold,
+        }))
+    }
+
+    async fn identity_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = credential_id.strip_prefix("0x").unwrap_or(&credential_id);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid credential id: {e}"), None::<()>)
+        })?;
+        if bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("credential id must be 32 bytes, got {}", bytes.len()),
+                None::<()>,
+            ));
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes);
+        let Some((credential, verdict)) = self.chain.identity_credential(id).await else {
+            return Ok(serde_json::json!(null));
+        };
+        Ok(serde_json::json!({
+            "id": format!("0x{}", hex::encode(id)),
+            "issuer": Self::to_0x_hash(credential.issuer.to_hex()),
+            "subject": Self::to_0x_hash(credential.subject.to_hex()),
+            "schema": credential.schema,
+            "fields": credential.fields.iter().map(|field| serde_json::json!({
+                "name": field.name,
+                "commitment": format!("0x{}", hex::encode(field.commitment)),
+            })).collect::<Vec<_>>(),
+            "root": format!("0x{}", hex::encode(credential.root())),
+            "issuedAt": credential.issued_at,
+            "expiresAt": credential.expires_at,
+            // The verdict is the registry's own `is_credential_valid`, moved
+            // verbatim: this view adds no opinion about validity, so it
+            // cannot drift from the rule the executor enforces.
+            "valid": verdict.is_ok(),
+            "refusal": verdict.as_ref().err().map(ToString::to_string),
+        }))
+    }
+
+    async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: String,
+        document: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = requester.strip_prefix("0x").unwrap_or(&requester);
+        let requester = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid requester address: {e}"),
+                None::<()>,
+            )
+        })?;
+        match self
+            .chain
+            .identity_verify_presentation(receipt, requester, document)
+            .await
+        {
+            Ok(()) => Ok(serde_json::json!({ "valid": true })),
+            // A refused presentation is an answer a service can act on;
+            // only the call itself failing is an RPC error.
+            Err(reason) => Ok(serde_json::json!({ "valid": false, "reason": reason })),
+        }
     }
 
     async fn bns_resolve_subdomain(
@@ -5660,5 +7024,182 @@ mod render_format_tests {
     fn the_transport_frame_is_not_a_read_format() {
         assert!(parse_render_format("qrstream:0").is_err());
         assert!(parse_render_format("qr:0:256").is_err());
+    }
+}
+
+#[cfg(test)]
+mod view_claim_tests {
+    use super::{check_claimed_owner, parse_grant_auth, verify_view_claim};
+    use crate::core::address::Address;
+    use crate::storage::ContentId;
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn parts() -> (ContentId, [u8; 32], Address, Vec<u8>) {
+        (
+            ContentId([7u8; 32]),
+            [3u8; 32],
+            Address::from([4u8; 32]),
+            b"packed-bytes".to_vec(),
+        )
+    }
+
+    /// The `owner` field is checked against the chain's record before the
+    /// grant lookup. A request naming another address as owner of recorded
+    /// content is refused by name; the recorded owner passes; content with no
+    /// record is left to the grant lookup rather than refused here.
+    #[test]
+    fn the_claimed_owner_must_be_the_recorded_owner() {
+        let recorded = Address::from([4u8; 32]);
+        let stranger = Address::from([5u8; 32]);
+        let err = check_claimed_owner(Some(recorded), &stranger).unwrap_err();
+        assert_eq!(err.code(), -32006, "{err:?}");
+        assert!(err.message().contains("recorded owner"), "{err:?}");
+        assert!(check_claimed_owner(Some(recorded), &recorded).is_ok());
+        assert!(check_claimed_owner(None, &stranger).is_ok());
+    }
+
+    /// A claim without a key or a signature is refused before any crypto.
+    #[test]
+    fn a_bare_viewer_address_is_not_a_claim() {
+        let (content, key, owner, packed) = parts();
+        let claim =
+            serde_json::json!("0x0202020202020202020202020202020202020202020202020202020202020202");
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+        assert!(err.message().contains("viewerClaim"), "{err:?}");
+    }
+
+    /// The claim's key field is the viewer's, by name. A claim that carries
+    /// the grant field `ownerPublicKey` instead is refused with the field the
+    /// viewer has to send, not with a signature error.
+    #[test]
+    fn a_view_claim_names_the_viewer_key_field() {
+        let (content, key, owner, packed) = parts();
+        let claim = serde_json::json!({
+            "ownerPublicKey": "0x00",
+            "signature": "0x00",
+            "issuedAt": NOW,
+        });
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+        assert!(
+            err.message().contains("viewerClaim.viewerPublicKey"),
+            "{err:?}"
+        );
+        let grant_err = parse_grant_auth(Some(&serde_json::json!({
+            "viewerPublicKey": "0x00",
+            "signature": "0x00",
+        })))
+        .unwrap_err();
+        assert!(
+            grant_err.message().contains("authorization.ownerPublicKey"),
+            "{grant_err:?}"
+        );
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    fn signed_claim(
+        kp: &crate::crypto::primitives::WalletKeyPair,
+        content: &ContentId,
+        key: &[u8; 32],
+        owner: &Address,
+        packed: &[u8],
+        issued_at: u64,
+    ) -> serde_json::Value {
+        let digest = crate::storage::view_claim_digest(
+            content,
+            &kp.address(),
+            key,
+            owner,
+            &crate::storage::payload_commitment(packed),
+            issued_at,
+        );
+        serde_json::json!({
+            "viewerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
+            "signature": format!("0x{}", hex::encode(kp.sign(&digest))),
+            "issuedAt": issued_at,
+        })
+    }
+
+    /// The viewer is the address the signing key derives to, and nothing else.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn the_viewer_is_whoever_signed() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
+        let viewer = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW)
+            .expect("a claim signed by the viewer's own key is accepted");
+        assert_eq!(viewer, kp.address());
+    }
+
+    /// A claim signed for one object, key, owner or payload opens no other.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_claim_is_bound_to_the_request_it_was_signed_for() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
+        let other_content = ContentId([8u8; 32]);
+        let other_key = [9u8; 32];
+        let other_owner = Address::from([5u8; 32]);
+        let other_packed = b"other-bytes".to_vec();
+        for (c, k, o, p) in [
+            (&other_content, &key, &owner, &packed),
+            (&content, &other_key, &owner, &packed),
+            (&content, &key, &other_owner, &packed),
+            (&content, &key, &owner, &other_packed),
+        ] {
+            let err = verify_view_claim(&claim, c, k, o, p, NOW).unwrap_err();
+            assert_eq!(err.code(), -32602, "{err:?}");
+        }
+    }
+
+    /// A stranger's key cannot speak for a grantee: the address is derived,
+    /// so the only way to be the grantee is to hold the grantee's key.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_stranger_cannot_name_the_grantee() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let grantee = WalletKeyPair::generate();
+        let stranger = WalletKeyPair::generate();
+        // The stranger signs the grantee's digest with its own key: the
+        // signature verifies under the stranger's key, but the key derives to
+        // the stranger, so the request is about the stranger, not the grantee.
+        let digest = crate::storage::view_claim_digest(
+            &content,
+            &grantee.address(),
+            &key,
+            &owner,
+            &crate::storage::payload_commitment(&packed),
+            NOW,
+        );
+        let claim = serde_json::json!({
+            "viewerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
+            "signature": format!("0x{}", hex::encode(stranger.sign(&digest))),
+            "issuedAt": NOW,
+        });
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+    }
+
+    /// A captured claim dies with the session window, and future claims are invalid.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_claim_outside_the_window_is_refused() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let max = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
+        let stale = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max - 1);
+        assert!(verify_view_claim(&stale, &content, &key, &owner, &packed, NOW).is_err());
+        let future = signed_claim(&kp, &content, &key, &owner, &packed, NOW + 1);
+        assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
+        let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
+        assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());
     }
 }

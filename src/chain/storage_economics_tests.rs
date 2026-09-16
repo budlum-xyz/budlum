@@ -3,7 +3,7 @@ mod tests {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;
     use crate::core::address::Address;
-    use crate::domain::storage_deal::{StorageEconomicsParams, FEE_RATE_SCALE};
+    use crate::domain::storage_deal::{ReallocationStatus, StorageEconomicsParams, FEE_RATE_SCALE};
     use crate::domain::storage_params::StorageDomainParams;
     use crate::storage::db::Storage;
     use crate::storage::manifest::ContentManifest;
@@ -180,7 +180,15 @@ mod tests {
             let at = src
                 .find(name)
                 .unwrap_or_else(|| panic!("{name} must still exist"));
-            let body = &src[at..(at + 4000).min(src.len())];
+            // The window is the function itself: from its signature to the
+            // next `pub fn` (or the end of the file), on byte offsets that
+            // `find` returns, so no fixed width can split a multi-byte
+            // character or reach into the next function.
+            let rest = &src[at + name.len()..];
+            let end = rest
+                .find("\n    pub fn ")
+                .map_or(src.len(), |off| at + name.len() + off);
+            let body = &src[at..end];
             assert!(
                 body.contains("self.persist_storage_economics_state()?"),
                 "{name} must propagate a failed persist, not drop it"
@@ -389,5 +397,251 @@ mod tests {
         assert_eq!(event.operator, operator);
         assert_eq!(event.amount, bond);
         assert_eq!(event.balance_effect, bond);
+    }
+
+    /// A manifest whose first shard never held a deal, plus the ticket the
+    /// maintenance sweep would open for that empty slot. Returns the chain,
+    /// the ticket id, the funded operator and payer, the deal economics,
+    /// the domain params and the proof envelope an acceptance needs.
+    fn blockchain_with_never_placed_ticket() -> (
+        Blockchain,
+        u64,
+        Address,
+        Address,
+        StorageEconomicsParams,
+        StorageDomainParams,
+        Vec<u8>,
+    ) {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let operator = Address::from([21u8; 32]);
+        let payer = Address::from([22u8; 32]);
+        blockchain.state.add_balance(&operator, 5_000_000);
+        blockchain.state.add_balance(&payer, 5_000_000);
+
+        let manifest = ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
+        // open_never_placed_ticket refuses an unknown manifest on purpose; the
+        // helper built one locally without registering it, so the sweep could never
+        // open the ticket the four acceptance tests are about.
+        blockchain
+            .state
+            .storage_registry
+            .register_manifest(&manifest);
+        let shard_id = manifest.shards[0].shard_id;
+        let params = StorageDomainParams::default();
+        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
+        let economics = StorageEconomicsParams {
+            operator_bond: params.min_operator_bond,
+            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
+        };
+        let proof = {
+            let envelope = bud_proof::ProofEnvelope {
+                proof_format_version: 1,
+                backend: "test-backend".to_string(),
+                p3_version: "0.6".to_string(),
+                fri_params_id: "test-fri".to_string(),
+                public_inputs_hash: [0x42u8; 32],
+                proof_bytes: vec![0xABu8; 96],
+                degree_bits: 8,
+            };
+            bincode::serialize(&envelope).unwrap()
+        };
+        let ticket_id = blockchain
+            .state
+            .storage_registry
+            .open_never_placed_ticket(42, manifest.manifest_id, shard_id, 0, 1)
+            .expect("the sweep's ticket opens for an empty slot");
+        (
+            blockchain, ticket_id, operator, payer, economics, params, proof,
+        )
+    }
+
+    #[test]
+    fn accept_reallocation_opens_replacement_deal_with_escrow() {
+        let (mut blockchain, ticket_id, operator, payer, economics, params, proof) =
+            blockchain_with_never_placed_ticket();
+        let fee = economics.total_fee(8, 10);
+        let payer_before = blockchain.state.get_balance(&payer);
+        let op_before = blockchain.state.get_balance(&operator);
+
+        let replacement_deal_id = blockchain
+            .accept_storage_reallocation_with_escrow(
+                ticket_id,
+                operator,
+                payer,
+                0,
+                10,
+                economics.clone(),
+                &params,
+                Some(proof),
+                Some([0x42u8; 32]),
+            )
+            .expect("the replacement opens with escrow");
+
+        let ticket = blockchain
+            .state
+            .storage_registry
+            .get_reallocation_ticket(ticket_id)
+            .expect("ticket exists");
+        assert_eq!(ticket.status, ReallocationStatus::ActiveReplacement);
+        assert_eq!(ticket.replacement_deal_id, Some(replacement_deal_id));
+        let deal = blockchain
+            .state
+            .storage_registry
+            .all_deals()
+            .into_iter()
+            .find(|d| d.deal_id == replacement_deal_id)
+            .expect("replacement deal recorded");
+        assert!(deal.is_active());
+        assert_eq!(deal.operator, operator);
+        assert_eq!(blockchain.state.get_balance(&payer), payer_before - fee);
+        assert_eq!(
+            blockchain.state.get_balance(&operator),
+            op_before - economics.operator_bond
+        );
+    }
+
+    #[test]
+    fn accept_reallocation_refuses_the_slashed_operator() {
+        let (mut blockchain, deal_id, operator, _bond, _after_bond) = blockchain_with_one_deal(10);
+        blockchain
+            .state
+            .storage_registry
+            .open_challenge(deal_id, 0, 4, 1, 2, Address::zero(), 1)
+            .unwrap();
+        let (finalized, _slashed) = blockchain.finalize_missed_storage_challenges(20).unwrap();
+        assert_eq!(finalized, 1, "the missed challenge finalizes and slashes");
+        // `all_reallocation_tickets` yields `Vec<&Ticket>`, so a `ticket` kept
+        // past here holds an immutable borrow on `blockchain` - and the rest of
+        // this test credits a balance and calls the escrow, both of which need it
+        // mutably (E0502 twice in the failing build). The one field the test reads
+        // afterwards is copied out and the borrow ends with the block. Cloning the
+        // whole ticket would compile too, and would hide which field matters.
+        let ticket_id = {
+            let ticket = blockchain
+                .state
+                .storage_registry
+                .all_reallocation_tickets()
+                .into_iter()
+                .find(|t| t.failed_deal_id == deal_id)
+                .expect("the slash opens a ticket");
+            assert_eq!(ticket.slashed_operator, operator);
+            ticket.ticket_id
+        };
+
+        let params = StorageDomainParams::default();
+        let economics = StorageEconomicsParams {
+            operator_bond: params.min_operator_bond,
+            fee_per_byte_epoch: 1,
+        };
+        let proof = vec![0xABu8; 96];
+        let payer = Address::from([23u8; 32]);
+        blockchain.state.add_balance(&payer, 1_000_000);
+        let payer_before = blockchain.state.get_balance(&payer);
+        let op_before = blockchain.state.get_balance(&operator);
+
+        let err = blockchain
+            .accept_storage_reallocation_with_escrow(
+                ticket_id,
+                operator,
+                payer,
+                0,
+                10,
+                economics,
+                &params,
+                Some(proof),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("the slashed operator may not replace itself");
+        assert!(err.contains("slashed operator"), "got: {err}");
+        // The refusal precedes every balance move.
+        assert_eq!(blockchain.state.get_balance(&payer), payer_before);
+        assert_eq!(blockchain.state.get_balance(&operator), op_before);
+        let after = blockchain
+            .state
+            .storage_registry
+            .get_reallocation_ticket(ticket_id)
+            .expect("ticket exists");
+        assert_eq!(after.status, ReallocationStatus::Pending);
+    }
+
+    #[test]
+    fn accept_reallocation_is_one_shot() {
+        let (mut blockchain, ticket_id, operator, payer, economics, params, proof) =
+            blockchain_with_never_placed_ticket();
+        let first = blockchain
+            .accept_storage_reallocation_with_escrow(
+                ticket_id,
+                operator,
+                payer,
+                0,
+                10,
+                economics.clone(),
+                &params,
+                Some(proof.clone()),
+                Some([0x42u8; 32]),
+            )
+            .expect("first acceptance opens the replacement");
+        let payer_before = blockchain.state.get_balance(&payer);
+
+        let second_operator = Address::from([24u8; 32]);
+        blockchain.state.add_balance(&second_operator, 5_000_000);
+        let err = blockchain
+            .accept_storage_reallocation_with_escrow(
+                ticket_id,
+                second_operator,
+                payer,
+                0,
+                10,
+                economics.clone(),
+                &params,
+                Some(proof),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("a filled ticket cannot be accepted again");
+        assert!(err.contains("not open for acceptance"), "got: {err}");
+        // The refused second attempt debits nothing.
+        assert_eq!(blockchain.state.get_balance(&payer), payer_before);
+        let ticket = blockchain
+            .state
+            .storage_registry
+            .get_reallocation_ticket(ticket_id)
+            .expect("ticket exists");
+        assert_eq!(ticket.replacement_deal_id, Some(first));
+    }
+
+    #[test]
+    fn accept_reallocation_refunds_when_the_proof_is_missing() {
+        let (mut blockchain, ticket_id, operator, payer, economics, params, _proof) =
+            blockchain_with_never_placed_ticket();
+        let payer_before = blockchain.state.get_balance(&payer);
+        let op_before = blockchain.state.get_balance(&operator);
+
+        let err = blockchain
+            .accept_storage_reallocation_with_escrow(
+                ticket_id,
+                operator,
+                payer,
+                0,
+                10,
+                economics.clone(),
+                &params,
+                None,
+                None,
+            )
+            .expect_err("the merkle envelope is mandatory on the replacement too");
+        assert!(
+            err.contains("accept_reallocation_ticket failed"),
+            "got: {err}"
+        );
+        // A refused replacement keeps neither the escrow nor the bond.
+        assert_eq!(blockchain.state.get_balance(&payer), payer_before);
+        assert_eq!(blockchain.state.get_balance(&operator), op_before);
+        let ticket = blockchain
+            .state
+            .storage_registry
+            .get_reallocation_ticket(ticket_id)
+            .expect("ticket exists");
+        assert_eq!(ticket.status, ReallocationStatus::Pending);
     }
 }

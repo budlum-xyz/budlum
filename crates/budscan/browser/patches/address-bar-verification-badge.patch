@@ -50,7 +50,7 @@ would corrupt a meaning users spent years learning.
  
 --- /dev/null
 +++ b/browser/base/content/browser-budVerification.js
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,98 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -166,7 +166,7 @@ would corrupt a meaning users spent years learning.
                           role="button">
 --- a/browser/themes/shared/urlbar-searchbar.css
 +++ b/browser/themes/shared/urlbar-searchbar.css
-@@ -404,3 +404,38 @@
+@@ -404,3 +404,37 @@
  #urlbar[breakout-extend] > #urlbar-input-container > #urlbar-go-button {
    display: none;
  }

@@ -53,10 +53,20 @@
 //! not there. What is enforceable here is that one address never holds two
 //! shards of the same object, which is checkable from state.
 //!
-//! WIRING: wired - `assign_shard` is called once per epoch by the storage
-//! maintenance sweep, through `StorageRegistry::annotate_expected_holders`.
-//! Each pending repair ticket is annotated with the holder rendezvous
-//! placement would choose.
+//! WIRING: wired - two production entry points, both from the storage
+//! maintenance sweep. `StorageRegistry::annotate_expected_holders` runs once
+//! per epoch and annotates each pending repair ticket with the holder
+//! placement would choose; the annotation goes through `assign_object`, one
+//! call per object, so several tickets for one object cannot all be advised
+//! to the same operator.
+//!
+//! The entry points were not always both there. `assign_object` was written,
+//! tested and never called outside its own module, while the annotation loop
+//! asked for one shard at a time - the exact shape whose failure the spread
+//! exists to remove. The production behaviour was therefore the unspread one,
+//! and no gate saw it: the `unwired-guards` baseline counts guards *named*
+//! `check`/`verify`/`validate`/..., and a placement rule named `assign_*` is
+//! invisible to it. Wiring a rule is not the same as having the rule run.
 //!
 //! The annotation is **advisory**. Whoever accepts a ticket still gets it;
 //! `accept_reallocation_ticket` did not change. Binding acceptance to the
@@ -204,6 +214,15 @@ pub fn assign_shard(
 /// The order matches the manifest's shard order, so index `i` of the result
 /// holds shard `i` of the code word.
 ///
+/// A subset may be passed when only some of the object's shards are being
+/// placed - the repair path does this, one object per maintenance pass, over
+/// the shards that currently have no live replica. The spreading rule is the
+/// point of the function, and it only has something to spread over if the
+/// shards are handed to it together: asking for one shard at a time is exactly
+/// the per-shard loop whose failure mode this exists to remove. A one-shard
+/// subset therefore returns what [`assign_shard`] would, and a
+/// multi-shard subset returns the same answers plus the distinctness rule.
+///
 /// # Errors
 ///
 /// Propagates [`assign_shard`]'s errors. A partial index is never returned:
@@ -215,13 +234,38 @@ pub fn assign_object(
     candidates: &[ShardCandidate],
 ) -> Result<Vec<Address>, AssignmentError> {
     let mut holders = Vec::with_capacity(shard_ids.len());
+    let mut used: std::collections::BTreeSet<Address> = std::collections::BTreeSet::new();
     for shard_id in shard_ids {
         // One holder per shard: the code word's redundancy is the erasure
         // scheme's job, not this function's. Asking for more here would
         // store `n * replicas` copies and quietly multiply the cost the
         // scheme was chosen to control.
-        let placed = assign_shard(shard_id, entropy, candidates, 1)?;
+        //
+        // Within one object, a validator that already holds a shard steps
+        // aside for the next shard while any eligible candidate remains:
+        // each shard is scored against the full pool on its own, so one
+        // high-scoring address can otherwise win many shards of the same
+        // object, and its departure loses all of them at once. When every
+        // candidate already holds a shard of this object, the pool falls
+        // back to the full set - spreading is best-effort once the
+        // validator set is smaller than the code word.
+        // `stake > 0` mirrors `assign_shard`'s own eligibility rule: a
+        // candidate with nothing at stake can never win a shard, and if it
+        // alone is left "unused" it would masquerade as a free pool, making
+        // the placement refuse an object the full pool can still serve.
+        let unused: Vec<ShardCandidate> = candidates
+            .iter()
+            .filter(|c| c.stake > 0 && !used.contains(&c.address))
+            .copied()
+            .collect();
+        let pool: &[ShardCandidate] = if unused.is_empty() {
+            candidates
+        } else {
+            &unused
+        };
+        let placed = assign_shard(shard_id, entropy, pool, 1)?;
         holders.push(placed[0]);
+        used.insert(placed[0]);
     }
     Ok(holders)
 }
@@ -260,6 +304,55 @@ mod tests {
 
     fn shard(tag: u8) -> ContentId {
         ContentId([tag; 32])
+    }
+
+    #[test]
+    fn shards_of_one_object_spread_across_validators() {
+        // One object's shards must not pile onto one address while other
+        // candidates are free: a single departure would take several shards
+        // of the same object with it.
+        let c = candidates(20);
+        let ids: Vec<ContentId> = (1..=12).map(shard).collect();
+        let holders = assign_object(&ids, &[7u8; 32], &c).unwrap();
+        let distinct: std::collections::BTreeSet<Address> = holders.iter().copied().collect();
+        assert_eq!(distinct.len(), 12, "every shard gets its own validator");
+
+        // Fewer validators than shards: spreading degrades to best-effort
+        // and still produces a placement for every shard.
+        let small = candidates(2);
+        let holders = assign_object(&ids, &[7u8; 32], &small).unwrap();
+        assert_eq!(holders.len(), 12);
+    }
+
+    /// The shape the repair path uses: one object, the subset of its shards
+    /// that are missing, placed together.
+    ///
+    /// This is the regression lock for the wiring. Before it, each pending
+    /// ticket asked for its own shard and nothing else, so two tickets for one
+    /// object could both be advised to the same operator.
+    #[test]
+    fn a_multi_shard_subset_still_spreads() {
+        let c = candidates(20);
+        let ids = vec![shard(3), shard(4)];
+        let holders = assign_object(&ids, &[7u8; 32], &c).unwrap();
+        assert_eq!(holders.len(), 2);
+        assert_ne!(
+            holders[0], holders[1],
+            "two shards of one object must not be placed on one address while the pool has another"
+        );
+    }
+
+    /// And the other half of the lock: a subset of one must be *unchanged*
+    /// from the per-shard rule, so wiring the spread cannot silently move an
+    /// object that has only one shard to repair.
+    #[test]
+    fn a_single_shard_subset_places_exactly_as_the_per_shard_rule() {
+        let c = candidates(20);
+        for tag in [1u8, 2, 3, 7, 19] {
+            let spread = assign_object(&[shard(tag)], &[11u8; 32], &c).unwrap();
+            let direct = assign_shard(&shard(tag), &[11u8; 32], &c, 1).unwrap();
+            assert_eq!(spread, direct, "shard {tag} must place identically");
+        }
     }
 
     #[test]
@@ -467,6 +560,27 @@ mod tests {
             "100 shards over 20 equal-stake validators should touch most of \
              them, touched {}",
             seen.len()
+        );
+    }
+
+    #[test]
+    fn a_zero_stake_leftover_does_not_block_the_fallback_pool() {
+        // Every positive-stake candidate already holds a shard of this
+        // object; the only candidate still "unused" has nothing at stake.
+        // `assign_shard` excludes zero stake, so a pool of one zero-stake
+        // candidate is a pool of none: the placement must fall back to the
+        // full set instead of refusing the object.
+        let mut c = candidates(2);
+        c.push(ShardCandidate {
+            address: Address([0xEE; 32]),
+            stake: 0,
+        });
+        let ids: Vec<ContentId> = (1..=3).map(shard).collect();
+        let holders = assign_object(&ids, &[9u8; 32], &c).unwrap();
+        assert_eq!(holders.len(), 3);
+        assert!(
+            holders.iter().all(|h| h.0 != [0xEE; 32]),
+            "zero stake never holds a shard"
         );
     }
 }

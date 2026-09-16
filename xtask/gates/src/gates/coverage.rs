@@ -81,11 +81,7 @@ pub fn self_test() -> Result<String, String> {
     }
     // The committed baseline is a plain float without `%`; the parser must
     // read it (the shell gate's `float()` did, and CI writes it that way).
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-cov-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-cov")?;
     std::fs::create_dir_all(dir.join(".github")).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(".github/coverage-baseline.txt"), "64.30\n")
         .map_err(|e| e.to_string())?;

@@ -140,7 +140,7 @@ pub fn store_zstd_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
 /// (losslessness is preserved, the caller falls back to the raw path).
 pub fn store_json_columnar(data: &[u8], mode: ColumnarMode, _min_chunk: usize) -> Option<Vec<u8>> {
     let col = columnar_encode(data, mode)?;
-    let blob = columnar_to_blob(&col);
+    let blob = columnar_to_blob(&col)?;
     let chunk = crate::bud_format_container::StructuralChunk {
         content_id: crate::bud_format_container::content_id(&blob),
         data: blob,

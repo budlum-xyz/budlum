@@ -228,7 +228,12 @@ async fn test_chaos_v2_differential_vm_oracle() {
     let bytecode: Vec<u8> = program.iter().flat_map(|inst| inst.to_le_bytes()).collect();
 
     // 1. ZKVM Execution (Oracle A)
-    let receipt = ZkVmExecutor::execute_bytecode(&bytecode, 1_000_000).unwrap();
+    let receipt = ZkVmExecutor::execute_bytecode(
+        &bytecode,
+        1_000_000,
+        crate::execution::zkvm::TxContext::default(),
+    )
+    .unwrap();
     let zkvm_result = receipt.events[0];
 
     // 2. Rust Native Oracle (Oracle B)
@@ -237,8 +242,7 @@ async fn test_chaos_v2_differential_vm_oracle() {
     // Differential Assert
     assert_eq!(
         zkvm_result, rust_result,
-        "ZKVM result {} must match Rust Oracle {}",
-        zkvm_result, rust_result
+        "ZKVM result {zkvm_result} must match Rust Oracle {rust_result}"
     );
     println!("DIFFERENTIAL VM TEST SUCCESS: ZKVM == Rust Oracle");
 }

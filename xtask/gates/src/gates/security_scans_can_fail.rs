@@ -125,6 +125,26 @@ const ALLOWED: &[Allowed] = &[
         what: "semver-check",
         reason: "the diagnostic step records evidence; the semver gate blocks",
     },
+    Allowed {
+        file: "ci.yml",
+        what: "gates",
+        reason: "two softener shapes inside one blocking job, neither of which is the \
+                 verdict: the `|| true` lines are log-cleaning in surface/annotation \
+                 steps (`sed ... > tmp || true` before a grep that only reports), and \
+                 the single `continue-on-error` sits on the step that regenerates the \
+                 lib-test log for the badge gate - the suite's verdict belongs to the \
+                 `budlum` job, and a red copy of another job's verdict hides the gate \
+                 steps after it. The gate binary run itself carries neither softener \
+                 and blocks.",
+    },
+    Allowed {
+        file: "typos.yml",
+        what: "typos",
+        reason: "the `|| true` is in the `if: failure()` annotation step that re-runs \
+                 typos to surface the misspelled words on the API host; the verdict \
+                 step above it carries no softener and has already failed by the time \
+                 this line runs.",
+    },
     // The two `supply-chain-extra.yml` entries that used to sit here are
     // gone, not moved: the `|| true` they justified was removed from the
     // workflow, so both scans now carry their own exit status. This gate's

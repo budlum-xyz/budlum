@@ -8,7 +8,10 @@
 //! trace (step list + input/output digests + intermediate hashes). The real
 //! proof (nexus/SP1) lives outside the sandbox; witness determinism is tested
 //! here and it gives the SPEC of the circuit a zkVM would prove. On chain,
-//! `generate_and_verify` (I9) already provides cheap verification.
+//! `generate_and_verify` (I9) already provides cheap verification. The
+//! RUNNING side of this bridge - attempting an external prover and the
+//! fail-closed trust decision (a proof is never fabricated, and never
+//! claimed as in-tree verified) - lives in `bud_format_zkproof`.
 
 #![forbid(unsafe_code)]
 

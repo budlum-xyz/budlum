@@ -299,7 +299,9 @@ impl RecoveryProposal {
 /// is used from outside.
 pub use crate::storage::pact_binding::{Pact, PactRegistry};
 
-// BFT finality for guardian votes (ratio of guardians)
+/// One guardian's vote on a recovery proposal: the guardian's ML-DSA-87
+/// public key, the digest of the proposal it approves, and its signature
+/// over that digest under `GUARDIAN_VOTE_DOMAIN_V1`.
 #[derive(Debug, Clone)]
 pub struct GuardianVote {
     pub guardian_id: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
@@ -307,21 +309,79 @@ pub struct GuardianVote {
     pub signature: [u8; ML_DSA_87_SIGNATURE_LEN],
 }
 
+/// The bytes a guardian signs: the domain tag, then the proposal digest.
+const GUARDIAN_VOTE_DOMAIN_V1: &[u8] = b"BUDLUM_GUARDIAN_VOTE_V1";
+
+impl GuardianVote {
+    /// The message a vote's signature covers. Private until a signer in
+    /// this tree produces votes; the finality check is the only reader.
+    fn signed_message(proposal_digest: &[u8; 32]) -> Vec<u8> {
+        let mut m = Vec::with_capacity(GUARDIAN_VOTE_DOMAIN_V1.len() + 32);
+        m.extend_from_slice(GUARDIAN_VOTE_DOMAIN_V1);
+        m.extend_from_slice(proposal_digest);
+        m
+    }
+}
+
 pub struct BftGuardianFinality;
 
 impl BftGuardianFinality {
+    /// Decide whether the votes finalise `proposal_digest` for an account
+    /// with `guardians` and `threshold`.
+    ///
+    /// A vote counts when its key is one of the account's guardians, no
+    /// other counted vote came from that key, it names this proposal, and
+    /// its ML-DSA-87 signature over the proposal verifies under that key.
+    /// The counted votes must reach both the account's threshold and two
+    /// thirds of the guardian set.
+    ///
+    /// This used to compare `votes.len()` with the two numbers and return
+    /// the votes. Duplicates, votes on some other proposal and votes with
+    /// any bytes in the signature field all reached the count, so a single
+    /// party holding no guardian key could finalise a recovery by sending
+    /// enough vote records.
+    ///
     /// # Errors
     ///
-    /// Errors if the vote count is below the threshold or the quorum does not hold.
+    /// Errors when the guardian set is empty, a vote is from a stranger,
+    /// repeated, for another proposal or unsigned, or when the counted votes
+    /// fall short of the threshold or the quorum.
     pub fn finalize(
         votes: Vec<GuardianVote>,
-        n: usize,
+        guardians: &[[u8; ML_DSA_87_PUBLIC_KEY_LEN]],
         threshold: usize,
+        proposal_digest: &[u8; 32],
     ) -> Result<Vec<GuardianVote>, &'static str> {
+        if guardians.is_empty() {
+            return Err("K-BUD-BFT-GUARDIAN: no guardians");
+        }
+        if threshold == 0 || threshold > guardians.len() {
+            return Err("K-BUD-BFT-GUARDIAN: threshold outside 1..=guardians");
+        }
+        let message = GuardianVote::signed_message(proposal_digest);
+        let mut seen: Vec<&[u8; ML_DSA_87_PUBLIC_KEY_LEN]> = Vec::with_capacity(votes.len());
+        for vote in &votes {
+            if !guardians.contains(&vote.guardian_id) {
+                return Err("K-BUD-BFT-GUARDIAN: vote from a key outside the guardian set");
+            }
+            if seen.contains(&&vote.guardian_id) {
+                return Err("K-BUD-BFT-GUARDIAN: duplicate guardian");
+            }
+            if &vote.proposal_digest != proposal_digest {
+                return Err("K-BUD-BFT-GUARDIAN: vote names another proposal");
+            }
+            crate::crypto::primitives::verify_ml_dsa_87_signature(
+                &message,
+                &vote.signature,
+                &vote.guardian_id,
+            )
+            .map_err(|_| "K-BUD-BFT-GUARDIAN: signature did not verify")?;
+            seen.push(&vote.guardian_id);
+        }
         if votes.len() < threshold {
             return Err("K-BUD-BFT-GUARDIAN: quorum < threshold");
         }
-        let quorum = (n * 2).div_ceil(3);
+        let quorum = (guardians.len() * 2).div_ceil(3);
         if votes.len() < quorum {
             return Err("K-BUD-BFT-GUARDIAN: quorum <2n/3");
         }
@@ -443,17 +503,31 @@ mod tests {
         assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 3).is_err());
     }
 
+    /// Vote records filled with bytes reach neither the threshold nor the
+    /// quorum: a vote is counted only after its signature verifies, and
+    /// these never do. Before the check, four such records finalised any
+    /// recovery on a four-guardian account.
     #[test]
-    fn guardian_finality_needs_both_the_threshold_and_two_thirds() {
+    fn unsigned_vote_records_never_finalise() {
+        let guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]> =
+            (1u8..=4).map(|id| [id; ML_DSA_87_PUBLIC_KEY_LEN]).collect();
         let vote = |id: u8| GuardianVote {
             guardian_id: [id; ML_DSA_87_PUBLIC_KEY_LEN],
             proposal_digest: [0u8; 32],
             signature: SIG,
         };
-        assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2), vote(3)], 4, 2).is_ok());
-        // Passes the threshold but not the 2n/3 quorum: 2 votes, quorum is 3 for n=4.
-        assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2)], 4, 2).is_err());
-        assert!(BftGuardianFinality::finalize(vec![vote(1)], 4, 2).is_err());
+        let proposal = [0u8; 32];
+        for count in 1..=4u8 {
+            let votes: Vec<GuardianVote> = (1..=count).map(vote).collect();
+            assert!(
+                BftGuardianFinality::finalize(votes, &guardians, 2, &proposal).is_err(),
+                "{count} unsigned records must not finalise"
+            );
+        }
+        // the guardian set and threshold are checked before any vote
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], &[], 1, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], &guardians, 0, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], &guardians, 5, &proposal).is_err());
     }
 
     /// A seed cannot be derived from a short input.
@@ -516,5 +590,61 @@ mod tests {
             at, undomained,
             "the domain separator has to enter the derivation"
         );
+    }
+
+    /// Votes are counted only from the account's guardians, once per key,
+    /// on this proposal, with a verifying ML-DSA-87 signature. Every case
+    /// below passed the old length check; each is a different way of not
+    /// being a guardian vote.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn only_signed_votes_from_distinct_guardians_finalise() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let keys: Vec<WalletKeyPair> = (0..3).map(|_| WalletKeyPair::generate()).collect();
+        let guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]> =
+            keys.iter().map(WalletKeyPair::public_key_bytes).collect();
+        let proposal = [7u8; 32];
+        let other = [8u8; 32];
+        let vote = |k: &WalletKeyPair, digest: [u8; 32]| GuardianVote {
+            guardian_id: k.public_key_bytes(),
+            proposal_digest: digest,
+            signature: k.sign(&GuardianVote::signed_message(&digest)),
+        };
+        let honest: Vec<GuardianVote> = keys.iter().map(|k| vote(k, proposal)).collect();
+        assert!(
+            BftGuardianFinality::finalize(honest.clone(), &guardians, 2, &proposal).is_ok(),
+            "three honest votes finalise"
+        );
+        assert!(
+            BftGuardianFinality::finalize(honest[..2].to_vec(), &guardians, 2, &proposal).is_ok(),
+            "two of three is both the threshold and 2n/3"
+        );
+        // the same guardian twice, padded to the count
+        let dup = vec![honest[0].clone(), honest[0].clone()];
+        assert!(BftGuardianFinality::finalize(dup, &guardians, 2, &proposal).is_err());
+        // a stranger with a valid signature of its own
+        let stranger = WalletKeyPair::generate();
+        let mixed = vec![honest[0].clone(), vote(&stranger, proposal)];
+        assert!(BftGuardianFinality::finalize(mixed, &guardians, 2, &proposal).is_err());
+        // a vote on another proposal
+        let elsewhere = vec![honest[0].clone(), vote(&keys[1], other)];
+        assert!(BftGuardianFinality::finalize(elsewhere, &guardians, 2, &proposal).is_err());
+        // a vote record that names this proposal but carries someone else's signature
+        let mut forged = honest[1].clone();
+        forged.signature = honest[0].signature;
+        assert!(BftGuardianFinality::finalize(
+            vec![honest[0].clone(), forged],
+            &guardians,
+            2,
+            &proposal
+        )
+        .is_err());
+        // one honest vote is below the threshold of two
+        assert!(
+            BftGuardianFinality::finalize(honest[..1].to_vec(), &guardians, 2, &proposal).is_err()
+        );
+        // an empty guardian set or a threshold outside the set is refused
+        assert!(BftGuardianFinality::finalize(honest.clone(), &[], 1, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(honest, &guardians, 4, &proposal).is_err());
     }
 }

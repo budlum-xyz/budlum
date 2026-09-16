@@ -200,11 +200,14 @@ impl ModelFloatSplit {
         let count = u32::from_le_bytes(bytes[10..14].try_into().ok()?) as usize;
         let exp_len = u32::from_le_bytes(bytes[14..18].try_into().ok()?) as usize;
         let exp_start = HDR;
-        if bytes.len() < exp_start + exp_len {
+        // `exp_len` is read from the blob; it must fit inside the payload,
+        // otherwise `rest_bits` is sliced backwards.
+        let exp_end = exp_start.checked_add(exp_len)?;
+        if exp_end > payload_len || bytes.len() < payload_len {
             return None;
         }
-        let exponents = bytes[exp_start..exp_start + exp_len].to_vec();
-        let rest_bits = bytes[exp_start + exp_len..payload_len].to_vec();
+        let exponents = bytes[exp_start..exp_end].to_vec();
+        let rest_bits = bytes[exp_end..payload_len].to_vec();
         if count == 0 || count > MAX_VALUES {
             return None;
         }
@@ -281,6 +284,23 @@ mod tests {
             *bad.last_mut().unwrap() ^= 0x01;
             assert!(ModelFloatSplit::from_blob(&bad).is_none());
         }
+    }
+
+    /// An `exp_len` larger than the payload used to slice `rest_bits`
+    /// backwards; the blob is refused (the digest guards the header, so the
+    /// forged length has to be re-signed for the check to be reached).
+    #[test]
+    fn an_exp_len_beyond_the_payload_is_refused() {
+        let split = ModelFloatSplit::encode(&gen_bf16_model(10), FloatKind::Bf16).expect("encode");
+        let mut blob = split.to_blob();
+        let payload_len = blob.len() - 32;
+        blob[14..18].copy_from_slice(&(u32::MAX).to_le_bytes());
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_MODEL_V1");
+        h.update(&blob[..payload_len]);
+        let d: [u8; 32] = h.finalize().into();
+        blob[payload_len..].copy_from_slice(&d);
+        assert!(ModelFloatSplit::from_blob(&blob).is_none());
     }
 
     #[test]

@@ -87,7 +87,7 @@ pub fn reward_for_epoch(
         .collect();
     validators.sort_by_key(|(addr, _)| *addr);
 
-    let total_stake: u128 = validators.iter().map(|(_, stake)| *stake as u128).sum();
+    let total_stake: u128 = validators.iter().map(|(_, stake)| u128::from(*stake)).sum();
     if total_stake == 0 {
         return Vec::new();
     }
@@ -95,7 +95,7 @@ pub fn reward_for_epoch(
     let mut out = Vec::with_capacity(validators.len());
     let mut paid = 0u64;
     for (addr, stake) in validators {
-        let share = ((budget as u128) * (stake as u128) / total_stake) as u64;
+        let share = (u128::from(budget) * u128::from(stake) / total_stake) as u64;
         paid = paid.saturating_add(share);
         out.push((addr, share));
     }

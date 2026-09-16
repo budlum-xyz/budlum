@@ -275,7 +275,7 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
     for &b in bytes {
         n = n
             .checked_mul(256)
-            .and_then(|v| v.checked_add(b as u64))
+            .and_then(|v| v.checked_add(u64::from(b)))
             .ok_or(RlpError::InvalidLengthPrefix)?;
     }
     Ok(n)

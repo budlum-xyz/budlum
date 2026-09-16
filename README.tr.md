@@ -13,7 +13,7 @@ hangi konsensüsün ürettiğini sormaz, yalnızca o olgunun kesinlik kanıtın�
 olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-2621%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-2885%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -215,7 +215,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 | `buf.yaml` | Protobuf çalışma alanı kökü, `proto/` ile eşleşir (Repo Lint kapısı `buf`u kökten çalıştırır) |
 | `flake.nix` · `flake.lock` | Nix flake keşfi yalnızca kökte olur |
 | `README.md` | GitHub depo ana sayfasını kökteki README'den oluşturur |
-| `LICENSE.md` | GitHub lisans tespiti, `cargo-deny` ve `.quality/check_license.py` dosyayı kökten okur |
+| `LICENSE.md` | GitHub lisans tespiti, `cargo-deny` ve `license-consistency` kapısı dosyayı kökten okur |
 | `.gitignore` · `.gitleaks.toml` | Git ve gitleaks yapılandırmaları kökten çözer |
 
 Konteyner ve lisans bildirim dosyaları ağaç içine taşındı: `ops/Dockerfile`,
@@ -302,8 +302,10 @@ bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
 ### Düğüm rolleri
 
 `--role` bir düğümün hangi profille çalışacağını seçer: `validator`, `sentry`, `seed`,
-`rpc` veya `archive`. Her birinin maruz kalma yüzeyi ve gerekli garanti kümesi farklıdır;
-bkz. [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md).
+`rpc`, `archive` veya `relayer`. Her birinin maruz kalma yüzeyi ve gerekli garanti kümesi
+farklıdır; bkz. [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md). `relayer` düğüm içi
+zincirler arası aktarım işçisini çalıştırır (doğrulayıcılar da çalıştırır), tam depolama
+tutar ve hiçbir açık dinleyici açmaz.
 
 > [!IMPORTANT]
 > **Ana ağ doğrulayıcıları PKCS#11 üzerinden imzalamak zorundadır.** Diske dayalı

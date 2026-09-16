@@ -15,6 +15,17 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
+    /// The variant's name, for error text that reports what arrived.
+    pub fn name(&self) -> &'static str {
+        match self {
+            MessageKind::BridgeLock => "BridgeLock",
+            MessageKind::BridgeMint => "BridgeMint",
+            MessageKind::BridgeBurn => "BridgeBurn",
+            MessageKind::BridgeUnlock => "BridgeUnlock",
+            MessageKind::Custom(_) => "Custom",
+        }
+    }
+
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
             MessageKind::BridgeLock => b"bridge-lock".to_vec(),

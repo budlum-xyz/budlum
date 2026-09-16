@@ -281,8 +281,8 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
-        count: 3,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+        count: 4,
+        reason: "consensus or storage entry points whose arguments are all required and none of which groups into a meaningful struct; the fourth is `accept_storage_reallocation_with_escrow`, whose ticket/operator/payer/epoch-window/economics/proof arguments each come from a different authority and bundling them would hide which fields a caller must supply",
     },
     Budget {
         file: "src/chain/blockchain.rs",
@@ -293,8 +293,14 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "src/chain/chain_actor.rs",
         lint: "clippy::too_many_arguments",
-        count: 3,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+        count: 4,
+        reason: "actor-boundary mirrors of the bridge lock/mint entry points; each argument crosses the channel as part of one message and none groups into a meaningful struct, so bundling them would hide which fields a caller must supply",
+    },
+    Budget {
+        file: "src/cross_domain/external/registry.rs",
+        lint: "clippy::too_many_arguments",
+        count: 2,
+        reason: "`register` takes the full admission surface (network, descriptor, bond, probes, height) and `check` re-verifies that same surface; both lists are load-bearing - dropping an argument silently narrows what admission covers - and a struct would let a caller omit a field by default",
     },
     Budget {
         file: "src/consensus/pos.rs",
@@ -505,6 +511,18 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::unwrap_used",
         count: 1,
         reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the bench run, which is the reporting channel a benchmark is supposed to use",
+    },
+    Budget {
+        file: "src/cross_domain/evm/sync_committee.rs",
+        lint: "clippy::large_stack_arrays",
+        count: 1,
+        reason: "the mainnet known-answer fixture holds two 512-entry committee arrays on the stack exactly as the state they pin does; the size is fixed by Ethereum's SYNC_COMMITTEE_SIZE, the function is test-only, and a heap copy would obscure the byte-for-byte comparison the fixture exists for",
+    },
+    Budget {
+        file: "src/crypto/primitives.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "`WalletKeyPair::address` derives from a generated ML-DSA-87 public key, and derivation only rejects malformed keys, so the panic path is unreachable; the expect beats the previous silent zero-address fallback, which would have let a malformed key spend as `[0u8; 32]`",
     },
 ];
 

@@ -1,10 +1,13 @@
-7142
+7048
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
 # (scripts/check-clippy-extra.sh reads it with `grep -E '^[0-9]+$' | head -1`);
 # below it is the justification.
 #
+# 2026-09-13 - 7142 -> 7048 (mechanical `clippy --fix` on four lints cut the
+#   measured count to 6713 on CI run for 74cc558; base = 6713 + 5% concurrency
+#   margin, per the ratchet policy: the base only descends to a CI-measured count)
 # 2026-08-11 - 7108 -> 7142 (MSRV 1.97.0 upgrade: +34 new pedantic/nursery lints)
 # 2026-07-26 - 217 -> 7108
 #

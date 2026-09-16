@@ -154,6 +154,7 @@ impl std::error::Error for ContentGateError {}
 pub struct ProtectedContent {
     /// `manifest_id -> asset_id`. Append-only by construction: there is no
     /// removal method, for the reason in the module doc.
+    #[serde(with = "crate::core::map_keys")]
     bindings: BTreeMap<ContentId, AssetId>,
 }
 

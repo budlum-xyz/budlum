@@ -195,9 +195,11 @@ pub fn evaluate(
 #[must_use]
 pub fn partial_registry_root(base_cost: u64, entries: &[RegistryEntry]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"BDLM_BNS_REGISTRY_V1");
+    hasher.update(b"BDLM_BNS_REGISTRY_V2");
     hasher.update(base_cost.to_le_bytes());
+    hasher.update((entries.len() as u64).to_le_bytes());
     for e in entries {
+        hasher.update((e.name.len() as u64).to_le_bytes());
         hasher.update(e.name.as_bytes());
         hasher.update(e.owner);
         hasher.update(e.expires_at.to_le_bytes());

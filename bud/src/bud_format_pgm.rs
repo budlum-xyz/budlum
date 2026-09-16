@@ -27,6 +27,12 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
     if keys.len() != offsets.len() || keys.is_empty() || eps == 0 {
         return None;
     }
+    // Both slope fits subtract an earlier key from a later one. That only
+    // holds for a non-decreasing key sequence; anything else is refused
+    // here rather than wrapping (or, with overflow-checks, panicking) below.
+    if keys.windows(2).any(|w| w[1] < w[0]) {
+        return None;
+    }
     let mut segs = Vec::new();
     let mut i = 0usize;
     while i < keys.len() {
@@ -166,6 +172,15 @@ mod tests {
         assert!(build_pgm(&[], &[], 1).is_none());
         assert!(build_pgm(&[1, 2], &[1], 1).is_none());
         assert!(build_pgm(&[1, 2], &[1, 2], 0).is_none());
+    }
+
+    #[test]
+    fn pgm_refuses_descending_keys() {
+        // A single descending pair used to underflow `keys[i + 1] - keys[i]`.
+        assert!(build_pgm(&[5, 1], &[10, 20], 8).is_none());
+        assert!(build_pgm(&[1, 4, 3, 9], &[0, 10, 20, 30], 8).is_none());
+        // Equal neighbours are still admitted (dx is clamped to 1).
+        assert!(build_pgm(&[2, 2, 7], &[0, 5, 9], 8).is_some());
     }
 
     #[test]

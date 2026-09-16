@@ -58,6 +58,8 @@ pub enum ChainCommand {
     GetBaseFee(oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
+    /// Whether the mempool still holds the transaction with this hash.
+    MempoolContains(String, oneshot::Sender<bool>),
     HandleFinalityCert(FinalityCert, oneshot::Sender<Result<(), String>>),
     HandlePrevote(Prevote, oneshot::Sender<Result<(), String>>),
     HandlePrecommit(
@@ -136,6 +138,10 @@ pub enum ChainCommand {
         crate::domain::VerifiedDomainCommitment,
         oneshot::Sender<Result<(), String>>,
     ),
+    BuildStateUpdateTransaction(
+        crate::domain::DomainCommitment,
+        oneshot::Sender<Result<Transaction, String>>,
+    ),
     SubmitCrossDomainMessage(
         crate::cross_domain::CrossDomainMessage,
         oneshot::Sender<Result<(), String>>,
@@ -148,6 +154,76 @@ pub enum ChainCommand {
         crate::core::address::Address,
         u64,
         oneshot::Sender<Result<(), String>>,
+    ),
+    RegisterExternalDomain(
+        Box<crate::cross_domain::external::RegistrationRequest>,
+        oneshot::Sender<Result<crate::cross_domain::external::DomainKey, String>>,
+    ),
+    SubmitExternalEvidence(
+        Box<crate::cross_domain::external::RawConsensusEvidence>,
+        oneshot::Sender<Result<Option<crate::cross_domain::external::FinalityAttestation>, String>>,
+    ),
+    GetExternalDomainProfile(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<
+            Option<(
+                crate::cross_domain::external::DomainProfile,
+                crate::cross_domain::external::IntakeEntry,
+                crate::cross_domain::external::AdapterDescriptor,
+            )>,
+        >,
+    ),
+    GetExternalDomainProfiles(
+        oneshot::Sender<Vec<(crate::cross_domain::external::DomainProfile, String)>>,
+    ),
+    GetExternalIntakeDigest(oneshot::Sender<Result<[u8; 32], String>>),
+    ReadmitExternalDomain(
+        crate::cross_domain::external::DomainKey,
+        String,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    ScheduleExternalFork {
+        key: crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    SlashExternalProver {
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: crate::core::address::Address,
+        response: oneshot::Sender<Result<(u128, u128), String>>,
+    },
+    SetExternalQuorumPolicy(
+        crate::cross_domain::external::DomainKey,
+        crate::cross_domain::external::QuorumPolicy,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    BondExternalProver(
+        crate::cross_domain::external::DomainKey,
+        crate::core::address::Address,
+        u128,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    GetExternalQuorumRound(
+        crate::cross_domain::external::DomainKey,
+        u64,
+        oneshot::Sender<Option<crate::cross_domain::external::QuorumRound>>,
+    ),
+    GetExternalQuorumRounds(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<(
+            Option<crate::cross_domain::external::QuorumPolicy>,
+            Vec<crate::cross_domain::external::QuorumRound>,
+        )>,
+    ),
+    GetExternalDomainRegistration(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
     BondProver(
         crate::core::address::Address,
@@ -280,7 +356,7 @@ pub enum ChainCommand {
         asset_id: crate::cross_domain::AssetId,
         owner: crate::core::address::Address,
         recipient: crate::core::address::Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
         response: oneshot::Sender<
             Result<
@@ -339,6 +415,18 @@ pub enum ChainCommand {
         operator: crate::core::address::Address,
         payer: crate::core::address::Address,
         replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    AcceptStorageReallocation {
+        ticket_id: u64,
+        replacement_operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
         start_epoch: u64,
         end_epoch: u64,
         economics: crate::domain::storage_deal::StorageEconomicsParams,
@@ -513,6 +601,21 @@ pub enum ChainCommand {
         parent: String,
         label: String,
         response: oneshot::Sender<Option<Address>>,
+    },
+    IdentityResolve {
+        subject: Address,
+        response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
+    },
+    IdentityCredential {
+        credential_id: [u8; 32],
+        response:
+            oneshot::Sender<Option<(crate::registry::CredentialCommitment, Result<(), String>)>>,
+    },
+    IdentityVerifyPresentation {
+        receipt: crate::registry::PresentationReceipt,
+        requester: Address,
+        document: String,
+        response: oneshot::Sender<Result<(), String>>,
     },
     BnsSetStorage {
         name: String,
@@ -721,6 +824,19 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetMempoolSize(tx)).await;
         rx.await.unwrap_or(0)
+    }
+
+    /// Whether the mempool still holds `hash`.
+    ///
+    /// `add_transaction` confirms admission, not execution: the pool can
+    /// expire or evict the transaction afterwards. A submitter that must see
+    /// its transaction through to a block asks this to tell "still queued"
+    /// from "lost". An unreachable actor reads as `false`, the direction in
+    /// which the caller resubmits rather than waits forever.
+    pub async fn mempool_contains(&self, hash: String) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::MempoolContains(hash, tx)).await;
+        rx.await.unwrap_or(false)
     }
 
     pub async fn handle_finality_cert(&self, cert: FinalityCert) -> Result<(), String> {
@@ -934,6 +1050,39 @@ impl ChainHandle {
                 operator,
                 payer,
                 replica_index,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_storage_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AcceptStorageReallocation {
+                ticket_id,
+                replacement_operator,
+                payer,
                 start_epoch,
                 end_epoch,
                 economics,
@@ -1523,6 +1672,19 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    pub async fn build_state_update_transaction(
+        &self,
+        commitment: crate::domain::DomainCommitment,
+    ) -> Result<Transaction, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BuildStateUpdateTransaction(commitment, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
     pub async fn submit_cross_domain_message(
         &self,
         message: crate::cross_domain::CrossDomainMessage,
@@ -1534,6 +1696,226 @@ impl ChainHandle {
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Registers an external domain through the actor. The BLS verifier is
+    /// installed inside the actor (`IntakeState::production_bls`), never
+    /// carried over the channel: crypto configuration is the node's, not the
+    /// caller's.
+    pub async fn register_external_domain(
+        &self,
+        registration: crate::cross_domain::external::RegistrationRequest,
+    ) -> Result<crate::cross_domain::external::DomainKey, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterExternalDomain(
+                Box::new(registration),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Submits external-finality evidence through the actor.
+    pub async fn submit_external_evidence(
+        &self,
+        evidence: crate::cross_domain::external::RawConsensusEvidence,
+    ) -> Result<Option<crate::cross_domain::external::FinalityAttestation>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitExternalEvidence(Box::new(evidence), tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Reads one external domain's public profile with its intake entry and
+    /// registered descriptor.
+    pub async fn get_external_domain_profile(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> Option<(
+        crate::cross_domain::external::DomainProfile,
+        crate::cross_domain::external::IntakeEntry,
+        crate::cross_domain::external::AdapterDescriptor,
+    )> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainProfile(key, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Reads every external domain's profile with its summary line.
+    pub async fn get_external_domain_profiles(
+        &self,
+    ) -> Vec<(crate::cross_domain::external::DomainProfile, String)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainProfiles(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// The deterministic digest of the whole external-intake state, for
+    /// cross-node comparison.
+    pub async fn get_external_intake_digest(&self) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalIntakeDigest(tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Re-runs admission for a faulted external domain.
+    pub async fn readmit_external_domain(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        reason: String,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ReadmitExternalDomain(key, reason, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Schedules an evidence-format fork for an external domain.
+    pub async fn schedule_external_fork(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ScheduleExternalFork {
+                key,
+                old_version,
+                new_version,
+                fork_height,
+                grace_heights,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Slashes the prover behind an accepted external attestation.
+    pub async fn slash_external_prover(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: crate::core::address::Address,
+    ) -> Result<(u128, u128), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SlashExternalProver {
+                key,
+                prover,
+                evidence_digest,
+                value_atoms,
+                challenger,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. Evidence for that domain then goes through rounds: nothing
+    /// commits until enough bonded provers carry the same claim.
+    pub async fn set_external_quorum_policy(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        policy: crate::cross_domain::external::QuorumPolicy,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SetExternalQuorumPolicy(key, policy, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Bonds an additional prover to a registered external domain.
+    pub async fn bond_external_prover(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        bond_atoms: u128,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondExternalProver(
+                key, prover, bond_atoms, tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// The quorum round for one external height of one domain, if retained.
+    pub async fn external_quorum_round(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        height: u64,
+    ) -> Option<crate::cross_domain::external::QuorumRound> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalQuorumRound(key, height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Every retained quorum round of one domain, with its policy.
+    pub async fn external_quorum_rounds(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> (
+        Option<crate::cross_domain::external::QuorumPolicy>,
+        Vec<crate::cross_domain::external::QuorumRound>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalQuorumRounds(key, tx))
+            .await;
+        rx.await.unwrap_or((None, Vec::new()))
+    }
+
+    /// The full registration record of one external domain, with the
+    /// registry clock beside it.
+    pub async fn external_domain_registration(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> Option<(crate::cross_domain::external::DomainRegistration, u64)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainRegistration(key, tx))
+            .await;
+        rx.await.unwrap_or(None)
     }
 
     /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
@@ -2075,7 +2457,7 @@ impl ChainHandle {
         asset_id: crate::cross_domain::AssetId,
         owner: crate::core::address::Address,
         recipient: crate::core::address::Address,
-        amount: u128,
+        amount: u64,
         expiry_height: u64,
     ) -> Result<
         (
@@ -2372,6 +2754,59 @@ impl ChainHandle {
             })
             .await;
         rx.await.unwrap_or(None)
+    }
+
+    pub async fn identity_resolve(
+        &self,
+        subject: Address,
+    ) -> Option<(crate::registry::IdentityRecord, u64)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IdentityResolve {
+                subject,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn identity_credential(
+        &self,
+        credential_id: [u8; 32],
+    ) -> Option<(crate::registry::CredentialCommitment, Result<(), String>)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IdentityCredential {
+                credential_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: Address,
+        document: String,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::IdentityVerifyPresentation {
+                receipt,
+                requester,
+                document,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err("chain actor closed".to_string());
+        }
+        rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
     pub async fn bns_set_storage(
@@ -2715,8 +3150,7 @@ impl ChainActor {
                         .storage_registry
                         .deals_for_manifest(manifest_id)
                         .first()
-                        .map(|d| d.domain_id)
-                        .unwrap_or(0);
+                        .map_or(0, |d| d.domain_id);
                     if let Some(ticket_id) = self
                         .blockchain
                         .state
@@ -2819,23 +3253,24 @@ impl ChainActor {
                 stake: validator.stake,
             })
             .collect();
-        if !placement_candidates.is_empty() {
+        let annotated = if placement_candidates.is_empty() {
+            0
+        } else {
             let entropy = crate::core::hash::hash_fields_bytes(&[
                 b"BDLM_MAINTENANCE_PLACEMENT_V1",
                 &self.blockchain.chain_id.to_le_bytes(),
                 self.blockchain.last_block().hash.as_bytes(),
                 &current_epoch.to_le_bytes(),
             ]);
-            let annotated = self
-                .blockchain
+            self.blockchain
                 .state
                 .storage_registry
-                .annotate_expected_holders(&entropy, &placement_candidates);
-            if annotated > 0 {
-                tracing::info!(
-                    "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
-                );
-            }
+                .annotate_expected_holders(&entropy, &placement_candidates)
+        };
+        if annotated > 0 {
+            tracing::info!(
+                "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
+            );
         }
         for (ticket_id, expected, actual) in self
             .blockchain
@@ -2872,13 +3307,52 @@ impl ChainActor {
             );
         }
 
+        // The action the demand band was missing. Each shard under its target
+        // gets a replacement ticket for every replica slot that is actually
+        // free, which is the same repair the zero-replica path performs; the
+        // guard is per slot, not per shard, because "the shard has an active
+        // deal" and "this slot has one" are different statements and only the
+        // second one means paying two operators for one slot. Tickets are
+        // registry state, so the count below feeds the persist decision.
+        let repair_tickets = self
+            .blockchain
+            .state
+            .storage_registry
+            .open_repair_tickets_for_free_slots(current_epoch);
+        if repair_tickets > 0 {
+            tracing::warn!(
+                "B.U.D. storage maintenance opened {repair_tickets} repair tickets for free replica slots at epoch {current_epoch}"
+            );
+        }
+
         let under_replicated = self
             .blockchain
             .state
             .storage_registry
             .mark_overdue_reallocations_under_replicated(current_epoch);
-        if under_replicated > 0 || !repair_band.is_empty() {
+        // The delete half of the ticket lifecycle. A ticket whose replacement
+        // deal opened long enough ago is a record, not an obligation; the map
+        // had no delete path and grew by one row per slash or expiry forever.
+        let swept = self
+            .blockchain
+            .state
+            .storage_registry
+            .sweep_settled_reallocations(current_epoch);
+        if swept > 0 {
+            tracing::info!("B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {current_epoch}");
+        }
+        if under_replicated > 0 {
             tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
+        }
+        // An advisory written into a pending ticket is registry state too: a
+        // tick that only annotated used to skip the write, and a crash before
+        // the next persisting tick dropped every advisory of this epoch.
+        let registry_changed = annotated > 0
+            || under_replicated > 0
+            || swept > 0
+            || repair_tickets > 0
+            || !repair_band.is_empty();
+        if registry_changed {
             if let Err(error) = self.blockchain.persist_storage_registry() {
                 tracing::error!("Failed to persist storage reallocation status: {error}");
             }
@@ -3037,6 +3511,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetMempoolSize(tx) => {
                     let _ = tx.send(self.blockchain.mempool.len());
+                }
+                ChainCommand::MempoolContains(hash, tx) => {
+                    let _ = tx.send(self.blockchain.mempool.get(&hash).is_some());
                 }
                 ChainCommand::GetValidatorAddress(tx) => {
                     let addr = self
@@ -3212,7 +3689,7 @@ impl ChainActor {
                     let header = self.blockchain.build_global_header(None);
                     let info = serde_json::json!({
                         "globalHeight": self.blockchain.global_headers.len(),
-                        "latestGlobalHash": self.blockchain.global_headers.last().map(|h| h.calculate_hash()),
+                        "latestGlobalHash": self.blockchain.global_headers.last().map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash),
                         "pendingGlobalHash": header.calculate_hash(),
                         "domainRegistryRoot": hex::encode(header.domain_registry_root),
                         "domainCommitmentRoot": hex::encode(header.domain_commitment_root),
@@ -3257,6 +3734,10 @@ impl ChainActor {
                             .submit_verified_domain_commitment(payload.commitment, payload.proof),
                     );
                 }
+                ChainCommand::BuildStateUpdateTransaction(commitment, res_tx) => {
+                    let _ =
+                        res_tx.send(self.blockchain.build_state_update_transaction(&commitment));
+                }
                 ChainCommand::SubmitCrossDomainMessage(message, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));
                 }
@@ -3272,6 +3753,96 @@ impl ChainActor {
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::RegisterExternalDomain(registration, res_tx) => {
+                    let request = *registration;
+                    let bls = matches!(
+                        request.spec,
+                        crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                    )
+                    .then(crate::cross_domain::external::IntakeState::production_bls);
+                    let _ = res_tx.send(self.blockchain.register_external_domain(request, bls));
+                }
+                ChainCommand::SubmitExternalEvidence(evidence, res_tx) => {
+                    let needs_bls = self
+                        .blockchain
+                        .external_intake
+                        .entries
+                        .get(&crate::cross_domain::external::DomainKey::from_parts(
+                            &evidence.adapter,
+                            &evidence.network,
+                        ))
+                        .is_some_and(|entry| {
+                            matches!(
+                                entry.spec,
+                                crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                            )
+                        });
+                    let bls =
+                        needs_bls.then(crate::cross_domain::external::IntakeState::production_bls);
+                    let _ = res_tx.send(self.blockchain.submit_external_evidence(&evidence, bls));
+                }
+                ChainCommand::GetExternalDomainProfile(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_profile(&key));
+                }
+                ChainCommand::GetExternalDomainProfiles(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_profiles());
+                }
+                ChainCommand::GetExternalIntakeDigest(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_intake.state_digest());
+                }
+                ChainCommand::ReadmitExternalDomain(key, reason, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.readmit_external_domain(&key, &reason));
+                }
+                ChainCommand::ScheduleExternalFork {
+                    key,
+                    old_version,
+                    new_version,
+                    fork_height,
+                    grace_heights,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.schedule_external_fork(
+                        &key,
+                        old_version,
+                        new_version,
+                        fork_height,
+                        grace_heights,
+                    ));
+                }
+                ChainCommand::SlashExternalProver {
+                    key,
+                    prover,
+                    evidence_digest,
+                    value_atoms,
+                    challenger,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.slash_external_prover(
+                        &key,
+                        prover,
+                        evidence_digest,
+                        value_atoms,
+                        challenger,
+                    ));
+                }
+                ChainCommand::SetExternalQuorumPolicy(key, policy, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.set_external_quorum_policy(&key, policy));
+                }
+                ChainCommand::BondExternalProver(key, prover, bond_atoms, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .bond_external_prover(&key, prover, bond_atoms),
+                    );
+                }
+                ChainCommand::GetExternalQuorumRound(key, height, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_quorum_round(&key, height));
+                }
+                ChainCommand::GetExternalQuorumRounds(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_quorum_rounds(&key));
+                }
+                ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
                 }
                 ChainCommand::BondProver(address, amount, res_tx) => {
                     let _ = res_tx.send(
@@ -3488,8 +4059,7 @@ impl ChainActor {
                         .blockchain
                         .pruning_manager
                         .as_ref()
-                        .map(|pm| pm.min_blocks_to_keep < 1000)
-                        .unwrap_or(false);
+                        .is_some_and(|pm| pm.min_blocks_to_keep < 1000);
                     let res = serde_json::json!({
                         "current_height": height,
                         "finalized_height": finalized,
@@ -3641,12 +4211,9 @@ impl ChainActor {
                     let _ = res_tx.send(self.blockchain.seal_global_header(None));
                 }
                 ChainCommand::FlushStorage(res_tx) => {
-                    let res = self
-                        .blockchain
-                        .storage
-                        .as_ref()
-                        .map(|storage| storage.flush_batch().map_err(|e| e.to_string()))
-                        .unwrap_or(Ok(0));
+                    let res = self.blockchain.storage.as_ref().map_or(Ok(0), |storage| {
+                        storage.flush_batch().map_err(|e| e.to_string())
+                    });
                     let _ = res_tx.send(res);
                 }
                 // ─── B.U.D.: Storage operations ─────
@@ -3676,6 +4243,34 @@ impl ChainActor {
                         operator,
                         payer,
                         replica_index,
+                        start_epoch,
+                        end_epoch,
+                        economics,
+                        &domain_params,
+                        merkle_proof,
+                        storage_root,
+                    ));
+                }
+                ChainCommand::AcceptStorageReallocation {
+                    ticket_id,
+                    replacement_operator,
+                    payer,
+                    start_epoch,
+                    end_epoch,
+                    economics,
+                    domain_params,
+                    merkle_proof,
+                    storage_root,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let _ = response.send(self.blockchain.accept_storage_reallocation_with_escrow(
+                        ticket_id,
+                        replacement_operator,
+                        payer,
                         start_epoch,
                         end_epoch,
                         economics,
@@ -4295,6 +4890,59 @@ impl ChainActor {
                         &label,
                         self.blockchain.state.epoch_index,
                     ));
+                }
+                ChainCommand::IdentityResolve { subject, response } => {
+                    // The epoch travels with the record so liveness is
+                    // answered at the height the read happened on, not at
+                    // whatever `now` the RPC layer later believes in.
+                    let record = self
+                        .blockchain
+                        .state
+                        .identity
+                        .record(&subject)
+                        .cloned()
+                        .map(|record| (record, self.blockchain.state.epoch_index));
+                    let _ = response.send(record);
+                }
+                ChainCommand::IdentityCredential {
+                    credential_id,
+                    response,
+                } => {
+                    let answer = self
+                        .blockchain
+                        .state
+                        .identity
+                        .credential(&credential_id)
+                        .cloned()
+                        .map(|credential| {
+                            let verdict = self
+                                .blockchain
+                                .state
+                                .identity
+                                .is_credential_valid(
+                                    &credential_id,
+                                    self.blockchain.state.epoch_index,
+                                )
+                                .map_err(|e| e.to_string());
+                            (credential, verdict)
+                        });
+                    let _ = response.send(answer);
+                }
+                ChainCommand::IdentityVerifyPresentation {
+                    receipt,
+                    requester,
+                    document,
+                    response,
+                } => {
+                    let _ = response.send(
+                        crate::registry::check_receipt(
+                            &self.blockchain.state.identity,
+                            &receipt,
+                            &requester,
+                            &document,
+                        )
+                        .map_err(|e| e.to_string()),
+                    );
                 }
                 ChainCommand::BnsSetStorage {
                     name,

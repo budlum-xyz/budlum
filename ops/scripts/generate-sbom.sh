@@ -32,20 +32,23 @@ fi
 
 # 2. produce the SBOM
 SBOM_FILE="$REPO_ROOT/sbom.cdx.json"
+# cargo-cyclonedx writes <package-name>.cdx.json next to the manifest. The
+# root manifest is the single package `budlum-core`, so that name is the
+# artifact of this run; a stale file from an earlier run must not stand in
+# for it, which is why it is removed first and named explicitly afterwards.
+SBOM_TMP="$REPO_ROOT/budlum-core.cdx.json"
+rm -f "$SBOM_TMP"
 cargo cyclonedx --format json
-# Cargo-cyclonedx writes <package-name>.cdx.json (e.g. budlum-core.cdx.json)
-SBOM_TMP=$(ls -t *.cdx.json 2>/dev/null | head -1)
-if [ -n "$SBOM_TMP" ] && [ -f "$SBOM_TMP" ]; then
-    mv "$SBOM_TMP" "$SBOM_FILE"
-else
-    echo "[generate-sbom] ERROR: no .cdx.json file was found."
-    ls -la *.json *.xml 2>/dev/null || true
+if [ ! -f "$SBOM_TMP" ]; then
+    echo "[generate-sbom] ERROR: cargo-cyclonedx did not write $SBOM_TMP."
+    ls -la ./*.cdx.json 2>/dev/null || true
     exit 1
 fi
+mv "$SBOM_TMP" "$SBOM_FILE"
 
-# 3. JSON validasyon
+# 3. JSON validation
 if ! python3 -c "import json; json.load(open('$SBOM_FILE'))" 2>/dev/null; then
-    echo "[generate-sbom] HATA: SBOM JSON parse edilemedi."
+    echo "[generate-sbom] ERROR: the SBOM is not parseable JSON."
     exit 1
 fi
 
@@ -53,7 +56,7 @@ fi
 SBOM_SIZE="$(stat -c%s "$SBOM_FILE" 2>/dev/null || stat -f%z "$SBOM_FILE" 2>/dev/null || echo "?")"
 COMPONENT_COUNT="$(python3 -c "import json; print(len(json.load(open('$SBOM_FILE')).get('components', [])))" 2>/dev/null || echo "?")"
 
-# 5. Rapor
+# 5. Report
 DOC="$REPO_ROOT/target/audit/SBOM.md"
 mkdir -p "$(dirname "$DOC")"
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -76,7 +79,7 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo "The external audit firm can use \`sbom.cdx.json\` directly."
     echo "Format: CycloneDX 1.5 JSON, it includes every transitive dependency."
     echo ""
-    echo "## Yenileme"
+    echo "## Regeneration"
     echo ""
     echo "\`\`\`bash"
     echo "./scripts/generate-sbom.sh"
@@ -86,5 +89,5 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 } > "$DOC"
 
 echo "[generate-sbom] SBOM: $SBOM_FILE ($SBOM_SIZE bytes, $COMPONENT_COUNT components)"
-echo "[generate-sbom] Rapor: $DOC"
-echo "[generate-sbom] Bitti."
+echo "[generate-sbom] report: $DOC"
+echo "[generate-sbom] done."

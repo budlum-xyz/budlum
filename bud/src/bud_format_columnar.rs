@@ -29,10 +29,14 @@
 use serde_json::Value;
 
 pub const COLUMNAR_MAGIC: [u8; 8] = *b"\xB5COL\0\0\0\0";
-pub const COLUMNAR_VERSION: u8 = 2; // v2: type-aware columns
+pub const COLUMNAR_VERSION: u8 = 3; // v3: `Str` cells carry the JSON kind of the value
 pub const MAX_RECORDS: u64 = 10_000_000;
 pub const MAX_COLUMNS: usize = 256;
 pub const MAX_VALUE_BYTES: u64 = 1024 * 1024; // ceiling for a single string value (bomb guard)
+/// Ceiling for one key's UTF-8 length. `columnar_from_blob` refuses a longer
+/// key, so `columnar_encode` refuses it too: a writer that accepts what the
+/// reader refuses stores a container it cannot restore.
+const MAX_KEY_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnarMode {
@@ -119,6 +123,9 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     if keys.is_empty() || keys.len() > MAX_COLUMNS {
         return None;
     }
+    if keys.iter().any(|k| k.len() > MAX_KEY_BYTES) {
+        return None;
+    }
     // are all records objects with the SAME key set?
     let mut canon: Vec<String> = keys.clone();
     canon.sort();
@@ -180,6 +187,12 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             // type mismatch -> turn the column into Str (later values are stringified)
             if cell_type(v) != col_types[ci] {
                 col_types[ci] = ColType::Str;
+            }
+            // The reader refuses a `Str` cell above `MAX_VALUE_BYTES`. Any
+            // value can end in a `Str` cell (its column may degrade later),
+            // so the bound is applied to the text every value would become.
+            if str_cell_len(v) > MAX_VALUE_BYTES {
+                return None;
             }
             columns[ci].push(v.clone());
         }
@@ -264,21 +277,61 @@ fn push_value(out: &mut Vec<u8>, t: ColType, v: &Value) -> bool {
             None => false,
         },
         ColType::Str => {
-            let s = match v {
-                Value::String(s) => s.as_bytes(),
-                Value::Null => b"",
-                _ => return false, // mixed type (the column is tagged Str but the value does not fit)
-            };
-            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            out.extend_from_slice(s);
+            push_str_cell(out, v);
             true
         }
     }
 }
 
-/// A deterministic blob (fed into the pipeline): magic + mode + key/column counts
-/// + type bytes + length-prefixed values. Bomb guarded and panic free.
-pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
+/// The kind byte in front of every `Str` cell: the cell holds a JSON string's
+/// bytes, or the JSON text of some other value.
+const STR_CELL_STRING: u8 = 0;
+const STR_CELL_JSON: u8 = 1;
+
+/// A `Str` column holds whatever did not fit a typed column: strings, but
+/// also nulls, arrays, objects, and the numbers of a column that degraded to
+/// `Str` on a type mismatch. The cell used to hold only the bytes, so a null
+/// came back as `""` and a number as `"1"`: the blob path changed the data
+/// while the in-memory path did not. The kind byte keeps the two apart.
+/// The byte length a value has as a `Str` cell, which is what the reader's
+/// `MAX_VALUE_BYTES` is measured against.
+fn str_cell_len(v: &Value) -> u64 {
+    match v {
+        Value::String(s) => s.len() as u64,
+        other => other.to_string().len() as u64,
+    }
+}
+
+fn push_str_cell(out: &mut Vec<u8>, v: &Value) {
+    let (kind, text) = match v {
+        Value::String(s) => (STR_CELL_STRING, s.clone()),
+        other => (STR_CELL_JSON, other.to_string()),
+    };
+    out.push(kind);
+    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// A deterministic blob (fed into the pipeline): magic, mode, key and column
+/// counts, type bytes, length-prefixed values. Bomb guarded and panic free.
+/// `None` when a typed column holds a value of another kind, which
+/// `columnar_encode` never produces.
+pub fn columnar_to_blob(col: &JsonColumnar) -> Option<Vec<u8>> {
+    // The fields are public, so a hand-built value can disagree with itself:
+    // more columns than types (an index panic below), ragged columns, or
+    // counts the reader refuses. Check the shape before writing a byte.
+    let n = col.columns.first().map(|c| c.len()).unwrap_or(0);
+    if col.keys.is_empty()
+        || col.keys.len() > MAX_COLUMNS
+        || col.keys.len() != col.col_types.len()
+        || col.keys.len() != col.columns.len()
+        || n == 0
+        || n as u64 > MAX_RECORDS
+        || col.columns.iter().any(|c| c.len() != n)
+        || col.keys.iter().any(|k| k.len() > MAX_KEY_BYTES)
+    {
+        return None;
+    }
     let mut out = Vec::new();
     out.extend_from_slice(&COLUMNAR_MAGIC);
     out.push(COLUMNAR_VERSION);
@@ -288,20 +341,25 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
         out.extend_from_slice(&(k.len() as u32).to_le_bytes());
         out.extend_from_slice(k.as_bytes());
     }
-    let n = col.columns.first().map(|c| c.len()).unwrap_or(0);
     out.extend_from_slice(&(n as u32).to_le_bytes());
-    // kolon tipleri
+    // column types
     for t in &col.col_types {
         out.push(t.to_u8());
     }
-    for (ci, c) in col.columns.iter().enumerate() {
-        let t = col.col_types[ci];
+    for (c, &t) in col.columns.iter().zip(&col.col_types) {
         for v in c {
+            if t == ColType::Str && str_cell_len(v) > MAX_VALUE_BYTES {
+                // The reader refuses the cell; refusing the blob here keeps
+                // a hand-built value from storing what cannot be restored.
+                return None;
+            }
             if !push_value(&mut out, t, v) {
-                // type-mismatching value: write it as Str (a lossless fallback)
-                let s = v.to_string();
-                out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                out.extend_from_slice(s.as_bytes());
+                // A typed column cannot hold this value. `columnar_encode`
+                // degrades such a column to `Str`, so this only happens for a
+                // hand-built `JsonColumnar`; the reader parses the cell by
+                // the column type, so an untyped byte here would not come
+                // back as this value. Refuse the blob instead of lying.
+                return None;
             }
         }
     }
@@ -312,7 +370,7 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Vec<u8> {
     h.update(&out);
     let digest: [u8; 32] = h.finalize().into();
     out.extend_from_slice(&digest);
-    out
+    Some(out)
 }
 
 /// Blob -> JsonColumnar (strict validation: magic, mode, types, size ceilings, digest).
@@ -334,7 +392,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         }
         let kl = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        if kl > 1024 || bytes.len() < pos + kl {
+        if kl > MAX_KEY_BYTES || bytes.len() < pos + kl {
             return None;
         }
         let k = std::str::from_utf8(&bytes[pos..pos + kl]).ok()?.to_string();
@@ -347,6 +405,12 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
     let n = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
     pos += 4;
     if n as u64 > MAX_RECORDS || n == 0 {
+        return None;
+    }
+    // The smallest encoded value is one byte (`Bool`), so a record count
+    // above the bytes remaining before the digest cannot be honest. Refuse it
+    // here rather than let `Vec::with_capacity(n)` below allocate for it.
+    if n > bytes.len().saturating_sub(pos + 32) {
         return None;
     }
     // kolon tipleri
@@ -425,19 +489,30 @@ fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
             Some(Value::Bool(b != 0))
         }
         ColType::Str => {
-            if bytes.len() < *pos + 4 {
+            if bytes.len() < *pos + 5 {
                 return None;
             }
-            let sl = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().ok()?) as usize;
-            *pos += 4;
+            let kind = bytes[*pos];
+            let sl = u32::from_le_bytes(bytes[*pos + 1..*pos + 5].try_into().ok()?) as usize;
+            *pos += 5;
             if sl as u64 > MAX_VALUE_BYTES || bytes.len() < *pos + sl {
                 return None;
             }
-            let s = std::str::from_utf8(&bytes[*pos..*pos + sl])
-                .ok()?
-                .to_string();
+            let text = std::str::from_utf8(&bytes[*pos..*pos + sl]).ok()?;
             *pos += sl;
-            Some(Value::String(s))
+            match kind {
+                STR_CELL_STRING => Some(Value::String(text.to_string())),
+                STR_CELL_JSON => {
+                    let v: Value = serde_json::from_str(text).ok()?;
+                    // A JSON string under the JSON kind would have two
+                    // encodings for one value; the writer never does that.
+                    if v.is_string() {
+                        return None;
+                    }
+                    Some(v)
+                }
+                _ => None,
+            }
         }
     }
 }
@@ -448,6 +523,30 @@ mod tests {
 
     fn sample_json() -> Vec<u8> {
         br#"[{"u":"u1","ts":"2026-08-01T10:00:00Z","a":"r","v":42,"s":200},{"u":"u1","ts":"2026-08-01T10:00:01Z","a":"w","v":7,"s":200},{"u":"u2","ts":"2026-08-01T10:00:00Z","a":"l","v":999,"s":404},{"u":"u2","ts":"2026-08-01T10:00:02Z","a":"d","v":1,"s":500}]"#.to_vec()
+    }
+
+    /// A header record count the body cannot hold (one key, one `Bool`
+    /// column, count near `MAX_RECORDS`, no values) used to reach
+    /// `Vec::with_capacity(n)` before the first value was parsed. The digest
+    /// is valid, so only the count-versus-remaining check can refuse it.
+    #[test]
+    fn a_record_count_the_body_cannot_hold_is_refused_before_allocation() {
+        let mut out = Vec::new();
+        out.extend_from_slice(&COLUMNAR_MAGIC);
+        out.push(COLUMNAR_VERSION);
+        out.push(ColumnarMode::Exact.to_u8());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(b'k');
+        out.extend_from_slice(&(MAX_RECORDS as u32 - 1).to_le_bytes());
+        out.push(ColType::Bool.to_u8());
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_COLUMNAR_V1");
+        h.update(&out);
+        let digest: [u8; 32] = h.finalize().into();
+        out.extend_from_slice(&digest);
+        assert!(columnar_from_blob(&out).is_none());
     }
 
     #[test]
@@ -461,7 +560,7 @@ mod tests {
         assert_eq!(col.col_types[3], ColType::U64, "column v is numeric");
         assert_eq!(col.col_types[4], ColType::U64, "column s is numeric");
         // blob roundtrip
-        let blob = columnar_to_blob(&col);
+        let blob = columnar_to_blob(&col).expect("blob");
         let col2 = columnar_from_blob(&blob).expect("the blob decodes");
         assert_eq!(col2.mode, ColumnarMode::Exact);
         assert_eq!(col2.col_types, col.col_types, "tipler blob'da korunur");
@@ -532,6 +631,59 @@ mod tests {
         assert_eq!(back, d, "lossless (the stringified value returns to JSON)");
     }
 
+    /// The blob path must agree with the in-memory path: a column that
+    /// degraded to `Str` because of a negative number, a null in a string
+    /// column, and nested values all come back as the JSON they were.
+    #[test]
+    fn str_cells_keep_the_json_kind_through_the_blob() {
+        let d = br#"[{"v":1,"s":"a","n":null,"o":{"k":[1,2]}},{"v":-2,"s":null,"n":"x","o":[]}]"#;
+        let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
+        assert_eq!(
+            col.col_types,
+            vec![ColType::Str, ColType::Str, ColType::Str, ColType::Str]
+        );
+        let blob = columnar_to_blob(&col).expect("blob");
+        let back = columnar_from_blob(&blob).expect("from_blob");
+        assert_eq!(
+            columnar_decode(&back).unwrap(),
+            d,
+            "the blob path is lossless"
+        );
+        assert_eq!(columnar_decode(&back), columnar_decode(&col));
+        // a hand-built column whose typed cell does not fit is refused, not stringified
+        let mut wrong = col.clone();
+        wrong.col_types[0] = ColType::U64;
+        assert!(columnar_to_blob(&wrong).is_none());
+        // a JSON-kind cell holding a string would be a second spelling of a value
+        let single = columnar_encode(br#"[{"s":"a"}]"#, ColumnarMode::Exact).unwrap();
+        let blob = columnar_to_blob(&single).expect("blob");
+        let mut body = blob[..blob.len() - 32].to_vec();
+        let cell = body.len() - (1 + 4 + 1);
+        assert_eq!(body[cell], STR_CELL_STRING);
+        body.truncate(cell);
+        body.push(STR_CELL_JSON);
+        body.extend_from_slice(&3u32.to_le_bytes());
+        body.extend_from_slice(b"\"a\"");
+        let sealed = seal(&body);
+        assert!(columnar_from_blob(&sealed).is_none());
+        // the same cell under an unknown kind byte is refused as well
+        body[cell] = 9;
+        assert!(columnar_from_blob(&seal(&body)).is_none());
+    }
+
+    /// Append the digest `columnar_to_blob` writes, so a hand-edited body
+    /// reaches the value parser instead of failing the digest check.
+    fn seal(body: &[u8]) -> Vec<u8> {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_COLUMNAR_V1");
+        h.update(body);
+        let digest: [u8; 32] = h.finalize().into();
+        let mut out = body.to_vec();
+        out.extend_from_slice(&digest);
+        out
+    }
+
     #[test]
     fn blob_never_panics_on_arbitrary() {
         // K38: from_blob is panic free on random bytes (it returns None)
@@ -558,6 +710,64 @@ mod tests {
             }
             let _ = columnar_from_blob(&buf[..len]);
         }
+    }
+
+    /// The writer refuses what the reader refuses. A value above
+    /// `MAX_VALUE_BYTES` or a key above `MAX_KEY_BYTES` used to encode,
+    /// serialise and pass the digest, and then `columnar_from_blob` returned
+    /// `None`: a stored container nobody could restore. With `None` from
+    /// `columnar_encode` the engine keeps the raw JSON instead.
+    #[test]
+    fn the_writer_refuses_what_the_reader_refuses() {
+        let long = "x".repeat(MAX_VALUE_BYTES as usize + 1);
+        let too_long_value = format!(r#"[{{"v":"{long}"}}]"#);
+        assert!(columnar_encode(too_long_value.as_bytes(), ColumnarMode::Exact).is_none());
+        // a number column degrades to Str on a later string, so the bound is
+        // measured on every value, not only on the ones in a Str column
+        let degraded = format!(r#"[{{"v":1}},{{"v":"{long}"}}]"#);
+        assert!(columnar_encode(degraded.as_bytes(), ColumnarMode::Exact).is_none());
+        let long_key = "k".repeat(MAX_KEY_BYTES + 1);
+        let too_long_key = format!(r#"[{{"{long_key}":1}}]"#);
+        assert!(columnar_encode(too_long_key.as_bytes(), ColumnarMode::Exact).is_none());
+        // exactly at the bounds both sides agree
+        let at_value = "x".repeat(MAX_VALUE_BYTES as usize);
+        let at_key = "k".repeat(MAX_KEY_BYTES);
+        let at = format!(r#"[{{"{at_key}":"{at_value}"}}]"#);
+        let col = columnar_encode(at.as_bytes(), ColumnarMode::Exact).expect("at the bound");
+        let blob = columnar_to_blob(&col).expect("blob");
+        let back = columnar_from_blob(&blob).expect("the reader accepts the bound");
+        assert_eq!(columnar_decode(&back).unwrap(), at.as_bytes());
+    }
+
+    /// The fields of `JsonColumnar` are public. A value whose columns and
+    /// types disagree used to panic on the type index; a ragged one or one
+    /// with an oversized `Str` cell wrote a blob the reader refuses.
+    #[test]
+    fn a_hand_built_columnar_is_refused_not_panicked_on() {
+        let good = columnar_encode(br#"[{"a":1,"b":"x"}]"#, ColumnarMode::Exact).unwrap();
+        assert!(columnar_to_blob(&good).is_some());
+
+        let mut more_columns_than_types = good.clone();
+        more_columns_than_types.col_types.pop();
+        assert!(columnar_to_blob(&more_columns_than_types).is_none());
+
+        let mut ragged = good.clone();
+        ragged.columns[1].push(Value::String("extra".into()));
+        assert!(columnar_to_blob(&ragged).is_none());
+
+        let mut key_count_off = good.clone();
+        key_count_off.keys.push("c".into());
+        assert!(columnar_to_blob(&key_count_off).is_none());
+
+        let mut empty = good.clone();
+        for c in &mut empty.columns {
+            c.clear();
+        }
+        assert!(columnar_to_blob(&empty).is_none());
+
+        let mut oversized_cell = good;
+        oversized_cell.columns[1][0] = Value::String("x".repeat(MAX_VALUE_BYTES as usize + 1));
+        assert!(columnar_to_blob(&oversized_cell).is_none());
     }
 
     #[test]

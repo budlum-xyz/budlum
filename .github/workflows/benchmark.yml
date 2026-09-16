@@ -33,10 +33,24 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: Run the Criterion benchmarks
+      # The micro benches are plain binaries (`[[bin]] bench_*` in
+      # Cargo.toml), not Criterion targets: there is no bench target named
+      # `micro` or `single_node`, and with pipefail on that error is now
+      # visible instead of being swallowed by `tee`. Each binary prints its
+      # own timing report; the output is the artifact. One release build for
+      # the four binaries (the same profile `cargo bench` inherits), then each
+      # runs on its own so a failure names the binary.
+      - name: Run the micro and single-node benchmarks
         run: |
-          cargo bench --bench micro -- --output-format bencher 2>&1 | tee /tmp/bench-micro.txt
-          cargo bench --bench single_node -- --output-format bencher 2>&1 | tee /tmp/bench-single.txt
+          # pipefail: without it the step reports tee's exit status and a
+          # failed bench uploads an artifact under a green check.
+          set -euo pipefail
+          cargo build --release --bin bench_sig_verify --bin bench_merkle_update \
+            --bin bench_merkle_scaling --bin bench_internal_pipeline_tps
+          ./target/release/bench_sig_verify 2>&1 | tee /tmp/bench-micro.txt
+          ./target/release/bench_merkle_update 2>&1 | tee -a /tmp/bench-micro.txt
+          ./target/release/bench_merkle_scaling 2>&1 | tee -a /tmp/bench-micro.txt
+          ./target/release/bench_internal_pipeline_tps 2>&1 | tee /tmp/bench-single.txt
           echo "Benchmark runs completed."
       # BudZero canonical-program benches: prove/verify times for the three
       # programs the regeneration gate reproduces (storage challenge, private
@@ -44,6 +58,7 @@ jobs:
       # timeout; the JSON lines are recorded as artifacts.
       - name: Run the BudZero canonical benches
         run: |
+          set -euo pipefail
           (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
           (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
           echo "BudZero bench runs completed."

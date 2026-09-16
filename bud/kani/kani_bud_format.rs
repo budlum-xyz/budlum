@@ -3,12 +3,21 @@
 
 #[cfg(kani)]
 mod kani {
-    use crate::bud_format::{BudFile, BudFormatClass, BudFlags};
+    use crate::bud_format::{BudFile, BudFlags, BudFormatClass};
 
     #[kani::proof]
     fn kani_bud_format_roundtrip() {
-        let data: Vec<u8> = vec![1,2,3,4];
-        let file = BudFile::encode(&data, BudFormatClass::Json, "application/json", 0,0, 3, BudFlags::new(true,true,false,false,false,false), data.clone());
+        let data: Vec<u8> = vec![1, 2, 3, 4];
+        let file = BudFile::encode(
+            &data,
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            data.clone(),
+        );
         let bytes = file.to_bytes();
         let decoded = BudFile::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.decode().unwrap(), data);
@@ -17,7 +26,16 @@ mod kani {
     #[kani::proof]
     fn kani_bud_erasure_reconstruct() {
         let data = vec![10u8; 32];
-        let file = BudFile::encode(&data, BudFormatClass::Json, "application/json", 0,0, 3, BudFlags::new(true,true,false,false,false,false), data.clone());
+        let file = BudFile::encode(
+            &data,
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            data.clone(),
+        );
         // Were the parity shards produced, and does the byte round-trip hold?
         let bytes = file.to_bytes();
         let decoded = BudFile::from_bytes(&bytes).unwrap();

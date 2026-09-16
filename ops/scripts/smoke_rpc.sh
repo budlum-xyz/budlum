@@ -3,7 +3,9 @@
 # Use the operator listener so smoke is independent from public-RPC auth policy
 # And allow-list changes; this job validates node boot, not public exposure.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The script lives in ops/scripts, so the repository root is two levels up;
+# one level is `ops`, where there is no target/ and no Cargo.toml to build.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 NETWORK="${SMOKE_NETWORK:-devnet}"
@@ -16,8 +18,11 @@ if [[ "$RPC_PORT" == "$PUBLIC_PORT" ]]; then
   echo "[smoke] operator port $RPC_PORT equals public port $PUBLIC_PORT; shifting operator to $((PUBLIC_PORT + 1))" >&2
   RPC_PORT="$((PUBLIC_PORT + 1))"
 fi
-DB_PATH="${SMOKE_DB_PATH:-/tmp/budlum-smoke-db}"
+DB_PATH="${SMOKE_DB_PATH:-$(mktemp -d /tmp/budlum-smoke-db.XXXXXX)}"
 BIN="${SMOKE_BIN:-}"
+# Fixed paths under /tmp follow whatever symlink another user left there;
+# mktemp gives this run a file nobody else could have named in advance.
+RPC_RESPONSE="$(mktemp /tmp/budlum-smoke-rpc.XXXXXX.json)"
 
 if [[ -z "$BIN" ]]; then
   if [[ -x "$ROOT/target/debug/budlum-core" ]]; then
@@ -25,11 +30,11 @@ if [[ -z "$BIN" ]]; then
   elif [[ -x "$ROOT/target/release/budlum-core" ]]; then
     BIN="$ROOT/target/release/budlum-core"
   elif docker image inspect budlum-core:devnet >/dev/null 2>&1; then
-    # docker-smoke workflow'u compose build ile budlum-core:devnet uretir
+    # The docker-smoke workflow builds budlum-core:devnet with compose build
     # (the old smoke-test tag was abandoned over a buildx -f problem).
     echo "[smoke] extracting binary from Docker image..."
     _SMOKE_DOCKER_ID=$(docker create budlum-core:devnet)
-    BIN="/tmp/budlum-smoke-bin"
+    BIN="$(mktemp /tmp/budlum-smoke-bin.XXXXXX)"
     docker cp "$_SMOKE_DOCKER_ID:/usr/local/bin/budlum-core" "$BIN"
     docker rm "$_SMOKE_DOCKER_ID" >/dev/null 2>&1
     chmod +x "$BIN"
@@ -65,13 +70,17 @@ ARGS=(
 echo "[smoke] starting $BIN ${ARGS[*]}"
 "$BIN" "${ARGS[@]}" >"$DB_PATH/node.log" 2>&1 &
 PID=$!
-cleanup() { kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; }
+cleanup() {
+  kill "$PID" 2>/dev/null || true
+  wait "$PID" 2>/dev/null || true
+  rm -f "$RPC_RESPONSE"
+}
 trap cleanup EXIT
 
 for i in $(seq 1 60); do
   if curl -sf -H 'Content-Type: application/json' \
     --data '{"jsonrpc":"2.0","method":"bud_chainId","params":[],"id":1}' \
-    "http://127.0.0.1:${RPC_PORT}" >/tmp/budlum-smoke-rpc.json 2>/dev/null; then
+    "http://127.0.0.1:${RPC_PORT}" >"$RPC_RESPONSE" 2>/dev/null; then
     break
   fi
   sleep 0.5
@@ -87,6 +96,6 @@ for i in $(seq 1 60); do
   fi
 done
 
-echo "[smoke] RPC response: $(cat /tmp/budlum-smoke-rpc.json)"
-grep -q '"result"' /tmp/budlum-smoke-rpc.json
+echo "[smoke] RPC response: $(cat "$RPC_RESPONSE")"
+grep -q '"result"' "$RPC_RESPONSE"
 echo "[smoke] OK - bud_chainId responded on ${NETWORK}"

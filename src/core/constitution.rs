@@ -221,7 +221,7 @@ impl ConstitutionRegistry {
             let parameter = self
                 .parameters
                 .get(&key)
-                .ok_or_else(|| format!("missing hard constitution guardrail {:?}", key))?;
+                .ok_or_else(|| format!("missing hard constitution guardrail {key:?}"))?;
             parameter.validate_value()?;
         }
         Ok(())

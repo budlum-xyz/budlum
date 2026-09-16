@@ -8,8 +8,17 @@
 //!
 //! Y10: the derivation ladder, the ABR tiers, is used in the audit in place of
 //! the master, because producing 480p is cheaper than producing 1080p. Each
-//! step's commitment is chained back to the master, and the guardian produces
-//! the cheapest step and verifies consistency with the master.
+//! step records the content id of its output and a commitment that chains
+//! that content id, the step and its parameter back to the master; the
+//! guardian produces the cheapest step and verifies it against the record.
+//!
+//! The first version of the record carried one field for two values: the
+//! chain commitment, derived from the master alone, and the hash of the
+//! produced step, which `verify_step` compared against the same field. No
+//! output could satisfy both, so verification could never succeed and the
+//! only test of it discarded the result. The record now carries both values
+//! and the commitment covers the content id, so a produced step is checked
+//! against what was published, and what was published is bound to the master.
 
 #![forbid(unsafe_code)]
 
@@ -49,32 +58,55 @@ pub fn demote_decision(p: &MultiSourcePact) -> bool {
     alive_count(p) == 0
 }
 
-/// Y10: a ladder step record. Each step has its own commitment and is chained
-/// back to the master; it is the same recipe under a different parameter.
+/// Y10: a ladder step record. Each step is the same recipe under a different
+/// parameter; it records the content id of its output and a commitment that
+/// chains that output back to the master.
 #[derive(Debug, Clone)]
 pub struct LadderStep {
     pub step_id: u8,
     pub param: u64, // for example the resolution or target
+    /// The content id of the step's output, as published.
+    pub content_id: [u8; 32],
+    /// [`step_commitment`] over the master, the step, the parameter and the
+    /// content id: the link from this output to the master.
     pub commitment: [u8; 32],
     pub production_cost: u64, // the relative production cost, in core-seconds for example
 }
 
-/// Y10: the step commitment, derived from the master commitment and the step
-/// parameter.
-pub fn step_commitment(master: &[u8; 32], step: u8, param: u64) -> [u8; 32] {
+impl LadderStep {
+    /// The record for a step whose output is `produced`.
+    pub fn new(master: &[u8; 32], step_id: u8, param: u64, produced: &[u8], cost: u64) -> Self {
+        let content_id = crate::bud_format_container::content_id(produced);
+        Self {
+            step_id,
+            param,
+            content_id,
+            commitment: step_commitment(master, step_id, param, &content_id),
+            production_cost: cost,
+        }
+    }
+}
+
+/// Y10: the step commitment, derived from the master commitment, the step,
+/// its parameter and the content id of the step's output.
+pub fn step_commitment(master: &[u8; 32], step: u8, param: u64, content_id: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
-    h.update(b"BDLM_LADDER_STEP_V1");
+    h.update(b"BDLM_LADDER_STEP_V2");
     h.update(master);
     h.update([step]);
     h.update(param.to_le_bytes());
+    h.update(content_id);
     h.finalize().into()
 }
 
-/// Y10: step consistency. The hash of the produced step verifies the step
-/// commitment and, through the chain, the master.
+/// Y10: step consistency. The produced bytes hash to the recorded content id,
+/// and the recorded commitment chains that content id, under this step and
+/// parameter, to the master. Both must hold: the first alone accepts a record
+/// forged for another master, the second alone accepts any output.
 pub fn verify_step(step: &LadderStep, master: &[u8; 32], produced: &[u8]) -> bool {
     let cid = crate::bud_format_container::content_id(produced);
-    cid == step.commitment && step.commitment == step_commitment(master, step.step_id, step.param)
+    cid == step.content_id
+        && step.commitment == step_commitment(master, step.step_id, step.param, &step.content_id)
 }
 
 /// Y10: pick the cheapest step; the audit cost is that of the lowest step.
@@ -157,33 +189,34 @@ mod tests {
     fn y10_ladder_chain_and_cheapest_choice() {
         let master = hof(b"master-video");
         let steps = vec![
-            LadderStep {
-                step_id: 1,
-                param: 1080,
-                commitment: step_commitment(&master, 1, 1080),
-                production_cost: 10,
-            },
-            LadderStep {
-                step_id: 2,
-                param: 480,
-                commitment: step_commitment(&master, 2, 480),
-                production_cost: 3,
-            },
+            LadderStep::new(&master, 1, 1080, b"1080p output", 10),
+            LadderStep::new(&master, 2, 480, b"480p output", 3),
         ];
-        // Produce the 480p step, then verify it.
-        let produced = b"480p output";
-        // The commitment depends on the produced content; what is tested here is
-        // the consistency of the chain.
-        assert_eq!(steps[1].commitment, step_commitment(&master, 2, 480));
-        // The cheapest step is 480p.
-        assert_eq!(cheapest_step(&steps).unwrap().step_id, 2);
-        // If the master changes, the step commitment changes; a negative case,
-        // where a different master gives a different commitment.
-        assert_ne!(
-            step_commitment(&hof(b"another-master"), 2, 480),
-            steps[1].commitment
+        // The cheapest step is 480p, so that is the one the guardian produces.
+        let cheapest = cheapest_step(&steps).unwrap();
+        assert_eq!(cheapest.step_id, 2);
+        // An honest reproduction of the published step verifies.
+        assert!(
+            verify_step(cheapest, &master, b"480p output"),
+            "the published 480p output must verify against its own record"
         );
-        let _ = verify_step(&steps[0], &master, produced); // no panic
+        // A different output does not, however the record looks.
+        assert!(!verify_step(cheapest, &master, b"480p output, altered"));
+        // The right output under another master does not: the chain is broken.
+        assert!(!verify_step(
+            cheapest,
+            &hof(b"another-master"),
+            b"480p output"
+        ));
+        // A record whose content id was swapped to match a forged output is
+        // caught by the commitment, which still names the published one.
+        let mut swapped = cheapest.clone();
+        swapped.content_id = crate::bud_format_container::content_id(b"forged");
+        assert!(!verify_step(&swapped, &master, b"forged"));
+        // And a record re-committed for the forged output no longer chains
+        // to this master, because the master is part of the commitment.
+        let other = LadderStep::new(&hof(b"another-master"), 2, 480, b"forged", 3);
+        assert!(!verify_step(&other, &master, b"forged"));
     }
 
     #[test]

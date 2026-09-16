@@ -6,8 +6,11 @@
 //!   bud store   <in> <out> [--min-chunk 65536]                               write v2 container (K38)
 //!   bud restore <in> <out>                                                   read v2 container (verify)
 //!   bud bench   <file>                                                       speed + cost measurement
-//!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (2n/3)
+//!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (more than two thirds)
 //!   bud check   <file>                                                       integrity + gate check
+//!   bud zk witness <in> <out>                                                  STARK field trace + root
+//!   bud zk prove   <in> [--prover p]                                            external proof attempt (fail-closed)
+//!   bud zk verify  --trace t [--proof p]                                         trace binding; a proof is refused
 //!
 //! Error path: every command performs real file I/O; on error -> exit code 1 + message.
 
@@ -16,9 +19,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus};
-use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote};
+use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote, ValidatorSet};
 use bud_core::bud_format_checkpoint::Checkpoint;
-use bud_core::bud_format_container::BudV2File;
+use bud_core::bud_format_container::{BudV2File, BudV2Header, ChunkCodec, MultiHash};
 use bud_core::bud_format_pact::PactRecord;
 use bud_core::bud_format_production::BudProductionRecord;
 
@@ -26,6 +29,11 @@ use bud_core::bud_format_engine::{engine_restore_container, engine_store, Transf
 use bud_core::bud_format_multifile::TenantMultifileStore;
 use bud_core::bud_format_segment::SegmentLedger;
 use bud_core::bud_format_videopipe::run_video_pipeline;
+use bud_core::bud_format_zkbridge::{engine_to_witness, field_trace_meta, witness_to_field_trace};
+use bud_core::bud_format_zkproof::{
+    attempt_proof, in_tree_verification_possible, load_field_trace, save_field_trace,
+    zk_verify_refusal, ZK_PROVER_ENV,
+};
 
 use bud_core::bud_format_block::{PactChallengeInBlock, RegenerationBlock};
 use bud_core::bud_format_catalog::CATALOG;
@@ -94,7 +102,7 @@ enum Commands {
         #[arg(short, long)]
         file: PathBuf,
     },
-    /// BFT finality: n validators, a 2n/3 majority for the same pipe_id/ratio
+    /// BFT finality: n validators, more than two thirds voting the same pipe_id/ratio
     BftVote {
         #[arg(long)]
         pipe_id: u16,
@@ -109,6 +117,29 @@ enum Commands {
     Check {
         #[arg(short, long)]
         input: PathBuf,
+    },
+    /// zk witness: any file -> STARK field trace + binding root (deterministic)
+    ZkWitness {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+    },
+    /// zk prove: attempt an EXTERNAL prover on the witness trace (fail-closed:
+    /// no prover, a broken prover or an empty proof is a typed refusal)
+    ZkProve {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(long)]
+        prover: Option<PathBuf>,
+    },
+    /// zk verify: bind a saved trace to its root; a zk PROOF is refused here
+    /// (in-tree STARK verification is not implemented)
+    ZkVerify {
+        #[arg(short, long)]
+        trace: PathBuf,
+        #[arg(long)]
+        proof: Option<PathBuf>,
     },
     /// Production ratio proof: produce a root-anchored record with the measured ratio + pipeline from a .bud
     ProduceProof {
@@ -341,7 +372,14 @@ fn run(cli: Cli) -> Result<String, String> {
             } else {
                 store(&data)
             }
-            .ok_or("v2 store failed (size/capacity limit - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)")?;
+            .ok_or_else(|| {
+                format!(
+                    "v2 store failed: a container holds at most {} chunks of {} bytes, {} bytes in total",
+                    BudV2File::MAX_CHUNK_COUNT,
+                    BudV2File::MAX_CHUNK_BYTES,
+                    BudV2File::MAX_TOTAL_BYTES
+                )
+            })?;
             write_file(&output, &enc)?;
             let cc = chunk_count(&enc).unwrap_or(0);
             Ok(format!(
@@ -387,32 +425,41 @@ fn run(cli: Cli) -> Result<String, String> {
             validator,
             n,
         } => {
-            if n < 1 {
-                return Err("BFT: n must be >= 1".into());
+            if !(1..=255).contains(&n) {
+                return Err(
+                    "BFT: n must be between 1 and 255 (one derived key per validator)".into(),
+                );
             }
-            // votes are REALLY signed (each validator with its own ed25519 key)
+            // A demonstration set of n validators with derived ed25519 keys;
+            // the votes are really signed, and the certificate is checked
+            // against that registered set, not against the keys it carries.
             use ed25519_dalek::SigningKey;
-            let votes: Vec<RatioVote> = (0..n)
-                .map(|i| {
-                    let sk = SigningKey::from_bytes(&[(i as u8).wrapping_add(1); 32]);
-                    let vk = sk.verifying_key().to_bytes();
-                    let v = RatioVote {
-                        validator_id: format!("{validator}-{i}"),
+            let keys: Vec<SigningKey> = (0..n)
+                .map(|i| SigningKey::from_bytes(&[(i as u8).wrapping_add(1); 32]))
+                .collect();
+            let validators =
+                ValidatorSet::new(keys.iter().map(|k| k.verifying_key().to_bytes()).collect())
+                    .map_err(|e| format!("BFT validators: {e}"))?;
+            let votes: Vec<RatioVote> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, sk)| {
+                    let id = format!("{validator}-{i}");
+                    RatioVote {
+                        signature: RatioVote::sign(sk, &id, pipe_id, ratio),
+                        validator_id: id,
                         pipe_id,
                         ratio,
-                        public_key: vk,
-                        signature: vec![],
-                    };
-                    let mut v = v;
-                    v.signature = RatioVote::sign(&sk, pipe_id, ratio);
-                    v
+                        public_key: sk.verifying_key().to_bytes(),
+                    }
                 })
                 .collect();
-            let cert = BftRatioConsensus::finalize_ratio(votes, n)
+            let cert = BftRatioConsensus::finalize_ratio(votes, &validators)
                 .map_err(|e| format!("BFT finalize: {e}"))?;
-            cert.verify(n).map_err(|e| format!("BFT verify: {e}"))?;
+            cert.verify(&validators)
+                .map_err(|e| format!("BFT verify: {e}"))?;
             Ok(format!(
-                "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (2n/3 majority)"
+                "BFT: n={n} consensus pipe_id={pipe_id} ratio {ratio} - certificate verified (supermajority)"
             ))
         }
         Commands::Pact {
@@ -523,7 +570,7 @@ fn run(cli: Cli) -> Result<String, String> {
             let ts = if ts == 0 { 1_768_000_000u64 } else { ts }; // deterministic test
             let rec = BudProductionRecord::new(
                 file.header.codec,
-                Box::leak(pipe.clone().into_boxed_str()),
+                &pipe,
                 &original,
                 bytes.len() as u64,
                 ts,
@@ -629,14 +676,7 @@ fn run(cli: Cli) -> Result<String, String> {
             prev,
         } => {
             // prev hex -> [u8;32]
-            if prev.len() != 64 {
-                return Err("prev_hash must be 64 hex characters".into());
-            }
-            let mut prev_hash = [0u8; 32];
-            for i in 0..32 {
-                prev_hash[i] = u8::from_str_radix(&prev[i * 2..i * 2 + 2], 16)
-                    .map_err(|_| "prev hex is corrupt")?;
-            }
+            let prev_hash = parse_prev_hash(&prev)?;
             // Sample PACT challenge: the produced bytes match the commitment (VERIFIED)
             let produced = b"deterministic content 1234567890";
             let pact = bud_core::bud_format_pact::PactRecord::pure(
@@ -712,14 +752,72 @@ fn run(cli: Cli) -> Result<String, String> {
                 hex8(&root)
             ))
         }
+        Commands::ZkWitness { input, out } => {
+            let data = read_file(&input)?;
+            let res = engine_store(&data, false, 42)
+                .ok_or("zk witness: invalid input (empty or >512MB)")?;
+            let witness = engine_to_witness(&res);
+            let rows = witness_to_field_trace(&witness);
+            let (n, root) = field_trace_meta(&rows);
+            save_field_trace(&out, &rows, &root)?;
+            Ok(format!(
+                "zk-witness: rows={} root={} bound={} (deterministic; the trace is the SPEC the circuit proves)",
+                n,
+                hex8(&root),
+                out.display()
+            ))
+        }
+
+        Commands::ZkProve { input, prover } => {
+            let data = read_file(&input)?;
+            let res = engine_store(&data, false, 42)
+                .ok_or("zk prove: invalid input (empty or >512MB)")?;
+            let witness = engine_to_witness(&res);
+            let prover = prover.or_else(|| std::env::var_os(ZK_PROVER_ENV).map(PathBuf::from));
+            match attempt_proof(&witness, prover.as_deref())? {
+                bud_core::bud_format_zkproof::ZkTrust::Unproduced { reason } => {
+                    Err(format!("zk prove REFUSED: {reason}"))
+                }
+                bud_core::bud_format_zkproof::ZkTrust::ProvenExternally { rows, proof_bytes } => {
+                    Ok(format!(
+                        "zk prove: external prover produced {proof_bytes} bytes for {rows} rows; \
+                     the tree RECORDS the proof and does not verify it in-tree ({})",
+                        zk_verify_refusal()
+                    ))
+                }
+            }
+        }
+
+        Commands::ZkVerify { trace, proof } => {
+            if proof.is_some() {
+                return Err(format!("zk verify REFUSED: {}", zk_verify_refusal()));
+            }
+            let (rows, root) = load_field_trace(&trace)?;
+            let _ = in_tree_verification_possible(); // the hard false is tested in-tree
+            Ok(format!(
+                "zk verify: {} rows bind to root {} (trace-binding only; {})",
+                rows.len(),
+                hex8(&root),
+                zk_verify_refusal()
+            ))
+        }
+
         Commands::Check { input } => {
             let bytes = read_file(&input)?;
-            // v2 magic (\xB5 high-bit) -> container; otherwise v1
-            if bytes.first() == Some(&0xB5) {
-                let out = restore(&bytes).ok_or("v2 integrity failed")?;
+            // v2 magic (high bit set) -> container; otherwise v1
+            if bytes.first() == Some(&BudV2Header::MAGIC[0]) {
+                let file = BudV2File::decode(&bytes).ok_or("v2 integrity failed")?;
+                let out = file.restore_original().ok_or("v2 integrity failed")?;
+                let MultiHash { algo, digest } = file.header.content_id;
+                let chunks = match file.chunk_codec {
+                    ChunkCodec::Raw => "raw",
+                    ChunkCodec::Huffman => "huffman",
+                    ChunkCodec::Zstd => "zstd",
+                };
                 Ok(format!(
-                    "check v2: OK - {} bytes verified (magic+chunk content_id+root)",
-                    out.len()
+                    "check v2: OK - {} bytes verified (magic, chunk content_id, root {} algo 0x{algo:02x}, {chunks} chunks)",
+                    out.len(),
+                    hex8(&digest)
                 ))
             } else {
                 let file = BudFile::from_bytes(&bytes).map_err(|e| format!("v1 parse: {e}"))?;
@@ -734,6 +832,22 @@ fn run(cli: Cli) -> Result<String, String> {
             }
         }
     }
+}
+
+/// `--prev` as 32 bytes. Works on the byte view, never on `str` slices: a
+/// 64-byte value holding one multi-byte character passed the old length check
+/// and then aborted at the slice boundary instead of returning the typed error.
+fn parse_prev_hash(prev: &str) -> Result<[u8; 32], String> {
+    let raw = prev.as_bytes();
+    if raw.len() != 64 || !raw.iter().all(u8::is_ascii_hexdigit) {
+        return Err("prev_hash must be 64 hex characters".into());
+    }
+    let nibble = |c: u8| (c as char).to_digit(16).ok_or("prev hex is corrupt");
+    let mut out = [0u8; 32];
+    for (i, pair) in raw.chunks_exact(2).enumerate() {
+        out[i] = (nibble(pair[0])? << 4) as u8 | nibble(pair[1])? as u8;
+    }
+    Ok(out)
 }
 
 fn main() -> ExitCode {

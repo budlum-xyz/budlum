@@ -97,6 +97,11 @@ pub enum MempoolError {
 struct PendingTx {
     tx: Transaction,
     added_at: u128,
+    /// The bytes this entry was admitted against, computed once. The size is
+    /// fixed for the life of the entry, and re-encoding it on every eviction
+    /// scan let one refused submission drive a protobuf encode over every
+    /// cheaper entry in the pool.
+    charged: usize,
 }
 
 #[derive(Clone)]
@@ -189,7 +194,10 @@ impl Mempool {
         //
         // A replacement (same sender, same nonce) frees its own slot and needs
         // no eviction at all, so a full pool must not refuse it.
-        let sender_count = self.by_sender.get(&tx.from).map_or(0, |v| v.len());
+        let sender_count = self
+            .by_sender
+            .get(&tx.from)
+            .map_or(0, std::collections::BTreeMap::len);
         let existing_hash = self.find_tx_by_sender_nonce(&tx.from, tx.nonce);
 
         if let Some(existing_hash) = existing_hash.as_ref() {
@@ -208,8 +216,8 @@ impl Mempool {
             // cheap DoS vector). Now: bump = max(1, ceil(fee * pct / 100)),
             // and the replacement fee MUST exceed the old fee. The
             // intermediate computation uses u128 against overflow.
-            let bump =
-                (existing.tx.fee as u128 * self.config.rbf_bump_percent as u128).div_ceil(100);
+            let bump = (u128::from(existing.tx.fee) * u128::from(self.config.rbf_bump_percent))
+                .div_ceil(100);
             let min_new_fee = existing
                 .tx
                 .fee
@@ -245,7 +253,7 @@ impl Mempool {
         let freed = existing_hash
             .as_ref()
             .and_then(|h| self.transactions.get(h))
-            .map_or(0, |entry| charged_bytes(&entry.tx));
+            .map_or(0, |entry| entry.charged);
         let projected = self
             .resident_bytes
             .saturating_sub(freed)
@@ -275,17 +283,21 @@ impl Mempool {
             .insert(tx.hash.clone());
 
         self.resident_bytes = self.resident_bytes.saturating_add(incoming);
-        self.transactions
-            .insert(tx.hash.clone(), PendingTx { tx, added_at: now });
+        self.transactions.insert(
+            tx.hash.clone(),
+            PendingTx {
+                tx,
+                added_at: now,
+                charged: incoming,
+            },
+        );
 
         Ok(())
     }
 
     pub fn remove_transaction(&mut self, hash: &str) -> Option<Transaction> {
         if let Some(pending) = self.transactions.remove(hash) {
-            self.resident_bytes = self
-                .resident_bytes
-                .saturating_sub(charged_bytes(&pending.tx));
+            self.resident_bytes = self.resident_bytes.saturating_sub(pending.charged);
             if let Some(sender_txs) = self.by_sender.get_mut(&pending.tx.from) {
                 sender_txs.remove(&pending.tx.nonce);
                 if sender_txs.is_empty() {
@@ -326,7 +338,7 @@ impl Mempool {
             .unwrap_or_default()
             .as_millis();
 
-        let ttl_ms = self.config.tx_ttl_secs as u128 * 1000;
+        let ttl_ms = u128::from(self.config.tx_ttl_secs) * 1000;
         let expired: Vec<String> = self
             .transactions
             .iter()
@@ -385,6 +397,11 @@ impl Mempool {
         self.transactions.clear();
         self.by_sender.clear();
         self.by_fee.clear();
+        // The counter is debited only by `remove_transaction`, which cannot
+        // run for entries this call already dropped. Without the reset the
+        // stale total grows with every drain until an empty pool refuses
+        // every admission with `PoolBytesFull`.
+        self.resident_bytes = 0;
         txs
     }
 
@@ -462,7 +479,7 @@ impl Mempool {
                 if entry.tx.from == new_tx.from {
                     continue;
                 }
-                freed = freed.saturating_add(charged_bytes(&entry.tx));
+                freed = freed.saturating_add(entry.charged);
                 victims.push(hash.clone());
                 if freed >= needed {
                     break 'outer;
@@ -633,6 +650,30 @@ mod tests {
             assert_eq!(pool.resident_bytes(), recompute(&pool), "after a removal");
         }
         assert_eq!(pool.resident_bytes(), 0, "an emptied pool holds no bytes");
+    }
+
+    /// A drained pool holds no bytes and still admits transactions.
+    #[test]
+    fn a_drained_pool_forgets_its_bytes() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 100,
+            max_per_sender: 100,
+            min_fee: 1,
+            max_pool_bytes: 80 * 1024,
+            ..Default::default()
+        });
+        pool.add_transaction(create_test_tx_sized(1, 0, 10, 32 * 1024))
+            .unwrap();
+        pool.add_transaction(create_test_tx_sized(2, 0, 10, 32 * 1024))
+            .unwrap();
+        assert_eq!(pool.drain().len(), 2);
+        assert_eq!(
+            pool.resident_bytes(),
+            0,
+            "a drained pool still charges bytes"
+        );
+        pool.add_transaction(create_test_tx_sized(3, 0, 10, 32 * 1024))
+            .expect("a drained pool must still admit transactions");
     }
 
     /// A replacement is charged the difference, not the whole body.
@@ -1021,7 +1062,12 @@ mod tests {
             pool.add_transaction(mk(&kp_b, n, 1)).expect("B within cap");
         }
         assert_eq!(pool.transactions.len(), 4, "pool should be full");
-        assert_eq!(pool.by_sender.get(&a).map_or(0, |v| v.len()), 2);
+        assert_eq!(
+            pool.by_sender
+                .get(&a)
+                .map_or(0, std::collections::BTreeMap::len),
+            2
+        );
 
         // A is at its cap. A high fee may win eviction, but it must not buy a
         // third slot for a sender that already holds two.
@@ -1033,7 +1079,10 @@ mod tests {
             "unexpected error: {err:?}"
         );
         assert!(
-            pool.by_sender.get(&a).map_or(0, |v| v.len()) <= 2,
+            pool.by_sender
+                .get(&a)
+                .map_or(0, std::collections::BTreeMap::len)
+                <= 2,
             "A holds more than max_per_sender after a rejected admission"
         );
     }
@@ -1164,7 +1213,9 @@ mod tests {
         assert_eq!(pool.transactions.len(), 2, "replacement changed the size");
         let b = crate::core::address::Address::from(kp_b.public_key_bytes());
         assert_eq!(
-            pool.by_sender.get(&b).map_or(0, |v| v.len()),
+            pool.by_sender
+                .get(&b)
+                .map_or(0, std::collections::BTreeMap::len),
             1,
             "the replacement evicted an unrelated sender"
         );

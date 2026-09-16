@@ -12,7 +12,7 @@ mod tests {
     use tracing::info;
 
     #[tokio::test]
-    async fn test_chaos_v2_disaster_recovery_full_state() {
+    async fn test_chaos_v2_disaster_recovery_chain_reopens() {
         let temp_dir = tempdir().expect("failed to create temp dir");
         let db_path = temp_dir.path().join("dr_test.db");
         let db_path_str = db_path.to_str().unwrap();
@@ -20,7 +20,9 @@ mod tests {
         let alice = Address::from([0xAA; 32]);
         let cid = crate::storage::content_id::ContentId([0x42; 32]);
 
-        // 1. Initial Setup and State Creation
+        // 1. Initial setup and durable block creation. Direct state writes
+        //    below are intentionally not the persistence contract; transaction
+        //    replay is covered by replay_audit.rs.
         {
             let storage = reopen_storage(db_path_str);
             let consensus = Arc::new(PoWEngine::new(0));
@@ -70,14 +72,19 @@ mod tests {
                 "Chain must have blocks from before crash"
             );
 
-            // Note: Direct state changes (add_balance, bns_registry, nft_registry)
-            // Don't survive restart because they bypass block transaction replay.
-            // Only block-level state persists through commit_block_durable.
+            // Direct state changes (add_balance, bns_registry, nft_registry)
+            // do not survive because they bypass block transaction replay.
+            // This test proves the chain/storage reopen path; the real
+            // transaction-backed BNS recovery path is locked in replay_audit.rs.
+            assert!(bc.state.bns_registry.resolve("ayaz.bud", 0).is_none());
+            assert!(bc.state.nft_registry.nfts.is_empty());
 
             // Verify chain is functional by producing a new block after restart
             let _ = bc.produce_block(Address::zero());
 
-            info!("SUCCESS: Disaster Recovery verified. Budlum is immortal.");
+            info!(
+                "SUCCESS: durable chain reopen verified; transaction replay is tested separately."
+            );
         }
     }
 

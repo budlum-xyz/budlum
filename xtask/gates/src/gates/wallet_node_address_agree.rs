@@ -227,16 +227,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 /// A scratch directory for the canaries.
 fn scratch_dir() -> Result<std::path::PathBuf, String> {
-    let base = std::env::temp_dir().join(format!(
-        "budlum-wallet-node-agree-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| format!("clock is before the epoch: {e}"))?
-            .as_nanos()
-    ));
-    fs::create_dir_all(&base).map_err(|e| format!("cannot create scratch dir: {e}"))?;
-    Ok(base)
+    crate::gates::rust_literals::exclusive_scratch_dir("budlum-wallet-node-agree")
 }
 
 /// Stages a tree with the given wallet and node function bodies.

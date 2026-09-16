@@ -143,11 +143,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when an unpinned flag passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!("budlum-gates-gf-{}-{nanos}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-gf")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
     let good = "pub const COL_REG_SAME: usize = 28;\npub const COL_MEM_SAME: usize = 54;\n        let r_same: AB::Expr = cur[COL_REG_SAME].into();\n        builder.assert_bool(r_same.clone());\n        builder.when_transition().assert_eq(r_same.clone(), one.clone() - reg_diff_z);\n        let m_same: AB::Expr = cur[COL_MEM_SAME].into();\n        builder.assert_bool(m_same.clone());\n        builder.when_transition().assert_zero(\n            m_active.clone() * (one.clone() - m_same.clone()) * nm_val.clone(),\n        );\n";

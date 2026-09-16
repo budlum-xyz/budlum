@@ -12,12 +12,135 @@ use std::path::Path;
 const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
 
 /// Balanced brace body starting at `open` (index of `{`).
+/// Skip a regular string literal starting at `b[j] == b'"'`. Returns the
+/// index just past the closing quote. Backslash escapes hide a quote.
+fn skip_string(b: &[u8], j: usize) -> usize {
+    let mut k = j + 1;
+    while k < b.len() {
+        match b[k] {
+            b'\\' => k += 2,
+            b'"' => return k + 1,
+            _ => k += 1,
+        }
+    }
+    b.len()
+}
+
+/// Skip a raw string literal (`r"..."`, `r#"..."#`, `br##"..."##`) whose
+/// opening prefix starts at `j`. Returns the index just past the closing
+/// delimiter, or `None` when the bytes at `j` are not a raw string (an
+/// identifier like `r#gen`, or a plain `r`).
+fn skip_raw_string(b: &[u8], j: usize) -> Option<usize> {
+    let mut k = j;
+    if k < b.len() && b[k] == b'b' {
+        k += 1;
+    }
+    if k >= b.len() || b[k] != b'r' {
+        return None;
+    }
+    k += 1;
+    let mut hashes = 0usize;
+    while k < b.len() && b[k] == b'#' {
+        hashes += 1;
+        k += 1;
+    }
+    if k >= b.len() || b[k] != b'"' {
+        return None;
+    }
+    k += 1;
+    while k < b.len() {
+        if b[k] == b'"' {
+            let mut h = 0usize;
+            while h < hashes && k + 1 + h < b.len() && b[k + 1 + h] == b'#' {
+                h += 1;
+            }
+            if h == hashes {
+                return Some(k + 1 + hashes);
+            }
+        }
+        k += 1;
+    }
+    Some(b.len())
+}
+
+/// Skip a block comment starting at `b[j..j+2] == "/*"`. Rust block comments
+/// nest. Returns the index just past the closing `*/`, or the end of the
+/// input for an unterminated comment.
+fn skip_block_comment(b: &[u8], j: usize) -> usize {
+    let mut depth = 1usize;
+    let mut k = j + 2;
+    while k + 1 < b.len() {
+        if b[k] == b'/' && b[k + 1] == b'*' {
+            depth += 1;
+            k += 2;
+        } else if b[k] == b'*' && b[k + 1] == b'/' {
+            depth -= 1;
+            k += 2;
+            if depth == 0 {
+                return k;
+            }
+        } else {
+            k += 1;
+        }
+    }
+    b.len()
+}
+
+/// Skip a character literal starting at `b[j] == b'\''`, or return `None`
+/// when the quote starts a lifetime instead. A char literal closes within a
+/// few bytes (escapes included); a lifetime never does.
+fn skip_char_literal(b: &[u8], j: usize) -> Option<usize> {
+    let mut k = j + 1;
+    if k < b.len() && b[k] == b'\\' {
+        k += 1; // the escape start; the scan below finds the closing quote
+    }
+    let limit = (j + 16).min(b.len());
+    while k < limit {
+        match b[k] {
+            b'\n' => return None,
+            b'\'' => return Some(k + 1),
+            _ => k += 1,
+        }
+    }
+    None
+}
+
 fn balanced(src: &str, open: usize) -> String {
     let mut depth = 0i32;
     let mut j = open;
     let b = src.as_bytes();
     while j < b.len() {
         match b[j] {
+            // Braces inside literals and comments are text, not structure.
+            // The old counter walked straight through them, so a `"}"` in a
+            // string or a `// {` in a comment ended the test-module strip at
+            // the wrong place and test-only code was scanned as production.
+            b'"' => {
+                j = skip_string(b, j);
+                continue;
+            }
+            b'r' | b'b' => {
+                if let Some(k) = skip_raw_string(b, j) {
+                    j = k;
+                    continue;
+                }
+            }
+            b'\'' => {
+                if let Some(k) = skip_char_literal(b, j) {
+                    j = k;
+                    continue;
+                }
+            }
+            b'/' if j + 1 < b.len() && b[j + 1] == b'/' => {
+                while j < b.len() && b[j] != b'\n' {
+                    j += 1;
+                }
+                continue;
+            }
+            b'/' if j + 1 < b.len() && b[j + 1] == b'*' => {
+                j = skip_block_comment(b, j);
+                continue;
+            }
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
@@ -61,7 +184,11 @@ fn strip_test_mods(src: &str) -> String {
         let brace = m + brace_rel;
         let body = balanced(rest, brace);
         out.push_str(&rest[..m]);
-        rest = &rest[m + body.len()..];
+        // The block ends where its balanced body ends: at `brace`, not at
+        // the attribute. Advancing from `m` left the last `brace_rel` bytes
+        // of every test module in the scanned text, so a `remove(` or a
+        // `return Err(` in that tail was read as production code.
+        rest = &rest[brace + body.len()..];
     }
 }
 
@@ -338,14 +465,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .subsec_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "budlum-gates-refusals-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-refusals")?;
     let _ = std::fs::create_dir_all(dir.join("src"));
     let _ = std::fs::create_dir_all(dir.join("budzero"));
     let _ = std::fs::create_dir_all(dir.join("wallet-core"));
@@ -366,8 +486,42 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: Err after remove passed"));
     }
 
+    // A test module is not production code, whatever it does to its own
+    // maps. The strip used to leave the tail of every `#[cfg(test)] mod`
+    // in the scanned text, so a partial write inside a test read as a
+    // finding against the file.
+    let test_only = format!(
+        "{good}#[cfg(test)]\nmod tests {{\n    {bad}}}\n",
+        good = good,
+        bad = bad.replace('\n', "\n    ")
+    );
+    std::fs::write(dir.join("src/lib.rs"), test_only).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a partial write that lives only in a test module was reported",
+        ));
+    }
+
+    // The strip is token-aware: a `}` inside a string literal within the
+    // test module must not end the strip early and leave the violation
+    // that follows it in the scanned text.
+    let tricky = format!(
+        "{good}#[cfg(test)]\nmod tests {{\n    let s = \"}}\";\n    {bad}}}\n",
+        good = good,
+        bad = bad.replace('\n', "\n    ")
+    );
+    std::fs::write(dir.join("src/lib.rs"), tricky).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a brace inside a string literal ended the test-module strip early",
+        ));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "refusals canary OK (good PASSes, a partial write FAILs).",
+        "refusals canary OK (good PASSes, a partial write FAILs, one inside a test module \
+         PASSES, and a brace inside a string does not end the strip).",
     ))
 }

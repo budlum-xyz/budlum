@@ -56,8 +56,14 @@ impl Network {
     pub fn bootnodes(&self) -> Vec<String> {
         match self {
             Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_BOOTNODES),
-            Network::Testnet => TESTNET_BOOTNODES.iter().map(|s| s.to_string()).collect(),
-            Network::Devnet => DEVNET_BOOTNODES.iter().map(|s| s.to_string()).collect(),
+            Network::Testnet => TESTNET_BOOTNODES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            Network::Devnet => DEVNET_BOOTNODES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 
@@ -66,7 +72,7 @@ impl Network {
             Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_FALLBACK_BOOTNODES),
             Network::Testnet => TESTNET_FALLBACK_BOOTNODES
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             Network::Devnet => Vec::new(),
         }
@@ -75,7 +81,10 @@ impl Network {
     pub fn dns_seeds(&self) -> Vec<String> {
         match self {
             Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_DNS_SEEDS),
-            Network::Testnet => TESTNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect(),
+            Network::Testnet => TESTNET_DNS_SEEDS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             Network::Devnet => Vec::new(),
         }
     }
@@ -231,25 +240,21 @@ impl std::fmt::Display for Network {
 pub const EPOCH_LEN: u64 = 100;
 
 pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
-    Network::from_chain_id(chain_id)
-        .map(|network| network.epoch_len())
-        .unwrap_or(EPOCH_LEN)
+    Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
 }
 
 pub const SLOT_MS: u64 = 1000;
 
 pub fn slot_ms_for_chain_id(chain_id: u64) -> u64 {
-    Network::from_chain_id(chain_id)
-        .map(|network| network.slot_ms())
-        .unwrap_or(SLOT_MS)
+    Network::from_chain_id(chain_id).map_or(SLOT_MS, |network| network.slot_ms())
 }
 
 pub const FINALITY_CHECKPOINT_INTERVAL: u64 = 10;
 
 pub fn finality_checkpoint_interval_for_chain_id(chain_id: u64) -> u64 {
-    Network::from_chain_id(chain_id)
-        .map(|network| network.consensus_params().finality_checkpoint_interval)
-        .unwrap_or(FINALITY_CHECKPOINT_INTERVAL)
+    Network::from_chain_id(chain_id).map_or(FINALITY_CHECKPOINT_INTERVAL, |network| {
+        network.consensus_params().finality_checkpoint_interval
+    })
 }
 
 pub const FINALITY_QUORUM_NUMERATOR: u64 = 2;
@@ -349,6 +354,16 @@ fn guarded_mainnet_peer_entries(entries: &[&str]) -> Vec<String> {
     } else {
         rendered
     }
+}
+
+/// Whether a node on this profile has any way to find a peer.
+///
+/// mDNS is refused outside devnet, so a mainnet or testnet node whose
+/// bootnode list and DNS-seed list are both empty would come up, listen, and
+/// never meet another node while looking healthy. Startup refuses that
+/// instead of idling.
+pub fn has_peer_source(network: Network, bootnodes: &[String], dns_seeds: &[String]) -> bool {
+    network == Network::Devnet || !bootnodes.is_empty() || !dns_seeds.is_empty()
 }
 
 /// Returns the first entry in the input list carrying a placeholder/dummy
@@ -469,13 +484,18 @@ mod tests {
         // F7: the compiled mainnet constants have to contain a placeholder and
         // have to be caught by the guard. This prevents a repeat of the guard
         // bypass regression in c953049.
-        let compiled_bootnodes: Vec<String> =
-            MAINNET_BOOTNODES.iter().map(|s| s.to_string()).collect();
+        let compiled_bootnodes: Vec<String> = MAINNET_BOOTNODES
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert!(
             first_placeholder_peer(&compiled_bootnodes).is_some(),
             "Compiled MAINNET_BOOTNODES must be detected as placeholder (fail-closed guard active)"
         );
-        let compiled_dns: Vec<String> = MAINNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect();
+        let compiled_dns: Vec<String> = MAINNET_DNS_SEEDS
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert!(
             first_placeholder_peer(&compiled_dns).is_some(),
             "Compiled MAINNET_DNS_SEEDS must be detected as placeholder"
@@ -501,6 +521,24 @@ mod tests {
         // An empty list: not the guard, but the existing "empty bootnode" rule
         // applies.
         assert!(first_placeholder_peer(&[]).is_none());
+    }
+
+    /// The public profiles cannot use mDNS, so without a bootnode or a DNS
+    /// seed there is nothing to dial; only devnet may start alone.
+    #[test]
+    fn public_profiles_need_a_bootnode_or_a_dns_seed() {
+        let none: Vec<String> = Vec::new();
+        let peer = vec![
+            "/ip4/139.59.10.20/tcp/5001/p2p/12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+                .to_string(),
+        ];
+        let seed = vec!["_dnsaddr.seed-1.testnet.budlum.xyz".to_string()];
+        assert!(!has_peer_source(Network::Testnet, &none, &none));
+        assert!(!has_peer_source(Network::Mainnet, &none, &none));
+        assert!(has_peer_source(Network::Devnet, &none, &none));
+        assert!(has_peer_source(Network::Testnet, &peer, &none));
+        assert!(has_peer_source(Network::Testnet, &none, &seed));
+        assert!(has_peer_source(Network::Mainnet, &peer, &seed));
     }
 
     /// Mainnet is the strictest security profile.

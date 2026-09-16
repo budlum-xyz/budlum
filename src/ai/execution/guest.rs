@@ -562,8 +562,7 @@ pub fn validate_gas_budget(
 ) -> Result<u64, String> {
     if proof_bytes_len > MAX_PROOF_BYTES {
         return Err(format!(
-            "proof_bytes {} exceeds MAX_PROOF_BYTES {}",
-            proof_bytes_len, MAX_PROOF_BYTES
+            "proof_bytes {proof_bytes_len} exceeds MAX_PROOF_BYTES {MAX_PROOF_BYTES}"
         ));
     }
     let gas = estimate_full_gas(spec, proof_bytes_len);
@@ -634,8 +633,7 @@ mod gas_tests {
         let executor_src = include_str!("../../execution/executor.rs");
         let production = executor_src
             .split_once("#[cfg(test)]")
-            .map(|(before, _)| before)
-            .unwrap_or(executor_src);
+            .map_or(executor_src, |(before, _)| before);
 
         let at = production
             .find("validate_gas_budget(")
@@ -781,7 +779,7 @@ pub fn i32_to_field(v: i32) -> u64 {
     if v >= 0 {
         v as u64
     } else {
-        GOLDILOCKS_P - (v.unsigned_abs() as u64)
+        GOLDILOCKS_P - u64::from(v.unsigned_abs())
     }
 }
 

@@ -91,11 +91,26 @@ impl BudErasure {
     pub fn expansion(&self) -> f64 {
         (self.k + self.p) as f64 / self.k as f64
     }
-    pub fn encode(&self, data_shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    /// Parity shards for `data_shards`: exactly `k` shards of one common
+    /// length. An empty set, a count other than `k` or a ragged shard is
+    /// refused: indexing the first shard of an empty set panicked, and
+    /// zipping a short shard folded only its prefix into the parity, so the
+    /// parity was wrong with no error to say so.
+    pub fn encode(&self, data_shards: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, &'static str> {
+        if self.k == 0 || self.p == 0 {
+            return Err("K-BUD-ERASURE-REAL: k and p must be positive");
+        }
+        if data_shards.len() != self.k {
+            return Err("K-BUD-ERASURE-REAL: shard count differs from k");
+        }
+        let len = data_shards[0].len();
+        if len == 0 || data_shards.iter().any(|s| s.len() != len) {
+            return Err("K-BUD-ERASURE-REAL: shards must be non-empty and equal in length");
+        }
         // Cauchy MDS stub: parity = XOR of data shards with different patterns
-        let mut parity = Vec::new();
+        let mut parity = Vec::with_capacity(self.p);
         for i in 0..self.p {
-            let mut p = vec![0u8; data_shards[0].len()];
+            let mut p = vec![0u8; len];
             for (j, shard) in data_shards.iter().enumerate() {
                 let pattern = ((i + j) % 256) as u8;
                 for (o, s) in p.iter_mut().zip(shard.iter()) {
@@ -104,7 +119,7 @@ impl BudErasure {
             }
             parity.push(p);
         }
-        parity
+        Ok(parity)
     }
 }
 
@@ -171,8 +186,21 @@ mod tests {
         let erasure = BudErasure::new(7, 2);
         assert!((erasure.expansion() - 1.2857).abs() < 0.01);
         let shards = vec![vec![1u8; 10]; 7];
-        let parity = erasure.encode(shards);
+        let parity = erasure.encode(&shards).expect("seven equal shards encode");
         assert_eq!(parity.len(), 2);
+        assert!(parity.iter().all(|p| p.len() == 10));
         assert!(IntegrationGates::k_bud_erasure(&erasure, 7).is_ok());
+    }
+
+    #[test]
+    fn erasure_encode_refuses_empty_ragged_and_miscounted_shards() {
+        let erasure = BudErasure::new(3, 1);
+        assert!(erasure.encode(&[]).is_err());
+        assert!(erasure.encode(&vec![vec![1u8; 4]; 2]).is_err());
+        let ragged = vec![vec![1u8; 4], vec![2u8; 4], vec![3u8; 3]];
+        assert!(erasure.encode(&ragged).is_err());
+        let empty = vec![Vec::new(); 3];
+        assert!(erasure.encode(&empty).is_err());
+        assert!(BudErasure::new(0, 1).encode(&[]).is_err());
     }
 }

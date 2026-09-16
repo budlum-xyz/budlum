@@ -32,8 +32,7 @@ impl std::fmt::Display for ProofVerificationError {
                 sequence,
             } => write!(
                 f,
-                "Missing commitment for domain={}, height={}, sequence={}",
-                domain_id, domain_height, sequence
+                "Missing commitment for domain={domain_id}, height={domain_height}, sequence={sequence}"
             ),
             ProofVerificationError::EventDomainMismatch => {
                 write!(f, "Event domain does not match commitment domain")
@@ -134,7 +133,7 @@ mod tests {
             target_domain: 2,
             source_height: 10,
             event_index: index,
-            nonce: index as u64,
+            nonce: u64::from(index),
             sender: Address::from([1u8; 32]),
             recipient: Address::from([2u8; 32]),
             payload_hash,

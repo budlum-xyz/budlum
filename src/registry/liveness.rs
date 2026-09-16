@@ -71,7 +71,14 @@ impl LivenessTracker {
         let mut reports = Vec::new();
         let threshold = params.liveness_max_missed_epochs;
 
-        for validator in expected {
+        // Normalize the expected set: a validator named twice in one epoch
+        // would otherwise have the same duty counted twice against them.
+        // Miss STATE survives duty-free epochs on purpose: a slashed or
+        // jailed validator drops out of the expected set, and its accrued
+        // streak must stay exactly where it was, frozen, not vanish.
+        let expected_set: std::collections::BTreeSet<Address> = expected.iter().copied().collect();
+
+        for validator in &expected_set {
             if participated(validator) {
                 // Reset on participation (consecutive, not cumulative).
                 self.missed.remove(validator);
@@ -119,15 +126,25 @@ impl LivenessTracker {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_LIVENESS_TRACKER_V2");
+        // V3: each map carries its count, so an entry cannot slide from
+        // one map into the next.
+        //
+        // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
+        // for the shared rule - the V-bumped roots activate with the USL
+        // genesis, there is no pre-launch mainnet state to migrate, and a
+        // post-launch bump needs its migration recorded in the same commit.
+        hasher.update(b"BDLM_LIVENESS_TRACKER_V3");
+        hasher.update((self.missed.len() as u64).to_le_bytes());
         for (addr, count) in &self.missed {
             hasher.update(addr.0);
             hasher.update(count.to_le_bytes());
         }
+        hasher.update((self.streak_start_epoch.len() as u64).to_le_bytes());
         for (addr, epoch) in &self.streak_start_epoch {
             hasher.update(addr.0);
             hasher.update(epoch.to_le_bytes());
         }
+        hasher.update((self.reported.len() as u64).to_le_bytes());
         for addr in self.reported.keys() {
             hasher.update(addr.0);
         }
@@ -149,6 +166,50 @@ mod tests {
             liveness_max_missed_epochs: threshold,
             ..RegistryParams::default()
         }
+    }
+
+    /// A duplicate in the expected set is one duty, not two; a duty-free
+    /// epoch FROZES the miss state instead of extending or clearing it, so
+    /// a jailed validator's streak survives the jail term unchanged.
+    #[test]
+    fn duplicates_count_once_and_duty_free_epochs_freeze_the_streak() {
+        let mut t = LivenessTracker::new();
+        let p = params(5);
+        let v = addr(1);
+
+        // Named twice, missed once: one strike, not two.
+        let reports = t.record_epoch(1, &[v, v], |_| false, &p);
+        assert!(reports.is_empty());
+        assert_eq!(t.missed_count(&v), 1);
+
+        // No duty at epoch 2: the strike is frozen, not cleared...
+        t.record_epoch(2, &[], |_| false, &p);
+        assert_eq!(t.missed_count(&v), 1);
+
+        // ...and not double-counted either: one missed duty after the gap
+        // is strike two, not three.
+        let reports = t.record_epoch(3, &[v], |_| false, &p);
+        assert!(reports.is_empty());
+        assert_eq!(t.missed_count(&v), 2);
+    }
+
+    /// Each map is counted, so a row cannot slide from `missed` into
+    /// `streak_start_epoch`: the same (address, u64) pairs placed in
+    /// different maps give different roots.
+    #[test]
+    fn root_commits_each_map_count() {
+        let mut a = LivenessTracker::new();
+        a.missed.insert(addr(1), 5);
+        let mut b = LivenessTracker::new();
+        b.streak_start_epoch.insert(addr(1), 5);
+        assert_ne!(a.root(), b.root());
+        let mut c = LivenessTracker::new();
+        c.reported.insert(addr(1), ());
+        let mut d = LivenessTracker::new();
+        d.reported.insert(addr(1), ());
+        d.reported.insert(addr(2), ());
+        assert_ne!(c.root(), d.root());
+        assert_ne!(LivenessTracker::new().root(), c.root());
     }
 
     #[test]

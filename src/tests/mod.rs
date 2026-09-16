@@ -62,6 +62,8 @@ pub mod finality_live_path;
 #[cfg(test)]
 pub mod hardening;
 #[cfg(test)]
+pub mod identity_tx_door;
+#[cfg(test)]
 pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
@@ -75,6 +77,8 @@ pub mod persistence;
 pub mod poa_isolation;
 #[cfg(test)]
 pub mod pollen_ai_data_rights;
+#[cfg(test)]
+pub mod ported_slice_redteam;
 #[cfg(test)]
 pub mod pow_light_client;
 pub mod privacy_ai_execution;
@@ -96,6 +100,8 @@ pub mod settlement_prod;
 #[cfg(test)]
 pub mod tokenomics;
 pub mod tokenomics_proptest;
+#[cfg(test)]
+pub mod vault_tx_door;
 #[cfg(test)]
 pub mod zkvm;
 // The F4 seal (2026-07-17): the SocialFi boost 4 percent B.U.D. operator

@@ -16,9 +16,9 @@ The root `README.md` is only a dashboard; maturity and risk warnings live here.
   `execution/guest.rs` 39, `execution/verify.rs` 16, `execution/model_class.rs`
   3). Counted, not estimated; `registry.rs` and `types.rs` carry no test of
   their own and are exercised through `mod.rs`.
-- **RPC endpoints (6):** `bud_aiGetModel`, `bud_aiRegisterModel`,
+- **RPC endpoints (7):** `bud_aiGetModel`, `bud_aiRegisterModel`,
   `bud_aiSubmitRequest`, `bud_aiSubmitResult`, `bud_aiGetOutcome`,
-  `bud_aiGetActiveVerifiers`.
+  `bud_aiGetActiveVerifiers`, `bud_aiInferenceStats`.
 - **ZKVM host call:** `Syscall imm=6` -> a `0x00A1_00A1` event -> automatic
   `AiInferenceRequest` creation (`budzero/bud-vm/src/lib.rs`).
 

@@ -12,8 +12,7 @@ pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, String> {
     if data.len() > MAX_GATEWAY_CONTENT_BYTES {
         return Err(format!(
-            "gateway content from {source} exceeds {} bytes",
-            MAX_GATEWAY_CONTENT_BYTES
+            "gateway content from {source} exceeds {MAX_GATEWAY_CONTENT_BYTES} bytes"
         ));
     }
     Ok(data)
@@ -213,10 +212,14 @@ impl BudGateway {
         if let Some(manifest) = self.chain.get_storage_manifest(cid).await {
             // Generation outside the lock: a slow recipe must not stall the whole gateway.
             if let Some(bytes) = render_from_recipe(&manifest)? {
+                // Size is checked before the insert: an oversize object is
+                // refused, and refusing it must not leave it in a cache whose
+                // bound is stated as 64 entries of at most this size.
+                let bytes = checked_gateway_content("on-demand generation", bytes)?;
                 if let Ok(mut cache) = self.generation_cache.lock() {
                     cache.insert(cid, bytes.clone());
                 }
-                return checked_gateway_content("on-demand generation", bytes);
+                return Ok(bytes);
             }
         }
 
@@ -251,9 +254,7 @@ impl BudGateway {
             "Content {}:{} not available in local storage, local B.U.D. store, or remote P2P peers.",
             hex::encode(&storage_root[..8]),
             resolved
-                .content_id
-                .map(|c| hex::encode(&c.as_bytes()[..4]))
-                .unwrap_or_else(|| "none".to_string())
+                .content_id.map_or_else(|| "none".to_string(), |c| hex::encode(&c.as_bytes()[..4]))
         ))
     }
 
@@ -308,10 +309,9 @@ impl BudGateway {
                 return Err("sealed recipe cannot be rendered without a view-granted seed".into());
             }
             _ => {
-                return Err(
-                    "only recipe-born content can be rendered into a requested format;                      stored bytes already are their format"
-                        .into(),
-                );
+                return Err("only recipe-born content can be rendered into a requested \
+                            format; stored bytes already are their format"
+                    .into());
             }
         };
 

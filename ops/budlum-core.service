@@ -22,11 +22,14 @@ WorkingDirectory=/var/lib/budlum
 #   --network=mainnet|testnet|devnet
 #   --consensus=pow|pos|poa
 #   --p2p-identity-file /var/lib/budlum/secrets/node-id.key
+# The public RPC stays on loopback: the node speaks plain HTTP and every call
+# carries the API key, so a TLS-terminating reverse proxy on this host is what
+# faces the network, with its address in `trusted_proxies`.
 ExecStart=/usr/local/bin/budlum-core \
     --network=mainnet \
     --consensus=pos \
     --port=4001 \
-    --rpc-public-listener=0.0.0.0:8545 \
+    --rpc-public-listener=127.0.0.1:8545 \
     --rpc-operator-listener=127.0.0.1:8546 \
     --metrics-port=9090 \
     --db-path=/var/lib/budlum/data \

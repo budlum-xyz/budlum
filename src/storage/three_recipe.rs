@@ -236,11 +236,7 @@ impl VideoRecipe {
             &self.repair_permillage.to_le_bytes(),
             &[self.payload_kind],
             &[u8::from(self.transform.apply_zlib)],
-            &[self
-                .transform
-                .force_class
-                .map(|c| c as u8)
-                .unwrap_or(u8::MAX)],
+            &[self.transform.force_class.map_or(u8::MAX, |c| c as u8)],
         ])
     }
 
@@ -427,9 +423,14 @@ impl RecipeCore {
     }
 
     /// One optical (A3) frame. Independent of every other frame.
-    fn optical_frame(&self, seq: u32) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`FrameError`] when the drop does not fit one frame; the carousel is
+    /// sized so that it does, so this names a construction bug.
+    fn optical_frame(&self, seq: u32) -> Result<Vec<u8>, VideoRecipeError> {
         let drop = self.enc.drop_at(seq);
-        pack_frame(&self.stream_commitment, &drop)
+        Ok(pack_frame(&self.stream_commitment, &drop)?)
     }
 
     /// Materialise every frame and mux the BDLV container (A3-A4).
@@ -439,7 +440,7 @@ impl RecipeCore {
         for seq in 0..self.n {
             let drop = self.enc.drop_at(seq);
             digests.push(frame_digest(&self.stream_commitment, seq, &drop.to_bytes()));
-            frames.push(pack_frame(&self.stream_commitment, &drop));
+            frames.push(pack_frame(&self.stream_commitment, &drop)?);
         }
         let fold = fold_frame_digests(&digests)?;
         let pipe_recipe =
@@ -526,7 +527,7 @@ impl VideoFrameStream {
         if seq >= self.core.n {
             return Err(VideoRecipeError::Video(QrVideoError::TooMany(seq)));
         }
-        let optical = self.core.optical_frame(seq);
+        let optical = self.core.optical_frame(seq)?;
         // QrPngError -> QrVideoError::Png, the same wrapper the muxer uses.
         frame_to_qr_png(&optical)
             .map_err(QrVideoError::from)
