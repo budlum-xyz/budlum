@@ -1,5 +1,11 @@
 //! The cold wallet for the Universal Settlement Layer.
 //!
+//! WIRING: unwired - the dormant cold-wallet path (the USL settlement
+//! executor's settlement arm and the operator rotation channel) is the
+//! production caller; the refusal and rotation rules are pinned by this
+//! file's tests, and the per-item notes below name the same door where they
+//! are more specific.
+//!
 //! # The threat model, stated before the code
 //!
 //! A cold wallet exists because the online side is assumed to be compromised.
