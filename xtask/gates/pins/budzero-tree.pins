@@ -2,7 +2,7 @@
 # Regenerate with: cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-pin --pin
 # Commit the new pins together with the change they describe.
 .gitignore 85862188075fef15ec83fbacafe0c6253df03775bfd667e7b4e415379ddf4b44
-Cargo.lock a059a21bf30c5c1c5e19307de6e4bbe55a9e1e00c173230047294d8f4e617bce
+Cargo.lock db2b7ec102aa217909e970cafb871673fc7076d33fd410c29b6b00327989e063
 Cargo.toml 315e5f6b06fc889d1326d5b816bec247c4d43fd22cace2e03c0fc5b33fc8c7b1
 LICENSE 960f5f0274def1338949e8cd485d36d485f2b87f447ab9d581767c0fbbaa8575
 bud-cli/Cargo.toml 9067928bbca6892d2790d87f2b20656304dbbd176bb022dcdd11ab810fd1ab14
