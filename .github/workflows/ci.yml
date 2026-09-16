@@ -584,7 +584,7 @@ jobs:
           # no -n: an annotation that starts with a line number of a scratch file is
           # noise, and the gate's own message already names the gate and the reason.
           grep "^FAIL \[" "$log" | tail -n 40 | sed -e 's/^/::error::/'
-          n=$(grep -c "^FAIL \[" "$log")
+          n=$(grep -c "^FAIL \[" "$log" || true)
           if [ "$n" -eq 0 ]; then
             echo "gate tally: no FAIL headlines recorded; if this job is red the cause is the step that owns it"
             exit 0
