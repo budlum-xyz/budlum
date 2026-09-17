@@ -767,8 +767,13 @@ impl ColdWalletState {
 
     /// How much of this epoch's budget remains.
     #[must_use]
-    /// WIRING: unwired - the settlement executor consults the remaining
-    /// budget when cold-wallet flows go live; the ceiling is pinned by tests.
+    /// WIRING: no wiring decided (assessment 2026-09-17): this is a derived
+    /// view of `policy.max_value_per_epoch_atoms - epoch_spent_atoms`, and
+    /// every force-bearing path (`sign`, `sign_with_quorum`) enforces the
+    /// ceiling itself, so no caller is needed for enforcement. The door is
+    /// telemetry/health dashboards reading how much headroom a cold epoch
+    /// has left; if a real consumer appears, this note converts to a named
+    /// wiring target. Until then the view is pinned by tests only.
     pub fn budget_remaining(&self, epoch: u64) -> u128 {
         let spent = if epoch < self.budget_epoch {
             return 0;
