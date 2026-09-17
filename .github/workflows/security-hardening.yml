@@ -216,8 +216,12 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: cargo install cargo-supply-chain
-        run: cargo install cargo-supply-chain --locked
+      # Version pinned. An unpinned install made the parse script below the
+      # victim of whichever output shape the newest release emitted; the parser
+      # still tolerates the list shape, but the pin stops the JSON from being
+      # rewritten underneath a review.
+      - name: cargo install cargo-supply-chain (version pinned)
+        run: cargo install cargo-supply-chain --version 0.3.7 --locked
       # Every run of `publishers` asked crates.io per crate at more than about
       # 2 seconds each, and with 566 dependencies that exceeded the 15-minute
       # timeout: the job was cancelled and produced no output. `update` fetches
@@ -240,44 +244,62 @@ jobs:
         run: |
           set -euo pipefail
           cargo supply-chain json --diffable > /tmp/supply-chain.json
-          python3 - <<'PY'
+          cat > /tmp/ownerless_gate.py <<'PY'
           import json, sys
 
-          with open("/tmp/supply-chain.json") as f:
-              data = json.load(f)
+          def crate_owners(data):
+              crates = data.get("crates_io_crates")
+              if isinstance(crates, dict):
+                  # cargo-supply-chain 0.3.x emits name -> owners here; the old
+                  # script iterated this as a list of objects and died on
+                  # 'str' object has no attribute 'get', so the gate inspected
+                  # nothing while looking red for the wrong reason.
+                  for name, owners in crates.items():
+                      yield name, owners if isinstance(owners, list) else []
+              elif isinstance(crates, list):
+                  for entry in crates:
+                      if isinstance(entry, dict):
+                          yield entry.get("name", "?"), entry.get("owners") or []
+                      elif isinstance(entry, str):
+                          yield entry, []
+              else:
+                  sys.exit(
+                      "unrecognised crates_io_crates shape "
+                      f"({type(crates).__name__}); the gate refuses to claim "
+                      "a verdict over JSON it cannot parse"
+                  )
 
-          # Crates with no owner: neither a user nor a team can publish them.
-          # Such a dependency cannot be patched.
-          orphans = []
-          for crate in data.get("crates_io_crates", []):
-              name = crate.get("name", "?")
-              owners = crate.get("owners", [])
-              if not owners:
-                  orphans.append(name)
-
-          total = len(data.get("crates_io_crates", []))
-          if total == 0:
-              print(
-                  "THE GATE RAN EMPTY: cargo-supply-chain reported no crates, "
-                  "so this check inspected nothing.",
-                  file=sys.stderr,
-              )
+          with open(sys.argv[1]) as f:
+              pairs = list(crate_owners(json.load(f)))
+          if not pairs:
+              print("THE GATE RAN EMPTY: no crates were inspected.", file=sys.stderr)
               sys.exit(1)
-
+          orphans = sorted(n for n, owners in pairs if not owners)
           if orphans:
               print(f"{len(orphans)} ownerless dependencies:", file=sys.stderr)
-              for o in sorted(orphans):
+              for o in orphans:
                   print(f"  {o}", file=sys.stderr)
               print(
-                  "\nAn ownerless crate cannot be patched by anyone. If a vulnerability "
-                  "appears there is nobody to wait for; replace the dependency or "
-                  "vendor it in.",
+                  "\nAn ownerless crate cannot be patched by anyone. If a "
+                  "vulnerability appears there is nobody to wait for; replace "
+                  "the dependency or vendor it in.",
                   file=sys.stderr,
               )
               sys.exit(1)
-
-          print(f"No ownerless dependencies: all {total} crates.io crates have a publisher.")
+          print(f"No ownerless dependencies: all {len(pairs)} crates.io crates have a publisher.")
           PY
+          # Canary before the real data: the parser must flag a synthetic
+          # ownerless crate sitting next to an owned one, otherwise a green
+          # verdict could come from a parser that inspects nothing.
+          cat > /tmp/ownerless-canary.json <<'J'
+          {"crates_io_crates": {"owned-crate": [{"login": "someone", "kind": "user"}], "orphan-crate": []}}
+          J
+          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary.json; then
+            echo "ERROR: the gate let a synthetic ownerless crate through -> vacuous" >&2
+            exit 1
+          fi
+          echo "canary OK: the gate flags an ownerless crate."
+          python3 /tmp/ownerless_gate.py /tmp/supply-chain.json
 
   # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
   # different states depending on the outcome of a race, that is a fork.
