@@ -83,7 +83,11 @@ jobs:
   geiger:
     name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # 35 -> 55: the clean below adds one cold build per workspace until the
+    # shared cache saves this job's fresh artifacts again; 35 was sized for a
+    # cache-fresh run. The first green run re-establishes the cache and the
+    # number can come back down.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,6 +122,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The shared rust-cache restores stale dep-info from earlier builds:
+          # after the Plonky3 0.6.3 -> 0.7.0 swap a cached unit's .d file still
+          # lists p3-monty-31-0.6.3/src/lib.rs, the source is not on disk, and
+          # cargo-geiger dies with Io(NotFound) instead of scanning. Without a
+          # clean, every dependency swap breaks this job instead of the scan.
+          cargo clean
+
           set +e
           cargo geiger --all-targets > /tmp/geiger1.txt 2>&1
           status1=$?
@@ -143,6 +154,9 @@ jobs:
           # crate being skipped without being scanned is noticed too.
           cd budzero
           : > /tmp/geiger2.txt
+          # Same staleness, second workspace: budzero/target carries the same
+          # cached dep-info trap as the root build above.
+          cargo clean
           for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-node bud-cli verifier-registry; do
             set +e
             # cargo-geiger wants an ABSOLUTE path: given a relative one
