@@ -2,7 +2,7 @@
 //!
 //! What this gate promises, per the 2026-09-17 decision record (item 11):
 //! code that is incompatible with the regeneration layer's wiring is BLOCKED
-//! at CI — the gate turns red and the merge cannot proceed — and the gate
+//! at CI - the gate turns red and the merge cannot proceed - and the gate
 //! proves it is not vacuous by corrupting its own fixture set in
 //! `self_test` and requiring every corruption to be caught.
 //!

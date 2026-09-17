@@ -496,21 +496,21 @@ impl RegenerationLedger {
     /// forged audit trail.
     ///
     /// `revert` begins by validating the ledger, which is correct for honest
-    /// state — the anchor for the recovery is the ledger's own accounting.
+    /// state - the anchor for the recovery is the ledger's own accounting.
     /// Once the trail itself is forged there is nothing left to validate
     /// *inside* the ledger, and the accounting anchor moves: it becomes the
     /// canonical commitment, and nothing else. This method therefore:
     ///
     /// 1. Refuses when the ledger validates ([`ReversionError::LedgerIsValid`])
-    ///    — healthy state uses `revert`, and a door that also opened for
+    ///    - healthy state uses `revert`, and a door that also opened for
     ///    healthy state would let any caller bypass `revert`'s checks by
     ///    crying forgery.
     /// 2. Refuses any target shallower than [`Stage::Polyp`]
-    ///    ([`ReversionError::ForgedTrailTargetNotPolyp`]) — with damage
+    ///    ([`ReversionError::ForgedTrailTargetNotPolyp`]) - with damage
     ///    provenance unknown, the only checkpoint the forger provably
     ///    did not touch is the identity itself, which is what Polyp holds.
     /// 3. Still applies the canonical-commitment rule
-    ///    ([`ReversionError::TargetNotCanonical`]) — the canonical source is
+    ///    ([`ReversionError::TargetNotCanonical`]) - the canonical source is
     ///    trusted; a remark: this is exactly where the anchor-dormancy and
     ///    cold-committee rotation of the 2026-09-17 decision record applies,
     ///    because a forged anchor makes even this check converge onto the
@@ -521,7 +521,7 @@ impl RegenerationLedger {
     ///    reused, because reused counts from a forged trail are forged too.
     ///
     /// The forged entries themselves are evidence for forensics; this ledger
-    /// deliberately keeps no copy — carrying forged bytes forward would make
+    /// deliberately keeps no copy - carrying forged bytes forward would make
     /// them indistinguishable from an honest history to any later reader.
     ///
     /// # Errors

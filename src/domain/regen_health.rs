@@ -7,9 +7,9 @@
 //! `regeneration_stage` holds the reversion ledger and every rule that makes
 //! reversion safe, and it said so in its own header: the ledger is driven by
 //! a node-health layer that did not exist. This module is that layer. It owns
-//! exactly one decision class — given what the node currently holds and what
+//! exactly one decision class - given what the node currently holds and what
 //! the network agrees is canonical, is the node healthy, is repair worth
-//! trying, must it revert, or must a human hear about it — and it executes
+//! trying, must it revert, or must a human hear about it - and it executes
 //! nothing. Execution (the actual reversion and re-growth) stays with the
 //! ledger, because a layer that both decides and executes is a layer whose
 //! decision cannot be reviewed without trusting its hands.
@@ -26,7 +26,7 @@
 //!    commitment) is checked against the network-agreed source. A mismatch is
 //!    a divergence; recovery means reverting to the cheapest stage at or
 //!    below the damage window, chosen by
-//!    [`RegenerationLedger::cheapest_target`] — never deeper than the damage,
+//!    [`RegenerationLedger::cheapest_target`] - never deeper than the damage,
 //!    never shallower than needed.
 //! 3. **Economics** ([`reversion_beats_repair`]). Reversion that costs more
 //!    than repair is a recovery mechanism operators learn to avoid, and a
@@ -49,7 +49,7 @@
 //! corruption, rogue/incompatible upgrade artifacts, and network-layer
 //! tampering. This module answers all three through one observation: each of
 //! them ultimately presents as a commitment that diverges from the canonical
-//! source — corrupt state recomputes to a wrong commitment, an incompatible
+//! source - corrupt state recomputes to a wrong commitment, an incompatible
 //! artifact fails the regeneration pact upstream and lands here as damage,
 //! and a tampered network view cannot match a canonical commitment by
 //! construction. The canonicality check is the single tripwire; the verdict
@@ -113,7 +113,7 @@ pub enum HealthVerdict {
     /// canonical source. Nothing to do; doing anything here would be churn.
     Healthy,
     /// Damage exists but repair is cheaper than reversion by the configured
-    /// ratio. Recorded rather than executed — the repair path is the
+    /// ratio. Recorded rather than executed - the repair path is the
     /// artifact-level regeneration layer, not this module.
     RepairRecommended {
         /// Which stress class the assessment observed.
@@ -503,6 +503,9 @@ mod tests {
             1000,
             10,
         );
+        // Not-healthy is necessary but not sufficient: the exact alarm kind
+        // is pinned by the match below.
+        assert_ne!(v, HealthVerdict::Healthy);
         match v {
             HealthVerdict::Alarm { reason, .. } => {
                 assert_eq!(reason.kind(), "regen-alarm-full-reversion-forbidden");
