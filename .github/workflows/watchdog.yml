@@ -1,0 +1,151 @@
+name: Watchdog
+
+# The 24/7 pulse (decision record 2026-09-17, item 14). The existing scheduled
+# workflows cover weekly depth: fuzz nightly, OSV/grype weekly, Kani/Miri/
+# semgrep Monday, security-audit Monday. What none of them covers is the
+# drift that happens *between* code changes at sub-weekly cadence:
+#
+# 1. A RustSec advisory published on a Tuesday against an unchanged
+#    Cargo.lock would sit unseen until next Monday's security-audit. Six
+#    hours is the worst window acceptable for a chain repo.
+# 2. Main can rot between PRs: lockfiles drifting against manifests, a
+#    workflow edit breaking YAML, or a gate that was green at merge turning
+#    red when inputs around it moved. Only a scheduled re-measurement sees
+#    that; PR-time checks cannot.
+# 3. Scheduled failures must be visible: this workflow emits a summary
+#    artifact and the main-branch badge state carries the pulse outcomes.
+#
+# Deliberately NOT here: anything taking more than a few minutes. Depth is
+# the weekly jobs' job; a pulse that takes an hour runs a quarter as often
+# in practice.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rustsec-drift:
+    name: RustSec drift (fresh advisory DB vs unchanged locks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: watchdog-rustsec
+      # Binary-pinned by --locked; the advisory DB is refreshed on every run
+      # (refresh failure is itself a failure - a stale DB answers nothing).
+      - name: Install cargo-audit (locked)
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit every workspace lockfile
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' lock; do
+            found=$((found + 1))
+            echo "=== auditing $lock ==="
+            # Plain `cargo audit`: nonzero on vulnerability AND on advisory-DB
+            # fetch failure. Failing on fetch failure is deliberate (fresh-DB
+            # rule) - a watchdog that audits against a three-day-old database
+            # reports "green" about yesterday's advisories, which is worse
+            # than no watchdog because it reads as safety.
+            cargo audit --file "$lock"
+          done < <(find . -name Cargo.lock -not -path './target/*' -print0 | sort -z)
+          if [ "$found" -lt 2 ]; then
+            echo "expected at least root + fuzz lockfiles, found $found" >&2
+            exit 1
+          fi
+          echo "audited $found lockfile(s): clean against the fresh RustSec DB"
+
+  main-health-pulse:
+    name: Main health pulse (locks / workflows / regen gate)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.1"
+      - name: Install actionlint v1.7.12 (sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: watchdog-pulse
+      - name: Lockfiles still match their manifests on main
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' lock; do
+            dir="$(dirname "$lock")"
+            case "$dir" in */target/*) continue ;; esac
+            found=$((found + 1))
+            echo "=== freshness: $dir ==="
+            (cd "$dir" && cargo metadata --format-version 1 --locked >/dev/null)
+          done < <(find . -name Cargo.lock -not -path './target/*' -print0 | sort -z)
+          echo "$found lockfile(s) fresh against manifests"
+      - name: Workflows still parse (actionlint)
+        run: actionlint
+      - name: Build the gate binary
+        run: cargo build --release --manifest-path xtask/gates/Cargo.toml
+      - name: Regen-health door still wired on main
+        run: ./xtask/gates/target/release/budlum-gates regen-health-door
+      - name: Regen-health gate canaries still caught
+        run: ./xtask/gates/target/release/budlum-gates regen-health-door --self-test
+
+  summary:
+    name: Watchdog summary
+    runs-on: ubuntu-latest
+    needs: [rustsec-drift, main-health-pulse]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compose summary
+        run: |
+          set -euo pipefail
+          {
+            echo "# Watchdog pulse summary"
+            echo
+            echo "- run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- sha: ${GITHUB_SHA}"
+            echo "- schedule: every 6h (workflow_dispatch also available)"
+            echo "- rustsec-drift: ${{ needs.rustsec-drift.result }}"
+            echo "- main-health-pulse: ${{ needs.main-health-pulse.result }}"
+            echo
+            echo "Red pulses are findings about drift *between* code changes; investigate the named job first."
+          } > watchdog-summary.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: watchdog-summary
+          path: watchdog-summary.md
+          retention-days: 30
