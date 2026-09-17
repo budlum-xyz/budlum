@@ -1,10 +1,11 @@
 //! Stage reversion: what a node does when in-place repair cannot save it.
 //!
-//! WIRING: unwired - the reversion ledger is driven by the node-health layer
-//! that decides *when* a node reverts, and that layer is not built; wiring the
-//! ledger from an arbitrary call site would let any code path claim a
-//! reversion happened. The rules are pinned by this module's tests until the
-//! health layer arrives.
+//! WIRING: the reversion ledger is driven by the node-health layer at
+//! [`super::regen_health`], which decides *when* a node reverts against the
+//! canonical commitment source. The remaining door is the node runtime's
+//! health tick, which will call `assess` per block and then execute the
+//! verdict here. Rules stay pinned by this module's tests and by
+//! `regen_health`'s.
 //!
 //! # The biological model, and why it is not decoration
 //!
@@ -217,6 +218,17 @@ impl ReversionPolicy {
 /// Why a reversion was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReversionError {
+    /// [`RegenerationLedger::revert_after_forgery`] was called on a ledger
+    /// whose audit trail validates. Honest ledgers use `revert`; the forgery
+    /// door existing for healthy state would let any caller claim "my trail
+    /// was corrupt" to bypass every check `revert` performs.
+    #[error("revert_after_forgery called on a ledger with a valid audit trail")]
+    LedgerIsValid,
+    /// Recovery from a forged audit trail must go all the way to [`Stage::Polyp`].
+    /// Damage provenance is unknown once the trail itself is forged; any
+    /// shallower target trusts checkpoints the forger may also have touched.
+    #[error("forged-trail recovery target must be Polyp, got {to:?}")]
+    ForgedTrailTargetNotPolyp { to: Stage },
     /// The recovery policy itself would permit an unbounded or zero-sized
     /// recovery budget.
     #[error("invalid reversion policy: {rule}")]
@@ -480,6 +492,78 @@ impl RegenerationLedger {
         Ok(event)
     }
 
+    /// The recovery door for the one damage class `revert` cannot serve: a
+    /// forged audit trail.
+    ///
+    /// `revert` begins by validating the ledger, which is correct for honest
+    /// state — the anchor for the recovery is the ledger's own accounting.
+    /// Once the trail itself is forged there is nothing left to validate
+    /// *inside* the ledger, and the accounting anchor moves: it becomes the
+    /// canonical commitment, and nothing else. This method therefore:
+    ///
+    /// 1. Refuses when the ledger validates ([`ReversionError::LedgerIsValid`])
+    ///    — healthy state uses `revert`, and a door that also opened for
+    ///    healthy state would let any caller bypass `revert`'s checks by
+    ///    crying forgery.
+    /// 2. Refuses any target shallower than [`Stage::Polyp`]
+    ///    ([`ReversionError::ForgedTrailTargetNotPolyp`]) — with damage
+    ///    provenance unknown, the only checkpoint the forger provably
+    ///    did not touch is the identity itself, which is what Polyp holds.
+    /// 3. Still applies the canonical-commitment rule
+    ///    ([`ReversionError::TargetNotCanonical`]) — the canonical source is
+    ///    trusted; a remark: this is exactly where the anchor-dormancy and
+    ///    cold-committee rotation of the 2026-09-17 decision record applies,
+    ///    because a forged anchor makes even this check converge onto the
+    ///    adversary's line.
+    /// 4. Discards the forged history and counters. The audit trail restarts
+    ///    as a single event recording the forgery recovery: totals zeroed,
+    ///    event number one, the marker in `carried` explicit that nothing was
+    ///    reused, because reused counts from a forged trail are forged too.
+    ///
+    /// The forged entries themselves are evidence for forensics; this ledger
+    /// deliberately keeps no copy — carrying forged bytes forward would make
+    /// them indistinguishable from an honest history to any later reader.
+    ///
+    /// # Errors
+    ///
+    /// Any of [`ReversionError::LedgerIsValid`],
+    /// [`ReversionError::ForgedTrailTargetNotPolyp`], or
+    /// [`ReversionError::TargetNotCanonical`].
+    pub fn revert_after_forgery(
+        &mut self,
+        target: &StageSnapshot,
+        stress: Stress,
+        canonical: &dyn Fn(Stage, u64) -> Option<[u8; 32]>,
+    ) -> Result<Reversion, ReversionError> {
+        if self.validate().is_ok() {
+            return Err(ReversionError::LedgerIsValid);
+        }
+        if target.stage != Stage::Polyp {
+            return Err(ReversionError::ForgedTrailTargetNotPolyp { to: target.stage });
+        }
+        if canonical(target.stage, target.height) != Some(target.commitment) {
+            return Err(ReversionError::TargetNotCanonical {
+                height: target.height,
+            });
+        }
+        let event = Reversion {
+            from: self.stage,
+            to: target.stage,
+            stress,
+            height_after: target.height,
+            carried: Default::default(),
+            event_number: 1,
+        };
+        self.stage = target.stage;
+        self.height = target.height;
+        self.commitment = target.commitment;
+        self.reversion_events.clear();
+        self.reversion_events.push(event.clone());
+        self.total_reused = 0;
+        self.total_discarded = 0;
+        Ok(event)
+    }
+
     /// Grows forward one stage after a reversion.
     ///
     /// Not bounded by the reversion policy, and that asymmetry is the point:
@@ -529,8 +613,9 @@ impl RegenerationLedger {
     /// right answer, because anything shallower than necessary is re-growth
     /// nobody asked for and anything deeper leaves the damage in place.
     #[must_use]
-    /// WIRING: unwired - the node-health layer that chooses a reversion
-    /// target is not built; the selection rule is pinned here by tests.
+    /// WIRING: wired through [`super::regen_health::assess`], which calls
+    /// this with the caller's snapshot table; the node runtime's health tick
+    /// is the remaining door. The selection rule is pinned here by tests.
     pub fn cheapest_target(
         &self,
         damaged_below: u64,
@@ -582,8 +667,9 @@ fn saturating_event_count(len: usize) -> u32 {
 /// repair to be an order of magnitude more expensive before heights are given
 /// up.
 #[must_use]
-/// WIRING: unwired - the same missing node-health layer is the caller that
-/// would compare repair against reversion; the economics are pinned by tests.
+/// WIRING: wired through [`super::regen_health::assess`], which prices the
+/// converged decision; the node runtime's health tick is the remaining door.
+/// The economics are pinned here by tests.
 pub fn reversion_beats_repair(
     repair_cost: u64,
     regrowth_cost: u64,
@@ -1116,5 +1202,136 @@ mod tests {
         );
         assert_eq!(Stage::Polyp.earlier(), None);
         assert_eq!(Stage::Medusa.later(), None);
+    }
+
+    // ---- The forgery door: recovery when the audit trail itself is damaged ----
+
+    mod forgery_door {
+        use super::*;
+
+        fn canonical(stage: Stage, height: u64) -> Option<[u8; 32]> {
+            match (stage, height) {
+                (Stage::Polyp, 0) => Some([0x11; 32]),
+                (Stage::Ephyra, 50) => Some([0x22; 32]),
+                (Stage::Medusa, 100) => Some([0x33; 32]),
+                _ => None,
+            }
+        }
+
+        fn with_forged_trail() -> RegenerationLedger {
+            let mut ledger = RegenerationLedger::at(50, [0x22; 32]);
+            ledger.stage = Stage::Ephyra;
+            ledger.reversion_events.push(Reversion {
+                from: Stage::Medusa,
+                to: Stage::Ephyra,
+                stress: Stress::Divergence,
+                height_after: 50,
+                carried: Transdifferentiated {
+                    proofs_reusable: 3,
+                    proofs_discarded: 0,
+                    records_refiled: 1,
+                },
+                event_number: 1,
+            });
+            ledger.total_reused = 123_456; // contradicts the recorded event
+            assert!(ledger.validate().is_err());
+            ledger
+        }
+
+        #[test]
+        fn the_forgery_door_refuses_a_valid_ledger() {
+            let mut ledger = RegenerationLedger::at(100, [0x33; 32]);
+            let err = ledger
+                .revert_after_forgery(
+                    &StageSnapshot {
+                        stage: Stage::Polyp,
+                        height: 0,
+                        commitment: [0x11; 32],
+                        carried: Default::default(),
+                    },
+                    Stress::RepairFailed,
+                    &canonical,
+                )
+                .unwrap_err();
+            assert_eq!(err, ReversionError::LedgerIsValid);
+        }
+
+        #[test]
+        fn the_forgery_door_refuses_any_target_shallower_than_polyp() {
+            let mut ledger = with_forged_trail();
+            let err = ledger
+                .revert_after_forgery(
+                    &StageSnapshot {
+                        stage: Stage::Ephyra,
+                        height: 50,
+                        commitment: [0x22; 32],
+                        carried: Default::default(),
+                    },
+                    Stress::RepairFailed,
+                    &canonical,
+                )
+                .unwrap_err();
+            assert_eq!(
+                err,
+                ReversionError::ForgedTrailTargetNotPolyp { to: Stage::Ephyra }
+            );
+        }
+
+        #[test]
+        fn the_forgery_door_still_refuses_a_non_canonical_target() {
+            let mut ledger = with_forged_trail();
+            let err = ledger
+                .revert_after_forgery(
+                    &StageSnapshot {
+                        stage: Stage::Polyp,
+                        height: 0,
+                        commitment: [0xFF; 32],
+                        carried: Default::default(),
+                    },
+                    Stress::RepairFailed,
+                    &canonical,
+                )
+                .unwrap_err();
+            assert_eq!(err, ReversionError::TargetNotCanonical { height: 0 });
+        }
+
+        #[test]
+        fn the_forgery_door_resets_the_trail_to_one_honest_event() {
+            let mut ledger = with_forged_trail();
+            let event = ledger
+                .revert_after_forgery(
+                    &StageSnapshot {
+                        stage: Stage::Polyp,
+                        height: 0,
+                        commitment: [0x11; 32],
+                        carried: Default::default(),
+                    },
+                    Stress::RepairFailed,
+                    &canonical,
+                )
+                .expect("forgery recovery succeeds");
+            assert_eq!(event.event_number, 1);
+            assert_eq!(ledger.stage, Stage::Polyp);
+            assert_eq!(ledger.height, 0);
+            assert_eq!(ledger.commitment, [0x11; 32]);
+            assert_eq!(ledger.reversion_events.len(), 1);
+            assert_eq!(ledger.total_reused, 0);
+            assert_eq!(ledger.total_discarded, 0);
+            // The fresh trail validates; the door did what `revert` cannot.
+            assert!(ledger.validate().is_ok());
+            // And from here, normal re-growth is possible again.
+            ledger
+                .grow(
+                    &StageSnapshot {
+                        stage: Stage::Ephyra,
+                        height: 50,
+                        commitment: [0x22; 32],
+                        carried: Default::default(),
+                    },
+                    &canonical,
+                )
+                .expect("re-growth onto the canonical line");
+            assert_eq!(ledger.stage, Stage::Ephyra);
+        }
     }
 }
