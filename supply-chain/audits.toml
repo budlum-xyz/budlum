@@ -149,3 +149,27 @@ delta = "0.6.0 -> 0.7.0@git:38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"
 criteria = "safe-to-deploy"
 who = "Lubo's Ruler <ayazkussann@gmail.com>"
 notes = "diffed the crates.io 0.6.0 tarball against misc/connection-limits at the pinned rust-libp2p commit: the version bump, an MSRV raise to 1.88 (PR 6273), rustfmt import reordering in lib.rs and the tests module, and rand moving to a workspace dev-dependency; no functional change"
+
+[[audits.flate2]]
+version = "1.1.10"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "delta audit against this tree's audited 1.1.9 (cargo vet diff --mode=local, 27 files): the cloudflare_zlib C-backend feature is dropped, the backend set is restructured (runtime_detection feature added) and miniz_oxide moves to 0.9; io traits move std -> core/alloc. No unsafe, network or build-script additions. This workspace pins default-features=false + rust_backend, so the shipped path stays pure-Rust miniz_oxide."
+
+[[audits.hyper]]
+version = "1.11.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "delta audit against 1.11.0, which the existing vet graph already vetted (absent from the baseline's unvetted set); the 27-file diff is a clippy/match-ergonomics cleanup (match &mut self.kind, ref patterns removed, lint config). No unsafe additions, no change to the HTTP/1 or HTTP/2 paths."
+
+[[audits.miniz_oxide]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "delta audit against 0.8.9, already vetted by the existing graph (14 files): the flush-mode enum gains PartialOpt/SyncOpt variants with docs, SMALL_DIST_EXTRA is reduced by bit shift, serde/std feature wiring is reworked and adler32 moves to 0.3.8. The unsafe SIMD kernels are untouched."
+
+[[audits.toml]]
+version = "1.1.5+spec-1.1.0"
+criteria = "safe-to-deploy"
+who = "Lubo's Ruler <ayazkussann@gmail.com>"
+notes = "delta audit against 1.1.4, already vetted by the existing graph; two source files change: make_owned() is added to parsed integers/strings so borrowed input data can be detached, plus doc-link fixes. No unsafe, no build script, no feature changes."
