@@ -1,5 +1,9 @@
 //! The node-health layer: the caller that decides *when* a node reverts.
 //!
+//! WIRING: unwired - the production caller is the node runtime's health tick
+//! (per-block `assess` plus verdict execution through the ledger). Until that tick lands, the rules are pinned by this file's
+//! tests, the chaos acceptance suite, and the `regen-health-door` gate.
+//!
 //! `regeneration_stage` holds the reversion ledger and every rule that makes
 //! reversion safe, and it said so in its own header: the ledger is driven by
 //! a node-health layer that did not exist. This module is that layer. It owns

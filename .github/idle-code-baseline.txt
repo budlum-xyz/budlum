@@ -746,7 +746,6 @@ bud/src/quantum_chain.rs	fn	kq_stark
 bud/src/quantum_chain.rs	fn	kq_tx
 bud/src/quantum_chain.rs	fn	kq_wallet
 bud/src/quantum_chain.rs	fn	should_displace
-bud/src/quantum_chain.rs	fn	verify_quorum
 bud/src/quantum_chain.rs	struct	DualWallet
 bud/src/quantum_chain.rs	struct	FiatShamirTranscript
 bud/src/quantum_chain.rs	struct	HybridFinalityVote

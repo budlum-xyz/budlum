@@ -126,6 +126,10 @@ impl DeviceSigner {
     /// will (correctly) still accept it against this device - which is why the
     /// payload layer pins the chain id, height, value, nonce and key epoch.
     #[must_use]
+    /// WIRING: the committee channels (emergency-anchor rotation in
+    /// `pq_anchor::rotate_anchor_key_with_committee`, future anchor-break
+    /// quorums) sign certificates through this helper; exercised by those
+    /// callers' tests until a production committee channel submits payloads.
     pub fn sign_payload(&self, payload: &[u8], key_epoch: u32) -> DeviceSignature {
         let signature = self.key.sign(payload);
         DeviceSignature {
