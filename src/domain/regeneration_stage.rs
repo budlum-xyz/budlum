@@ -501,16 +501,16 @@ impl RegenerationLedger {
     /// *inside* the ledger, and the accounting anchor moves: it becomes the
     /// canonical commitment, and nothing else. This method therefore:
     ///
-    /// 1. Refuses when the ledger validates ([`ReversionError::LedgerIsValid`])
-    ///    - healthy state uses `revert`, and a door that also opened for
-    ///    healthy state would let any caller bypass `revert`'s checks by
-    ///    crying forgery.
+    /// 1. Refuses when the ledger validates ([`ReversionError::LedgerIsValid`]):
+    ///    healthy state uses `revert`, and a door that also opened for honest
+    ///    state would let any caller bypass `revert`'s checks by crying
+    ///    forgery.
     /// 2. Refuses any target shallower than [`Stage::Polyp`]
-    ///    ([`ReversionError::ForgedTrailTargetNotPolyp`]) - with damage
-    ///    provenance unknown, the only checkpoint the forger provably
-    ///    did not touch is the identity itself, which is what Polyp holds.
+    ///    ([`ReversionError::ForgedTrailTargetNotPolyp`]): with damage
+    ///    provenance unknown, the only checkpoint the forger provably did not
+    ///    touch is the identity itself, which is what Polyp holds.
     /// 3. Still applies the canonical-commitment rule
-    ///    ([`ReversionError::TargetNotCanonical`]) - the canonical source is
+    ///    ([`ReversionError::TargetNotCanonical`]): the canonical source is
     ///    trusted; a remark: this is exactly where the anchor-dormancy and
     ///    cold-committee rotation of the 2026-09-17 decision record applies,
     ///    because a forged anchor makes even this check converge onto the
