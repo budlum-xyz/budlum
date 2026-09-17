@@ -26,6 +26,15 @@ use crate::domain::regeneration_stage::{
 /// blocks above the damage height.
 const RECOVERY_WINDOW_BLOCKS: u64 = 64;
 
+/// Item-3 acceptance: surfaced recovery must stay inside the canonical
+/// window. The constants are ergonomic inputs of every scenario below, so
+/// pin their relationship where a clippy run cannot mistake it for a
+/// runtime assertion over constants.
+const _: () = assert!(
+    RECOVERED_HEIGHT <= DAMAGE_HEIGHT + RECOVERY_WINDOW_BLOCKS,
+    "recovered serving must emerge within RECOVERY_WINDOW_BLOCKS"
+);
+
 const C_POLYP: [u8; 32] = [0x11; 32];
 const C_EPHYRA: [u8; 32] = [0x22; 32];
 const C_MEDUSA: [u8; 32] = [0x33; 32];
@@ -96,10 +105,7 @@ fn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {
             &canonical,
         )
         .expect("re-growth into a canonical height succeeds");
-    assert!(
-        RECOVERED_HEIGHT <= DAMAGE_HEIGHT + RECOVERY_WINDOW_BLOCKS,
-        "recovered serving emerged within {RECOVERY_WINDOW_BLOCKS} blocks"
-    );
+    // (acceptance window pinned at compile time, see RECOVERED_HEIGHT)
     assert_eq!(damaged.stage, Stage::Medusa);
     // The audit trail stayed honest throughout.
     assert!(damaged.validate().is_ok());
@@ -169,10 +175,7 @@ fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
             &canonical,
         )
         .expect("grow to serving");
-    assert!(
-        RECOVERED_HEIGHT <= DAMAGE_HEIGHT + RECOVERY_WINDOW_BLOCKS,
-        "recovered serving emerged within {RECOVERY_WINDOW_BLOCKS} blocks"
-    );
+    // (acceptance window pinned at compile time, see RECOVERED_HEIGHT)
     assert!(forged.validate().is_ok(), "audit trail is honest again");
 }
 

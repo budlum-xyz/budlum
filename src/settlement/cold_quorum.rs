@@ -8,7 +8,7 @@
 //! the presented signature count from a number into a proof.
 //!
 //! WIRING: the cold-anchor committee channel (the same dormant cold-wallet
-//! path named by `cold_wallet`) is where [`ColdWalletState::sign_with_quorum`]
+//! path named by `cold_wallet`) is where [`crate::settlement::cold_wallet::ColdWalletState::sign_with_quorum`]
 //! becomes live for settlement release, and where quorum-signed rotation of a
 //! compromised anchor key is released as the reserve anchor (3-of-6 cold
 //! committee, per the 2026-09-17 decision record). The rules here are pinned

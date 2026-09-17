@@ -84,7 +84,8 @@ pub struct AnchorSignature {
     /// Which algorithm produced it.
     pub algorithm: AnchorSignatureAlgorithm,
     /// The signer's public key, raw bytes. Travels with the anchor; trust is
-    /// established by the [`AnchorKeybook`], not by the field.
+    /// established by the anchor keybook (`&[AnchorKeyEntry]` passed to the
+    /// verify functions), not by this field.
     pub public_key: Vec<u8>,
     /// Signature bytes.
     pub signature: Vec<u8>,
