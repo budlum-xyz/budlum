@@ -225,6 +225,7 @@ impl std::fmt::Display for AnchorError {
             Self::SigningBackendUnavailable(feature) => {
                 write!(f, "anchor signing backend unavailable: enable {feature}")
             }
+            Self::EmissionIo(stage) => write!(f, "anchor emission log io: {stage}"),
         }
     }
 }
