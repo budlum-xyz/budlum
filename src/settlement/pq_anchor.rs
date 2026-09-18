@@ -172,6 +172,10 @@ pub enum AnchorError {
     Rotation(RotationError),
     /// The signing backend is not compiled in this build (feature off).
     SigningBackendUnavailable(&'static str),
+    /// The node-local anchor log could not be written. Node-local by
+    /// contract, never consensus state - the reason is reported, nothing is
+    /// retried silently.
+    EmissionIo(&'static str),
 }
 
 impl AnchorError {
@@ -188,6 +192,7 @@ impl AnchorError {
             Self::CommitteeQuorum(..) => "anchor-committee-quorum",
             Self::Rotation(..) => "anchor-committee-rotation",
             Self::SigningBackendUnavailable(_) => "anchor-signing-backend-unavailable",
+            Self::EmissionIo(_) => "anchor-emission-io",
         }
     }
 }
@@ -520,6 +525,99 @@ pub fn assemble_anchor(
     })
 }
 
+/// The outcome of one emission attempt: whether an anchor record reached
+/// the node-local log, or the mode said no. Distinct from an error so a
+/// caller cannot mistake a deliberate gate for a failure (or vice versa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmissionOutcome {
+    /// The anchor was built and appended to the node-local log.
+    Written,
+    /// `GatedOff`: emission skipped by decision, not by failure.
+    Skipped,
+}
+
+/// The devnet emission driver: turn one finality window into a signed
+/// anchor record.
+///
+/// Binding rule: every window leaf (the bare digest the global header's
+/// `settlement_finality_root` folds today) enters the anchor aggregation
+/// through [`anchor_leaf_digest`], so the anchor tree's leaves can never
+/// alias a leaf of the header's own tree even if the payload digests
+/// coincide. Consensus stays untouched: this is a pure derivation whose
+/// only side effect is the returned record.
+///
+/// WIRING: the caller is the consensus seam that seals global headers
+/// (devnet first), documented in docs/PQ_ANCHOR_RESEARCH.md section 2.
+pub fn build_anchor_for_height(
+    height: u64,
+    window_leaves: &[[u8; 32]],
+    stark_root: Option<[u8; 32]>,
+    crossdomain_root: Option<[u8; 32]>,
+    key_epoch: u32,
+    signer: &dyn AnchorSigner,
+) -> Result<PqAnchor, AnchorError> {
+    let domain_leaves: Vec<[u8; 32]> = window_leaves.iter().map(anchor_leaf_digest).collect();
+    assemble_anchor(
+        height,
+        &domain_leaves,
+        stark_root,
+        crossdomain_root,
+        key_epoch,
+        signer,
+    )
+}
+
+/// Build the anchor and append it to the node-local JSONL log, under mode
+/// control.
+///
+/// Mode semantics: `GatedOff` -> Ok(Skipped) (the gate is a decision,
+/// recorded as such); `Devnet` -> build + append; `ProductionApproved` ->
+/// Err(anchor-production-blocked) with the same named blocker as the verify
+/// gate. The log is node-local by contract: it is not consensus state and a
+/// node that loses it simply re-derives from the chain, so an io failure is
+/// reported, never retried silently.
+pub fn emit_anchor_node_local(
+    log_path: &std::path::Path,
+    mode: AnchorMode,
+    height: u64,
+    window_leaves: &[[u8; 32]],
+    stark_root: Option<[u8; 32]>,
+    crossdomain_root: Option<[u8; 32]>,
+    key_epoch: u32,
+    signer: &dyn AnchorSigner,
+) -> Result<EmissionOutcome, AnchorError> {
+    match mode {
+        AnchorMode::GatedOff => return Ok(EmissionOutcome::Skipped),
+        AnchorMode::Devnet => {}
+        AnchorMode::ProductionApproved => {
+            return Err(AnchorError::ProductionBlocked {
+                blocker: "verifymerkle-opcode-external-audit-pending (decision record 2026-09-17, item 6)",
+            });
+        }
+    }
+    let anchor = build_anchor_for_height(
+        height,
+        window_leaves,
+        stark_root,
+        crossdomain_root,
+        key_epoch,
+        signer,
+    )?;
+    let line =
+        serde_json::to_string(&anchor).map_err(|_| AnchorError::EmissionIo("json serialize"))?;
+    use std::io::Write as _;
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| AnchorError::EmissionIo("mkdir"))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|_| AnchorError::EmissionIo("open"))?;
+    writeln!(file, "{line}").map_err(|_| AnchorError::EmissionIo("append"))?;
+    Ok(EmissionOutcome::Written)
+}
+
 /// The cold-committee reserve-anchor channel (decision record 2026-09-17,
 /// item 4): when the anchor key is compromised, the 3-of-6 cold committee
 /// rotates the cold wallet's key epoch directly - no on-chain vote stalls
@@ -575,6 +673,114 @@ mod tests {
 
     fn leaves(n: usize) -> Vec<[u8; 32]> {
         (0..n).map(|i| [i as u8; 32]).collect()
+    }
+
+    /// Deterministic echo signer: produces structurally valid signatures
+    /// without any real cryptography, for plumbing tests that verify the
+    /// emission path itself, not the scheme (the scheme has its own gated
+    /// tests behind `wallet-ml-dsa`).
+    struct StubSigner;
+
+    impl AnchorSigner for StubSigner {
+        fn algorithm(&self) -> AnchorSignatureAlgorithm {
+            AnchorSignatureAlgorithm::MlDsa87
+        }
+        fn public_key(&self) -> Vec<u8> {
+            vec![7u8; 8]
+        }
+        fn sign(&self, payload: &[u8]) -> Result<AnchorSignature, AnchorError> {
+            Ok(AnchorSignature {
+                algorithm: AnchorSignatureAlgorithm::MlDsa87,
+                public_key: vec![7u8; 8],
+                signature: payload[..8].to_vec(),
+            })
+        }
+    }
+
+    fn temp_log_path(name: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("pq-anchor-test-{name}-{}", std::process::id()));
+        let _unused = std::fs::remove_dir_all(&dir);
+        dir.push("anchors.jsonl");
+        dir
+    }
+
+    #[test]
+    fn emission_driver_domain_separates_the_window_leaves() {
+        let window = leaves(3);
+        let anchor = build_anchor_for_height(9, &window, None, None, 4, &StubSigner)
+            .expect("driver builds over three leaves");
+        let separated: Vec<[u8; 32]> = window.iter().map(anchor_leaf_digest).collect();
+        assert_eq!(
+            anchor.aggregate_root,
+            aggregate_finality_roots(&separated).expect("three separated leaves aggregate")
+        );
+        assert_ne!(
+            anchor.aggregate_root,
+            aggregate_finality_roots(&window).expect("bare leaves also aggregate"),
+            "the anchor's tree must never share the header's bare leaf space"
+        );
+    }
+
+    #[test]
+    fn emission_gated_off_skips_and_touches_no_file() {
+        let path = temp_log_path("gated-off");
+        let outcome = emit_anchor_node_local(
+            &path,
+            AnchorMode::GatedOff,
+            9,
+            &leaves(2),
+            None,
+            None,
+            4,
+            &StubSigner,
+        )
+        .expect("gated off is a decision, not an error");
+        assert_eq!(outcome, EmissionOutcome::Skipped);
+        assert!(!path.exists(), "a skipped emission must not create the log");
+    }
+
+    #[test]
+    fn emission_production_approved_is_blocked() {
+        let path = temp_log_path("production");
+        let err = emit_anchor_node_local(
+            &path,
+            AnchorMode::ProductionApproved,
+            9,
+            &leaves(2),
+            None,
+            None,
+            4,
+            &StubSigner,
+        )
+        .expect_err("production stays blocked until the opcode audit");
+        assert_eq!(err.kind(), "anchor-production-blocked");
+        assert!(!path.exists(), "a blocked emission must not create the log");
+    }
+
+    #[test]
+    fn emission_devnet_writes_one_jsonl_record() {
+        let path = temp_log_path("devnet");
+        let written = emit_anchor_node_local(
+            &path,
+            AnchorMode::Devnet,
+            9,
+            &leaves(2),
+            None,
+            None,
+            4,
+            &StubSigner,
+        )
+        .expect("devnet emission writes the record");
+        assert_eq!(written, EmissionOutcome::Written);
+        let body = std::fs::read_to_string(&path).expect("the log exists");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 1, "exactly one record per emission");
+        let recorded: PqAnchor = serde_json::from_str(lines[0]).expect("the line is a PqAnchor");
+        let expected = build_anchor_for_height(9, &leaves(2), None, None, 4, &StubSigner)
+            .expect("same inputs, same anchor");
+        assert_eq!(recorded, expected);
+        let _cleanup = std::fs::remove_dir_all(path.parent().expect("temp dir"));
     }
 
     #[test]

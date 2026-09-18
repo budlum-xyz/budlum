@@ -21,9 +21,10 @@ pub use global_block::GlobalBlockHeader;
 pub use pq_anchor::SoftwareMlDsa87Signer;
 pub use pq_anchor::{
     aggregate_finality_roots, anchor_leaf_digest, anchor_payload_for, assemble_anchor,
-    enforce_anchor_mode, rotate_anchor_key_with_committee, verify_anchor_full, verify_anchor_light,
-    AnchorError, AnchorKeyEntry, AnchorMode, AnchorSignature, AnchorSignatureAlgorithm,
-    AnchorSigner, HsmSignerStub, PqAnchor,
+    build_anchor_for_height, emit_anchor_node_local, enforce_anchor_mode,
+    rotate_anchor_key_with_committee, verify_anchor_full, verify_anchor_light, AnchorError,
+    AnchorKeyEntry, AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner,
+    EmissionOutcome, HsmSignerStub, PqAnchor,
 };
 pub use proof_market::{
     ProofMarketState, ProofReceipt, ProofTask, ProofTaskKind, ProofTaskStatus, ReceiptStatus,
