@@ -293,6 +293,12 @@ pub struct NodeConfig {
     #[arg(long)]
     pub features_verify_merkle: bool,
 
+    /// Archive node: snapshots still run, but the pruning manager never
+    /// deletes block history (only meaningful together with the pruning
+    /// feature; without it there is nothing to suppress).
+    #[arg(long)]
+    pub features_archive_mode: bool,
+
     // Storage Node Config (B.U.D.). Both booleans take a value
     // (`--storage-enabled=false`); as bare flags with a `true` default
     // neither could be switched off from the command line.
@@ -423,6 +429,7 @@ impl Default for NodeConfig {
             features_zkvm_contracts: false,
             features_pruning: false,
             features_verify_merkle: false,
+            features_archive_mode: false,
             storage_enabled: true,
             storage_replication_factor: 3,
             storage_mandatory_sharding: true,
@@ -560,6 +567,8 @@ pub struct FeaturesSection {
     /// Mobile mode (lightweight P2P/sharding)
     pub mobile_mode: Option<bool>,
     pub storage: Option<bool>,
+    /// Archive node: full block history retained even when pruning runs.
+    pub archive_mode: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -879,6 +888,9 @@ impl NodeConfig {
             }
             if let Some(vm) = features.verify_merkle {
                 self.features_verify_merkle = vm;
+            }
+            if let Some(archive) = features.archive_mode {
+                self.features_archive_mode = archive;
             }
             if let Some(mobile) = features.mobile_mode {
                 self.mobile_mode = mobile;

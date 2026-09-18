@@ -1283,7 +1283,7 @@ jobs:
             --report-format sarif --report-path gitleaks.sarif --exit-code 0
       - name: Upload gitleaks SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -1380,7 +1380,7 @@ jobs:
           ignore-unfixed: false
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -1505,6 +1505,26 @@ jobs:
       # a misspelled variable is not an error but an empty string, so a check
       # can examine nothing and say OK. On this branch two gates passed while missing
       # the very defect they were written for. The Rust version stops if it does not compile.
+      # fuzz/Cargo.lock drifted to p3 0.6.2 while bud-proof's manifest
+      # already demanded 0.6.3 and nothing caught it, because every
+      # consumer resolves the lock silently at build time. From this step
+      # on, drift is a red check: full `cargo metadata --locked` fails the
+      # moment any workspace's lockfile stops matching its manifests
+      # ("cannot update the lock file ... because --locked was passed";
+      # measured: stale lock exits 101, fresh exits 0; --no-deps does NOT
+      # validate, measured the same day). The discovery is dynamic, like
+      # the machete gate: hand-kept lists go stale silently.
+      - name: lockfiles match their manifests (--locked metadata)
+        run: |
+          set -euo pipefail
+          n=0
+          while IFS= read -r lock; do
+            dir="$(dirname "$lock")"
+            echo "── $dir ──"
+            (cd "$dir" && cargo metadata --format-version 1 --locked > /dev/null)
+            n=$((n + 1))
+          done < <(find . -name Cargo.lock -not -path '*/target/*' | sort)
+          echo "lock freshness: $n workspace lockfile(s) verified."
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates

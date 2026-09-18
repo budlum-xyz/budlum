@@ -125,6 +125,7 @@ mod gates {
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
+    pub mod regen_health_door;
     pub mod regeneration;
     pub mod rejection_tests;
     pub mod relay;
@@ -646,6 +647,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::regeneration::self_test,
+    },
+    Gate {
+        name: "regen-health-door",
+        replaces: None,
+        run: gates::regen_health_door::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::regen_health_door::self_test,
     },
     Gate {
         name: "relay",

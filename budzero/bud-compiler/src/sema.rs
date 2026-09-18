@@ -78,10 +78,22 @@ impl Type {
 /// value fits in 32 bits needs range-check columns the AIR does not have.
 /// Naming them would be a label, not a guarantee.
 const RESERVED_TYPE_NAMES: &[(&str, &str)] = &[
-    ("u8", "BudL has one integer type, `u64`, and it is a Goldilocks field element"),
-    ("u16", "BudL has one integer type, `u64`, and it is a Goldilocks field element"),
-    ("u32", "BudL has one integer type, `u64`; a narrower type would need range-check columns the AIR does not have"),
-    ("u128", "BudL has one integer type, `u64`; a wider type would need multi-limb arithmetic the VM does not have"),
+    (
+        "u8",
+        "BudL has one integer type, `u64`, and it is a Goldilocks field element",
+    ),
+    (
+        "u16",
+        "BudL has one integer type, `u64`, and it is a Goldilocks field element",
+    ),
+    (
+        "u32",
+        "BudL has one integer type, `u64`; a narrower type would need range-check columns the AIR does not have",
+    ),
+    (
+        "u128",
+        "BudL has one integer type, `u64`; a wider type would need multi-limb arithmetic the VM does not have",
+    ),
     ("i8", "BudL integers are unsigned field elements"),
     ("i16", "BudL integers are unsigned field elements"),
     ("i32", "BudL integers are unsigned field elements"),
@@ -90,7 +102,10 @@ const RESERVED_TYPE_NAMES: &[(&str, &str)] = &[
     ("isize", "BudL has one integer type, `u64`"),
     ("String", "BudL has no string type"),
     ("str", "BudL has no string type"),
-    ("Vec", "BudL has no dynamic collections; a proof has to bound its own length"),
+    (
+        "Vec",
+        "BudL has no dynamic collections; a proof has to bound its own length",
+    ),
 ];
 
 impl Type {
