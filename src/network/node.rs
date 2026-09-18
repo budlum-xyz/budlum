@@ -85,6 +85,22 @@ pub enum NodeCommand {
         cid: [u8; 32],
         response: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    /// Operator RPC (`bud_adminBanPeer`): ban a peer through the same peer
+    /// manager the gossip path consults; ban persistence stays on its
+    /// existing cadence.
+    AdminBanPeer {
+        peer_id: PeerId,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Operator RPC (`bud_adminUnbanPeer`): lift a ban by peer id.
+    AdminUnbanPeer {
+        peer_id: PeerId,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Operator RPC (`bud_adminListBannedPeers`): list currently banned ids.
+    AdminListBannedPeers {
+        response: oneshot::Sender<Result<Vec<String>, String>>,
+    },
 }
 #[derive(Clone)]
 pub struct NodeClient {
@@ -182,6 +198,57 @@ impl NodeClient {
             .await
             .map_err(|_| "remote content fetch timed out".to_string())?
             .map_err(|e| format!("failed to receive remote content response: {e}"))?
+    }
+
+    /// Bans a peer by id through the node loop (`bud_adminBanPeer`). The
+    /// public RPC listener never reaches this; the operator listener calls
+    /// it after its own mode check.
+    pub async fn admin_ban_peer(&self, peer_id: PeerId) -> Result<(), String> {
+        const ADMIN_BAN_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminBanPeer {
+                peer_id,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to send ban request: {e}"))?;
+        tokio::time::timeout(ADMIN_BAN_TIMEOUT, rx)
+            .await
+            .map_err(|_| "peer ban timed out".to_string())?
+            .map_err(|e| format!("failed to receive ban response: {e}"))?
+    }
+
+    /// Lifts a ban by peer id (`bud_adminUnbanPeer`); operator listener only.
+    pub async fn admin_unban_peer(&self, peer_id: PeerId) -> Result<(), String> {
+        const ADMIN_UNBAN_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminUnbanPeer {
+                peer_id,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to send unban request: {e}"))?;
+        tokio::time::timeout(ADMIN_UNBAN_TIMEOUT, rx)
+            .await
+            .map_err(|_| "peer unban timed out".to_string())?
+            .map_err(|e| format!("failed to receive unban response: {e}"))?
+    }
+
+    /// Lists currently banned peer ids (`bud_adminListBannedPeers`);
+    /// operator listener only.
+    pub async fn admin_list_banned_peers(&self) -> Result<Vec<String>, String> {
+        const ADMIN_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminListBannedPeers { response: tx })
+            .await
+            .map_err(|e| format!("failed to send banned-peer list request: {e}"))?;
+        tokio::time::timeout(ADMIN_LIST_TIMEOUT, rx)
+            .await
+            .map_err(|_| "banned-peer list timed out".to_string())?
+            .map_err(|e| format!("failed to receive banned-peer list response: {e}"))?
     }
 }
 #[tokio::test]
@@ -1690,6 +1757,35 @@ impl Node {
                                        } else {
                                            Err("local B.U.D. storage node not configured".into())
                                        };
+                                       let _ = response.send(result);
+                                   }
+                                   NodeCommand::AdminBanPeer { peer_id, response } => {
+                                       let result = self
+                                           .peer_manager
+                                           .lock()
+                                           .map_err(|_| "peer manager lock poisoned".to_string())
+                                           .map(|mut pm| pm.ban_peer(&peer_id));
+                                       let _ = response.send(result);
+                                   }
+                                   NodeCommand::AdminUnbanPeer { peer_id, response } => {
+                                       let result = self
+                                           .peer_manager
+                                           .lock()
+                                           .map_err(|_| "peer manager lock poisoned".to_string())
+                                           .map(|mut pm| pm.unban_peer(&peer_id));
+                                       let _ = response.send(result);
+                                   }
+                                   NodeCommand::AdminListBannedPeers { response } => {
+                                       let result = self
+                                           .peer_manager
+                                           .lock()
+                                           .map_err(|_| "peer manager lock poisoned".to_string())
+                                           .map(|pm| {
+                                               pm.get_banned_peers()
+                                                   .iter()
+                                                   .map(ToString::to_string)
+                                                   .collect::<Vec<String>>()
+                                           });
                                        let _ = response.send(result);
                                    }
                                    NodeCommand::FetchRemoteContent { cid, response } => {
