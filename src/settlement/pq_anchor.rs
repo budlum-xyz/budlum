@@ -577,6 +577,7 @@ pub fn build_anchor_for_height(
 /// gate. The log is node-local by contract: it is not consensus state and a
 /// node that loses it simply re-derives from the chain, so an io failure is
 /// reported, never retried silently.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_anchor_node_local(
     log_path: &std::path::Path,
     mode: AnchorMode,
