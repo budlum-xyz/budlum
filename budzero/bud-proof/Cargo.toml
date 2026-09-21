@@ -17,7 +17,7 @@ sha2 = "0.11"
 
 p3-air = "=0.6.3"
 p3-matrix = "=0.6.3"
-p3-field = "=0.6.3"
+p3-field = "=0.7.0"
 p3-commit = "=0.6.3"
 p3-challenger = "=0.6.3"
 p3-symmetric = "=0.6.3"
