@@ -89,7 +89,11 @@ to a live second anchor family once it passes the acceptance bar.
 - [ ] anchor-emission slice (devnet) - depends on this doc's section 2
 - [ ] V6 header bump decision (leaf widening) - separate commit
 - [ ] HSM/PKCS#11 vendor integration design
-- [ ] VerifyMerkle third-party opcode audit (production blocker)
+- [ ] VerifyMerkle third-party opcode audit (production blocker) -
+      queue manifest now pinned at crates/bpqs/VERIFYMERKLE-EXPRESSIBILITY.md
+      section 5 (items M-1..M-5): the BPQS expressibility analysis found the
+      AIR-vs-BPQS width mismatch (width-8 constrained vs width-16 canonical)
+      and routes it through the same engagement
 - [ ] BPQS bar item 1: written security argument at NIST L5
 - [ ] BPQS bar item 3: independent review call
 - [x] BPQS reference implementation kick-off (section 3) - M1 (2026-09-22
