@@ -1508,6 +1508,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint
+      - name: Install typos v1.48.0 (sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/typos.tar.gz \
+            https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+          echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/typos-bin
+          tar -xzf /tmp/typos.tar.gz -C /tmp/typos-bin ./typos
+          sudo install -m 0755 /tmp/typos-bin/typos /usr/local/bin/typos
+          typos --version
       - name: typos gate + canary (whole-tree spell check, calibrated)
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos --self-test
