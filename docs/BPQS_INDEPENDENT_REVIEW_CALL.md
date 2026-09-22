@@ -31,14 +31,18 @@ ceremony lane and the KAT writer). Rust toolchain is pinned at 1.97.1.
 ## Questions the review is asked to answer
 
 1. Few-time bound (the open core): SECURITY-ARGUMENT.md section 6 prices
-   a first-order domination-hunt estimate treating the three checksum
-   digits as uniform and message digits as independent across chains
-   (joint over LEN dims). Tighten or refute: what is the exact
-   existential-forgery work factor against one epoch key (a) as a
-   function of the number q of observed signatures, (b) with the
-   checksum-correlation handled formally, (c) under an offline hunter
-   vs an adaptive hunter (who may feed honest members protocol-weight
-   payloads)?
+   the domination hunt first-order (message digits independent across
+   chains) and, since 2026-09-22, carries an EXACT checksum-side
+   enumeration pinned to a stdlib-only script
+   (tools/bpqs_checksum_domination_exact.py: exact digit marginals,
+   exact joint domination over the three checksum ranks with pool
+   minima, pool saturation at q ~ 4-8). Tighten or refute what remains:
+   (a) the message-into-checksum cross-correlation, stated at the end
+   of the section-6 refinement - bound it tightly or break it with a
+   counter-example; (b) re-derive the per-q work factors under an
+   OFFLINE hunter vs an ADAPTIVE hunter (who may feed honest members
+   protocol-weight payloads); (c) check the section's arithmetic itself
+   against the code (params, checksum gadget, quota).
 2. Family question: for the cold-committee anchor flow (window-paced,
    at most q_max mints per epoch per member, offline ceremony), is the
    in-family posture (signer-side message randomization plus one-time

@@ -219,15 +219,86 @@ computed exactly, no constants hidden:
 - joint over the LEN = 67 dims of the L5 row (51 dims at L3, strictly
   easier for the attacker and stated as such): independence across dims
   of one random message digest, treating checksum dims as uniform
-  (stated bound, tightness to bar 3):
+  (stated bound, first-order column; the checksum half of the bound is
+  computed EXACTLY in the refinement below):
   q=1: 2^-61.1 per candidate -> hunt ~ 2^61 classical / ~2^31 Grover
   q=2: 2^-34.9
   q=4: 2^-18.0 (approx. one in 2.6 x 10^5 candidates)
 
+### Exact checksum refinement (pinned 2026-09-22)
+
+The checksum digits are not uniform, and the uniform treatment is the
+checksum half of the "first-order" label above. The exact checksum side
+is computable by full enumeration: T = sum of 64 iid uniform nibbles has
+an exact 961-bin distribution (convolution, exact integers), and the
+digit ranks are (T mod 16, (T div 16) mod 16, T div 256). The script
+`tools/bpqs_checksum_domination_exact.py` does this with exact rational
+arithmetic; the numbers below are its stdout, reproducible with no
+randomness and no dependencies.
+
+Exact marginals (one checksum vector from one honest message):
+
+- rank 0 (T mod 16): EXACTLY uniform on {0..15} (sum of iid uniforms
+  mod 16 is uniform - the one uniform digit in the row).
+- rank 1: strongly right-skewed: P(12..15) = 0.614, P(14,15) = 0.309,
+  P(0) = 0.098. Honest rank-1 digits sit HIGH: E = 10.38 vs 7.5 uniform.
+- rank 2 (T div 256): mass concentrated on {1, 2}: P(1) = 0.803,
+  P(2) = 0.197; P(0) = 2^-32.4, P(3) = 2^-53.3. Honest rank-2 digits
+  sit LOW - the one position that is cheaper for the hunter than the
+  uniform column said.
+
+E[min over a pool of q honest draws] per rank (uniform column repeated):
+
+    q=1:  rank0 7.500 | rank1 10.38 | rank2 1.197 | uniform 7.500
+    q=2:  rank0 4.844 | rank1  7.85 | rank2 1.039 | uniform 4.844
+    q=4:  rank0 2.721 | rank1  4.88 | rank2 1.002 | uniform 2.721
+    q=8:  rank0 1.319 | rank1  2.12 | rank2 1.000 | uniform 1.319
+
+Exact checksum-side domination term, joint over all three ranks of the
+honest digit VECTOR (componentwise min over the q honest draws, then
+candidate dominates it); uniform first-order column in parentheses:
+
+    q=1: P = 0.203832  log2 = -2.295   (uniform: 0.1499, -2.737)
+    q=2: P = 0.072460  log2 = -3.787   (uniform: 0.3389, -1.560)
+    q=4: P = 0.017499  log2 = -5.837   (uniform: 0.5705, -0.808)
+    q=8: P = 0.002487  log2 = -8.651   (uniform: -,      -0.491)
+
+Refined per-candidate success (64 message positions kept exact-and-
+independent as above; the 3 checksum positions replaced by the exact
+joint term):
+
+    q=1: 58.40 + 2.295 = 2^60.7   (first-order said 2^61.1)
+    q=2: 33.27 + 3.787 = 2^37.1   (first-order said 2^34.9)
+    q=4: 17.23 + 5.837 = 2^23.1   (first-order said 2^18.0;
+                                   approx. one in 1.1 x 10^7 candidates)
+    q=8: 14.45 + 8.651 = 2^23.1   (pool attack SATURATES: message-digit
+                                   minima floor at 0 while rank-1 minima
+                                   stay high; more signatures stop
+                                   helping the hunter past q ~ 4)
+
+Direction of the correction (read both halves): the refinement moves
+q=1 DOWN by 0.44 bit (rank-2 concentration makes chain 67 nearly free
+for the hunter) and moves q >= 2 UP by +2.2..+5.1 bits (the rank-1
+right-skew dominates the joint once pooling starts: honest checksum
+minima stay high across chains 65..66 while message minima collapse).
+The remaining un-priced term, exactly one: the checksum digits of the
+CANDIDATE are a deterministic function of its 64 message digits, so the
+event "candidate tuple inside the hyper-box imposed by the pool minima"
+correlates with "its induced checksum dominates the checksum minima"
+(and the honest side has the same self-correlation). The enumeration
+above prices each side's checksum law exactly but treats the
+message-into-checksum coupling first-order; bounding that coupling
+tightly is the checksum-correlation refinement the review is still
+asked for (question 1 of the review call), now with exact marginals and
+the exact self-joint handed over as reference computation instead of an
+open question.
+
 Read: the few-time relaxation to q_max = 4 lowers the existential-forgery
 resistance of one epoch key from the hash budgets of section 5 to about
-2^18 classical for an offline hunter. The q=1 one-time floor of the same
-raw dimensions is ~2^61 classical / ~2^31 quantum - above the L3
+2^23 classical for an offline hunter (checksum-exact; first-order had
+2^18). The q=1 one-time floor of the same raw dimensions is ~2^61
+classical / ~2^31 quantum (~2^60.7 checksum-exact - unchanged to within
+half a bit) - above the L3
 collision class but far below the NIST level-5 target line this research
 line is named after. No choice of w, N, or backend repairs this term:
 it is a property of "sign verifier-walkable chain digests
@@ -280,18 +351,24 @@ are inside-out as section 5 states):
 - PRF/seed and chain expansion: follows the same budgets
 - Merkle leaf/node second-preimage: 2^256 / 2^128
 - vk/leaf/node collision (where collision matters): 2^128 / ~2^85
-- few-time domination hunt (q=4): ~2^18 / ~2^9 - THE binding term today
-- one-time posture floor (q=1): ~2^61 / ~2^31
+- few-time domination hunt (q=4): ~2^23 / ~2^12 (checksum-exact
+  refinement, section 6; first-order uniform said ~2^18 / ~2^9) - THE
+  binding term today
+- one-time posture floor (q=1): ~2^61 / ~2^31 (exact checksum: 2^60.7)
 
 NIST level-5 target (classical ~2^256-class, quantum >= 2^128): met by
 every mechanism except the few-time term; that term is decision item 7.
 
 ## 8. Remaining work owned by other bar items
 
-- bar 3 (independent review): check section 6's arithmetic and the
-  checksum-correlation refinement; settle whether the in-family posture
-  (R-2/R-3) suffices for the cold-committee use case or whether R-4
-  becomes the recommendation.
+- bar 3 (independent review): check section 6's arithmetic; the
+  checksum side now arrives PARTIALLY pre-answered (exact marginals,
+  exact joint domination over the three checksum ranks, pool saturation
+  at q ~ 4-8; script-pinned). What is still open is the
+  message-into-checksum cross-correlation stated at the end of the
+  refinement, plus the family question: settle whether the in-family
+  posture (R-2/R-3) suffices for the cold-committee use case or whether
+  R-4 becomes the recommendation.
 - bar 4 (VerifyMerkle expressibility): unchanged by this document; the
   verify chain's primitive projection (Poseidon single-primitive lane)
   stands as section 5/A3 records.
