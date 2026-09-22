@@ -31,12 +31,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(format!("missing calibration file: {}", config.display()));
     }
     let out = std::process::Command::new(bin())
-        .args([
-            "--config",
-            &config.to_string_lossy(),
-            "--format",
-            "long",
-        ])
+        .args(["--config", &config.to_string_lossy(), "--format", "long"])
         .current_dir(root)
         .output();
     match out {

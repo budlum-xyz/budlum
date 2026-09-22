@@ -154,8 +154,8 @@ mod gates {
     pub mod timing_safe;
     pub mod transcript_mirrors;
     pub mod tree_is_english;
-    pub mod typos;
     pub mod tree_pin;
+    pub mod typos;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
