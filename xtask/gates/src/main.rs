@@ -154,6 +154,7 @@ mod gates {
     pub mod timing_safe;
     pub mod transcript_mirrors;
     pub mod tree_is_english;
+    pub mod typos;
     pub mod tree_pin;
     pub mod udeps;
     pub mod uncheckable_proof;
@@ -787,6 +788,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::actionlint::self_test,
+    },
+    Gate {
+        name: "typos",
+        replaces: None,
+        run: gates::typos::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::typos::self_test,
     },
     Gate {
         name: "zizmor",

@@ -215,6 +215,20 @@ jobs:
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
           actionlint --version
+      # The fail-closed typos gate (xtask/gates, mirrors the standalone Typos
+      # workflow, same calibration file) runs inside this suite as well; same
+      # install-step reason as actionlint above. Version and hash match
+      # typos.yml exactly so both spell checks run the same binary.
+      - name: Install typos v1.48.0 (sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/typos.tar.gz \
+            https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+          echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/typos-bin
+          tar -xzf /tmp/typos.tar.gz -C /tmp/typos-bin ./typos
+          sudo install -m 0755 /tmp/typos-bin/typos /usr/local/bin/typos
+          typos --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
@@ -1494,6 +1508,10 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint
+      - name: typos gate + canary (whole-tree spell check, calibrated)
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos
       - name: zizmor gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- zizmor --self-test
