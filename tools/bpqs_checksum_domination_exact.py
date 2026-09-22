@@ -96,8 +96,8 @@ def domination_prob_pair_q(counts, total, q_h):
     return Fraction(num, total)
 
 
-def fmt(x, nd=4):
-    return f"{float(x):.{nd}f}"
+def fmt(x, ndigits=4):
+    return f"{float(x):.{ndigits}f}"
 
 
 def main():
