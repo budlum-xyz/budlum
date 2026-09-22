@@ -50,25 +50,39 @@ open design work. Decision record: workspace
 Goal: an in-house post-quantum signature family that can be promoted
 to a live second anchor family once it passes the acceptance bar.
 
-- **Shape candidates:** degree-2/3 hash-chain families rather than a
-  WOTS+/XMSS derivative - tentatively called a "backbone-paired quorum
-  signature" design: each committee device keeps an independent
-  one-time-signature chain, which composes naturally with the 3-of-6
-  cold-committee context.
-- **Hard boundary:** statefulness is the known failure class (chain
-  state loss = signature stream corruption), so the target is
-  stateless - the same boundary SPHINCS+ opererates under. The
+- **Decided shape (user decisions 2026-09-19, pinned in the workspace
+  repo's 2026-09-19 BPQS F2 design pre-registration):** epoch-chained
+  Winternitz few-time signatures. Epochs run on chain tempo (the
+  settlement window; no calendar), q_max = 4 minted signatures per epoch
+  (quota breach = loud protocol fault, signer fail-closed), dual-budget
+  parameter rows: canonical L5 (n=32, w=16, T=2^16) plus a transportable
+  L3 (n=24). Scope pinned to the cold-committee anchor flow; the
   reserved `BudlumBpqsReserved` slot stays fail-closed throughout.
 - **Promotion bar (to live family):**
-  1. documented security argument at NIST level 5,
+  1. documented security argument at NIST level 5 (PENDING: bar item 1),
   2. reference implementation plus differential tests against the
-     SPHINCS+ parameter sets,
+     incumbent PQ crates - LANDED (see below),
   3. at least one independent review,
   4. the verify chain must be expressible within the VerifyMerkle
      opcode audit scope so the anchor verification stays auditable.
-- **Working home:** either a separate `budlum-bpqs` crate repository
-  (candidate) or a feature-gated module inside budlum - decided at
-  implementation time, not now.
+- **Working home (decided 2026-09-19):** in-tree, feature-gated crate
+  `crates/bpqs` behind the non-default `bpqs-research` cargo feature; a
+  separate crate repository was explicitly rejected.
+- **Bar item 2 status (milestones as of 2026-09-22):**
+  - M1: no_std+alloc reference implementation (Winternitz core,
+    epoch-bound Merkle key evolution, quota-bounded signing), 31-test
+    battery, SHA3-256 reference backend behind the `BpqsHash` seam.
+  - M2: canonical Poseidon2-Goldilocks-16 backend (p3 parameters,
+    straightline in-crate port, upstream known-answer vector pinned);
+    SHAKE-256 XOF cross-check backend on the vetted `keccak` permutation
+    (FIPS 202 suffix 0x1F, Python-hashlib cross vectors); the three-way
+    backend differential battery (same scheme, three hash families);
+    frozen KAT vector file `crates/bpqs/kat/bpqs-kat-v1.txt`; the
+    differential bench example against the same ml-dsa 0.1.1 the root
+    links and the slh-dsa crate (68-library-test battery total). The
+    fuzz harness `bpqs_wots_reject` is wired into the quick gate and
+    the nightly schedule. Remaining route to green on item 2: repeat
+    the findings after the first independent read (feeds item 3).
 
 ## 4. Open follow-ups
 
@@ -76,4 +90,7 @@ to a live second anchor family once it passes the acceptance bar.
 - [ ] V6 header bump decision (leaf widening) - separate commit
 - [ ] HSM/PKCS#11 vendor integration design
 - [ ] VerifyMerkle third-party opcode audit (production blocker)
-- [ ] BPQS reference implementation kick-off (section 3)
+- [ ] BPQS bar item 1: written security argument at NIST L5
+- [ ] BPQS bar item 3: independent review call
+- [x] BPQS reference implementation kick-off (section 3) - M1 (2026-09-22
+      `51ec637`) + M2 canonical backend/differential/KAT/fuzz

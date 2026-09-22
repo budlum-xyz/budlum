@@ -48,6 +48,9 @@ jobs:
 # the part of the bridge fed from outside.
           #
           - evm_rlp_decode
+          # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
+          # quick gate too; here it gets the deep budget.
+          - bpqs_wots_reject
           - evm_mpt_verify
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

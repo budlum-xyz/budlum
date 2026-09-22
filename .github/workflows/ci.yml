@@ -1192,6 +1192,10 @@ jobs:
             zk_verifier
             budl_compile
             vm_execute
+            # BPQS WOTS chain-walk refusal safety (crates/bpqs, M2 fuzz
+            # harness): two chain-set builds per iteration, far inside the
+            # 60 second budget; long coverage in fuzz-nightly.
+            bpqs_wots_reject
           )
           # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
           # comment used to say "nightly/manual" while the nightly matrix did

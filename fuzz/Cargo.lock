@@ -464,6 +464,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "budlum-bpqs"
+version = "0.1.0"
+dependencies = [
+ "keccak 0.2.0",
+ "sha3",
+]
+
+[[package]]
 name = "budlum-core"
 version = "0.1.0"
 dependencies = [
@@ -525,6 +533,7 @@ dependencies = [
  "bud-isa",
  "bud-proof",
  "bud-vm",
+ "budlum-bpqs",
  "budlum-core",
  "libfuzzer-sys",
  "libp2p",

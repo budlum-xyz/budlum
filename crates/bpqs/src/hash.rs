@@ -1,25 +1,39 @@
 //! Hash backend seam. The whole construction is written against `BpqsHash`;
-//! parameter rows never touch a concrete hash directly. This is what keeps
-//! the milestone-M2 Poseidon swap a one-file change.
+//! parameter rows never touch a concrete hash directly. Milestone M2 landed
+//! the swap this seam was cut for: the canonical backend is now
+//! [`super::poseidon2::Poseidon2GoldilocksHash`] (Poseidon2 over Goldilocks,
+//! p3 parameters), with the two FIPS-202 members kept as the audit
+//! cross-checks the differential battery compares against.
 //!
-//! The reference backend is **SHA3-256** (fixed-output member of the NIST
-//! SHA-3 family): the construction only ever digests ≤ 32 bytes, so a
-//! fixed-output function is byte-for-byte equivalent to the corresponding
-//! SHAKE-256 XOF read. (sha3 0.12 dropped the SHAKE XOF surface; the
-//! fixed-output member is present and already vetted in-tree.) The level-3
-//! row's 24-byte lane semantics truncate this digest under explicit domain
-//! separation - the truncation argument is part of the security-argument
-//! write-up (research bar item 1), not an implicit hand-wave.
+//! ## Backends
+//!
+//! - **Canonical**: [`super::poseidon2::Poseidon2GoldilocksHash`] -
+//!   Poseidon2-Goldilocks-16 with the BPQS-POSEIDON2-SPONGE-v0 byte binding
+//!   (see the poseidon2 module header for the full binding proof sketch).
+//! - **Cross-check 1**: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
+//!   present and vetted in-tree since M1.
+//! - **Cross-check 2**: [`super::shake256::Shake256Hash`] - the FIPS 202
+//!   XOF member (domain suffix 0x1F, 32-byte read), implemented in-crate on
+//!   the `keccak` permutation because sha3 0.12 ships no SHAKE surface.
+//!
+//! Research-line usage note: parameter rows with N < 32 truncate the 32-byte
+//! digest under their own domain separation; the truncation argument remains
+//! part of the security-argument write-up (research bar item 1).
 //!
 //! ## Domain packaging (canonical byte sketch)
 //!
 //! Every call is length-prefixed parts after one domain tag:
 //!
 //! ```text
-//! digest = H( u16le(dom.len()) || dom || Σ_i [ u32le(parts[i].len()) || parts[i] ] )
+//! frame = u16le(dom.len()) || dom || S_i [ u32le(parts[i].len()) || parts[i] ]
 //! ```
 //!
-//! so distinct input shapes can never collide into one preimage.
+//! so distinct input shapes can never collide into one preimage. All three
+//! backends digest this one frame, built once by [`frame_bytes`]; there is a
+//! single source for the framing contract and the battery asserts the
+//! property matrix per backend.
+
+use alloc::vec::Vec;
 
 use sha3::{Digest, Sha3_256};
 
@@ -31,24 +45,29 @@ pub trait BpqsHash {
     fn digest32(domain: &[u8], parts: &[&[u8]]) -> [u8; 32];
 }
 
-fn pack_domain_and_parts(hasher: &mut Sha3_256, domain: &[u8], parts: &[&[u8]]) {
-    hasher.update((domain.len() as u16).to_le_bytes());
-    hasher.update(domain);
+/// Build the canonical framing bytes every backend digests. Single source of
+/// the packaging contract; backends differ only in what they do to these
+/// bytes afterwards.
+pub(crate) fn frame_bytes(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+    let mut frame =
+        Vec::with_capacity(2 + domain.len() + parts.iter().map(|p| 4 + p.len()).sum::<usize>());
+    frame.extend_from_slice(&(domain.len() as u16).to_le_bytes());
+    frame.extend_from_slice(domain);
     for part in parts {
-        hasher.update((part.len() as u32).to_le_bytes());
-        hasher.update(part);
+        frame.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        frame.extend_from_slice(part);
     }
+    frame
 }
 
-/// SHA3-256 reference backend (NIST FIPS 202). Research-line reference today;
-/// once the Poseidon backend is canonical this stays as the independent twin
-/// the differential battery compares against.
+/// SHA3-256 reference backend (NIST FIPS 202). M1's only backend; since M2
+/// this is cross-check 1 for the differential battery.
 pub struct Sha3_256Hash;
 
 impl BpqsHash for Sha3_256Hash {
     fn digest32(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        pack_domain_and_parts(&mut hasher, domain, parts);
+        hasher.update(frame_bytes(domain, parts));
         hasher.finalize().into()
     }
 }
@@ -79,16 +98,26 @@ mod hash_tests {
     }
 
     #[test]
-    fn sha3_256_nist_vector_matches() {
-        // NIST example: SHA3-256("") =
-        // a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+    fn frame_matches_the_documented_sketch() {
+        // The byte-level contract auditors re-derive by hand:
+        // frame = u16le(dom.len) || dom || u32le(part.len) || part (per part).
+        let frame = frame_bytes(b"AB", &[b"xy", b"z"]);
+        let expected: &[u8] = &[
+            2, 0, b'A', b'B', // u16le(2) || dom
+            2, 0, 0, 0, b'x', b'y', // u32le(2) || part 1
+            1, 0, 0, 0, b'z', // u32le(1) || part 2
+        ];
+        assert_eq!(frame, expected);
+    }
+
+    #[test]
+    fn sha3_256_fips_vector_over_framed_empty_parts() {
+        // Framing of H("", [""]) is six zero bytes; the digest must equal the
+        // FIPS-202 function applied to those six bytes directly.
         let out = Sha3_256Hash::digest32(b"", &[b""]);
-        // The true reference is the same packaging rebuilt by hand:
-        // H(u16le(0) || u32le(0) || empty-part).
         let mut h = Sha3_256::new();
         h.update([0u8; 6]);
         let expected: [u8; 32] = h.finalize().into();
-        assert_eq!(out[..32], expected[..32]);
-        let _ = out;
+        assert_eq!(out, expected);
     }
 }

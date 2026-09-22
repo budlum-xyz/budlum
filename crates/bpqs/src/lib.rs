@@ -18,12 +18,17 @@
 //!
 //! ## Milestones
 //!
-//! - M1 (this file set): Winternitz core, epoch-bound Merkle key evolution,
-//!   quota-bounded signing, self-consistency and refusal batteries, SHAKE-256
-//!   reference backend.
-//! - M2: canonical Poseidon backend over the same [`hash::BpqsHash`] seam
-//!   (p3 parameters), at which point the legacy `Sha3_256Hash` becomes the
-//!   cross-check instead of the only backend.
+//! - M1: Winternitz core, epoch-bound Merkle key evolution, quota-bounded
+//!   signing, self-consistency and refusal batteries, SHA3-256 reference
+//!   backend.
+//! - M2 (this file set): canonical Poseidon2-Goldilocks-16 backend over the
+//!   [`hash::BpqsHash`] seam (p3 parameters, straightline in-crate port);
+//!   SHAKE-256 XOF cross-check backend on the `keccak` permutation
+//!   (FIPS 202 domain suffix 0x1F); the backend differential battery
+//!   (same scheme, three hash families); frozen KAT vector file under
+//!   `kat/`; differential bench example vs the in-tree `ml-dsa` and the
+//!   `slh-dsa` crate; BPQS fuzz harness in the repo fuzz workspace.
+//!   `Sha3_256Hash` is cross-check 1 from here on.
 //!
 //! ## Honesty box
 //!
@@ -62,13 +67,19 @@ pub mod error;
 pub mod hash;
 pub mod merkle;
 pub mod params;
+pub mod poseidon2;
+pub mod shake256;
 pub mod sign;
 pub mod wots;
 
 pub use epoch::{epoch_of, EpochWindow};
 pub use hash::{BpqsHash, Sha3_256Hash};
 pub use params::{BpqsParams, ParamsL3, ParamsL5};
+pub use poseidon2::Poseidon2GoldilocksHash;
+pub use shake256::Shake256Hash;
 pub use sign::{keygen_root, sign_at_height, verify_at_height, BpqsSignature};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_backends;
