@@ -1,0 +1,14 @@
+[package]
+name = "budlum-bpqs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Budlum-BPQS research line (F2): epoch-chained Winternitz few-time anchor signatures. RESEARCH ONLY - the production algorithm slot stays reserved and fail-closed."
+
+# Deliberately minimal: the research acceptance bar wants a surface a
+# third-party auditor can read in one sitting. sha3 gives the reference
+# (SHAKE-256 cross-check) backend; the canonical Poseidon backend lands over
+# the same `BpqsHash` seam in milestone M2 (p3 parameters).
+[dependencies]
+sha3 = { version = "0.12", default-features = false }

@@ -17,6 +17,11 @@ pq-ml-dsa = ["dep:ml-dsa"]
 # User/wallet ML-DSA-87 signatures are always required (FIPS 204 Category 5).
 wallet-ml-dsa = ["dep:ml-dsa"]
 p2p-mdns = ["libp2p/mdns"]
+# F2 research line (2026-09-19 decisions, workspace ARASTIRMA doc): the
+# Budlum-BPQS reference implementation. Non-default on purpose: the anchor's
+# production `BudlumBpqsReserved` slot stays fail-closed until the four
+# promotion-bar items land; nothing in the default build links this crate.
+bpqs-research = ["dep:budlum-bpqs"]
 
 [dependencies]
 sha2 = "0.11"
@@ -141,6 +146,8 @@ bud-node = { path = "budzero/bud-node" }
 # one in the zkVM state layer, and nothing forced them to stay equal. They now
 # read one definition.
 budlum-note-packing = { path = "crates/note-packing" }
+# In-tree, feature-gated (2026-09-19 user decision: no separate repository).
+budlum-bpqs = { path = "crates/bpqs", optional = true }
 
 [build-dependencies]
 prost-build = "0.14.3"

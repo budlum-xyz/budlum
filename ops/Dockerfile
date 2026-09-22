@@ -48,6 +48,9 @@ COPY budzero/ ./budzero/
 # anything, it fails to resolve, which is how this line came to be missing
 # and be noticed the same hour.
 COPY crates/note-packing/ ./crates/note-packing/
+# Optional feature-gated research crate (`bpqs-research`); path dependencies
+# must exist in the build context even when their feature is off.
+COPY crates/bpqs/ ./crates/bpqs/
 
 # Is the compiler really the pinned version: BEFORE the build, inside the image.
 # Without this line a binary produced by the wrong compiler would be published

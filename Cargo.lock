@@ -473,6 +473,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "budlum-bpqs"
+version = "0.1.0"
+dependencies = [
+ "sha3",
+]
+
+[[package]]
 name = "budlum-core"
 version = "0.1.0"
 dependencies = [
@@ -483,6 +490,7 @@ dependencies = [
  "bud-node",
  "bud-proof",
  "bud-vm",
+ "budlum-bpqs",
  "budlum-note-packing",
  "bytes",
  "chacha20poly1305 0.11.0",
