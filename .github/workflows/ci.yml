@@ -1139,7 +1139,7 @@ jobs:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
     # Long runs are handled by fuzz-nightly.yml (schedule, 4h/target, corpus cache).
     # Quick: 60s/target (10 targets x 60s ~ 10min + build; timeout-minutes 60).
-    name: Fuzz Quick (60s x 9 targets)
+    name: Fuzz Quick (60s x 12 targets)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

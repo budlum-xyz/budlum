@@ -59,7 +59,7 @@ to a live second anchor family once it passes the acceptance bar.
   L3 (n=24). Scope pinned to the cold-committee anchor flow; the
   reserved `BudlumBpqsReserved` slot stays fail-closed throughout.
 - **Promotion bar (to live family):**
-  1. documented security argument at NIST level 5 (PENDING: bar item 1),
+  1. documented security argument at NIST level 5 (WRITTEN: crates/bpqs/SECURITY-ARGUMENT.md; one open decision item inside - the few-time domination-hunt pricing, section 6 - so the item is not marked complete until that decision lands),
   2. reference implementation plus differential tests against the
      incumbent PQ crates - LANDED (see below),
   3. at least one independent review,
