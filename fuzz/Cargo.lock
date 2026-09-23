@@ -477,7 +477,6 @@ dependencies = [
  "bud-proof",
  "bud-vm",
  "budlum-note-packing",
- "bytes",
  "chacha20poly1305 0.11.0",
  "clap",
  "cryptoki",
