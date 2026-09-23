@@ -218,8 +218,40 @@ jobs:
           echo "cargo machete: $scanned manifest tarandi."
           exit "$fail"
 
-      - name: Shear report (a second opinion)
-        continue-on-error: true
+      # Promoted from report to gate. `cargo shear` is a second opinion on the
+      # same question `cargo machete` answers above, and the two disagree in
+      # both directions - that is the reason to run both, and it was also the
+      # excuse for never letting this one speak.
+      #
+      # A canary first, for the same reason machete has one: a tool that fails
+      # to install, or whose output shape moved, reports a clean tree the same
+      # way an actually clean tree does. `cargo shear` exits non-zero when it
+      # finds an unused dependency, so a crate with an obviously unused `libc`
+      # must make it fail; if it does not, the gate below is decoration.
+      - name: Shear canary (does the tool really catch it)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/shear-canary/src
+          cat > /tmp/shear-canary/Cargo.toml <<'CANARY'
+          [package]
+          name = "shear-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          libc = "0.2"
+          CANARY
+          echo 'fn main() {}' > /tmp/shear-canary/src/main.rs
+          if cargo shear /tmp/shear-canary; then
+            echo "ERROR: shear failed to catch the unused 'libc' dependency -> vacuous gate!" >&2
+            exit 1
+          fi
+          echo "Canary caught -> the shear alarm works."
+      # The gate. False positives are not silenced with a flag here either: shear
+      # reads `[workspace.metadata.cargo-shear] ignored`, and an entry there
+      # carries its justification in the commit that adds it, exactly like the
+      # machete side.
+      - name: The shear gate (a second opinion that can say no)
         run: cargo shear
 
   # -- 3. Binary size visibility ----------------------------------------------
