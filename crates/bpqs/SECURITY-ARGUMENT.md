@@ -383,7 +383,9 @@ every mechanism except the few-time term; that term is decision item 7.
   verify chain's primitive projection (Poseidon single-primitive lane)
   stands as section 5/A3 records.
 - constant-time audit: named in section 1 as out of scope; a sideways
-  open item listed here so it is owned by exactly one list.
+  open item listed here so it is owned by exactly one list. Partially
+  advanced 2026-09-23: the one confined caveat below (the u128-% field
+  arithmetic) is closed structurally; the timing MEASUREMENT is not.
 
 ### Constant-time posture, confined pre-answer (code-read, not measured)
 
@@ -402,18 +404,31 @@ SIGNED-PATH secret flow inventory (each item points at code):
    timing profile carries no key signal. The per-chain index `i` is the
    public loop counter.
 4. Backends: poseidon2.rs schedules a fixed 30-round pattern; S-BOX and
-   MDS arithmetic routes through fe_add/fe_mul. CONFINED CAVEAT (the one
-   finding): fe_add/fe_mul are written as `(a+b) % p` / `(a*b) % p` on
-   u128. The algorithmic schedule is data-independent, but the
-   micro-architectural lowering of a 128-bit remainder can carry
-   operand-dependent latency (compiler-rt __modti3 / div-ish sequences
-   vary by width of operands). No measurement has been run; a dudect or
-   equivalent timing harness over the poseidon2 lanes is the named
-   follow-up (review call question 6), and a variant fe_mul written
-   with an explicit conditional subtract (constant-latency reduction
-   pattern for the 64-bit Goldilocks modulus where implementers choose
-   limbs, not u128-%) is the candidate hardening if measurement shows
-   signal.
+   MDS arithmetic routes through fe_add/fe_mul. CLOSED 2026-09-23 (this
+   was the one finding of this section). The caveat was: fe_add/fe_mul
+   were written as `(a+b) % p` / `(a*b) % p` on u128, so while the
+   algorithmic schedule is data-independent, the lowering of a 128-bit
+   remainder carries operand-dependent latency. That lowering was
+   confirmed rather than assumed: `nm -u` on the release rlib listed
+   `U __umodti3`, i.e. the compiler-rt software divider really was
+   being called from this crate.
+   The candidate hardening named here (an explicit conditional subtract
+   instead of u128-%) is now the implementation. fe_add is a wrapping
+   add plus a masked conditional subtract; fe_mul reduces the 128-bit
+   product with the Goldilocks identities 2^64 == 2^32 - 1 and
+   2^96 == -1 (mod p), corrections applied as arithmetic, not branches.
+   After the change `nm -u` lists no 128-bit division helper at all.
+   Equivalence is pinned by three tests: comparison against the retained
+   `%` reference over boundary and pseudorandom inputs, the upstream
+   Plonky3 width-16 known-answer vector, and a separate canonicality
+   test (a result congruent mod p but >= p would change the squeezed
+   digest; an early draft of the reduction did exactly that for
+   0xffff_ffff_0000_0000 squared).
+   Still open, and deliberately not claimed closed by this entry: no
+   TIMING MEASUREMENT has been run. The claim here is structural (no
+   data-dependent division remains in the field ops), not statistical.
+   A dudect or equivalent harness over the poseidon2 lanes stays the
+   named follow-up (review call question 6).
 5. shake256.rs (K12-class keccak): fixed 24-round permutation,
    table-free by construction; absorb boundaries depend on input LENGTH
    (public), never on input bytes.
