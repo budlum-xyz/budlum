@@ -299,11 +299,33 @@ jobs:
         # A log producer, so it must run whatever else is red: the badge gate reads
         # this file, and if a neighbouring failure skipped it the badge gate would
         # report "no log" - a tooling artefact dressed up as a content finding.
+        #
+        # `continue-on-error: true` was here and swallowed EVERY outcome, including
+        # the one it was not meant to cover: a run that produced no log at all.
+        # Two different things were hiding behind one flag, so they are now
+        # separated by hand.
+        #
+        #   * The suite's VERDICT genuinely belongs to the `budlum` job. A red
+        #     copy of another job's red teaches nothing, so a non-zero exit from
+        #     `cargo test` is recorded as an annotation here, not as a failure.
+        #   * The LOG is this step's own product, and its absence is a tooling
+        #     failure with no other owner. Empty or missing = red, right here.
+        #     Under the old flag that state reached the badge gate as "no log",
+        #     i.e. a broken producer dressed up as a content finding - exactly
+        #     what the comment above says must not happen.
         if: always() && steps.build.outcome == 'success'
-        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+          status="${PIPESTATUS[0]}"
+          if [ ! -s /tmp/libtests.log ]; then
+            echo "::error::the badge gate's test log is empty or missing - this step's own product failed to appear, which is a tooling failure and belongs to nobody else."
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::notice::cargo test --lib exited $status here; the verdict on the suite belongs to the budlum job, this copy only produces the log the badge gate reads."
+          fi
+          exit 0
       - name: Badge canary (independent of the log)
         if: always() && steps.build.outcome == 'success'
         run: |
