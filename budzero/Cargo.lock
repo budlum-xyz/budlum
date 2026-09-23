@@ -2546,6 +2546,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "486d6396b0d22274f862a6c5987bb25f9ea61b34f21b54c23a2ee53f2d8c20ea"
 
 [[package]]
+name = "p3-maybe-rayon"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "486d6396b0d22274f862a6c5987bb25f9ea61b34f21b54c23a2ee53f2d8c20ea"
+
+[[package]]
 name = "p3-mds"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2651,6 +2657,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e020b468e9188da32310d8c876225e5183df105a1970368df97f8a76b85dcc5b"
 dependencies = [
  "p3-maybe-rayon",
+ "serde",
+]
+
+[[package]]
+name = "p3-util"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e020b468e9188da32310d8c876225e5183df105a1970368df97f8a76b85dcc5b"
+dependencies = [
+ "p3-maybe-rayon 0.7.0",
  "serde",
 ]
 
