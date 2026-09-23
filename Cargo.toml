@@ -93,7 +93,17 @@ ed25519-dalek = "3.0.0"
 rand = "0.10.1"
 sha3 = "0.12"
 prost = "0.14.3"
-bytes = "1.11.1"
+# `bytes` is NOT declared here. cargo-shear found it unused on 2026-09-23,
+# the first run after that gate stopped carrying `continue-on-error`, and
+# the tree agrees: not one `bytes::` path, `Bytes`/`BytesMut` value or
+# `extern crate bytes` exists outside budzero. The reason it looked
+# plausible is that `build.rs` compiles protobuf with a default
+# `prost_build::Config`, which emits `Vec<u8>` for a proto `bytes` field,
+# not `bytes::Bytes` - that would need `.bytes(["."])`. prost itself
+# depends on `bytes`, so the crate stays in the lock either way; what is
+# removed is a DIRECT dependency nobody imports. cargo-machete missed it
+# (five manifests, "Good job!") - which is the whole argument for keeping
+# a second opinion that is allowed to say no.
 # bincode is held at 1.x deliberately. Its byte output is consensus input, not
 # just storage: `Block::calculate_hash` folds serialized slashing evidence into
 # the block hash, and the account state root folds serialized tokenomics,
