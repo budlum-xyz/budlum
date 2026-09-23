@@ -173,7 +173,25 @@ jobs:
             exit 1
           fi
         env:
-          MIRIFLAGS: "-Zmiri-disable-isolation"
+          # Tree Borrows, not the default Stacked Borrows, for this step only.
+          # With the sled tests skipped the run gets past `getrlimit` and 652
+          # tests execute - and then abort on a genuine Stacked Borrows
+          # violation inside crossbeam-epoch 0.9.21 (internal.rs:567,
+          # `element_of`), reached from a rayon worker thread via sled's
+          # `pin()`. Not one budlum frame appears in that backtrace.
+          #
+          # It is upstream and known: crossbeam-rs/crossbeam#545. The fix (PR
+          # #871) is not in a published release, and the maintainers' own
+          # guidance in that thread is to use Tree Borrows instead of Stacked
+          # Borrows. TB is the newer aliasing model and is deliberately less
+          # strict about exactly the raw-pointer patterns an epoch GC uses.
+          #
+          # This is narrower than the alternatives: `-Zmiri-disable-stacked-
+          # borrows` would switch the aliasing check OFF and keep the step
+          # green while checking less, which is the softening this PR exists to
+          # remove. TB keeps an aliasing model in force over all 652 tests. If
+          # budlum's own code violates aliasing, TB still says so.
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-tree-borrows"
         # `continue-on-error: true` was here with the note "the storage sled
         # dependency may be incompatible with Miri" - a hedge against a failure
         # mode that has not occurred. Measured 2026-09-23 over the last nine
