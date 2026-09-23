@@ -74,12 +74,21 @@ jobs:
       - name: Gate canary (vacuous-gate protection)
         run: BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver --self-test
       - name: Diagnosis (permanent evidence step) - rustdoc-json directly
-        # For future silent-crash classes it makes the error body swallowed by the
-        # wrapper visible raw (continue-on-error: it does not block the run).
+        # This one is a DIAGNOSTIC, not a gate, and it now says so in its exit
+        # code rather than in a flag. It exists to make the error body that the
+        # cargo-semver-checks wrapper swallows visible raw; the verdict on the
+        # public API belongs to the gate step below, which blocks.
+        #
+        # `continue-on-error: true` is gone anyway, because it made this step
+        # unable to report its own tooling failure: the run is captured with
+        # `set +e`, the exit code is printed as RUSTDOC_DIRECT_EXIT (a red
+        # rustdoc here is evidence, not a verdict), and the step only fails if
+        # the diagnosis itself produced nothing - no output to read. A silent
+        # evidence step is the thing this step was added to prevent.
+        #
         # NOTE: `-o <dir>` is FORBIDDEN, cargo rustdoc adds --out-dir itself; a
         # second one dies with "Option 'out-dir' given more than once" (2026-07-21
         # local evidence). The JSON lands in target/doc/budlum_core.json.
-        continue-on-error: true
         env:
           RUSTUP_TOOLCHAIN: nightly-2026-07-19
           CARGO_BUILD_JOBS: "2"
@@ -88,8 +97,20 @@ jobs:
         run: |
           set +e
           cd current
-          cargo rustdoc -p budlum-core --lib -- -Z unstable-options --output-format json 2>&1 | tail -60
-          echo "RUSTDOC_DIRECT_EXIT: ${PIPESTATUS[0]}"
+          cargo rustdoc -p budlum-core --lib -- -Z unstable-options --output-format json \
+            > /tmp/rustdoc-direct.log 2>&1
+          status=$?
+          echo "RUSTDOC_DIRECT_EXIT: $status"
+          tail -60 /tmp/rustdoc-direct.log
+          # A SUCCESSFUL rustdoc is legitimately quiet, so silence is only a
+          # defect when the command failed: an error with no error body is a
+          # diagnosis step that diagnosed nothing, which is precisely the state
+          # it exists to prevent.
+          if [ "$status" -ne 0 ] && [ ! -s /tmp/rustdoc-direct.log ]; then
+            echo "::error::rustdoc exited $status and wrote nothing - the evidence step produced no evidence."
+            exit 1
+          fi
+          exit 0
       - name: Semver gate - budlum-core vs baseline
         env:
           SEMVER_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}

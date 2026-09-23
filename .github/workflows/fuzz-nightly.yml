@@ -95,12 +95,24 @@ jobs:
             -max_total_time=14400 \
             -timeout=25 \
             -print_final_stats=1
+      # A four-hour fuzz run that finds a crash and then loses the input has
+      # produced nothing: the crash is only actionable as a file. Under
+      # `continue-on-error: true` plus `if-no-files-found: ignore` a failed
+      # upload was indistinguishable from a clean exit, on the one step whose
+      # entire purpose is preserving evidence that took four CPU-hours to
+      # produce and may not reappear on the next seed.
+      #
+      # The job is already red here (`if: failure()`), so removing the flag
+      # does not change any verdict - it only stops a broken uploader from
+      # being invisible. `warn` rather than `error` for the missing-file case:
+      # the step also runs when the job died before fuzzing at all (a build
+      # break, a toolchain failure), and in that state there is legitimately
+      # no artifact and no second finding to report.
       - name: Crash artifact (varsa)
         if: failure()
-        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-nightly-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 30
