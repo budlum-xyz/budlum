@@ -385,6 +385,48 @@ every mechanism except the few-time term; that term is decision item 7.
 - constant-time audit: named in section 1 as out of scope; a sideways
   open item listed here so it is owned by exactly one list.
 
+### Constant-time posture, confined pre-answer (code-read, not measured)
+
+SIGNED-PATH secret flow inventory (each item points at code):
+
+1. Secrets touched at sign time: root_seed (PRF inputs), epoch chains
+   (derived), per-call randomizer (PRF-derived, public in the sig).
+   Signing branches ONLY on: per_epoch_count vs Q_MAX (public ceremony
+   state; `sign_at_height`), epoch bounds (public height;
+   `epoch_of` = one u64 divide on public values), quota refusals.
+2. `epoch_secret_chains` (wots.rs): fixed-count loop of LEN fixed-shape
+   digests; no secret-dependent control flow, no secret-indexed memory.
+3. `sign_chains`/`chain_walk` (wots.rs): walk length per chain = digit
+   of H(MESSAGE_BIND_V1, r16 || msg) — the digest is PUBLICLY
+   recomputable (msg + public sig.randomizer), so the digit-dependent
+   timing profile carries no key signal. The per-chain index `i` is the
+   public loop counter.
+4. Backends: poseidon2.rs schedules a fixed 30-round pattern; S-BOX and
+   MDS arithmetic routes through fe_add/fe_mul. CONFINED CAVEAT (the one
+   finding): fe_add/fe_mul are written as `(a+b) % p` / `(a*b) % p` on
+   u128. The algorithmic schedule is data-independent, but the
+   micro-architectural lowering of a 128-bit remainder can carry
+   operand-dependent latency (compiler-rt __modti3 / div-ish sequences
+   vary by width of operands). No measurement has been run; a dudect or
+   equivalent timing harness over the poseidon2 lanes is the named
+   follow-up (review call question 6), and a variant fe_mul written
+   with an explicit conditional subtract (constant-latency reduction
+   pattern for the 64-bit Goldilocks modulus where implementers choose
+   limbs, not u128-%) is the candidate hardening if measurement shows
+   signal.
+5. shake256.rs (K12-class keccak): fixed 24-round permutation,
+   table-free by construction; absorb boundaries depend on input LENGTH
+   (public), never on input bytes.
+6. Absent from the whole signing path: secret-indexed table access,
+   secret-dependent early exits, secret-dependent allocation sizes.
+
+Claim, confined: the signing path's instruction SCHEDULE is
+data-independent; its timing VARIABLES all derive from publicly
+recomputable values (height, count, msg, the carried randomizer). The
+single open leak candidate is the u128-remainder lowering in the
+Poseidon2 field arithmetic (item 4), named and measured-or-refuted by
+question 6, not assumed away.
+
 ## 9. Test map (claim -> pin)
 
 - PRF/chain independence and domains: `domains` table in lib.rs, KAT
