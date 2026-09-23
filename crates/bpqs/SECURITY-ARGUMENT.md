@@ -397,7 +397,7 @@ SIGNED-PATH secret flow inventory (each item points at code):
 2. `epoch_secret_chains` (wots.rs): fixed-count loop of LEN fixed-shape
    digests; no secret-dependent control flow, no secret-indexed memory.
 3. `sign_chains`/`chain_walk` (wots.rs): walk length per chain = digit
-   of H(MESSAGE_BIND_V1, r16 || msg) — the digest is PUBLICLY
+   of H(MESSAGE_BIND_V1, r16 || msg), so the digest is PUBLICLY
    recomputable (msg + public sig.randomizer), so the digit-dependent
    timing profile carries no key signal. The per-chain index `i` is the
    public loop counter.
