@@ -318,7 +318,11 @@ jobs:
       - name: Install Rust (nightly for TSan)
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
-          toolchain: nightly
+          # Date-pinned, like the Miri and ASan jobs. A floating `nightly` is
+          # the reason this job re-broke on 2026-09-21 without a single line
+          # of this repository changing: a sanitizer job whose compiler moves
+          # under it reports the toolchain's weather, not this tree's races.
+          toolchain: nightly-2026-07-19
           # `-Zbuild-std` rebuilds the standard library from source; without
           # this component the canary stops at "Cargo.lock does not exist,
           # unable to build with the standard library" before TSan ever runs
@@ -326,13 +330,52 @@ jobs:
           components: rust-src
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: budlum-core
+          # A cache key of its OWN, not the shared `budlum-core` one. Sanitizer
+          # builds are ABI-incompatible with ordinary ones, so restoring
+          # artefacts produced by a non-sanitizer job is a second, independent
+          # source of exactly the "mixing `-Zsanitizer`" error this job died
+          # on. The ASan job already keys itself separately; this one did not.
+          shared-key: tsan
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # Canary: a deliberately racing program is written and TSan is expected to
       # catch it. If it does not, the tool is not working and a clean report says
       # nothing. Without the canary a green job would say not that the scan ran,
       # but at most that it did not fail.
+      # `-Zsanitizer` is a TARGET MODIFIER. From rustc 1.91 on, the compiler
+      # refuses to link a crate built with it against one built without it:
+      #
+      #   error: mixing `-Zsanitizer` will cause an ABI mismatch in crate `cfg_if`
+      #
+      # which is what killed the 2026-09-21 scheduled run (35591669754) without
+      # a single line of this tree changing - the job floated on `nightly`, and
+      # the toolchain moved under it. Two fixes, and both are needed:
+      #
+      #   1. the toolchain is now date-pinned (see above), like Miri and ASan;
+      #   2. `-Cunsafe-allow-abi-mismatch=sanitizer` is added IF the pinned
+      #      compiler knows the flag. Build scripts and proc-macros are
+      #      compiled for the host and deliberately do not carry `-Zsanitizer`,
+      #      so under `-Zbuild-std` the mismatch is structural, not a defect in
+      #      this code; the flag is the documented escape from the upstream
+      #      sanitizer tutorial.
+      #
+      # The support probe is not decoration: hardcoding a flag an older pinned
+      # nightly does not recognise would turn "unknown codegen option" into the
+      # next silent red, which is the same failure wearing a different hat. The
+      # detection is not weakened either way - the canary below still has to
+      # SEE the race or the step fails.
+      - name: Does the pinned compiler need (and know) the ABI-mismatch escape
+        run: |
+          set -euo pipefail
+          if echo 'fn main(){}' \
+             | rustc +nightly-2026-07-19 -Cunsafe-allow-abi-mismatch=sanitizer \
+                 --emit=metadata -o /dev/null - 2>/dev/null; then
+            echo "TSAN_ABI_FLAG=-Cunsafe-allow-abi-mismatch=sanitizer" >> "$GITHUB_ENV"
+            echo "the pinned nightly knows -Cunsafe-allow-abi-mismatch; using it."
+          else
+            echo "TSAN_ABI_FLAG=" >> "$GITHUB_ENV"
+            echo "the pinned nightly has no -Cunsafe-allow-abi-mismatch: it predates the target-modifier check, so nothing to escape from."
+          fi
       - name: TSan canary (does the tool really catch it)
         run: |
           set -euo pipefail
@@ -363,13 +406,13 @@ jobs:
           }
           EOF
           cd /tmp/tsan-canary
-          export RUSTFLAGS="-Zsanitizer=thread"
+          export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
           # Capture the output into a file first: under `set -euo pipefail` a
           # non-zero exit anywhere in the pipeline decides the condition, and
           # TSan exits non-zero precisely when it finds the race. The pipeline
           # form made a successful catch read as a failed canary.
           set +e
-          cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu \
+          cargo +nightly-2026-07-19 run -Zbuild-std --target x86_64-unknown-linux-gnu \
             > /tmp/tsan-canary.log 2>&1
           set -e
           if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-canary.log; then
@@ -384,8 +427,13 @@ jobs:
       - name: RUSTFLAGS -Zsanitizer=thread
         run: |
           set -euo pipefail
-          export RUSTFLAGS="-Zsanitizer=thread"
-          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1
+          # Same target-modifier reasoning as the canary above; `RUSTDOCFLAGS`
+          # is set too because doctests are compiled by rustdoc and inherit
+          # neither `RUSTFLAGS` nor, without this, the sanitizer ABI.
+          export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
+          export RUSTDOCFLAGS="$RUSTFLAGS"
+          cargo +nightly-2026-07-19 test --lib -Zbuild-std \
+            --target x86_64-unknown-linux-gnu -- --test-threads=1
 
   # BLOCKS. TSan reports the race it sees, loom proves the one it does not see.
   #
