@@ -129,6 +129,18 @@ jobs:
           cargo test --release -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
           N=$(grep -c "^test.*ok$" det-${{ matrix.os }}.txt || true)
           echo "Determinism test count (${{ matrix.os }}): $N"
+          # The count was printed and then dropped, so a filter that selects
+          # NOTHING (a renamed test, a moved module, a `--release` build that
+          # compiled but ran no determinism case) produced a green step on this
+          # platform and the digest comparison below then compared three
+          # equally empty runs. The PoA isolation job in ci.yml already pins its
+          # count for the same reason; this is the same threshold, measured on
+          # the suite as it stands (>= 1 per platform, and identical across the
+          # three - the compare job owns that half).
+          if [ "${N:-0}" -lt 1 ]; then
+            echo "FAIL: no determinism test ran on ${{ matrix.os }} ($N) - a determinism gate that executes nothing is not determinism."
+            exit 1
+          fi
       - name: Produce the consensus digest
         shell: bash
         run: |
