@@ -31,7 +31,14 @@ jobs:
     # dependency chain and for MIR-level errors.
     name: Miri UB Inspection (crypto + budzero, nightly-2026-07-19) (item 4)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 60 was enough while the storage step aborted on its first test: it cost
+    # about a minute and the budget was really being spent by crypto and
+    # bud-zero. Now that the step actually inspects 652 tests, that step alone
+    # runs past 27 minutes and the job was cancelled at the cap mid-run
+    # (35894609091). Miri is an interpreter, roughly two orders of magnitude
+    # slower than native, so this is the honest cost of the gate doing its job
+    # rather than a hang. Raised with the measurement attached, not guessed.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
