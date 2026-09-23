@@ -142,7 +142,20 @@ jobs:
         run: |
           set -euo pipefail
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra --self-test
-          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
+          # `|| true` is unavoidable here - clippy exits non-zero precisely when
+          # it has warnings to report, which is the normal state of a ratchet -
+          # but on its own it also swallows clippy DYING. An empty or absent
+          # JSON then reaches the ratchet as "0 pedantic warnings", i.e. the
+          # best score this gate can print, produced by a tool that never ran.
+          # A ratchet that reports its baseline as beaten when the compiler
+          # crashes is worse than no ratchet, so the output is checked before
+          # it is counted.
+          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/tmp/clippy-extra.err || true
+          if [ ! -s /tmp/clippy-extra.json ]; then
+            echo "::error::clippy produced no JSON at all - the pedantic ratchet would read this as zero warnings, its best possible score, from a tool that did not run."
+            tail -n 20 /tmp/clippy-extra.err >&2 || true
+            exit 1
+          fi
           # Diagnostic only: the ratchet reports a count, and the JSON it counts
           # lives in the runner's /tmp, so a trip leaves nothing to inspect.
           # This prints the per-lint tally and every first-party file:line.
