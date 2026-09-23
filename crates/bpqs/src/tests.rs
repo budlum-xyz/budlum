@@ -62,8 +62,7 @@ fn quota_violation_is_epoch_scoped_not_window_scoped() {
     // One mint inside epoch 1 (heights 2,3 share it), then refusal there,
     // then epoch 2 (height 4) signs again: the quota binds the epoch,
     // not the call history (one-time posture since 2026-09-22).
-    sign_at_height::<H, ParamsTestFast>(&signer, 2, 0, b"x")
-        .unwrap_or_else(|e| panic!("{e}"));
+    sign_at_height::<H, ParamsTestFast>(&signer, 2, 0, b"x").unwrap_or_else(|e| panic!("{e}"));
     assert!(matches!(
         sign_at_height::<H, ParamsTestFast>(&signer, 3, 1, b"x"),
         Err(BpqsError::QuotaExceeded { epoch: 1, .. })
