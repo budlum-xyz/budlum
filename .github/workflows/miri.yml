@@ -207,18 +207,27 @@ jobs:
           # budlum's own code violates aliasing, TB still says so.
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-tree-borrows"
         # `continue-on-error: true` was here with the note "the storage sled
-        # dependency may be incompatible with Miri" - a hedge against a failure
-        # mode that has not occurred. Measured 2026-09-23 over the last nine
-        # completed runs of this workflow (35723653191, 35734888884,
-        # 35741876626, 35751380632, 35758105670, 35763407003, 35769354578,
-        # 35835976509, 35836929417): this step succeeded in all nine.
+        # dependency may be incompatible with Miri". It was removed on the
+        # measurement that the last nine completed runs (35723653191,
+        # 35734888884, 35741876626, 35751380632, 35758105670, 35763407003,
+        # 35769354578, 35835976509, 35836929417) all showed this step green.
         #
-        # So the softening was not protecting the job from a flaky dependency,
-        # it was standing between undefined behaviour in the storage layer and
-        # a red check - on the one module whose job is to persist consensus
-        # state. If sled ever does become Miri-incompatible the honest response
-        # is a named, dated exclusion of the offending test, not a blanket
-        # "whatever happens here does not count".
+        # THAT MEASUREMENT WAS WRONG, and the way it was wrong is worth keeping
+        # written down. It read the step's *conclusion* - the exact field
+        # `continue-on-error` overwrites. Re-reading the LOG of 35836929417
+        # shows the `getrlimit` abort on the first sled test. The step was
+        # failing in all nine and being recoloured, so the hedge was not
+        # guarding against a hypothetical incompatibility: it was hiding a real
+        # and total one, on the one module whose job is to persist consensus
+        # state.
+        #
+        # The standing rule this earns: when removing a softening, "the step
+        # was passing anyway" may only be established from log CONTENT. A
+        # conclusion field cannot be evidence about the thing that writes it.
+        # The honest response to a genuine incompatibility is what is now
+        # above - a named, dated exclusion of the offending tests, plus an
+        # aliasing model the dependency can actually run under - never a
+        # blanket "whatever happens here does not count".
 
       # Miri's own output is the only thing that makes a red Miri check
       # fixable, and it lives on the log host. The commands above already tee to
