@@ -746,7 +746,6 @@ bud/src/quantum_chain.rs	fn	kq_stark
 bud/src/quantum_chain.rs	fn	kq_tx
 bud/src/quantum_chain.rs	fn	kq_wallet
 bud/src/quantum_chain.rs	fn	should_displace
-bud/src/quantum_chain.rs	fn	verify_quorum
 bud/src/quantum_chain.rs	struct	DualWallet
 bud/src/quantum_chain.rs	struct	FiatShamirTranscript
 bud/src/quantum_chain.rs	struct	HybridFinalityVote
@@ -761,7 +760,6 @@ bud/src/ratio.rs	enum	FormatClass
 bud/src/ratio.rs	fn	from_best
 bud/src/ratio.rs	struct	RatioResult
 budzero/bud-compiler/src/parser.rs	const	MAX_NESTING_DEPTH
-budzero/bud-compiler/src/sema.rs	enum	Type
 budzero/bud-compiler/src/sema.rs	fn	is_opaque_bytes32
 budzero/bud-isa/src/lib.rs	enum	DecodeError
 budzero/bud-isa/src/lib.rs	fn	allows
@@ -1727,7 +1725,6 @@ src/network/peer_manager.rs	fn	report_slow_sync
 src/network/peer_manager.rs	fn	set_max_peers_per_subnet
 src/network/peer_manager.rs	fn	subnet_connection_count
 src/network/peer_manager.rs	fn	tracked_peer_count
-src/network/peer_manager.rs	fn	unban_peer
 src/network/peer_manager.rs	struct	PeerScore
 src/network/protocol.rs	const	MAX_BLOCK_SIZE
 src/network/protocol.rs	const	MAX_HEADERS_PER_REQUEST

@@ -31,6 +31,10 @@ bud-proof = { path = "../budzero/bud-proof" }
 bud-compiler = { path = "../budzero/bud-compiler" }
 bud-isa = { path = "../budzero/bud-isa" }
 bud-vm = { path = "../budzero/bud-vm" }
+# BPQS research line (crates/bpqs): M2 landed the fuzz-harness item of the
+# F2 pre-registration. The crate stays research-gated in the root package;
+# here it fuzzes its own verify walk, which the root never links.
+budlum-bpqs = { path = "../crates/bpqs" }
 libfuzzer-sys = "0.4"
 libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd" }
 
@@ -140,6 +144,15 @@ bench = false
 [[bin]]
 name = "vm_execute"
 path = "fuzz_targets/vm_execute.rs"
+test = false
+doc = false
+bench = false
+
+# WOTS chain-walk refusal safety for the BPQS research line (see the harness
+# header for the two checked properties and the iteration-cost budget).
+[[bin]]
+name = "bpqs_wots_reject"
+path = "fuzz_targets/bpqs_wots_reject.rs"
 test = false
 doc = false
 bench = false

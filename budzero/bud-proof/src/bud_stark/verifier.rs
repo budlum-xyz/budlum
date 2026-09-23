@@ -343,8 +343,12 @@ where
         num_permutation_challenges: if has_aux_trace { 3 } else { 0 },
         ..Default::default()
     };
-    let log_num_quotient_chunks =
-        get_log_num_quotient_chunks::<Val<SC>, A>(air, layout, config.is_zk() as usize);
+    let log_num_quotient_chunks = get_log_num_quotient_chunks::<Val<SC>, A>(
+        air,
+        layout,
+        degree >> (config.is_zk() as usize),
+        config.is_zk() as usize,
+    );
     let num_quotient_chunks = 1 << (log_num_quotient_chunks + config.is_zk() as usize);
     let mut challenger = config.initialise_challenger();
     let init_trace_domain = pcs.natural_domain_for_degree(degree >> (config.is_zk() as usize));

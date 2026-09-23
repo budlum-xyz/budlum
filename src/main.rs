@@ -859,6 +859,7 @@ async fn main() {
                 .clone()
                 .unwrap_or_else(|| "./data/snapshots".to_string()),
         )
+        .with_archive_mode(config.features_archive_mode)
     });
 
     // `Metrics::new` can only fail on a metric name we wrote wrong, which is a

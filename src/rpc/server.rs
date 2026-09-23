@@ -16,9 +16,11 @@ use hyper::header::{HeaderValue, AUTHORIZATION};
 use hyper::StatusCode;
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use jsonrpsee::types::error::ErrorObjectOwned;
+use libp2p::PeerId;
 use serde_json;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -3167,6 +3169,43 @@ impl BudlumApiServer for RpcServer {
             "peerId": self.node.peer_id.to_string(),
             "rpcMode": match self.mode { RpcMode::Public => "public", RpcMode::Operator => "operator" },
         }))
+    }
+
+    async fn admin_ban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminBanPeer")?;
+        let parsed = PeerId::from_str(&peer_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid peer id: {e}"), None::<()>)
+        })?;
+        self.node
+            .admin_ban_peer(parsed)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({ "banned": peer_id }))
+    }
+
+    async fn admin_unban_peer(
+        &self,
+        peer_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminUnbanPeer")?;
+        let parsed = PeerId::from_str(&peer_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid peer id: {e}"), None::<()>)
+        })?;
+        self.node
+            .admin_unban_peer(parsed)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({ "unbanned": peer_id }))
+    }
+
+    async fn admin_list_banned_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminListBannedPeers")?;
+        let banned = self
+            .node
+            .admin_list_banned_peers()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({ "bannedPeers": banned }))
     }
 
     // === B.U.D. Storage RPC implementations ====================

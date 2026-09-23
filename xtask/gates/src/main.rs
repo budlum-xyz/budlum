@@ -125,6 +125,7 @@ mod gates {
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
+    pub mod regen_health_door;
     pub mod regeneration;
     pub mod rejection_tests;
     pub mod relay;
@@ -154,6 +155,7 @@ mod gates {
     pub mod transcript_mirrors;
     pub mod tree_is_english;
     pub mod tree_pin;
+    pub mod typos;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
@@ -648,6 +650,14 @@ const GATES: &[Gate] = &[
         self_test: gates::regeneration::self_test,
     },
     Gate {
+        name: "regen-health-door",
+        replaces: None,
+        run: gates::regen_health_door::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::regen_health_door::self_test,
+    },
+    Gate {
         name: "relay",
         replaces: None,
         run: gates::relay::run,
@@ -778,6 +788,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::actionlint::self_test,
+    },
+    Gate {
+        name: "typos",
+        replaces: None,
+        run: gates::typos::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::typos::self_test,
     },
     Gate {
         name: "zizmor",

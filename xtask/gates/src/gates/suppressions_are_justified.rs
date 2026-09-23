@@ -524,6 +524,12 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "`WalletKeyPair::address` derives from a generated ML-DSA-87 public key, and derivation only rejects malformed keys, so the panic path is unreachable; the expect beats the previous silent zero-address fallback, which would have let a malformed key spend as `[0u8; 32]`",
     },
+    Budget {
+        file: "src/settlement/pq_anchor.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "the node-local emission driver mirrors assemble_anchor's seven-argument shape and adds only the two knobs it uniquely owns (the log path and the mode gate); bundling them into a params struct would hide from the seam wiring which values the consensus caller must supply",
+    },
 ];
 
 /// Lints that may never be suppressed anywhere.

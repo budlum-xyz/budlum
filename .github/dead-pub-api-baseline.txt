@@ -168,7 +168,6 @@ src/network/peer_manager.rs:report_slow_sync
 src/network/peer_manager.rs:set_max_peers_per_subnet
 src/network/peer_manager.rs:subnet_connection_count
 src/network/peer_manager.rs:tracked_peer_count
-src/network/peer_manager.rs:unban_peer
 src/pollen/content_gate.rs:is_protected
 src/pollen/offers.rs:bind_content_to_asset
 src/privacy/note_registry.rs:prune_spent_nullifiers

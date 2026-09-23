@@ -135,6 +135,10 @@ pub struct PruningManager {
     pub min_blocks_to_keep: u64,
     pub snapshot_interval: u64,
     pub snapshot_dir: String,
+    /// Archive nodes keep full block history; when set, no caller (RPC or
+    /// internal) may prune anything. Only meaningful together with the
+    /// pruning feature flag.
+    pub archive_mode: bool,
 }
 impl PruningManager {
     pub fn new(min_blocks: u64, snapshot_interval: u64, snapshot_dir: String) -> Self {
@@ -142,7 +146,16 @@ impl PruningManager {
             min_blocks_to_keep: min_blocks,
             snapshot_interval,
             snapshot_dir,
+            archive_mode: false,
         }
+    }
+
+    /// Sets archive mode at construction time: with `enabled` the node keeps
+    /// full block history and every pruning query returns an empty list
+    /// (guarded at the parametrized core, not only in a convenience wrapper).
+    pub fn with_archive_mode(mut self, enabled: bool) -> Self {
+        self.archive_mode = enabled;
+        self
     }
     pub fn should_create_snapshot(&self, height: u64) -> bool {
         height > 0 && height.is_multiple_of(self.snapshot_interval)
@@ -168,6 +181,13 @@ impl PruningManager {
         finalized_height: u64,
         min_blocks_to_keep: u64,
     ) -> Vec<u64> {
+        // Archive nodes keep full block history: guarding here (rather than
+        // only in the convenience wrapper) means no caller, RPC or internal,
+        // can bypass the retention guarantee by reaching for the parametrized
+        // entry point.
+        if self.archive_mode {
+            return vec![];
+        }
         // A caller may request *more* retention than the configured floor, but
         // Never less. This keeps an operator/RPC request from weakening the
         // Node's startup-validated pruning policy.
@@ -1192,6 +1212,25 @@ mod tests {
 
         assert_eq!(weaker_request, configured);
         assert!(stronger_request.len() < configured.len());
+    }
+
+    #[test]
+    fn test_archive_mode_never_prunes() {
+        let manager =
+            PruningManager::new(100, 1000, "./snapshots".to_string()).with_archive_mode(true);
+
+        // Same call shape pruning code paths make in production: nothing may
+        // ever come back for an archive node, whatever the heights look like.
+        let prunable = manager.get_prunable_blocks_with_retention(200, 50, 50, 100);
+        assert!(prunable.is_empty());
+        let prunable = manager.get_prunable_blocks_with_retention(1_000_000, 999_999, 999_999, 100);
+        assert!(prunable.is_empty());
+    }
+
+    #[test]
+    fn test_archive_mode_defaults_to_false() {
+        let manager = PruningManager::new(100, 1000, "./snapshots".to_string());
+        assert!(!manager.archive_mode);
     }
 
     #[test]

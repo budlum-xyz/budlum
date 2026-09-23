@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
       - id: rust
         name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
@@ -198,7 +198,7 @@ jobs:
           python3 .github/scripts/audit_guard.py --self-test
           python3 .github/scripts/audit_guard.py
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
@@ -215,6 +215,20 @@ jobs:
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
           actionlint --version
+      # The fail-closed typos gate (xtask/gates, mirrors the standalone Typos
+      # workflow, same calibration file) runs inside this suite as well; same
+      # install-step reason as actionlint above. Version and hash match
+      # typos.yml exactly so both spell checks run the same binary.
+      - name: Install typos v1.48.0 (sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/typos.tar.gz \
+            https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+          echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/typos-bin
+          tar -xzf /tmp/typos.tar.gz -C /tmp/typos-bin ./typos
+          sudo install -m 0755 /tmp/typos-bin/typos /usr/local/bin/typos
+          typos --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
@@ -617,7 +631,7 @@ jobs:
           persist-credentials: false
       - id: rust
         name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         # NOTE: master 2026-07-16 and later make the `toolchain` input MANDATORY
         # (CI evidence: job 87741629986 - "'toolchain' is a required input").
         with:
@@ -651,7 +665,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -676,7 +690,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -702,7 +716,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -727,7 +741,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -760,7 +774,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -786,7 +800,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -843,7 +857,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -868,7 +882,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -893,7 +907,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -925,7 +939,7 @@ jobs:
           persist-credentials: false
       - id: rust
         name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
@@ -971,7 +985,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1000,7 +1014,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1032,7 +1046,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1139,7 +1153,7 @@ jobs:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
     # Long runs are handled by fuzz-nightly.yml (schedule, 4h/target, corpus cache).
     # Quick: 60s/target (10 targets x 60s ~ 10min + build; timeout-minutes 60).
-    name: Fuzz Quick (60s x 9 targets)
+    name: Fuzz Quick (60s x 12 targets)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1147,7 +1161,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust (nightly - cargo-fuzz gereksinimi)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: nightly
       - name: Install protoc
@@ -1192,6 +1206,10 @@ jobs:
             zk_verifier
             budl_compile
             vm_execute
+            # BPQS WOTS chain-walk refusal safety (crates/bpqs, M2 fuzz
+            # harness): two chain-set builds per iteration, far inside the
+            # 60 second budget; long coverage in fuzz-nightly.
+            bpqs_wots_reject
           )
           # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
           # comment used to say "nightly/manual" while the nightly matrix did
@@ -1283,7 +1301,7 @@ jobs:
             --report-format sarif --report-path gitleaks.sarif --exit-code 0
       - name: Upload gitleaks SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -1301,7 +1319,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
       - name: Install protoc
@@ -1380,7 +1398,7 @@ jobs:
           ignore-unfixed: false
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -1408,7 +1426,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: "1.97.1"
           components: llvm-tools-preview
@@ -1490,6 +1508,20 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint
+      - name: Install typos v1.48.0 (sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/typos.tar.gz \
+            https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+          echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/typos-bin
+          tar -xzf /tmp/typos.tar.gz -C /tmp/typos-bin ./typos
+          sudo install -m 0755 /tmp/typos-bin/typos /usr/local/bin/typos
+          typos --version
+      - name: typos gate + canary (whole-tree spell check, calibrated)
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos
       - name: zizmor gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- zizmor --self-test
@@ -1505,6 +1537,26 @@ jobs:
       # a misspelled variable is not an error but an empty string, so a check
       # can examine nothing and say OK. On this branch two gates passed while missing
       # the very defect they were written for. The Rust version stops if it does not compile.
+      # fuzz/Cargo.lock drifted to p3 0.6.2 while bud-proof's manifest
+      # already demanded 0.6.3 and nothing caught it, because every
+      # consumer resolves the lock silently at build time. From this step
+      # on, drift is a red check: full `cargo metadata --locked` fails the
+      # moment any workspace's lockfile stops matching its manifests
+      # ("cannot update the lock file ... because --locked was passed";
+      # measured: stale lock exits 101, fresh exits 0; --no-deps does NOT
+      # validate, measured the same day). The discovery is dynamic, like
+      # the machete gate: hand-kept lists go stale silently.
+      - name: lockfiles match their manifests (--locked metadata)
+        run: |
+          set -euo pipefail
+          n=0
+          while IFS= read -r lock; do
+            dir="$(dirname "$lock")"
+            echo "── $dir ──"
+            (cd "$dir" && cargo metadata --format-version 1 --locked > /dev/null)
+            n=$((n + 1))
+          done < <(find . -name Cargo.lock -not -path '*/target/*' | sort)
+          echo "lock freshness: $n workspace lockfile(s) verified."
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates

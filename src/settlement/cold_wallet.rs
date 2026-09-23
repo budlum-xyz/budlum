@@ -4,7 +4,12 @@
 //! cold-wallet path - the USL settlement executor's settlement arm and the
 //! operator rotation channel; the refusal and rotation rules are pinned by
 //! this file's tests, and the per-item notes below name the same door where
-//! they are more specific.
+//! they are more specific. [`sign_with_quorum`] is the two-gate entry point
+//! on that path: it fronts every settlement with the cryptographic quorum
+//! proof (`cold_quorum`) before this file's policy rules run, so a presented
+//! signature count is never taken on trust.
+//!
+//! [`sign_with_quorum`]: ColdWalletState::sign_with_quorum
 //!
 //! # The threat model, stated before the code
 //!
@@ -60,6 +65,8 @@
 //! the policy rule.
 
 use serde::{Deserialize, Serialize};
+
+use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError, SignerIdentity};
 
 /// The rotation log is an audit trail, not an append-only denial-of-service
 /// surface. Once this many entries exist the oldest entry is evicted; the
@@ -301,6 +308,43 @@ pub struct ColdWalletState {
     /// nobody is using, and that is an operational fact worth seeing.
     pub signed_count: u64,
 }
+
+/// The result of a settlement cleared by both gates: the cryptographic quorum
+/// (`cold_quorum`) and the policy state machine (this file).
+///
+/// `payload` is what each device already signed; `signer_ids` is the sorted,
+/// distinct, *verified* device set - never the claimed count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedSettlement {
+    /// Canonical payload bytes (see [`ColdWalletState::payload_for`]).
+    pub payload: Vec<u8>,
+    /// Sorted device ids whose signatures verified strictly.
+    pub signer_ids: Vec<u32>,
+    /// The key epoch in force when the payload was bound.
+    pub key_epoch: u32,
+}
+
+/// Why `sign_with_quorum` refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColdSettleError {
+    /// The cryptographic gate refused: signatures were missing, duplicated,
+    /// epoch-stale, or simply forged.
+    Quorum(QuorumError),
+    /// The policy gate refused: one of the eight rules fired. Recorded in the
+    /// refusal history by `sign`, as always.
+    Policy(ColdRefusal),
+}
+
+impl std::fmt::Display for ColdSettleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Quorum(err) => write!(f, "{err}"),
+            Self::Policy(err) => write!(f, "cold wallet refused: {}", err.kind()),
+        }
+    }
+}
+
+impl std::error::Error for ColdSettleError {}
 
 /// Why a key rotation was refused before it changed state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +674,65 @@ impl ColdWalletState {
         self.refusals.push(record);
     }
 
+    /// The two-gate entry point: prove the quorum, then prove the policy.
+    ///
+    /// Order matters and is deliberate: the cryptographic gate
+    /// ([`cold_quorum::verify_quorum`]) is checked against the payload this
+    /// device would sign, *before* any policy mutation. A failed quorum leaves
+    /// this device's counters, budget and refusal history untouched - a forged
+    /// quorum must cost the cold side nothing, and a refusal entry written for
+    /// a request that presented no valid signature would drink history capacity
+    /// the attacker controls. Once the signatures are proven, [`Self::sign`]
+    /// runs all eight policy rules and its counters as usual, with the proven
+    /// signer count standing in for the presented one.
+    ///
+    /// The verified device set is returned so the caller can record *who*
+    /// backed the settlement, not merely that somebody did.
+    ///
+    /// [`cold_quorum::verify_quorum`]: super::cold_quorum::verify_quorum
+    ///
+    /// # Errors
+    ///
+    /// [`ColdSettleError::Quorum`] if the signature set is refused by the
+    /// cryptographic gate, else [`ColdSettleError::Policy`] with the first
+    /// [`ColdRefusal`] that applies.
+    pub fn sign_with_quorum(
+        &mut self,
+        request: &SettlementRequest,
+        presented_key_epoch: u32,
+        identities: &[SignerIdentity],
+        signatures: &[DeviceSignature],
+    ) -> Result<VerifiedSettlement, ColdSettleError> {
+        let payload = Self::payload_for(request, self.key_epoch);
+        // The epoch pinned into the payload is this device's own epoch; the
+        // epoch the request *claims* to target is checked inside `sign`. The
+        // quorum gate however must refuse signatures pinned to any other
+        // epoch right here, before the policy layer even looks at the request.
+        if presented_key_epoch != self.key_epoch {
+            // Reuse the policy layer's refusal path so rotation boundaries
+            // stay recorded in the refusal history.
+            return match self.sign(request, presented_key_epoch, 0) {
+                Ok(_) => unreachable!("mismatched key epoch cannot pass check"),
+                Err(refusal) => Err(ColdSettleError::Policy(refusal)),
+            };
+        }
+        let signer_ids = verify_quorum(
+            &self.policy,
+            identities,
+            &payload,
+            self.key_epoch,
+            signatures,
+        )
+        .map_err(ColdSettleError::Quorum)?;
+        self.sign(request, presented_key_epoch, signer_ids.len() as u32)
+            .map_err(ColdSettleError::Policy)?;
+        Ok(VerifiedSettlement {
+            payload,
+            signer_ids,
+            key_epoch: self.key_epoch,
+        })
+    }
+
     /// Rotates the key. The old epoch stops being accepted immediately.
     ///
     /// Returns the new epoch. The rotation is recorded with the height, because
@@ -664,8 +767,13 @@ impl ColdWalletState {
 
     /// How much of this epoch's budget remains.
     #[must_use]
-    /// WIRING: unwired - the settlement executor consults the remaining
-    /// budget when cold-wallet flows go live; the ceiling is pinned by tests.
+    /// WIRING: no wiring decided (assessment 2026-09-17): this is a derived
+    /// view of `policy.max_value_per_epoch_atoms - epoch_spent_atoms`, and
+    /// every force-bearing path (`sign`, `sign_with_quorum`) enforces the
+    /// ceiling itself, so no caller is needed for enforcement. The door is
+    /// telemetry/health dashboards reading how much headroom a cold epoch
+    /// has left; if a real consumer appears, this note converts to a named
+    /// wiring target. Until then the view is pinned by tests only.
     pub fn budget_remaining(&self, epoch: u64) -> u128 {
         let spent = if epoch < self.budget_epoch {
             return 0;
@@ -1049,5 +1157,158 @@ mod tests {
         cold.sign(&request(1, 1, 100), 1, 2)
             .expect("a fresh device signs height 1");
         assert_eq!(cold.signed_count, 1);
+    }
+
+    // ---- The two-gate entry point: quorum proof + policy state machine ----
+
+    mod quorum_gate {
+        use super::*;
+        use crate::settlement::cold_quorum::{
+            dev_fixture_device_signers, DeviceSignature, SignerIdentity,
+        };
+
+        fn quorum_policy() -> ColdWalletPolicy {
+            ColdWalletPolicy {
+                required_quorum: 3,
+                device_count: 6,
+                ..policy()
+            }
+        }
+
+        fn quorum_identities() -> Vec<SignerIdentity> {
+            dev_fixture_device_signers()
+                .iter()
+                .map(|d| d.identity.clone())
+                .collect()
+        }
+
+        fn signatures_for(
+            request: &SettlementRequest,
+            epoch: u32,
+            devices: usize,
+        ) -> Vec<DeviceSignature> {
+            let payload = ColdWalletState::payload_for(request, epoch);
+            dev_fixture_device_signers()[..devices]
+                .iter()
+                .map(|d| d.sign_payload(&payload, epoch))
+                .collect()
+        }
+
+        #[test]
+        fn a_valid_three_of_six_quorum_signs_and_counts_proven_devices() {
+            let mut cold = ColdWalletState::new(quorum_policy());
+            let req = request(100, 1, 500);
+            let sigs = signatures_for(&req, cold.key_epoch, 3);
+            let out = cold
+                .sign_with_quorum(&req, cold.key_epoch, &quorum_identities(), &sigs)
+                .expect("valid quorum must pass both gates");
+            assert_eq!(out.signer_ids, vec![1, 2, 3]);
+            assert_eq!(out.key_epoch, 1);
+            assert_eq!(
+                out.payload,
+                ColdWalletState::payload_for(&request(100, 1, 500), 1)
+            );
+            // The policy layer still ran: counters advanced exactly once.
+            assert_eq!(cold.signed_count, 1);
+            assert_eq!(cold.last_signed_height, 100);
+        }
+
+        #[test]
+        fn a_count_of_claimed_devices_means_nothing_without_signatures() {
+            // This test is the regression guard for the whole gate: the
+            // untyped path accepts `presented_signatures: u32` as a claim;
+            // `sign_with_quorum` must refuse the same request when the
+            // signatures themselves are absent, even though the claimed count
+            // would have passed the old count check.
+            let mut cold = ColdWalletState::new(quorum_policy());
+            let req = request(100, 1, 500);
+            let err = cold
+                .sign_with_quorum(&req, 1, &quorum_identities(), &[])
+                .unwrap_err();
+            match err {
+                ColdSettleError::Quorum(err) => {
+                    assert_eq!(err.kind(), "quorum-not-reached");
+                }
+                other => panic!("expected a quorum refusal, got {other:?}"),
+            }
+            // A refused forged quorum costs the cold side nothing: no
+            // counters, no budget, not even a refusal record - the request
+            // presented no epigraphic evidence worth logging as a policy
+            // refusal.
+            assert_eq!(cold.signed_count, 0);
+            assert_eq!(cold.epoch_spent_atoms, 0);
+            assert!(cold.refusals.is_empty());
+        }
+
+        #[test]
+        fn a_forged_signature_is_refused_and_no_refusal_history_is_spent() {
+            let mut cold = ColdWalletState::new(quorum_policy());
+            let req = request(100, 1, 500);
+            let mut sigs = signatures_for(&req, 1, 3);
+            sigs[0].signature[10] ^= 0x01;
+            let err = cold
+                .sign_with_quorum(&req, 1, &quorum_identities(), &sigs)
+                .unwrap_err();
+            match err {
+                ColdSettleError::Quorum(err) => {
+                    assert_eq!(err.kind(), "quorum-invalid-signature");
+                }
+                other => panic!("expected a quorum refusal, got {other:?}"),
+            }
+            assert!(cold.refusals.is_empty());
+            assert_eq!(cold.signed_count, 0);
+        }
+
+        #[test]
+        fn policy_refusals_after_a_valid_quorum_are_still_recorded() {
+            // The two gates compose rather than replace each other: a real
+            // quorum over a value the policy forbids is refused by the policy
+            // layer, and that refusal belongs in the history - the committee
+            // genuinely attempted it.
+            let mut cold = ColdWalletState::new(quorum_policy());
+            let req = request(100, 1, 2_000); // above the 1000 ceiling
+            let sigs = signatures_for(&req, 1, 3);
+            let err = cold
+                .sign_with_quorum(&req, 1, &quorum_identities(), &sigs)
+                .unwrap_err();
+            match err {
+                ColdSettleError::Policy(ColdRefusal::ValueAboveCeiling { .. }) => {}
+                other => panic!("expected a policy refusal, got {other:?}"),
+            }
+            assert_eq!(cold.refusals.len(), 1);
+        }
+
+        #[test]
+        fn rotation_invalidates_earlier_quorum_signatures() {
+            let mut cold = ColdWalletState::new(quorum_policy());
+            cold.rotate_key(100, "epoch one compromised")
+                .expect("rotation succeeds");
+            let req = request(100, 1, 500);
+            // Signed with the (now rotated-out) epoch 1 payload.
+            let sigs = signatures_for(&req, 1, 3);
+            let err = cold
+                .sign_with_quorum(&req, cold.key_epoch, &quorum_identities(), &sigs)
+                .unwrap_err();
+            match err {
+                ColdSettleError::Quorum(err) => {
+                    assert_eq!(err.kind(), "quorum-epoch-mismatch");
+                }
+                other => panic!("expected an epoch mismatch, got {other:?}"),
+            }
+            assert_eq!(cold.signed_count, 0);
+        }
+
+        #[test]
+        fn a_rotated_community_can_still_sign_at_the_new_epoch() {
+            let mut cold = ColdWalletState::new(quorum_policy());
+            cold.rotate_key(100, "epoch one compromised")
+                .expect("rotation succeeds");
+            let req = request(100, 1, 500);
+            let sigs = signatures_for(&req, cold.key_epoch, 3);
+            let out = cold
+                .sign_with_quorum(&req, cold.key_epoch, &quorum_identities(), &sigs)
+                .expect("fresh-epoch signatures pass");
+            assert_eq!(out.key_epoch, 2);
+        }
     }
 }
