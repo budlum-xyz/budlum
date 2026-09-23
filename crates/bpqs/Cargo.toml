@@ -1,0 +1,28 @@
+[package]
+name = "budlum-bpqs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Budlum-BPQS research line (F2): epoch-chained Winternitz few-time anchor signatures. RESEARCH ONLY - the production algorithm slot stays reserved and fail-closed."
+
+# Deliberately minimal: the research acceptance bar wants a surface a
+# third-party auditor can read in one sitting. sha3 gives the SHA3-256
+# cross-check backend; keccak (already pinned in this lock as sha3's own
+# permutation dependency) carries the SHAKE-256 XOF cross-check written
+# in-crate because sha3 0.12 ships no SHAKE surface. The canonical
+# Poseidon2 backend is hand-ported in-tree (src/poseidon2.rs) with zero
+# additional surface.
+[dependencies]
+sha3 = { version = "0.12", default-features = false }
+keccak = { version = "0.2", default-features = false }
+
+# Differential bench example only: BPQS fast lane against the same ml-dsa
+# version the root package links (0.1.1, already vetted by the root OSV and
+# audit gates) plus the slh-dsa crate for the stateless-hash family baseline.
+# Nothing here links into the library or the production tree; this lock is
+# scanned by the OSV inventory line (crates/bpqs/Cargo.lock).
+[dev-dependencies]
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core"] }
+slh-dsa = "0.1.0"
+rand_core = { version = "=0.6.4", features = [] } # slh-dsa 0.1.0's trait major; ml-dsa side needs no rng (from_seed)

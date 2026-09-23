@@ -1181,4 +1181,45 @@ mod rpc_tests {
             "burn_from_operator_liquid_balance_best_effort"
         );
     }
+
+    /// The operator-only admin surface refuses on a public listener: the
+    /// mode gate runs before any peer-state work and answers with the
+    /// static -32004 string shared by every admin endpoint, so clients do
+    /// not learn whether the peer id was valid or the peer even exists.
+    #[tokio::test]
+    async fn rpc_tests_admin_ban_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45264, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let refused = public_server
+            .admin_ban_peer("12D3KooWanything".to_string())
+            .await
+            .expect_err("public listener must refuse the operator-only method");
+        assert_eq!(refused.code(), -32004);
+    }
+
+    /// On an operator listener the peer-id format is validated before any
+    /// work is handed to the node: a syntactically empty id stops at
+    /// -32602 and the mode gate did not fire, proving validation order
+    /// (mode check, then format check) end to end.
+    #[tokio::test]
+    async fn rpc_tests_admin_ban_validates_peer_id_on_operator_listener() {
+        let (server, _chain) = setup().await;
+        let empty = server
+            .admin_ban_peer(String::new())
+            .await
+            .expect_err("empty peer id must fail format validation");
+        assert_eq!(empty.code(), -32602);
+    }
 }

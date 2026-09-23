@@ -48,13 +48,16 @@ jobs:
 # the part of the bridge fed from outside.
           #
           - evm_rlp_decode
+          # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
+          # quick gate too; here it gets the deep budget.
+          - bpqs_wots_reject
           - evm_mpt_verify
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust (nightly - cargo-fuzz gereksinimi)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
         with:
           toolchain: nightly
       - name: Override the rust-toolchain.toml pin (nightly is required)

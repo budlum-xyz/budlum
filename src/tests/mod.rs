@@ -55,6 +55,9 @@ pub mod wall_clock_locks;
 pub mod ai_inference_runtime;
 #[cfg(test)]
 pub mod disaster_recovery;
+// Chaos acceptance for the regeneration/reversion layer: corrupt views and
+// forged audit trails must recover via canonical reversion inside a fixed N
+// blocks, and the compromised-anchor boundary is pinned as documented.
 #[cfg(test)]
 pub mod finality_adversarial;
 #[cfg(test)]
@@ -85,6 +88,8 @@ pub mod privacy_ai_execution;
 pub mod private_transfer_fee_market;
 #[cfg(test)]
 pub mod prover;
+#[cfg(test)]
+pub mod regeneration_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
 // L1 relayer proof kripto-doorulama + M5 budlumxyz fee + M4 BNS fee
