@@ -139,6 +139,12 @@ jobs:
           rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::warning::gate exit=$rc - runner memory snapshot (for OOM evidence):"
-            free -m || true
+            # The verdict is `$rc` and it is returned unchanged below; this is
+            # the OOM evidence beside it. `|| true` meant a runner without
+            # `free` produced no snapshot and said nothing about why, leaving
+            # the OOM hypothesis neither supported nor refuted.
+            if ! free -m; then
+              echo "::warning::\`free\` is unavailable on this runner - no memory snapshot, so an OOM cannot be confirmed or ruled out from this run."
+            fi
           fi
           exit "$rc"

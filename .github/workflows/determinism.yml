@@ -127,7 +127,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --release -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
-          N=$(grep -c "^test.*ok$" det-${{ matrix.os }}.txt || true)
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          N=$(grep -c "^test.*ok$" det-${{ matrix.os }}.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "FAIL: could not read det-${{ matrix.os }}.txt (grep exit $grep_status) - the determinism count is missing, not zero."
+            exit 1
+          fi
           echo "Determinism test count (${{ matrix.os }}): $N"
           # The count was printed and then dropped, so a filter that selects
           # NOTHING (a renamed test, a moved module, a `--release` build that

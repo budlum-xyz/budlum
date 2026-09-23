@@ -457,9 +457,23 @@ jobs:
       - name: Does the pinned compiler need (and know) the ABI-mismatch escape
         run: |
           set -euo pipefail
-          if echo 'fn main(){}' \
-             | rustc +nightly-2026-07-19 -Cunsafe-allow-abi-mismatch=sanitizer \
-                 --emit=metadata -o /dev/null - 2>/dev/null; then
+          # A FEATURE PROBE, not a measurement: the question is strictly "does
+          # this compiler accept this flag", and the answer is the exit code.
+          # The stderr is kept rather than discarded, because "rustc is not on
+          # PATH" and "the flag is unknown" are different answers and only the
+          # second one may be treated as a no.
+          set +e
+          echo 'fn main(){}' \
+            | rustc +nightly-2026-07-19 -Cunsafe-allow-abi-mismatch=sanitizer \
+                --emit=metadata -o /dev/null - > /tmp/abi-probe.log 2>&1
+          probe_status=$?
+          set -e
+          if [ "$probe_status" -ne 0 ] && ! grep -qiE "unknown|unstable|unrecognized|invalid" /tmp/abi-probe.log; then
+            echo "::error::the ABI-escape probe failed for a reason that is not an unknown flag (exit $probe_status) - the pinned toolchain itself is not usable here."
+            cat /tmp/abi-probe.log >&2
+            exit 1
+          fi
+          if [ "$probe_status" -eq 0 ]; then
             echo "TSAN_ABI_FLAG=-Cunsafe-allow-abi-mismatch=sanitizer" >> "$GITHUB_ENV"
             echo "the pinned nightly knows -Cunsafe-allow-abi-mismatch; using it."
           else

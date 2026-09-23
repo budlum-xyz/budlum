@@ -168,10 +168,24 @@ jobs:
           # A ratchet that reports its baseline as beaten when the compiler
           # crashes is worse than no ratchet, so the output is checked before
           # it is counted.
-          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/tmp/clippy-extra.err || true
+          # clippy exits non-zero precisely when it has warnings to report,
+          # which is the normal state of a ratchet - so the exit code is
+          # CAPTURED rather than discarded, and the two non-zero reasons are
+          # separated: warnings (expected) versus a compiler that died (a
+          # missing measurement). The emptiness check stays as a second,
+          # independent guard.
+          set +e
+          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/tmp/clippy-extra.err
+          clippy_status=$?
+          set -e
+          echo "CLIPPY_EXTRA_EXIT: $clippy_status (non-zero is normal: it means warnings were reported)"
           if [ ! -s /tmp/clippy-extra.json ]; then
             echo "::error::clippy produced no JSON at all - the pedantic ratchet would read this as zero warnings, its best possible score, from a tool that did not run."
-            tail -n 20 /tmp/clippy-extra.err >&2 || true
+            if [ -s /tmp/clippy-extra.err ]; then
+              tail -n 20 /tmp/clippy-extra.err >&2
+            else
+              echo "::error::and it wrote no error body either, so the reason is on the log host." >&2
+            fi
             exit 1
           fi
           # Diagnostic only: the ratchet reports a count, and the JSON it counts
@@ -200,7 +214,18 @@ jobs:
           # first: under `CARGO_TERM_COLOR: always` the diff is colored, and an anchored
           # pattern would report an empty debt while hunks waited.
           tmp=$(mktemp)
-          cargo fmt --all -- --check 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | grep -E "^Diff in " > "$tmp" || true
+          # This is a SURFACE step under `if: failure()`: the verdict was
+          # already cast by the Format step, and its job is to carry the reason
+          # to a reader who cannot open the log host. So it must not die on an
+          # empty grep - but it must also not stay silent when the pipeline
+          # itself broke. The status is captured and checked below.
+          set +e
+          cargo fmt --all -- --check 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | grep -E "^Diff in " > "$tmp"
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            printf '::error::the format surface could not run (exit %s) - the Format step is red and this annotation cannot say why.\n' "$grep_status"
+          fi
           head -n 8 "$tmp" | sed -e "s/^/::error::/"
           # The backticks around Diff in were a live command substitution inside a
           # double-quoted printf format: the step ran `Diff in`, and the message it
@@ -280,7 +305,17 @@ jobs:
         run: |
           set +o pipefail
           tmp=$(mktemp)
-          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/gates-build.log > "$tmp" 2>/dev/null || true
+          # Surface step (`if: failure()`): it carries the reason for a verdict
+          # already cast. `2>/dev/null || true` hid the one state it cannot
+          # tolerate - no log to read at all - behind the same silence as a
+          # clean strip, so that state is now named.
+          set +e
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/gates-build.log > "$tmp" 2>/tmp/sed-build.err
+          sed_status=$?
+          set -e
+          if [ "$sed_status" -ne 0 ] || [ ! -s "$tmp" ]; then
+            echo "::error::the build surface has no log to read (/tmp/gates-build.log missing or empty, sed exit $sed_status) - the Build step is red and its reason is only on the log host."
+          fi
           grep -E "^error" -A4 "$tmp" | head -n 40 | sed -e 's/^/::error::/'
           printf '::error::build surface: %s error line(s), first 40 shown - the Build step holds the rest\n' "$(grep -cE '^error' "$tmp")"
           rm -f "$tmp"
@@ -318,7 +353,15 @@ jobs:
         run: |
           set +o pipefail
           tmp=$(mktemp)
-          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/gates-clippy.log > "$tmp" 2>/dev/null || true
+          # Same as the build surface above: an unreadable log is the one state
+          # this step must not report as "0 warnings".
+          set +e
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/gates-clippy.log > "$tmp" 2>/tmp/sed-clippy.err
+          sed_status=$?
+          set -e
+          if [ "$sed_status" -ne 0 ] || [ ! -s "$tmp" ]; then
+            echo "::error::the clippy surface has no log to read (/tmp/gates-clippy.log missing or empty, sed exit $sed_status) - the count below would be 0 from an unread file, not from a clean workspace."
+          fi
           # -A1 pairs each headline with its `--> file:line:col`, because a lint
           # surface without a location is a to-do list, not a fix. The count stays a
           # count of headlines: `head` truncates the pairs, the number does not lie.
@@ -651,7 +694,18 @@ jobs:
           # no -n: an annotation that starts with a line number of a scratch file is
           # noise, and the gate's own message already names the gate and the reason.
           grep "^FAIL \[" "$log" | tail -n 40 | sed -e 's/^/::error::/'
-          n=$(grep -c "^FAIL \[" "$log" || true)
+          # Same distinction the other counters now make: grep exits 1 for "no
+          # match" and >1 for "could not read". A tally that cannot read its own
+          # log must not report zero red gates - that is the best-looking number
+          # this step can print, from a measurement that did not happen.
+          set +e
+          n=$(grep -c "^FAIL \[" "$log")
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            printf '::error::the gate tally could not read %s (grep exit %s) - "no red gates" here would be an unread log, not a clean run.\n' "$log" "$grep_status"
+            exit 1
+          fi
           if [ "$n" -eq 0 ]; then
             echo "gate tally: no FAIL headlines recorded; if this job is red the cause is the step that owns it"
             exit 0
@@ -664,7 +718,14 @@ jobs:
         run: |
           set +o pipefail
           tmp=$(mktemp)
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test > "$tmp" 2>&1 || true
+          # Surface step (`if: failure()`). The self-test is EXPECTED to be able
+          # to fail here - that is the information being surfaced - but its exit
+          # code is evidence, not noise, so it is printed rather than erased.
+          set +e
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test > "$tmp" 2>&1
+          selftest_status=$?
+          set -e
+          echo "::notice::gate self-test re-run exit: $selftest_status"
           # `thread 'main' panicked at ...` does not start with the word panicked, so
           # the first version of this filter dropped the panic and kept only the line
           # after it - the one thing it existed to report. `thread ` is matched, and
@@ -1082,7 +1143,17 @@ jobs:
           # green AND reach the expected count.
           set -euo pipefail
           cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
-          N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "FAIL: could not read /tmp/poa-isolation.txt (grep exit $grep_status) - the PoA isolation count is missing, not zero."
+            exit 1
+          fi
           echo "PoA isolation test count: $N"
           if [ "$N" -lt 7 ]; then
             echo "FAIL: PoA isolation test count is below 7 ($N)"
@@ -1175,9 +1246,27 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/lic-canary
           printf '[licenses]\nallow = []\nconfidence-threshold = 0.8\n' > /tmp/lic-canary/deny.toml
-          if cargo deny --manifest-path "${{ matrix.manifest }}" \
-               --config /tmp/lic-canary/deny.toml check licenses >/dev/null 2>&1; then
+          # `>/dev/null 2>&1` made this canary assert only that cargo-deny
+          # exited non-zero - and it does that for a malformed config, a
+          # manifest it cannot read, or a version whose CLI moved. In all of
+          # those the canary printed "rejected as expected" while proving
+          # nothing about licences. Same defect class as the --all-features
+          # canary in the Core job. The rejection reason is read instead:
+          # cargo-deny reports an unlicensed/denied crate as a `licenses`
+          # diagnostic, and anything else means the probe failed for its own
+          # reasons.
+          set +e
+          cargo deny --manifest-path "${{ matrix.manifest }}" \
+            --config /tmp/lic-canary/deny.toml check licenses > /tmp/lic-canary.log 2>&1
+          canary_status=$?
+          set -e
+          if [ "$canary_status" -eq 0 ]; then
             echo "FAIL: an empty allow-list was accepted - the licence gate is vacuous." >&2
+            exit 1
+          fi
+          if ! grep -qiE "licen[cs]e|rejected|denied" /tmp/lic-canary.log; then
+            echo "FAIL: cargo deny exited $canary_status but not over a licence - this canary cannot tell a working gate from a broken invocation." >&2
+            tail -n 20 /tmp/lic-canary.log >&2
             exit 1
           fi
           echo "Canary rejected as expected; the gate evaluates licences."
@@ -2105,6 +2194,17 @@ jobs:
           # The baseline is established by this push -> an honest SKIP marker.
           # On non-main branches there is no 'branch=main' ref -> Repo Lint goes red.
           # The correct form is 'origin/main' (GitHub docs: .git#branch=<remote>/<branch>).
+          # `git cat-file -e` is a boolean question, so its stderr is the noise
+          # of the "no" answer - but the SKIP branch below is a real risk: it
+          # cannot tell "main genuinely has no buf.yaml yet" from "origin/main
+          # is not present in this checkout", and the second one makes the
+          # breaking-change gate skip itself on every run, permanently and
+          # quietly. The ref is therefore proven to exist first, and only the
+          # file's absence is allowed to skip.
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "::error::origin/main is not in this checkout, so the buf breaking baseline cannot be resolved - this would SKIP as if main simply had no buf.yaml. Check the checkout depth/refs, not the protos."
+            exit 1
+          fi
           if git cat-file -e origin/main:buf.yaml 2>/dev/null; then
             buf breaking --against '.git#branch=origin/main'
             echo "buf breaking: clean against main."
