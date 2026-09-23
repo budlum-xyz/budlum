@@ -54,8 +54,7 @@ fn roundtrip<H: BpqsHash, P: BpqsParams>() {
 fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
     let signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
-    let sig =
-        sign_at_height::<H, P>(&signer, 2, 0, MSG).unwrap_or_else(|e| panic!("sign: {e}"));
+    let sig = sign_at_height::<H, P>(&signer, 2, 0, MSG).unwrap_or_else(|e| panic!("sign: {e}"));
     let mut chain_tamper = sig.clone();
     chain_tamper.chains[0][0] ^= 0x01; // one bit in a revealed chain element
     assert!(
@@ -94,16 +93,27 @@ fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let a = sign_at_height::<H, P>(&signer, 1, 0, MSG).unwrap_or_else(|e| panic!("a: {e}"));
     let a2 = sign_at_height::<H, P>(&signer, 1, 0, MSG).unwrap_or_else(|e| panic!("a2: {e}"));
-    assert_eq!(a, a2, "{}: identical tuple must sign byte-identically", P::NAME);
+    assert_eq!(
+        a,
+        a2,
+        "{}: identical tuple must sign byte-identically",
+        P::NAME
+    );
     let b = sign_at_height::<H, P>(&signer, 1, 0, b"bpqs-backend-differential-payload-2")
         .unwrap_or_else(|e| panic!("b: {e}"));
     assert_ne!(
-        a.randomizer, b.randomizer,
+        a.randomizer,
+        b.randomizer,
         "{}: different messages must draw different randomizers",
         P::NAME
     );
-    verify_at_height::<H, P>(signer.public(), 1, b"bpqs-backend-differential-payload-2", &b)
-        .unwrap_or_else(|e| panic!("b verify: {e}"));
+    verify_at_height::<H, P>(
+        signer.public(),
+        1,
+        b"bpqs-backend-differential-payload-2",
+        &b,
+    )
+    .unwrap_or_else(|e| panic!("b verify: {e}"));
 }
 
 fn epoch_replay_refuses<H: BpqsHash, P: BpqsParams>() {
