@@ -81,9 +81,17 @@ jobs:
   # change. A green test suite can also consist of tests that assert nothing.
   #
   mutants:
-    name: cargo mutants (mutation testing)
+    name: cargo mutants (mutation testing) ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      # The point of the run is the LIST of survivors; cancelling seven shards
+      # because one found something hides the rest of that list.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -195,7 +203,17 @@ jobs:
             echo "no Rust change under src/ in the last week: nothing to mutate, and this line is the record of it."
             exit 0
           fi
-          cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
+          # Sharded across the matrix. The 2026-09-21 scheduled run selected
+          # 2705 mutants from a week that contained a consolidation merge, ran
+          # for 59 minutes and was KILLED by `timeout-minutes: 60` with no
+          # verdict at all - the most expensive possible way to learn nothing.
+          # Shards need no coordination: each independently discovers the same
+          # mutant set and tests the subset `k/8`, so every mutant is still
+          # tested exactly once and the wall clock is roughly an eighth.
+          # `--baseline=skip` is NOT used: each shard proves its own tree is
+          # green before trusting a "caught" verdict.
+          cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff \
+            --shard "${SHARD}/8" -- --lib
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
