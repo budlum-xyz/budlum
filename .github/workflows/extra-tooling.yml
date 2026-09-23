@@ -282,17 +282,46 @@ jobs:
         run: cargo build --release --locked
       - name: Size + the largest crates (into the PR summary)
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Both masks here hid the same thing in two places: the release build
+          # ran in the step above, so a MISSING artifact is not a quiet
+          # "nothing to list", it is a build that did not produce what this job
+          # exists to measure. And `cargo bloat ... 2>/dev/null || echo` turned
+          # every failure of the tool into the sentence "(could not be run)"
+          # inside a green step - visibility with no consequence, which is the
+          # shape the charter calls a bos gecen kapi.
+          #
+          # Still not a size THRESHOLD (no number is agreed yet, and inventing
+          # one here would be a gate nobody chose). What blocks is narrower and
+          # certain: the measurement must exist.
+          set +e
+          ls -lh target/release/budlum-core target/release/libbudlum_core.rlib > /tmp/bloat-size.log 2>&1
+          size_status=$?
+          cargo bloat --release --crates -n 20 > /tmp/bloat-crates.log 2>&1
+          bloat_status=$?
+          set -e
           {
             echo "### Binary size"
             echo '```'
-            ls -lh target/release/budlum-core target/release/libbudlum_core.rlib 2>/dev/null || true
+            cat /tmp/bloat-size.log
             echo '```'
             echo "### The crates taking the most space"
             echo '```'
-            cargo bloat --release --crates -n 20 2>/dev/null || echo "(cargo bloat could not be run)"
+            tail -40 /tmp/bloat-crates.log
             echo '```'
+            echo "(ls exit: $size_status, cargo bloat exit: $bloat_status)"
           } >> "$GITHUB_STEP_SUMMARY"
+          fail=0
+          if [ "$size_status" -ne 0 ]; then
+            echo "::error::the release artifacts are not on disk after the release build - there is nothing to measure, so the size report is empty for a reason that is not size."
+            fail=1
+          fi
+          if [ "$bloat_status" -ne 0 ]; then
+            echo "::error::cargo bloat exited $bloat_status; the crate breakdown in this summary is missing, not small."
+            sed -e 's/^/::error::/' /tmp/bloat-crates.log | head -n 5
+            fail=1
+          fi
+          exit "$fail"
 
   # -- 4. TOML formatting/lint -------------------------------------------------
   # GATE: taplo lint + format --check = FAIL.
