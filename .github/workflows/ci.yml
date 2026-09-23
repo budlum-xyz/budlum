@@ -97,9 +97,27 @@ jobs:
       - name: Feature canary - --all-features MUST BE REFUSED
         if: always() && steps.rust.outcome == 'success'
         run: |
-          set -euo pipefail
-          if cargo check --all-features 2>/dev/null; then
+          set -uo pipefail
+          # The canary asserts that `--all-features` is REFUSED. With stderr
+          # sent to /dev/null it asserted only that cargo exited non-zero, and
+          # cargo exits non-zero for a hundred reasons that have nothing to do
+          # with the guard: a syntax error, a missing protoc, an unresolved
+          # dependency. In every one of those states this step printed
+          # "Canary OK" - the guard could have been deleted and this gate would
+          # still have said it was there. The reason is read instead of
+          # discarded: the refusal must be the `compile_error!` in
+          # src/crypto/primitives.rs, by its own text.
+          set +e
+          cargo check --all-features > /tmp/all-features.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
             echo "ERROR: --all-features compiled -> no compile_error guard (vacuous gate!)"
+            exit 1
+          fi
+          if ! grep -q "mutually exclusive validator backends" /tmp/all-features.log; then
+            echo "::error::--all-features failed (exit $status) but NOT on the compile_error guard - this canary cannot tell a working guard from a broken build."
+            tail -n 20 /tmp/all-features.log | sed -e 's/^/::error::/'
             exit 1
           fi
           echo "Canary OK: --all-features was refused with compile_error as expected (PQ backends are mutually exclusive)."
@@ -1175,14 +1193,30 @@ jobs:
       - name: Licence inventory (summary)
         if: always()
         run: |
+          set -uo pipefail
+          # The licence VERDICT is the gate step above. This is the inventory,
+          # and an inventory that silently prints nothing is worse than no
+          # inventory: an empty code block reads as "no third-party licences"
+          # when it actually means `cargo deny list` died. The output is
+          # captured, the exit code is published with it, and emptiness is
+          # treated as the tooling failure it is.
+          set +e
+          cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
+            ${{ matrix.config }} list > /tmp/deny-list.log 2>&1
+          status=$?
+          set -e
           {
             echo "### Dependency licences - ${{ matrix.name }}"
             echo ""
             echo '```'
-            cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
-              ${{ matrix.config }} list 2>/dev/null | cut -c1-200 || true
+            cut -c1-200 /tmp/deny-list.log
             echo '```'
+            echo "(cargo deny list exit: $status)"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -s /tmp/deny-list.log ]; then
+            echo "::error::cargo deny list (${{ matrix.name }}) exited $status and produced no inventory - an empty licence list is a missing measurement, not a clean tree."
+            exit 1
+          fi
 
   fuzz-quick:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
