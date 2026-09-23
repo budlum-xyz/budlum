@@ -74,7 +74,19 @@ jobs:
           echo "Miri storage: $(grep -c 'test result: ok' /tmp/miri-storage.txt || echo '0') suites passed"
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
-        continue-on-error: true  # the storage sled dependency may be incompatible with Miri
+        # `continue-on-error: true` was here with the note "the storage sled
+        # dependency may be incompatible with Miri" - a hedge against a failure
+        # mode that has not occurred. Measured 2026-09-23 over the last nine
+        # completed runs of this workflow (35723653191, 35734888884,
+        # 35741876626, 35751380632, 35758105670, 35763407003, 35769354578,
+        # 35835976509, 35836929417): this step succeeded in all nine.
+        #
+        # So the softening was not protecting the job from a flaky dependency,
+        # it was standing between undefined behaviour in the storage layer and
+        # a red check - on the one module whose job is to persist consensus
+        # state. If sled ever does become Miri-incompatible the honest response
+        # is a named, dated exclusion of the offending test, not a blanket
+        # "whatever happens here does not count".
 
       # Miri's own output is the only thing that makes a red Miri check
       # fixable, and it lives on the log host. The commands above already tee to
