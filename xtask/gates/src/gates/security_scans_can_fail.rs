@@ -40,6 +40,11 @@
 //! gate, for the same reason: a suppression nobody can audit is worse than the
 //! finding it hides.
 
+//! 2026-09-23: the allow-list reached zero. Every softener the list pointed
+//! at was replaced in the workflows by an explicit exit-code path, so the
+//! list now approves nothing - it only stands ready, and anything that
+//! reappears is refused until somebody writes its reason here.
+
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -56,107 +61,27 @@ struct Allowed {
 
 /// Every softener in the tree, with its justification.
 ///
-/// Measured, not typed: the gate refuses an entry that matches nothing.
-const ALLOWED: &[Allowed] = &[
-    Allowed {
-        file: "ci.yml",
-        what: "budlum",
-        reason: "clippy pedantic/nursery ratchet reports a count against a baseline; \
-                 the baseline itself is enforced elsewhere and blocks",
-    },
-    Allowed {
-        file: "ci.yml",
-        what: "poa-isolation",
-        reason: "the tests block; the softened line collects output for the summary",
-    },
-    Allowed {
-        file: "ci.yml",
-        what: "license-compliance",
-        reason: "inventory listing for the job summary; the licence gate itself blocks",
-    },
-    Allowed {
-        file: "determinism.yml",
-        what: "cross-platform-determinism",
-        reason: "collects the existing suite's output; determinism is asserted by the \
-                 comparison step that follows and does block",
-    },
-    Allowed {
-        file: "docker-smoke.yml",
-        what: "devnet-multinode-smoke",
-        reason: "compose teardown must run whatever happened before it, and the smoke \
-                 assertions block separately",
-    },
-    Allowed {
-        file: "extra-tooling.yml",
-        what: "dead-deps",
-        reason: "cargo-shear is a second opinion beside cargo-machete, which blocks",
-    },
-    Allowed {
-        file: "extra-tooling.yml",
-        what: "binary-size",
-        reason: "size report for the PR summary; no threshold has been measured, so \
-                 there is nothing to fail against yet",
-    },
-    Allowed {
-        file: "fuzz-nightly.yml",
-        what: "fuzz-deep",
-        reason: "artefact upload runs only when a crash exists; the fuzz run blocks",
-    },
-    Allowed {
-        file: "miri.yml",
-        what: "asan",
-        reason: "the canary deliberately runs a program with a memory error, so that \
-                 command is expected to exit non-zero; the decision is made by the grep \
-                 that follows and the sanitizer run itself blocks",
-    },
-    Allowed {
-        file: "miri.yml",
-        what: "miri-crypto",
-        reason: "the storage module under Miri is slow and not yet clean; the crypto \
-                 module is the one that blocks",
-    },
-    Allowed {
-        file: "security-hardening.yml",
-        what: "machete",
-        reason: "root-tree machete duplicates the blocking run in extra-tooling.yml",
-    },
-    Allowed {
-        file: "semver.yml",
-        what: "semver-check",
-        reason: "the diagnostic step records evidence; the semver gate blocks",
-    },
-    Allowed {
-        file: "ci.yml",
-        what: "gates",
-        reason: "two softener shapes inside one blocking job, neither of which is the \
-                 verdict: the `|| true` lines are log-cleaning in surface/annotation \
-                 steps (`sed ... > tmp || true` before a grep that only reports), and \
-                 the single `continue-on-error` sits on the step that regenerates the \
-                 lib-test log for the badge gate - the suite's verdict belongs to the \
-                 `budlum` job, and a red copy of another job's verdict hides the gate \
-                 steps after it. The gate binary run itself carries neither softener \
-                 and blocks.",
-    },
-    Allowed {
-        file: "typos.yml",
-        what: "typos",
-        reason: "the `|| true` is in the `if: failure()` annotation step that re-runs \
-                 typos to surface the misspelled words on the API host; the verdict \
-                 step above it carries no softener and has already failed by the time \
-                 this line runs.",
-    },
-    // The two `supply-chain-extra.yml` entries that used to sit here are
-    // gone, not moved: the `|| true` they justified was removed from the
-    // workflow, so both scans now carry their own exit status. This gate's
-    // dead-entry rule reported them as soon as the softening disappeared,
-    // which is the intended direction - the list only ever shortens.
-];
-
-/// Softeners that must be removed rather than justified.
+/// 2026-09-23: the list is empty. The last fourteen entries were retired in
+/// one pass - not by being justified harder but by the tree hardening out
+/// from under them: every remaining masked exit became an explicit exit-code
+/// path first (the report steps learned to report their own failure, then
+/// the sweep emptied the bag entirely), and a list that justifies nothing is
+/// only ever a lie waiting for a reader. Six entries were already dead on
+/// this branch before the sweep (dead-deps, fuzz-deep, miri-crypto, machete,
+/// binary-size, license-compliance), which is the dead-entry rule working as
+/// designed. Any softener that returns must come back through this list, in
+/// a commit that carries its reason, or it fails here.
 ///
-/// One entry, and it is the reason this gate exists. Everything else on the
-/// list above is arguable; this one is not, because the failure it hides is a
-/// consensus failure rather than a test failure.
+/// Measured, not typed: the gate refuses an entry that matches nothing.
+const ALLOWED: &[Allowed] = &[];
+
+/// Softeners that must never exist, listed so a return is caught by name.
+///
+/// Five entries, and the first of them is the reason this gate exists: the
+/// failure it hid (tsan, softened in two places at once and canary-less) is
+/// a consensus failure rather than a test failure. These tools are not
+/// arguable in the way an allow-listed report is; a mask on any of them
+/// stands between a security verdict and the red check that owns it.
 const MUST_BLOCK: &[(&str, &str, &str)] = &[
     (
         "security-hardening.yml",
@@ -454,6 +379,18 @@ jobs:
         problems.push(String::from(
             "VACUOUS: a must-block job was accepted while softened",
         ));
+    }
+
+    // The allow-list is empty on the tree, so `Allowed` would never be
+    // constructed outside this canary; keep the type live and pin the rule
+    // that re-growing the list is a deliberate act, never a leftover.
+    let kept_alive = Allowed {
+        file: "x.yml",
+        what: "self-test",
+        reason: "constructed only so an empty allow-list never turns the type into dead code",
+    };
+    if kept_alive.file != "x.yml" || kept_alive.what != "self-test" || kept_alive.reason.is_empty() {
+        problems.push(String::from("BROKEN: the Allowed type drifted"));
     }
 
     if !problems.is_empty() {
