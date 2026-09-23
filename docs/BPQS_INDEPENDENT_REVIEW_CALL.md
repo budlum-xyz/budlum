@@ -44,13 +44,13 @@ ceremony lane and the KAT writer). Rust toolchain is pinned at 1.97.1.
    protocol-weight payloads); (c) check the section's arithmetic itself
    against the code (params, checksum gadget, quota).
 2. Family question: for the cold-committee anchor flow (window-paced,
-   at most q_max mints per epoch per member, offline ceremony), is the
-   in-family posture (signer-side message randomization plus one-time
-   quota, R-2/R-3 in the argument) defensible at the aimed security
-   label, or should the recommendation be a family change toward a
-   FORS/hyperstructure core (R-4), or a fallback to FIPS-205 tree class
-   for the anchor slot? The review's answer to this question
-   supersedes decision item 7's interim posture.
+   at most one mint per epoch per member, offline ceremony), is the
+   LANDED in-family posture (PRF-derived per-call randomizer + Q_MAX=1,
+   decision item 7 of 2026-09-22, in the crate since that date)
+   defensible at the aimed security label, or should the recommendation
+   be a family change toward a FORS/hyperstructure core (R-4), or a
+   fallback to FIPS-205 tree class for the anchor slot? The review's
+   answer to this question supersedes the landed interim posture.
 3. Poseidon load (A3): the canonical backend is Poseidon2-Goldilocks-16
    under an overwrite sponge with 512-bit capacity and an injective
    u32-element byte binding. Assess the assumption "the sponge binding

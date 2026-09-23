@@ -54,25 +54,56 @@ fn roundtrip<H: BpqsHash, P: BpqsParams>() {
 fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
     let signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
-    let mut sig =
+    let sig =
         sign_at_height::<H, P>(&signer, 2, 0, MSG).unwrap_or_else(|e| panic!("sign: {e}"));
-    sig.chains[0][0] ^= 0x01; // one bit in a revealed chain element
+    let mut chain_tamper = sig.clone();
+    chain_tamper.chains[0][0] ^= 0x01; // one bit in a revealed chain element
     assert!(
-        verify_at_height::<H, P>(signer.public(), 2, MSG, &sig).is_err(),
+        verify_at_height::<H, P>(signer.public(), 2, MSG, &chain_tamper).is_err(),
         "{}: single-bit chain tamper must refuse",
         P::NAME
     );
-    let mut sig2 =
-        sign_at_height::<H, P>(&signer, 2, 1, MSG).unwrap_or_else(|e| panic!("sign2: {e}"));
     // Flip the last *meaningful* byte of the path node: lanes carry a
     // P::N-byte prefix and a zero tail, so a tail flip would be invisible by
     // design (canonicity, not a defense gap).
-    sig2.path[0][P::N - 1] ^= 0x80;
+    let mut path_tamper = sig.clone();
+    path_tamper.path[0][P::N - 1] ^= 0x80;
     assert!(
-        verify_at_height::<H, P>(signer.public(), 2, MSG, &sig2).is_err(),
+        verify_at_height::<H, P>(signer.public(), 2, MSG, &path_tamper).is_err(),
         "{}: auth-path tamper must refuse",
         P::NAME
     );
+    // Randomizer tamper (2026-09-22 wire field): the bound digest rebinds
+    // over the carried randomizer, so a flipped bit elsewhere-lawful must
+    // still refuse.
+    let mut r_tamper = sig;
+    r_tamper.randomizer[0] ^= 0x01;
+    assert!(
+        verify_at_height::<H, P>(signer.public(), 2, MSG, &r_tamper).is_err(),
+        "{}: randomizer tamper must refuse",
+        P::NAME
+    );
+}
+
+/// Per-call randomizer semantics (2026-09-22, bar-1 record): the same tuple
+/// signs byte-identically (determinism; KAT stability), while a second
+/// message under the same (signer, epoch, count) draws a different
+/// randomizer - the anti-adaptive property of the PRF-derived r.
+fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
+    let signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+        .unwrap_or_else(|e| panic!("keygen: {e}"));
+    let a = sign_at_height::<H, P>(&signer, 1, 0, MSG).unwrap_or_else(|e| panic!("a: {e}"));
+    let a2 = sign_at_height::<H, P>(&signer, 1, 0, MSG).unwrap_or_else(|e| panic!("a2: {e}"));
+    assert_eq!(a, a2, "{}: identical tuple must sign byte-identically", P::NAME);
+    let b = sign_at_height::<H, P>(&signer, 1, 0, b"bpqs-backend-differential-payload-2")
+        .unwrap_or_else(|e| panic!("b: {e}"));
+    assert_ne!(
+        a.randomizer, b.randomizer,
+        "{}: different messages must draw different randomizers",
+        P::NAME
+    );
+    verify_at_height::<H, P>(signer.public(), 1, b"bpqs-backend-differential-payload-2", &b)
+        .unwrap_or_else(|e| panic!("b verify: {e}"));
 }
 
 fn epoch_replay_refuses<H: BpqsHash, P: BpqsParams>() {
@@ -126,6 +157,14 @@ macro_rules! backend_battery {
                 super::tamper_refuses::<$backend, ParamsBattL3>();
             }
             #[test]
+            fn randomizer_bd_l5_fast() {
+                super::randomizer_bound_and_deterministic::<$backend, ParamsTestFast>();
+            }
+            #[test]
+            fn randomizer_bd_l3_lane() {
+                super::randomizer_bound_and_deterministic::<$backend, ParamsBattL3>();
+            }
+            #[test]
             fn epoch_replay_refuses_l5_fast() {
                 super::epoch_replay_refuses::<$backend, ParamsTestFast>();
             }
@@ -153,9 +192,9 @@ backend_battery!(poseidon_battery, Poseidon2GoldilocksHash);
 fn backends_are_three_distinct_functions() {
     // One framing, one payload, three different digests: proves the battery
     // above is not comparing one function to itself under three names.
-    let a = Sha3_256Hash::digest32(crate::domains::MESSAGE_BIND, &[b"x"]);
-    let b = Shake256Hash::digest32(crate::domains::MESSAGE_BIND, &[b"x"]);
-    let c = Poseidon2GoldilocksHash::digest32(crate::domains::MESSAGE_BIND, &[b"x"]);
+    let a = Sha3_256Hash::digest32(crate::domains::MESSAGE_BIND_V1, &[&[0u8; 16], b"x"]);
+    let b = Shake256Hash::digest32(crate::domains::MESSAGE_BIND_V1, &[&[0u8; 16], b"x"]);
+    let c = Poseidon2GoldilocksHash::digest32(crate::domains::MESSAGE_BIND_V1, &[&[0u8; 16], b"x"]);
     assert_ne!(a, b);
     assert_ne!(b, c);
     assert_ne!(a, c);
@@ -166,6 +205,7 @@ fn backends_are_three_distinct_functions() {
 fn wire_bytes<P: BpqsParams>(sig: &BpqsSignature<P>) -> alloc::vec::Vec<u8> {
     let mut wire = alloc::vec::Vec::with_capacity(4 + P::LEN * 32 + P::T_LOG2 * 32);
     wire.extend_from_slice(&sig.epoch.to_le_bytes());
+    wire.extend_from_slice(&sig.randomizer);
     for chain in sig.chains.iter().take(P::LEN) {
         wire.extend_from_slice(chain);
     }
@@ -203,17 +243,17 @@ const KAT_ROWS: [KatRow; 3] = [
     KatRow {
         backend: "sha3-256",
         root_hex: "998c0b4320fb17a32726ade9770b4b148e206d16a345ed2601dc1bfdfe4a317f",
-        sig_digest_hex: "9f4d6fcab4a14346102398dbe23914aeb353f07799c5be0f50e88ad40ea8fb7d",
+        sig_digest_hex: "e2c41b1e1ffdb74d19fcfd70a6c53c8e8d40f47153d406c7036c4ff125aefea3",
     },
     KatRow {
         backend: "shake256",
         root_hex: "a1f1f4296ebd4e91a907ea070045b44689d0e28f94e0d4d543e01706cca32434",
-        sig_digest_hex: "0ad6abf8b6d77d0e00a69a1f94290d6fbcbeb88a750045d06e1cd9a39d4bb3fa",
+        sig_digest_hex: "2684d048e716e9aa1ca393ee55697eaae1bd82c15ea67b250c0a4b92dffec22d",
     },
     KatRow {
         backend: "poseidon2-goldilocks-16",
         root_hex: "fe3a689123f38a5f39d8aadb4e415f5102c539829f0212c95af5a95b98655497",
-        sig_digest_hex: "4a71ec8eaccb979c4dd7552313661e4e1b00979653801488c2ccd030f4f40366",
+        sig_digest_hex: "eec36121946c210cda9ddc3309364a57c80dfb903127f6cf91d3c7bb7fc2c013",
     },
 ];
 
@@ -263,13 +303,14 @@ fn kat_file_writer() {
         kat_compute::<Poseidon2GoldilocksHash>(),
     ];
     std::println!("# Budlum-BPQS known-answer vectors v1 (milestone M2, 2026-09-22)");
-    std::println!("# construction: epoch-chained Winternitz few-time, q_max=4");
+    std::println!("# construction: epoch-chained Winternitz (one-time per epoch, q_max=1,");
+    std::println!("#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, 2026-09-22 wire)");
     std::println!("# row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash");
     std::println!("#      discipline to the canonical L5/L3 rows, ceremony depth pruned.");
     std::println!("# pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',");
     std::println!("#       signed at height 3 (epoch 1), quota counter 0.");
     std::println!(
-        "# sig_digest is SHA3-256 over the wire sketch (epoch_le || LEN chains || path)."
+        "# sig_digest is SHA3-256 over the wire sketch (epoch_le || randomizer || LEN chains || path)."
     );
     for (name, (root, sig_digest)) in KAT_ROWS.iter().zip(rows.iter()) {
         std::println!(

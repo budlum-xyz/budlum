@@ -1,10 +1,11 @@
 # Budlum-BPQS known-answer vectors v1 (milestone M2, 2026-09-22)
-# construction: epoch-chained Winternitz few-time, q_max=4
+# construction: epoch-chained Winternitz (one-time per epoch, q_max=1,
+#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, 2026-09-22 wire)
 # row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash
 #      discipline to the canonical L5/L3 rows, ceremony depth pruned.
 # pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',
 #       signed at height 3 (epoch 1), quota counter 0.
-# sig_digest is SHA3-256 over the wire sketch (epoch_le || LEN chains || path).
-backend=sha3-256 root=998c0b4320fb17a32726ade9770b4b148e206d16a345ed2601dc1bfdfe4a317f sig_digest=9f4d6fcab4a14346102398dbe23914aeb353f07799c5be0f50e88ad40ea8fb7d
-backend=shake256 root=a1f1f4296ebd4e91a907ea070045b44689d0e28f94e0d4d543e01706cca32434 sig_digest=0ad6abf8b6d77d0e00a69a1f94290d6fbcbeb88a750045d06e1cd9a39d4bb3fa
-backend=poseidon2-goldilocks-16 root=fe3a689123f38a5f39d8aadb4e415f5102c539829f0212c95af5a95b98655497 sig_digest=4a71ec8eaccb979c4dd7552313661e4e1b00979653801488c2ccd030f4f40366
+# sig_digest is SHA3-256 over the wire sketch (epoch_le || randomizer || LEN chains || path).
+backend=sha3-256 root=998c0b4320fb17a32726ade9770b4b148e206d16a345ed2601dc1bfdfe4a317f sig_digest=e2c41b1e1ffdb74d19fcfd70a6c53c8e8d40f47153d406c7036c4ff125aefea3
+backend=shake256 root=a1f1f4296ebd4e91a907ea070045b44689d0e28f94e0d4d543e01706cca32434 sig_digest=2684d048e716e9aa1ca393ee55697eaae1bd82c15ea67b250c0a4b92dffec22d
+backend=poseidon2-goldilocks-16 root=fe3a689123f38a5f39d8aadb4e415f5102c539829f0212c95af5a95b98655497 sig_digest=eec36121946c210cda9ddc3309364a57c80dfb903127f6cf91d3c7bb7fc2c013

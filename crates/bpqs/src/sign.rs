@@ -65,6 +65,13 @@ impl<P: BpqsParams> BpqsPublicKey<P> {
 pub struct BpqsSignature<P: BpqsParams> {
     /// Epoch the signature was minted in (`floor(height / window)`).
     pub epoch: u32,
+    /// Per-call randomizer (2026-09-22, bar-1 record): 16 bytes derived as
+    /// `H(RANDOMIZER, root_seed || epoch_le || count_le || msg)`, bound into
+    /// the signed digest (`MESSAGE_BIND_V1`). It is PRF-derived, not
+    /// entropy-fresh: deterministic per (signer, epoch, count, message),
+    /// so an adaptive attacker steering payloads cannot evaluate the
+    /// randomization in advance, while replay/KAT determinism survives.
+    pub randomizer: [u8; 16],
     /// Winternitz chain segments: the first `P::LEN` entries carry the
     /// signature, the tail is zero. Each lane holds its meaningful prefix of
     /// `P::N` bytes; the rest is zero padding (module contract, `wots`).
@@ -146,9 +153,21 @@ pub fn sign_at_height<H: BpqsHash, P: BpqsParams>(
     }
     let epoch_seed = prf_epoch_seed::<H>(&signer.root_seed, epoch);
     let chains = wots::epoch_secret_chains::<H, P>(&epoch_seed);
-    let bound = H::digest32(domains::MESSAGE_BIND, &[msg]);
+    let r_wide = H::digest32(
+        domains::RANDOMIZER,
+        &[
+            &signer.root_seed,
+            &epoch.to_le_bytes(),
+            &per_epoch_count.to_le_bytes(),
+            msg,
+        ],
+    );
+    let mut randomizer = [0u8; 16];
+    randomizer.copy_from_slice(&r_wide[..16]);
+    let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&randomizer, msg]);
     let mut signature = BpqsSignature {
         epoch,
+        randomizer,
         chains: wots::sign_chains::<H, P>(&chains, &bound),
         path: merkle::auth_path::<P>(&signer.levels, epoch as usize)?,
         _private: core::marker::PhantomData,
@@ -185,7 +204,7 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     if sig.epoch >= (1u32 << P::T_LOG2) {
         return Err(BpqsError::Malformed("epoch beyond tree headroom"));
     }
-    let bound = H::digest32(domains::MESSAGE_BIND, &[msg]);
+    let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&sig.randomizer, msg]);
     let rebuilt = wots::verify_chains::<H, P>(&sig.chains, &bound);
     merkle::verify_path::<H, P>(&rebuilt, sig.epoch as usize, &sig.path, &public.root)
 }
@@ -230,17 +249,15 @@ mod sign_tests {
     }
 
     #[test]
-    fn fifth_signature_in_one_epoch_refuses() {
+    fn second_signature_in_one_epoch_refuses() {
         let signer = committee();
-        for count in 0..4u32 {
-            sign_at_height::<H, P>(&signer, 3, count, b"m")
-                .unwrap_or_else(|e| panic!("count {count} up to q_max must sign: {e}"));
-        }
+        sign_at_height::<H, P>(&signer, 3, 0, b"m")
+            .unwrap_or_else(|e| panic!("first mint of the epoch must sign: {e}"));
         assert_eq!(
-            sign_at_height::<H, P>(&signer, 3, 4, b"m"),
+            sign_at_height::<H, P>(&signer, 3, 1, b"m"),
             Err(BpqsError::QuotaExceeded {
                 epoch: 0,
-                attempted: 5
+                attempted: 2
             })
         );
     }

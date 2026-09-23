@@ -59,15 +59,13 @@ fn signature_wire_size_matches_the_cost_model() {
 fn quota_violation_is_epoch_scoped_not_window_scoped() {
     let signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen([1u8; 32], EpochWindow(2))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
-    // Four mints inside epoch 1 (heights 2,3 share it), then refusal there,
+    // One mint inside epoch 1 (heights 2,3 share it), then refusal there,
     // then epoch 2 (height 4) signs again: the quota binds the epoch,
-    // not the call history.
-    for count in 0..4u32 {
-        sign_at_height::<H, ParamsTestFast>(&signer, 2, count, b"x")
-            .unwrap_or_else(|e| panic!("{e}"));
-    }
+    // not the call history (one-time posture since 2026-09-22).
+    sign_at_height::<H, ParamsTestFast>(&signer, 2, 0, b"x")
+        .unwrap_or_else(|e| panic!("{e}"));
     assert!(matches!(
-        sign_at_height::<H, ParamsTestFast>(&signer, 3, 4, b"x"),
+        sign_at_height::<H, ParamsTestFast>(&signer, 3, 1, b"x"),
         Err(BpqsError::QuotaExceeded { epoch: 1, .. })
     ));
     sign_at_height::<H, ParamsTestFast>(&signer, 4, 0, b"x")
@@ -92,7 +90,7 @@ fn epoch_chain_derivation_is_message_independent() {
     let chains = wots::epoch_secret_chains::<H, ParamsTestFast>(&seed);
     let vk = wots::vk_of_chains::<H, ParamsTestFast>(&chains);
     for msg in [&b"one"[..], &b"two"[..]] {
-        let bound = Sha3_256Hash::digest32(domains::MESSAGE_BIND, &[msg]);
+        let bound = Sha3_256Hash::digest32(domains::MESSAGE_BIND_V1, &[&[0u8; 16], msg]);
         let sig = wots::sign_chains::<H, ParamsTestFast>(&chains, &bound);
         let rebuilt = wots::verify_chains::<H, ParamsTestFast>(&sig, &bound);
         assert_eq!(rebuilt, vk, "any message must rebuild the same leaf");
@@ -133,6 +131,7 @@ fn kat_freeze_digest_is_stable() {
         verify_at_height::<H, ParamsTestFast>(signer.public(), height, msg, &sig)
             .unwrap_or_else(|e| panic!("kat verify: {e}"));
         kat_hasher.update(sig.epoch.to_le_bytes());
+        kat_hasher.update(sig.randomizer);
         for lane in sig.chains[..ParamsTestFast::LEN].iter() {
             kat_hasher.update(lane);
         }
@@ -150,6 +149,7 @@ fn kat_freeze_digest_is_stable() {
         .unwrap_or_else(|e| panic!("kat l3 verify: {e}"));
     kat_hasher.update(l3.public().root);
     kat_hasher.update(sig3.epoch.to_le_bytes());
+    kat_hasher.update(sig3.randomizer);
 
     let out: [u8; 32] = kat_hasher.finalize().into();
     assert_eq!(
@@ -162,6 +162,9 @@ fn kat_freeze_digest_is_stable() {
 /// the M1 battery green; an editor who changes it must say why in the commit
 /// message (the test prints the live value, so forgery is visible in CI).
 const EXPECTED_KAT_DIGEST: [u8; 32] = [
-    1, 5, 136, 57, 252, 64, 120, 126, 206, 29, 138, 213, 188, 93, 218, 15, 27, 94, 166, 173, 245,
-    185, 163, 141, 44, 24, 241, 74, 252, 246, 158, 105,
+    85, 145, 87, 46, 99, 103, 152, 205, 42, 80, 194, 210, 180, 78, 135, 22, 169, 19, 217, 123, 43,
+    0, 188, 129, 248, 88, 2, 110, 247, 204, 237, 164,
 ];
+// Re-frozen 2026-09-22 for the bar-1 wire change (randomizer field +
+// MESSAGE_BIND_V1): the migration is justified in the commit message of the
+// implementation; the hasher now also absorbs sig.randomizer.
