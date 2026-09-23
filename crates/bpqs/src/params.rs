@@ -26,14 +26,20 @@ pub trait BpqsParams:
     const LEN: usize;
     /// Epoch Merkle tree height; number of leaves is `1 << T_LOG2`.
     const T_LOG2: usize;
-    /// Few-time ceiling per epoch (2026-09-19 decision: 4).
-    const Q_MAX: u32 = 4;
+    /// Few-time ceiling per epoch. 2026-09-19 decision: 4. 2026-09-22
+    /// decision (bar-1 record, SECURITY-ARGUMENT.md section 6): 1 - the
+    /// few-time domination hunt at q=4 was priced ~2^23 classical
+    /// (checksum-exact), tens of orders below the level-5 line, so the
+    /// in-family posture moved to one-time. The quadratic-shape caveat
+    /// stays with the verifier: quota is a ceremony-log rule, not a
+    /// property the wire can prove.
+    const Q_MAX: u32 = 1;
     /// Human name, for test vectors and error strings.
     const NAME: &'static str;
 }
 
 /// Canonical set: NIST level-5 budget. Signature
-/// `67 * 32 (chains) + 16 * 32 (path) + 4 (epoch)` ≈ 2.7 KB.
+/// `4 (epoch) + 16 (randomizer) + 67 * 32 (chains) + 16 * 32 (path)` ≈ 2.7 KB.
 ///
 /// LEN1 = 2·32 = 64; LEN2 = floor(log16(64·15)) + 1 = floor(2.47) + 1 = 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -51,7 +51,11 @@ tails to prove the tail is invisible by design).
    LEN2 = 3 checksum nibbles, w = 16).
 4. Chain step: `step(x, i) = H(WOTS_CHAIN_STEP, x[..N] || u32le(i))[..N]`.
    Walking to position d: `walk(c_i, d, i) = step applied d times`.
-5. Message binding: `bound = H(MESSAGE_BIND, msg)`, full 32 bytes.
+5. Message binding: `bound = H(MESSAGE_BIND_V1, r16 || msg)`, full 32
+   bytes, where r16 is the 16-byte randomizer field carried in the
+   signature (2026-09-22 posture, priced in section 6 and implemented
+   the same day): `r16 = H(RANDOMIZER, root_seed || epoch_le ||
+   count_le || msg)[..16]`.
    Digits: the N-byte prefix of `bound` split into 2N nibbles (LEN1), plus
    LEN2 base-16 nibbles of `sum(w-1 - d_i)` (the Winternitz checksum).
 6. Signature: chain segments at digit positions per chain (walk-forward
@@ -203,7 +207,7 @@ of one epoch. For chain i the observer can produce the segment at any
 position >= min_j d_i^(j) (walk forward from the least revealed
 position); positions below min are inversion-locked. Forgery of a NEW
 message succeeds exactly when every one of the LEN digit positions of
-H(MESSAGE_BIND, msg) lies at or above the per-chain minima (the 3
+H(MESSAGE_BIND_V1, r16 || msg) lies at or above the per-chain minima (the 3
 checksum digits included; their dependence on the message digits is a
 refinement stated below, not swept).
 
@@ -316,31 +320,35 @@ Design responses the literature and this codebase can actually support:
   priced; leaning on it alone recasts BPQS' security as a property of
   the anchor flow rather than the primitive - inside this document the
   flow is out of scope, so R-1 is recorded as context, not as a fix.
-- R-2 (signer-side message randomization): sign H(MESSAGE_BIND,
-  r || msg) with fresh 16-byte r carried in the signature. This closes
-  the *adaptive* amplification (an attacker steering an honest member's
-  future minima by feeding it crafted payloads), but it does NOT close
-  the offline hunt on already-revealed minima (the hunter varies both
-  msg and r'). Residual: 2^61 at q=1 unchanged at the same dimensions.
-- R-3 (one-time posture): set q_max = 1, which is what the code's
-  quota machinery enforces with a constant change and no redesign;
-  combined with R-2 this is the strongest in-family posture available:
-  every epoch key is one-time, randomized per mint, existential-hunt
-  floor ~2^61 classical.
+- R-2 (signer-side message randomization) - IMPLEMENTED 2026-09-22, one
+  deliberate variant within the response's documented scope: r16 is
+  PRF-DERIVED (deterministic per (root_seed, epoch, count, msg)) rather
+  than entropy-fresh. The anti-adaptive property is identical (the
+  attacker cannot evaluate the PRF off-line, so feeding crafted payloads
+  cannot steer future digests), the offline hunt on already-revealed
+  minima remains open (documented residual), and determinism preserves
+  replay/KAT stability with zero new entropy plumbing on the cold
+  device. Carried as `sig.randomizer` (wire +16 bytes) and bound under
+  MESSAGE_BIND_V1 (the v0 unbound tag is retired; nothing accepts v0
+  digests).
+- R-3 (one-time posture) - IMPLEMENTED 2026-09-22: Q_MAX = 1. Combined
+  with R-2 this is the strongest in-family posture: every epoch key is
+  one-time, digest-randomized per mint, existential-hunt floor ~2^61
+  classical (~2^60.7 by the exact checksum refinement).
 - R-4 (family change toward FORS/hyperstructure): the textbook answer
   to "WOTS under few-time/many-hunt pressure" is the SPHINCS class
   answer (sign verifiably-uncontrolled short strings with WOTS, put the
   hash-few-time core into FORS). This is a design family revision, i.e.
   a research decision, not a patch.
 
-Decision item 7 (PENDING, user decision follows the standing pattern of
-the 2026-09-19 session): choose the residual-risk posture for bar-1
-closure. Recommended interim posture (this document's own weighing):
-R-2 + R-3 now (small code delta, strongest in-family posture), with the
-family review (R-4) handed to bar 3 (independent review) as a named
-question. Until the item is decided, bar item 1 is "written, open
-decision", the production slot stays fail-closed, and no claim in this
-document should be quoted without section 6 attached.
+Decision item 7 - DECIDED 2026-09-22 (R-2 + R-3, the interim posture
+this document recommended, landed the same day): PRF-derived per-call
+randomizer with Q_MAX = 1. What REMAINS deliberately open: the family
+question (R-4), handed to bar 3 (the independent review) as named
+question 2 - the review's answer supersedes this interim posture. Bar
+item 1 is closed at the in-family level pending that review; the
+production slot stays fail-closed through every bar, and the few-time
+term of section 6 stays quoted whenever this document is quoted.
 
 ## 7. Quantum accounting summary
 
@@ -352,9 +360,10 @@ are inside-out as section 5 states):
 - Merkle leaf/node second-preimage: 2^256 / 2^128
 - vk/leaf/node collision (where collision matters): 2^128 / ~2^85
 - few-time domination hunt (q=4): ~2^23 / ~2^12 (checksum-exact
-  refinement, section 6; first-order uniform said ~2^18 / ~2^9) - THE
-  binding term today
-- one-time posture floor (q=1): ~2^61 / ~2^31 (exact checksum: 2^60.7)
+  refinement, section 6; first-order uniform said ~2^18 / ~2^9) -
+  retired posture (decision item 7); quoted for the record
+- one-time posture floor (q=1) - THE SHIPPED POSTURE: ~2^61 / ~2^31
+  (exact checksum: 2^60.7)
 
 NIST level-5 target (classical ~2^256-class, quantum >= 2^128): met by
 every mechanism except the few-time term; that term is decision item 7.
@@ -366,9 +375,10 @@ every mechanism except the few-time term; that term is decision item 7.
   exact joint domination over the three checksum ranks, pool saturation
   at q ~ 4-8; script-pinned). What is still open is the
   message-into-checksum cross-correlation stated at the end of the
-  refinement, plus the family question: settle whether the in-family
-  posture (R-2/R-3) suffices for the cold-committee use case or whether
-  R-4 becomes the recommendation.
+  refinement, plus the family question: settle whether the LANDED
+  in-family posture (R-2 + R-3 with the PRF-derived randomizer, decision
+  item 7 of 2026-09-22) suffices for the cold-committee use case or
+  whether R-4 becomes the recommendation.
 - bar 4 (VerifyMerkle expressibility): unchanged by this document; the
   verify chain's primitive projection (Poseidon single-primitive lane)
   stands as section 5/A3 records.
@@ -404,8 +414,10 @@ every mechanism except the few-time term; that term is decision item 7.
 Domain tags (exact bytes, from `lib.rs` `domains`):
 BPQS-PRF-EPOCH-SEED-v0, BPQS-WOTS-CHAIN-SEED-v0, BPQS-WOTS-CHAIN-STEP-v0,
 BPQS-WOTS-VK-COMPRESS-v0, BPQS-MERKLE-LEAF-v0, BPQS-MERKLE-NODE-v0,
-BPQS-MESSAGE-BIND-v0.
+BPQS-MESSAGE-BIND-v1, BPQS-RANDOMIZER-v0 (2026-09-22 wire: the v0
+unbound tag is retired; nothing accepts v0 digests).
 
-Rows: L5 - N=32, w=16, LEN1=64, LEN2=3, LEN=67, T_LOG2=16, Q_MAX=4,
-wire 2660 B; L3 - N=24, LEN1=48, LEN2=3, LEN=51, T_LOG2=16, Q_MAX=4,
-wire 2148 B. Test lanes share hash discipline at T_LOG2 = 4.
+Rows: L5 - N=32, w=16, LEN1=64, LEN2=3, LEN=67, T_LOG2=16, Q_MAX=1,
+wire 2676 B (epoch 4 + randomizer 16 + chains 2144 + path 512); L3 -
+N=24, LEN1=48, LEN2=3, LEN=51, T_LOG2=16, Q_MAX=1, wire 2164 B. Test
+lanes share hash discipline at T_LOG2 = 4.

@@ -59,7 +59,17 @@ pub mod domains {
     /// Merkle node label: node = H(DOM_NODE, left, right).
     pub const MERKLE_NODE: &[u8] = b"BPQS-MERKLE-NODE-v0";
     /// Domain the anchor digest is bound to before WOTS signing.
-    pub const MESSAGE_BIND: &[u8] = b"BPQS-MESSAGE-BIND-v0";
+    /// Message binding with the per-call randomizer (2026-09-22 decision,
+    /// bar-1 record): `H(tag, r16 || msg)` where r16 is the 16-byte
+    /// randomizer carried in the signature. v0 (unbound randomizer) is
+    /// retired with the wire-format change; nothing accepts v0 digests.
+    pub const MESSAGE_BIND_V1: &[u8] = b"BPQS-MESSAGE-BIND-v1";
+    /// Per-call signature randomizer derivation:
+    /// `H(tag, root_seed || epoch_le || count_le || msg)`, first 16 bytes
+    /// carried in the signature. Deterministic per (signer, epoch, count,
+    /// message): adaptive amplification is closed because the attacker
+    /// cannot evaluate the PRF, while KAT/replay determinism is preserved.
+    pub const RANDOMIZER: &[u8] = b"BPQS-RANDOMIZER-v0";
 }
 
 pub mod epoch;

@@ -53,13 +53,16 @@ to a live second anchor family once it passes the acceptance bar.
 - **Decided shape (user decisions 2026-09-19, pinned in the workspace
   repo's 2026-09-19 BPQS F2 design pre-registration):** epoch-chained
   Winternitz few-time signatures. Epochs run on chain tempo (the
-  settlement window; no calendar), q_max = 4 minted signatures per epoch
+  settlement window; no calendar), q_max = 1 minted signature per epoch (2026-09-09... 2026-09-19 decision was
+   4; decision item 7 of 2026-09-22 - the bar-1 record - moved the posture
+   to one-time after the few-time domination hunt was priced; see
+   crates/bpqs/SECURITY-ARGUMENT.md section 6)
   (quota breach = loud protocol fault, signer fail-closed), dual-budget
   parameter rows: canonical L5 (n=32, w=16, T=2^16) plus a transportable
   L3 (n=24). Scope pinned to the cold-committee anchor flow; the
   reserved `BudlumBpqsReserved` slot stays fail-closed throughout.
 - **Promotion bar (to live family):**
-  1. documented security argument at NIST level 5 (WRITTEN: crates/bpqs/SECURITY-ARGUMENT.md; one open decision item inside - the few-time domination-hunt pricing, section 6 - so the item is not marked complete until that decision lands),
+  1. documented security argument at NIST level 5 (WRITTEN: crates/bpqs/SECURITY-ARGUMENT.md; decision item 7 landed 2026-09-22 - PRF-derived per-call randomizer + Q_MAX=1, the few-time pricing of section 6 - so the item is closed at the in-family level; the family question it left open rides with bar 3 as named question 2),
   2. reference implementation plus differential tests against the
      incumbent PQ crates - LANDED (see below),
   3. at least one independent review,
