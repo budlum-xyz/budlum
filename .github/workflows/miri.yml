@@ -54,7 +54,17 @@ jobs:
           # run that never executed a test: both print a green step. The count
           # was printed and then thrown away (`|| echo '0'` made the empty case
           # the quietest one of all), so the number is turned into a threshold.
-          n=$(grep -c 'test result: ok' /tmp/miri-crypto.txt || true)
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          n=$(grep -c 'test result: ok' /tmp/miri-crypto.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-crypto.txt (grep exit $grep_status) - the Miri crypto count is missing, not zero."
+            exit 1
+          fi
           echo "Miri crypto: $n suites passed"
           if [ "${n:-0}" -lt 1 ]; then
             echo "::error::Miri crypto reported $n passing suites - a UB gate that inspects nothing is not a pass."
@@ -76,7 +86,17 @@ jobs:
           # run that never executed a test: both print a green step. The count
           # was printed and then thrown away (`|| echo '0'` made the empty case
           # the quietest one of all), so the number is turned into a threshold.
-          n=$(grep -c 'test result: ok' /tmp/miri-budvm.txt || true)
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          n=$(grep -c 'test result: ok' /tmp/miri-budvm.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-budvm.txt (grep exit $grep_status) - the Miri bud-vm count is missing, not zero."
+            exit 1
+          fi
           echo "Miri bud-vm: $n suites passed"
           if [ "${n:-0}" -lt 1 ]; then
             echo "::error::Miri bud-vm reported $n passing suites - a UB gate that inspects nothing is not a pass."
@@ -93,7 +113,17 @@ jobs:
           # run that never executed a test: both print a green step. The count
           # was printed and then thrown away (`|| echo '0'` made the empty case
           # the quietest one of all), so the number is turned into a threshold.
-          n=$(grep -c 'test result: ok' /tmp/miri-storage.txt || true)
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          n=$(grep -c 'test result: ok' /tmp/miri-storage.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-storage.txt (grep exit $grep_status) - the Miri storage count is missing, not zero."
+            exit 1
+          fi
           echo "Miri storage: $n suites passed"
           if [ "${n:-0}" -lt 1 ]; then
             echo "::error::Miri storage reported $n passing suites - a UB gate that inspects nothing is not a pass."
@@ -208,11 +238,27 @@ jobs:
           # had caught it; the shadow byte dump was right there in the log. So the canary
           # was measuring its own shell logic rather than the tool.
           #
-          # `|| true` is deliberate: this command is EXPECTED TO FAIL, because it
-          # runs an intentional memory error. The decision is made by the grep below.
-          # and that one blocks.
+          # This command is EXPECTED TO FAIL: it runs an intentional memory
+          # error. The verdict belongs to the grep below, and that one blocks.
+          #
+          # But `|| true` did more than tolerate the expected failure - it also
+          # erased the exit code, so a canary that never compiled and a canary
+          # that ASan correctly aborted looked identical here. The status is
+          # captured and printed as evidence instead; a canary that exits ZERO
+          # is its own finding, because a deliberate use-after-free that runs
+          # cleanly means the sanitizer is not instrumenting anything.
+          set +e
           cargo +nightly-2026-07-19 run -Zbuild-std \
-            --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1 || true
+            --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1
+          canary_status=$?
+          set -e
+          echo "ASAN_CANARY_EXIT: $canary_status (non-zero is expected here)"
+          if [ "$canary_status" -eq 0 ]; then
+            echo "CANARY FAILED: the deliberate memory error ran to a CLEAN EXIT," >&2
+            echo "so ASan is not instrumenting this binary at all." >&2
+            tail -25 /tmp/asan-canary.log >&2
+            exit 1
+          fi
           if grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope" \
                /tmp/asan-canary.log; then
             echo "canary OK: ASan caught the deliberately written memory error."
