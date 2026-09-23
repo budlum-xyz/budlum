@@ -90,7 +90,19 @@ jobs:
         run: |
           set +o pipefail
           tmp=$(mktemp)
-          typos --config .quality/typos.toml --format long > "$tmp" 2>&1 || true
+          # Surface step (`if: failure()`): typos already cast the verdict
+          # above. This re-run exists to carry the misspelled words onto the API
+          # host. It exits non-zero BECAUSE it found them, so that status is
+          # evidence; what must not stay silent is a re-run that produced no
+          # output at all, because then the red check still names no word.
+          set +e
+          typos --config .quality/typos.toml --format long > "$tmp" 2>&1
+          typos_status=$?
+          set -e
+          echo "::notice::typos surface re-run exit: $typos_status"
+          if [ ! -s "$tmp" ]; then
+            echo "::error::the typos surface produced no output (exit $typos_status) - the spell check is red and this annotation cannot name a single word."
+          fi
           sed -e 's/\x1b\[[0-9;]*m//g' "$tmp" | grep -E "^In |^error|-->|misspelled|suggestion|Found" | head -n 9 \
             | sed -e "s@^@::error::@"
           printf '::error::%s output lines from the scan; first 9 matching lines shown\n' \

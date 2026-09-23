@@ -117,7 +117,30 @@ jobs:
       - name: 4-node compose smoke (mesh/liveness/metrics/RPC-izolasyon)
         run: |
           chmod +x ops/scripts/devnet-multinode-smoke.sh
-          ./ops/scripts/devnet-multinode-smoke.sh || { docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke ps || true; docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150 || true; exit 1; }
+          # The smoke script owns the verdict and the `exit 1` below preserves
+          # it. The two `docker compose` calls in the failure branch are
+          # DIAGNOSTICS printed on the way out, and `|| true` let both of them
+          # come back empty without saying so - which is how a red multi-node
+          # run ends up with no container state and no logs attached to it.
+          if ! ./ops/scripts/devnet-multinode-smoke.sh; then
+            echo "::error::devnet multi-node smoke failed; container state and logs follow."
+            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke ps; then
+              echo "::error::\`docker compose ps\` also failed - the failure diagnosis has no container state."
+            fi
+            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150; then
+              echo "::error::\`docker compose logs\` also failed - the failure diagnosis has no node logs."
+            fi
+            exit 1
+          fi
       - name: Teardown (always)
         if: always()
-        run: docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke down -v --remove-orphans || true
+        # Teardown runs under `if: always()`, so it must not overwrite the
+        # smoke verdict with a cleanup failure - but a teardown that fails
+        # leaves containers and volumes behind on a shared runner, and `|| true`
+        # made that state invisible. It is reported as a warning and the step
+        # still exits clean.
+        run: |
+          set -uo pipefail
+          if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke down -v --remove-orphans; then
+            echo "::warning::teardown failed - containers or volumes from this run may still exist on the runner. The job verdict is unchanged (it belongs to the smoke step)."
+          fi
