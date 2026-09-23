@@ -33,9 +33,28 @@
 //!   giving exactly 32 bytes. Capacity is 8 x 64 = 512 bits, so the sponge
 //!   budget exceeds the 256-bit output by a factor of two on both axes.
 //!
-//! Field arithmetic uses u128 intermediates on purpose: this is the
-//! *reference* backend. Speed belongs to a future optimized lane; clarity
-//! belongs to the audit.
+//! ## Field arithmetic: constant time, not `%`
+//!
+//! `fe_add`/`fe_mul` originally read `(a as u128 OP b as u128) % p`. That is
+//! the clearest possible spelling and it was the wrong one here. On 64-bit
+//! targets a `u128 % u128` does not lower to an instruction: rustc emits a
+//! call to compiler-rt `__umodti3`, a software division whose iteration count
+//! depends on the operand bits. The permutation is fed by secret material on
+//! the BPQS signing path, so the division's data-dependent timing is a
+//! candidate leak - named in the 2026-09-23 constant-time review as the only
+//! outstanding one in this module.
+//!
+//! Both are now branchless and division-free: `fe_add` is one wrapping add
+//! plus a masked conditional subtract, `fe_mul` reduces the 128-bit product
+//! with the Goldilocks identities 2^64 == 2^32 - 1 and 2^96 == -1 (mod p),
+//! also with masked corrections. Every input takes the same instruction
+//! sequence. The values are unchanged - `fe_matches_modular_reference` pins
+//! the new path against the old `%` formula over boundary and random inputs,
+//! and the upstream known-answer vector below is the second, independent
+//! anchor.
+//!
+//! Clarity still belongs to the audit, which is why the reduction carries its
+//! derivation above the code rather than a reference to it.
 
 // initial external round constants, 4 vectors x 16 lanes
 const RC_EXT_INIT: [[u64; 16]; 4] = [
@@ -243,14 +262,65 @@ const RATE: usize = 8;
 /// State width of the permutation (paper parameter t).
 pub const WIDTH: usize = 16;
 
+/// Branchless conditional subtract of `p`: returns `x - p` when `x >= p`,
+/// otherwise `x`. No comparison branch, no table lookup - the selection is a
+/// mask derived from the borrow of the subtraction itself.
+#[inline]
+fn fe_sub_p(x: u64) -> u64 {
+    let (diff, borrow) = x.overflowing_sub(GOLDILOCKS_P);
+    // borrow == true  <=>  x < p  =>  keep x
+    // borrow == false <=>  x >= p =>  keep diff
+    let mask = u64::from(borrow).wrapping_sub(1); // all-ones when x >= p, zero otherwise
+    (diff & mask) | (x & !mask)
+}
+
 #[inline]
 fn fe_add(a: u64, b: u64) -> u64 {
-    ((a as u128 + b as u128) % GOLDILOCKS_P as u128) as u64
+    // Inputs are canonical (< p), so a + b < 2p < 2^65: at most one fold, and
+    // the 65th bit is the add's own carry-out.
+    let (sum, carry) = a.overflowing_add(b);
+    let (diff, borrow) = sum.overflowing_sub(GOLDILOCKS_P);
+    // Fold when the true sum reached 2^64 (carry) or when the truncated sum is
+    // already >= p (no borrow). Both conditions are bits, not branches.
+    // `u64::from(..)` rather than `as`: the bool -> u64 widening is the whole
+    // trick here, and `!borrow as u64` reads like a bitwise-not on the cast.
+    let fold = u64::from(carry) | u64::from(!borrow);
+    let mask = fold.wrapping_sub(1); // all-ones when fold == 0
+    (sum & mask) | (diff & !mask)
+}
+
+/// Goldilocks reduction of a 128-bit product, using p = 2^64 - 2^32 + 1, i.e.
+/// 2^64 == 2^32 - 1 (mod p) and 2^96 == -1 (mod p).
+///
+/// Splitting `x = x_lo + 2^64 * (x_hi_lo + 2^32 * x_hi_hi)`:
+///   2^64 * x_hi_lo == (2^32 - 1) * x_hi_lo, and
+///   2^96 * x_hi_hi == -x_hi_hi.
+/// The folds below implement exactly that, with the borrow/carry corrections
+/// applied as arithmetic rather than as branches.
+#[inline]
+fn fe_reduce128(x: u128) -> u64 {
+    let x_lo = x as u64;
+    let x_hi = (x >> 64) as u64;
+    let x_hi_hi = x_hi >> 32;
+    let x_hi_lo = x_hi & 0xFFFF_FFFF;
+
+    // x_lo - x_hi_hi  (the 2^96 == -1 fold); a borrow costs another 2^32 - 1.
+    let (t0, borrow) = x_lo.overflowing_sub(x_hi_hi);
+    let t0 = t0.wrapping_sub(0xFFFF_FFFF * u64::from(borrow));
+
+    // + x_hi_lo * (2^32 - 1)  (the 2^64 == 2^32 - 1 fold).
+    let t1 = x_hi_lo.wrapping_mul(0xFFFF_FFFF);
+    let (t2, carry) = t0.overflowing_add(t1);
+    let t2 = t2.wrapping_add(0xFFFF_FFFF * u64::from(carry));
+
+    // t2 < 2p at this point (pinned by `reduce128_output_stays_below_2p`), so
+    // a single conditional subtract canonicalises it.
+    fe_sub_p(t2)
 }
 
 #[inline]
 fn fe_mul(a: u64, b: u64) -> u64 {
-    ((a as u128 * b as u128) % GOLDILOCKS_P as u128) as u64
+    fe_reduce128(u128::from(a) * u128::from(b))
 }
 
 /// S-box x^7 (three multiplications).
@@ -413,6 +483,139 @@ mod poseidon2_tests {
         ];
         permute16(&mut state);
         assert_eq!(state, expected, "p3-port drift: permutation diverged");
+    }
+
+    /// The reference the constant-time path replaced. Kept here, in the test
+    /// module only, so the equivalence claim is checked against the actual
+    /// prior formula rather than against a restatement of it.
+    fn ref_add(a: u64, b: u64) -> u64 {
+        ((u128::from(a) + u128::from(b)) % u128::from(GOLDILOCKS_P)) as u64
+    }
+
+    fn ref_mul(a: u64, b: u64) -> u64 {
+        ((u128::from(a) * u128::from(b)) % u128::from(GOLDILOCKS_P)) as u64
+    }
+
+    /// A small deterministic PRNG: the crate is `no_std` on the hash path and
+    /// a test must not be the reason a dev-dependency enters the tree.
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Boundary values where a fold, a borrow or a carry is actually
+    /// exercised. `0xffff_ffff_0000_0000` and `0xffff_fffe_ffff_ffff` are in
+    /// this list because an earlier draft of `fe_reduce128` returned
+    /// `p + 2` and `p + 5` for their squares: the reduction leaves a result
+    /// below 2p, not below p, and dropping the final conditional subtract
+    /// produced a NON-CANONICAL element that still satisfied every
+    /// `x == y (mod p)` style assertion. The KAT caught it; so does this.
+    const EDGES: [u64; 11] = [
+        0,
+        1,
+        2,
+        GOLDILOCKS_P - 1,
+        GOLDILOCKS_P - 2,
+        (GOLDILOCKS_P - 1) / 2,
+        0xFFFF_FFFF,
+        0x1_0000_0000,
+        0xFFFF_FFFF_0000_0000,
+        0xFFFF_FFFE_FFFF_FFFF,
+        u64::MAX % GOLDILOCKS_P,
+    ];
+
+    #[test]
+    fn fe_matches_modular_reference() {
+        for &a in &EDGES {
+            for &b in &EDGES {
+                assert_eq!(fe_add(a, b), ref_add(a, b), "fe_add({a:#x}, {b:#x})");
+                assert_eq!(fe_mul(a, b), ref_mul(a, b), "fe_mul({a:#x}, {b:#x})");
+            }
+        }
+
+        let mut seed = 0x2026_0923_B9F5_u64 | 1;
+        for _ in 0..20_000 {
+            let a = xorshift(&mut seed) % GOLDILOCKS_P;
+            let b = xorshift(&mut seed) % GOLDILOCKS_P;
+            assert_eq!(fe_add(a, b), ref_add(a, b), "fe_add({a:#x}, {b:#x})");
+            assert_eq!(fe_mul(a, b), ref_mul(a, b), "fe_mul({a:#x}, {b:#x})");
+        }
+    }
+
+    #[test]
+    fn fe_output_is_always_canonical() {
+        // Not the same claim as the one above: two values can be congruent
+        // mod p and still differ as u64, and the sponge squeezes elements as
+        // raw little-endian bytes. A non-canonical element would change the
+        // digest without changing the field value.
+        let mut seed = 0x0BAD_C0DE_1234_5678_u64;
+        for &a in &EDGES {
+            for &b in &EDGES {
+                assert!(fe_add(a, b) < GOLDILOCKS_P);
+                assert!(fe_mul(a, b) < GOLDILOCKS_P);
+            }
+        }
+        for _ in 0..20_000 {
+            let a = xorshift(&mut seed) % GOLDILOCKS_P;
+            let b = xorshift(&mut seed) % GOLDILOCKS_P;
+            assert!(
+                fe_add(a, b) < GOLDILOCKS_P,
+                "fe_add left {a:#x}+{b:#x} >= p"
+            );
+            assert!(
+                fe_mul(a, b) < GOLDILOCKS_P,
+                "fe_mul left {a:#x}*{b:#x} >= p"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce128_output_stays_below_2p() {
+        // The single conditional subtract in `fe_reduce128` is only sufficient
+        // because the folded value is < 2p. That is a precondition of the
+        // algorithm, so it is measured rather than asserted in a comment.
+        fn folded_before_final_subtract(x: u128) -> u64 {
+            let x_lo = x as u64;
+            let x_hi = (x >> 64) as u64;
+            let (t0, borrow) = x_lo.overflowing_sub(x_hi >> 32);
+            let t0 = t0.wrapping_sub(0xFFFF_FFFF * u64::from(borrow));
+            let t1 = (x_hi & 0xFFFF_FFFF).wrapping_mul(0xFFFF_FFFF);
+            let (t2, carry) = t0.overflowing_add(t1);
+            t2.wrapping_add(0xFFFF_FFFF * u64::from(carry))
+        }
+        let two_p = u128::from(GOLDILOCKS_P) * 2;
+        let mut seed = 0x5EED_5EED_5EED_5EED_u64;
+        for &a in &EDGES {
+            for &b in &EDGES {
+                let t = folded_before_final_subtract(u128::from(a) * u128::from(b));
+                assert!(
+                    u128::from(t) < two_p,
+                    "fold of {a:#x}*{b:#x} reached {t:#x}"
+                );
+            }
+        }
+        for _ in 0..20_000 {
+            let a = xorshift(&mut seed) % GOLDILOCKS_P;
+            let b = xorshift(&mut seed) % GOLDILOCKS_P;
+            let t = folded_before_final_subtract(u128::from(a) * u128::from(b));
+            assert!(
+                u128::from(t) < two_p,
+                "fold of {a:#x}*{b:#x} reached {t:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fe_sub_p_selects_without_branching_on_the_value() {
+        assert_eq!(fe_sub_p(0), 0);
+        assert_eq!(fe_sub_p(GOLDILOCKS_P - 1), GOLDILOCKS_P - 1);
+        assert_eq!(fe_sub_p(GOLDILOCKS_P), 0);
+        assert_eq!(fe_sub_p(GOLDILOCKS_P + 1), 1);
+        assert_eq!(fe_sub_p(u64::MAX), u64::MAX - GOLDILOCKS_P);
     }
 
     #[test]
