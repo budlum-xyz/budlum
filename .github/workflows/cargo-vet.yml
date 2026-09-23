@@ -82,9 +82,26 @@ jobs:
       - name: Audit debt summary (informational)
         if: always()
         run: |
+          set -uo pipefail
+          # The verdict belongs to the ratchet gate above; this step only
+          # publishes WHICH crates carry the debt. But `2>/dev/null || echo`
+          # discarded the error body and the exit code together, so a
+          # cargo-vet that cannot even load the store rendered as an empty
+          # debt list - the best-looking output this step can produce, from a
+          # command that did not run. The status is captured instead, and the
+          # step reports its own tooling failure without touching the verdict.
+          set +e
+          cargo vet suggest > /tmp/vet-suggest.log 2>&1
+          status=$?
+          set -e
           {
             echo "### cargo-vet audit debt"
             echo '```'
-            cargo vet suggest 2>/dev/null | tail -40 || echo "(suggest could not run)"
+            tail -40 /tmp/vet-suggest.log
             echo '```'
+            echo "(cargo vet suggest exit: $status)"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ] && [ ! -s /tmp/vet-suggest.log ]; then
+            echo "::error::cargo vet suggest exited $status and wrote nothing - the debt summary summarised a command that never ran."
+            exit 1
+          fi

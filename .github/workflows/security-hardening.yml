@@ -66,10 +66,41 @@ jobs:
       # discovers every manifest in the tree, and it fails. This job exists for
       # the `--with-metadata` view (which resolves the metadata-ignored
       # entries), and its verdict belongs to that other workflow.
+      # Still a REPORT on unused dependencies - that verdict belongs to
+      # extra-tooling.yml's "Dead Deps" job, which has the canary and the tree
+      # walk. But `|| true` (and its twin `; true`) also swallowed the state
+      # where machete itself fell over: a tool that cannot parse a manifest
+      # exits non-zero and prints nothing, and this step rendered that exactly
+      # like a clean tree. cargo-machete exits 1 when it FINDS something (a
+      # finding, not a failure) and 2 on an internal error, so the two are now
+      # told apart instead of both being erased.
       - name: cargo machete (root) - report
-        run: cargo machete --with-metadata || true
+        run: |
+          set -uo pipefail
+          set +e
+          cargo machete --with-metadata > /tmp/machete-root.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/machete-root.log
+          if [ "$status" -gt 1 ]; then
+            echo "::error::cargo machete (root) exited $status - that is a tool failure, not a report of unused dependencies."
+            exit 1
+          fi
+          echo "machete (root) report exit: $status (0 = nothing found, 1 = findings; the gate lives in extra-tooling.yml)"
       - name: cargo machete (budzero) - report
-        run: cd budzero && cargo machete --with-metadata; true
+        run: |
+          set -uo pipefail
+          cd budzero
+          set +e
+          cargo machete --with-metadata > /tmp/machete-budzero.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/machete-budzero.log
+          if [ "$status" -gt 1 ]; then
+            echo "::error::cargo machete (budzero) exited $status - that is a tool failure, not a report of unused dependencies."
+            exit 1
+          fi
+          echo "machete (budzero) report exit: $status (0 = nothing found, 1 = findings; the gate lives in extra-tooling.yml)"
 
   # BLOCKS. The previous form carried both `continue-on-error: true` and `|| true`,
   # and the tool never ran at all:
