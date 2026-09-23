@@ -383,9 +383,10 @@ every mechanism except the few-time term; that term is decision item 7.
   verify chain's primitive projection (Poseidon single-primitive lane)
   stands as section 5/A3 records.
 - constant-time audit: named in section 1 as out of scope; a sideways
-  open item listed here so it is owned by exactly one list. Partially
-  advanced 2026-09-23: the one confined caveat below (the u128-% field
-  arithmetic) is closed structurally; the timing MEASUREMENT is not.
+  open item listed here so it is owned by exactly one list. CLOSED for
+  the poseidon2 field arithmetic 2026-09-23: structurally (no reachable
+  128-bit software divider) and statistically (dudect, controls passed).
+  The rest of the signing path stays as section 1 scopes it.
 
 ### Constant-time posture, confined pre-answer (code-read, not measured)
 
@@ -424,11 +425,54 @@ SIGNED-PATH secret flow inventory (each item points at code):
    test (a result congruent mod p but >= p would change the squeezed
    digest; an early draft of the reduction did exactly that for
    0xffff_ffff_0000_0000 squared).
-   Still open, and deliberately not claimed closed by this entry: no
-   TIMING MEASUREMENT has been run. The claim here is structural (no
-   data-dependent division remains in the field ops), not statistical.
-   A dudect or equivalent harness over the poseidon2 lanes stays the
-   named follow-up (review call question 6).
+   MEASURED 2026-09-23 (the statistical half, previously open here).
+   `examples/dudect_poseidon2.rs`, Welch t-test, 200k interleaved
+   measurements per class, 90th-percentile crop, threshold |t| > 4.5:
+
+   | run | |t| | meaning |
+   |---|---|---|
+   | null control (both classes random) | 0.52 | no harness bias |
+   | positive control (synthetic operand-dependent load) | 39.33 | the harness CAN return a positive |
+   | subject, 8 distinct constant pairs | worst 3.13 | no value-dependent timing |
+   | legacy `%` arithmetic, same protocol | 0.52 | see below |
+
+   Three things this measurement forced into the open, all of which are
+   findings about the METHOD and are recorded because a harness nobody
+   can check is not evidence:
+
+   a. The positive control is not decoration. The first three drafts of
+      the harness each reported a confident verdict that was wrong, and
+      only the controls caught it: one charged class-1 input generation
+      to the timer (reported |t| = 106 for code with no data-dependent
+      operation and 0.57 for code that provably calls a software
+      divider - backwards); one let class 0 replay a single cache-hot
+      input while class 1 walked a pool.
+   b. Fix-vs-random, the classic dudect shape, does NOT work on this
+      target and the harness prints the artifact next to the verdict so
+      the claim stays checkable: the same shipped code reads |t| = 110
+      under fix-vs-random and 0.52 under random-vs-random. A permutation
+      scrambles its whole state over 30 rounds, so repeating one input
+      measures residency, not the field ops. The verdict therefore uses
+      pairs of CONSTANTS, where the only difference between classes is
+      the bytes.
+   c. The legacy `%` arithmetic did NOT show a timing signal under this
+      protocol (0.52). Stated plainly rather than buried: the structural
+      finding - a reachable `__umodti3` on a secret-fed path - stands on
+      its own, but this host did not turn it into a measurable one. The
+      removal remains the right change (a divider whose timing is not
+      resolvable HERE is not a divider that is safe on every target,
+      microcode and operand distribution), and this line records that
+      the justification is defence in depth, not a measured exploit.
+
+   Borderline crossings are re-measured before they are reported: an
+   eight-pair sweep is eight chances to cross, and the first full run
+   put one pair at 4.88 against 0.46-3.62 for the rest. A value-dependent
+   operation reproduces; drift does not. Only a second crossing counts,
+   and both numbers are printed either way.
+
+   Scope, unchanged: this is a wall-clock test on one host, not a formal
+   constant-time proof, and it covers the field arithmetic through the
+   permutation - which is what the caveat named.
 5. shake256.rs (K12-class keccak): fixed 24-round permutation,
    table-free by construction; absorb boundaries depend on input LENGTH
    (public), never on input bytes.
