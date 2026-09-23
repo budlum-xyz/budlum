@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   machete:
-    name: cargo machete (unused deps)
+    name: cargo machete (unused deps, REPORT - the gate is in extra-tooling)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -59,9 +59,16 @@ jobs:
           tar -xzf /tmp/machete.tar.gz -C /tmp
           install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
           cargo-machete --version
-      - name: cargo machete (root)
+      # REPORT, NOT A GATE - and the name says so, because `|| true` plus a
+      # gate-sounding job name is how a repository ends up believing it has a
+      # check it does not have. The ENFORCING copy of this tool lives in
+      # extra-tooling.yml ("Dead Deps (machete + shear)"): it has a canary, it
+      # discovers every manifest in the tree, and it fails. This job exists for
+      # the `--with-metadata` view (which resolves the metadata-ignored
+      # entries), and its verdict belongs to that other workflow.
+      - name: cargo machete (root) - report
         run: cargo machete --with-metadata || true
-      - name: cargo machete (budzero)
+      - name: cargo machete (budzero) - report
         run: cd budzero && cargo machete --with-metadata; true
 
   # BLOCKS. The previous form carried both `continue-on-error: true` and `|| true`,
