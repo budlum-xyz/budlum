@@ -108,7 +108,50 @@ jobs:
         run: |
           set -euo pipefail
           echo "Running Miri on storage module..."
-          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage 2>&1 | tee /tmp/miri-storage.txt
+          # NAMED, DATED EXCLUSION (2026-09-23). Every test below opens a real
+          # sled database, and sled's `Config::open` calls `libc::getrlimit`
+          # (sys_limits.rs:37) to size its cache. Miri cannot call foreign
+          # functions at all, so these abort with "unsupported operation" - not
+          # undefined behaviour, and not something this repository can fix
+          # without vendoring sled.
+          #
+          # This is the exact case the note below anticipated, and it revises
+          # that note's own evidence. Miri aborts the whole binary on the FIRST
+          # such error, so `set -euo pipefail` ended the step right there: while
+          # `continue-on-error` was in place this step was not succeeding nine
+          # times out of nine, it was FAILING nine times and being recoloured
+          # green. Verified in the log of run 35836929417, one of the nine
+          # counted as a success: same `getrlimit` abort, same line. The step
+          # never reached its own count, so the storage module has not been
+          # inspected for UB at any point in that window.
+          #
+          # Skipping the 20 FFI-bound tests lets the rest of the storage module
+          # - the pure serialization, hashing and state-machine logic, which is
+          # where UB would actually hide - be inspected for the first time. The
+          # skipped behaviour is still covered by the normal (non-Miri) test
+          # run in CI; only the UB inspection of them is impossible.
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage \
+            --skip chain::blockchain::tests::startup_loads_consensus_state_from_storage \
+            --skip chain::storage_economics_tests::test_storage_maintenance_fail_closed_regression \
+            --skip chain::storage_economics_tests::storage_economics_state_persists_across_restart \
+            --skip storage::db::tests::test_durable_commit_batch_and_recovery \
+            --skip storage::db::tests::a_commit_without_bridge_state_carries_the_live_snapshot_forward \
+            --skip storage::db::tests::corrupt_height_markers_are_reported_not_read_as_zero \
+            --skip storage::db::tests::backup_restore_roundtrip_is_integrity_checked_and_non_destructive \
+            --skip storage::db::tests::load_mempool_txs_drops_corrupt_entries_without_aborting_startup \
+            --skip storage::db::tests::content_store_roundtrip_and_rejects_wrong_cid \
+            --skip storage::db::tests::sled_open_with_retry_waits_for_lock_release \
+            --skip storage::db::tests::sled_open_with_retry_reports_persistent_contention \
+            --skip storage::db::tests::json_is_no_longer_accepted_where_only_bincode_is_written \
+            --skip storage::db::tests::removing_the_fallback_does_not_make_bincode_strict \
+            --skip storage::db::tests::a_corrupt_schema_version_refuses_to_boot \
+            --skip tests::chaos::test_chaos_settlement_state_survives_storage_reload \
+            --skip tests::settlement_prod::multi_consensus_settlement_state_round_trips_through_storage \
+            --skip tests::settlement_prod::storage_reload_skips_malformed_consensus_domains \
+            --skip tests::settlement_prod::storage_reload_skips_commitments_for_unknown_or_mismatched_domains \
+            --skip tests::settlement_prod::storage_reload_skips_global_headers_with_broken_hash_chain \
+            --skip tests::settlement_prod::bridge_state_roots_round_trip_through_storage_after_lock \
+            2>&1 | tee /tmp/miri-storage.txt
           # A Miri run that passes ZERO suites is indistinguishable from a Miri
           # run that never executed a test: both print a green step. The count
           # was printed and then thrown away (`|| echo '0'` made the empty case
