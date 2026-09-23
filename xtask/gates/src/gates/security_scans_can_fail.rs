@@ -389,7 +389,8 @@ jobs:
         what: "self-test",
         reason: "constructed only so an empty allow-list never turns the type into dead code",
     };
-    if kept_alive.file != "x.yml" || kept_alive.what != "self-test" || kept_alive.reason.is_empty() {
+    if kept_alive.file != "x.yml" || kept_alive.what != "self-test" || kept_alive.reason.is_empty()
+    {
         problems.push(String::from("BROKEN: the Allowed type drifted"));
     }
 
