@@ -593,14 +593,17 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
 
 fn mask_applies(mask: u8, r: usize, c: usize) -> bool {
     match mask {
-        0 => (r + c) % 2 == 0,
-        1 => r % 2 == 0,
-        2 => c % 3 == 0,
-        3 => (r + c) % 3 == 0,
-        4 => (r / 2 + c / 3) % 2 == 0,
+        0 => (r + c).is_multiple_of(2),
+        1 => r.is_multiple_of(2),
+        2 => c.is_multiple_of(3),
+        3 => (r + c).is_multiple_of(3),
+        4 => (r / 2 + c / 3).is_multiple_of(2),
+        // Not a divisibility test: this one is a SUM of two remainders being
+        // zero, which is why it reads differently from its neighbours and why
+        // clippy does not flag it. Kept in spec form on purpose.
         5 => (r * c) % 2 + (r * c) % 3 == 0,
-        6 => ((r * c) % 2 + (r * c) % 3) % 2 == 0,
-        7 => ((r + c) % 2 + (r * c) % 3) % 2 == 0,
+        6 => ((r * c) % 2 + (r * c) % 3).is_multiple_of(2),
+        7 => ((r + c) % 2 + (r * c) % 3).is_multiple_of(2),
         _ => false,
     }
 }

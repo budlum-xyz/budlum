@@ -46,17 +46,29 @@ pub struct FederatedAiOutputEvent {
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
+    // Written with `char::from(b'0' + n)` arithmetic rather than `HEX[i]`:
+    // both nibbles are 0..=15 by construction, but `slice[i]` is a panic site
+    // and a release build aborts on panic, so the indexing gate is right to
+    // refuse it even where the bound is locally provable. No index, no panic
+    // site, and nothing to re-prove if this is ever called with other input.
+    fn nibble(n: u8) -> char {
+        if n < 10 {
+            char::from(b'0' + n)
+        } else {
+            char::from(b'a' + (n - 10))
+        }
+    }
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        out.push(char::from(HEX[usize::from(b >> 4)]));
-        out.push(char::from(HEX[usize::from(b & 0x0f)]));
+        out.push(nibble(b >> 4));
+        out.push(nibble(b & 0x0f));
     }
     out
 }
 
 /// Build the federation envelope for an already minted AI output.
 #[must_use]
+/// Convenience: exposed for the federation bridge, as above.
 pub fn federated_ai_output_event(
     owner: Address,
     nft_id: u64,
@@ -90,6 +102,8 @@ impl FederatedAiOutputEvent {
     /// fixed keys, lowercase hex and integers, so no user-controlled escaping is
     /// needed here.
     #[must_use]
+    /// Convenience: exposed for the federation bridge. Nothing in the tree
+    /// publishes the envelope yet, so this has no production caller.
     pub fn to_json(&self) -> String {
         format!(
             concat!(

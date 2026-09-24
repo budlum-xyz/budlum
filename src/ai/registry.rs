@@ -1716,6 +1716,9 @@ impl AiRegistry {
     }
 
     /// Return the portable accountability receipt for a settled agent payment.
+    ///
+    /// Convenience: exposed for the RPC/CLI read path. The receipt writer is
+    /// wired; this is the matching reader and has no in-tree caller yet.
     #[must_use]
     pub fn get_agent_payment_receipt(
         &self,
