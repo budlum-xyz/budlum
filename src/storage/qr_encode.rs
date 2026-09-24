@@ -648,9 +648,7 @@ fn matrix_decodes_to(matrix: &EncodedMatrix, data: &[u8]) -> bool {
     let mut prepared = rqrr::PreparedImage::prepare_from_bitmap(img, img, |x, y| {
         let (c, r) = (x / scale, y / scale);
         let inside = quiet..quiet + side;
-        inside.contains(&r)
-            && inside.contains(&c)
-            && matrix.is_dark(r - quiet, c - quiet)
+        inside.contains(&r) && inside.contains(&c) && matrix.is_dark(r - quiet, c - quiet)
     });
     let grids = prepared.detect_grids();
     if grids.len() != 1 {

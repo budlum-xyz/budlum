@@ -77,9 +77,7 @@ impl LocaleTag {
 
         let mut out = Vec::new();
         for (idx, part) in tag.split('-').enumerate() {
-            if part.is_empty()
-                || part.len() > 8
-                || !part.bytes().all(|b| b.is_ascii_alphanumeric())
+            if part.is_empty() || part.len() > 8 || !part.bytes().all(|b| b.is_ascii_alphanumeric())
             {
                 return Err(I18nError::InvalidLocaleTag(tag.to_string()));
             }
@@ -263,11 +261,14 @@ impl OfflineLocalizationCatalog {
             locale: locale.clone(),
             mode,
         };
-        let text = self.entries.get(&lookup).ok_or_else(|| I18nError::MissingTranslation {
-            key: key.to_string(),
-            locale: locale.clone(),
-            mode,
-        })?;
+        let text = self
+            .entries
+            .get(&lookup)
+            .ok_or_else(|| I18nError::MissingTranslation {
+                key: key.to_string(),
+                locale: locale.clone(),
+                mode,
+            })?;
         let mut localized = LocalizedText {
             provider_id: self.provider_id.clone(),
             key: key.to_string(),
@@ -374,10 +375,7 @@ mod tests {
     #[test]
     fn locale_tags_are_canonicalized_without_registry_lookup() {
         assert_eq!(LocaleTag::new("TR").expect("locale").as_str(), "tr");
-        assert_eq!(
-            LocaleTag::new("en-us").expect("locale").as_str(),
-            "en-US"
-        );
+        assert_eq!(LocaleTag::new("en-us").expect("locale").as_str(), "en-US");
         assert_eq!(
             LocaleTag::new("az-latn-az").expect("locale").as_str(),
             "az-Latn-AZ"
@@ -400,11 +398,7 @@ mod tests {
             .expect("insert");
 
         let localized = catalog
-            .translate(
-                "wallet.send.confirm",
-                &tr,
-                AccessibilityMode::ScreenReader,
-            )
+            .translate("wallet.send.confirm", &tr, AccessibilityMode::ScreenReader)
             .expect("translation");
         assert_eq!(localized.provider_id, "budlum-fixture-v1");
         assert_eq!(localized.locale, tr);
@@ -412,7 +406,11 @@ mod tests {
         assert_eq!(localized.commitment, localized.calculate_commitment());
 
         assert!(matches!(
-            catalog.translate("wallet.send.confirm", &localized.locale, AccessibilityMode::UiText),
+            catalog.translate(
+                "wallet.send.confirm",
+                &localized.locale,
+                AccessibilityMode::UiText
+            ),
             Err(I18nError::MissingTranslation { .. })
         ));
         assert!(OfflineLocalizationCatalog::new("https://hosted.example/api").is_err());
@@ -424,16 +422,36 @@ mod tests {
         let en = LocaleTag::new("en-US").expect("locale");
         let mut catalog = OfflineLocalizationCatalog::new("budlum-fixture-v1").expect("catalog");
         catalog
-            .insert("a11y.caption", tr.clone(), AccessibilityMode::Captions, "Hazır")
+            .insert(
+                "a11y.caption",
+                tr.clone(),
+                AccessibilityMode::Captions,
+                "Hazır",
+            )
             .expect("insert");
         catalog
-            .insert("a11y.caption", en.clone(), AccessibilityMode::Captions, "Ready")
+            .insert(
+                "a11y.caption",
+                en.clone(),
+                AccessibilityMode::Captions,
+                "Ready",
+            )
             .expect("insert");
         catalog
-            .insert("a11y.caption", tr.clone(), AccessibilityMode::PlainText, "Hazır")
+            .insert(
+                "a11y.caption",
+                tr.clone(),
+                AccessibilityMode::PlainText,
+                "Hazır",
+            )
             .expect("insert");
         catalog
-            .insert("a11y.other", tr.clone(), AccessibilityMode::Captions, "Hazır")
+            .insert(
+                "a11y.other",
+                tr.clone(),
+                AccessibilityMode::Captions,
+                "Hazır",
+            )
             .expect("insert");
 
         let base = catalog
