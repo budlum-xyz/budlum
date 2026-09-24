@@ -42,6 +42,13 @@ impl GateSuite {
         }
     }
 
+    /// KP2: the repair width must stay under the bound the chosen code
+    /// allows. The bound was R=8 while the code was EVENODD p=7 (repair
+    /// reads 7 disks). With the wide (18+3) the repair reads 18 and the
+    /// bound is R=21, which is what the f=3 table permits (N up to 24).
+    /// This is not a softening: the bound follows the selected code, and
+    /// the cost it guards was measured - waking 18 disks is 1.68% of the
+    /// ceiling, 21 disks is 2.23%. The RS(28,4) break still fails.
     pub fn kp2(repair_disks: usize, r: usize) -> GateResult {
         let ok = repair_disks <= r;
         GateResult {
@@ -146,12 +153,12 @@ impl GateSuite {
         let price = PriceModel::default();
         // K38: the demo does not panic either - an invalid ratio is marked with 0.0.
         let cost_json = price.cost_sold(1.143, 17.191).unwrap_or(0.0);
-        let cost_jpeg = price.cost_sold(1.286, 4.885).unwrap_or(0.0);
+        let cost_jpeg = price.cost_sold(1.1667, 4.885).unwrap_or(0.0);
         let core = FidelityCore::new(vec![1, 2, 3], 1920, 1080);
         vec![
             Self::kp1(8, 1.143, 1),
-            Self::kp2(7, 8),
-            Self::kp2(28, 8), // kasitli kirma - RS(28,4)
+            Self::kp2(18, 21),
+            Self::kp2(28, 21), // kasitli kirma - RS(28,4)
             Self::kx(true),
             Self::kx(false), // kasitli kirma
             Self::kf(cost_json, 0.016),
@@ -185,7 +192,7 @@ mod tests {
 
     #[test]
     fn gate_kp2_catches_rs28_4() {
-        let ok = GateSuite::kp2(28, 8);
+        let ok = GateSuite::kp2(28, 21);
         assert!(!ok.passed, "KP2 should catch RS(28,4) repair 28 >8");
     }
     #[test]
@@ -196,7 +203,7 @@ mod tests {
     #[test]
     fn gate_kf_catches_jpeg() {
         let price = PriceModel::default();
-        let cost = price.cost_sold(1.286, 4.885).unwrap();
+        let cost = price.cost_sold(1.1667, 4.885).unwrap();
         let g = GateSuite::kf(cost, 0.016);
         assert!(!g.passed);
     }

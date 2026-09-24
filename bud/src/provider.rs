@@ -8,7 +8,7 @@
 pub enum ProviderClass {
     SocialOpen,   // cancelled by the no_social decision (present in code, unused)
     DeviceClosed, // mobile_self, encrypted, kendi suresiz
-    NetworkFull,  // Quad-Ring EVENODD p=7
+    NetworkFull,  // Quad-Ring (18+3), N=21, f=3
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,11 +101,16 @@ pub struct NetworkFullProvider {
 
 impl NetworkFullProvider {
     pub fn expansion(&self) -> f64 {
-        // EVENODD p=7 e=1.286 always_evenodd
-        9.0 / 7.0
+        // (18+3): N=21, f=3, e=21/18=1.1667. The code moved off EVENODD
+        // p=7 (N=9, f=2, e=9/7=1.2857) because the wide f=3 code wins on
+        // all three axes at once: durability 7.57 -> 9.31 nines, storage
+        // expansion 1.2857 -> 1.1667, and two more scenarios under the
+        // ceiling. Repair now wakes 18 disks instead of 7, which costs
+        // 1.68% of the ceiling instead of 0.28%.
+        21.0 / 18.0
     }
     pub fn required_ratio_60m(&self) -> f64 {
-        // fiziksel 0.23342 * e / 0.016 = 18.76
+        // fiziksel 0.23342 * e / 0.016 = 17.02
         0.23342 * self.expansion() / 0.016
     }
 }
@@ -162,9 +167,10 @@ mod tests {
     }
     #[test]
     fn network_required_ratio() {
-        let p = NetworkFullProvider { n: 9 };
+        let p = NetworkFullProvider { n: 21 };
         let req = p.required_ratio_60m();
-        assert!((req - 18.76).abs() < 0.5);
+        // (18+3): 0.23342*1.1667/0.016 = 17.02 (EVENODD p=7 needed 18.76)
+        assert!((req - 17.02).abs() < 0.5);
     }
     #[test]
     fn media_device_only_holds() {
