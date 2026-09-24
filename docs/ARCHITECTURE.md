@@ -1783,6 +1783,17 @@ not claim it is.
 
 ## 56. Only the code we put there runs: the zk program allowlist
 
+> **These proofs do not hide anything.** Before reading further: the "zk" in
+> this section's title, and the `BudZero` name, describe *succinct verifiable
+> computation*, not privacy. The PCS is `TwoAdicFriPcs`, whose `Pcs::ZK` is
+> `false`, so the prover never commits a randomization polynomial. A Budlum
+> STARK proves that a computation happened; it does **not** keep that
+> computation's witness secret, and a holder of a proof plus the public inputs
+> should assume the execution trace is recoverable. That is the intended trade
+> for storage and finality proofs, and it is stated here because the naming
+> invites the opposite assumption. The test `zk_flag_is_pinned` fails if the
+> PCS ever starts claiming `ZK`, so this paragraph cannot silently go stale.
+
 The previous section covers the three gates that guarantee a proof belongs to
 the **right claim**. Even after all of them pass, one question stayed open: what
 **code** was proved?
