@@ -8877,4 +8877,24 @@ mod tests {
             "undefined proof type imm=2 must be rejected by the AIR, but it verified!"
         );
     }
+
+    /// Budlum's STARK is sound and succinct, but it is NOT hiding: the PCS is
+    /// `TwoAdicFriPcs`, whose `Pcs::ZK` is `false`, so the prover never commits
+    /// a randomization polynomial and the witness is not protected.
+    ///
+    /// That is the intended trade - these proofs attest that a computation
+    /// happened, they do not keep its inputs secret. This test exists so the
+    /// trade stays deliberate. If a future PCS swap flips `ZK` to `true`, this
+    /// fails, and whoever flipped it has to say so in the same change rather
+    /// than letting a privacy property appear (or a privacy claim become
+    /// true-by-accident) without review.
+    #[test]
+    fn zk_flag_is_pinned() {
+        assert!(
+            !<MyPcs as p3_commit::Pcs<MyExtensionField, MyChallenger>>::ZK,
+            "the proof system PCS now claims ZK. Budlum's docs and the \
+             bud_stark prover both state that these proofs do not hide the \
+             witness; update that story before pinning the new value here."
+        );
+    }
 }
