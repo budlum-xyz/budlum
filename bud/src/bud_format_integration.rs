@@ -71,7 +71,7 @@ impl BudLivingThreshold {
         if self.access_count_last_epoch > 100 {
             "hot 3 replica"
         } else if self.access_count_last_epoch > 10 {
-            "cold EVENODD 7+2"
+            "cold (18+3)"
         } else {
             "ice device+1"
         }
@@ -183,13 +183,15 @@ mod tests {
     }
     #[test]
     fn erasure_real() {
-        let erasure = BudErasure::new(7, 2);
-        assert!((erasure.expansion() - 1.2857).abs() < 0.01);
-        let shards = vec![vec![1u8; 10]; 7];
-        let parity = erasure.encode(&shards).expect("seven equal shards encode");
-        assert_eq!(parity.len(), 2);
+        let erasure = BudErasure::new(18, 3);
+        assert!((erasure.expansion() - 1.1667).abs() < 0.01);
+        let shards = vec![vec![1u8; 10]; 18];
+        let parity = erasure
+            .encode(&shards)
+            .expect("eighteen equal shards encode");
+        assert_eq!(parity.len(), 3);
         assert!(parity.iter().all(|p| p.len() == 10));
-        assert!(IntegrationGates::k_bud_erasure(&erasure, 7).is_ok());
+        assert!(IntegrationGates::k_bud_erasure(&erasure, 18).is_ok());
     }
 
     #[test]

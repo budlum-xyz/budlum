@@ -171,4 +171,5 @@ replaced with verified values (EK13).
 | JSON columnar OrderFree (zstd19) | 11.49x (seed=7, 50k; if record order is free) |
 
 The 17.19x JSON claim DOES NOT HOLD against these measurements (the K19 canary: 7.83x < 17.19x);
-the $0.016/TB/month ceiling requires 18.76x for EVENODD (1.286) and 16.68x for flat 7+1 (1.143).
+the $0.016/TB/month ceiling requires 17.02x for the selected wide code (18+3), e=1.1667
+(it required 18.76x while the code was EVENODD p=7, e=1.286) and 16.68x for flat 7+1 (1.143).

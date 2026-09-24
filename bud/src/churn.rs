@@ -88,8 +88,8 @@ impl ChurnFixture {
             },
             ChurnFixture {
                 kind: FixtureKind::DoubleChurn,
-                n: 9,
-                description: "N=9 EVENODD p=7 must survive a double column loss",
+                n: 21,
+                description: "N=21 (18+3) must survive a double column loss; f=3 covers three",
             },
             ChurnFixture {
                 kind: FixtureKind::SmartProactive,
