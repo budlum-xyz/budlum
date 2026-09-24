@@ -134,7 +134,7 @@ mod tests {
     /// and then cannot select a version at all.
     #[test]
     fn every_libp2p_dependency_is_pinned_to_the_tree() {
-        const REV: &str = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd";
+        const REV: &str = "70bf5e2f5c64cfa36405ccf9f4f1690afd8abf66";
         for (name, manifest) in [
             ("Cargo.toml", include_str!("../../Cargo.toml")),
             (
@@ -437,7 +437,7 @@ mod tests {
 
         // The pin is by full revision, so record what was verified in that
         // tree. Checked by hand against
-        // 38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd:
+        // 70bf5e2f5c64cfa36405ccf9f4f1690afd8abf66:
         //
         //   behaviour.rs: const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
         //   backoff.rs:   backoff_time.checked_add(slack)
@@ -447,7 +447,7 @@ mod tests {
         // be re-checked in the new tree.
         let manifest = include_str!("../../Cargo.toml");
         assert!(
-            manifest.contains("38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"),
+            manifest.contains("70bf5e2f5c64cfa36405ccf9f4f1690afd8abf66"),
             "the libp2p revision changed. Re-verify in the new tree that \
                  gossipsub still bounds remote PRUNE backoff \
                  (MAX_REMOTE_PRUNE_BACKOFF_SECONDS) and still uses checked_add for \

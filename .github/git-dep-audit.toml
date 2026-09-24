@@ -33,8 +33,8 @@
 
 [[revision]]
 repository = "https://github.com/libp2p/rust-libp2p"
-rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"
-committed = "2026-07-27"
+rev = "70bf5e2f5c64cfa36405ccf9f4f1690afd8abf66"
+committed = "2026-09-21"
 
 # Why the tree is pinned to a revision at all: libp2p 0.57.0 is not on
 # crates.io, and the 0.56.0 release carries yamux and hickory-proto versions
