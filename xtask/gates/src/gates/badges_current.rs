@@ -295,7 +295,12 @@ pub fn self_test() -> Result<String, String> {
             Some(tr_real) => {
                 let scratch_root = dir.join("tr-root");
                 std::fs::create_dir(&scratch_root).map_err(|e| e.to_string())?;
-                for rel in ["README.md", "Cargo.toml", "rust-toolchain.toml", "LICENSE.md"] {
+                for rel in [
+                    "README.md",
+                    "Cargo.toml",
+                    "rust-toolchain.toml",
+                    "LICENSE.md",
+                ] {
                     std::fs::copy(root.join(rel), scratch_root.join(rel))
                         .map_err(|e| format!("copy {rel} into Turkish badge canary: {e}"))?;
                 }
