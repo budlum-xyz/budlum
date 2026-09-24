@@ -180,7 +180,10 @@ pub enum NetworkPrivacyError {
     /// Route id was empty, path-like, URL-like, or otherwise non-deterministic.
     InvalidRouteId(String),
     /// Policy requires proxy/overlay egress but the caller selected direct.
-    DirectEgressDenied { purpose: EgressPurpose, target_kind: TargetKind },
+    DirectEgressDenied {
+        purpose: EgressPurpose,
+        target_kind: TargetKind,
+    },
     /// Policy refuses direct IP egress.
     DirectIpDenied { purpose: EgressPurpose },
     /// Policy refuses direct DNS/hostname egress.
@@ -196,7 +199,10 @@ impl fmt::Display for NetworkPrivacyError {
             Self::InvalidRouteId(route_id) => {
                 write!(f, "invalid network privacy route id: {route_id}")
             }
-            Self::DirectEgressDenied { purpose, target_kind } => write!(
+            Self::DirectEgressDenied {
+                purpose,
+                target_kind,
+            } => write!(
                 f,
                 "direct egress denied for purpose={purpose:?}, target_kind={target_kind:?}"
             ),
@@ -327,9 +333,15 @@ mod tests {
 
     #[test]
     fn target_classification_is_resolution_free() {
-        assert_eq!(classify_target("/ip4/198.51.100.7/tcp/4001"), TargetKind::IpAddress);
+        assert_eq!(
+            classify_target("/ip4/198.51.100.7/tcp/4001"),
+            TargetKind::IpAddress
+        );
         assert_eq!(classify_target("198.51.100.7:4001"), TargetKind::IpAddress);
-        assert_eq!(classify_target("/dns4/bootstrap.example/tcp/4001"), TargetKind::DnsName);
+        assert_eq!(
+            classify_target("/dns4/bootstrap.example/tcp/4001"),
+            TargetKind::DnsName
+        );
         assert_eq!(classify_target("seed.example:4001"), TargetKind::DnsName);
         assert_eq!(classify_target("mdns://lan"), TargetKind::LocalDiscovery);
         assert_eq!(classify_target("adapter-target-1"), TargetKind::Opaque);

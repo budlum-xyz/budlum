@@ -3,7 +3,7 @@
 //! `docs/FSF_PROJECT_FIT.md` maps Free Software Foundation high-priority
 //! projects to Budlum modules. That map is useful only if it cannot silently
 //! become a licence bypass: several of the interesting projects are GPL/AGPL or
-//! have mixed/unknown licensing, while this tree is PolyForm Shield. The rule is
+//! have mixed/unknown licensing, while this tree is `PolyForm` Shield. The rule is
 //! therefore simple: Budlum may learn protocols, threat models and interface
 //! shapes, but product code must be Budlum-native unless a later legal and
 //! provenance decision creates an explicit boundary.
@@ -39,7 +39,10 @@ const MAX_REPORTED: usize = 24;
 enum Boundary {
     DesignOnly,
     ReviewFirst,
-    BoundaryOnly,
+    /// Renamed from `BoundaryOnly`: the variant repeated its own enum name,
+    /// which clippy's `enum_variant_names` refuses. The user-visible label is
+    /// unchanged.
+    InterfaceOnly,
 }
 
 impl Boundary {
@@ -47,7 +50,7 @@ impl Boundary {
         match self {
             Self::DesignOnly => "design-only",
             Self::ReviewFirst => "review-first",
-            Self::BoundaryOnly => "boundary-only",
+            Self::InterfaceOnly => "boundary-only",
         }
     }
 }
@@ -81,7 +84,7 @@ const CONTROLLED: &[ControlledProject] = &[
     ControlledProject {
         name: "FOSSology / GNU Licenseutils",
         terms: &["fossology", "licenseutils", "gnu licenseutils"],
-        boundary: Boundary::BoundaryOnly,
+        boundary: Boundary::InterfaceOnly,
         reason: "compliance tooling inspiration is process/gate-level unless a boundary is documented",
     },
     ControlledProject {
@@ -206,7 +209,10 @@ fn is_allowed_reference(rel: &str) -> bool {
         || rel == "docs/PROVENANCE_NOTES.md"
         || rel == "LICENSE.md"
         || rel.ends_with(&format!("/{BOUNDARY_NOTE}"))
-        || (rel.starts_with("docs/FSF_") && rel.ends_with(".md"))
+        || (rel.starts_with("docs/FSF_")
+            && std::path::Path::new(rel)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("md")))
 }
 
 fn is_import_surface(rel: &str) -> bool {
@@ -389,25 +395,37 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Returns the first canary whose boundary expectation is wrong.
 pub fn self_test() -> Result<String, String> {
     if !controlled_hits("src/settlement/taler.rs", "pub struct Receipt;").is_empty() {
-        return Err(String::from("canary 1: allowed path test used a bad expectation"));
+        return Err(String::from(
+            "canary 1: allowed path test used a bad expectation",
+        ));
     }
     if path_hits("src/settlement/taler.rs").is_empty() {
-        return Err(String::from("canary 2: a product path named after GNU Taler was not caught"));
+        return Err(String::from(
+            "canary 2: a product path named after GNU Taler was not caught",
+        ));
     }
     if controlled_hits("src/settlement/receipt.rs", "// GNU Taler receipt model").is_empty() {
-        return Err(String::from("canary 3: product code naming a design-only project was not caught"));
+        return Err(String::from(
+            "canary 3: product code naming a design-only project was not caught",
+        ));
     }
     if !controlled_hits(FIT_DOC, "GNU Taler is design-only").is_empty() {
         return Err(String::from("canary 4: the FSF fit doc was not exempt"));
     }
     if !controlled_hits("docs/FSF_TALER_BRIEF.md", "GNU Taler design brief").is_empty() {
-        return Err(String::from("canary 5: FSF design briefs must be allowed to name their source"));
+        return Err(String::from(
+            "canary 5: FSF design briefs must be allowed to name their source",
+        ));
     }
     if controlled_hits("docs/ARCHITECTURE.md", "GNUnet routing was copied").is_empty() {
-        return Err(String::from("canary 6: ordinary docs cannot become an import boundary"));
+        return Err(String::from(
+            "canary 6: ordinary docs cannot become an import boundary",
+        ));
     }
     if !is_import_surface("vendor/taler/COPYING") {
-        return Err(String::from("canary 7: vendor/ was not treated as an import surface"));
+        return Err(String::from(
+            "canary 7: vendor/ was not treated as an import surface",
+        ));
     }
     if copyleft_hits(
         Path::new("/nonexistent-root"),
@@ -417,7 +435,9 @@ pub fn self_test() -> Result<String, String> {
     )
     .is_empty()
     {
-        return Err(String::from("canary 8: copyleft import without a boundary note was not caught"));
+        return Err(String::from(
+            "canary 8: copyleft import without a boundary note was not caught",
+        ));
     }
     if !copyleft_hits(
         Path::new("/nonexistent-root"),
@@ -427,7 +447,9 @@ pub fn self_test() -> Result<String, String> {
     )
     .is_empty()
     {
-        return Err(String::from("canary 9: normal source text was treated as a vendored bundle"));
+        return Err(String::from(
+            "canary 9: normal source text was treated as a vendored bundle",
+        ));
     }
     if !check_fit_doc(
         "phase 0\nnot a completed implementation\ndoes **not** copy upstream project code\ndesign-only\ndocs/FSF_ADAPTATION_PLAN.md",
