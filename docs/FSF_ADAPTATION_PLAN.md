@@ -71,7 +71,9 @@ code starts.
 
 Only after Phase 1 briefs and Phase 2 guardrail:
 
-1. Federation event envelope + tests.
+1. Federation event envelope + tests. **Started** in `src/ai_inference/social.rs`
+   with `FederatedAiOutputEvent`: a Budlum-native event id and deterministic
+   JSON transport view for AI outputs minted into SocialFi.
 2. Receipt/accountability model + tests.
 3. Offline i18n provider seam + fixtures.
 4. Network proxy/privacy seam tests.
@@ -83,6 +85,8 @@ Only after Phase 1 briefs and Phase 2 guardrail:
 - The Phase 2 import-boundary guardrail is now coded as `fsf-import-boundaries`
   so later work cannot accidentally vendor FSF/copyleft source while the design
   briefs are being written.
-- Phase 1 design briefs are next.
+- Phase 1 design briefs are next; the first federation-event code is intentionally
+  small and native, and should be backed by a fuller brief before expanding the
+  bridge surface.
 - No FSF upstream code has been imported.
 - No claim is made that all FSF-inspired tooling is fully coded.
