@@ -4,7 +4,8 @@
 //! And finalized consensus outcomes. Provides deterministic `state_root` calculation.
 
 use crate::ai::types::{
-    AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
+    AiAgentPayment, AiAgentPaymentReceipt, AiAgentPaymentSettlement, AiAgentReputation,
+    AiCallbackEvent,
     AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
     AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
     AiVerifierStakeInfo, BoundedBytes,
@@ -1713,6 +1714,17 @@ impl AiRegistry {
         payment_id: &[u8; 32],
     ) -> Option<&AiAgentPaymentSettlement> {
         self.settled_agent_payments.get(payment_id)
+    }
+
+    /// Return the portable accountability receipt for a settled agent payment.
+    #[must_use]
+    pub fn get_agent_payment_receipt(
+        &self,
+        payment_id: &[u8; 32],
+    ) -> Option<AiAgentPaymentReceipt> {
+        self.settled_agent_payments
+            .get(payment_id)
+            .map(AiAgentPaymentSettlement::accountability_receipt)
     }
 
     pub fn is_payment_id_consumed(&self, payment_id: &[u8; 32]) -> bool {
