@@ -283,22 +283,41 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     let red_fails = run(&root, &red).is_err();
 
-    // Turkish README drift must fail too. Proven by measuring against the
-    // count the Turkish file actually carries: if that differs from README.md
-    // the gate has to reject, and if the two agree this log drifts both.
+    // Turkish README drift must fail too. This has to isolate the translated
+    // README path: a log with `README.tr.md + 1` would also fail on README.md,
+    // so it would keep passing even if the Turkish check were deleted. Build a
+    // tiny scratch tree where README.md matches the measured count and only
+    // README.tr.md is stale.
     let tr_path = root.join("README.tr.md");
     let tr_drift_fails = if tr_path.is_file() {
         let tr = read_file(&root, "README.tr.md")?;
         match badge_count(&tr) {
             Some(tr_real) => {
-                let log = dir.join("tr-drift.log");
+                let scratch_root = dir.join("tr-root");
+                std::fs::create_dir(&scratch_root).map_err(|e| e.to_string())?;
+                for rel in ["README.md", "Cargo.toml", "rust-toolchain.toml", "LICENSE.md"] {
+                    std::fs::copy(root.join(rel), scratch_root.join(rel))
+                        .map_err(|e| format!("copy {rel} into Turkish badge canary: {e}"))?;
+                }
                 let n: u64 = tr_real.parse::<u64>().map_err(|e| e.to_string())? + 1;
+                let stale_tr = tr.replace(
+                    &format!("tests-{tr_real}%20lib"),
+                    &format!("tests-{n}%20lib"),
+                );
+                if stale_tr == tr {
+                    return Err(String::from(
+                        "canary: could not drift README.tr.md test badge",
+                    ));
+                }
+                std::fs::write(scratch_root.join("README.tr.md"), stale_tr)
+                    .map_err(|e| e.to_string())?;
+                let log = dir.join("tr-drift.log");
                 std::fs::write(
                     &log,
-                    format!("test result: ok. {n} passed; 0 failed; 0 ignored\n"),
+                    format!("test result: ok. {real} passed; 0 failed; 0 ignored\n"),
                 )
                 .map_err(|e| e.to_string())?;
-                run(&root, &log).is_err()
+                run(&scratch_root, &log).is_err()
             }
             None => false,
         }
