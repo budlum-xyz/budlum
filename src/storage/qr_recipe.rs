@@ -172,6 +172,67 @@ mod tests {
     use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame};
     use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
 
+    /// The fee schedule prices content by recipe bytes. This measures what a
+    /// recipe actually costs on the wire and pins it.
+    ///
+    /// Why it exists: `BUD_RECIPE_PUBLIC_BYTES = 74` and
+    /// `BUD_RECIPE_SEALED_BYTES = 40` live in the fee crate
+    /// (`crates/ai-inference/crates/ai-serve/src/fee_scenario.rs`) and nothing
+    /// tied them to this struct. The two agreed by discipline, not by a gate.
+    /// Every storage price in the 3.0 spec is `recipes * 74`, so a field added
+    /// here would silently make every published cost number wrong while all
+    /// existing tests stayed green.
+    ///
+    /// bincode 1.x is held deliberately because its byte output is consensus
+    /// input, so this size is a wire fact and not an implementation detail:
+    ///   public = 32 commitment + 8 carousel (u16+u16+u32) + 32 stream + 2 block
+    ///   sealed = 32 commitment + 4 total_len + 2 k + 2 block_len
+    ///
+    /// If this fails, do not edit the number here. Change the fee constants in
+    /// the same commit, or the network charges for bytes it does not send.
+    #[test]
+    fn recipe_wire_size_is_the_size_the_fee_schedule_charges_for() {
+        const FEE_PUBLIC_BYTES: usize = 74;
+        const FEE_SEALED_BYTES: usize = 40;
+
+        let packed = pack_payload(PayloadKind::ContentBytes, b"wire-size-probe").unwrap();
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, DEFAULT_BLOCK_LEN).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        let full = ThreeRecipePublic::new(commit, enc.params(), stream);
+        let sealed = full.seal();
+
+        let public_wire = bincode::serialize(&full).unwrap();
+        let sealed_wire = bincode::serialize(&sealed).unwrap();
+
+        assert_eq!(
+            public_wire.len(),
+            FEE_PUBLIC_BYTES,
+            "public recipe is {} B on the wire but the fee schedule charges for {FEE_PUBLIC_BYTES} B",
+            public_wire.len()
+        );
+        assert_eq!(
+            sealed_wire.len(),
+            FEE_SEALED_BYTES,
+            "sealed recipe is {} B on the wire but the fee schedule charges for {FEE_SEALED_BYTES} B",
+            sealed_wire.len()
+        );
+
+        // The size must not depend on the content: pricing is per recipe, not
+        // per payload. A variable-length field would break that and is the
+        // exact drift this test is here to catch.
+        let other = pack_payload(PayloadKind::ContentBytes, &[7u8; 4096]).unwrap();
+        let other_commit = payload_commitment(&other);
+        let other_enc = CarouselEncoder::new(&other, 128).unwrap();
+        let other_stream = other_enc.params().stream_commitment(&other_commit);
+        let other_full = ThreeRecipePublic::new(other_commit, other_enc.params(), other_stream);
+        assert_eq!(
+            bincode::serialize(&other_full).unwrap().len(),
+            FEE_PUBLIC_BYTES,
+            "recipe size changed with the payload; pricing per recipe is no longer sound"
+        );
+    }
+
     #[test]
     fn public_recipe_stable_digest() {
         let packed = pack_payload(PayloadKind::ContentBytes, b"recipe-content-xx").unwrap();
