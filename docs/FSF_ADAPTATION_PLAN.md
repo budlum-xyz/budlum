@@ -78,7 +78,10 @@ Only after Phase 1 briefs and Phase 2 guardrail:
    `src/ai/registry.rs` with `AiAgentPaymentReceipt`: a public receipt id, payer
    commitment and terminal settlement fields derived from the canonical settled
    payment record.
-3. Offline i18n provider seam + fixtures.
+3. Offline i18n provider seam + fixtures. **Started** in
+   `src/ai_inference/i18n.rs` with local-only provider identifiers,
+   deterministic locale canonicalization, exact fixture lookup, localized-text
+   commitments and STT transcript provenance commitments.
 4. Network proxy/privacy seam tests.
 5. Privacy research prototypes behind non-default features, if approved.
 
@@ -88,8 +91,9 @@ Only after Phase 1 briefs and Phase 2 guardrail:
 - The Phase 2 import-boundary guardrail is now coded as `fsf-import-boundaries`
   so later work cannot accidentally vendor FSF/copyleft source while the design
   briefs are being written.
-- Phase 1 design briefs are next; the first federation-event code is intentionally
-  small and native, and should be backed by a fuller brief before expanding the
-  bridge surface.
+- Phase 1 design briefs are still needed; the first federation-event,
+  receipt/accountability and offline i18n/accessibility seams are intentionally
+  small and native, and should be backed by fuller briefs before expanding their
+  bridge surfaces.
 - No FSF upstream code has been imported.
 - No claim is made that all FSF-inspired tooling is fully coded.

@@ -23,6 +23,7 @@ use crate::pollen::data_rights::{AccessGrant, AccessGrantStatus};
 
 pub mod effort;
 pub mod executor;
+pub mod i18n;
 pub mod inference;
 pub mod metrics;
 // What a model may read, and in what form. Reading only: AI inference layer does not
