@@ -1118,6 +1118,11 @@ pub struct AiAgentPaymentReceipt {
 
 impl AiAgentPaymentReceipt {
     /// Build a public receipt from the canonical settlement record.
+    ///
+    /// Convenience: exposed for the RPC/CLI read path alongside
+    /// `RegistryState::get_agent_payment_receipt`. Reached in-file through
+    /// `AiAgentPaymentSettlement::accountability_receipt`; no other file
+    /// names it yet, which is what the idle-code gate is reporting.
     #[must_use]
     pub fn from_settlement(settlement: &AiAgentPaymentSettlement) -> Self {
         let payer_commitment = payer_commitment(settlement.payment_id, settlement.from_agent);
@@ -1142,6 +1147,10 @@ impl AiAgentPaymentReceipt {
     }
 
     /// Recompute the receipt id.
+    ///
+    /// Convenience: exposed so a consumer of a receipt can re-derive the id
+    /// and compare, rather than trusting the field it was handed. The writer
+    /// calls it in-file; a cross-file caller arrives with the RPC surface.
     #[must_use]
     pub fn calculate_receipt_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();

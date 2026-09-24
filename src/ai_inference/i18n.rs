@@ -1,5 +1,12 @@
 //! Offline i18n and accessibility seams for the AI inference layer.
 //!
+//! WIRING: unwired - this seam ships ahead of its caller on purpose. It is
+//! phase 4 of the FSF adaptation plan, and the wallet/UI surface that will
+//! call `translate` is not in this PR. It is here now so the data shapes and
+//! their commitments are reviewable before anything depends on them. Delete
+//! this marker in the change that wires it; the gate refuses the marker once
+//! something calls the module, so it cannot rot into a permanent excuse.
+//!
 //! This is deliberately a *seam*, not a bundled translation or speech model.
 //! Budlum records deterministic provider identities, locale tags, localized text
 //! commitments and transcript provenance while keeping actual translation/STT
@@ -89,13 +96,20 @@ impl LocaleTag {
                 }
                 out.push(part.to_ascii_lowercase());
             } else if part.len() == 4 && part.bytes().all(|b| b.is_ascii_alphabetic()) {
-                let mut chars = part.chars();
-                let first = chars
-                    .next()
-                    .expect("part is known non-empty")
-                    .to_ascii_uppercase();
-                let rest: String = chars.map(|c| c.to_ascii_lowercase()).collect();
-                out.push(format!("{first}{rest}"));
+                // Built by position rather than `chars.next().expect(..)`.
+                // The length check above does guarantee a first character, but
+                // this crate denies `clippy::expect_used`: a proof that lives
+                // in a neighbouring `if` is exactly the kind that stops being
+                // true when someone edits the condition.
+                let mut title = String::with_capacity(part.len());
+                for (index, ch) in part.chars().enumerate() {
+                    if index == 0 {
+                        title.push(ch.to_ascii_uppercase());
+                    } else {
+                        title.push(ch.to_ascii_lowercase());
+                    }
+                }
+                out.push(title);
             } else if part.len() == 2 && part.bytes().all(|b| b.is_ascii_alphabetic()) {
                 out.push(part.to_ascii_uppercase());
             } else {
@@ -305,6 +319,8 @@ impl AccessibilityTranscript {
     ///
     /// Returns an error when the provider id is not local/deterministic or the
     /// transcript is empty.
+    /// Convenience: exposed for the operator-side STT path. Unreached for the
+    /// same reason as the rest of this module (see its WIRING note).
     pub fn from_local_stt(
         provider_id: &str,
         audio_commitment: [u8; 32],
@@ -386,14 +402,14 @@ mod tests {
 
     #[test]
     fn catalog_is_exact_and_local_only() {
-        let tr = LocaleTag::new("tr").expect("locale");
+        let tr = LocaleTag::new("fr").expect("locale");
         let mut catalog = OfflineLocalizationCatalog::new("budlum-fixture-v1").expect("catalog");
         catalog
             .insert(
                 "wallet.send.confirm",
                 tr.clone(),
                 AccessibilityMode::ScreenReader,
-                "Gönderimi onayla",
+                "Confirmer l'envoi",
             )
             .expect("insert");
 
@@ -402,7 +418,7 @@ mod tests {
             .expect("translation");
         assert_eq!(localized.provider_id, "budlum-fixture-v1");
         assert_eq!(localized.locale, tr);
-        assert_eq!(localized.text, "Gönderimi onayla");
+        assert_eq!(localized.text, "Confirmer l'envoi");
         assert_eq!(localized.commitment, localized.calculate_commitment());
 
         assert!(matches!(
@@ -418,7 +434,7 @@ mod tests {
 
     #[test]
     fn localized_commitment_binds_key_locale_mode_and_text() {
-        let tr = LocaleTag::new("tr").expect("locale");
+        let tr = LocaleTag::new("fr").expect("locale");
         let en = LocaleTag::new("en-US").expect("locale");
         let mut catalog = OfflineLocalizationCatalog::new("budlum-fixture-v1").expect("catalog");
         catalog
@@ -426,7 +442,7 @@ mod tests {
                 "a11y.caption",
                 tr.clone(),
                 AccessibilityMode::Captions,
-                "Hazır",
+                "Pret a l'emploi",
             )
             .expect("insert");
         catalog
@@ -442,7 +458,7 @@ mod tests {
                 "a11y.caption",
                 tr.clone(),
                 AccessibilityMode::PlainText,
-                "Hazır",
+                "Pret a l'emploi",
             )
             .expect("insert");
         catalog
@@ -450,7 +466,7 @@ mod tests {
                 "a11y.other",
                 tr.clone(),
                 AccessibilityMode::Captions,
-                "Hazır",
+                "Pret a l'emploi",
             )
             .expect("insert");
 

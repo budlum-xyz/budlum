@@ -30,7 +30,6 @@ src/ai/registry.rs:clear_whitelist
 src/ai/registry.rs:get_payment_escrow_status
 src/ai/registry.rs:get_request
 src/ai/registry.rs:get_settled_agent_payment
-src/ai/registry.rs:is_payment_id_consumed
 src/ai/registry.rs:is_whitelist_mode
 src/ai/registry.rs:record_reputation_equivocation
 src/ai/registry.rs:record_reputation_payment_completed

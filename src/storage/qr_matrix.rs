@@ -163,6 +163,8 @@ impl QrMatrix {
 
     /// ISO mask pattern this symbol carries.
     #[must_use]
+    /// Convenience: exposed for reports and tests, which need to state which
+    /// mask was actually emitted now that the encoder chooses one by trial.
     pub const fn mask_pattern(&self) -> u8 {
         self.mask
     }
