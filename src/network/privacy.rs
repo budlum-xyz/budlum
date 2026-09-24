@@ -1,5 +1,12 @@
 //! Network egress privacy policy seam.
 //!
+//! WIRING: unwired - the egress policy seam is written before the network
+//! adapter that consults it (FSF adaptation plan, phase 5). `check_egress`
+//! is a refusal nothing calls yet, which is exactly the shape the
+//! guards-are-reachable gate is built to catch, so it is declared rather
+//! than left to be discovered. The dial path in the libp2p adapter is the
+//! intended caller and is not in this PR.
+//!
 //! This module does not implement an anonymity network. It gives Budlum a small,
 //! deterministic boundary where outbound dials can be classified, routed through
 //! a local proxy/overlay, and logged without leaking the concrete address. The
@@ -103,6 +110,7 @@ pub struct NetworkPrivacyPolicy {
 impl NetworkPrivacyPolicy {
     /// Strict node policy: no direct egress, no local discovery.
     #[must_use]
+    /// Convenience: kept for devnet and tests, as above.
     pub const fn strict_private() -> Self {
         Self {
             require_private_route: true,
@@ -115,6 +123,7 @@ impl NetworkPrivacyPolicy {
     /// Normal public-node policy: direct IP is allowed, DNS still needs an
     /// explicit decision so seed resolution cannot be introduced accidentally.
     #[must_use]
+    /// Convenience: kept for devnet and tests, as above.
     pub const fn public_node_no_dns_leak() -> Self {
         Self {
             require_private_route: false,
@@ -126,6 +135,9 @@ impl NetworkPrivacyPolicy {
 
     /// Test/devnet policy that allows all direct routes.
     #[must_use]
+    /// Convenience: kept for devnet and tests. The three constructors are the
+    /// named policy presets; the adapter that will pick one at startup is not
+    /// in this PR (see the module's WIRING note).
     pub const fn devnet_clear() -> Self {
         Self {
             require_private_route: false,

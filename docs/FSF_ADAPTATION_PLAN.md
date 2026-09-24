@@ -1,4 +1,4 @@
-# FSF adaptation plan for Budlum — clean-room, multi-stage
+# FSF adaptation plan for Budlum: clean-room, multi-stage
 
 This is the follow-up plan for `docs/FSF_PROJECT_FIT.md`.  The fit matrix is
 only phase 0: it tells us what is worth learning from FSF-listed projects and
@@ -15,7 +15,7 @@ datasets, test vectors, and generated artifacts.
 
 ## Phases
 
-### Phase 0 — inventory and boundary map (done)
+### Phase 0: inventory and boundary map (done)
 
 Commit: `f6d94a3`.
 
@@ -25,32 +25,32 @@ Commit: `f6d94a3`.
   review-first.
 - `tools/fsf_project_fit.py --self-test --check` pins the curation file.
 
-### Phase 1 — design briefs, no product code
+### Phase 1: design briefs, no product code
 
 Each brief must answer: Budlum module, threat model, license/provenance boundary,
 what we copy **conceptually**, what we explicitly do **not** copy, and which tests
 will prove the Budlum-native implementation.
 
-1. **Federation events** — Matrix / Pump.io / Activity Streams inspiration.
+1. **Federation events**: Matrix / Pump.io / Activity Streams inspiration.
    - Modules: `src/ai_inference`, RPC event feeds, SocialFi bridge.
    - Output: Budlum event envelope spec and golden JSON fixtures.
-2. **Receipt/accountability model** — GNU Taler inspiration.
+2. **Receipt/accountability model**: GNU Taler inspiration.
    - Modules: economy, settlement, wallet-core.
    - Output: anonymous-customer/auditable-operator receipt threat model.
-3. **Compliance gate** — FOSSology / licenseutils inspiration.
+3. **Compliance gate**: FOSSology / licenseutils inspiration.
    - Modules: `xtask/gates`, supply-chain workflows.
    - Output: import-boundary gate that blocks unreviewed GPL/AGPL vendoring.
-4. **Local i18n/accessibility seam** — Argos / STT family inspiration.
+4. **Local i18n/accessibility seam**: Argos / STT family inspiration.
    - Modules: docs/UI/Lubot/off-chain assistant.
    - Output: provider trait and deterministic fixture format, no model asset import.
-5. **Network privacy seam** — Tor / I2P / GNUnet design inspiration.
+5. **Network privacy seam**: Tor / I2P / GNUnet design inspiration.
    - Modules: `src/network`, devnet, RPC exposure.
    - Output: proxy/egress boundary tests and leak model.
-6. **Privacy research** — Monero/Zcash-style research inspiration.
+6. **Privacy research**: Monero/Zcash-style research inspiration.
    - Modules: note-packing, wallet privacy, settlement privacy research.
    - Output: research memo only; no new cryptographic primitive without a BPQS-like bar.
 
-### Phase 2 — first safe Budlum-native code
+### Phase 2: first safe Budlum-native code
 
 Start with the least license-risky, highest gate value item.  This guardrail may
 land before the Phase 1 briefs are all written, because it prevents the mistake
@@ -67,7 +67,7 @@ the briefs are meant to avoid: turning research into an unreviewed source import
 This gives the rest of the adaptation work a hard guardrail before any feature
 code starts.
 
-### Phase 3 — module implementations, one at a time
+### Phase 3: module implementations, one at a time
 
 Only after Phase 1 briefs and Phase 2 guardrail:
 
