@@ -1023,6 +1023,18 @@ pub struct AiAgentPaymentSettlement {
     pub status: AiPaymentEscrowStatus,
 }
 
+impl AiPaymentEscrowStatus {
+    /// Stable tag used by state leaves and public settlement receipts.
+    pub const fn tag(&self) -> u8 {
+        match self {
+            Self::Pending => 0,
+            Self::Released => 1,
+            Self::Reclaimed => 2,
+            Self::SettledImmediate => 3,
+        }
+    }
+}
+
 impl AiAgentPaymentSettlement {
     pub fn from_payment(
         payment: &AiAgentPayment,
@@ -1060,13 +1072,186 @@ impl AiAgentPaymentSettlement {
         hasher.update(self.submitted_at_block.to_le_bytes());
         hasher.update(self.expiry_block.to_le_bytes());
         hasher.update(self.settled_at_block.to_le_bytes());
-        let status_tag: u8 = match self.status {
-            AiPaymentEscrowStatus::Pending => 0,
-            AiPaymentEscrowStatus::Released => 1,
-            AiPaymentEscrowStatus::Reclaimed => 2,
-            AiPaymentEscrowStatus::SettledImmediate => 3,
-        };
-        hasher.update([status_tag]);
+        hasher.update([self.status.tag()]);
         hasher.finalize().into()
+    }
+
+    /// Build the public accountability receipt for this terminal settlement.
+    #[must_use]
+    pub fn accountability_receipt(&self) -> AiAgentPaymentReceipt {
+        AiAgentPaymentReceipt::from_settlement(self)
+    }
+}
+
+/// Public accountability receipt for an agent payment settlement.
+///
+/// The settled map remains the full on-chain audit trail. This receipt is the
+/// portable view a wallet, explorer or off-chain bridge can hand around: it binds
+/// the terminal settlement facts and the payer by a domain-separated commitment,
+/// without requiring every consumer of the receipt to restate the raw payer
+/// address in its transport format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiAgentPaymentReceipt {
+    /// Domain-separated receipt id over every field below.
+    pub receipt_id: [u8; 32],
+    /// Payment id whose live entry can never be reused after settlement.
+    pub payment_id: [u8; 32],
+    /// Commitment to `(payment_id, payer)` for portable accountability views.
+    pub payer_commitment: [u8; 32],
+    /// Recipient / operator paid by the settlement.
+    pub payee: Address,
+    /// Settled amount in base units.
+    pub amount: u64,
+    /// Commitment to `(payment_id, request_id)` when the payment was request-bound.
+    pub request_commitment: Option<[u8; 32]>,
+    /// Whether an execution proof was required for release.
+    pub require_proof: bool,
+    /// Block when the payment entered the registry.
+    pub submitted_at_block: u64,
+    /// Expiry block copied from the payment terms.
+    pub expiry_block: u64,
+    /// Block when the terminal status was recorded.
+    pub settled_at_block: u64,
+    /// Terminal settlement status.
+    pub status: AiPaymentEscrowStatus,
+}
+
+impl AiAgentPaymentReceipt {
+    /// Build a public receipt from the canonical settlement record.
+    #[must_use]
+    pub fn from_settlement(settlement: &AiAgentPaymentSettlement) -> Self {
+        let payer_commitment = payer_commitment(settlement.payment_id, settlement.from_agent);
+        let request_commitment = settlement
+            .request_id
+            .map(|rid| request_commitment(settlement.payment_id, rid));
+        let mut receipt = Self {
+            receipt_id: [0u8; 32],
+            payment_id: settlement.payment_id,
+            payer_commitment,
+            payee: settlement.to_agent,
+            amount: settlement.amount,
+            request_commitment,
+            require_proof: settlement.require_proof,
+            submitted_at_block: settlement.submitted_at_block,
+            expiry_block: settlement.expiry_block,
+            settled_at_block: settlement.settled_at_block,
+            status: settlement.status.clone(),
+        };
+        receipt.receipt_id = receipt.calculate_receipt_id();
+        receipt
+    }
+
+    /// Recompute the receipt id.
+    #[must_use]
+    pub fn calculate_receipt_id(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_AI_AGENT_PAYMENT_RECEIPT_V1");
+        hasher.update(self.payment_id);
+        hasher.update(self.payer_commitment);
+        hasher.update(self.payee.as_bytes());
+        hasher.update(self.amount.to_le_bytes());
+        if let Some(commitment) = self.request_commitment {
+            hasher.update(b"request");
+            hasher.update(commitment);
+        } else {
+            hasher.update(b"no_request");
+        }
+        hasher.update([u8::from(self.require_proof)]);
+        hasher.update(self.submitted_at_block.to_le_bytes());
+        hasher.update(self.expiry_block.to_le_bytes());
+        hasher.update(self.settled_at_block.to_le_bytes());
+        hasher.update([self.status.tag()]);
+        hasher.finalize().into()
+    }
+}
+
+fn payer_commitment(payment_id: [u8; 32], payer: Address) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_AI_AGENT_PAYMENT_PAYER_COMMITMENT_V1");
+    hasher.update(payment_id);
+    hasher.update(payer.as_bytes());
+    hasher.finalize().into()
+}
+
+fn request_commitment(payment_id: [u8; 32], request_id: AiRequestId) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_AI_AGENT_PAYMENT_REQUEST_COMMITMENT_V1");
+    hasher.update(payment_id);
+    hasher.update(request_id.0);
+    hasher.finalize().into()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(b: u8) -> Address {
+        Address([b; 32])
+    }
+
+    fn settlement(status: AiPaymentEscrowStatus) -> AiAgentPaymentSettlement {
+        AiAgentPaymentSettlement {
+            payment_id: [9u8; 32],
+            from_agent: addr(1),
+            to_agent: addr(2),
+            amount: 123,
+            request_id: Some(AiRequestId([3u8; 32])),
+            require_proof: true,
+            submitted_at_block: 10,
+            expiry_block: 99,
+            settled_at_block: 40,
+            status,
+        }
+    }
+
+    #[test]
+    fn payment_receipt_binds_terminal_settlement_fields() {
+        let base = settlement(AiPaymentEscrowStatus::Released).accountability_receipt();
+        assert_eq!(base.receipt_id, base.calculate_receipt_id());
+        assert_eq!(base.payment_id, [9u8; 32]);
+        assert_eq!(base.payee, addr(2));
+        assert_eq!(base.amount, 123);
+        assert!(base.request_commitment.is_some());
+        assert_eq!(base.status, AiPaymentEscrowStatus::Released);
+
+        let mut changed = settlement(AiPaymentEscrowStatus::Released);
+        changed.amount += 1;
+        assert_ne!(base.receipt_id, changed.accountability_receipt().receipt_id);
+
+        let mut changed = settlement(AiPaymentEscrowStatus::Released);
+        changed.to_agent = addr(7);
+        assert_ne!(base.receipt_id, changed.accountability_receipt().receipt_id);
+
+        let changed = settlement(AiPaymentEscrowStatus::Reclaimed);
+        assert_ne!(base.receipt_id, changed.accountability_receipt().receipt_id);
+    }
+
+    #[test]
+    fn payment_receipt_commits_to_payer_without_using_raw_address_as_id() {
+        let base = settlement(AiPaymentEscrowStatus::Released).accountability_receipt();
+        assert_ne!(base.payer_commitment, [1u8; 32]);
+
+        let mut changed = settlement(AiPaymentEscrowStatus::Released);
+        changed.from_agent = addr(4);
+        let changed = changed.accountability_receipt();
+        assert_ne!(base.payer_commitment, changed.payer_commitment);
+        assert_ne!(base.receipt_id, changed.receipt_id);
+    }
+
+    #[test]
+    fn payment_receipt_separates_missing_request_from_zero_request() {
+        let mut no_request = settlement(AiPaymentEscrowStatus::SettledImmediate);
+        no_request.request_id = None;
+        no_request.require_proof = false;
+        let no_request = no_request.accountability_receipt();
+
+        let mut zero_request = settlement(AiPaymentEscrowStatus::Released);
+        zero_request.request_id = Some(AiRequestId([0u8; 32]));
+        let zero_request = zero_request.accountability_receipt();
+
+        assert!(no_request.request_commitment.is_none());
+        assert!(zero_request.request_commitment.is_some());
+        assert_ne!(no_request.receipt_id, zero_request.receipt_id);
     }
 }
