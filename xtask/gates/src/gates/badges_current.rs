@@ -1,5 +1,10 @@
 //! README badges must match reality.
 //!
+//! Both READMEs are checked. `README.tr.md` repeats the same four claims in
+//! Turkish and was unprotected until 2026-09-24: it advertised 2885 tests
+//! while `README.md` advertised 3219, a drift of 334 that no gate could see.
+//! A translated claim is still a claim.
+//!
 //! Ported from `scripts/check-badges-are-current.sh`. Four claims: the test
 //! badge count equals the last measured `N passed` in the CI log (and the log
 //! is green), the CI badge pins `branch=main&event=push`, the rust badge
@@ -216,8 +221,30 @@ pub fn run(root: &Path, log: &Path) -> Result<String, String> {
     check_ci_badge(&readme)?;
     check_rust_badge(root, &readme)?;
     check_license_badge(root, &readme)?;
+
+    // The Turkish README makes the same claims to a different audience. If it
+    // is present it is held to the same measurement; a stale translation is a
+    // stale claim, not a formatting detail.
+    let translated = root.join("README.tr.md");
+    let tr_note = if translated.is_file() {
+        let tr = read_file(root, "README.tr.md")?;
+        let tr_badge = badge_count(&tr).ok_or_else(|| {
+            String::from("no tests-N%20lib badge found in README.tr.md - gate would be vacuous")
+        })?;
+        if tr_badge != measured {
+            return Err(format!(
+                "README.tr.md test badge says {tr_badge}, this run measured {measured} (README.md says {badge}).\n  Update the Turkish badge in the same pull request:\n      [![Tests](https://img.shields.io/badge/tests-{measured}%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)"
+            ));
+        }
+        check_ci_badge(&tr)?;
+        check_rust_badge(root, &tr)?;
+        " README.tr.md carries the same count and pins."
+    } else {
+        ""
+    };
+
     Ok(format!(
-        "Badge gate OK: README advertises {badge} tests, run measured {measured};\n  CI badge pins branch=main&event=push, rust badge matches rust-toolchain.toml,\n  license badge matches Cargo.toml and links to LICENSE.md."
+        "Badge gate OK: README advertises {badge} tests, run measured {measured};\n  CI badge pins branch=main&event=push, rust badge matches rust-toolchain.toml,\n  license badge matches Cargo.toml and links to LICENSE.md.{tr_note}"
     ))
 }
 
@@ -256,6 +283,29 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     let red_fails = run(&root, &red).is_err();
 
+    // Turkish README drift must fail too. Proven by measuring against the
+    // count the Turkish file actually carries: if that differs from README.md
+    // the gate has to reject, and if the two agree this log drifts both.
+    let tr_path = root.join("README.tr.md");
+    let tr_drift_fails = if tr_path.is_file() {
+        let tr = read_file(&root, "README.tr.md")?;
+        match badge_count(&tr) {
+            Some(tr_real) => {
+                let log = dir.join("tr-drift.log");
+                let n: u64 = tr_real.parse::<u64>().map_err(|e| e.to_string())? + 1;
+                std::fs::write(
+                    &log,
+                    format!("test result: ok. {n} passed; 0 failed; 0 ignored\n"),
+                )
+                .map_err(|e| e.to_string())?;
+                run(&root, &log).is_err()
+            }
+            None => false,
+        }
+    } else {
+        true
+    };
+
     let empty = dir.join("empty.log");
     std::fs::write(&empty, "").map_err(|e| e.to_string())?;
     let empty_fails = run(&root, &empty).is_err();
@@ -273,5 +323,12 @@ pub fn self_test() -> Result<String, String> {
     if !empty_fails {
         return Err(String::from("canary: empty test output was accepted"));
     }
-    Ok(String::from("badge canary OK (drift/red/empty FAIL)."))
+    if !tr_drift_fails {
+        return Err(String::from(
+            "canary: a drifted README.tr.md badge was accepted",
+        ));
+    }
+    Ok(String::from(
+        "badge canary OK (drift/red/empty/tr-drift FAIL).",
+    ))
 }
