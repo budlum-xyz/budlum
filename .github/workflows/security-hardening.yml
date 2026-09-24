@@ -250,7 +250,22 @@ jobs:
           # tested exactly once and the wall clock is roughly an eighth.
           # `--baseline=skip` is NOT used: each shard proves its own tree is
           # green before trusting a "caught" verdict.
-          cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff \
+          # `--timeout` hem mutant testlerine hem de baseline'a uygulanir ve
+          # `--in-place` kullanildigi icin carpan tabanli (`--timeout-multiplier`)
+          # bicim kabul edilmez: cargo-mutants'in kendi belgesi bunu soyluyor.
+          # 300 saniye cargo-mutants'in varsayilaniydi ve bu depo icin yetmiyor.
+          # Olculdu, iki bagimsiz kosumda iki farkli shard'da ayni satir:
+          #   36027822255 shard 6/8 -> TIMEOUT Unmutated baseline in 73s build + 300s test
+          #   36032403742 shard 4/8 -> TIMEOUT Unmutated baseline in 76s build + 300s test
+          # Ardindan "cargo test failed in an unmutated tree, so no mutants were
+          # tested": is kirmizi donuyor ama tek bir mutant bile test edilmemis
+          # oluyor, yani en pahali bicimde hicbir sey olculmuyor.
+          #
+          # 900 saniye kapiyi gevsetmez: bir TIMEOUT hicbir zaman "caught"
+          # sayilmaz, yani sure buyumesi hayatta kalan bir mutanti gizleyemez.
+          # Gevseten sey baseline'in hic kosmamasiydi. `--baseline=skip`
+          # kullanilmiyor: her shard kendi agacinin yesil oldugunu kanitlar.
+          cargo mutants --in-place --timeout 900 --in-diff /tmp/pr.diff \
             --shard "${SHARD}/8" -- --lib
 
   supply-chain:
