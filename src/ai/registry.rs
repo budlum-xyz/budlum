@@ -5,8 +5,7 @@
 
 use crate::ai::types::{
     AiAgentPayment, AiAgentPaymentReceipt, AiAgentPaymentSettlement, AiAgentReputation,
-    AiCallbackEvent,
-    AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
+    AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
     AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
     AiVerifierStakeInfo, BoundedBytes,
 };

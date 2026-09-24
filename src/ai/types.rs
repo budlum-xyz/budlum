@@ -1181,7 +1181,6 @@ fn request_commitment(payment_id: [u8; 32], request_id: AiRequestId) -> [u8; 32]
     hasher.finalize().into()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
