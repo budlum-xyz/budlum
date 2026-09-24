@@ -476,6 +476,7 @@ dependencies = [
 name = "budlum-bpqs"
 version = "0.1.0"
 dependencies = [
+ "cmov",
  "keccak 0.2.0",
  "sha3",
 ]

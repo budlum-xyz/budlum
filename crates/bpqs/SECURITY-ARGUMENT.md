@@ -415,15 +415,23 @@ SIGNED-PATH secret flow inventory (each item points at code):
    being called from this crate.
    The candidate hardening named here (an explicit conditional subtract
    instead of u128-%) is now the implementation. fe_add is a wrapping
-   add plus a masked conditional subtract; fe_mul reduces the 128-bit
-   product with the Goldilocks identities 2^64 == 2^32 - 1 and
-   2^96 == -1 (mod p), corrections applied as arithmetic, not branches.
-   After the change `nm -u` lists no 128-bit division helper at all.
-   Equivalence is pinned by three tests: comparison against the retained
-   `%` reference over boundary and pseudorandom inputs, the upstream
-   Plonky3 width-16 known-answer vector, and a separate canonicality
-   test (a result congruent mod p but >= p would change the squeezed
-   digest; an early draft of the reduction did exactly that for
+   add plus a conditional-move-backed subtract; fe_mul reduces the
+   128-bit product with the Goldilocks identities 2^64 == 2^32 - 1 and
+   2^96 == -1 (mod p), with borrow/carry corrections also routed
+   through `cmov::Cmov`. This is the 2026-09-24 follow-up to the
+   residual-branch review: the first division-free rewrite still used raw
+   bool-derived masked selects, and release x86-64 codegen could recover
+   a short data-dependent branch from them. The current code depends on
+   `cmov` directly so supported targets use CMOV/CSEL-style predication
+   for those secret-fed selections rather than relying on LLVM to keep a
+   source-level mask. After the original change `nm -u` listed no
+   128-bit division helper at all; after this follow-up the arithmetic no
+   longer contains the masked-select shape the review flagged. Equivalence
+   is pinned by three tests: comparison against the retained `%`
+   reference over boundary and pseudorandom inputs, the upstream Plonky3
+   width-16 known-answer vector, and a separate canonicality test (a
+   result congruent mod p but >= p would change the squeezed digest; an
+   early draft of the reduction did exactly that for
    0xffff_ffff_0000_0000 squared).
    MEASURED 2026-09-23 (the statistical half, previously open here).
    `examples/dudect_poseidon2.rs`, Welch t-test, 200k interleaved
@@ -479,12 +487,14 @@ SIGNED-PATH secret flow inventory (each item points at code):
 6. Absent from the whole signing path: secret-indexed table access,
    secret-dependent early exits, secret-dependent allocation sizes.
 
-Claim, confined: the signing path's instruction SCHEDULE is
-data-independent; its timing VARIABLES all derive from publicly
+Claim, confined: the signing path's algorithmic schedule is
+data-independent, and its timing variables all derive from publicly
 recomputable values (height, count, msg, the carried randomizer). The
-single open leak candidate is the u128-remainder lowering in the
-Poseidon2 field arithmetic (item 4), named and measured-or-refuted by
-question 6, not assumed away.
+named u128-remainder leak candidate in Poseidon2 field arithmetic is
+closed structurally by removing the software divider and by moving the
+remaining conditional corrections onto `cmov`; the statistical harness is
+still evidence on one host, not a formal target-independent constant-time
+proof.
 
 ## 9. Test map (claim -> pin)
 

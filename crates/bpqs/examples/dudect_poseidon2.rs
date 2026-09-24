@@ -33,7 +33,7 @@
 //! - `legacy`: the `(a as u128 OP b) % p` arithmetic this crate shipped before
 //!   2026-09-23, lowered by rustc to a compiler-rt `__umodti3` call whose
 //!   iteration count depends on the operand bits. This one MUST be flagged.
-//! - `current`: the branchless reduction in `poseidon2.rs` today. This one is
+//! - `current`: the cmov-backed reduction in `poseidon2.rs` today. This one is
 //!   the subject of the claim.
 //!
 //! Three runs, in this order, and all three must land correctly:
@@ -81,21 +81,25 @@ const GOLDILOCKS_P: u64 = 0xffff_ffff_0000_0001;
 
 mod current {
     use super::{GOLDILOCKS_P, WIDTH};
+    use cmov::Cmov;
+
+    #[inline]
+    fn cmov_if(mut keep: u64, replace: u64, condition: bool) -> u64 {
+        keep.cmovnz(&replace, u8::from(condition));
+        keep
+    }
 
     #[inline]
     fn fe_sub_p(x: u64) -> u64 {
         let (diff, borrow) = x.overflowing_sub(GOLDILOCKS_P);
-        let mask = u64::from(borrow).wrapping_sub(1);
-        (diff & mask) | (x & !mask)
+        cmov_if(x, diff, !borrow)
     }
 
     #[inline]
     pub fn fe_add(a: u64, b: u64) -> u64 {
         let (sum, carry) = a.overflowing_add(b);
         let (diff, borrow) = sum.overflowing_sub(GOLDILOCKS_P);
-        let fold = u64::from(carry) | u64::from(!borrow);
-        let mask = fold.wrapping_sub(1);
-        (sum & mask) | (diff & !mask)
+        cmov_if(sum, diff, carry | !borrow)
     }
 
     #[inline]
@@ -104,10 +108,10 @@ mod current {
         let x_lo = x as u64;
         let x_hi = (x >> 64) as u64;
         let (t0, borrow) = x_lo.overflowing_sub(x_hi >> 32);
-        let t0 = t0.wrapping_sub(0xFFFF_FFFF * u64::from(borrow));
+        let t0 = cmov_if(t0, t0.wrapping_sub(0xFFFF_FFFF), borrow);
         let t1 = (x_hi & 0xFFFF_FFFF).wrapping_mul(0xFFFF_FFFF);
         let (t2, carry) = t0.overflowing_add(t1);
-        fe_sub_p(t2.wrapping_add(0xFFFF_FFFF * u64::from(carry)))
+        fe_sub_p(cmov_if(t2, t2.wrapping_add(0xFFFF_FFFF), carry))
     }
 
     super::define_permutation!();
