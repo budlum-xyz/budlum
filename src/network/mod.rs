@@ -1,8 +1,8 @@
 pub mod gossip_dedup;
 pub mod mobile;
 pub mod node;
-pub mod privacy;
 pub mod peer_manager;
+pub mod privacy;
 pub mod proto_conversions;
 pub mod protocol;
 pub mod sync_codec;
