@@ -193,7 +193,9 @@ impl fmt::Display for NetworkPrivacyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyTarget => f.write_str("network egress target must not be empty"),
-            Self::InvalidRouteId(route_id) => write!(f, "invalid network privacy route id: {route_id}"),
+            Self::InvalidRouteId(route_id) => {
+                write!(f, "invalid network privacy route id: {route_id}")
+            }
             Self::DirectEgressDenied { purpose, target_kind } => write!(
                 f,
                 "direct egress denied for purpose={purpose:?}, target_kind={target_kind:?}"
