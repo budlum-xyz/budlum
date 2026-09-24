@@ -462,12 +462,23 @@ jobs:
           # The stderr is kept rather than discarded, because "rustc is not on
           # PATH" and "the flag is unknown" are different answers and only the
           # second one may be treated as a no.
+          # The output must NOT be /dev/null. rustc creates its temporary
+          # files next to the output path, so `-o /dev/null` makes it try to
+          # mkdir inside /dev, which fails with "couldn't create a temp dir:
+          # Permission denied" - an answer about the runner's filesystem, not
+          # about the flag. The probe then reported the toolchain as unusable
+          # and the job died before the sanitizer ever ran (2026-09-24: the
+          # canary and the TSan step were both skipped, so the "does the tool
+          # really catch a race" proof was never produced).
+          probe_dir=$(mktemp -d)
           set +e
           echo 'fn main(){}' \
             | rustc +nightly-2026-07-19 -Cunsafe-allow-abi-mismatch=sanitizer \
-                --emit=metadata -o /dev/null - > /tmp/abi-probe.log 2>&1
+                --emit=metadata -o "${probe_dir}/probe.rmeta" - \
+                > /tmp/abi-probe.log 2>&1
           probe_status=$?
           set -e
+          rm -rf "${probe_dir}"
           if [ "$probe_status" -ne 0 ] && ! grep -qiE "unknown|unstable|unrecognized|invalid" /tmp/abi-probe.log; then
             echo "::error::the ABI-escape probe failed for a reason that is not an unknown flag (exit $probe_status) - the pinned toolchain itself is not usable here."
             cat /tmp/abi-probe.log >&2
