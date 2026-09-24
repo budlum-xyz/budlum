@@ -439,10 +439,29 @@ SIGNED-PATH secret flow inventory (each item points at code):
 
    | run | |t| | meaning |
    |---|---|---|
-   | null control (both classes random) | 0.52 | no harness bias |
-   | positive control (synthetic operand-dependent load) | 39.33 | the harness CAN return a positive |
-   | subject, 8 distinct constant pairs | worst 3.13 | no value-dependent timing |
-   | legacy `%` arithmetic, same protocol | 0.52 | see below |
+   | null control (both classes random) | 0.46 | no harness bias |
+   | positive control (synthetic operand-dependent load) | 442.63 | the harness CAN return a positive |
+   | subject, 8 distinct constant pairs | worst 1.93 | no value-dependent timing |
+   | legacy `%` arithmetic, same protocol | 0.09 | see below |
+
+   RE-MEASURED after the cmov change. The first pass of this table was taken
+   against the masked-select arithmetic; that arithmetic was then replaced
+   (secret-fed corrections now go through `cmov::Cmov::cmovnz`), so the old
+   numbers described code that no longer ships and were replaced rather than
+   kept alongside. The verdict is unchanged, and two things moved:
+
+   - The permutation got SLOWER: the same sweep reads 134.6 us per batch
+     against 82.4 us before, i.e. 1.63x. The conditional-move path costs real
+     time, and that cost belongs in the record next to the security argument
+     it buys - the legacy `%` arithmetic this replaced runs at 171 us, so the
+     shipped code is still the faster of the two, but the margin narrowed from
+     2.1x to 1.3x.
+   - The fix-vs-random residency artifact collapsed from 110 to 0.56. That is
+     consistent with the artifact having been a cache-residency effect all
+     along: a uniformly slower, more regular inner loop leaves less headroom
+     for one class's working set to stay resident. It is NOT evidence that
+     fix-vs-random is now a valid shape for this target, and the verdict still
+     does not rest on it.
 
    Three things this measurement forced into the open, all of which are
    findings about the METHOD and are recorded because a harness nobody
@@ -458,13 +477,14 @@ SIGNED-PATH secret flow inventory (each item points at code):
    b. Fix-vs-random, the classic dudect shape, does NOT work on this
       target and the harness prints the artifact next to the verdict so
       the claim stays checkable: the same shipped code reads |t| = 110
-      under fix-vs-random and 0.52 under random-vs-random. A permutation
+      under fix-vs-random and 0.52 under random-vs-random (measured on the
+      pre-cmov arithmetic; see the re-measurement note above). A permutation
       scrambles its whole state over 30 rounds, so repeating one input
       measures residency, not the field ops. The verdict therefore uses
       pairs of CONSTANTS, where the only difference between classes is
       the bytes.
    c. The legacy `%` arithmetic did NOT show a timing signal under this
-      protocol (0.52). Stated plainly rather than buried: the structural
+      protocol (0.09). Stated plainly rather than buried: the structural
       finding - a reachable `__umodti3` on a secret-fed path - stands on
       its own, but this host did not turn it into a measurable one. The
       removal remains the right change (a divider whose timing is not
