@@ -415,7 +415,15 @@ jobs:
   tsan:
     name: ThreadSanitizer (data race detection)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Olculdu 2026-09-24, kosum 36057795640: sonda duzeltildikten sonra is
+    # ilk kez gercekten kostu. Sonda 0 sn, kanarya 19 sn, ama
+    # `RUSTFLAGS -Zsanitizer=thread` adimi 20:53:30'dan 21:37:52'ye kadar
+    # surdu (44 dk 22 sn) ve is tavani olan 45 dakikaya takildi: sanitizer
+    # butun bagimlilik agacini yeniden derliyor ve o kosuda derleyici
+    # onbellegi soguktu. Tavan 120 dakikaya cikti; bu bir gevsetme degil,
+    # olcumun bitmesine izin vermek. Sifir bulgu ile biten bir kosu, hic
+    # bitmeyen bir kosudan cok daha fazlasini soyler.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
