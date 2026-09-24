@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main, fix/architecture-tip-adlari]
+  workflow_dispatch:
   # A weekly nightly run, continuous UB inspection
   schedule:
     - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
@@ -220,7 +221,7 @@ jobs:
             # rather than dressed up: at ~148 s/test the suite needs ~26.5 h
             # against a 6 h hard ceiling. This is a NOTICE, not a silent pass -
             # the number above is the coverage claim, and it is a partial one.
-            echo "::warning::Miri storage inspection hit its 3600 s window after ${n:-0} of ${total:-unknown} tests. This is a measured shortfall, not a clean run: the full suite needs roughly 26.5 h and a hosted job is capped at 6 h. Tracked as the open item in the Miri section of the audit log."
+            echo "::warning::Miri storage inspection hit its 3600 s window after ${n:-0} of ${total:-unknown} tests. This is a measured shortfall, not a clean run: the full suite needs roughly 26.5 h and a hosted job is capped at 6 h. Weekly sharded storage Miri now carries that full-cost sweep on schedule/workflow_dispatch."
           elif [ "$rc" -ne 0 ]; then
             echo "::error::Miri storage inspection failed with exit $rc - this is a real failure, not the time bound."
             exit "$rc"
@@ -287,6 +288,148 @@ jobs:
               | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
               | head -n 9 | sed -e "s@^@::error::$f @"
           done
+
+
+  miri-storage-weekly-shards:
+    # User decision 2026-09-24: pay the full storage UB inspection cost rather
+    # than leaving the 3600 s PR window as the only evidence. Six scheduled
+    # shards keep each hosted job under the 6 h ceiling (measured full cost:
+    # ~26.5 runner-hours/week). This job is intentionally absent from PRs; PRs
+    # keep the bounded PARTIAL visibility above.
+    name: Miri storage full shard ${{ matrix.shard_index }}/6 (weekly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly Rust with Miri
+        run: |
+          rustup toolchain install nightly-2026-07-19 --component miri
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: miri-storage-weekly-${{ matrix.shard_index }}
+          cache-on-failure: true
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Miri storage shard ${{ matrix.shard_index }} of 6
+        run: |
+          set -euo pipefail
+          shard='${{ matrix.shard_index }}'
+          shards=6
+          echo "Enumerating storage tests for shard $shard/$shards..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage --list \
+            2>&1 | tee /tmp/miri-storage-list.txt
+          mapfile -t tests < <(sed -n 's/: test$//p' /tmp/miri-storage-list.txt)
+          total_listed=${#tests[@]}
+          if [ "$total_listed" -lt 100 ]; then
+            echo "::error::Miri storage test enumeration found only $total_listed tests; refusing to call a shard complete."
+            exit 1
+          fi
+
+          # Same named, dated FFI-bound exclusions as the PR-visible storage
+          # step. These open real sled databases and abort under Miri at
+          # libc::getrlimit before any Budlum storage state machine code can be
+          # inspected. The sharded job is the full pure-storage UB sweep, not a
+          # retry of tests Miri cannot execute.
+          ffi_skip=(
+            startup_loads_consensus_state_from_storage
+            test_storage_maintenance_fail_closed_regression
+            storage_economics_state_persists_across_restart
+            test_durable_commit_batch_and_recovery
+            a_commit_without_bridge_state_carries_the_live_snapshot_forward
+            corrupt_height_markers_are_reported_not_read_as_zero
+            backup_restore_roundtrip_is_integrity_checked_and_non_destructive
+            load_mempool_txs_drops_corrupt_entries_without_aborting_startup
+            content_store_roundtrip_and_rejects_wrong_cid
+            sled_open_with_retry_waits_for_lock_release
+            sled_open_with_retry_reports_persistent_contention
+            json_is_no_longer_accepted_where_only_bincode_is_written
+            removing_the_fallback_does_not_make_bincode_strict
+            a_corrupt_schema_version_refuses_to_boot
+            test_chaos_settlement_state_survives_storage_reload
+            multi_consensus_settlement_state_round_trips_through_storage
+            storage_reload_skips_malformed_consensus_domains
+            storage_reload_skips_commitments_for_unknown_or_mismatched_domains
+            storage_reload_skips_global_headers_with_broken_hash_chain
+            bridge_state_roots_round_trip_through_storage_after_lock
+          )
+
+          args=(storage --test-threads=1)
+          selected=0
+          forced_skipped=0
+          for i in "${!tests[@]}"; do
+            name="${tests[$i]}"
+            skip=0
+            for forced in "${ffi_skip[@]}"; do
+              if [[ "$name" == *"$forced"* ]]; then
+                skip=1
+                forced_skipped=$((forced_skipped + 1))
+                break
+              fi
+            done
+            if [ "$skip" -eq 0 ] && [ $((i % shards)) -ne "$shard" ]; then
+              skip=1
+            fi
+            if [ "$skip" -eq 0 ]; then
+              selected=$((selected + 1))
+            else
+              args+=(--skip "$name")
+            fi
+          done
+          if [ "$selected" -lt 1 ]; then
+            echo "::error::Shard $shard selected zero tests from $total_listed listed tests."
+            exit 1
+          fi
+          echo "Shard $shard selected $selected of $total_listed listed storage tests; forced Miri-FFI skips encountered: $forced_skipped."
+
+          set +e
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- "${args[@]}" \
+            2>&1 | tee /tmp/miri-storage-shard.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Miri storage shard $shard failed with exit $rc."
+            exit "$rc"
+          fi
+          set +e
+          passed=$(grep -c '^test .* \.\.\. ok$' /tmp/miri-storage-shard.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-storage-shard.txt (grep exit $grep_status)."
+            exit 1
+          fi
+          if [ "${passed:-0}" -lt 1 ]; then
+            echo "::error::Miri storage shard $shard passed ${passed:-0} tests - a shard that inspects nothing is not a pass."
+            exit 1
+          fi
+          {
+            echo "### Miri storage weekly shard $shard/$shards"
+            echo ""
+            echo "| measured | value |"
+            echo "| :-- | --: |"
+            echo "| tests listed | $total_listed |"
+            echo "| tests selected by shard | $selected |"
+            echo "| tests passed under Miri | ${passed:-0} |"
+            echo "| forced sled/FFI skips seen in list | $forced_skipped |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-tree-borrows"
+      - name: Miri storage shard failure surface
+        if: failure()
+        run: |
+          set +o pipefail
+          if [ -s /tmp/miri-storage-shard.txt ]; then
+            sed -e 's/\x1b\[[0-9;]*m//g' /tmp/miri-storage-shard.txt \
+              | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
+              | head -n 12 | sed -e "s@^@::error::/tmp/miri-storage-shard.txt @"
+          fi
 
   asan:
     # An alternative to cargo-careful. With the pinned nightly the 0.4.7 tool
