@@ -27,7 +27,7 @@ const AI_OUTPUT_EVENT_KIND: &str = "budlum.ai.output.v1";
 /// SocialFi.
 ///
 /// This is Budlum-native code: it borrows only the general federation lesson from
-/// the FSF survey (stable event ids, explicit actor/object fields, and portable
+/// design briefs (stable event ids, explicit actor/object fields, and portable
 /// JSON), not any upstream server implementation. The event id is length-prefixed
 /// and domain-separated so the JSON rendering is a transport view, not the hash
 /// preimage itself.
