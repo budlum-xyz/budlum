@@ -1,8 +1,8 @@
 //! Real ISO QR module matrix for Three optical frames (plan §CI / K-QR §7).
 //!
-//! Pin: byte mode, EC=L, mask 0 - matrices come from our own `qr_encode`, so a
-//! recipe regenerates the exact same modules on every machine and every future
-//! dependency bump.
+//! Pin: byte mode, EC=L, deterministic mask order 0..=7 - matrices come from
+//! our own `qr_encode`, so a recipe regenerates the exact same modules on every
+//! machine and every future dependency bump.
 //! `block_len` 200 lab default stays on the carousel side; here we encode one
 //! A3 optical frame wire into one QR symbol.
 //!
@@ -78,6 +78,8 @@ pub struct QrMatrix {
     /// matrix so a report describes the symbol rather than the level someone
     /// intended, which is what the pinned constant alone could not promise.
     pub ec: EcLevel,
+    /// ISO mask pattern carried in the QR format word.
+    pub mask: u8,
 }
 
 impl QrMatrix {
@@ -149,6 +151,7 @@ impl QrMatrix {
             width: side as u32,
             dark: Self::rows_of(&m),
             ec,
+            mask: m.mask(),
         })
     }
 
@@ -156,6 +159,12 @@ impl QrMatrix {
     #[must_use]
     pub const fn ec_level(&self) -> EcLevel {
         self.ec
+    }
+
+    /// ISO mask pattern this symbol carries.
+    #[must_use]
+    pub const fn mask_pattern(&self) -> u8 {
+        self.mask
     }
 
     /// Module at (x,y) dark?
@@ -190,6 +199,7 @@ mod tests {
         let m = QrMatrix::encode(b"BDL3-test-optical-frame-bytes").unwrap();
         assert!(m.width >= 21);
         assert_eq!(m.dark.len(), (m.width * m.width) as usize);
+        assert!(m.mask_pattern() < 8);
     }
 
     #[test]

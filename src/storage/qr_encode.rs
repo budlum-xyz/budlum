@@ -1,12 +1,13 @@
-//! Byte-mode QR encoder pinned to EC level L and mask pattern 0.
+//! Byte-mode QR encoder pinned to EC level L with deterministic mask fallback.
 //!
 //! Budlum 3.0 renders recipes as QR video frames and every frame has to be
 //! reproducible byte-for-byte from the recipe, so the matrix must come from an
 //! encoder whose every choice is fixed by us instead of a library whose mask
 //! selection or tie breaking may drift between versions. This module
-//! implements ISO/IEC 18004 for byte mode, error-correction level L, mask 0
-//! and versions 1..=40, and its tests read the output back through the
-//! independent `rqrr` decoder.
+//! implements ISO/IEC 18004 for byte mode, error-correction level L and
+//! versions 1..=40. Mask 0 stays the first choice for wire continuity; if the
+//! independently decoded symbol cannot recover the payload, masks 1..=7 are
+//! tried in order and the selected mask index is carried in the QR format word.
 
 /// Largest payload a version-40 level-L byte-mode symbol can carry.
 pub const MAX_DATA_BYTES: usize = 2953;
@@ -19,12 +20,15 @@ const MAX_EC: usize = 30;
 pub enum QrError {
     /// Payload longer than [`MAX_DATA_BYTES`].
     TooLong(usize),
+    /// No deterministic mask candidate decoded back to the payload.
+    Undecodable,
 }
 
 impl std::fmt::Display for QrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooLong(len) => write!(f, "payload of {len} bytes exceeds {MAX_DATA_BYTES}"),
+            Self::Undecodable => write!(f, "no QR mask candidate decoded back to the payload"),
         }
     }
 }
@@ -418,12 +422,18 @@ const fn format_cell_side(i: usize, side: usize) -> (usize, usize) {
 #[derive(Clone)]
 pub struct EncodedMatrix {
     version: u8,
+    mask: u8,
     dark: Vec<Vec<bool>>,
 }
 
 impl EncodedMatrix {
     pub const fn version(&self) -> u8 {
         self.version
+    }
+
+    /// ISO mask pattern carried by this symbol's format word.
+    pub const fn mask(&self) -> u8 {
+        self.mask
     }
 
     pub const fn side_len(&self) -> usize {
@@ -440,7 +450,7 @@ impl EncodedMatrix {
     }
 }
 
-/// Encodes a byte-mode, level-L, mask-0 symbol for `data`.
+/// Encodes a byte-mode, level-L symbol for `data` with deterministic mask fallback.
 /// # Errors
 ///
 /// Propagates `QrError` from the step that failed; its variants name the refused conditions.
@@ -564,23 +574,57 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     }
     debug_assert_eq!(bit_at, total_bits);
 
-    // mask 0 on every data module
-    for r in 0..side {
-        for c in 0..side {
+    for mask in 0..8u8 {
+        let mut candidate = dark.clone();
+        apply_data_mask(&mut candidate, &reserved, mask);
+        write_format_and_dark_module(&mut candidate, side, mask);
+        let matrix = EncodedMatrix {
+            version,
+            mask,
+            dark: candidate,
+        };
+        if matrix_decodes_to(&matrix, data) {
+            return Ok(matrix);
+        }
+    }
+
+    Err(QrError::Undecodable)
+}
+
+fn mask_applies(mask: u8, r: usize, c: usize) -> bool {
+    match mask {
+        0 => (r + c) % 2 == 0,
+        1 => r % 2 == 0,
+        2 => c % 3 == 0,
+        3 => (r + c) % 3 == 0,
+        4 => (r / 2 + c / 3) % 2 == 0,
+        5 => (r * c) % 2 + (r * c) % 3 == 0,
+        6 => ((r * c) % 2 + (r * c) % 3) % 2 == 0,
+        7 => ((r + c) % 2 + (r * c) % 3) % 2 == 0,
+        _ => false,
+    }
+}
+
+fn apply_data_mask(dark: &mut [Vec<bool>], reserved: &[Vec<bool>], mask: u8) {
+    for r in 0..dark.len() {
+        let cols = dark.get(r).map_or(0, |row| row.len());
+        for c in 0..cols {
             let reserved_cell = reserved
                 .get(r)
                 .and_then(|row| row.get(c))
                 .is_some_and(|v| *v);
-            if !reserved_cell && (r + c) % 2 == 0 {
+            if !reserved_cell && mask_applies(mask, r, c) {
                 if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
                     *slot = !*slot;
                 }
             }
         }
     }
+}
 
-    // format information, level L mask 0, then the forced dark module
-    let word = format_word(0b01_000);
+fn write_format_and_dark_module(dark: &mut [Vec<bool>], side: usize, mask: u8) {
+    // format information, level L plus the selected mask, then the forced dark module
+    let word = format_word(0b01_000 | u32::from(mask & 0b111));
     for i in 0..15 {
         let bit = (word >> i) & 1 != 0;
         let (r, c) = format_cell_main(i);
@@ -595,8 +639,25 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     if let Some(slot) = dark.get_mut(side - 8).and_then(|row| row.get_mut(8)) {
         *slot = true;
     }
+}
 
-    Ok(EncodedMatrix { version, dark })
+fn matrix_decodes_to(matrix: &EncodedMatrix, data: &[u8]) -> bool {
+    let side = matrix.side_len();
+    let (quiet, scale) = (4usize, 4usize);
+    let img = (side + 2 * quiet) * scale;
+    let mut prepared = rqrr::PreparedImage::prepare_from_bitmap(img, img, |x, y| {
+        let (c, r) = (x / scale, y / scale);
+        let inside = quiet..quiet + side;
+        inside.contains(&r)
+            && inside.contains(&c)
+            && matrix.is_dark(r - quiet, c - quiet)
+    });
+    let grids = prepared.detect_grids();
+    if grids.len() != 1 {
+        return false;
+    }
+    let mut out = Vec::new();
+    grids[0].decode_to(&mut out).is_ok() && out.as_slice() == data
 }
 
 #[cfg(test)]
@@ -670,6 +731,33 @@ mod tests {
         for (mask, want) in expected.iter().enumerate() {
             assert_eq!(format_word(0b01_000 | mask as u32), *want, "mask {mask}");
         }
+    }
+
+    #[test]
+    fn mask_predicates_match_iso_spot_checks() {
+        assert!(mask_applies(0, 2, 4));
+        assert!(!mask_applies(0, 2, 5));
+        assert!(mask_applies(1, 2, 5));
+        assert!(!mask_applies(1, 3, 5));
+        assert!(mask_applies(2, 7, 6));
+        assert!(!mask_applies(2, 7, 7));
+        assert!(mask_applies(3, 4, 5));
+        assert!(!mask_applies(3, 4, 6));
+        assert!(mask_applies(4, 2, 3));
+        assert!(!mask_applies(4, 4, 3));
+        assert!(mask_applies(5, 2, 3));
+        assert!(!mask_applies(5, 1, 1));
+        assert!(mask_applies(6, 1, 2));
+        assert!(!mask_applies(6, 1, 3));
+        assert!(mask_applies(7, 1, 3));
+        assert!(!mask_applies(7, 1, 1));
+    }
+
+    #[test]
+    fn mask_zero_remains_the_first_successful_wire_choice() {
+        let m = encode(b"A").unwrap();
+        assert_eq!(m.mask(), 0, "readable mask-0 payloads keep byte continuity");
+        assert!(matrix_decodes_to(&m, b"A"));
     }
 
     #[test]
