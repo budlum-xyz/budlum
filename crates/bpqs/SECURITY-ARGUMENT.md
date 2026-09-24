@@ -456,6 +456,30 @@ SIGNED-PATH secret flow inventory (each item points at code):
      it buys - the legacy `%` arithmetic this replaced runs at 171 us, so the
      shipped code is still the faster of the two, but the margin narrowed from
      2.1x to 1.3x.
+
+     That cost was then attacked rather than accepted on faith. Five variants
+     were measured (`examples/bench_perm.rs`, 200k permutations, best of
+     three, with `objdump` jump counts beside each):
+
+     | variant | ns/perm | cond. jumps |
+     | :-- | --: | --: |
+     | `cmov` crate (shipped) | 5714 | 6 |
+     | masked select (pre-Strix) | 3796 | 41 |
+     | correction by multiply | 7789 | 28 |
+     | correction by mask-AND | 7745 | 28 |
+     | shipped + `inline(always)` | 5674 | 6 |
+
+     No variant is both faster and branch-free. The fast one is the leak
+     Strix reported, now quantified: removing the conditional-move backend
+     takes the jump count from 6 to 41. Replacing the select with arithmetic
+     on a 0/1 is worse on BOTH axes. A hand-rolled `asm!` cmov was tried and
+     rejected because this crate forbids `unsafe`, and trading a zero-unsafe
+     surface for throughput is the worse deal. The six remaining jumps are
+     backward round-loop control, not data-dependent branches.
+
+     So the 1.6x is the price of the guarantee on this target, not an
+     implementation slip. The bar for reclaiming it is written down: beat
+     5714 ns/perm at a jump count of 6.
    - The fix-vs-random residency artifact collapsed from 110 to 0.56. That is
      consistent with the artifact having been a cache-residency effect all
      along: a uniformly slower, more regular inner loop leaves less headroom
