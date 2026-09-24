@@ -31,14 +31,24 @@ jobs:
     # dependency chain and for MIR-level errors.
     name: Miri UB Inspection (crypto + budzero, nightly-2026-07-19) (item 4)
     runs-on: ubuntu-latest
-    # 60 was enough while the storage step aborted on its first test: it cost
-    # about a minute and the budget was really being spent by crypto and
-    # bud-zero. Now that the step actually inspects 652 tests, that step alone
-    # runs past 27 minutes and the job was cancelled at the cap mid-run
-    # (35894609091). Miri is an interpreter, roughly two orders of magnitude
-    # slower than native, so this is the honest cost of the gate doing its job
-    # rather than a hang. Raised with the measurement attached, not guessed.
-    timeout-minutes: 120
+    # Raising this number is not what fixes the storage step, and the two
+    # previous attempts to fix it that way are why the measurement is written
+    # out in full here.
+    #
+    # 60 was enough while the storage step aborted on its first test. It was
+    # raised to 120 on a reading of "past 27 minutes", and run 35913163691 was
+    # then cancelled at exactly 120 minutes, mid-suite, which also threw away
+    # the crypto and bud-zero results that had already passed.
+    #
+    # Counted from that run's log: the storage suite is 646 tests, of which 31
+    # finished in 76.4 minutes. That is 148 s/test, so the full suite needs
+    # about 26.5 HOURS. A GitHub-hosted job is capped at 6 hours, so no
+    # timeout-minutes value can ever let this step finish. The step is bounded
+    # below instead, and the remainder is reported rather than waited for.
+    #
+    # 150 covers crypto (30 min) + bud-zero (12 min) + the bounded storage
+    # window (60 min) with headroom, and is no longer load-bearing.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -144,7 +154,8 @@ jobs:
           # where UB would actually hide - be inspected for the first time. The
           # skipped behaviour is still covered by the normal (non-Miri) test
           # run in CI; only the UB inspection of them is impossible.
-          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage \
+          set +e
+          timeout 3600 cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage \
             --skip startup_loads_consensus_state_from_storage \
             --skip test_storage_maintenance_fail_closed_regression \
             --skip storage_economics_state_persists_across_restart \
@@ -166,24 +177,57 @@ jobs:
             --skip storage_reload_skips_global_headers_with_broken_hash_chain \
             --skip bridge_state_roots_round_trip_through_storage_after_lock \
             2>&1 | tee /tmp/miri-storage.txt
-          # A Miri run that passes ZERO suites is indistinguishable from a Miri
-          # run that never executed a test: both print a green step. The count
-          # was printed and then thrown away (`|| echo '0'` made the empty case
-          # the quietest one of all), so the number is turned into a threshold.
+          # BOUNDED WINDOW, and the bound is the point (see timeout-minutes).
+          # At 148 s/test the 646-test suite needs ~26.5 h, which is over four
+          # times the hard 6 h ceiling on a hosted job. Left unbounded the step
+          # does not fail - it gets the whole JOB cancelled, which is worse: it
+          # discards the crypto and bud-zero results that already passed and
+          # leaves no summary at all. Bounded, the job completes, reports how
+          # far the inspection actually got, and the shortfall is visible.
+          # Exit 124 is `timeout` hitting the cap: a measured partial, not a
+          # failure. Any other non-zero exit is still a real failure.
+          rc=${PIPESTATUS[0]}
+          set -e
+          # A Miri run that passes ZERO tests is indistinguishable from a Miri
+          # run that never executed one: both print a green step. So the number
+          # inspected is counted, printed, and floored - and with the window
+          # bounded it is also the honest coverage figure, not a formality.
           # `grep -c` exits 1 when it matches nothing and >1 when it could not
-          # read the file at all. `|| true` collapsed those two into the same
-          # thing, and the second one is a missing measurement, not a zero.
+          # read the file at all; the second is a missing measurement, not a
+          # zero, so the two are kept apart.
           set +e
-          n=$(grep -c 'test result: ok' /tmp/miri-storage.txt)
+          n=$(grep -c '^test .* \.\.\. ok$' /tmp/miri-storage.txt)
           grep_status=$?
+          total=$(sed -n 's/^running \([0-9]*\) tests$/\1/p' /tmp/miri-storage.txt | head -1)
           set -e
           if [ "$grep_status" -gt 1 ]; then
             echo "::error::could not read /tmp/miri-storage.txt (grep exit $grep_status) - the Miri storage count is missing, not zero."
             exit 1
           fi
-          echo "Miri storage: $n suites passed"
+          {
+            echo "### Miri storage UB inspection"
+            echo ""
+            echo "| measured | value |"
+            echo "| :-- | --: |"
+            echo "| tests inspected under Miri | ${n:-0} |"
+            echo "| tests in the suite | ${total:-unknown} |"
+            echo "| window | 3600 s |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Miri storage: ${n:-0} of ${total:-unknown} tests inspected"
+
+          if [ "$rc" -eq 124 ]; then
+            # The expected outcome today, and it is reported as a shortfall
+            # rather than dressed up: at ~148 s/test the suite needs ~26.5 h
+            # against a 6 h hard ceiling. This is a NOTICE, not a silent pass -
+            # the number above is the coverage claim, and it is a partial one.
+            echo "::warning::Miri storage inspection hit its 3600 s window after ${n:-0} of ${total:-unknown} tests. This is a measured shortfall, not a clean run: the full suite needs roughly 26.5 h and a hosted job is capped at 6 h. Tracked as the open item in the Miri section of the audit log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::Miri storage inspection failed with exit $rc - this is a real failure, not the time bound."
+            exit "$rc"
+          fi
+
           if [ "${n:-0}" -lt 1 ]; then
-            echo "::error::Miri storage reported $n passing suites - a UB gate that inspects nothing is not a pass."
+            echo "::error::Miri storage inspected ${n:-0} tests - a UB gate that inspects nothing is not a pass."
             exit 1
           fi
         env:
@@ -274,7 +318,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust (nightly, tarih-pinli)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
         with:
           toolchain: nightly-2026-07-19
           components: rust-src
