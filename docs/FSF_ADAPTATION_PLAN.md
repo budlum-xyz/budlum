@@ -52,12 +52,15 @@ will prove the Budlum-native implementation.
 
 ### Phase 2 — first safe Budlum-native code
 
-Start with the least license-risky, highest gate value item:
+Start with the least license-risky, highest gate value item.  This guardrail may
+land before the Phase 1 briefs are all written, because it prevents the mistake
+the briefs are meant to avoid: turning research into an unreviewed source import.
 
 - `xtask/gates` import-boundary gate:
-  - reads `docs/FSF_PROJECT_FIT.md` and/or a machine-readable policy table;
-  - rejects new vendored GPL/AGPL/unknown-license directories unless an allowlisted
-    provenance note exists;
+  - reads `docs/FSF_PROJECT_FIT.md` and `docs/FSF_ADAPTATION_PLAN.md`;
+  - rejects controlled FSF project names in product code and vendored-looking
+    GPL/AGPL/LGPL/MPL source bundles unless an explicit `BUDLUM_IMPORT_BOUNDARY.md`
+    note records the boundary;
   - has self-tests proving it catches an unreviewed copyleft import and accepts a
     documented design-only reference.
 
@@ -77,6 +80,9 @@ Only after Phase 1 briefs and Phase 2 guardrail:
 ## Current status
 
 - Phase 0 is complete.
-- Phase 1 is next.
+- The Phase 2 import-boundary guardrail is now coded as `fsf-import-boundaries`
+  so later work cannot accidentally vendor FSF/copyleft source while the design
+  briefs are being written.
+- Phase 1 design briefs are next.
 - No FSF upstream code has been imported.
 - No claim is made that all FSF-inspired tooling is fully coded.
