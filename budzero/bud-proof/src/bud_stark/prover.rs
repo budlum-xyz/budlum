@@ -244,7 +244,9 @@ where
     // Over the quotient domain.
     //
     // This only works if the trace domain is `gH'` and the quotient domain is `gK` for some subgroup `K` contained in `H'`.
-    // TODO: Make this explicit in `get_evaluations_on_domain` or otherwise fix this.
+    // TODO(upstream p3-uni-stark 0.7.0): make this explicit in
+    // `get_evaluations_on_domain` or otherwise fix this. Inherited from the
+    // fork parent; fixing it means changing an upstream trait, not this file.
     let trace_on_quotient_domain = pcs.get_evaluations_on_domain(&trace_data, 0, quotient_domain);
     let preprocessed_on_quotient_domain = preprocessed_data_ref
         .map(|data| pcs.get_evaluations_on_domain_no_random(data, 0, quotient_domain));
@@ -308,7 +310,27 @@ where
     // Since we need a random polynomial defined over the extension field, and the `commit` method is over the base field,
     // We actually need to commit to `SC::Challenge::D` base field random polynomials.
     // This is similar to what is done for the quotient polynomials.
-    // TODO: This approach is only statistically zk. To make it perfectly zk, `R` would have to truly be an extension field polynomial.
+    // TODO(upstream p3-uni-stark 0.7.0): this approach is only statistically
+    // zk; perfect zk would need `R` to truly be an extension field polynomial.
+    //
+    // DORMANT HERE, and the reason is worth stating plainly. Budlum configures
+    // the PCS as `TwoAdicFriPcs`, whose `Pcs::ZK` is `false` (p3-fri 0.7.0).
+    // The branch below is therefore never taken and no randomization
+    // polynomial is ever committed. So the gap in this proof system is not
+    // "statistical instead of perfect zero-knowledge" - it is that there is NO
+    // zero-knowledge at all. These proofs are succinct and sound; they do not
+    // hide the witness, and anyone holding a proof plus the public inputs
+    // should assume the execution trace is recoverable.
+    //
+    // That is the correct trade for what Budlum uses STARKs for - storage and
+    // finality proofs, where the claim is "this computation happened", not
+    // "and you learn nothing else". It is written down because the names
+    // around it (`BudZero`, "ZK domain", "zk program allowlist") invite the
+    // opposite assumption, and a reader should not have to infer the absence
+    // of a privacy property from a `const` three crates away.
+    //
+    // `zk_flag_is_pinned` below fails if the PCS ever starts claiming `ZK`,
+    // so turning hiding on cannot happen quietly.
     let (opt_r_commit, opt_r_data) = if SC::Pcs::ZK {
         // Read the option instead of asserting that `Pcs::ZK` implies it: the
         // flag and the commitment come from different impls, so a mismatch
@@ -491,7 +513,8 @@ where
 }
 
 #[instrument(skip_all, level = "debug")]
-// TODO: Group some arguments to remove the `allow`?
+// TODO(upstream p3-uni-stark 0.7.0): group some arguments to remove the
+// `allow`? Inherited from the fork parent; cosmetic.
 #[allow(clippy::too_many_arguments)]
 pub fn quotient_values<SC, A, Mat>(
     air: &A,

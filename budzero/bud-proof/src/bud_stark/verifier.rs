@@ -322,7 +322,9 @@ where
     let pcs = config.pcs();
     let degree = 1 << degree_bits;
     let trace_domain = pcs.natural_domain_for_degree(degree);
-    // TODO: allow moving preprocessed commitment to preprocess time, if known in advance
+    // TODO(upstream p3-uni-stark 0.7.0): allow moving preprocessed commitment
+    // to preprocess time, if known in advance. Inherited from the fork parent,
+    // not local debt - it is a throughput idea, not a soundness gap.
     let (preprocessed_width, preprocessed_commit) =
         process_preprocessed_trace::<SC, A>(air, opened_values, preprocessed_vk)?;
 
