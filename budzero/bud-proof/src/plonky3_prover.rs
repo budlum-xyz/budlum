@@ -8888,13 +8888,21 @@ mod tests {
     /// fails, and whoever flipped it has to say so in the same change rather
     /// than letting a privacy property appear (or a privacy claim become
     /// true-by-accident) without review.
+    ///
+    /// The check sits in a `const` block on purpose: the flag is an associated
+    /// constant, so a plain `assert!` is constant-valued and clippy's
+    /// `assertions_on_constants` rejects it. In a `const` block the same
+    /// assertion is evaluated at compile time, which is strictly stronger -
+    /// a PCS that starts claiming ZK stops the build instead of failing a run.
     #[test]
     fn zk_flag_is_pinned() {
-        assert!(
-            !<MyPcs as p3_commit::Pcs<MyExtensionField, MyChallenger>>::ZK,
-            "the proof system PCS now claims ZK. Budlum's docs and the \
-             bud_stark prover both state that these proofs do not hide the \
-             witness; update that story before pinning the new value here."
-        );
+        const {
+            assert!(
+                !<MyPcs as p3_commit::Pcs<MyExtensionField, MyChallenger>>::ZK,
+                "the proof system PCS now claims ZK. Budlum's docs and the \
+                 bud_stark prover both state that these proofs do not hide the \
+                 witness; update that story before pinning the new value here."
+            );
+        }
     }
 }
