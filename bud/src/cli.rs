@@ -78,7 +78,7 @@ impl BudCli {
         let dec_speed = (data.len() as f64 / (1024.0 * 1024.0)) / dec_elapsed.max(0.001);
         let econ = BudEconomics {
             physical_usd: 0.23342,
-            expansion: 1.286,
+            expansion: 1.1667, // (18+3)
             ratio: 17.19,
             device_only: false,
         };

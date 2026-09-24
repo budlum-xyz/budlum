@@ -3,7 +3,7 @@
 //!
 //! Physical: 12.5/60=0.20833 + elec 0.02309 + other 0.002 (external bench) =
 //! 0.23342.
-//! Required: 18.76x for EVENODD 1.286.
+//! Required: 17.02x for (18+3) 1.1667 (it was 18.76x under EVENODD 1.286).
 
 #[derive(Debug, Clone)]
 pub struct PriceModel {
@@ -90,11 +90,14 @@ mod tests {
         assert!((phys - 0.23342).abs() < 0.001);
     }
     #[test]
-    fn required_ratio_evenodd() {
+    fn required_ratio_18plus3() {
         let m = PriceModel::default();
-        let req = m.required_ratio(1.286, 0.016);
-        // 0.23342*1.286/0.016 = 18.76
-        assert!((req - 18.76).abs() < 0.5);
+        let req = m.required_ratio(1.1667, 0.016);
+        // 0.23342*1.1667/0.016 = 17.02
+        assert!((req - 17.02).abs() < 0.5);
+        // The code it replaced needed more compression for the same ceiling.
+        let evenodd = m.required_ratio(1.286, 0.016);
+        assert!(evenodd > req, "the wide code must demand a lower ratio");
     }
     #[test]
     fn required_ratio_7plus1() {
@@ -108,14 +111,14 @@ mod tests {
         let m = PriceModel::default();
         // JSON 17.19x against the 16.68 required by 7+1 => it passes, but
         // nine at 4.32 is REFUSED. Hence the hybrid: hot uses plain 7+1, cold
-        // uses EVENODD.
+        // uses the wide (18+3) code.
         let cost = m.cost_sold(1.143, 17.191).unwrap();
         assert!(cost <= 0.016 + 0.001); // 0.0155
     }
     #[test]
     fn jpeg_fails_price_even_with_external_bench() {
         let m = PriceModel::default();
-        let cost = m.cost_sold(1.286, 2.53).unwrap(); // AVIF 2.53x
+        let cost = m.cost_sold(1.1667, 2.53).unwrap(); // AVIF 2.53x
         assert!(cost > 0.016); // 0.118 > 0.016 is REFUSED; device-only is the answer
     }
     #[test]

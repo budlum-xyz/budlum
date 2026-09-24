@@ -186,8 +186,8 @@ impl BudHeader {
             chunk_count: 1,
             dictionary_hash: [0u8; 32],
             tier: 1,
-            erasure_k: 7,
-            erasure_p: 2,
+            erasure_k: 18,
+            erasure_p: 3,
             version_number: 1,
             previous_version_hash: [0u8; 32],
         }

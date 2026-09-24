@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 pub struct BudEconomics {
     pub physical_usd: f64, // 0.23342
-    pub expansion: f64,    // 1.286
+    pub expansion: f64,    // 1.1667 for the selected (18+3) code
     pub ratio: f64,
     pub device_only: bool,
 }
@@ -348,14 +348,26 @@ mod tests {
             device_only: false,
         };
         assert!(econ.holds_price(0.016));
-        // With EVENODD (e=1.286) it does NOT hold: 0.23342*1.286/17.19 = 0.01747 > 0.016 - this is the real measurement (a canary)
+        // The code the repository actually selects is the wide (18+3):
+        // 0.23342*1.1667/17.19 = 0.01584 <= 0.016, so the same corpus that
+        // EVENODD could not carry now holds. This is the measured gain of
+        // the code change, pinned as a test rather than written in prose.
         let econ2 = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.1667,
+            ratio: 17.19,
+            device_only: false,
+        };
+        assert!(econ2.holds_price(0.016));
+        // The canary stays: under the EVENODD it replaced (e=1.286) the same
+        // line does NOT hold, 0.23342*1.286/17.19 = 0.01747 > 0.016.
+        let econ_evenodd = BudEconomics {
             physical_usd: 0.23342,
             expansion: 1.286,
             ratio: 17.19,
             device_only: false,
         };
-        assert!(!econ2.holds_price(0.016));
+        assert!(!econ_evenodd.holds_price(0.016));
         let econ3 = BudEconomics {
             physical_usd: 0.23342,
             expansion: 1.286,
