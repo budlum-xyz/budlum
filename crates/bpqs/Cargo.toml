@@ -16,6 +16,10 @@ description = "Budlum-BPQS research line (F2): epoch-chained Winternitz few-time
 [dependencies]
 sha3 = { version = "0.12", default-features = false }
 keccak = { version = "0.2", default-features = false }
+# Direct, not transitive by accident: Poseidon2 field reduction uses cmov
+# for the secret-fed conditional corrections so LLVM cannot turn a masked
+# boolean select back into a data-dependent branch on supported targets.
+cmov = "0.5.4"
 
 # Differential bench example only: BPQS fast lane against the same ml-dsa
 # version the root package links (0.1.1, already vetted by the root OSV and
