@@ -101,7 +101,13 @@ impl FederatedAiOutputEvent {
             hex_lower(&self.owner.0),
             self.nft_id,
             hex_lower(&self.content_id.0),
-            self.epoch
+            self.epoch,
+            // Passed explicitly, not captured implicitly: the format string is
+            // built by `concat!`, and implicit named-argument capture only
+            // works on a literal written in place. `{AI_OUTPUT_EVENT_KIND}`
+            // alone therefore fails to compile with "there is no argument
+            // named ...", which is how this reached CI.
+            AI_OUTPUT_EVENT_KIND = AI_OUTPUT_EVENT_KIND
         )
     }
 }
