@@ -80,6 +80,7 @@ mod gates {
     pub mod fixture_integrity;
     pub mod forgery_tests;
     pub mod fork_choice_gate;
+    pub mod fsf_import_boundaries;
     pub mod fuzz_targets_wired;
     pub mod gas_calibration;
     pub mod gates_are_wired;
@@ -700,6 +701,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::license_consistency::self_test,
+    },
+    Gate {
+        name: "fsf-import-boundaries",
+        replaces: None,
+        run: gates::fsf_import_boundaries::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::fsf_import_boundaries::self_test,
     },
     Gate {
         name: "tree-pin",
