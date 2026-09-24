@@ -360,7 +360,7 @@ mod tests {
     }
 
     /// Golden vector: the header of a single-frame BDLV blob and its full sha256.
-    /// Frame modules now come from our fixed-mask qr_encode, so
+    /// Frame modules now come from our deterministic-mask qr_encode, so
     /// this vector pins the byte-level behaviour of the encoder and the mux.
     #[test]
     fn video_wire_matches_the_golden_vectors() {
