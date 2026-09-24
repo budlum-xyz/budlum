@@ -313,7 +313,12 @@ jobs:
     # BLOCKS. It has a canary.
     name: AddressSanitizer + debug std (in place of careful)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Measured on PR #79 head 3a97569: the canary passed and the ASan lib
+    # suite reached 2956/3219 tests before the old 45 minute job timeout
+    # cancelled it mid-run. This is a real cancellation of a still-progressing
+    # sanitizer run, not a test failure; keep the gate blocking and give the
+    # full lib suite enough wall time to finish instead of losing the result.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
