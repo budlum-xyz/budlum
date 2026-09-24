@@ -57,7 +57,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust (nightly - cargo-fuzz gereksinimi)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-16
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
         with:
           toolchain: nightly
       - name: Override the rust-toolchain.toml pin (nightly is required)
