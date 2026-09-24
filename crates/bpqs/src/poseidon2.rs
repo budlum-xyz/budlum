@@ -44,14 +44,15 @@
 //! candidate leak - named in the 2026-09-23 constant-time review as the only
 //! outstanding one in this module.
 //!
-//! Both are now branchless and division-free: `fe_add` is one wrapping add
-//! plus a masked conditional subtract, `fe_mul` reduces the 128-bit product
-//! with the Goldilocks identities 2^64 == 2^32 - 1 and 2^96 == -1 (mod p),
-//! also with masked corrections. Every input takes the same instruction
-//! sequence. The values are unchanged - `fe_matches_modular_reference` pins
-//! the new path against the old `%` formula over boundary and random inputs,
-//! and the upstream known-answer vector below is the second, independent
-//! anchor.
+//! Both are now division-free and route every secret-fed conditional
+//! correction through `cmov`: `fe_add` is one wrapping add plus a conditional
+//! move-backed subtract, and `fe_mul` reduces the 128-bit product with the
+//! Goldilocks identities 2^64 == 2^32 - 1 and 2^96 == -1 (mod p). This
+//! deliberately avoids raw bool-derived masked selects, which LLVM has been
+//! observed lowering back into short data-dependent branches. The values are
+//! unchanged - `fe_matches_modular_reference` pins the new path against the
+//! old `%` formula over boundary and random inputs, and the upstream
+//! known-answer vector below is the second, independent anchor.
 //!
 //! Clarity still belongs to the audit, which is why the reduction carries its
 //! derivation above the code rather than a reference to it.
@@ -262,16 +263,28 @@ const RATE: usize = 8;
 /// State width of the permutation (paper parameter t).
 pub const WIDTH: usize = 16;
 
-/// Branchless conditional subtract of `p`: returns `x - p` when `x >= p`,
-/// otherwise `x`. No comparison branch, no table lookup - the selection is a
-/// mask derived from the borrow of the subtraction itself.
+use cmov::Cmov;
+
+/// Conditional move on `u64` with a bool-shaped condition.
+///
+/// The `cmov` crate takes a `u8` condition specifically so the compiler does
+/// not get to re-interpret a masked select as an ordinary boolean branch. On
+/// x86/x86_64 this lowers through the CMOV instruction family; on aarch64 it
+/// lowers through CSEL; other targets use the crate's documented best-effort
+/// fallback.
+#[inline]
+fn cmov_if(mut keep: u64, replace: u64, condition: bool) -> u64 {
+    keep.cmovnz(&replace, u8::from(condition));
+    keep
+}
+
+/// Conditional subtract of `p`: returns `x - p` when `x >= p`, otherwise `x`.
 #[inline]
 fn fe_sub_p(x: u64) -> u64 {
     let (diff, borrow) = x.overflowing_sub(GOLDILOCKS_P);
     // borrow == true  <=>  x < p  =>  keep x
     // borrow == false <=>  x >= p =>  keep diff
-    let mask = u64::from(borrow).wrapping_sub(1); // all-ones when x >= p, zero otherwise
-    (diff & mask) | (x & !mask)
+    cmov_if(x, diff, !borrow)
 }
 
 #[inline]
@@ -281,12 +294,11 @@ fn fe_add(a: u64, b: u64) -> u64 {
     let (sum, carry) = a.overflowing_add(b);
     let (diff, borrow) = sum.overflowing_sub(GOLDILOCKS_P);
     // Fold when the true sum reached 2^64 (carry) or when the truncated sum is
-    // already >= p (no borrow). Both conditions are bits, not branches.
-    // `u64::from(..)` rather than `as`: the bool -> u64 widening is the whole
-    // trick here, and `!borrow as u64` reads like a bitwise-not on the cast.
-    let fold = u64::from(carry) | u64::from(!borrow);
-    let mask = fold.wrapping_sub(1); // all-ones when fold == 0
-    (sum & mask) | (diff & !mask)
+    // already >= p (no borrow). The OR stays at the bool level; `cmov_if`
+    // widens it only as the u8 condition expected by the conditional-move
+    // backend.
+    let fold = carry | !borrow;
+    cmov_if(sum, diff, fold)
 }
 
 /// Goldilocks reduction of a 128-bit product, using p = 2^64 - 2^32 + 1, i.e.
@@ -306,12 +318,12 @@ fn fe_reduce128(x: u128) -> u64 {
 
     // x_lo - x_hi_hi  (the 2^96 == -1 fold); a borrow costs another 2^32 - 1.
     let (t0, borrow) = x_lo.overflowing_sub(x_hi_hi);
-    let t0 = t0.wrapping_sub(0xFFFF_FFFF * u64::from(borrow));
+    let t0 = cmov_if(t0, t0.wrapping_sub(0xFFFF_FFFF), borrow);
 
     // + x_hi_lo * (2^32 - 1)  (the 2^64 == 2^32 - 1 fold).
     let t1 = x_hi_lo.wrapping_mul(0xFFFF_FFFF);
     let (t2, carry) = t0.overflowing_add(t1);
-    let t2 = t2.wrapping_add(0xFFFF_FFFF * u64::from(carry));
+    let t2 = cmov_if(t2, t2.wrapping_add(0xFFFF_FFFF), carry);
 
     // t2 < 2p at this point (pinned by `reduce128_output_stays_below_2p`), so
     // a single conditional subtract canonicalises it.
@@ -582,10 +594,10 @@ mod poseidon2_tests {
             let x_lo = x as u64;
             let x_hi = (x >> 64) as u64;
             let (t0, borrow) = x_lo.overflowing_sub(x_hi >> 32);
-            let t0 = t0.wrapping_sub(0xFFFF_FFFF * u64::from(borrow));
+            let t0 = cmov_if(t0, t0.wrapping_sub(0xFFFF_FFFF), borrow);
             let t1 = (x_hi & 0xFFFF_FFFF).wrapping_mul(0xFFFF_FFFF);
             let (t2, carry) = t0.overflowing_add(t1);
-            t2.wrapping_add(0xFFFF_FFFF * u64::from(carry))
+            cmov_if(t2, t2.wrapping_add(0xFFFF_FFFF), carry)
         }
         let two_p = u128::from(GOLDILOCKS_P) * 2;
         let mut seed = 0x5EED_5EED_5EED_5EED_u64;
@@ -610,7 +622,7 @@ mod poseidon2_tests {
     }
 
     #[test]
-    fn fe_sub_p_selects_without_branching_on_the_value() {
+    fn fe_sub_p_selects_correctly_at_boundaries() {
         assert_eq!(fe_sub_p(0), 0);
         assert_eq!(fe_sub_p(GOLDILOCKS_P - 1), GOLDILOCKS_P - 1);
         assert_eq!(fe_sub_p(GOLDILOCKS_P), 0);
