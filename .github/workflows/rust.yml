@@ -58,6 +58,72 @@ jobs:
           shared-key: budlum-tsan
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # A clean sanitizer run means one of two things: it found nothing, or it
+      # never ran. The canary is the only thing that tells them apart. It
+      # builds a program with a deliberate unsynchronised race and fails the
+      # job if TSan does NOT report it, so a silently disabled sanitizer can
+      # never be read as a green gate.
+      #
+      # Deliberately uses the same toolchain, target and RUSTFLAGS as the real
+      # step below: a canary proving a different configuration proves nothing.
+      - name: ThreadSanitizer canary (does the sanitizer really catch a race)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tsan-canary/src
+          cat > /tmp/tsan-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "tsan-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [workspace]
+          EOF
+          cat > /tmp/tsan-canary/src/main.rs <<'EOF'
+          // Two threads write the same cell with no synchronisation. This is
+          // a real data race and TSan must report it.
+          use std::thread;
+
+          struct Shared(std::cell::UnsafeCell<u64>);
+          unsafe impl Sync for Shared {}
+
+          static CELL: Shared = Shared(std::cell::UnsafeCell::new(0));
+
+          fn main() {
+              let a = thread::spawn(|| {
+                  for _ in 0..10_000 {
+                      unsafe { *CELL.0.get() += 1 };
+                  }
+              });
+              let b = thread::spawn(|| {
+                  for _ in 0..10_000 {
+                      unsafe { *CELL.0.get() += 1 };
+                  }
+              });
+              a.join().unwrap();
+              b.join().unwrap();
+              println!("canary finished: {}", unsafe { *CELL.0.get() });
+          }
+          EOF
+          cd /tmp/tsan-canary
+          # The canary is EXPECTED to exit non-zero: TSan returns failure when
+          # it reports a race, which is exactly the outcome being proven. The
+          # exit code is captured explicitly rather than masked away, so
+          # nothing here can hide a different failure. The verdict comes
+          # from the log, and an empty log fails below.
+          set +e
+          RUSTFLAGS="-Zsanitizer=thread" cargo +nightly run \
+            --target x86_64-unknown-linux-gnu > /tmp/tsan-canary.log 2>&1
+          canary_rc=$?
+          set -e
+          echo "canary exit code: ${canary_rc}"
+          if grep -qE "WARNING: ThreadSanitizer: data race" /tmp/tsan-canary.log; then
+            echo "canary OK: the sanitizer reported the deliberate race (exit ${canary_rc})."
+          else
+            echo "CANARY FAILED: TSan did not report a race it was built to catch." >&2
+            echo "The gate below cannot be trusted; do not read its green as safety." >&2
+            tail -40 /tmp/tsan-canary.log >&2
+            exit 1
+          fi
       - name: cargo test under ThreadSanitizer
         # The explicit --target is required for sanitizer flags to apply.
         # Default test-threads: races only exist under real concurrency, so
