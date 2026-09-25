@@ -21,7 +21,7 @@
 //! variance is tiny; as the denominator shrinks t inflates. The tighter the measurement the
 //! MORE red the gate goes - even as constant-timeness improves. A real run:
 //!
-//!     kontrol (naif, SIZMALI): mean_first=19.05ns mean_last=41.41ns |t|=83.62
+//!     control (naive, LEAKY) : mean_first=19.05ns mean_last=41.41ns |t|=83.62
 //!     constant_time_eq_str   : mean_first=119.48ns mean_last=118.45ns |t|=7.62
 //!
 //! The naive implementation leaks 22.36 ns; the real function 1.03 ns - three cycles at 3 GHz,
@@ -62,8 +62,8 @@ const T_THRESHOLD: f64 = 4.5;
 const EFFECT_RATIO_THRESHOLD: f64 = 0.05;
 
 /// Positive control: a deliberately early-exiting comparison with a timing
-/// leak. A harness that cannot catch this cannot catch a constant-time violation
-/// Yakalayamaz.
+/// leak. A harness that cannot catch this cannot catch a constant-time
+/// violation either.
 fn naive_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -94,6 +94,37 @@ impl XorShift {
 
 /// N batches times iters measurements; the two classes are measured interleaved within each
 /// batch and the per-batch class MINIMUM is returned.
+/// How many calls share one clock reading.
+///
+/// Measured 2026-09-25 (run 36102043330, job 107948777912): on that runner
+/// `Instant::now()` resolved to 10 ns steps, so every per-call measurement
+/// collapsed onto a multiple of one tick. The control's two classes came out
+/// as a flat 30.00 ns and 40.00 ns - zero variance, which made Welch's t
+/// return `f64::MAX` - and the known leak was measured as a single tick.
+/// The real function differed by 3.15 ns, which is below the tick, yet the
+/// ratio 3.15/10 read as 31.4 percent and the gate went red. That is a
+/// resolution artefact, not a regression.
+///
+/// Timing a batch of calls under ONE clock reading divides the granularity by
+/// the batch size: 10 ns / 64 is 0.16 ns per call. The number reported stays
+/// per-call, so the thresholds keep their meaning.
+const CALLS_PER_SAMPLE: u64 = 64;
+
+/// Clock granularity in nanoseconds, measured rather than assumed: the
+/// smallest non-zero difference between two consecutive readings.
+fn clock_granularity_ns() -> u64 {
+    let mut best = u64::MAX;
+    for _ in 0..10_000 {
+        let t0 = Instant::now();
+        let mut d = 0u64;
+        while d == 0 {
+            d = t0.elapsed().as_nanos() as u64;
+        }
+        best = best.min(d);
+    }
+    best
+}
+
 fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
     f: F,
     first: &[u8],
@@ -114,9 +145,15 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
             } else {
                 (last, &mut m_last)
             };
+            // One clock reading covers CALLS_PER_SAMPLE calls, then the time
+            // is divided back down. Without this the reading is quantised to
+            // the clock tick and the comparison measures the clock, not the
+            // function.
             let t0 = Instant::now();
-            black_box(f(black_box(cand), black_box(valid)));
-            let dt = t0.elapsed().as_nanos() as u64;
+            for _ in 0..CALLS_PER_SAMPLE {
+                black_box(f(black_box(cand), black_box(valid)));
+            }
+            let dt = t0.elapsed().as_nanos() as u64 / CALLS_PER_SAMPLE;
             *acc = (*acc).min(dt);
         }
         mins_first.push(m_first);
@@ -225,10 +262,13 @@ fn main() -> ExitCode {
     );
     let t_ct = welch_t(&ct_a, &ct_b);
 
+    let granularity = clock_granularity_ns();
+
     println!("=== Timing-safe statistical test (dudect style) ===");
+    println!("clock granularity: {granularity}ns per tick, {CALLS_PER_SAMPLE} calls per sample");
     println!("batches={batches} iters/batch/class={iters} threshold=|t|>={T_THRESHOLD}");
     println!(
-        "kontrol (naif, SIZMALI): mean_first={:.2}ns mean_last={:.2}ns |t|={:.2}",
+        "control (naive, LEAKY) : mean_first={:.2}ns mean_last={:.2}ns |t|={:.2}",
         mean(&ctl_a),
         mean(&ctl_b),
         t_control.abs()
@@ -240,6 +280,28 @@ fn main() -> ExitCode {
         t_ct.abs()
     );
 
+    // Validity before verdict. A degenerate control does not mean the function
+    // under test is constant time, and it does not mean it is broken either;
+    // it means this run measured nothing. Exit code 2 says exactly that, and
+    // it is kept distinct from 1 (a real regression) on purpose.
+    let control_delta_pre = (mean(&ctl_a) - mean(&ctl_b)).abs();
+    if !t_control.is_finite() {
+        eprintln!(
+            "FAIL(harness): the control's variance collapsed to zero, so Welch's t is not \
+             defined (both classes landed on a single clock value). With a {granularity}ns \
+             tick this run cannot separate the classes; nothing was measured."
+        );
+        return ExitCode::from(2);
+    }
+    if control_delta_pre < 3.0 * granularity as f64 {
+        eprintln!(
+            "FAIL(harness): the known leak measured {control_delta_pre:.2}ns against a \
+             {granularity}ns clock tick. Below three ticks the ratio is an artefact of the \
+             clock, not of the code - on 2026-09-25 exactly this produced a 31.4 percent \
+             'effect' out of a 3.15ns difference. Nothing was measured."
+        );
+        return ExitCode::from(2);
+    }
     if t_control.abs() < T_THRESHOLD {
         eprintln!(
             "FAIL(harness): the positive control produced no timing difference (|t|={:.2} < {T_THRESHOLD}). \
@@ -271,7 +333,7 @@ fn main() -> ExitCode {
     if t_ct.abs() >= T_THRESHOLD && effect_ratio >= EFFECT_RATIO_THRESHOLD {
         eprintln!(
             "FAIL(regression): constant_time_eq_str produced a significant difference between the classes \
-             (|t|={:.2} >= {T_THRESHOLD} VE oran={:.1}% >= {:.1}%). \
+             (|t|={:.2} >= {T_THRESHOLD} AND ratio={:.1}% >= {:.1}%). \
              Constant-timeness is broken!",
             t_ct.abs(),
             effect_ratio * 100.0,
