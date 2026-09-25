@@ -790,6 +790,32 @@ mod tests {
         assert!(matrix_decodes_to(&m, b"A"));
     }
 
+    /// `matrix_decodes_to` answers "does this symbol decode to EXACTLY this
+    /// payload", and the two halves of that question are joined by `&&`.
+    /// Mutation testing turned it into `||` (run 36149222233, shard 22/24)
+    /// and nothing failed, because every existing call passed the payload the
+    /// symbol was built from: the left half was always true. With `||` a
+    /// symbol that decodes to something else would be accepted, which is the
+    /// one thing this function exists to rule out - it is the check the
+    /// encoder's mask search relies on.
+    #[test]
+    fn decoding_to_a_different_payload_is_not_a_match() {
+        let m = encode(b"A").expect("encode");
+        assert!(matrix_decodes_to(&m, b"A"), "its own payload must match");
+        assert!(
+            !matrix_decodes_to(&m, b"B"),
+            "a symbol that decodes to A does not match B"
+        );
+        assert!(
+            !matrix_decodes_to(&m, b"AA"),
+            "a longer payload is not a match either"
+        );
+        assert!(
+            !matrix_decodes_to(&m, b""),
+            "an empty expectation is not a match"
+        );
+    }
+
     /// The rendered canvas is a symbol plus four quiet modules on EACH side,
     /// four pixels per module. Mutation testing killed the previous version of
     /// this arithmetic three different ways without a single test noticing,
