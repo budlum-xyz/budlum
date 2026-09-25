@@ -388,7 +388,6 @@ fn validate_translation_key(key: &str) -> Result<(), I18nError> {
 mod tests {
     use super::*;
 
-
     /// `validate_provider_id` chains its conditions with `&&`. Mutation
     /// testing turned the third link into `||` (run 36119848850, shard 2/24:
     /// "replace && with || in validate_provider_id") and no test failed,
