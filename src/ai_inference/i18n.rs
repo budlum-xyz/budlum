@@ -388,6 +388,54 @@ fn validate_translation_key(key: &str) -> Result<(), I18nError> {
 mod tests {
     use super::*;
 
+
+    /// `validate_provider_id` chains its conditions with `&&`. Mutation
+    /// testing turned the third link into `||` (run 36119848850, shard 2/24:
+    /// "replace && with || in validate_provider_id") and no test failed,
+    /// because every existing case exercised the path-like rejections and
+    /// none of them exercised the two cheap ones: empty, and too long.
+    ///
+    /// With `||` the expression becomes `(A && B && C) || (D && E && F)`, so
+    /// an empty id - which trivially contains no slash, no backslash and no
+    /// forbidden byte - would be accepted. The same holds for a 65-character
+    /// id made of ordinary characters. Both are pinned here.
+    #[test]
+    fn provider_id_rejects_empty_and_overlong_ids() {
+        assert!(
+            matches!(
+                validate_provider_id(""),
+                Err(I18nError::InvalidProviderId(_))
+            ),
+            "an empty provider id must be refused"
+        );
+
+        let longest_allowed = "a".repeat(64);
+        assert!(
+            validate_provider_id(&longest_allowed).is_ok(),
+            "64 characters is the documented ceiling and must still pass"
+        );
+
+        let one_too_long = "a".repeat(65);
+        assert!(
+            matches!(
+                validate_provider_id(&one_too_long),
+                Err(I18nError::InvalidProviderId(_))
+            ),
+            "65 characters must be refused"
+        );
+
+        // A control for the rest of the chain: the path-like rejections keep
+        // working, so this test cannot pass by weakening them.
+        for bad in ["http://x", "a/b", "a\\b", "a?b", "a#b", "a b"] {
+            assert!(
+                matches!(
+                    validate_provider_id(bad),
+                    Err(I18nError::InvalidProviderId(_))
+                ),
+                "{bad} must be refused"
+            );
+        }
+    }
     #[test]
     fn locale_tags_are_canonicalized_without_registry_lookup() {
         assert_eq!(LocaleTag::new("TR").expect("locale").as_str(), "tr");

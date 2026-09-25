@@ -611,7 +611,12 @@ jobs:
           # that is exactly the softening the `security-scans-can-fail` gate
           # refuses to see in this job. `awk` reports zero as a number and
           # exits zero, so nothing here can swallow a failure.
-          matched=$(awk '/ThreadSanitizer: Matched/{n++} END{print n+0}' /tmp/tsan-run.log)
+          # ThreadSanitizer prints "ThreadSanitizer: Matched N suppressions";
+          # take N, not the number of times the line appeared. Measured
+          # 2026-09-25 (job 108022518404): N was 578 while the line itself
+          # appeared once, and the first version of this counter reported 1.
+          matched=$(awk '/ThreadSanitizer: Matched [0-9]+ suppressions/{for(i=1;i<=NF;i++) if($i=="Matched") {print $(i+1); exit}}' /tmp/tsan-run.log)
+          matched=${matched:-0}
           surviving=$(awk '/WARNING: ThreadSanitizer/{n++} END{print n+0}' /tmp/tsan-run.log)
           echo "suppressed by the list: ${matched}"
           echo "unsuppressed ThreadSanitizer warnings: ${surviving}"

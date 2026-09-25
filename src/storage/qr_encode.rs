@@ -644,10 +644,31 @@ fn write_format_and_dark_module(dark: &mut [Vec<bool>], side: usize, mask: u8) {
     }
 }
 
+/// Quiet zone in modules on every side, and how many pixels one module gets
+/// when the matrix is rendered for the decoder.
+///
+/// The ISO quiet zone for a QR symbol is four modules; the scale is what makes
+/// the rendered image large enough for `rqrr` to find the finder patterns.
+const QUIET_MODULES: usize = 4;
+const PIXELS_PER_MODULE: usize = 4;
+
+/// Side of the rendered image in pixels: the symbol plus a quiet zone on both
+/// sides, scaled up.
+///
+/// This used to be an inline expression, and mutation testing showed it was
+/// unguarded: three surviving mutants (run 36119848850, shard 22/24) rewrote
+/// `(side + 2 * quiet) * scale` into `(side * 2 * quiet) * scale` and
+/// `2 + quiet`, and `quiet + side` into `quiet * side`, and every test stayed
+/// green. The decoder tolerates a too-large canvas, so the arithmetic was
+/// never actually checked. Now it is named and pinned by a test.
+const fn rendered_side_px(side: usize) -> usize {
+    (side + 2 * QUIET_MODULES) * PIXELS_PER_MODULE
+}
+
 fn matrix_decodes_to(matrix: &EncodedMatrix, data: &[u8]) -> bool {
     let side = matrix.side_len();
-    let (quiet, scale) = (4usize, 4usize);
-    let img = (side + 2 * quiet) * scale;
+    let (quiet, scale) = (QUIET_MODULES, PIXELS_PER_MODULE);
+    let img = rendered_side_px(side);
     let mut prepared = rqrr::PreparedImage::prepare_from_bitmap(img, img, |x, y| {
         let (c, r) = (x / scale, y / scale);
         let inside = quiet..quiet + side;
@@ -767,6 +788,33 @@ mod tests {
         let m = encode(b"A").unwrap();
         assert_eq!(m.mask(), 0, "readable mask-0 payloads keep byte continuity");
         assert!(matrix_decodes_to(&m, b"A"));
+    }
+
+    /// The rendered canvas is a symbol plus four quiet modules on EACH side,
+    /// four pixels per module. Mutation testing killed the previous version of
+    /// this arithmetic three different ways without a single test noticing,
+    /// because `rqrr` decodes fine from an oversized canvas. Pin the numbers:
+    /// a quiet zone that is too small breaks real scanners even when this
+    /// in-process decoder is happy.
+    #[test]
+    fn rendered_canvas_is_symbol_plus_two_quiet_zones_scaled() {
+        // 21 modules is version 1; 21 + 4 + 4 = 29 modules, times 4 px = 116.
+        assert_eq!(rendered_side_px(21), 116);
+        // 25 modules is version 2: 25 + 8 = 33 modules, times 4 px = 132.
+        assert_eq!(rendered_side_px(25), 132);
+        // Growing the symbol by one module grows the canvas by exactly one
+        // module worth of pixels - a multiplication in place of the addition
+        // would grow it by far more.
+        assert_eq!(
+            rendered_side_px(22) - rendered_side_px(21),
+            PIXELS_PER_MODULE
+        );
+        // The quiet zone is counted twice, not once: the difference between a
+        // canvas with and without it is 2 x 4 modules.
+        assert_eq!(
+            rendered_side_px(21) - 21 * PIXELS_PER_MODULE,
+            2 * QUIET_MODULES * PIXELS_PER_MODULE
+        );
     }
 
     #[test]
