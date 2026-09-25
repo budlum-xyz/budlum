@@ -790,6 +790,75 @@ mod tests {
         assert!(matrix_decodes_to(&m, b"A"));
     }
 
+    /// Mutation testing replaced `QrError`'s `Display::fmt` body with
+    /// `Ok(Default::default())` and nothing failed (run 36149222233, shard
+    /// 15/24): the messages were never read. An error type whose text can be
+    /// emptied without a test noticing is an error type that will one day
+    /// print nothing at the moment somebody needs it most.
+    #[test]
+    fn error_messages_name_the_condition_and_the_number() {
+        let too_long = QrError::TooLong(9_999).to_string();
+        assert!(
+            too_long.contains("9999") && too_long.contains(&MAX_DATA_BYTES.to_string()),
+            "TooLong must state both the payload size and the ceiling: {too_long}"
+        );
+        let undecodable = QrError::Undecodable.to_string();
+        assert!(
+            undecodable.contains("mask") && !undecodable.is_empty(),
+            "Undecodable must say what failed: {undecodable}"
+        );
+    }
+
+    /// `EncodedMatrix::mask` is a getter, and a getter pinned to `0` survived
+    /// every test (same run, shard 15/24). The mask is written into the format
+    /// word, so a getter that lies makes the symbol and its report disagree.
+    #[test]
+    fn encoded_matrix_reports_the_mask_it_carries() {
+        let m = encode(b"mask getter").expect("encode");
+        assert!(m.mask() < 8, "the ISO mask is one of eight");
+        // The format word is derived from the mask; deriving it twice from the
+        // getter and from the field must agree, so a constant getter is caught
+        // even when the chosen mask happens to be that constant.
+        assert_eq!(
+            format_word(0b01_000 | u32::from(m.mask() & 0b111)),
+            format_word(0b01_000 | u32::from(m.mask & 0b111)),
+            "the getter must report the field the encoder wrote"
+        );
+        for mask in 0..8u8 {
+            let probe = EncodedMatrix {
+                version: m.version(),
+                mask,
+                dark: m.dark.clone(),
+            };
+            assert_eq!(probe.mask(), mask, "mask {mask} was not reported");
+        }
+    }
+
+    /// `write_format_and_dark_module` combines the EC level with the mask
+    /// using `|`. Mutation testing turned that into `^` and no test failed
+    /// (same run, shard 20/24), because nothing checked the combination for
+    /// the masks where the two operators agree. They only differ when a bit is
+    /// set on both sides - here, level L is `0b01_000` and the mask occupies
+    /// the low three bits, so on this input `|` and `^` agree by construction.
+    /// That is worth pinning explicitly: the day the level gains a low bit,
+    /// `^` would silently clear it and every symbol would carry the wrong
+    /// format word.
+    #[test]
+    fn format_word_input_combines_level_and_mask_without_cancelling() {
+        for mask in 0..8u32 {
+            let ored = 0b01_000 | mask;
+            let xored = 0b01_000 ^ mask;
+            assert_eq!(
+                ored, xored,
+                "level L and the mask must not overlap; if they ever do, the \
+                 `|` in write_format_and_dark_module is load-bearing"
+            );
+            // The level bits must survive the combination.
+            assert_eq!(ored & 0b11_000, 0b01_000, "level L bits were lost");
+            assert_eq!(ored & 0b00_111, mask, "mask bits were lost");
+        }
+    }
+
     /// `matrix_decodes_to` answers "does this symbol decode to EXACTLY this
     /// payload", and the two halves of that question are joined by `&&`.
     /// Mutation testing turned it into `||` (run 36149222233, shard 22/24)
