@@ -121,19 +121,20 @@ jobs:
   mutants:
     name: cargo mutants (mutation testing) ${{ matrix.shard }}/24
     runs-on: ubuntu-latest
-    # Olculdu 2026-09-24, kosum 36063084319 shard 0/8: `--timeout 900`
-    # sayesinde baseline ilk kez gecti (`ok Unmutated baseline in 72s build
-    # + 290s test`) ve 39 mutant secildi. Ama her mutant kendi derlemesi ve
-    # tam test kosusu demek (~6 dk), 60 dakikalik is tavani shard'in payina
-    # dusen mutantlara yetmedi: is 58,5 dakikada kesildi. Kesilmeden once
-    # uc hayatta kalan mutant bildirdi, yani olcum calisiyor ve bitmesine
-    # izin vermek gerekiyor. Tavan 120 dakika.
-    # Ek olcum (ayni kosum, shard 6/8): 39 mutant secildi ve mutant basina
-    # ~350 sn (65s build + 286s test) olculdu, yani 8 shard ile shard basina
-    # ~227 dakika gerekiyor; 120 dakikalik tavan tek basina yetmez. Shard
-    # sayisi 24'e cikti: 312 mutant / 24 = 13 mutant x 350 sn = ~76 dakika,
-    # tavanin altinda. Shard'lar koordinasyon istemez, her biri ayni mutant
-    # kumesini bagimsiz kesfedip kendi dilimini test eder.
+    # Measured 2026-09-24, run 36063084319 shard 0/8: with `--timeout 900`
+    # the baseline passed for the first time ("ok Unmutated baseline in 72s
+    # build + 290s test") and 39 mutants were selected. Each mutant costs its
+    # own build plus a full test run (~6 min), so a 60-minute job ceiling did
+    # not cover the shard's share: the job was cut at 58.5 minutes. Before
+    # being cut it had already reported surviving mutants, which is the whole
+    # point of the run, so the measurement has to be allowed to finish.
+    #
+    # Second measurement, same run, shard 6/8: 39 mutants at ~350 s each
+    # (65 s build + 286 s test) means ~227 minutes per shard with 8 shards;
+    # raising the ceiling alone cannot fix that. The shard count is now 24:
+    # 312 mutants / 24 = 13 mutants x 350 s = ~76 minutes, under the ceiling.
+    # Shards need no coordination - each independently discovers the same
+    # mutant set and tests its own slice.
     timeout-minutes: 120
     strategy:
       # The point of the run is the LIST of survivors; cancelling seven shards
@@ -263,21 +264,23 @@ jobs:
           # tested exactly once and the wall clock is roughly an eighth.
           # `--baseline=skip` is NOT used: each shard proves its own tree is
           # green before trusting a "caught" verdict.
-          # `--timeout` hem mutant testlerine hem de baseline'a uygulanir ve
-          # `--in-place` kullanildigi icin carpan tabanli (`--timeout-multiplier`)
-          # bicim kabul edilmez: cargo-mutants'in kendi belgesi bunu soyluyor.
-          # 300 saniye cargo-mutants'in varsayilaniydi ve bu depo icin yetmiyor.
-          # Olculdu, iki bagimsiz kosumda iki farkli shard'da ayni satir:
+          # `--timeout` applies to the baseline as well as to each mutant,
+          # and because `--in-place` is used cargo-mutants refuses the
+          # multiplier form (`--timeout-multiplier`); its own book says so.
+          # 300 seconds was cargo-mutants' default and it is not enough for
+          # this tree. Measured, two independent runs, two different shards,
+          # the same line:
           #   36027822255 shard 6/8 -> TIMEOUT Unmutated baseline in 73s build + 300s test
           #   36032403742 shard 4/8 -> TIMEOUT Unmutated baseline in 76s build + 300s test
-          # Ardindan "cargo test failed in an unmutated tree, so no mutants were
-          # tested": is kirmizi donuyor ama tek bir mutant bile test edilmemis
-          # oluyor, yani en pahali bicimde hicbir sey olculmuyor.
+          # followed by "cargo test failed in an unmutated tree, so no mutants
+          # were tested": the job went red while measuring nothing at all,
+          # which is the most expensive possible way to learn nothing.
           #
-          # 900 saniye kapiyi gevsetmez: bir TIMEOUT hicbir zaman "caught"
-          # sayilmaz, yani sure buyumesi hayatta kalan bir mutanti gizleyemez.
-          # Gevseten sey baseline'in hic kosmamasiydi. `--baseline=skip`
-          # kullanilmiyor: her shard kendi agacinin yesil oldugunu kanitlar.
+          # 900 seconds does not soften the gate: a TIMEOUT is never counted
+          # as "caught", so a longer budget cannot hide a surviving mutant.
+          # What did soften the gate was a baseline that never ran.
+          # `--baseline=skip` is still NOT used: every shard proves its own
+          # tree is green before any verdict is trusted.
           cargo mutants --in-place --timeout 900 --in-diff /tmp/pr.diff \
             --shard "${SHARD}/24" -- --lib
 
@@ -428,14 +431,14 @@ jobs:
   tsan:
     name: ThreadSanitizer (data race detection)
     runs-on: ubuntu-latest
-    # Olculdu 2026-09-24, kosum 36057795640: sonda duzeltildikten sonra is
-    # ilk kez gercekten kostu. Sonda 0 sn, kanarya 19 sn, ama
-    # `RUSTFLAGS -Zsanitizer=thread` adimi 20:53:30'dan 21:37:52'ye kadar
-    # surdu (44 dk 22 sn) ve is tavani olan 45 dakikaya takildi: sanitizer
-    # butun bagimlilik agacini yeniden derliyor ve o kosuda derleyici
-    # onbellegi soguktu. Tavan 120 dakikaya cikti; bu bir gevsetme degil,
-    # olcumun bitmesine izin vermek. Sifir bulgu ile biten bir kosu, hic
-    # bitmeyen bir kosudan cok daha fazlasini soyler.
+    # Measured 2026-09-24, run 36057795640: once the probe was fixed the job
+    # really ran for the first time. The probe took under a second, the canary
+    # 19 seconds, but `RUSTFLAGS -Zsanitizer=thread` ran from 20:53:30 to
+    # 21:37:52 (44 min 22 s) and hit the 45-minute job ceiling: the sanitizer
+    # rebuilds the whole dependency tree and the compiler cache was cold on
+    # that run. The ceiling is now 120 minutes. This is not a softening; it is
+    # letting the measurement finish. A run that ends with zero findings says
+    # far more than a run that never ends.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -603,8 +606,14 @@ jobs:
           echo "--- suppression accounting"
           # Two numbers, both read from the run that just happened: what the
           # list swallowed, and what survived it. The second one is the gate.
-          grep -c "ThreadSanitizer: Matched" /tmp/tsan-run.log || true
-          surviving=$(grep -c "WARNING: ThreadSanitizer" /tmp/tsan-run.log || true)
+          # `awk` is used rather than `grep -c`, because `grep` exits non-zero
+          # when a pattern is absent and the `|| true` that would paper over
+          # that is exactly the softening the `security-scans-can-fail` gate
+          # refuses to see in this job. `awk` reports zero as a number and
+          # exits zero, so nothing here can swallow a failure.
+          matched=$(awk '/ThreadSanitizer: Matched/{n++} END{print n+0}' /tmp/tsan-run.log)
+          surviving=$(awk '/WARNING: ThreadSanitizer/{n++} END{print n+0}' /tmp/tsan-run.log)
+          echo "suppressed by the list: ${matched}"
           echo "unsuppressed ThreadSanitizer warnings: ${surviving}"
           if [ "${surviving}" -ne 0 ]; then
             echo "::error::${surviving} data race report(s) survived the suppression list; these are not the known sled shutdown races." >&2

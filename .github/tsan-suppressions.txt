@@ -1,37 +1,41 @@
-# ThreadSanitizer bastirma listesi - DAR TUTULUR, GEREKCESI OLCULMUSTUR.
+# ThreadSanitizer suppression list - KEPT NARROW, AND EVERY LINE IS MEASURED.
 #
-# Kosum 36063084319 (commit 444f938) ThreadSanitizer isini ilk kez sonuna
-# kadar kostu ve sunu olctu:
+# Run 36063084319 (commit 444f938) was the first time the ThreadSanitizer job
+# ran to completion. What it measured:
 #
-#   test result: ok. 3220 passed; 0 failed   (4270,64 sn)
+#   test result: ok. 3220 passed; 0 failed   (4270.64 s)
 #   WARNING: ThreadSanitizer: data race       x 354
 #
-# 354 raporun **tamaminin** yiginlarinda `sled 0.34.7` var; sled gecmeyen
-# tek bir rapor yok. Dagilim:
+# Every one of those 354 reports has `sled 0.34.7` somewhere in its stack;
+# not a single report is free of it. The split:
 #
-#   306  free -> std::sys::alloc::unix::dealloc   (sled nesnelerinin drop'u)
+#   306  free -> std::sys::alloc::unix::dealloc   (dropping sled objects)
 #    48  <sled::pagecache::segment::SegmentAccountant as Drop>::drop
 #         (sled-0.34.7/src/pagecache/segment.rs:140)
 #
-# Yani yarislar bizim eszamanlilik kodumuzda degil, bagimliligin **kapanis**
-# yolunda: sled kendi arka plan is parcaciklarini kapanista join etmeden
-# birakiyor ve drop sirasinda ayni bellege iki taraftan dokunuluyor.
-# sled 0.34.7 son yayinlanan surumdur; bakimi durmustur.
+# So the races are not in our concurrency code; they are on the dependency's
+# shutdown path: sled leaves its background threads unjoined at close and the
+# same memory is touched from both sides while dropping. sled 0.34.7 is the
+# last release of that crate and it is unmaintained.
 #
-# Bu liste, o bilinen ve bizim kodumuzun disindaki gurultuyu susturur. Ne
-# susturmadigi daha onemlidir:
+# This list silences that known, external noise. What it does NOT silence
+# matters more:
 #
-#   * budlum kodundaki bir yaris bastirilmaz: kalip yalniz `sled::` ile
-#     baslayan sembolleri hedefler.
-#   * kanarya bu liste ile birlikte kosar. Bilerek yazilmis yarisi TSan
-#     hala gormuyorsa is kirmizi doner, yani liste kapiyi bosaltamaz.
-#   * `print_suppressions=1` acik: her kosu kac raporun bastirildigini
-#     log'a yazar. Sayi sifira duserse bu liste gereksizlesmis demektir ve
-#     silinir.
+#   * a race in budlum code is not suppressed: the patterns only match
+#     symbols beginning with `sled::`;
+#   * the canary runs WITH this list. If ThreadSanitizer stops seeing the
+#     deliberately written race, the job fails, so the list cannot hollow
+#     out the gate;
+#   * `print_suppressions=1` is on, and the job prints how many reports the
+#     list swallowed. If that number ever falls to zero the list has become
+#     dead weight and is deleted; if it jumps, the cause is read before the
+#     number is accepted;
+#   * any warning that survives the list is counted, and a non-zero count
+#     fails the step.
 #
-# Kalici cozum bu dosya degildir: issue #80'de yazili oldugu gibi dogru
-# hamle gomulu KV'yi bakimli bir surume tasimaktir. Bu liste o ise kadar
-# gecerlidir ve her degistiginde yukaridaki olcum yenilenir.
+# This file is not the fix. The fix is moving off an unmaintained embedded
+# key-value store, which is tracked in issue #80. The list is valid until
+# then, and every time it changes the measurement above is taken again.
 
 race:sled::pagecache
 race:sled::arc
