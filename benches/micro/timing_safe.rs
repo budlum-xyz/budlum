@@ -293,12 +293,20 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if control_delta_pre < 3.0 * granularity as f64 {
+    // The comparison is against the EFFECTIVE resolution, not the raw tick:
+    // one reading covers CALLS_PER_SAMPLE calls, so a 20ns tick resolves
+    // 20/64 = 0.31ns per call. Measured 2026-09-25 (job 107995294005): a 20ns
+    // tick, a control leak of 26.89ns and |t|=0.00 for the constant-time path.
+    // Comparing that leak against the raw tick failed a perfectly valid run,
+    // which is the same class of mistake as the one this gate is here to
+    // catch - judging the clock instead of the code.
+    let effective_resolution = granularity as f64 / CALLS_PER_SAMPLE as f64;
+    if control_delta_pre < 3.0 * effective_resolution {
         eprintln!(
-            "FAIL(harness): the known leak measured {control_delta_pre:.2}ns against a \
-             {granularity}ns clock tick. Below three ticks the ratio is an artefact of the \
-             clock, not of the code - on 2026-09-25 exactly this produced a 31.4 percent \
-             'effect' out of a 3.15ns difference. Nothing was measured."
+            "FAIL(harness): the known leak measured {control_delta_pre:.2}ns against an \
+             effective resolution of {effective_resolution:.2}ns ({granularity}ns tick over \
+             {CALLS_PER_SAMPLE} calls). Below three resolution steps the ratio is an artefact \
+             of the clock, not of the code. Nothing was measured."
         );
         return ExitCode::from(2);
     }
