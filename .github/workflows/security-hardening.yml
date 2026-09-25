@@ -558,6 +558,10 @@ jobs:
           EOF
           cd /tmp/tsan-canary
           export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
+          # The canary runs WITH the suppression list. A list that also
+          # silenced a deliberate race would turn this job into decoration,
+          # so the proof and the filter are exercised together or not at all.
+          export TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt print_suppressions=1"
           # Capture the output into a file first: under `set -euo pipefail` a
           # non-zero exit anywhere in the pipeline decides the condition, and
           # TSan exits non-zero precisely when it finds the race. The pipeline
@@ -583,8 +587,30 @@ jobs:
           # neither `RUSTFLAGS` nor, without this, the sanitizer ABI.
           export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
           export RUSTDOCFLAGS="$RUSTFLAGS"
+          # Suppression list: `.github/tsan-suppressions.txt` carries the
+          # measurement that justifies every line in it. `print_suppressions=1`
+          # makes each run state how many reports the list swallowed, so the
+          # filter cannot quietly grow into a blindfold: if that number ever
+          # reaches zero the list is dead weight and gets deleted, and if it
+          # jumps the cause is read before the number is accepted.
+          export TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt print_suppressions=1"
+          set +e
           cargo +nightly-2026-07-19 test --lib -Zbuild-std \
-            --target x86_64-unknown-linux-gnu -- --test-threads=1
+            --target x86_64-unknown-linux-gnu -- --test-threads=1 \
+            2>&1 | tee /tmp/tsan-run.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "--- suppression accounting"
+          # Two numbers, both read from the run that just happened: what the
+          # list swallowed, and what survived it. The second one is the gate.
+          grep -c "ThreadSanitizer: Matched" /tmp/tsan-run.log || true
+          surviving=$(grep -c "WARNING: ThreadSanitizer" /tmp/tsan-run.log || true)
+          echo "unsuppressed ThreadSanitizer warnings: ${surviving}"
+          if [ "${surviving}" -ne 0 ]; then
+            echo "::error::${surviving} data race report(s) survived the suppression list; these are not the known sled shutdown races." >&2
+            exit 1
+          fi
+          exit "${status}"
 
   # BLOCKS. TSan reports the race it sees, loom proves the one it does not see.
   #

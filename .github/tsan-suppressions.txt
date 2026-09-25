@@ -1,0 +1,41 @@
+# ThreadSanitizer bastirma listesi - DAR TUTULUR, GEREKCESI OLCULMUSTUR.
+#
+# Kosum 36063084319 (commit 444f938) ThreadSanitizer isini ilk kez sonuna
+# kadar kostu ve sunu olctu:
+#
+#   test result: ok. 3220 passed; 0 failed   (4270,64 sn)
+#   WARNING: ThreadSanitizer: data race       x 354
+#
+# 354 raporun **tamaminin** yiginlarinda `sled 0.34.7` var; sled gecmeyen
+# tek bir rapor yok. Dagilim:
+#
+#   306  free -> std::sys::alloc::unix::dealloc   (sled nesnelerinin drop'u)
+#    48  <sled::pagecache::segment::SegmentAccountant as Drop>::drop
+#         (sled-0.34.7/src/pagecache/segment.rs:140)
+#
+# Yani yarislar bizim eszamanlilik kodumuzda degil, bagimliligin **kapanis**
+# yolunda: sled kendi arka plan is parcaciklarini kapanista join etmeden
+# birakiyor ve drop sirasinda ayni bellege iki taraftan dokunuluyor.
+# sled 0.34.7 son yayinlanan surumdur; bakimi durmustur.
+#
+# Bu liste, o bilinen ve bizim kodumuzun disindaki gurultuyu susturur. Ne
+# susturmadigi daha onemlidir:
+#
+#   * budlum kodundaki bir yaris bastirilmaz: kalip yalniz `sled::` ile
+#     baslayan sembolleri hedefler.
+#   * kanarya bu liste ile birlikte kosar. Bilerek yazilmis yarisi TSan
+#     hala gormuyorsa is kirmizi doner, yani liste kapiyi bosaltamaz.
+#   * `print_suppressions=1` acik: her kosu kac raporun bastirildigini
+#     log'a yazar. Sayi sifira duserse bu liste gereksizlesmis demektir ve
+#     silinir.
+#
+# Kalici cozum bu dosya degildir: issue #80'de yazili oldugu gibi dogru
+# hamle gomulu KV'yi bakimli bir surume tasimaktir. Bu liste o ise kadar
+# gecerlidir ve her degistiginde yukaridaki olcum yenilenir.
+
+race:sled::pagecache
+race:sled::arc
+race:sled::tree
+race:sled::context
+race:sled::Db
+race:sled::ivec
