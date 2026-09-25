@@ -746,6 +746,14 @@ mod tests {
         assert!(!mask_applies(3, 4, 6));
         assert!(mask_applies(4, 2, 3));
         assert!(!mask_applies(4, 4, 3));
+        // Mask 4 is the one place where `+` and `-` are indistinguishable by
+        // the two spot checks above: `(a + b) % 2` and `(a - b) % 2` always
+        // agree, because a sum and a difference share their parity. Mutation
+        // testing found exactly that hole (run 36063084319, shard 6/8:
+        // MISSED `replace + with - in mask_applies`). The case below separates
+        // them: with `+` the answer is a plain `false`, with `-` the usize
+        // subtraction underflows, so the mutant can no longer survive.
+        assert!(!mask_applies(4, 0, 3));
         assert!(mask_applies(5, 2, 3));
         assert!(!mask_applies(5, 1, 1));
         assert!(mask_applies(6, 1, 2));
