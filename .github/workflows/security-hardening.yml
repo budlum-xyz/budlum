@@ -582,6 +582,83 @@ jobs:
             exit 1
           fi
 
+      # Second canary, and it exists because of a review finding on PR #81: a
+      # `race:` rule is a substring test against every frame of BOTH stacks, so
+      # a rule naming sled's public API could silence a race in OUR memory
+      # whose other access merely passed through a sled entry point. The first
+      # canary cannot catch that - its race has no sled frame anywhere.
+      #
+      # This one has exactly that shape. One thread writes the racing address
+      # from inside the closure `Tree::update_and_fetch` calls, the other
+      # writes it directly and never touches sled, so the two accesses share no
+      # sled-created happens-before edge while one of the two stacks carries
+      # `sled::tree::` frames. If the suppression list ever swallows this, the
+      # job fails here instead of going green over a hidden race.
+      - name: TSan sled-frame canary (can the list swallow OUR race?)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tsan-sled-canary/src
+          cat > /tmp/tsan-sled-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "tsan-sled-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          sled = "0.34.7"
+          EOF
+          cat > /tmp/tsan-sled-canary/src/main.rs <<'EOF'
+          // The racing memory is ours; only the stack is sled's.
+          fn main() {
+              let db = sled::Config::new()
+                  .temporary(true)
+                  .open()
+                  .expect("the canary needs a store to borrow a stack frame from");
+              let mut value = 0i64;
+              let ptr = std::ptr::addr_of_mut!(value) as usize;
+
+              // Thread A: the write happens INSIDE a closure sled invokes, so
+              // `sled::tree::Tree::update_and_fetch` sits in this stack.
+              let inside = {
+                  let db = db.clone();
+                  std::thread::spawn(move || {
+                      for i in 0..20_000u32 {
+                          let _ = db.update_and_fetch(b"canary", |_old| {
+                              let p = ptr as *mut i64;
+                              unsafe { *p += 1 }
+                              Some(i.to_le_bytes().to_vec())
+                          });
+                      }
+                  })
+              };
+              // Thread B: the same address, no sled on this side at all.
+              let outside = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..20_000 { unsafe { *p += 1 } }
+              });
+              inside.join().expect("join");
+              outside.join().expect("join");
+              println!("{value}");
+          }
+          EOF
+          cd /tmp/tsan-sled-canary
+          export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
+          export TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt print_suppressions=1"
+          set +e
+          cargo +nightly-2026-07-19 run -Zbuild-std --target x86_64-unknown-linux-gnu \
+            > /tmp/tsan-sled-canary.log 2>&1
+          set -e
+          if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-sled-canary.log; then
+            echo "sled-frame canary OK: a race in our own memory is still reported"
+            echo "even though one of its stacks goes through sled."
+          else
+            echo "::error::SLED-FRAME CANARY FAILED: ThreadSanitizer reported nothing for a race" >&2
+            echo "in our own memory whose other stack passes through sled. The suppression list" >&2
+            echo "is masking application races - narrow it (see .github/tsan-suppressions.txt)." >&2
+            tail -40 /tmp/tsan-sled-canary.log >&2
+            exit 1
+          fi
+
       - name: RUSTFLAGS -Zsanitizer=thread
         run: |
           set -euo pipefail
@@ -620,6 +697,39 @@ jobs:
           surviving=$(awk '/WARNING: ThreadSanitizer/{n++} END{print n+0}' /tmp/tsan-run.log)
           echo "suppressed by the list: ${matched}"
           echo "unsuppressed ThreadSanitizer warnings: ${surviving}"
+
+          # Per-rule table. One total cannot say WHICH rule is carrying the
+          # noise, and the review finding on PR #81 is about a rule that is
+          # wider than the noise it was written for. `print_suppressions=1`
+          # prints "  <count> <rule>" under the Matched line; those counts are
+          # the only evidence that a line in the file is still earning its
+          # place.
+          echo "--- per-rule hits (from print_suppressions=1)"
+          awk '/^[[:space:]]*[0-9]+[[:space:]]+race:/{print $1, $2}' /tmp/tsan-run.log \
+            | sort | uniq > /tmp/tsan-rule-hits.txt
+          cat /tmp/tsan-rule-hits.txt
+          dead=0
+          while read -r rule; do
+            case "${rule}" in ''|\#*) continue ;; esac
+            hits=$(awk -v r="${rule}" '$2==r{n+=$1} END{print n+0}' /tmp/tsan-rule-hits.txt)
+            echo "${rule}: ${hits}"
+            if [ "${hits}" -eq 0 ]; then
+              echo "::error::suppression rule '${rule}' matched nothing in this run. A rule that silences nothing can only ever silence something new: delete the line from .github/tsan-suppressions.txt." >&2
+              dead=1
+            fi
+          done < "${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt"
+
+          # The list was cut from six rules to three on this branch, so the
+          # matched total can fall but has no way to rise. 578 is the measured
+          # baseline (job 108022518404) and a number above it means new noise
+          # that nobody has read yet.
+          if [ "${matched}" -gt 578 ]; then
+            echo "::error::the list swallowed ${matched} reports, above the measured baseline of 578 taken with a WIDER list. Read the new reports before accepting the number." >&2
+            exit 1
+          fi
+          if [ "${dead}" -ne 0 ]; then
+            exit 1
+          fi
           if [ "${surviving}" -ne 0 ]; then
             echo "::error::${surviving} data race report(s) survived the suppression list; these are not the known sled shutdown races." >&2
             exit 1
