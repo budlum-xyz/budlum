@@ -132,12 +132,12 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
     valid: &[u8],
     batches: usize,
     iters: usize,
-) -> (Vec<u64>, Vec<u64>) {
+) -> (Vec<f64>, Vec<f64>) {
     let mut mins_first = Vec::with_capacity(batches);
     let mut mins_last = Vec::with_capacity(batches);
     for _ in 0..batches {
-        let mut m_first = u64::MAX;
-        let mut m_last = u64::MAX;
+        let mut m_first = f64::INFINITY;
+        let mut m_last = f64::INFINITY;
         for i in 0..iters {
             // Interleaved measurement: drift loads both classes equally.
             let (cand, acc) = if i % 2 == 0 {
@@ -148,12 +148,16 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
             // One clock reading covers CALLS_PER_SAMPLE calls, then the time
             // is divided back down. Without this the reading is quantised to
             // the clock tick and the comparison measures the clock, not the
-            // function.
+            // function. The division keeps the FRACTION: an integer ns would
+            // snap every sample to a whole nanosecond and quietly destroy the
+            // sub-tick resolution this batching exists to create (a 20 ns
+            // tick over 64 calls resolves 0.3125 ns per call only because the
+            // quotient is not truncated).
             let t0 = Instant::now();
             for _ in 0..CALLS_PER_SAMPLE {
                 black_box(f(black_box(cand), black_box(valid)));
             }
-            let dt = t0.elapsed().as_nanos() as u64 / CALLS_PER_SAMPLE;
+            let dt = t0.elapsed().as_nanos() as f64 / CALLS_PER_SAMPLE as f64;
             *acc = (*acc).min(dt);
         }
         mins_first.push(m_first);
@@ -162,17 +166,17 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
     (mins_first, mins_last)
 }
 
-fn mean(xs: &[u64]) -> f64 {
-    xs.iter().sum::<u64>() as f64 / xs.len() as f64
+fn mean(xs: &[f64]) -> f64 {
+    xs.iter().sum::<f64>() / xs.len() as f64
 }
 
-fn variance(xs: &[u64]) -> f64 {
+fn variance(xs: &[f64]) -> f64 {
     let m = mean(xs);
-    xs.iter().map(|x| (*x as f64 - m).powi(2)).sum::<f64>() / (xs.len() as f64 - 1.0)
+    xs.iter().map(|x| (*x - m).powi(2)).sum::<f64>() / (xs.len() as f64 - 1.0)
 }
 
 /// Welch's t statistic (unequal variance assumption).
-fn welch_t(a: &[u64], b: &[u64]) -> f64 {
+fn welch_t(a: &[f64], b: &[f64]) -> f64 {
     let na = a.len() as f64;
     let nb = b.len() as f64;
     let num = mean(a) - mean(b);
@@ -295,9 +299,12 @@ fn main() -> ExitCode {
     }
     // The comparison is against the EFFECTIVE resolution, not the raw tick:
     // one reading covers CALLS_PER_SAMPLE calls, so a 20ns tick resolves
-    // 20/64 = 0.31ns per call. Measured 2026-09-25 (job 107995294005): a 20ns
-    // tick, a control leak of 26.89ns and |t|=0.00 for the constant-time path.
-    // Comparing that leak against the raw tick failed a perfectly valid run,
+    // 20/64 = 0.31ns per call - and the samples keep that fraction (see
+    // measure_min_per_batch), so the effective resolution is real in the data,
+    // not an artefact of an integer quotient. Measured 2026-09-25 (job
+    // 107995294005): a 20ns tick, a control leak of 26.89ns and |t|=0.00 for
+    // the constant-time path. Comparing that leak against the raw tick failed
+    // a perfectly valid run,
     // which is the same class of mistake as the one this gate is here to
     // catch - judging the clock instead of the code.
     let effective_resolution = granularity as f64 / CALLS_PER_SAMPLE as f64;

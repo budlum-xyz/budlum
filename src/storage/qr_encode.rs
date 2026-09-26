@@ -625,9 +625,20 @@ fn apply_data_mask(dark: &mut [Vec<bool>], reserved: &[Vec<bool>], mask: u8) {
     }
 }
 
+/// The 5 bits the format word is built from: the two EC-level bits above the
+/// three mask bits. The fields are combined with `|`; an `^` cancels any bit
+/// set on BOTH sides. Today level L (`0b01_000`) and the low three mask bits
+/// cannot overlap, so the two operators agree on every real input - which is
+/// exactly why mutation testing's `|` -> `^` swap survived every symbol test.
+/// Keeping the combination in one helper lets the test suite feed it
+/// overlapping inputs and kill that mutant at its source.
+fn level_mask_bits(level: u32, mask: u32) -> u32 {
+    level | (mask & 0b111)
+}
+
 fn write_format_and_dark_module(dark: &mut [Vec<bool>], side: usize, mask: u8) {
     // format information, level L plus the selected mask, then the forced dark module
-    let word = format_word(0b01_000 | u32::from(mask & 0b111));
+    let word = format_word(level_mask_bits(0b01_000, u32::from(mask)));
     for i in 0..15 {
         let bit = (word >> i) & 1 != 0;
         let (r, c) = format_cell_main(i);
@@ -835,28 +846,55 @@ mod tests {
     }
 
     /// `write_format_and_dark_module` combines the EC level with the mask
-    /// using `|`. Mutation testing turned that into `^` and no test failed
-    /// (same run, shard 20/24), because nothing checked the combination for
-    /// the masks where the two operators agree. They only differ when a bit is
-    /// set on both sides - here, level L is `0b01_000` and the mask occupies
-    /// the low three bits, so on this input `|` and `^` agree by construction.
-    /// That is worth pinning explicitly: the day the level gains a low bit,
-    /// `^` would silently clear it and every symbol would carry the wrong
-    /// format word.
+    /// through `level_mask_bits`, which uses `|`. Mutation testing turned that
+    /// into `^` and no test failed (same run, shard 20/24): on level L the
+    /// level bits and the mask bits never overlap, so `|` and `^` agree by
+    /// construction on every real input. The earlier version of this test
+    /// re-stated that arithmetic inline and never touched the production
+    /// helper, so it guarded nothing. The combination now lives in
+    /// `level_mask_bits`, and the test drives the PRODUCTION function with
+    /// overlapping fields, where `^` cancels a shared bit and `|` keeps it:
+    /// the day the level gains a low bit, the mutant dies here.
     #[test]
-    fn format_word_input_combines_level_and_mask_without_cancelling() {
+    fn level_mask_bits_keeps_overlapping_fields() {
+        // Non-overlapping inputs (today's level L and any mask): the result
+        // is the plain union, and both field groups survive it intact.
         for mask in 0..8u32 {
-            let ored = 0b01_000 | mask;
-            let xored = 0b01_000 ^ mask;
             assert_eq!(
-                ored, xored,
-                "level L and the mask must not overlap; if they ever do, the \
-                 `|` in write_format_and_dark_module is load-bearing"
+                level_mask_bits(0b01_000, mask),
+                0b01_000 | mask,
+                "mask {mask}"
             );
-            // The level bits must survive the combination.
-            assert_eq!(ored & 0b11_000, 0b01_000, "level L bits were lost");
-            assert_eq!(ored & 0b00_111, mask, "mask bits were lost");
+            assert_eq!(
+                level_mask_bits(0b01_000, mask) & 0b11_000,
+                0b01_000,
+                "level L bits were lost"
+            );
+            assert_eq!(
+                level_mask_bits(0b01_000, mask) & 0b00_111,
+                mask,
+                "mask bits were lost"
+            );
         }
+        // Overlapping inputs: a `|` -> `^` mutant clears every shared bit and
+        // fails both lines below, which is the point of the helper.
+        assert_eq!(
+            level_mask_bits(0b01_001, 0b001),
+            0b01_001,
+            "the shared low bit must survive"
+        );
+        assert_eq!(
+            level_mask_bits(0b11_111, 0b111),
+            0b11_111,
+            "fully overlapping fields must not cancel"
+        );
+        // The mask input is three bits wide; wider inputs must not leak into
+        // the level field.
+        assert_eq!(
+            level_mask_bits(0b00_000, 0b1_1010),
+            0b010,
+            "mask bits above the low three must be cut"
+        );
     }
 
     /// `matrix_decodes_to` answers "does this symbol decode to EXACTLY this
