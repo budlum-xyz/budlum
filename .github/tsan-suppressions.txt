@@ -1,0 +1,91 @@
+# ThreadSanitizer suppression list - KEPT NARROW, AND EVERY LINE IS MEASURED.
+#
+# Run 36063084319 (commit 444f938) was the first time the ThreadSanitizer job
+# ran to completion. What it measured:
+#
+#   test result: ok. 3220 passed; 0 failed   (4270.64 s)
+#   WARNING: ThreadSanitizer: data race       x 354
+#
+# Every one of those 354 reports has `sled 0.34.7` somewhere in its stack;
+# not a single report is free of it. The split:
+#
+#   306  free -> std::sys::alloc::unix::dealloc   (dropping sled objects)
+#    48  <sled::pagecache::segment::SegmentAccountant as Drop>::drop
+#         (sled-0.34.7/src/pagecache/segment.rs:140)
+#
+# So the races are not in our concurrency code; they are on the dependency's
+# shutdown path: sled leaves its background threads unjoined at close and the
+# same memory is touched from both sides while dropping. sled 0.34.7 is the
+# last release of that crate and it is unmaintained.
+#
+# ---------------------------------------------------------------------------
+# WHAT A `race:` RULE ACTUALLY MATCHES, AND WHY THREE RULES WERE DELETED
+# ---------------------------------------------------------------------------
+#
+# A `race:` rule is a substring test run against EVERY frame of BOTH stacks in
+# a report - the reporting access and the previous one. It is not a filter on
+# "races inside sled". It is a filter on "reports that touch sled anywhere".
+#
+# That distinction is the whole risk, and it was raised as a review finding on
+# PR #81: the storage layer is `sled::Db`, threaded through the node's state
+# handling, so a genuine race in OUR code whose other access merely passes
+# through a sled entry point would match a module-wide rule and be silenced.
+# The job would stay green with a real race hidden inside the `matched` count.
+#
+# The finding is correct about the mechanism, so the list is now cut along the
+# line that separates the two cases:
+#
+#   DELETED - these name sled's PUBLIC API, which is exactly where our own
+#   code stands when it calls into the store, so a rule here can cover an
+#   application race:
+#
+#       race:sled::tree        `Tree::insert/get/update_and_fetch/...`
+#       race:sled::Db          the handle held by src/storage/db.rs
+#       race:sled::context     opened and dropped through the public handle
+#
+#   KEPT - these name sled's internal machinery. Our code holds no reference
+#   into them, never calls them, and cannot be on the racing side of an access
+#   whose only sled frames are these:
+#
+#       race:sled::pagecache   the 48 SegmentAccountant::drop reports above
+#       race:sled::arc         sled's own refcount container, dropped at close
+#       race:sled::ivec        sled's own buffer type, dropped at close
+#
+# Not measured yet, and said plainly: whether the three deleted rules were
+# carrying any of the 354 reports. They were written from the shape of the
+# stacks, not from a per-rule count, because the run that produced the 354 did
+# not print one. The job now prints the per-rule table on every run, so the
+# next run answers it. If a deleted rule turns out to have been load-bearing
+# the reports come back as SURVIVING warnings and the job goes red - which is
+# the correct outcome: a rule is re-added with the count that justifies it,
+# never because the gate was inconvenient.
+#
+# ---------------------------------------------------------------------------
+# WHAT KEEPS THIS LIST FROM BECOMING A BLINDFOLD
+# ---------------------------------------------------------------------------
+#
+#   * Two canaries run WITH this list, not without it.
+#     - the plain canary: two threads, one address, no sled anywhere. Proves
+#       the tool still sees a race at all.
+#     - the sled-frame canary: one thread writes the racing address from
+#       inside a closure sled calls, the other writes it directly. The report
+#       therefore carries `sled::tree::Tree::update_and_fetch` in one of its
+#       two stacks while the racing memory is ours. This is precisely the
+#       shape the review finding describes. If a rule ever swallows it the
+#       canary sees no warning and the job fails. Re-adding `race:sled::tree`
+#       would fail this canary on the next run rather than quietly widening
+#       the filter.
+#   * `print_suppressions=1` is on and the job prints the PER-RULE hit table.
+#     A rule that matched nothing is dead weight and the step fails until the
+#     line is deleted; the total is compared against the measured baseline and
+#     a jump has to be read before it is accepted.
+#   * any warning that survives the list is counted, and a non-zero count
+#     fails the step.
+#
+# This file is not the fix. The fix is moving off an unmaintained embedded
+# key-value store, which is tracked in issue #80. The list is valid until
+# then, and every time it changes the measurement above is taken again.
+
+race:sled::pagecache
+race:sled::arc
+race:sled::ivec

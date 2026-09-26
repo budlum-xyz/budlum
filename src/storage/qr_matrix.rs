@@ -204,6 +204,36 @@ mod tests {
         assert!(m.mask_pattern() < 8);
     }
 
+    /// `mask_pattern` is a getter, and a getter is exactly the shape mutation
+    /// testing eats: replacing the body with `0` or with `1` left every test
+    /// green (run 36149222233, shard 22/24), because the only assertion was
+    /// `mask_pattern() < 8`. A constant satisfies that and still lies about
+    /// which mask the symbol carries - and the mask is what a decoder needs
+    /// to undo the pattern.
+    #[test]
+    fn mask_pattern_reports_the_field_not_a_constant() {
+        let m = QrMatrix::encode(b"BDL3-mask-getter").expect("encode");
+        assert!(m.mask_pattern() < 8, "the ISO mask is one of eight");
+        assert_eq!(
+            m.mask_pattern(),
+            m.mask,
+            "the getter must report the field the encoder wrote"
+        );
+
+        // Every one of the eight patterns must survive the round trip, so a
+        // body pinned to any single value is caught rather than only 0 and 1.
+        for mask in 0..8u8 {
+            let probe = QrMatrix {
+                version: m.version,
+                width: m.width,
+                dark: m.dark.clone(),
+                ec: m.ec,
+                mask,
+            };
+            assert_eq!(probe.mask_pattern(), mask, "mask {mask} was not reported");
+        }
+    }
+
     #[test]
     fn empty_refused() {
         assert_eq!(QrMatrix::encode(b"").unwrap_err(), QrMatrixError::Empty);
