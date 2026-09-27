@@ -220,7 +220,37 @@ fn welch_sentinel_self_check() -> Option<String> {
             "a real spread gave t={spread}; expected finite and negative"
         ));
     }
+    if !completely_separated(&[30.0, 30.0, 30.0], &[40.0, 40.0, 40.0]) {
+        return Some("flat 30ns vs flat 40ns must count as completely separated".to_string());
+    }
+    if completely_separated(&[30.0, 30.0], &[30.0, 30.0])
+        || completely_separated(&[30.0, 41.0], &[40.0, 31.0])
+    {
+        return Some("equal or overlapping classes must not count as separated".to_string());
+    }
     None
+}
+
+/// Complete separation: every sample of one class is below every sample of
+/// the other. This is what a zero-variance Welch case looks like when the
+/// difference is real: a coarse clock puts each class on its own tick in
+/// EVERY batch, so `welch_t` is undefined (NaN) although the evidence is
+/// maximal, not absent. Under the null hypothesis the chance that N batches
+/// per class separate completely by luck is 2 / C(2N, N) - for the default
+/// 40 batches that is below 1e-22. Two flat classes on the SAME value are not
+/// separated: they differ by nothing.
+fn completely_separated(a: &[f64], b: &[f64]) -> bool {
+    let (amin, amax) = a
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+            (lo.min(*x), hi.max(*x))
+        });
+    let (bmin, bmax) = b
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+            (lo.min(*x), hi.max(*x))
+        });
+    amax < bmin || bmax < amin
 }
 
 fn getenv_usize(key: &str, default: usize) -> usize {
@@ -327,25 +357,61 @@ fn main() -> ExitCode {
     // it means this run measured nothing. Exit code 2 says exactly that, and
     // it is kept distinct from 1 (a real regression) on purpose.
     let control_delta_pre = (mean(&ctl_a) - mean(&ctl_b)).abs();
-    if !t_control.is_finite() {
+    let effective_resolution = granularity as f64 / CALLS_PER_SAMPLE as f64;
+    // A NaN from `welch_t` is a zero-variance pair. It is resolved here, out
+    // loud, before any threshold sees it: NaN compares false against every
+    // threshold, so left alone it would read as "no difference" for the
+    // function under test and as an unmeasurable control for the harness.
+    // Measured 2026-09-27 (run 36326178651): the control's per-batch minima
+    // were flat 1.88ns against flat 21.59ns over every batch - complete
+    // separation, a 19.7ns gap on a 0.31ns effective resolution. That is the
+    // strongest evidence the harness can produce, and calling it "nothing
+    // measured" made the gate red on a perfectly good run.
+    let t_control = if t_control.is_finite() {
+        t_control
+    } else if completely_separated(&ctl_a, &ctl_b)
+        && control_delta_pre >= 3.0 * effective_resolution
+    {
+        println!(
+            "control: zero variance with complete separation over {} batches per class \
+             (gap {control_delta_pre:.2}ns, effective resolution {effective_resolution:.2}ns); \
+             Welch's t is undefined, the separation itself is the evidence",
+            ctl_a.len()
+        );
+        f64::INFINITY
+    } else {
         eprintln!(
-            "FAIL(harness): the control's variance collapsed to zero, so Welch's t is not \
-             defined (both classes landed on a single clock value). With a {granularity}ns \
-             tick this run cannot separate the classes; nothing was measured."
+            "FAIL(harness): the control's variance collapsed to zero and the classes are not \
+             separated beyond three resolution steps ({control_delta_pre:.2}ns gap, \
+             {effective_resolution:.2}ns effective resolution, {granularity}ns tick); \
+             Welch's t is not defined and nothing was measured."
         );
         return ExitCode::from(2);
-    }
-    // The same degeneracy on the function under test is not a pass: a NaN
-    // compares false against T_THRESHOLD and would slide through the
-    // regression check below as if |t| were zero.
-    if !t_ct.is_finite() {
+    };
+    let ct_delta_pre = (mean(&ct_a) - mean(&ct_b)).abs();
+    let t_ct = if t_ct.is_finite() {
+        t_ct
+    } else if ct_delta_pre == 0.0 {
+        // Both classes flat on the same value: no difference at all. That is
+        // t = 0 by any reading, and it is stated rather than left as NaN.
+        println!("constant_time_eq_str: both classes flat on one value; |t| taken as 0");
+        0.0
+    } else if completely_separated(&ct_a, &ct_b) {
+        // Flat AND different: every batch put the classes on different
+        // values. Treated as maximal significance so the effect-size check
+        // below decides, instead of NaN sliding past the threshold as a pass.
+        println!(
+            "constant_time_eq_str: zero variance with complete separation (gap \
+             {ct_delta_pre:.2}ns); |t| taken as infinite, the effect size decides"
+        );
+        f64::INFINITY
+    } else {
         eprintln!(
-            "FAIL(harness): constant_time_eq_str's two classes each collapsed onto a single \
-             clock value, so Welch's t is not defined for it. With a {granularity}ns tick \
-             this run cannot separate the classes; nothing was measured."
+            "FAIL(harness): constant_time_eq_str's classes collapsed onto single values that \
+             neither coincide nor separate; Welch's t is not defined and nothing was measured."
         );
         return ExitCode::from(2);
-    }
+    };
     // The comparison is against the EFFECTIVE resolution, not the raw tick:
     // one reading covers CALLS_PER_SAMPLE calls, so a 20ns tick resolves
     // 20/64 = 0.31ns per call - and the samples keep that fraction (see
@@ -356,7 +422,6 @@ fn main() -> ExitCode {
     // a perfectly valid run,
     // which is the same class of mistake as the one this gate is here to
     // catch - judging the clock instead of the code.
-    let effective_resolution = granularity as f64 / CALLS_PER_SAMPLE as f64;
     if control_delta_pre < 3.0 * effective_resolution {
         eprintln!(
             "FAIL(harness): the known leak measured {control_delta_pre:.2}ns against an \
