@@ -736,7 +736,7 @@ jobs:
           while read -r brule bceiling; do
             case "${brule}" in ''|\#*) continue ;; esac
             if ! grep -qx "${brule}" "${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt"; then
-              echo "::error::.github/tsan-suppressions-baseline.txt lists '${brule}' but the suppression list does not carry it. Delete the baseline line, or re-add the rule - the two files must agree." >&2
+              echo "::error::.github/tsan-suppressions-baseline.txt lists '${brule}' (ceiling ${bceiling}) but the suppression list does not carry it. Delete the baseline line, or re-add the rule - the two files must agree." >&2
               dead=1
             fi
           done < "${baseline}"
