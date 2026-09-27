@@ -3,10 +3,15 @@
 # WHAT IS MISSING (as of 2026-09-09, checked against every file in
 # .github/workflows/):
 #
-#   - ThreadSanitizer. miri.yml runs Miri and ASan over the crypto paths;
-#     neither detects data races (Miri's borrow checker is single-threaded
-#     by design, ASan is memory errors). The chain actor, the relayer
-#     pipeline and the p2p layer all carry real threads.
+#   - ThreadSanitizer: MOVED to security-hardening.yml (2026-09-27, PR #81
+#     review finding). One TSan scan, one policy: that job runs the same lib
+#     suite under TSan with the measured suppression list, the reviewed
+#     per-rule ceilings (.github/tsan-suppressions-baseline.txt) and two
+#     canaries. The copy that used to live here ran WITHOUT the suppression
+#     policy, so the known sled shutdown races failed it every week: it
+#     measured an unmaintained dependency's noise and called it our code.
+#     Two scans of one suite under two policies is two answers for one
+#     question; the account with the evidence keeps the job.
 #   - Clippy drift on the NEXT stable toolchain. The pin is 1.97.1 and
 #     ci.yml clippy runs under exactly that pin - which is why three new
 #     1.98 lints surfaced on a developer machine before anyone saw them in
@@ -20,11 +25,11 @@
 #     2024-25 supply-chain incidents were all single-publisher trust
 #     failures; the number is a report, not a verdict.
 #
-# WHY SCHEDULED, NOT PER-PUSH: all three are expensive (TSan multiplies
-# test time, drift builds against a moving toolchain, the publisher report
-# downloads a database), and per-push Rust coverage already lives in
-# ci.yml (fmt, clippy, tests, feature matrix, rustdoc, cargo-deny). This
-# workflow adds the weekly depth, not the daily breadth.
+# WHY SCHEDULED, NOT PER-PUSH: the remaining inspections are expensive (drift
+# builds against a moving toolchain, the publisher report downloads a
+# database), and per-push Rust coverage already lives in ci.yml (fmt, clippy,
+# tests, feature matrix, rustdoc, cargo-deny). This workflow adds the weekly
+# depth, not the daily breadth.
 
 name: Rust Quality
 
@@ -41,104 +46,6 @@ permissions:
   contents: read
 
 jobs:
-  tsan:
-    name: ThreadSanitizer (data races)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust (nightly; -Zsanitizer is nightly-only)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
-        with:
-          toolchain: nightly
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: budlum-tsan
-      - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      # A clean sanitizer run means one of two things: it found nothing, or it
-      # never ran. The canary is the only thing that tells them apart. It
-      # builds a program with a deliberate unsynchronised race and fails the
-      # job if TSan does NOT report it, so a silently disabled sanitizer can
-      # never be read as a green gate.
-      #
-      # Deliberately uses the same toolchain, target and RUSTFLAGS as the real
-      # step below: a canary proving a different configuration proves nothing.
-      - name: ThreadSanitizer canary (does the sanitizer really catch a race)
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/tsan-canary/src
-          cat > /tmp/tsan-canary/Cargo.toml <<'EOF'
-          [package]
-          name = "tsan-canary"
-          version = "0.0.0"
-          edition = "2021"
-
-          [workspace]
-          EOF
-          cat > /tmp/tsan-canary/src/main.rs <<'EOF'
-          // Two threads write the same cell with no synchronisation. This is
-          // a real data race and TSan must report it.
-          use std::thread;
-
-          struct Shared(std::cell::UnsafeCell<u64>);
-          unsafe impl Sync for Shared {}
-
-          static CELL: Shared = Shared(std::cell::UnsafeCell::new(0));
-
-          fn main() {
-              let a = thread::spawn(|| {
-                  for _ in 0..10_000 {
-                      unsafe { *CELL.0.get() += 1 };
-                  }
-              });
-              let b = thread::spawn(|| {
-                  for _ in 0..10_000 {
-                      unsafe { *CELL.0.get() += 1 };
-                  }
-              });
-              a.join().unwrap();
-              b.join().unwrap();
-              println!("canary finished: {}", unsafe { *CELL.0.get() });
-          }
-          EOF
-          cd /tmp/tsan-canary
-          # The canary is EXPECTED to exit non-zero: TSan returns failure when
-          # it reports a race, which is exactly the outcome being proven. The
-          # exit code is captured explicitly rather than masked away, so
-          # nothing here can hide a different failure. The verdict comes
-          # from the log, and an empty log fails below.
-          set +e
-          RUSTFLAGS="-Zsanitizer=thread" cargo +nightly run \
-            --target x86_64-unknown-linux-gnu > /tmp/tsan-canary.log 2>&1
-          canary_rc=$?
-          set -e
-          echo "canary exit code: ${canary_rc}"
-          if grep -qE "WARNING: ThreadSanitizer: data race" /tmp/tsan-canary.log; then
-            echo "canary OK: the sanitizer reported the deliberate race (exit ${canary_rc})."
-          else
-            echo "CANARY FAILED: TSan did not report a race it was built to catch." >&2
-            echo "The gate below cannot be trusted; do not read its green as safety." >&2
-            tail -40 /tmp/tsan-canary.log >&2
-            exit 1
-          fi
-      - name: cargo test under ThreadSanitizer
-        # The explicit --target is required for sanitizer flags to apply.
-        # Default test-threads: races only exist under real concurrency, so
-        # the suite runs with the runner's parallelism, not --test-threads=1.
-        # TSan multiplies runtime; the 90-minute timeout is the honest
-        # budget for a weekly run of the lib suite.
-        run: |
-          set -euo pipefail
-          RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test --lib --target x86_64-unknown-linux-gnu 2>&1 | tee /tmp/tsan.log
-          if grep -qE "WARNING: ThreadSanitizer: (data race|thread leak)" /tmp/tsan.log; then
-            echo "ThreadSanitizer reported findings (see the log above)"
-            exit 1
-          fi
-          echo "ThreadSanitizer clean: no data races, no thread leaks."
-
   next-stable:
     name: Clippy drift (next stable toolchain)
     runs-on: ubuntu-latest
