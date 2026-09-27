@@ -99,8 +99,9 @@ impl XorShift {
 /// Measured 2026-09-25 (run 36102043330, job 107948777912): on that runner
 /// `Instant::now()` resolved to 10 ns steps, so every per-call measurement
 /// collapsed onto a multiple of one tick. The control's two classes came out
-/// as a flat 30.00 ns and 40.00 ns - zero variance, which made Welch's t
-/// return `f64::MAX` - and the known leak was measured as a single tick.
+/// as a flat 30.00 ns and 40.00 ns - zero variance, for which Welch's t is
+/// undefined (`welch_t` returns NaN) - and the known leak was measured as a
+/// single tick.
 /// The real function differed by 3.15 ns, which is below the tick, yet the
 /// ratio 3.15/10 read as 31.4 percent and the gate went red. That is a
 /// resolution artefact, not a regression.
@@ -182,11 +183,44 @@ fn welch_t(a: &[f64], b: &[f64]) -> f64 {
     let num = mean(a) - mean(b);
     let den = (variance(a) / na + variance(b) / nb).sqrt();
     if den == 0.0 {
-        // The environment is extremely quiet: both distributions collapsed to a single value. No statistic
-        // can be built; return f64::MAX as fail-safe (the caller decides).
-        return if num == 0.0 { 0.0 } else { f64::MAX };
+        // Both classes collapsed onto a single value each (a quantised clock,
+        // see CALLS_PER_SAMPLE). Welch's statistic is undefined here, and the
+        // sentinel has to say so in a way `is_finite()` can see: `f64::MAX`
+        // used to be returned for different means, and it is finite, so the
+        // caller's guard let a 30ns-vs-40ns flat pair through as an
+        // "infinitely significant" control (PR #81 review). NaN is not
+        // finite, compares false against every threshold, and is rejected
+        // before any verdict.
+        return f64::NAN;
     }
     num / den
+}
+
+/// The sentinel contract, checked on every run rather than claimed: flat
+/// samples (the quantised-clock case) must give a NON-finite statistic for
+/// both different and equal means, and a real spread must give a finite one.
+/// This bench has `harness = false`, so there is no `#[test]` to carry it;
+/// the run itself is the test. Returns what is wrong, or `None`.
+fn welch_sentinel_self_check() -> Option<String> {
+    let flat_diff = welch_t(&[30.0, 30.0, 30.0], &[40.0, 40.0, 40.0]);
+    if flat_diff.is_finite() || flat_diff.abs() >= T_THRESHOLD {
+        return Some(format!(
+            "flat 30ns vs flat 40ns gave t={flat_diff}; it must be non-finite and must not pass |t|>={T_THRESHOLD}"
+        ));
+    }
+    let flat_same = welch_t(&[30.0, 30.0, 30.0], &[30.0, 30.0, 30.0]);
+    if flat_same.is_finite() {
+        return Some(format!(
+            "flat equal classes gave finite t={flat_same}; nothing was measured there"
+        ));
+    }
+    let spread = welch_t(&[30.0, 31.0, 29.0, 30.5], &[40.0, 41.0, 39.0, 40.5]);
+    if !spread.is_finite() || spread >= 0.0 {
+        return Some(format!(
+            "a real spread gave t={spread}; expected finite and negative"
+        ));
+    }
+    None
 }
 
 fn getenv_usize(key: &str, default: usize) -> usize {
@@ -197,6 +231,10 @@ fn getenv_usize(key: &str, default: usize) -> usize {
 }
 
 fn main() -> ExitCode {
+    if let Some(neden) = welch_sentinel_self_check() {
+        eprintln!("FAIL(harness): welch_t sentinel contract broken: {neden}");
+        return ExitCode::from(2);
+    }
     // One batch has no variance to compare (`variance` divides by len - 1),
     // and zero iterations produce empty samples; with either, Welch's t
     // degenerates to NaN and every later comparison passes silently,
@@ -294,6 +332,17 @@ fn main() -> ExitCode {
             "FAIL(harness): the control's variance collapsed to zero, so Welch's t is not \
              defined (both classes landed on a single clock value). With a {granularity}ns \
              tick this run cannot separate the classes; nothing was measured."
+        );
+        return ExitCode::from(2);
+    }
+    // The same degeneracy on the function under test is not a pass: a NaN
+    // compares false against T_THRESHOLD and would slide through the
+    // regression check below as if |t| were zero.
+    if !t_ct.is_finite() {
+        eprintln!(
+            "FAIL(harness): constant_time_eq_str's two classes each collapsed onto a single \
+             clock value, so Welch's t is not defined for it. With a {granularity}ns tick \
+             this run cannot separate the classes; nothing was measured."
         );
         return ExitCode::from(2);
     }
