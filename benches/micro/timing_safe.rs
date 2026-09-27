@@ -21,7 +21,7 @@
 //! variance is tiny; as the denominator shrinks t inflates. The tighter the measurement the
 //! MORE red the gate goes - even as constant-timeness improves. A real run:
 //!
-//!     kontrol (naif, SIZMALI): mean_first=19.05ns mean_last=41.41ns |t|=83.62
+//!     control (naive, LEAKY) : mean_first=19.05ns mean_last=41.41ns |t|=83.62
 //!     constant_time_eq_str   : mean_first=119.48ns mean_last=118.45ns |t|=7.62
 //!
 //! The naive implementation leaks 22.36 ns; the real function 1.03 ns - three cycles at 3 GHz,
@@ -62,8 +62,8 @@ const T_THRESHOLD: f64 = 4.5;
 const EFFECT_RATIO_THRESHOLD: f64 = 0.05;
 
 /// Positive control: a deliberately early-exiting comparison with a timing
-/// leak. A harness that cannot catch this cannot catch a constant-time violation
-/// Yakalayamaz.
+/// leak. A harness that cannot catch this cannot catch a constant-time
+/// violation either.
 fn naive_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -94,6 +94,38 @@ impl XorShift {
 
 /// N batches times iters measurements; the two classes are measured interleaved within each
 /// batch and the per-batch class MINIMUM is returned.
+/// How many calls share one clock reading.
+///
+/// Measured 2026-09-25 (run 36102043330, job 107948777912): on that runner
+/// `Instant::now()` resolved to 10 ns steps, so every per-call measurement
+/// collapsed onto a multiple of one tick. The control's two classes came out
+/// as a flat 30.00 ns and 40.00 ns - zero variance, for which Welch's t is
+/// undefined (`welch_t` returns NaN) - and the known leak was measured as a
+/// single tick.
+/// The real function differed by 3.15 ns, which is below the tick, yet the
+/// ratio 3.15/10 read as 31.4 percent and the gate went red. That is a
+/// resolution artefact, not a regression.
+///
+/// Timing a batch of calls under ONE clock reading divides the granularity by
+/// the batch size: 10 ns / 64 is 0.16 ns per call. The number reported stays
+/// per-call, so the thresholds keep their meaning.
+const CALLS_PER_SAMPLE: u64 = 64;
+
+/// Clock granularity in nanoseconds, measured rather than assumed: the
+/// smallest non-zero difference between two consecutive readings.
+fn clock_granularity_ns() -> u64 {
+    let mut best = u64::MAX;
+    for _ in 0..10_000 {
+        let t0 = Instant::now();
+        let mut d = 0u64;
+        while d == 0 {
+            d = t0.elapsed().as_nanos() as u64;
+        }
+        best = best.min(d);
+    }
+    best
+}
+
 fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
     f: F,
     first: &[u8],
@@ -101,12 +133,12 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
     valid: &[u8],
     batches: usize,
     iters: usize,
-) -> (Vec<u64>, Vec<u64>) {
+) -> (Vec<f64>, Vec<f64>) {
     let mut mins_first = Vec::with_capacity(batches);
     let mut mins_last = Vec::with_capacity(batches);
     for _ in 0..batches {
-        let mut m_first = u64::MAX;
-        let mut m_last = u64::MAX;
+        let mut m_first = f64::INFINITY;
+        let mut m_last = f64::INFINITY;
         for i in 0..iters {
             // Interleaved measurement: drift loads both classes equally.
             let (cand, acc) = if i % 2 == 0 {
@@ -114,9 +146,19 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
             } else {
                 (last, &mut m_last)
             };
+            // One clock reading covers CALLS_PER_SAMPLE calls, then the time
+            // is divided back down. Without this the reading is quantised to
+            // the clock tick and the comparison measures the clock, not the
+            // function. The division keeps the FRACTION: an integer ns would
+            // snap every sample to a whole nanosecond and quietly destroy the
+            // sub-tick resolution this batching exists to create (a 20 ns
+            // tick over 64 calls resolves 0.3125 ns per call only because the
+            // quotient is not truncated).
             let t0 = Instant::now();
-            black_box(f(black_box(cand), black_box(valid)));
-            let dt = t0.elapsed().as_nanos() as u64;
+            for _ in 0..CALLS_PER_SAMPLE {
+                black_box(f(black_box(cand), black_box(valid)));
+            }
+            let dt = t0.elapsed().as_nanos() as f64 / CALLS_PER_SAMPLE as f64;
             *acc = (*acc).min(dt);
         }
         mins_first.push(m_first);
@@ -125,27 +167,90 @@ fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
     (mins_first, mins_last)
 }
 
-fn mean(xs: &[u64]) -> f64 {
-    xs.iter().sum::<u64>() as f64 / xs.len() as f64
+fn mean(xs: &[f64]) -> f64 {
+    xs.iter().sum::<f64>() / xs.len() as f64
 }
 
-fn variance(xs: &[u64]) -> f64 {
+fn variance(xs: &[f64]) -> f64 {
     let m = mean(xs);
-    xs.iter().map(|x| (*x as f64 - m).powi(2)).sum::<f64>() / (xs.len() as f64 - 1.0)
+    xs.iter().map(|x| (*x - m).powi(2)).sum::<f64>() / (xs.len() as f64 - 1.0)
 }
 
 /// Welch's t statistic (unequal variance assumption).
-fn welch_t(a: &[u64], b: &[u64]) -> f64 {
+fn welch_t(a: &[f64], b: &[f64]) -> f64 {
     let na = a.len() as f64;
     let nb = b.len() as f64;
     let num = mean(a) - mean(b);
     let den = (variance(a) / na + variance(b) / nb).sqrt();
     if den == 0.0 {
-        // The environment is extremely quiet: both distributions collapsed to a single value. No statistic
-        // can be built; return f64::MAX as fail-safe (the caller decides).
-        return if num == 0.0 { 0.0 } else { f64::MAX };
+        // Both classes collapsed onto a single value each (a quantised clock,
+        // see CALLS_PER_SAMPLE). Welch's statistic is undefined here, and the
+        // sentinel has to say so in a way `is_finite()` can see: `f64::MAX`
+        // used to be returned for different means, and it is finite, so the
+        // caller's guard let a 30ns-vs-40ns flat pair through as an
+        // "infinitely significant" control (PR #81 review). NaN is not
+        // finite, compares false against every threshold, and is rejected
+        // before any verdict.
+        return f64::NAN;
     }
     num / den
+}
+
+/// The sentinel contract, checked on every run rather than claimed: flat
+/// samples (the quantised-clock case) must give a NON-finite statistic for
+/// both different and equal means, and a real spread must give a finite one.
+/// This bench has `harness = false`, so there is no `#[test]` to carry it;
+/// the run itself is the test. Returns what is wrong, or `None`.
+fn welch_sentinel_self_check() -> Option<String> {
+    let flat_diff = welch_t(&[30.0, 30.0, 30.0], &[40.0, 40.0, 40.0]);
+    if flat_diff.is_finite() || flat_diff.abs() >= T_THRESHOLD {
+        return Some(format!(
+            "flat 30ns vs flat 40ns gave t={flat_diff}; it must be non-finite and must not pass |t|>={T_THRESHOLD}"
+        ));
+    }
+    let flat_same = welch_t(&[30.0, 30.0, 30.0], &[30.0, 30.0, 30.0]);
+    if flat_same.is_finite() {
+        return Some(format!(
+            "flat equal classes gave finite t={flat_same}; nothing was measured there"
+        ));
+    }
+    let spread = welch_t(&[30.0, 31.0, 29.0, 30.5], &[40.0, 41.0, 39.0, 40.5]);
+    if !spread.is_finite() || spread >= 0.0 {
+        return Some(format!(
+            "a real spread gave t={spread}; expected finite and negative"
+        ));
+    }
+    if !completely_separated(&[30.0, 30.0, 30.0], &[40.0, 40.0, 40.0]) {
+        return Some("flat 30ns vs flat 40ns must count as completely separated".to_string());
+    }
+    if completely_separated(&[30.0, 30.0], &[30.0, 30.0])
+        || completely_separated(&[30.0, 41.0], &[40.0, 31.0])
+    {
+        return Some("equal or overlapping classes must not count as separated".to_string());
+    }
+    None
+}
+
+/// Complete separation: every sample of one class is below every sample of
+/// the other. This is what a zero-variance Welch case looks like when the
+/// difference is real: a coarse clock puts each class on its own tick in
+/// EVERY batch, so `welch_t` is undefined (NaN) although the evidence is
+/// maximal, not absent. Under the null hypothesis the chance that N batches
+/// per class separate completely by luck is 2 / C(2N, N) - for the default
+/// 40 batches that is below 1e-22. Two flat classes on the SAME value are not
+/// separated: they differ by nothing.
+fn completely_separated(a: &[f64], b: &[f64]) -> bool {
+    let (amin, amax) = a
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+            (lo.min(*x), hi.max(*x))
+        });
+    let (bmin, bmax) = b
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+            (lo.min(*x), hi.max(*x))
+        });
+    amax < bmin || bmax < amin
 }
 
 fn getenv_usize(key: &str, default: usize) -> usize {
@@ -156,6 +261,10 @@ fn getenv_usize(key: &str, default: usize) -> usize {
 }
 
 fn main() -> ExitCode {
+    if let Some(neden) = welch_sentinel_self_check() {
+        eprintln!("FAIL(harness): welch_t sentinel contract broken: {neden}");
+        return ExitCode::from(2);
+    }
     // One batch has no variance to compare (`variance` divides by len - 1),
     // and zero iterations produce empty samples; with either, Welch's t
     // degenerates to NaN and every later comparison passes silently,
@@ -225,10 +334,13 @@ fn main() -> ExitCode {
     );
     let t_ct = welch_t(&ct_a, &ct_b);
 
+    let granularity = clock_granularity_ns();
+
     println!("=== Timing-safe statistical test (dudect style) ===");
+    println!("clock granularity: {granularity}ns per tick, {CALLS_PER_SAMPLE} calls per sample");
     println!("batches={batches} iters/batch/class={iters} threshold=|t|>={T_THRESHOLD}");
     println!(
-        "kontrol (naif, SIZMALI): mean_first={:.2}ns mean_last={:.2}ns |t|={:.2}",
+        "control (naive, LEAKY) : mean_first={:.2}ns mean_last={:.2}ns |t|={:.2}",
         mean(&ctl_a),
         mean(&ctl_b),
         t_control.abs()
@@ -240,6 +352,85 @@ fn main() -> ExitCode {
         t_ct.abs()
     );
 
+    // Validity before verdict. A degenerate control does not mean the function
+    // under test is constant time, and it does not mean it is broken either;
+    // it means this run measured nothing. Exit code 2 says exactly that, and
+    // it is kept distinct from 1 (a real regression) on purpose.
+    let control_delta_pre = (mean(&ctl_a) - mean(&ctl_b)).abs();
+    let effective_resolution = granularity as f64 / CALLS_PER_SAMPLE as f64;
+    // A NaN from `welch_t` is a zero-variance pair. It is resolved here, out
+    // loud, before any threshold sees it: NaN compares false against every
+    // threshold, so left alone it would read as "no difference" for the
+    // function under test and as an unmeasurable control for the harness.
+    // Measured 2026-09-27 (run 36326178651): the control's per-batch minima
+    // were flat 1.88ns against flat 21.59ns over every batch - complete
+    // separation, a 19.7ns gap on a 0.31ns effective resolution. That is the
+    // strongest evidence the harness can produce, and calling it "nothing
+    // measured" made the gate red on a perfectly good run.
+    let t_control = if t_control.is_finite() {
+        t_control
+    } else if completely_separated(&ctl_a, &ctl_b)
+        && control_delta_pre >= 3.0 * effective_resolution
+    {
+        println!(
+            "control: zero variance with complete separation over {} batches per class \
+             (gap {control_delta_pre:.2}ns, effective resolution {effective_resolution:.2}ns); \
+             Welch's t is undefined, the separation itself is the evidence",
+            ctl_a.len()
+        );
+        f64::INFINITY
+    } else {
+        eprintln!(
+            "FAIL(harness): the control's variance collapsed to zero and the classes are not \
+             separated beyond three resolution steps ({control_delta_pre:.2}ns gap, \
+             {effective_resolution:.2}ns effective resolution, {granularity}ns tick); \
+             Welch's t is not defined and nothing was measured."
+        );
+        return ExitCode::from(2);
+    };
+    let ct_delta_pre = (mean(&ct_a) - mean(&ct_b)).abs();
+    let t_ct = if t_ct.is_finite() {
+        t_ct
+    } else if ct_delta_pre == 0.0 {
+        // Both classes flat on the same value: no difference at all. That is
+        // t = 0 by any reading, and it is stated rather than left as NaN.
+        println!("constant_time_eq_str: both classes flat on one value; |t| taken as 0");
+        0.0
+    } else if completely_separated(&ct_a, &ct_b) {
+        // Flat AND different: every batch put the classes on different
+        // values. Treated as maximal significance so the effect-size check
+        // below decides, instead of NaN sliding past the threshold as a pass.
+        println!(
+            "constant_time_eq_str: zero variance with complete separation (gap \
+             {ct_delta_pre:.2}ns); |t| taken as infinite, the effect size decides"
+        );
+        f64::INFINITY
+    } else {
+        eprintln!(
+            "FAIL(harness): constant_time_eq_str's classes collapsed onto single values that \
+             neither coincide nor separate; Welch's t is not defined and nothing was measured."
+        );
+        return ExitCode::from(2);
+    };
+    // The comparison is against the EFFECTIVE resolution, not the raw tick:
+    // one reading covers CALLS_PER_SAMPLE calls, so a 20ns tick resolves
+    // 20/64 = 0.31ns per call - and the samples keep that fraction (see
+    // measure_min_per_batch), so the effective resolution is real in the data,
+    // not an artefact of an integer quotient. Measured 2026-09-25 (job
+    // 107995294005): a 20ns tick, a control leak of 26.89ns and |t|=0.00 for
+    // the constant-time path. Comparing that leak against the raw tick failed
+    // a perfectly valid run,
+    // which is the same class of mistake as the one this gate is here to
+    // catch - judging the clock instead of the code.
+    if control_delta_pre < 3.0 * effective_resolution {
+        eprintln!(
+            "FAIL(harness): the known leak measured {control_delta_pre:.2}ns against an \
+             effective resolution of {effective_resolution:.2}ns ({granularity}ns tick over \
+             {CALLS_PER_SAMPLE} calls). Below three resolution steps the ratio is an artefact \
+             of the clock, not of the code. Nothing was measured."
+        );
+        return ExitCode::from(2);
+    }
     if t_control.abs() < T_THRESHOLD {
         eprintln!(
             "FAIL(harness): the positive control produced no timing difference (|t|={:.2} < {T_THRESHOLD}). \
@@ -271,7 +462,7 @@ fn main() -> ExitCode {
     if t_ct.abs() >= T_THRESHOLD && effect_ratio >= EFFECT_RATIO_THRESHOLD {
         eprintln!(
             "FAIL(regression): constant_time_eq_str produced a significant difference between the classes \
-             (|t|={:.2} >= {T_THRESHOLD} VE oran={:.1}% >= {:.1}%). \
+             (|t|={:.2} >= {T_THRESHOLD} AND ratio={:.1}% >= {:.1}%). \
              Constant-timeness is broken!",
             t_ct.abs(),
             effect_ratio * 100.0,

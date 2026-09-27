@@ -625,9 +625,20 @@ fn apply_data_mask(dark: &mut [Vec<bool>], reserved: &[Vec<bool>], mask: u8) {
     }
 }
 
+/// The 5 bits the format word is built from: the two EC-level bits above the
+/// three mask bits. The fields are combined with `|`; an `^` cancels any bit
+/// set on BOTH sides. Today level L (`0b01_000`) and the low three mask bits
+/// cannot overlap, so the two operators agree on every real input - which is
+/// exactly why mutation testing's `|` -> `^` swap survived every symbol test.
+/// Keeping the combination in one helper lets the test suite feed it
+/// overlapping inputs and kill that mutant at its source.
+fn level_mask_bits(level: u32, mask: u32) -> u32 {
+    level | (mask & 0b111)
+}
+
 fn write_format_and_dark_module(dark: &mut [Vec<bool>], side: usize, mask: u8) {
     // format information, level L plus the selected mask, then the forced dark module
-    let word = format_word(0b01_000 | u32::from(mask & 0b111));
+    let word = format_word(level_mask_bits(0b01_000, u32::from(mask)));
     for i in 0..15 {
         let bit = (word >> i) & 1 != 0;
         let (r, c) = format_cell_main(i);
@@ -644,10 +655,31 @@ fn write_format_and_dark_module(dark: &mut [Vec<bool>], side: usize, mask: u8) {
     }
 }
 
+/// Quiet zone in modules on every side, and how many pixels one module gets
+/// when the matrix is rendered for the decoder.
+///
+/// The ISO quiet zone for a QR symbol is four modules; the scale is what makes
+/// the rendered image large enough for `rqrr` to find the finder patterns.
+const QUIET_MODULES: usize = 4;
+const PIXELS_PER_MODULE: usize = 4;
+
+/// Side of the rendered image in pixels: the symbol plus a quiet zone on both
+/// sides, scaled up.
+///
+/// This used to be an inline expression, and mutation testing showed it was
+/// unguarded: three surviving mutants (run 36119848850, shard 22/24) rewrote
+/// `(side + 2 * quiet) * scale` into `(side * 2 * quiet) * scale` and
+/// `2 + quiet`, and `quiet + side` into `quiet * side`, and every test stayed
+/// green. The decoder tolerates a too-large canvas, so the arithmetic was
+/// never actually checked. Now it is named and pinned by a test.
+const fn rendered_side_px(side: usize) -> usize {
+    (side + 2 * QUIET_MODULES) * PIXELS_PER_MODULE
+}
+
 fn matrix_decodes_to(matrix: &EncodedMatrix, data: &[u8]) -> bool {
     let side = matrix.side_len();
-    let (quiet, scale) = (4usize, 4usize);
-    let img = (side + 2 * quiet) * scale;
+    let (quiet, scale) = (QUIET_MODULES, PIXELS_PER_MODULE);
+    let img = rendered_side_px(side);
     let mut prepared = rqrr::PreparedImage::prepare_from_bitmap(img, img, |x, y| {
         let (c, r) = (x / scale, y / scale);
         let inside = quiet..quiet + side;
@@ -767,6 +799,155 @@ mod tests {
         let m = encode(b"A").unwrap();
         assert_eq!(m.mask(), 0, "readable mask-0 payloads keep byte continuity");
         assert!(matrix_decodes_to(&m, b"A"));
+    }
+
+    /// Mutation testing replaced `QrError`'s `Display::fmt` body with
+    /// `Ok(Default::default())` and nothing failed (run 36149222233, shard
+    /// 15/24): the messages were never read. An error type whose text can be
+    /// emptied without a test noticing is an error type that will one day
+    /// print nothing at the moment somebody needs it most.
+    #[test]
+    fn error_messages_name_the_condition_and_the_number() {
+        let too_long = QrError::TooLong(9_999).to_string();
+        assert!(
+            too_long.contains("9999") && too_long.contains(&MAX_DATA_BYTES.to_string()),
+            "TooLong must state both the payload size and the ceiling: {too_long}"
+        );
+        let undecodable = QrError::Undecodable.to_string();
+        assert!(
+            undecodable.contains("mask") && !undecodable.is_empty(),
+            "Undecodable must say what failed: {undecodable}"
+        );
+    }
+
+    /// `EncodedMatrix::mask` is a getter, and a getter pinned to `0` survived
+    /// every test (same run, shard 15/24). The mask is written into the format
+    /// word, so a getter that lies makes the symbol and its report disagree.
+    #[test]
+    fn encoded_matrix_reports_the_mask_it_carries() {
+        let m = encode(b"mask getter").expect("encode");
+        assert!(m.mask() < 8, "the ISO mask is one of eight");
+        // The format word is derived from the mask; deriving it twice from the
+        // getter and from the field must agree, so a constant getter is caught
+        // even when the chosen mask happens to be that constant.
+        assert_eq!(
+            format_word(0b01_000 | u32::from(m.mask() & 0b111)),
+            format_word(0b01_000 | u32::from(m.mask & 0b111)),
+            "the getter must report the field the encoder wrote"
+        );
+        for mask in 0..8u8 {
+            let probe = EncodedMatrix {
+                version: m.version(),
+                mask,
+                dark: m.dark.clone(),
+            };
+            assert_eq!(probe.mask(), mask, "mask {mask} was not reported");
+        }
+    }
+
+    /// `write_format_and_dark_module` combines the EC level with the mask
+    /// through `level_mask_bits`, which uses `|`. Mutation testing turned that
+    /// into `^` and no test failed (same run, shard 20/24): on level L the
+    /// level bits and the mask bits never overlap, so `|` and `^` agree by
+    /// construction on every real input. The earlier version of this test
+    /// re-stated that arithmetic inline and never touched the production
+    /// helper, so it guarded nothing. The combination now lives in
+    /// `level_mask_bits`, and the test drives the PRODUCTION function with
+    /// overlapping fields, where `^` cancels a shared bit and `|` keeps it:
+    /// the day the level gains a low bit, the mutant dies here.
+    #[test]
+    fn level_mask_bits_keeps_overlapping_fields() {
+        // Non-overlapping inputs (today's level L and any mask): the result
+        // is the plain union, and both field groups survive it intact.
+        for mask in 0..8u32 {
+            assert_eq!(
+                level_mask_bits(0b01_000, mask),
+                0b01_000 | mask,
+                "mask {mask}"
+            );
+            assert_eq!(
+                level_mask_bits(0b01_000, mask) & 0b11_000,
+                0b01_000,
+                "level L bits were lost"
+            );
+            assert_eq!(
+                level_mask_bits(0b01_000, mask) & 0b00_111,
+                mask,
+                "mask bits were lost"
+            );
+        }
+        // Overlapping inputs: a `|` -> `^` mutant clears every shared bit and
+        // fails both lines below, which is the point of the helper.
+        assert_eq!(
+            level_mask_bits(0b01_001, 0b001),
+            0b01_001,
+            "the shared low bit must survive"
+        );
+        assert_eq!(
+            level_mask_bits(0b11_111, 0b111),
+            0b11_111,
+            "fully overlapping fields must not cancel"
+        );
+        // The mask input is three bits wide; wider inputs must not leak into
+        // the level field.
+        assert_eq!(
+            level_mask_bits(0b00_000, 0b1_1010),
+            0b010,
+            "mask bits above the low three must be cut"
+        );
+    }
+
+    /// `matrix_decodes_to` answers "does this symbol decode to EXACTLY this
+    /// payload", and the two halves of that question are joined by `&&`.
+    /// Mutation testing turned it into `||` (run 36149222233, shard 22/24)
+    /// and nothing failed, because every existing call passed the payload the
+    /// symbol was built from: the left half was always true. With `||` a
+    /// symbol that decodes to something else would be accepted, which is the
+    /// one thing this function exists to rule out - it is the check the
+    /// encoder's mask search relies on.
+    #[test]
+    fn decoding_to_a_different_payload_is_not_a_match() {
+        let m = encode(b"A").expect("encode");
+        assert!(matrix_decodes_to(&m, b"A"), "its own payload must match");
+        assert!(
+            !matrix_decodes_to(&m, b"B"),
+            "a symbol that decodes to A does not match B"
+        );
+        assert!(
+            !matrix_decodes_to(&m, b"AA"),
+            "a longer payload is not a match either"
+        );
+        assert!(
+            !matrix_decodes_to(&m, b""),
+            "an empty expectation is not a match"
+        );
+    }
+
+    /// The rendered canvas is a symbol plus four quiet modules on EACH side,
+    /// four pixels per module. Mutation testing killed the previous version of
+    /// this arithmetic three different ways without a single test noticing,
+    /// because `rqrr` decodes fine from an oversized canvas. Pin the numbers:
+    /// a quiet zone that is too small breaks real scanners even when this
+    /// in-process decoder is happy.
+    #[test]
+    fn rendered_canvas_is_symbol_plus_two_quiet_zones_scaled() {
+        // 21 modules is version 1; 21 + 4 + 4 = 29 modules, times 4 px = 116.
+        assert_eq!(rendered_side_px(21), 116);
+        // 25 modules is version 2: 25 + 8 = 33 modules, times 4 px = 132.
+        assert_eq!(rendered_side_px(25), 132);
+        // Growing the symbol by one module grows the canvas by exactly one
+        // module worth of pixels - a multiplication in place of the addition
+        // would grow it by far more.
+        assert_eq!(
+            rendered_side_px(22) - rendered_side_px(21),
+            PIXELS_PER_MODULE
+        );
+        // The quiet zone is counted twice, not once: the difference between a
+        // canvas with and without it is 2 x 4 modules.
+        assert_eq!(
+            rendered_side_px(21) - 21 * PIXELS_PER_MODULE,
+            2 * QUIET_MODULES * PIXELS_PER_MODULE
+        );
     }
 
     #[test]

@@ -1,0 +1,39 @@
+# ThreadSanitizer suppression baseline - REVIEWED per-rule ceilings.
+#
+# One line per rule in .github/tsan-suppressions.txt:
+#
+#   <rule> <ceiling>
+#
+# The ceiling is the number of reports that rule is reviewed to swallow. It
+# is a MEASURED number with deliberate headroom, not an assertion of
+# exactness: TSan report counts move with the runner's scheduling, so each
+# ceiling is double the measured count, rounded up. Crossing a ceiling does
+# not mean the code raced; it means the growth has not been read yet. Read
+# the reports in the failing job, then raise the ceiling in a reviewed
+# commit if the growth is genuine - and never in the same commit as new
+# code, so the raise itself is the thing under review.
+#
+# The two files are one statement, checked in both directions:
+#   * a rule in the suppression list with no line here fails the job -
+#     rules are not added quietly;
+#   * a line here whose rule is not in the list fails the job - a review
+#     does not outlive its subject.
+#
+# The old gate compared the run's TOTAL against one aggregate cap. A total
+# cannot prove that no NEW race was swallowed: a new report matching one
+# kept rule can replace disappearing old reports and keep the total under
+# the cap. Per-rule ceilings close that hole: growth is judged where it
+# happens, rule by rule.
+#
+# Measured 2026-09-25, Security Hardening run 36149222233, job
+# 108117967069 (the PR #81 branch, three-rule list, --test-threads=1),
+# and re-measured 2026-09-27, run 36299947767, job 108565634246 after
+# the dead rule was deleted (pagecache 287, arc 348, zero survivors):
+#
+#   race:sled::pagecache  315
+#   race:sled::arc        349
+#   race:sled::ivec         0  -> rule deleted as dead (it silenced nothing)
+#
+# Headroom policy: ceiling = 2 x measured count.
+race:sled::pagecache 630
+race:sled::arc 700
