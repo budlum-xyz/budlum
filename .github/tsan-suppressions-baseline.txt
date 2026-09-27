@@ -26,8 +26,9 @@
 # happens, rule by rule.
 #
 # Measured 2026-09-25, Security Hardening run 36149222233, job
-# 108117967069 (branch tek-pr-tsan-ve-bagimliliklar, three-rule list,
-# --test-threads=1):
+# 108117967069 (the PR #81 branch, three-rule list, --test-threads=1),
+# and re-measured 2026-09-27, run 36299947767, job 108565634246 after
+# the dead rule was deleted (pagecache 287, arc 348, zero survivors):
 #
 #   race:sled::pagecache  315
 #   race:sled::arc        349
