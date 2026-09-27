@@ -49,7 +49,11 @@
 #
 #       race:sled::pagecache   the 48 SegmentAccountant::drop reports above
 #       race:sled::arc         sled's own refcount container, dropped at close
-#       race:sled::ivec        sled's own buffer type, dropped at close
+#
+#   race:sled::ivec was kept in the first cut and deleted afterwards: the
+#   per-rule table (Security Hardening run 36149222233, job 108117967069)
+#   measured it matching ZERO reports. A rule that silences nothing can only
+#   ever silence something new, so the gate failed until this line went.
 #
 # Not measured yet, and said plainly: whether the three deleted rules were
 # carrying any of the 354 reports. They were written from the shape of the
@@ -77,8 +81,10 @@
 #       the filter.
 #   * `print_suppressions=1` is on and the job prints the PER-RULE hit table.
 #     A rule that matched nothing is dead weight and the step fails until the
-#     line is deleted; the total is compared against the measured baseline and
-#     a jump has to be read before it is accepted.
+#     line is deleted; every rule's hit count is compared against its REVIEWED
+#     ceiling in .github/tsan-suppressions-baseline.txt, and a rule cannot be
+#     added without a baseline line - so a jump in any one rule has to be read
+#     before it is accepted.
 #   * any warning that survives the list is counted, and a non-zero count
 #     fails the step.
 #
@@ -88,4 +94,3 @@
 
 race:sled::pagecache
 race:sled::arc
-race:sled::ivec
