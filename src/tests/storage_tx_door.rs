@@ -427,21 +427,17 @@ fn generated_spec() -> crate::storage::generated::GeneratedSpec {
 }
 
 #[test]
-fn two_splits_of_source_and_dictionary_that_share_an_id_sign_differently() {
+fn two_splits_of_source_and_dictionary_get_different_ids() {
     let alice = addr(1);
     let spec = generated_spec();
     let digest = ContentId(crate::storage::generated::generated_spec_digest(&spec));
-    // The id of the first comes from the real derivation.
     let a = manifest_owned_by(alice).with_source(crate::storage::ContentSource::Generated(spec));
     let mut b = a.clone();
     b.source = crate::storage::ContentSource::Stored;
     b.dictionary_id = Some(digest);
-    // The id preimage appends the source bytes (tag 1 then the digest) and
-    // the dictionary bytes (1 then the id) without separating them, and the
-    // classic edition adds none. The second manifest therefore verifies
-    // under the first one's id.
-    b.verify_id().expect("the real derivation collides");
-    assert_eq!(a.manifest_id, b.manifest_id);
+    // The dictionary bytes carry a label, so they cannot mimic the source bytes.
+    assert!(b.verify_id().is_err());
+    assert_ne!(a.manifest_id, b.manifest_id);
     assert_ne!(register_hash(alice, a), register_hash(alice, b));
 }
 
