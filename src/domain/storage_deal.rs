@@ -1740,10 +1740,7 @@ impl StorageRegistry {
         chain_id: u64,
         content_id: ContentId,
         auth: &crate::storage::GrantAuthorization,
-        grantee: Option<Address>,
-        key_id: [u8; 32],
-        policy: crate::storage::ViewPolicy,
-        opened_epoch: u64,
+        terms: crate::storage::GrantIssueTerms,
     ) -> Result<u64, crate::storage::ViewGrantError> {
         let owner = self
             .owner_of(&content_id)
@@ -1759,15 +1756,18 @@ impl StorageRegistry {
             self.view_grants.issued(),
             &content_id,
             &issuer,
-            grantee.as_ref(),
-            &key_id,
-            policy,
-            opened_epoch,
+            &terms,
         );
         auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        self.view_grants
-            .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
+        self.view_grants.issue(
+            content_id,
+            issuer,
+            terms.grantee,
+            terms.key_id,
+            terms.policy,
+            terms.opened_epoch,
+        )
     }
 
     /// Revoke one grant. Returns the row that was revoked, because whatever has
@@ -4368,10 +4368,12 @@ mod tests {
                 1,
                 content,
                 &unsigned,
-                None,
-                key,
-                crate::storage::ViewPolicy::PublicKeyId,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::PublicKeyId,
+                    opened_epoch: 1,
+                },
             )
             .expect_err("a stranger cannot hand out grants");
         assert!(
@@ -4464,10 +4466,12 @@ mod tests {
             0,
             &content,
             &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            &crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
@@ -4477,10 +4481,12 @@ mod tests {
             1,
             content,
             &auth,
-            None,
-            key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         )
         .expect("the owner's own signed grant must be accepted");
         assert!(reg.may_view(&content, &bob, &key, &owner));
@@ -4496,10 +4502,12 @@ mod tests {
                 1,
                 other,
                 &auth,
-                None,
-                key,
-                crate::storage::ViewPolicy::PublicKeyId,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::PublicKeyId,
+                    opened_epoch: 1,
+                },
             )
             .expect_err("a grant signature is bound to the object it names");
         assert!(matches!(
@@ -4515,10 +4523,12 @@ mod tests {
                 1,
                 content,
                 &auth,
-                Some(bob),
-                key,
-                crate::storage::ViewPolicy::OwnerOnly,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: Some(bob),
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::OwnerOnly,
+                    opened_epoch: 1,
+                },
             )
             .expect_err("a grant signature is bound to the policy it names");
         assert!(matches!(
@@ -4552,10 +4562,12 @@ mod tests {
             0,
             &m.manifest_id,
             &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            &crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
@@ -4566,10 +4578,12 @@ mod tests {
             1,
             m.manifest_id,
             &auth,
-            None,
-            key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         )
         .expect("the owner's signed grant");
         assert_ne!(before, reg.root(), "a live grant must reach the state root");
@@ -4596,10 +4610,12 @@ mod tests {
                 nonce,
                 &m.manifest_id,
                 &owner,
-                None,
-                &key,
-                policy,
-                1,
+                &crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: policy,
+                    opened_epoch: 1,
+                },
             );
             crate::storage::GrantAuthorization {
                 owner_key: kp.public_key_bytes(),
@@ -4608,11 +4624,31 @@ mod tests {
         };
         let other_chain = sign(2, 0);
         assert!(reg
-            .issue_view_grant(1, m.manifest_id, &other_chain, None, key, policy, 1)
+            .issue_view_grant(
+                1,
+                m.manifest_id,
+                &other_chain,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: policy,
+                    opened_epoch: 1
+                }
+            )
             .is_err());
         let auth = sign(1, 0);
         let grant = reg
-            .issue_view_grant(1, m.manifest_id, &auth, None, key, policy, 1)
+            .issue_view_grant(
+                1,
+                m.manifest_id,
+                &auth,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: policy,
+                    opened_epoch: 1,
+                },
+            )
             .expect("first use");
         let revoke_d = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
@@ -4621,8 +4657,18 @@ mod tests {
         };
         reg.revoke_view_grant(1, grant, &revoke, 4).expect("revoke");
         assert!(
-            reg.issue_view_grant(1, m.manifest_id, &auth, None, key, policy, 1)
-                .is_err(),
+            reg.issue_view_grant(
+                1,
+                m.manifest_id,
+                &auth,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: policy,
+                    opened_epoch: 1
+                }
+            )
+            .is_err(),
             "the captured authorisation must not restore a revoked grant"
         );
     }
@@ -4644,10 +4690,12 @@ mod tests {
             0,
             &m.manifest_id,
             &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            &crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         );
         let issue = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
@@ -4658,10 +4706,12 @@ mod tests {
                 1,
                 m.manifest_id,
                 &issue,
-                None,
-                key,
-                crate::storage::ViewPolicy::PublicKeyId,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::PublicKeyId,
+                    opened_epoch: 1,
+                },
             )
             .expect("signed issuance");
         assert!(reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner));
