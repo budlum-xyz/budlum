@@ -27,7 +27,15 @@ pub const fn fixed_from_int(v: i32) -> i64 {
 /// either sign.
 #[must_use]
 pub const fn fixed_to_int(v: i64) -> i32 {
-    (v >> FIXED_FRAC_BITS) as i32
+    // Integer division truncates toward zero. A shift would floor.
+    let q = v / FIXED_ONE;
+    if q > i32::MAX as i64 {
+        i32::MAX
+    } else if q < i32::MIN as i64 {
+        i32::MIN
+    } else {
+        q as i32
+    }
 }
 
 /// Fixed-point multiply (32.16 by 32.16 -> 32.16). Saturating.
@@ -144,6 +152,11 @@ mod tests {
         // 1.5 -> 1, truncating toward zero
         let f = fixed_from_int(1) + FIXED_ONE / 2;
         assert_eq!(fixed_to_int(f), 1);
+        // -1.5 -> -1, not the floor -2
+        assert_eq!(fixed_to_int(-f), -1);
+        // out of range clamps, it does not wrap
+        assert_eq!(fixed_to_int(i64::MAX), i32::MAX);
+        assert_eq!(fixed_to_int(i64::MIN), i32::MIN);
     }
 
     #[test]
