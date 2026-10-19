@@ -183,6 +183,16 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
         ));
     }
 
+    let live_text = uncommented.join("\n");
+    if has_pair(&live_text, "continue-on-error", "true") {
+        errors.push(format!(
+            "{rel}: continue-on-error: true hides a failing step"
+        ));
+    }
+    if swallows_failure(&live_text) {
+        errors.push(format!("{rel}: `|| true` swallows a failing command"));
+    }
+
     // The guard workflow is itself part of the review boundary. Removing its
     // self-test, its real audit, or its fail-closed shell mode must turn this
     // audit red rather than silently reducing coverage.
@@ -632,6 +642,16 @@ mod tests {
         assert!(audit_text("x.yml", all)
             .iter()
             .any(|e| e.contains("write permission")));
+    }
+
+    #[test]
+    fn swallowed_failures_are_found_in_every_workflow() {
+        let text = format!("{CLEAN}\n      continue-on-error: true\n      run: make || true\n");
+        let errors = audit_text("other.yml", &text);
+        assert!(errors.iter().any(|e| e.contains("continue-on-error")));
+        assert!(errors.iter().any(|e| e.contains("|| true")));
+        let commented = format!("{CLEAN}\n# run: make || true\n");
+        assert_eq!(audit_text("other.yml", &commented), Vec::<String>::new());
     }
 
     #[test]
