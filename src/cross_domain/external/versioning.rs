@@ -322,7 +322,7 @@ mod tests {
     fn fork_height_overflow_is_a_refusal_not_a_saturated_window() {
         let mut policy = policy();
         let err = policy
-            .schedule_fork(1, 2, u64::MAX, 1)
+            .schedule_fork(1, 2, u64::MAX, 1, &[1, 2])
             .expect_err("overflow must not create a never-sunset window");
         assert_eq!(
             err,
@@ -341,9 +341,11 @@ mod tests {
     #[test]
     fn a_sunset_version_cannot_be_resurrected_by_a_second_fork() {
         let mut policy = policy();
-        policy.schedule_fork(1, 2, 100, 2).expect("first fork");
+        policy
+            .schedule_fork(1, 2, 100, 2, &[1, 2])
+            .expect("first fork");
         let err = policy
-            .schedule_fork(1, 3, 200, 2)
+            .schedule_fork(1, 3, 200, 2, &[1, 3])
             .expect_err("a published sunset cannot be rewritten");
         assert_eq!(err, ForkError::OldVersionAlreadySunset { version: 1 });
         assert_eq!(
