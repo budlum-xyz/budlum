@@ -392,6 +392,11 @@ pub enum ViewGrantError {
     DuplicateLiveGrant,
     /// The grant id counter reached `u64::MAX`.
     GrantIdSpaceExhausted,
+    /// A revoke dated before the grant was opened.
+    RevokeBeforeOpen {
+        opened_epoch: u64,
+        at_epoch: u64,
+    },
     /// The address named as issuer is not the owner of the content, so it has
     /// no word to give about who may view it.
     NotOwner {
@@ -427,6 +432,13 @@ impl std::fmt::Display for ViewGrantError {
             ),
             Self::UnknownContent => write!(f, "no manifest describes this content"),
             Self::Authorization(e) => write!(f, "grant authorization refused: {e}"),
+            Self::RevokeBeforeOpen {
+                opened_epoch,
+                at_epoch,
+            } => write!(
+                f,
+                "revoke epoch {at_epoch} is before the grant opened at {opened_epoch}"
+            ),
             Self::GrantIdSpaceExhausted => write!(f, "view grant id counter is exhausted"),
             Self::DuplicateLiveGrant => {
                 write!(
@@ -583,6 +595,12 @@ impl ViewGrantRegistry {
         }
         if grant.revoked_epoch.is_some() {
             return Err(ViewGrantError::AlreadyRevoked(grant_id));
+        }
+        if at_epoch < grant.opened_epoch {
+            return Err(ViewGrantError::RevokeBeforeOpen {
+                opened_epoch: grant.opened_epoch,
+                at_epoch,
+            });
         }
         grant.revoked_epoch = Some(at_epoch);
         Ok(())
@@ -834,6 +852,30 @@ mod tests {
         repeated.by_content.entry(cid(1)).or_default().push(g);
         let bytes = bincode::serialize(&repeated).unwrap();
         assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_revoke_dated_before_the_grant_opened_is_refused() {
+        let mut reg = ViewGrantRegistry::new();
+        let id = reg
+            .issue(
+                cid(1),
+                addr(2),
+                None,
+                [3u8; 32],
+                ViewPolicy::PublicKeyId,
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            reg.revoke(id, addr(2), 9),
+            Err(ViewGrantError::RevokeBeforeOpen {
+                opened_epoch: 10,
+                at_epoch: 9
+            })
+        );
+        assert!(reg.get(id).unwrap().is_live());
+        reg.revoke(id, addr(2), 10).unwrap();
     }
 
     #[test]
