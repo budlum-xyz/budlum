@@ -114,7 +114,10 @@ fn a_liveness_fault_is_cut_by_its_own_ratio_and_a_repeat_changes_nothing() {
     let again = reg
         .slash_from_report(&liveness(val))
         .expect("the repeat is still actionable");
-    assert!(again.is_none(), "a repeated liveness report must be a no-op");
+    assert!(
+        again.is_none(),
+        "a repeated liveness report must be a no-op"
+    );
     assert_eq!(
         reg.get(&val, roles::VALIDATOR).expect("registered").stake,
         stake_after_first
@@ -210,7 +213,10 @@ fn a_total_that_fits_gets_past_the_overflow_rule() {
         !err.contains("overflows u64"),
         "a fitting total was refused as an overflow: {err}"
     );
-    assert!(err.contains("Invalid signature"), "unexpected reason: {err}");
+    assert!(
+        err.contains("Invalid signature"),
+        "unexpected reason: {err}"
+    );
 }
 
 /// The nonce is judged before anything expensive, whatever the amount is.
