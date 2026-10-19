@@ -771,6 +771,7 @@ async fn main() {
             }
         }) {
             Ok(signer) => {
+                tracing::info!("{}", signer.connection_info());
                 if strict_vendor_native {
                     let caps = signer.vendor_capabilities();
                     if !caps.vendor_native_signing_configured() {
