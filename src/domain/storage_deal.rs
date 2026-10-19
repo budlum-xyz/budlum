@@ -4673,7 +4673,7 @@ mod tests {
                 &crate::storage::GrantIssueTerms {
                     grantee: None,
                     key_id: key,
-                    policy: policy,
+                    policy,
                     opened_epoch: 1,
                 },
             );
@@ -4691,7 +4691,7 @@ mod tests {
                 crate::storage::GrantIssueTerms {
                     grantee: None,
                     key_id: key,
-                    policy: policy,
+                    policy,
                     opened_epoch: 1
                 }
             )
@@ -4705,7 +4705,7 @@ mod tests {
                 crate::storage::GrantIssueTerms {
                     grantee: None,
                     key_id: key,
-                    policy: policy,
+                    policy,
                     opened_epoch: 1,
                 },
             )
@@ -4724,7 +4724,7 @@ mod tests {
                 crate::storage::GrantIssueTerms {
                     grantee: None,
                     key_id: key,
-                    policy: policy,
+                    policy,
                     opened_epoch: 1
                 }
             )
