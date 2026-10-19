@@ -14,6 +14,9 @@
 pub mod rest;
 pub mod ws;
 
+/// The most items one batched message may carry.
+pub const MAX_BATCH_ITEMS: usize = 10_000;
+
 /// The batched message parsing helper: it turns an incoming JSON value into a
 /// vector whether it is a single object or an array of objects.
 ///
@@ -22,6 +25,10 @@ pub mod ws;
 /// When the value is neither an array nor an object.
 pub fn as_items(value: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
     match value {
+        serde_json::Value::Array(items) if items.len() > MAX_BATCH_ITEMS => Err(format!(
+            "batch of {} items exceeds the limit of {MAX_BATCH_ITEMS}",
+            items.len()
+        )),
         serde_json::Value::Array(items) => Ok(items),
         serde_json::Value::Object(_) => Ok(vec![value]),
         serde_json::Value::Null => Err("expected an object or an array, got null".into()),
@@ -83,6 +90,9 @@ mod tests {
         let many = serde_json::json!([{"a": 1}, {"b": 2}]);
         assert_eq!(as_items(many).unwrap().len(), 2);
         assert!(as_items(serde_json::json!(42)).is_err());
+        let oversized =
+            serde_json::Value::Array(vec![serde_json::Value::Null; MAX_BATCH_ITEMS + 1]);
+        assert!(as_items(oversized).is_err());
         let echoed = as_items(serde_json::json!("secret-token-value")).unwrap_err();
         assert!(!echoed.contains("secret-token-value"));
     }
