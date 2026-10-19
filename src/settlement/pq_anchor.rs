@@ -965,7 +965,7 @@ mod tests {
                 key_epoch: 1,
                 signatures: Vec::new(),
             };
-            verify_anchor_full(&anchor, &[]).expect_err("empty anchor must fail");
+            verify_anchor_full(&anchor, &[], 1).expect_err("empty anchor must fail");
         }
 
         #[test]

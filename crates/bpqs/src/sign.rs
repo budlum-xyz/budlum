@@ -398,14 +398,24 @@ impl<P: BpqsParams, H: BpqsHash> Drop for BpqsSigner<P, H> {
 mod tests {
     use super::*;
     use crate::hash::Sha3_256Hash;
-    use crate::params::{BpqsParams, ParamsL3};
+    use crate::params::{BpqsParams, ParamsL3, ParamsTestFast};
 
+    // L3 lanes carry padding (N = 24 of 32); the test-fast row has short
+    // auth paths (T_LOG2 = 4 of 16) but full lanes, so each refusal arm is
+    // exercised on the row that has the bytes to spare.
     type T = ParamsL3;
     type H = Sha3_256Hash;
 
     fn signed() -> BpqsSignature<T> {
         let window = EpochWindow(4);
         let mut signer = BpqsSigner::<T, H>::ceremonial_keygen([7u8; 32], window).unwrap();
+        signer.sign_at_height(0, b"canonical-check").unwrap()
+    }
+
+    fn signed_fast() -> BpqsSignature<ParamsTestFast> {
+        let window = EpochWindow(4);
+        let mut signer =
+            BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen([7u8; 32], window).unwrap();
         signer.sign_at_height(0, b"canonical-check").unwrap()
     }
 
@@ -432,8 +442,11 @@ mod tests {
 
     #[test]
     fn check_canonical_refuses_nonzero_unused_path_entry() {
-        let mut sig = signed();
-        sig.path[T::T_LOG2][0] = 1;
-        assert!(matches!(check_canonical(&sig), Err(BpqsError::Malformed(_))));
+        let mut sig = signed_fast();
+        sig.path[ParamsTestFast::T_LOG2][0] = 1;
+        assert!(matches!(
+            check_canonical(&sig),
+            Err(BpqsError::Malformed(_))
+        ));
     }
 }
