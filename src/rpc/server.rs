@@ -3742,9 +3742,46 @@ impl BudlumApiServer for RpcServer {
             key_id,
             meter_budget,
         };
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            if gw.revoke_generation() != generation {
+                return Err(ErrorObjectOwned::owned(
+                    -32003,
+                    "reveal: a revoke started while the grant was being checked; retry the call",
+                    None::<()>,
+                ));
+            }
+            // Reclaim TTL-dead rows before admission so a burst of opens
+            // cannot be wedged by corpses, then refuse fast at the cap with
+            // its own code instead of paying for an open that admission
+            // would refuse.
+            gw.sweep(now);
+            if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
+                return Err(ErrorObjectOwned::owned(
+                    -32003,
+                    format!(
+                        "reveal: session table full ({})",
+                        crate::storage::MAX_REVEAL_SESSIONS
+                    ),
+                    None::<()>,
+                ));
+            }
+        }
+        // The emitter builds a whole one-shot pass to check the stream pin.
+        // That runs off the async workers and outside the gateway lock, so
+        // frame serving, close and revoke of other viewers do not wait on it.
+        let prepared = tokio::task::spawn_blocking(move || {
+            crate::storage::RevealGateway::prepare_prechecked(req, grant_allows)
+        })
+        .await
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "reveal open task failed", None::<()>))?
+        .map_err(reveal_gateway_rpc_error)?;
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        // A revoke may have started while the pass was built: ask again.
         if gw.revoke_generation() != generation {
             return Err(ErrorObjectOwned::owned(
                 -32003,
@@ -3752,22 +3789,8 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // Reclaim TTL-dead rows before admission so a burst of opens cannot
-        // be wedged by corpses, then refuse fast at the cap with its own
-        // code instead of paying for an open that admission would refuse.
-        gw.sweep(now);
-        if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
-            return Err(ErrorObjectOwned::owned(
-                -32003,
-                format!(
-                    "reveal: session table full ({})",
-                    crate::storage::MAX_REVEAL_SESSIONS
-                ),
-                None::<()>,
-            ));
-        }
         let session_id = gw
-            .open_prechecked(req, grant_allows, now)
+            .open_prepared(prepared, now)
             .map_err(reveal_gateway_rpc_error)?;
         let commit = gw
             .stream_commitment(session_id)
