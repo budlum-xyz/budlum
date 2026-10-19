@@ -8653,14 +8653,22 @@ mod tests {
     /// or a restarted node and a validating node disagree with the tip.
     #[test]
     fn replay_roots_match_live_past_settlement_horizon() {
+        // The retarget would climb one difficulty digit per 100-block
+        // boundary (planned timestamps are 1 s apart against a 10 s target),
+        // and mining at 16^8 or above runs past any wall-clock budget. The
+        // settlement-horizon semantics under test do not read the difficulty
+        // schedule, so the fixture pins it off.
+        let pow = || {
+            Arc::new(PoWEngine::with_config(crate::consensus::pow::PoWConfig {
+                difficulty: 0,
+                target_block_time: 10,
+                adjustment_interval: u64::MAX,
+                ..Default::default()
+            }))
+        };
         let tmp = tempdir().unwrap();
         let db_path = tmp.path().join("budlum.db").to_string_lossy().to_string();
-        let mut bc = Blockchain::new(
-            Arc::new(PoWEngine::new(0)),
-            Some(Storage::new(&db_path).unwrap()),
-            45262,
-            None,
-        );
+        let mut bc = Blockchain::new(pow(), Some(Storage::new(&db_path).unwrap()), 45262, None);
 
         // The first checkpoint (height 10) is buried one horizon (1000)
         // deep when the preceding tip is 1010, so the window is non-empty
@@ -8674,12 +8682,8 @@ mod tests {
         let live_root = bc.last_block().state_root.clone();
         drop(bc);
 
-        let mut restarted = Blockchain::new(
-            Arc::new(PoWEngine::new(0)),
-            Some(Storage::new(&db_path).unwrap()),
-            45262,
-            None,
-        );
+        let mut restarted =
+            Blockchain::new(pow(), Some(Storage::new(&db_path).unwrap()), 45262, None);
         assert_eq!(restarted.last_block().state_root, live_root);
         assert_eq!(restarted.state.calculate_state_root(), live_root);
         assert!(restarted.is_valid());

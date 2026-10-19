@@ -73,7 +73,7 @@ jobs:
             echo "clean=true" >> "$GITHUB_OUTPUT"
           else
             echo "clean=false" >> "$GITHUB_OUTPUT"
-            grep -E "^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|assertion|Error:|left:|right:)" /tmp/tests.txt | head -200 > /tmp/tests-trimmed.txt
+            grep -E "^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|assertion|Error:|left:|right:| *called |.*panicked at)" /tmp/tests.txt | head -200 > /tmp/tests-trimmed.txt
             if [ ! -s /tmp/tests-trimmed.txt ]; then
               tail -120 /tmp/tests.txt > /tmp/tests-trimmed.txt
             fi
