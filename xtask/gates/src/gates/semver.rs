@@ -295,7 +295,7 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
 ///
 /// Returns a finding when `cargo semver-checks` reports breakage without a
 /// justified exception, or crashes, or the classification is unrecognised.
-pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
+pub fn run_args(_root: &Path, args: &[&str]) -> Verdict {
     let (current_s, baseline_s) = match args {
         [current, baseline] => (*current, *baseline),
         _ => {
@@ -339,14 +339,32 @@ pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
         ));
     }
 
-    // The exceptions file belongs to the checkout under test; fall back to
-    // the gate's own tree when the current root predates it.
-    let mut exc = current.join(".github/semver-exceptions.txt");
-    if !exc.is_file() {
-        exc = root.join(".github/semver-exceptions.txt");
-    }
+    // The exceptions file comes from the baseline checkout. An exception
+    // added by the change under test cannot approve its own breakage.
+    let exc = exceptions_path(&baseline);
 
     compare(&current, &baseline, &exc)
+}
+
+/// Where accepted breakages are read from: the baseline checkout. A baseline
+/// without the file has no exceptions.
+fn exceptions_path(baseline: &Path) -> std::path::PathBuf {
+    baseline.join(".github/semver-exceptions.txt")
+}
+
+#[cfg(test)]
+mod exceptions_path_tests {
+    use super::exceptions_path;
+    use std::path::Path;
+
+    #[test]
+    fn exceptions_come_from_the_baseline_checkout() {
+        let path = exceptions_path(Path::new("/work/baseline"));
+        assert_eq!(
+            path,
+            Path::new("/work/baseline/.github/semver-exceptions.txt")
+        );
+    }
 }
 
 /// Build both rustdoc files and let cargo-semver-checks compare them.
