@@ -39,7 +39,7 @@ impl BpqsParams for ParamsFastL3 {
 fn l3_code_path_roundtrips() {
     let mut signer = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([7u8; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("l3 keygen: {e}"));
-    let Nonesig = signer
+    let sig = signer
         .sign_at_height(9, b"anchor")
         .unwrap_or_else(|e| panic!("l3 sign: {e}"));
     verify_at_height::<H, ParamsFastL3>(signer.public(), 9, b"anchor", &sig)
@@ -111,7 +111,7 @@ fn epoch_chain_derivation_is_message_independent() {
 fn full_size_ceremony_l5() {
     let mut signer = BpqsSigner::<ParamsL5, H>::ceremonial_keygen([0xA5u8; 32], EpochWindow(4096))
         .unwrap_or_else(|e| panic!("l5 ceremony: {e}"));
-    let Nonesig = signer
+    let sig = signer
         .sign_at_height(1_000_000, b"anchor")
         .unwrap_or_else(|e| panic!("l5 sign: {e}"));
     verify_at_height::<H, ParamsL5>(signer.public(), 1_000_000, b"anchor", &sig)
@@ -133,7 +133,7 @@ fn kat_freeze_digest_is_stable() {
         let seed = [seed_byte; 32];
         let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(seed, EpochWindow(window))
                 .unwrap_or_else(|e| panic!("kat keygen: {e}"));
-        let Nonesig = signer
+        let sig = signer
             .sign_at_height(height, msg)
             .unwrap_or_else(|e| panic!("kat sign: {e}"));
         verify_at_height::<H, ParamsTestFast>(signer.public(), height, msg, &sig)
@@ -151,7 +151,7 @@ fn kat_freeze_digest_is_stable() {
     }
     let mut l3 = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([9u8; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("kat l3 keygen: {e}"));
-    let Nonesig3 = l3
+    let sig3 = l3
         .sign_at_height(10, b"omega")
         .unwrap_or_else(|e| panic!("kat l3 sign: {e}"));
     verify_at_height::<H, ParamsFastL3>(l3.public(), 10, b"omega", &sig3)
