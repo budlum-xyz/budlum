@@ -178,14 +178,25 @@ impl SemanticAnalyzer {
     pub fn analyze(&mut self, contract: &Contract) -> Result<(), CompileError> {
         let mut errors = Vec::new();
 
-        // 1. Register structs
+        // 1. Register structs. A name declared twice is an error: the last
+        // definition used to win silently (P35-F22).
         for s in &contract.structs {
             let mut fields = HashMap::new();
             for f in &s.fields {
                 let ty = Type::from_str(&f.ty).map_err(CompileError::SemanticError)?;
-                fields.insert(f.name.clone(), ty);
+                if fields.insert(f.name.clone(), ty).is_some() {
+                    errors.push(CompileError::SemanticError(format!(
+                        "struct '{}' declares field '{}' twice",
+                        s.name, f.name
+                    )));
+                }
             }
-            self.structs.insert(s.name.clone(), fields);
+            if self.structs.insert(s.name.clone(), fields).is_some() {
+                errors.push(CompileError::SemanticError(format!(
+                    "struct '{}' is declared twice",
+                    s.name
+                )));
+            }
         }
 
         // 1a. Register storage fields. Their types are validated here once,
@@ -194,7 +205,12 @@ impl SemanticAnalyzer {
         for field in &contract.storage {
             match Type::from_str(&field.ty) {
                 Ok(ty) => {
-                    self.storage.insert(field.name.clone(), ty);
+                    if self.storage.insert(field.name.clone(), ty).is_some() {
+                        errors.push(CompileError::SemanticError(format!(
+                            "storage field '{}' is declared twice",
+                            field.name
+                        )));
+                    }
                 }
                 Err(e) => errors.push(CompileError::SemanticError(e)),
             }
@@ -246,7 +262,20 @@ impl SemanticAnalyzer {
         // 2. Register functions
         for f in &contract.functions {
             let mut params = Vec::new();
+            let mut seen_params = std::collections::HashSet::new();
+            if matches!(f.name.as_str(), "poseidon" | "verify_merkle_proof") {
+                errors.push(CompileError::SemanticError(format!(
+                    "function '{}' would be shadowed by the built-in of the same name",
+                    f.name
+                )));
+            }
             for p in &f.params {
+                if !seen_params.insert(p.name.as_str()) {
+                    errors.push(CompileError::SemanticError(format!(
+                        "function '{}' has two parameters named '{}'",
+                        f.name, p.name
+                    )));
+                }
                 // A rejected type name has to become an error here, not a
                 // silent `Unknown`. `Unknown` is treated as compatible with
                 // everything downstream, so swallowing it means `fn f(x: u32)`
@@ -288,7 +317,16 @@ impl SemanticAnalyzer {
             } else {
                 Type::Void
             };
-            self.functions.insert(f.name.clone(), (params, ret_ty));
+            if self
+                .functions
+                .insert(f.name.clone(), (params, ret_ty))
+                .is_some()
+            {
+                errors.push(CompileError::SemanticError(format!(
+                    "function '{}' is defined twice",
+                    f.name
+                )));
+            }
         }
 
         // 3. Builtins
