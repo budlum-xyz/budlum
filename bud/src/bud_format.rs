@@ -388,7 +388,7 @@ impl BudFile {
 
     /// Serialise without silent truncation: a field that does not fit its
     /// length prefix is an error (BLG-0574).
-    fn try_to_bytes(&self) -> Result<Vec<u8>, &'static str> {
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, &'static str> {
         fn len16(n: usize) -> Result<[u8; 2], &'static str> {
             u16::try_from(n)
                 .map(u16::to_le_bytes)
