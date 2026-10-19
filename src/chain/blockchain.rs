@@ -4789,51 +4789,20 @@ impl Blockchain {
                 if is_call && Executor::check_contract_call_count(contract_calls + 1).is_err() {
                     continue;
                 }
-                if Executor::apply_transaction_checked(&mut temp_state, tx).is_ok() {
+                // BLG-0289: execute against a disposable candidate. Only a
+                // successful transaction publishes its state to the selection
+                // prefix; every error discards ALL partial writes. Replaying a
+                // prefix after an error is not sufficient: replay itself can
+                // fail and contaminate the next accepted transaction.
+                let mut candidate_state = temp_state.clone();
+                if Executor::apply_transaction_checked(&mut candidate_state, tx).is_ok() {
+                    temp_state = candidate_state;
                     if is_call {
                         contract_calls += 1;
                     }
                     valid_txs.push(tx.clone());
                     included.insert(tx.hash.clone());
                     progress = true;
-                } else {
-                    // BLG-0289 (P18-F04): a refused transaction may have left
-                    // partial mutations in the simulation state - the
-                    // documented contract of `apply_transaction_checked`, and
-                    // the three arms that used to write before their last
-                    // check are fixed (executor.rs), but the selection loop
-                    // must not TRUST that. Building on contaminated state
-                    // diverges from what validators replay from the clean
-                    // base, and the producer ships a block that fails its own
-                    // block check. So on refusal the simulation is rebuilt the
-                    // way replay runs: fresh clone of the real base, the
-                    // accepted set re-applied in order - and anything that
-                    // fails THAT pass was riding contamination, so it leaves
-                    // the block. Conservative in both directions: nothing
-                    // contaminated stays in, nothing honest is dropped (a
-                    // clean re-apply of an accepted transaction can only fail
-                    // if its acceptance had depended on the refusal's side
-                    // effects).
-                    temp_state = self.state.clone();
-                    set_block_context(&mut temp_state);
-                    let mut rebuilt = Vec::with_capacity(valid_txs.len());
-                    let mut keep = std::collections::HashSet::new();
-                    for accepted in &valid_txs {
-                        if Executor::apply_transaction_checked(&mut temp_state, accepted)
-                            .is_ok()
-                        {
-                            keep.insert(accepted.hash.clone());
-                            rebuilt.push(accepted.clone());
-                        }
-                    }
-                    contract_calls = rebuilt
-                        .iter()
-                        .filter(|t| {
-                            t.tx_type == crate::core::transaction::TransactionType::ContractCall
-                        })
-                        .count() as u64;
-                    valid_txs = rebuilt;
-                    included = keep;
                 }
             }
         }
