@@ -176,6 +176,16 @@ pub enum RoundError {
     RoundClosed { state: String },
     #[error("round is full: the policy admits {max} participants")]
     RoundFull { max: usize },
+    /// BLG-0152 (P07-F07, decision A): bytes that cannot be read as evidence
+    /// at all are the caller's problem, never a vote. They must not open a
+    /// round or count toward any threshold.
+    #[error("the bytes are not evidence and cannot vote: {reason}")]
+    NotAVote { reason: String },
+    /// BLG-0152 (P07-F07, decision A): rounds are bounded per domain. A
+    /// prover-chosen height opened a retained round per call; the state
+    /// growth was bounded only by call rate.
+    #[error("the domain already has {max} open rounds; old rounds must decide or sweep first")]
+    TooManyOpenRounds { max: usize },
 }
 
 /// The quorum layer of the intake: policies per domain, live rounds, and the
@@ -260,22 +270,68 @@ impl QuorumRounds {
         let Some(policy) = self.policies.get(&domain).copied() else {
             return Err(RoundError::NoQuorumPolicy);
         };
-        let height = evidence.declared_height;
-        let round = self
-            .rounds
-            .entry(RoundKey { domain, height })
-            .or_insert_with(|| QuorumRound {
-                domain,
-                height,
-                state: RoundState::Open,
-                entries: Vec::new(),
-                opened_at: local_height,
-            });
-        if !matches!(round.state, RoundState::Open) {
-            return Err(RoundError::RoundClosed {
-                state: state_name(&round.state).to_string(),
-            });
+        // BLG-0152 (P07-F07, decision A): bytes the adapter cannot even read
+        // are not answers about a claim. Folding them in as refusal votes let
+        // one bonded prover open a retained round per garbage height and
+        // close a real height with a refusal quorum before honest evidence
+        // arrived. The boundary check runs BEFORE the round exists.
+        if let Err(err) = verified {
+            if is_not_a_vote(err) {
+                return Err(RoundError::NotAVote {
+                    reason: err.to_string(),
+                });
+            }
         }
+        let height = evidence.declared_height;
+        let digest = evidence.digest();
+        let key = RoundKey { domain, height };
+        match self.rounds.get_mut(&key) {
+            Some(round) => {
+                // BLG-0152 (P07-F07, decision B): an AgreedRefusal answered
+                // the bytes that were actually submitted. A later, DIFFERENT
+                // evidence at the same height is a new question and must not
+                // be censored by it. Same bytes after a refusal stay closed.
+                let seen = round.entries.iter().any(|e| e.evidence_digest == digest);
+                if matches!(round.state, RoundState::AgreedRefusal { .. }) && !seen {
+                    *round = QuorumRound {
+                        domain,
+                        height,
+                        state: RoundState::Open,
+                        entries: Vec::new(),
+                        opened_at: local_height,
+                    };
+                } else if !matches!(round.state, RoundState::Open) {
+                    return Err(RoundError::RoundClosed {
+                        state: state_name(&round.state).to_string(),
+                    });
+                }
+            }
+            None => {
+                let open = self.rounds.keys().filter(|k| k.domain == domain).count();
+                if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
+                    return Err(RoundError::TooManyOpenRounds {
+                        max: MAX_OPEN_ROUNDS_PER_DOMAIN,
+                    });
+                }
+                self.rounds.insert(
+                    key,
+                    QuorumRound {
+                        domain,
+                        height,
+                        state: RoundState::Open,
+                        entries: Vec::new(),
+                        opened_at: local_height,
+                    },
+                );
+            }
+        }
+        let Some(round) = self.rounds.get_mut(&key) else {
+            // The round was created or reopened above; a missing one here is
+            // an invariant break and refuses rather than panics.
+            return Err(RoundError::RoundClosed {
+                state: "vanished".to_string(),
+            });
+        };
         if round.has_answered(&evidence.submitter) {
             return Err(RoundError::DuplicateAnswer);
         }
@@ -394,6 +450,23 @@ impl QuorumRounds {
 /// Maps an adapter error to the answer kind the quorum counts. The split the
 /// quorum module insists on: a refusal about the *claim* participates, a
 /// failure about the *prover or transport* does not.
+/// The most rounds one domain may have open at once (BLG-0152/P07-F07).
+pub const MAX_OPEN_ROUNDS_PER_DOMAIN: usize = 64;
+
+/// Whether an adapter refusal says nothing about a claim - the bytes could
+/// not be read as evidence at all (wrong adapter, wrong version, malformed,
+/// declaration mismatch). Such a refusal is the caller's problem and is not
+/// a vote in anyone's quorum (BLG-0152/P07-F07).
+fn is_not_a_vote(err: &AdapterError) -> bool {
+    matches!(
+        err,
+        AdapterError::WrongAdapter { .. }
+            | AdapterError::UnsupportedEvidenceVersion { .. }
+            | AdapterError::Malformed { .. }
+            | AdapterError::DeclarationMismatch { .. }
+    )
+}
+
 fn answer_of_error(err: &AdapterError) -> Answer {
     match err {
         // The adapter could not answer for a reason about itself. Counting
@@ -737,4 +810,52 @@ mod tests {
         let listed: Vec<u64> = rounds.rounds_of(&key()).iter().map(|r| r.height).collect();
         assert_eq!(listed, vec![5, 9], "BTreeMap order is height order");
     }
+    /// BLG-0152 (P07-F07): unreadable bytes are not votes and open no round;
+    /// an AgreedRefusal censors only the bytes it actually answered.
+    #[test]
+    fn garbage_bytes_never_vote_and_a_refusal_only_closes_its_own_bytes() {
+        let mut rounds = QuorumRounds::default();
+        rounds.set_policy(key(), policy(2));
+        let garbage: Result<FinalityAttestation, AdapterError> = Err(AdapterError::Malformed {
+            offset: 0,
+            reason: "one byte".to_string(),
+        });
+        let err = rounds
+            .submit(key(), &evidence(1, 5), &garbage, 100)
+            .unwrap_err();
+        assert!(
+            matches!(err, RoundError::NotAVote { .. }),
+            "unreadable bytes must not vote, got: {err:?}"
+        );
+        assert!(
+            rounds.round_of(&key(), 5).is_none(),
+            "no round may be opened by bytes that are not evidence"
+        );
+        // Two real refusals of the SAME evidence close the round over those
+        // bytes (threshold 2)...
+        let refusal: Result<FinalityAttestation, AdapterError> =
+            Err(AdapterError::ConsensusRule {
+                rule: "nope".to_string(),
+            });
+        let a = rounds
+            .submit(key(), &evidence(1, 5), &refusal, 100)
+            .unwrap();
+        assert!(matches!(a, RoundState::Open));
+        let b = rounds
+            .submit(key(), &evidence(2, 5), &refusal, 100)
+            .unwrap();
+        assert!(matches!(b, RoundState::AgreedRefusal { .. }));
+        // ... but DIFFERENT bytes at the same height are a new question and
+        // open a fresh round instead of being censored by the refusal.
+        let fresh: Result<FinalityAttestation, AdapterError> = Err(AdapterError::ConsensusRule {
+            rule: "different bytes".to_string(),
+        });
+        let mut other = evidence(3, 5);
+        other.payload.push(0xFF);
+        let state = rounds
+            .submit(key(), &other, &fresh, 100)
+            .expect("new bytes open a new round after a refusal");
+        assert!(matches!(state, RoundState::Open));
+    }
+
 }
