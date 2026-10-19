@@ -668,7 +668,8 @@ fn read_bodies(root: &Path) -> Result<(Vec<PathBuf>, BTreeMap<PathBuf, String>),
 
     let mut bodies: BTreeMap<PathBuf, String> = BTreeMap::new();
     for p in &files {
-        let raw = std::fs::read_to_string(p).unwrap_or_default();
+        let raw = std::fs::read_to_string(p)
+            .map_err(|e| format!("{} could not be read: {e}", p.display()))?;
         bodies.insert(p.clone(), strip_test_mods(&raw));
     }
     Ok((files, bodies))

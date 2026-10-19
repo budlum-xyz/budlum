@@ -186,9 +186,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         if is_test_support(&rel) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(f) else {
-            continue;
-        };
+        let text = std::fs::read_to_string(f)
+            .map_err(|e| format!("FAIL: {} could not be read: {e}", f.display()))?;
         scanned += 1;
         let code = strip_test_modules(&text);
         let lines: Vec<&str> = code.lines().collect();
@@ -329,5 +328,15 @@ mod tests {
             "#[cfg(test)]\nconst X: u8 = 1;\nfn prod() {\n    let p = P { chain_id: 1, };\n}\n";
         let stripped = strip_test_modules(src);
         assert!(stripped.lines().any(|l| hardcoded_chain_id(l).is_some()));
+    }
+
+    #[test]
+    fn unreadable_file_is_an_error_not_a_skip() {
+        let dir = std::env::temp_dir().join(format!("chain-id-bad-utf8-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), [0xff, 0xfe, 0xfd]).unwrap();
+        let out = run(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(out.is_err());
     }
 }
