@@ -299,7 +299,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join(BASELINE_FILE), "1\n").map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: uncalled guard sayilmadi"));
+        return Err(String::from("canary: an uncalled guard was not counted"));
     }
     // The call sits on the same line as a function definition, which is the
     // shape the old predicate swallowed. The baseline is lowered to zero
