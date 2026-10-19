@@ -218,6 +218,8 @@ fn reconstruct(stream_commitment: &[u8; 32], frames: &[Vec<u8>]) -> Result<Found
             Some(p) if p != drop.params() => return Err(IndepError::ParamMismatch),
             Some(_) => {}
         }
+        let p = params.ok_or(IndepError::NoFrames)?;
+        let cols = row_columns(&drop, &p).map_err(|fault| IndepError::Frame { index, fault })?;
         if let Some(prev) = seen.get(&drop.seq) {
             if *prev == drop.body {
                 continue;
@@ -227,14 +229,11 @@ fn reconstruct(stream_commitment: &[u8; 32], frames: &[Vec<u8>]) -> Result<Found
         if seen.len() >= MAX_SEQS {
             return Err(IndepError::TooManySeqs);
         }
-        let p = params.ok_or(IndepError::NoFrames)?;
         let b = basis.as_mut().ok_or(IndepError::NoFrames)?;
-        let cols = row_columns(&drop, &p).map_err(|fault| IndepError::Frame { index, fault })?;
         seen.insert(drop.seq, drop.body.clone());
         b.add(&cols, drop.body)?;
-        if b.rank == b.k {
-            break;
-        }
+        // BLG-0431: full rank permits reconstruction, not acceptance of an
+        // unchecked suffix. Authenticate and validate every supplied frame.
     }
     let p = params.ok_or(IndepError::NoFrames)?;
     let b = basis.ok_or(IndepError::NoFrames)?;
@@ -330,6 +329,9 @@ fn parse_frame(stream: &[u8; 32], frame: &[u8]) -> Result<RawDrop, &'static str>
     let wire_len = usize::from(le_u16(frame, 12).ok_or("frame drop length")?);
     if wire_len == 0 || wire_len > MAX_DROP_WIRE {
         return Err("frame drop length range");
+    }
+    if frame.len() != FRAME_HEADER_LEN + wire_len {
+        return Err("frame length differs from declared drop length");
     }
     let wire = frame
         .get(FRAME_HEADER_LEN..FRAME_HEADER_LEN + wire_len)
@@ -834,6 +836,28 @@ mod tests {
                 independent: 1
             })
         );
+    }
+
+    #[test]
+    fn a_complete_prefix_does_not_hide_an_invalid_suffix() {
+        let pipe = pipe_of(&xorshift_bytes(7, 64), 256, None);
+        let sc = pipe.stream_commitment;
+        let claim = claim_from_primary(&sc, &pipe.frames);
+        let mut frames = pipe.frames.clone();
+        // Valid redundant frames remain valid after reaching full rank.
+        frames.push(frames[0].clone());
+        confirm(&sc, &frames, &claim).unwrap();
+        let bad_index = frames.len();
+        frames.push(vec![0; 10]);
+        assert!(
+            matches!(confirm(&sc, &frames, &claim), Err(IndepError::Frame { index, .. }) if index == bad_index)
+        );
+        let mut trailer = pipe.frames.clone();
+        trailer[0].push(0);
+        assert!(matches!(
+            confirm(&sc, &trailer, &claim),
+            Err(IndepError::Frame { index: 0, .. })
+        ));
     }
 
     #[test]

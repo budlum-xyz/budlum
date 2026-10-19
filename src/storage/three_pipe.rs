@@ -218,10 +218,9 @@ pub fn decode_frames(
 ) -> Result<(PayloadKind, Vec<u8>), PipeError> {
     let mut rx = ProgressiveReceiver::new(*stream_commitment);
     for fr in frames {
+        // BLG-0431: a complete prefix is not permission to skip validating
+        // the remaining frames the caller supplied.
         rx.push_frame(fr)?;
-        if rx.is_complete() {
-            break;
-        }
     }
     Ok(rx.finish_unpacked()?)
 }
@@ -386,6 +385,16 @@ mod tests {
         let (kind, raw) = decode_frames(&enc.stream_commitment, &kept).unwrap();
         assert_eq!(kind, PayloadKind::ContentBytes);
         assert_eq!(raw, content.as_slice());
+    }
+
+    #[test]
+    fn decode_refuses_an_invalid_frame_after_a_complete_prefix() {
+        let encoded = encode_qr_video(b"complete prefix", 256, None).unwrap();
+        let mut frames = encoded.frames.clone();
+        frames.push(frames[0].clone());
+        assert!(decode_frames(&encoded.stream_commitment, &frames).is_ok());
+        frames.push(vec![0; 10]);
+        assert!(decode_frames(&encoded.stream_commitment, &frames).is_err());
     }
 
     #[test]
