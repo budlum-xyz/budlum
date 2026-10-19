@@ -126,6 +126,16 @@ pub fn strip_block_comments(text: &str) -> String {
     let mut i = 0usize;
     let mut depth = 0usize;
     while i < n {
+        // A line comment outside a block comment is copied as it is: a `/*`
+        // inside it (a glob such as `config/*-genesis.json`) does not open a
+        // block comment. The line pass removes it afterwards.
+        if depth == 0 && i + 1 < n && chars[i] == '/' && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
         if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
             depth += 1;
             out.push_str("  ");
@@ -236,6 +246,16 @@ mod tests {
         let out = strip_rust_literals("let s = r##\"quote \"# inside\"##; let a = 1;");
         assert!(out.contains("let a = 1;"));
         assert!(!out.contains("quote"));
+    }
+
+    #[test]
+    fn a_block_opener_inside_a_line_comment_does_not_swallow_code() {
+        let text = "/// the files config/*-genesis.json\nfn kept() {}\n";
+        assert!(scrub(text).contains("fn kept()"));
+        // A real block comment after a line comment still goes.
+        let text = "// note\n/* gone */ fn kept() {}\n";
+        let out = scrub(text);
+        assert!(out.contains("fn kept()") && !out.contains("gone"));
     }
 
     #[test]

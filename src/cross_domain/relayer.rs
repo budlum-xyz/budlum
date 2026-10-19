@@ -327,7 +327,19 @@ impl UniversalRelayer {
             ));
         }
 
-        // 5. Record the relay
+        // 5. Message integrity. Both checks run before anything is written,
+        //    so a refusal leaves the ledger and the pending entry untouched
+        //    and the relay can be tried again.
+        let message = pending.source_event.message.clone().ok_or_else(|| {
+            RelayerError::Other("source event has no cross-domain message".into())
+        })?;
+        if !message.verify_id() {
+            return Err(RelayerError::InvalidProof(
+                "Relayed message ID does not match computed ID (tamper check)".into(),
+            ));
+        }
+
+        // 6. Record the relay
         // Use checked serialization - if proof cannot
         // Serialize, reject the relay rather than recording a bogus proof_hash.
         let proof_bytes = bincode::serialize(proof)
@@ -335,18 +347,6 @@ impl UniversalRelayer {
         let proof_hash = hash_fields_bytes(&[b"BDLM_RELAY_PROOF_HASH_V1", &proof_bytes]);
         self.ledger
             .record(message_id, relayer, current_height, proof_hash)?;
-
-        // Extract the cross-domain message from the source event
-        let message = pending.source_event.message.clone().ok_or_else(|| {
-            RelayerError::Other("source event has no cross-domain message".into())
-        })?;
-
-        // 6. Final message integrity check
-        if !message.verify_id() {
-            return Err(RelayerError::InvalidProof(
-                "Relayed message ID does not match computed ID (tamper check)".into(),
-            ));
-        }
 
         // Remove from pending
         self.pending.remove(&message_id);
@@ -766,5 +766,40 @@ mod tests {
         assert_eq!(relayer.pending_count(), 1, "the relay with no expiry stays");
         assert!(relayer.pending_relay(&message_c.message_id).is_some());
         assert!(relayer.pending_relay(&message_b.message_id).is_none());
+    }
+
+    /// P05-F05: a relay refused after the proof checks leaves no half state.
+    #[test]
+    fn a_refused_relay_leaves_no_ledger_record_and_keeps_the_pending_entry() {
+        let mut relayer = UniversalRelayer::new(RelayerConfig::default());
+        let (mut event, message) = make_event_and_message(1, 2, 10);
+        event.message = None;
+        relayer.enqueue_relay(event.clone(), &message, 10);
+        let mut tree = DomainEventTree::new();
+        tree.push(event);
+        let root = tree.root();
+        let proof = tree.proof(0).unwrap();
+
+        let first = relayer.process_relay(
+            message.message_id,
+            Address::from([0xAA; 32]),
+            &proof,
+            1,
+            root,
+            15,
+        );
+        assert!(matches!(first, Err(RelayerError::Other(_))));
+        assert!(!relayer.is_relayed(&message.message_id));
+        assert_eq!(relayer.pending_count(), 1);
+        // A retry gets the same refusal, not AlreadyRelayed.
+        let second = relayer.process_relay(
+            message.message_id,
+            Address::from([0xAA; 32]),
+            &proof,
+            1,
+            root,
+            16,
+        );
+        assert!(matches!(second, Err(RelayerError::Other(_))));
     }
 }

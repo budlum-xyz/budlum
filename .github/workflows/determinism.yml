@@ -33,7 +33,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Build (run 1)
-        run: cargo build --release 2>&1 | tail -5
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tail -5
       - name: Genesis hash (run 1)
         run: |
           set -euo pipefail
@@ -45,7 +47,9 @@ jobs:
       - name: Clean build cache
         run: cargo clean 2>&1 | tail -3
       - name: Build (run 2)
-        run: cargo build --release 2>&1 | tail -5
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tail -5
       - name: Genesis hash (run 2)
         run: |
           set -euo pipefail

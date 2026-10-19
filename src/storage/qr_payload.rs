@@ -41,6 +41,11 @@ pub const THREE_PAYLOAD_MAGIC: [u8; 4] = *b"BDL3";
 pub const THREE_PAYLOAD_VERSION: u8 = 1;
 /// `flags` bit0: body is zlib-compressed; clear means body is raw original.
 const FLAG_ZLIB: u8 = 1 << 0;
+/// `flags` bit1: content is empty. `orig_len` is 0, the body is empty and the
+/// sha is the sha256 of the empty string. Cannot combine with zlib.
+const FLAG_EMPTY: u8 = 1 << 1;
+/// Every flag bit this version knows. Any other bit refuses on unpack.
+const KNOWN_FLAGS: u8 = FLAG_ZLIB | FLAG_EMPTY;
 
 /// Fixed header size before the body: magic4 + ver + flags + kind + `orig_len8` + sha32.
 pub const THREE_PAYLOAD_HEADER_LEN: usize = 4 + 1 + 1 + 1 + 8 + 32;
@@ -85,8 +90,6 @@ impl PayloadKind {
 /// Errors packing or unpacking a three payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayloadError {
-    /// Empty content is refused - a zero-length payload is not a valid 3.0 unit.
-    Empty,
     /// Content or declared `orig_len` exceeds [`MAX_PAYLOAD_CONTENT`].
     TooLarge {
         /// Observed length.
@@ -108,12 +111,13 @@ pub enum PayloadError {
     ContentHashMismatch,
     /// Zlib flag / `orig_len` / body length disagree.
     ZlibInconsistent,
+    /// Flags carry an unknown bit, or a combination that cannot be valid.
+    BadFlags(u8),
 }
 
 impl std::fmt::Display for PayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => write!(f, "three payload refuses empty content"),
             Self::TooLarge { len, max } => {
                 write!(f, "content {len} bytes exceeds three-payload max {max}")
             }
@@ -123,6 +127,7 @@ impl std::fmt::Display for PayloadError {
             Self::Truncated => write!(f, "three payload truncated"),
             Self::Inflate => write!(f, "three payload zlib inflate failed"),
             Self::ContentHashMismatch => write!(f, "three payload content sha256 mismatch"),
+            Self::BadFlags(bits) => write!(f, "three payload bad flags {bits:#04x}"),
             Self::ZlibInconsistent => {
                 write!(f, "three payload zlib flag inconsistent with body")
             }
@@ -141,7 +146,6 @@ impl std::error::Error for PayloadError {}
 ///
 /// # Errors
 ///
-/// [`PayloadError::Empty`] on zero-length content;
 /// [`PayloadError::TooLarge`] when `content` exceeds [`MAX_PAYLOAD_CONTENT`].
 pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, PayloadError> {
     pack_payload_opts(kind, content, true)
@@ -160,9 +164,6 @@ pub fn pack_payload_opts(
     content: &[u8],
     allow_zlib: bool,
 ) -> Result<Vec<u8>, PayloadError> {
-    if content.is_empty() {
-        return Err(PayloadError::Empty);
-    }
     if content.len() > MAX_PAYLOAD_CONTENT {
         return Err(PayloadError::TooLarge {
             len: content.len(),
@@ -170,7 +171,9 @@ pub fn pack_payload_opts(
         });
     }
     let content_sha = calculate_hash_bytes(content);
-    let (body, flags) = if allow_zlib {
+    let (body, flags) = if content.is_empty() {
+        (Vec::new(), FLAG_EMPTY)
+    } else if allow_zlib {
         match try_zlib9(content) {
             Some(z) if z.len() < content.len() => (z, FLAG_ZLIB),
             _ => (content.to_vec(), 0u8),
@@ -227,7 +230,14 @@ pub fn unpack_payload(packed: &[u8]) -> Result<(PayloadKind, Vec<u8>), PayloadEr
 
     let body = packed.get(47..).ok_or(PayloadError::Truncated)?;
 
-    if orig_len == 0 || orig_len > MAX_PAYLOAD_CONTENT {
+    if flags & !KNOWN_FLAGS != 0 || (flags & FLAG_EMPTY != 0 && flags & FLAG_ZLIB != 0) {
+        return Err(PayloadError::BadFlags(flags));
+    }
+    let is_empty = flags & FLAG_EMPTY != 0;
+    if is_empty != (orig_len == 0) {
+        return Err(PayloadError::BadFlags(flags));
+    }
+    if orig_len > MAX_PAYLOAD_CONTENT {
         return Err(PayloadError::TooLarge {
             len: orig_len,
             max: MAX_PAYLOAD_CONTENT,
@@ -383,10 +393,80 @@ mod tests {
     }
 
     #[test]
-    fn empty_refused() {
+    fn empty_content_round_trips_with_the_empty_flag() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"").unwrap();
+        assert_eq!(packed.len(), THREE_PAYLOAD_HEADER_LEN);
+        assert_eq!(packed[5], FLAG_EMPTY);
+        let (kind, raw) = unpack_payload(&packed).unwrap();
+        assert_eq!(kind, PayloadKind::ContentBytes);
+        assert!(raw.is_empty());
+    }
+
+    #[test]
+    fn empty_flag_with_a_body_is_refused() {
+        let mut packed = pack_payload(PayloadKind::ContentBytes, b"").unwrap();
+        packed.push(0x41);
         assert_eq!(
-            pack_payload(PayloadKind::ContentBytes, b"").unwrap_err(),
-            PayloadError::Empty
+            unpack_payload(&packed).unwrap_err(),
+            PayloadError::ZlibInconsistent
+        );
+    }
+
+    #[test]
+    fn empty_flag_with_nonzero_len_is_refused() {
+        let mut packed = pack_payload(PayloadKind::ContentBytes, b"a").unwrap();
+        packed[5] |= FLAG_EMPTY;
+        assert_eq!(
+            unpack_payload(&packed).unwrap_err(),
+            PayloadError::BadFlags(FLAG_EMPTY)
+        );
+    }
+
+    #[test]
+    fn zero_len_without_the_empty_flag_is_refused() {
+        let mut packed = pack_payload(PayloadKind::ContentBytes, b"").unwrap();
+        packed[5] = 0;
+        assert_eq!(
+            unpack_payload(&packed).unwrap_err(),
+            PayloadError::BadFlags(0)
+        );
+    }
+
+    /// Golden vector for the empty content packet (A1, bit1 EMPTY, 47 bytes).
+    #[test]
+    fn empty_wire_bytes_match_the_golden_vector() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"").unwrap();
+        assert_eq!(packed.len(), 47);
+        assert_eq!(hex(&packed), "42444c330102010000000000000000e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
+    #[test]
+    fn empty_packet_with_a_changed_sha_is_refused() {
+        let mut packed = pack_payload(PayloadKind::ContentBytes, b"").unwrap();
+        packed[15] ^= 0x01;
+        assert_eq!(
+            unpack_payload(&packed).unwrap_err(),
+            PayloadError::ContentHashMismatch
+        );
+    }
+
+    #[test]
+    fn unknown_flag_bits_are_refused() {
+        let mut packed = pack_payload(PayloadKind::ContentBytes, b"abc").unwrap();
+        packed[5] |= 1 << 2;
+        assert_eq!(
+            unpack_payload(&packed).unwrap_err(),
+            PayloadError::BadFlags(1 << 2)
+        );
+    }
+
+    #[test]
+    fn empty_flag_and_zlib_flag_together_are_refused() {
+        let mut packed = pack_payload(PayloadKind::ContentBytes, b"").unwrap();
+        packed[5] |= FLAG_ZLIB;
+        assert_eq!(
+            unpack_payload(&packed).unwrap_err(),
+            PayloadError::BadFlags(FLAG_EMPTY | FLAG_ZLIB)
         );
     }
 

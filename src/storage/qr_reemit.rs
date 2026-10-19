@@ -1,10 +1,10 @@
 //! B.U.D. 3.0 recipe → stream re-emit (plan §CH A6, K-QR-GERIDONUS).
 //!
 //! The stream pin is verified on the reveal path: the reveal session in
-//! `crate::storage::three_reveal` calls [`RecipeEmitter::verify_stream_id`]
-//! with a fold recomputed from the emitted frames, so a recipe that pins a
-//! different stream cannot open a session. That path is not yet reachable
-//! from a binary, so the guard still counts as unwired.
+//! `crate::storage::three_reveal` builds the one-shot pass once at open and
+//! calls [`RecipeEmitter::verify_stream_id`] with its fold, so a recipe that
+//! pins a different stream cannot open a session. The session is reached
+//! from the `bud_storageOpenReveal` RPC.
 //!
 //! Given a [`ThreeRecipePublic`] and the packed A1 bytes whose commitment the
 //! recipe pins, regenerate carousel drops and optical frames **bit-equal** to

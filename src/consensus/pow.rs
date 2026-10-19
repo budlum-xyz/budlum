@@ -6,6 +6,10 @@ use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitD
 use std::sync::RwLock;
 use tracing::info;
 
+/// Nonces per mining chunk: the granularity at which the wall-clock budget
+/// and the staleness check run (P01-F16).
+const MINE_CHUNK: u64 = 10_000;
+
 /// A 256-bit unsigned integer, carrying exactly the three operations
 /// accumulated proof-of-work needs: `2^n`, addition, and comparison.
 ///
@@ -100,6 +104,16 @@ pub struct PoWConfig {
     pub difficulty: usize,
     pub target_block_time: u64,
     pub adjustment_interval: u64,
+    /// Wall-clock budget for one mining attempt (P01-F16).
+    ///
+    /// Mining runs synchronously inside the chain actor, so an unbounded
+    /// search starves RPC, validation and sync for as long as a hard nonce
+    /// takes. The budget caps one attempt: the search gives up with an error,
+    /// the actor drains its queue, and the producer loop retries on the
+    /// current tip - which also bounds how stale the discarded work can get
+    /// (P01-F16b). Defaults to 30 seconds: far beyond any difficulty this
+    /// chain retargets to, far below "the node is gone".
+    pub mine_time_budget_ms: u64,
 }
 impl Default for PoWConfig {
     fn default() -> Self {
@@ -107,6 +121,7 @@ impl Default for PoWConfig {
             difficulty: 2,
             target_block_time: 10,
             adjustment_interval: 100,
+            mine_time_budget_ms: 30_000,
         }
     }
 }
@@ -125,15 +140,23 @@ impl PoWEngine {
         }
     }
 
+    /// Test adapter over the production retarget (P01-F17).
+    ///
+    /// The old copy reimplemented the expected-time product and called
+    /// `retarget` directly, so the tests could stay green while
+    /// `adjusted_difficulty` itself broke. This builds the two boundary
+    /// blocks and runs the real path.
     #[cfg(test)]
     pub fn adjusted_difficulty_for_test(&self, current: usize, actual_time_sn: u64) -> usize {
-        let expected_time = self
-            .config
-            .target_block_time
-            .saturating_mul(self.config.adjustment_interval);
-        let ratio_scaled = (u128::from(expected_time) * 100) / u128::from(actual_time_sn).max(1);
-        let ratio_capped = ratio_scaled.clamp(25, 400);
-        ((current as u128 * ratio_capped) / 100).clamp(1, 32) as usize
+        let first = Block {
+            timestamp: 1_000_000,
+            ..Block::new_with_chain_id(0, "0".repeat(64), vec![], 42)
+        };
+        let last = Block {
+            timestamp: first.timestamp + u128::from(actual_time_sn) * 1000,
+            ..Block::new_with_chain_id(1, first.hash.clone(), vec![], 42)
+        };
+        self.adjusted_difficulty(current, &first, &last)
     }
     /// An engine calibrated to the producer's tick interval.
     ///
@@ -282,14 +305,48 @@ impl PoWEngine {
         Self::meets_difficulty_at(hash_hex, self.get_difficulty())
     }
 
-    fn mine_at_difficulty(&self, block: &mut Block, difficulty: usize) {
+    /// Mine `block` until it meets `difficulty`, or give up.
+    ///
+    /// Returns `true` when solved. The search is bounded (P01-F16): every
+    /// [`MINE_CHUNK`] nonces it checks the wall-clock budget and, in the
+    /// chain-aware entry points, that the block is still built on the tip it
+    /// was prepared for (P01-F16b). Stale or unsolved work is discarded and
+    /// re-prepared rather than mined forever on a tip the network has left.
+    fn mine_at_difficulty(&self, block: &mut Block, difficulty: usize) -> bool {
+        self.mine_at_difficulty_on(block, difficulty, || false)
+    }
+
+    fn mine_at_difficulty_on(
+        &self,
+        block: &mut Block,
+        difficulty: usize,
+        work_is_stale: impl Fn() -> bool,
+    ) -> bool {
         let mut iterations: u64 = 0;
         info!(
             "Mining started (difficulty: {}, binary target: {} leading zero bits)",
             difficulty,
             difficulty.saturating_mul(4),
         );
+        let started = std::time::Instant::now();
         while !Self::meets_difficulty_at(&block.hash, difficulty) {
+            if iterations.is_multiple_of(MINE_CHUNK) {
+                if work_is_stale() {
+                    info!(
+                        "Mining abandoned after {} iterations: the block is no longer built on the tip",
+                        iterations
+                    );
+                    return false;
+                }
+                if started.elapsed().as_millis() >= u128::from(self.config.mine_time_budget_ms) {
+                    info!(
+                        "Mining budget exhausted after {} iterations ({} ms): dropping stale work and re-preparing on the current tip",
+                        iterations,
+                        started.elapsed().as_millis()
+                    );
+                    return false;
+                }
+            }
             block.nonce = block.nonce.saturating_add(1);
             block.hash = block.calculate_hash();
             iterations = iterations.saturating_add(1);
@@ -304,17 +361,34 @@ impl PoWEngine {
             "Mining complete: {} iterations, nonce: {}",
             iterations, block.nonce
         );
+        true
     }
 
     fn adjusted_difficulty(&self, current: usize, first: &Block, last: &Block) -> usize {
-        let actual_time = last.timestamp.saturating_sub(first.timestamp) / 1000;
+        let actual_time = u64::try_from(last.timestamp.saturating_sub(first.timestamp) / 1000)
+            .unwrap_or(u64::MAX);
         let expected_time = self
             .config
             .target_block_time
             .saturating_mul(self.config.adjustment_interval);
-        let ratio_scaled = (u128::from(expected_time) * 100) / actual_time.max(1);
-        let ratio_capped = ratio_scaled.clamp(25, 400);
-        ((current as u128 * ratio_capped) / 100).clamp(1, 32) as usize
+        Self::retarget(current, expected_time, actual_time)
+    }
+
+    /// Work per block is `16^difficulty`, so the difficulty is a logarithm of
+    /// the work. A ratio `r` of expected to actual time needs `log16(r)` more
+    /// digits, not a digit count that is `r` times larger. Round `log16(r)` to
+    /// the nearest digit: the cut points are the geometric midpoints 4x and
+    /// 1/4x. One step per interval at most, and the result stays in `[1, 32]`.
+    fn retarget(current: usize, expected_time: u64, actual_time: u64) -> usize {
+        let ratio_scaled = (u128::from(expected_time) * 100) / u128::from(actual_time).max(1);
+        let next = if ratio_scaled >= 400 {
+            current.saturating_add(1)
+        } else if ratio_scaled <= 25 {
+            current.saturating_sub(1)
+        } else {
+            current
+        };
+        next.clamp(1, 32)
     }
 
     pub fn difficulty_for_next_block(&self, chain: &[Block]) -> usize {
@@ -357,8 +431,13 @@ impl ConsensusEngine for PoWEngine {
         _state: &AccountState,
     ) -> Result<(), ConsensusError> {
         block.hash = block.calculate_hash();
-        self.mine_at_difficulty(block, self.get_difficulty());
-        Ok(())
+        if self.mine_at_difficulty(block, self.get_difficulty()) {
+            Ok(())
+        } else {
+            Err(ConsensusError(
+                "PoW mining budget exhausted - retry from the current tip".to_string(),
+            ))
+        }
     }
 
     fn prepare_block_with_chain(
@@ -368,9 +447,21 @@ impl ConsensusEngine for PoWEngine {
         chain: &[Block],
     ) -> Result<(), ConsensusError> {
         let difficulty = self.difficulty_for_next_block(chain);
+        let tip_hash = chain.last().map(|b| b.hash.clone());
+        let prev_hash = block.previous_hash.clone();
         block.hash = block.calculate_hash();
-        self.mine_at_difficulty(block, difficulty);
-        Ok(())
+        // P01-F16b: work on a block that is no longer anchored to the tip the
+        // chain slice carries is abandoned instead of mined to completion and
+        // then rejected.
+        if self.mine_at_difficulty_on(block, difficulty, || {
+            tip_hash.as_deref() != Some(prev_hash.as_str())
+        }) {
+            Ok(())
+        } else {
+            Err(ConsensusError(
+                "PoW mining abandoned - retry from the current tip".to_string(),
+            ))
+        }
     }
 
     fn validate_block(
@@ -592,13 +683,19 @@ mod tests {
         // Build a synthetic chain of 4 blocks (adjustment boundary
         // At index 4, which is `is_multiple_of(4)`). Difficulty 1
         // Mining is fast - we don't need the chain to be long.
+        // P01-F17: the timestamps are stamped explicitly (1 s apart), so the
+        // retarget below asserts the exact post-adjustment value instead of
+        // only the `[1, 32]` clamp on whatever the wall clock happened to
+        // produce.
         let mut chain: Vec<Block> = Vec::new();
         let mut genesis = Block::new(0, "0".repeat(64), vec![]);
+        genesis.timestamp = 1_000_000;
         genesis.hash = genesis.calculate_hash();
         chain.push(genesis);
         for i in 1..=4u64 {
             let prev_hash = chain[(i - 1) as usize].hash.clone();
             let mut b = Block::new(i, prev_hash, vec![]);
+            b.timestamp = genesis.timestamp + u128::from(i) * 1_000;
             let state = AccountState::new();
             engine.prepare_block(&mut b, &state).unwrap();
             chain.push(b);
@@ -620,14 +717,15 @@ mod tests {
         );
 
         // Now drive the adjustment through the chain-aware record
-        // Path. The post-adjustment difficulty must stay within the
-        // [1, 32] clamp. The chain here is the *post-commit* chain
-        // (boundary is the last block in the chain).
+        // Path. The chain here is the *post-commit* chain (boundary is
+        // the last block). 4 blocks in 4 s against a 40 s target is 10x
+        // too fast: exactly one digit up (P01-F17: an exact value, not a
+        // range).
         engine.record_block_with_chain(boundary, &chain);
         let diff_after_record = engine.get_difficulty();
-        assert!(
-            (1..=32).contains(&diff_after_record),
-            "adjusted difficulty must be within [1, 32] clamp, got {diff_after_record}"
+        assert_eq!(
+            diff_after_record, 2,
+            "10x too fast must add exactly one difficulty digit, got {diff_after_record}"
         );
     }
 
@@ -748,13 +846,13 @@ mod tests {
         );
 
         // Without calibration (the default 10 second target) the same chain
-        // quadruples the difficulty - this is the behaviour measured on the
-        // live node.
+        // counts as 10x too fast. The difficulty is a logarithm of the work,
+        // so it rises by one digit (16x work), not to 8 (BLG-0013).
         let uncalibrated = PoWEngine::new(2);
         let d2 = uncalibrated.adjusted_difficulty_for_test(2, 100);
         assert_eq!(
-            d2, 8,
-            "an uncalibrated engine counts 100 blocks over 100 s as 10x too fast and raises the difficulty to 8"
+            d2, 3,
+            "an uncalibrated engine counts 100 blocks over 100 s as 10x too fast and raises the difficulty by one digit"
         );
     }
 
@@ -789,5 +887,25 @@ mod tests {
             e.config.target_block_time, 1,
             "the target has to be at least 1 s"
         );
+    }
+
+    /// BLG-0013: the retarget adds `log16(ratio)` digits. It must not scale
+    /// the digit count by the ratio.
+    #[test]
+    fn retarget_moves_difficulty_by_log16_of_the_ratio() {
+        let engine = PoWEngine::with_config(PoWConfig {
+            difficulty: 2,
+            target_block_time: 1,
+            adjustment_interval: 100,
+        });
+        // Expected 100 s. 4x too fast: one digit up (was 8 with linear scaling).
+        assert_eq!(engine.adjusted_difficulty_for_test(2, 25), 3);
+        // 1.5x too fast: no change (was 3).
+        assert_eq!(engine.adjusted_difficulty_for_test(2, 67), 2);
+        // 4x too slow: one digit down.
+        assert_eq!(engine.adjusted_difficulty_for_test(4, 400), 3);
+        // Floor and ceiling hold.
+        assert_eq!(engine.adjusted_difficulty_for_test(1, 400), 1);
+        assert_eq!(engine.adjusted_difficulty_for_test(32, 25), 32);
     }
 }

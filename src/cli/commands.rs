@@ -600,12 +600,23 @@ pub struct LegacyFileConfig {
 }
 
 impl NodeConfig {
+    /// Clap leaves the `#[arg(skip)]` RPC fields at type defaults (auth off,
+    /// allow list empty). Restore the secure `Default` values before the file
+    /// and environment overlays, so a flags-only start keeps them.
+    fn apply_secure_rpc_defaults(&mut self) {
+        let secure = Self::default();
+        self.rpc_auth_required = secure.rpc_auth_required;
+        self.rpc_allowed_ips = secure.rpc_allowed_ips;
+    }
+
     pub fn load_with_file(&mut self) {
+        self.apply_secure_rpc_defaults();
         if let Some(path) = self.config.clone() {
-            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                eprintln!("CRITICAL ERROR: Failed to read config file at {path}: {e}");
-                std::process::exit(1);
-            });
+            let content = read_to_string_bounded(Path::new(&path), MAX_CONFIG_FILE_BYTES)
+                .unwrap_or_else(|e| {
+                    eprintln!("CRITICAL ERROR: Failed to read config file at {path}: {e}");
+                    std::process::exit(1);
+                });
 
             // 1. Parse the file first, then overlay environment values.
             match toml::from_str::<FileConfig>(&content) {
@@ -1168,6 +1179,10 @@ impl NodeConfig {
         }
 
         if self.network == Network::Mainnet {
+            if let Some(reason) = self.mainnet_rpc_violation() {
+                eprintln!("CRITICAL SECURITY FAILURE: {reason}");
+                std::process::exit(1);
+            }
             // A signing key on disk is refused on mainnet for every role and
             // consensus type. `main` loads `validator_key_file` twice before
             // the PoS engine's own refusal (for the producer address and for
@@ -1263,6 +1278,26 @@ impl NodeConfig {
         }
     }
 
+    /// Mainnet refuses an RPC listener that has auth off or allows every
+    /// address. Roles that open no listener are not checked.
+    fn mainnet_rpc_violation(&self) -> Option<&'static str> {
+        let exposed = match self.role.as_str() {
+            "validator" | "sentry" | "seed" | "relayer" => false,
+            "rpc" | "archive" => true,
+            _ => self.rpc_enabled,
+        };
+        if !exposed {
+            return None;
+        }
+        if !self.rpc_auth_required {
+            return Some("mainnet refuses an RPC listener with auth_required = false");
+        }
+        if self.rpc_allowed_ips.is_empty() {
+            return Some("mainnet refuses an RPC listener with an empty allowed_ips list");
+        }
+        None
+    }
+
     // Node role based rules to avoid opening unnecessary listeners.
     fn apply_role_rules(&mut self) {
         match self.role.as_str() {
@@ -1284,36 +1319,33 @@ impl NodeConfig {
         }
     }
 
-    pub fn load_validators(&self) -> Vec<String> {
+    /// Reads the validators file. A missing file is an empty list (the
+    /// default path is optional); an unreadable, oversized or malformed file
+    /// is an error, so a PoA node never starts on a silently empty set.
+    pub fn load_validators(&self) -> Result<Vec<String>, String> {
         let path = Path::new(&self.validators_file);
         if !path.exists() {
             println!(" Validators file not found: {}", self.validators_file);
-            return vec![];
+            return Ok(vec![]);
         }
-        match std::fs::read_to_string(path) {
-            Ok(content) => match serde_json::from_str::<ValidatorsConfig>(&content) {
-                Ok(config) => {
-                    println!(
-                        "Loaded {} validators from {}",
-                        config.validators.len(),
-                        self.validators_file
-                    );
-                    config.validators
-                }
-                Err(e) => {
-                    println!("Failed to parse validators file: {e}");
-                    vec![]
-                }
-            },
-            Err(e) => {
-                println!("Failed to read validators file: {e}");
-                vec![]
-            }
-        }
+        let content = read_to_string_bounded(path, MAX_CONFIG_FILE_BYTES)
+            .map_err(|e| format!("failed to read validators file: {e}"))?;
+        let config = serde_json::from_str::<ValidatorsConfig>(&content)
+            .map_err(|e| format!("failed to parse validators file: {e}"))?;
+        println!(
+            "Loaded {} validators from {}",
+            config.validators.len(),
+            self.validators_file
+        );
+        Ok(config.validators)
     }
 
     pub fn load_validator_addresses(&self) -> Vec<Address> {
-        self.load_validators()
+        let validators = self.load_validators().unwrap_or_else(|e| {
+            eprintln!("CRITICAL: {e}");
+            std::process::exit(1);
+        });
+        validators
             .into_iter()
             .filter_map(|validator| match Address::from_hex(&validator) {
                 Ok(address) => Some(address),
@@ -1406,6 +1438,24 @@ fn listener_string(host: &str, port: u16) -> String {
     }
 }
 
+/// Upper bound for the config and validators files (operator input).
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_to_string_bounded(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut content = String::new();
+    std::fs::File::open(path)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_string(&mut content)?;
+    if content.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file is larger than {max_bytes} bytes"),
+        ));
+    }
+    Ok(content)
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct ValidatorsConfig {
     validators: Vec<String>,
@@ -1414,6 +1464,23 @@ struct ValidatorsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_or_oversized_validators_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("validators.json");
+        let cfg = NodeConfig {
+            validators_file: file.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.load_validators(), Ok(vec![]));
+        std::fs::write(&file, "{ not json").unwrap();
+        assert!(cfg.load_validators().is_err());
+        std::fs::write(&file, r#"{"validators":["aa"]}"#).unwrap();
+        assert_eq!(cfg.load_validators(), Ok(vec!["aa".to_string()]));
+        assert!(read_to_string_bounded(&file, 4).is_err());
+    }
+
     #[test]
     fn test_consensus_type_parsing() {
         assert_eq!(ConsensusType::PoW as u8, 0);
@@ -1549,6 +1616,34 @@ mod tests {
         assert_eq!(parse_env_bool("true"), Ok(true));
         assert_eq!(parse_env_bool("OFF"), Ok(false));
         assert!(parse_env_bool("typo").is_err());
+    }
+
+    #[test]
+    fn flags_only_start_restores_secure_rpc_defaults() {
+        let mut cfg = NodeConfig::parse_from(["budlum", "--rpc-host", "0.0.0.0"]);
+        assert!(!cfg.rpc_auth_required);
+        assert!(cfg.rpc_allowed_ips.is_empty());
+        cfg.apply_secure_rpc_defaults();
+        assert!(cfg.rpc_auth_required);
+        assert_eq!(cfg.rpc_allowed_ips, NodeConfig::default().rpc_allowed_ips);
+        assert!(!cfg.rpc_allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn mainnet_rejects_open_rpc_listener() {
+        let mut cfg = NodeConfig {
+            network: Network::Mainnet,
+            role: "rpc".into(),
+            ..Default::default()
+        };
+        assert!(cfg.mainnet_rpc_violation().is_none());
+        cfg.rpc_auth_required = false;
+        assert!(cfg.mainnet_rpc_violation().is_some());
+        cfg.rpc_auth_required = true;
+        cfg.rpc_allowed_ips.clear();
+        assert!(cfg.mainnet_rpc_violation().is_some());
+        cfg.role = "validator".into();
+        assert!(cfg.mainnet_rpc_violation().is_none());
     }
 
     #[test]

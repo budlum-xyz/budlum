@@ -22,6 +22,12 @@ extend-exclude = [
   "proto/",          # the wire schema - changing a word breaks the protocol
   "fuzz/corpus/",    # fuzzer produced binary seeds, not text
   "fuzz/artifacts/",
+  # The owner's Turkish directive documents, kept in the owner's words.
+  "/CLAUDE.md",
+  "/MODEL_ROUTING.md",
+  "/MODEL_ROUTING_KURULUM.md",
+  "/BUD-AI-KAPSAMLI-DIREKTIF.md",
+  "/.claude/agents/",
   "repo-lubot/patches/",  # git format-patch output: the text is another repo's
                           # commit message, re-verified verbatim by `git am`, not
                           # hand-edited here. A typo inside it is fixed upstream in
@@ -145,3 +151,12 @@ PN = "PN"           # typos splits the acronym PNG and offers ON for the PN half
 # error deliberately uses a misspelled type name in the source.
 # Fixing it would remove the very thing the test measures.
 Ponit = "Ponit"
+
+# -- Deliberate test data and a filter name ----------------------------------
+# tru   : json.rs negative test input, a deliberately truncated "true" literal.
+# paeth : the PNG Paeth predictor (src/storage/qr_video.rs), named after its author.
+tru = "tru"
+paeth = "paeth"
+# flate : typos splits the crate name `flate2` (zlib backend of the QR PNG code)
+#         and offers "flat". The crate name cannot change.
+flate = "flate"

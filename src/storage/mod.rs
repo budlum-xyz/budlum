@@ -47,6 +47,8 @@ pub mod qr_png;
 pub mod qr_receive;
 pub mod qr_recipe;
 pub mod qr_reemit;
+pub mod qr_verify;
+pub mod qr_verify_indep;
 pub mod qr_video;
 pub mod render;
 pub mod reveal_gateway;

@@ -435,13 +435,18 @@ mod tests {
             "request_response::Message::Request { request, channel, .. } => {",
             "request_response::Message::Response {",
         );
+        // The arm checks the ban and the rate limit first, then lets a
+        // handshake past the handshaked gate. Compare without white space.
+        let flat: String = arm.chars().filter(|c| !c.is_whitespace()).collect();
+        let exempt_at = flat
+            .find("is_handshake||self.peer_manager_lock().is_handshaked(&peer)")
+            .expect("the /sync request arm must admit the handshake before the handshaked gate");
+        let ban_at = flat
+            .find("!pm.is_banned(&peer)&&pm.check_rate_limit(&peer)")
+            .expect("the handshake exemption must not lift the ban or the rate limit");
         assert!(
-            arm.contains("(is_handshake || pm.is_handshaked(&peer))"),
-            "the /sync request arm must admit the handshake before the handshaked gate"
-        );
-        assert!(
-            arm.contains("!pm.is_banned(&peer)") && arm.contains("pm.check_rate_limit(&peer)"),
-            "the handshake exemption must not lift the ban or the rate limit"
+            ban_at < exempt_at,
+            "the ban and rate limit checks must run before the handshake exemption"
         );
     }
 

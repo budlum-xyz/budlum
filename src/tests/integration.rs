@@ -190,10 +190,19 @@ mod integration_tests {
 
         let mut block = Block::new(1, "0".repeat(64), vec![]);
         block.producer = Some(validator_pubkey);
+        // Slot and epoch match the index, so the block cannot fail on them.
+        block.epoch = 0;
+        block.slot = 1;
         block.hash = block.calculate_hash();
 
-        let result = engine.validate_block(&block, &[], &state);
-        assert!(result.is_err(), "PoS should reject unsigned blocks");
+        let error = engine
+            .validate_block(&block, &[], &state)
+            .expect_err("PoS should reject unsigned blocks");
+        assert!(
+            error.0.contains("Invalid block signature"),
+            "rejected for the wrong reason: {}",
+            error.0
+        );
     }
 
     #[test]
@@ -625,7 +634,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_qc_fault_proof_invalidates_cert_without_slashing() {
+    fn test_qc_fault_proof_on_unverifiable_signature_is_refused() {
         use crate::chain::finality::{FinalityCert, ValidatorEntry, ValidatorSetSnapshot};
         use crate::consensus::qc::{sign_attestation, QcBlob};
 
@@ -725,12 +734,20 @@ mod integration_tests {
             .verified_qc_blobs
             .insert(invalid_blob.checkpoint_height, invalid_blob);
 
-        blockchain.handle_qc_fault_proof(proof).unwrap();
+        // P01-F22: an unverifiable signature is not evidence against the
+        // named validator - garbage bytes naming anyone are free to produce,
+        // so acting on them would make the permissionless challenge RPC a
+        // frame-up rail. The challenge is refused and neither finality nor
+        // the named validator's stake moves.
+        let err = blockchain.handle_qc_fault_proof(proof).unwrap_err();
+        assert!(
+            err.contains("not evidence"),
+            "the refusal must say why no verdict issues, got: {err}"
+        );
 
         let validator = blockchain.state.get_validator(&pubkey).unwrap();
-        // InvalidDilithium fault proof slashes the offender.
-        assert!(validator.slashed);
-        assert_eq!(blockchain.finalized_height, 0);
+        assert!(!validator.slashed);
+        assert_eq!(blockchain.finalized_height, 10);
     }
 
     #[test]

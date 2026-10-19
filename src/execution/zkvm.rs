@@ -5,6 +5,14 @@ use sha3::{Digest, Keccak256};
 
 pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
 
+/// Memory size in bytes of the VM that runs and proves contract bytecode.
+const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
+
+const _: () = assert!(
+    CONTRACT_VM_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "CONTRACT_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES"
+);
+
 /// Contract gas one block may carry, summed over its `ContractCall`
 /// transactions at [`DEFAULT_CONTRACT_GAS_LIMIT`] each.
 ///
@@ -119,7 +127,7 @@ impl ZkVmExecutor {
         }
 
         let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
+        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
         vm.context.sender = ctx.sender;
         vm.context.nonce = ctx.nonce;
         vm.context.block_height = ctx.block_height;
@@ -232,7 +240,7 @@ fn prove_bytecode_inner_with_memory(
         return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
     }
     let program = decode_program(bytecode)?;
-    let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
+    let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
     if let Some(setup) = setup {
         setup(&mut vm.memory)?;
     }

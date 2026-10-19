@@ -810,6 +810,183 @@ mod tests {
         assert_eq!(vm.events, vec![30]);
     }
 
+    /// P35-F01: a scrutinee that is not a plain identifier lives in a
+    /// temporary register. The pattern Load must not overwrite it.
+    #[test]
+    fn test_match_on_expression_scrutinee_keeps_its_register() {
+        let source = r#"
+            contract MatchExpr {
+                pub fn main() {
+                    let x = 1;
+                    match (x + 1) {
+                        0 => { emit Result(100); },
+                        2 => { emit Result(200); },
+                        _ => { emit Result(999); },
+                    };
+                    match (x + 5) {
+                        0 => { emit Result(100); },
+                        2 => { emit Result(200); },
+                        _ => { emit Result(999); },
+                    };
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("match compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![200, 999]);
+    }
+
+    /// P35-F02: `let b = a;` copies the value. A later write to `a` must not
+    /// change `b`, and a write to the loop bound must not move the bound.
+    #[test]
+    fn test_let_copies_value_and_loop_bound_is_snapshotted() {
+        let source = r#"
+            contract Alias {
+                fn f(a: u64) -> u64 {
+                    let b = a;
+                    a = a + 1;
+                    return b;
+                }
+
+                pub fn main() {
+                    let r = f(5);
+                    emit Result(r);
+                    let n = 3;
+                    let count = 0;
+                    for i in 0..(n) {
+                        n = n - 1;
+                        count = count + 1;
+                    }
+                    emit Result(count);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("alias source compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![5, 3]);
+    }
+
+    /// P35-F03: a struct literal nested in another literal must get its own
+    /// heap block. Before, both objects started at the same address.
+    #[test]
+    fn test_nested_struct_literal_gets_its_own_heap_block() {
+        let source = r#"
+            contract Nested {
+                struct Inner { pad: u64, y: u64, }
+                struct Outer { inner: Inner, tag: u64, }
+                pub fn main() {
+                    let o = Outer { inner: Inner { pad: 1, y: 42 }, tag: 7 };
+                    emit E(o.inner.pad);
+                    emit E(o.inner.y);
+                    emit E(o.tag);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("nested literal compiles");
+        let mut vm = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![1, 42, 7]);
+    }
+
+    /// P35-F05: a wide integer pattern must compare as the full value. Before,
+    /// the Load immediate was cut with `as i32`, so 4294967296 matched 0.
+    #[test]
+    fn test_match_wide_integer_pattern_is_not_truncated() {
+        let source = r#"
+            contract WidePattern {
+                fn probe(x: u64) -> u64 {
+                    match (x) {
+                        4294967296 => { emit Result(1); },
+                        3000000000 => { emit Result(2); },
+                        _ => { emit Result(0); },
+                    };
+                    return 0;
+                }
+                pub fn main() {
+                    let a = probe(0);
+                    let b = probe(4294967296);
+                    let c = probe(3000000000);
+                    let d = probe(7);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("wide pattern compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![0, 1, 2, 0]);
+    }
+
+    /// P35-F05: a pattern at or above the field modulus is refused, like an
+    /// expression literal.
+    #[test]
+    fn test_match_pattern_above_field_modulus_is_refused() {
+        let source = r#"
+            contract BigPattern {
+                pub fn main() {
+                    let x = 0;
+                    match (x) {
+                        18446744073709551615 => { emit Result(1); },
+                        _ => { emit Result(0); },
+                    };
+                }
+            }
+        "#;
+        let res = compile(source, IsaProfile::Production);
+        assert!(matches!(res, Err(CompileError::CodegenError(_))), "{res:?}");
+    }
+
+    /// P35-F06: a `let` inside a match arm is scoped to the arm. It must not
+    /// replace an outer variable of the same name.
+    #[test]
+    fn test_match_arm_let_does_not_shadow_outer_variable() {
+        let source = r#"
+            contract ArmScope {
+                pub fn main() {
+                    let x = 1;
+                    let y = 0;
+                    match (y) {
+                        0 => { let x = 5; emit Result(x); },
+                        _ => { },
+                    };
+                    emit Result(x);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("arm scope compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![5, 1]);
+    }
+
+    /// P35-F07: sema enforces what codegen assumes: the last arm is the
+    /// wildcard, a wildcard is never in the middle, patterns are unique.
+    #[test]
+    fn test_match_shape_is_checked_by_sema() {
+        for (arms, needle) in [
+            ("0 => { emit Result(1); },", "must end with a wildcard"),
+            (
+                "1 => { emit Result(1); }, _ => { emit Result(0); }, _ => { emit Result(2); },",
+                "must be the last arm",
+            ),
+            (
+                "1 => { emit Result(1); }, 1 => { emit Result(2); }, _ => { emit Result(0); },",
+                "duplicate match pattern 1",
+            ),
+        ] {
+            let source =
+                format!("contract M {{ pub fn main() {{ let x = 0; match (x) {{ {arms} }}; }} }}");
+            match compile(&source, IsaProfile::Production) {
+                Ok(_) => panic!("malformed match compiled: {arms}"),
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains(needle), "wrong reason for {arms}: {msg}")
+                }
+                Err(other) => panic!("expected a SemanticError for {arms}, got {other:?}"),
+            }
+        }
+    }
+
     /// The wildcard arm (`_`) is required for exhaustive matching
     /// (semantic-checked); the parser only requires syntactic
     /// Validity. Verifies the parser rejects patterns that are not

@@ -967,36 +967,49 @@ mod chaos_tests {
     /// conservation of funds.
     #[test]
     fn test_chaos_state_determinism_under_tx_reordering() {
-        let consensus = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus.clone(), None, 45262, None);
-        let mut chain_b = Blockchain::new(consensus, None, 45262, None);
+        use crate::core::transaction::Transaction;
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
 
-        let alice = Address::from_hex(&"01".repeat(32)).unwrap();
-        let bob = Address::from_hex(&"02".repeat(32)).unwrap();
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from(bob_kp.public_key_bytes());
 
-        // Seed the initial accounts, giving a starting balance for the conservation check.
-        chain_a.state.add_balance(&alice, 1000);
-        chain_a.state.add_balance(&bob, 1000);
-        chain_b.state.add_balance(&alice, 1000);
-        chain_b.state.add_balance(&bob, 1000);
+        let mut to_bob = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
+        to_bob.sign(&alice_kp);
+        let mut to_alice = Transaction::new_with_fee(bob, alice, 50, 1, 0, vec![]);
+        to_alice.sign(&bob_kp);
 
-        // Simulated balance transfer - direct state mutation (add/spend).
-        // Alice → Bob: 100
-        chain_a.state.add_balance(&bob, 100);
-        chain_a.state.add_balance(&alice, 0); // a no-op, for the conservation check
+        let seeded = || {
+            let mut state = crate::core::account::AccountState::new();
+            state.add_balance(&alice, 1000);
+            state.add_balance(&bob, 1000);
+            state
+        };
+        let mut forward = seeded();
+        let mut reverse = seeded();
+        let supply_before = forward.circulating_supply();
 
-        // Bob to Alice: 50, in the reverse order on chain_b.
-        chain_b.state.add_balance(&alice, 50);
+        Executor::apply_transaction(&mut forward, &to_bob).unwrap();
+        Executor::apply_transaction(&mut forward, &to_alice).unwrap();
+        Executor::apply_transaction(&mut reverse, &to_alice).unwrap();
+        Executor::apply_transaction(&mut reverse, &to_bob).unwrap();
 
-        // Conservation: the total supply has to be equal on both chains.
-        let total_a = chain_a.state.get_balance(&alice) + chain_a.state.get_balance(&bob);
-        let total_b = chain_b.state.get_balance(&alice) + chain_b.state.get_balance(&bob);
-        // We applied different operations but the starting seed is the same, so
-        // conservation holds. This test verifies that the state mutations are
-        // deterministic and that the accounts are independent, with no
-        // cross-contamination.
-        assert!(total_a > 0, "chain A must have non-zero total");
-        assert!(total_b > 0, "chain B must have non-zero total");
+        // The two senders are independent, so the order must not matter.
+        assert_eq!(forward.get_balance(&alice), reverse.get_balance(&alice));
+        assert_eq!(forward.get_balance(&bob), reverse.get_balance(&bob));
+        assert_eq!(
+            forward.calculate_state_root(),
+            reverse.calculate_state_root()
+        );
+        // Funds are conserved: whatever left the accounts is the fees only.
+        assert!(forward.circulating_supply() <= supply_before);
+        assert_eq!(
+            forward.get_balance(&alice) + forward.get_balance(&bob) + 2,
+            2000,
+            "two fees of 1 are the only difference"
+        );
     }
 
     /// **Genesis mismatch:** two chains with different genesis hashes cannot be
