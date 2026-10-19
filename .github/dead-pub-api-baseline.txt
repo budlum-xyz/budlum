@@ -21,7 +21,7 @@
 # Format: one `path:name` per line, sorted, byte order. Comments and blank
 # lines are ignored; a line without a colon is an error, because a baseline
 # entry the gate cannot match is an entry that never matches again.
-src/account_abstraction/quantum_account.rs:storage_cost
+src/account_abstraction/quantum_account.rs:storage_cost_pico
 src/account_abstraction/registry.rs:is_registered
 src/account_abstraction/tee_attestation.rs:kq_wallet_tee_attestation
 src/account_abstraction/tee_attestation.rs:kq_wallet_tee_runtime

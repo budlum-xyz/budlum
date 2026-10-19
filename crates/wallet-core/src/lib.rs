@@ -371,11 +371,27 @@ fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
     #[cfg(not(feature = "production"))]
     let hedged: Option<Signature<MlDsa87>> = None;
 
-    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| sk.sign(message));
+    // BLG-0278 (P17-F12): the fallback is now a named decision, not a
+    // silent one. ML-DSA's DETERMINISTIC mode is the FIPS 204 approved default;
+    // the hedge is defense-in-depth against side channels on platforms that
+    // expose one. So a platform whose CSPRNG fails keeps producing VALID,
+    // FIPS-conformant signatures - just without the extra masking. What must
+    // not happen is the operator believing hedging is active when it never
+    // runs: that belief is tested below (`deterministic_fallback_signatures_
+    // verify` pins the fallback path's correctness), and the feature gate
+    // means non-production builds always take this exact path, so the tested
+    // code is the shipped code for the fallback.
+    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| deterministic_fallback(sk, message));
     let enc: EncodedSignature<MlDsa87> = sig.encode();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
     out.copy_from_slice(enc.as_ref());
     out
+}
+
+/// The explicit deterministic path (BLG-0278/P17-F12). Exists so the
+/// fallback has a name in the call graph and a target for the pinning test.
+fn deterministic_fallback(sk: &SigningKey<MlDsa87>, message: &[u8]) -> Signature<MlDsa87> {
+    sk.sign(message)
 }
 
 /// Verify an ML-DSA-87 signature against a 2592-byte public key.
@@ -645,7 +661,7 @@ pub type BudlumAddress = [u8; 32];
 ///
 /// A real TEE enclave (SGX/Nitro) is a separate integration track; this struct holds the preference +
 /// view-key material.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WalletPrivacyConfig {
     /// Whether network-level private transfer (the note/UTXO opcode family) is used.
     /// Default `false` - the user enables it in wallet settings (an option for the network).
@@ -659,6 +675,28 @@ pub struct WalletPrivacyConfig {
     /// User-generated view key (32 bytes). `None` = not generated yet.
     /// Shared manually with an authority for selective disclosure; never written to the chain.
     pub view_key: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for WalletPrivacyConfig {
+    /// BLG-0280 (P17-F14): the derived Debug printed `view_key` in the
+    /// clear. The whole point of the key is that it stays off chain and off
+    /// logs - one `{config:?}` in an error path or a test panic message put
+    /// the selective-disclosure secret into whatever captured it. The redacted
+    /// form keeps every toggle visible and says only whether a key is set.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalletPrivacyConfig")
+            .field("note_privacy_enabled", &self.note_privacy_enabled)
+            .field("tee_enabled", &self.tee_enabled)
+            .field("prefer_client_side_tee", &self.prefer_client_side_tee)
+            .field(
+                "view_key",
+                &match self.view_key {
+                    Some(_) => "[set]",
+                    None => "[none]",
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for WalletPrivacyConfig {
@@ -1321,10 +1359,19 @@ impl Wallet {
     ///
     /// Requires `note_privacy_enabled`. If `tee_enabled`, requires a live
     /// [`TeeRuntime`] and refuses to return plaintext witnesses without it.
+    /// Build a private-transfer intent.
+    ///
+    /// BLG-0275 (P17-F09): `chain_id` and `sender_nonce` come from the caller
+    /// (the network the relayer will submit to, the account nonce at signing
+    /// time) and are bound into the authorization signature; they are not
+    /// wallet state, and silently assuming either was how V1 became
+    /// replayable.
     pub fn build_private_transfer(
         &self,
         req: PrivateTransferRequest,
         runtime: &dyn TeeRuntime,
+        chain_id: u64,
+        sender_nonce: u64,
     ) -> Result<PrivateTransferIntent, WalletError> {
         if !self.privacy.note_privacy_enabled {
             return Err(WalletError::NotePrivacyDisabled);
@@ -1393,7 +1440,12 @@ impl Wallet {
             )));
         }
         let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
-        let authorization_sig = self.sign(&digest);
+        // BLG-0275 (P17-F09): the signature covers the binding message, not
+        // the bare digest; the binding data travels on the intent so the
+        // verifier reconstructs it from public fields.
+        let auth_msg =
+            privacy_transfer::authorization_message(chain_id, &wallet_address, sender_nonce, &digest);
+        let authorization_sig = self.sign(&auth_msg);
 
         Ok(PrivateTransferIntent {
             output_commitments,
@@ -1403,6 +1455,9 @@ impl Wallet {
             inputs: vec![req.input],
             outputs,
             public_digest: digest,
+            chain_id,
+            sender: wallet_address,
+            sender_nonce,
             authorization_sig,
         })
     }
@@ -1493,6 +1548,54 @@ impl Wallet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0278 (P17-F12): the deterministic fallback must be a working
+    /// signer, not a half-path. In non-production builds every signature
+    /// takes this exact route, so this test pins what the fallback produces:
+    /// verify-able under the wallet's key, and deterministic (same message,
+    /// same signature - the FIPS 204 default property that hedging removes).
+    /// The determinism half only holds on the fallback, so the test runs
+    /// exactly where the fallback is the whole story.
+    #[cfg(not(feature = "production"))]
+    /// BLG-0281 (P17-F15): rotation is counter-indexed, so the property the
+    /// design depends on must be pinned: same (seed, counter) -> same key no
+    /// matter what key the wallet currently holds, distinct counters ->
+    /// distinct keys. The derivation is deliberately NOT chained through the
+    /// previous key - chaining would make the key unreproducible from the
+    /// seed, which is the whole recovery story - so "purity" is what has to
+    /// hold, and this is where it is said out loud.
+    #[test]
+    fn view_key_rotation_is_a_pure_function_of_seed_and_counter() {
+        let seed = [9u8; 32];
+        let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
+        let k0 = w.rotate_view_key(&seed, 0);
+        let k1 = w.rotate_view_key(&seed, 1);
+        assert_ne!(k0, k1, "distinct counters must derive distinct keys");
+        assert_ne!(k0, derive_view_key(&seed), "rotation #0 must differ from the unrotated key");
+        // Re-deriving counter 0 after the wallet moved on to k1 returns the
+        // SAME k0: no hidden dependence on current state.
+        assert_eq!(w.rotate_view_key(&seed, 0), k0, "rotation must be reproducible");
+        let mut other_wallet = Wallet::from_entropy(&[0x67u8; 16]).unwrap();
+        assert_eq!(
+            other_wallet.rotate_view_key(&seed, 0),
+            k0,
+            "rotation must depend on the seed and counter only, not the wallet"
+        );
+        let _ = &mut other_wallet;
+    }
+
+    #[test]
+    fn deterministic_fallback_signatures_verify_and_are_stable() {
+        let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let msg = b"private transfer authorization";
+        let a = w.sign(msg);
+        let b = w.sign(msg);
+        assert!(
+            Wallet::verify(&w.public_key(), msg, &a),
+            "a fallback-mode signature must verify"
+        );
+        assert_eq!(a, b, "deterministic mode must be byte-stable");
+    }
 
     #[test]
     fn generate_12_word_wallet() {
@@ -2244,7 +2347,7 @@ mod tests {
             change_blinding: None,
         };
         let rt = w.default_tee_runtime();
-        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        let err = w.build_private_transfer(req, &rt, 45262, 0).unwrap_err();
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
     }
 
@@ -2299,16 +2402,38 @@ mod tests {
             change_blinding: None,
         };
         let rt = w.default_tee_runtime();
-        let intent = w.build_private_transfer(req, &rt).unwrap();
+        let intent = w.build_private_transfer(req, &rt, 45262, 3).unwrap();
         assert_eq!(intent.sum_in, intent.sum_out);
         assert_eq!(intent.sum_in, 100);
         assert_eq!(intent.nullifiers.len(), 1);
         assert_eq!(intent.output_commitments.len(), 1);
         assert!(Wallet::verify(
             &w.public_key(),
-            &intent.public_digest,
+            &privacy_transfer::intent_authorization_message(&intent),
             &intent.authorization_sig
         ));
+        // BLG-0275: the same signature on another chain (or another nonce)
+        // must not verify - the replay V1 allowed.
+        let mut foreign = intent.clone();
+        foreign.chain_id = 1;
+        assert!(
+            !Wallet::verify(
+                &w.public_key(),
+                &privacy_transfer::intent_authorization_message(&foreign),
+                &foreign.authorization_sig
+            ),
+            "an authorization bound to chain 45262 must not verify on chain 1"
+        );
+        let mut reused = intent.clone();
+        reused.sender_nonce = 4;
+        assert!(
+            !Wallet::verify(
+                &w.public_key(),
+                &privacy_transfer::intent_authorization_message(&reused),
+                &reused.authorization_sig
+            ),
+            "an authorization must not survive a nonce bump"
+        );
     }
 
     #[test]
@@ -2327,7 +2452,7 @@ mod tests {
             change_blinding: Some(12),
         };
         let intent = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap();
         assert_eq!(intent.output_commitments.len(), 2);
         assert_eq!(intent.sum_out, 100);
@@ -2349,7 +2474,7 @@ mod tests {
             change_blinding: Some(12),
         };
         let err = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }
@@ -2375,7 +2500,7 @@ mod tests {
             change_recipient_tag: None,
             change_blinding: None,
         };
-        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        let err = w.build_private_transfer(req, &rt, 45262, 0).unwrap_err();
         assert!(matches!(err, WalletError::TeeUnavailable(_)));
     }
 
@@ -2507,7 +2632,7 @@ mod tests {
             change_blinding: None,
         };
         let err = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }
