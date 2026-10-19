@@ -135,8 +135,14 @@ fn is_bearer_jwt_like(v: &str) -> bool {
     // compound credential. Kept conservative: only a string of 3 dot-separated
     // base64url segments with a long total, which is a JWT-shaped secret.
     let parts: Vec<&str> = v.split('.').collect();
+    // Real tokens are encoded bytes, so they mix upper case, lower case and
+    // digits. A host name or a dotted identifier does not.
+    let mixed = v.bytes().any(|b| b.is_ascii_uppercase())
+        && v.bytes().any(|b| b.is_ascii_lowercase())
+        && v.bytes().any(|b| b.is_ascii_digit());
     parts.len() == 3
         && v.len() >= 40
+        && mixed
         && parts.iter().all(|p| {
             !p.is_empty()
                 && p.bytes()
@@ -507,6 +513,16 @@ pub fn redact_model_strings(value: &serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotted_names_are_not_token_shaped_but_mixed_tokens_are() {
+        assert!(!is_bearer_jwt_like(
+            "service.long-internal-name.example-hostname-here"
+        ));
+        assert!(is_bearer_jwt_like(
+            "aB3dEfGhIjKlMnOp.qRsTuVwXyZ012345.AbCdEfGhIjKlMnOp"
+        ));
+    }
 
     #[test]
     fn plain_keys_that_contain_a_keyword_are_not_masked() {
