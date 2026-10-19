@@ -1795,7 +1795,8 @@ impl Storage {
         &self,
         cid: &crate::storage::content_id::ContentId,
     ) -> std::io::Result<Vec<u8>> {
-        self.db
+        let bytes = self
+            .db
             .get(Self::content_key(cid).as_bytes())?
             .map(|value| value.to_vec())
             .ok_or_else(|| {
@@ -1803,7 +1804,16 @@ impl Storage {
                     std::io::ErrorKind::NotFound,
                     format!("content {cid} not found"),
                 )
-            })
+            })?;
+        // The row is addressed by its hash; a row that no longer hashes to its
+        // key is damage and must not be served as that content.
+        if &crate::storage::content_id::ContentId::of(&bytes) != cid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("content {cid} does not match its stored bytes"),
+            ));
+        }
+        Ok(bytes)
     }
 }
 
@@ -2077,6 +2087,21 @@ mod tests {
     use crate::core::address::Address;
     use crate::core::block::Block;
     use tempfile::tempdir;
+
+    #[test]
+    fn get_content_refuses_a_row_that_no_longer_hashes_to_its_key() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let cid = crate::storage::content_id::ContentId::of(b"hello");
+        storage.put_content(&cid, b"hello").unwrap();
+        assert_eq!(storage.get_content(&cid).unwrap(), b"hello");
+        storage
+            .db()
+            .insert(Storage::content_key(&cid).as_bytes(), b"tampered")
+            .unwrap();
+        let err = storage.get_content(&cid).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn corrupt_tx_index_row_is_an_error_not_a_miss() {
