@@ -32,7 +32,7 @@ const TOOL_OUTPUT: &str = "budlum-core.cdx.json";
 /// production was cut short and a signature over it would be meaningless.
 pub const MIN_COMPONENTS: usize = 50;
 
-/// Is this document a complete CycloneDX SBOM? The check the provenance
+/// Is this document a complete `CycloneDX` SBOM? The check the provenance
 /// workflow used to run as an inline Python snippet (Z6): the format name is
 /// `CycloneDX`, and `components` is an array of at least [`MIN_COMPONENTS`].
 ///

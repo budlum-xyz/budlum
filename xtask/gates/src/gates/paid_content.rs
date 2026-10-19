@@ -275,6 +275,54 @@ fn declaration_call_count(actor: &Path) -> usize {
         .count()
 }
 
+/// A binding must never be removable.
+fn check_no_unbind(gate_src: &str) -> Result<(), String> {
+    let mut unbind = unbind_lines(gate_src);
+    // A call that rustfmt wrapped (`self.bindings\n    .remove(`) has no
+    // single-line match; the whitespace-free text still shows it.
+    let squeezed: String = gate_src.chars().filter(|c| !c.is_whitespace()).collect();
+    if unbind.is_empty()
+        && ["remove", "clear", "retain"]
+            .iter()
+            .any(|op| squeezed.contains(&format!("bindings.{op}(")))
+    {
+        unbind.push((0, String::from("a wrapped `bindings.<op>(` call")));
+    }
+    if !unbind.is_empty() {
+        let mut msg = String::new();
+        for (nr, line) in &unbind {
+            let _ = writeln!(msg, "{nr}:{line}");
+        }
+        msg.push_str(
+            "FAIL: a binding can be removed: an owner could take payment then free \
+             the bytes",
+        );
+        return Err(msg);
+    }
+    Ok(())
+}
+
+/// Every RPC endpoint that publishes a shard id asks Pollen first.
+fn check_rpc_endpoints(root: &Path) -> Result<(), String> {
+    // A moved file must not skip the step: the file is required.
+    let rpc = root.join("src/rpc/server.rs");
+    let rpc_src = std::fs::read_to_string(&rpc)
+        .map_err(|e| format!("FAIL: cannot read {}: {e}", rpc.display()))?;
+    let unguarded = unguarded_endpoints(&rpc_src);
+    if !unguarded.is_empty() {
+        let mut msg = String::new();
+        for u in &unguarded {
+            let _ = writeln!(msg, "{u}");
+        }
+        msg.push_str(
+            "FAIL: RPC endpoint(s) publish shard ids without asking Pollen: the \
+             handles for fetching paid bytes are served to anyone",
+        );
+        return Err(msg);
+    }
+    Ok(())
+}
+
 /// # Errors
 ///
 /// A fail-open read path, protected content that can be declared public, a
@@ -323,28 +371,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 3. No unbind.
-    let mut unbind = unbind_lines(&gate_src);
-    // A call that rustfmt wrapped (`self.bindings\n    .remove(`) has no
-    // single-line match; the whitespace-free text still shows it.
-    let squeezed: String = gate_src.chars().filter(|c| !c.is_whitespace()).collect();
-    if unbind.is_empty()
-        && ["remove", "clear", "retain"]
-            .iter()
-            .any(|op| squeezed.contains(&format!("bindings.{op}(")))
-    {
-        unbind.push((0, String::from("a wrapped `bindings.<op>(` call")));
-    }
-    if !unbind.is_empty() {
-        let mut msg = String::new();
-        for (nr, line) in &unbind {
-            let _ = writeln!(msg, "{nr}:{line}");
-        }
-        msg.push_str(
-            "FAIL: a binding can be removed: an owner could take payment then free \
-             the bytes",
-        );
-        return Err(msg);
-    }
+    check_no_unbind(&gate_src)?;
 
     // 4. The registry offers the read authorisation and hashes the binding
     //    map into its root.
@@ -376,22 +403,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 6. Every RPC endpoint that publishes a shard id asks Pollen first.
-    // A moved file must not skip the step: the file is required.
-    let rpc = root.join("src/rpc/server.rs");
-    let rpc_src = std::fs::read_to_string(&rpc)
-        .map_err(|e| format!("FAIL: cannot read {}: {e}", rpc.display()))?;
-    let unguarded = unguarded_endpoints(&rpc_src);
-    if !unguarded.is_empty() {
-        let mut msg = String::new();
-        for u in &unguarded {
-            let _ = writeln!(msg, "{u}");
-        }
-        msg.push_str(
-            "FAIL: RPC endpoint(s) publish shard ids without asking Pollen: the \
-             handles for fetching paid bytes are served to anyone",
-        );
-        return Err(msg);
-    }
+    check_rpc_endpoints(root)?;
 
     // 7. The AI runtime cannot reach storage bytes except through Pollen.
     let reach = ai_storage_reach(&root.join("src/ai"));
