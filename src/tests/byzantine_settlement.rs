@@ -442,8 +442,9 @@ mod byzantine_settlement_tests {
 
     #[tokio::test]
     async fn test_parallel_cross_domain_stress_determinism() {
-        use rand::rng;
+        use rand::rngs::StdRng;
         use rand::seq::SliceRandom;
+        use rand::SeedableRng;
 
         let make_node = || {
             let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
@@ -489,7 +490,7 @@ mod byzantine_settlement_tests {
         let mut commitments_a = commitments.clone();
         let mut commitments_b = commitments.clone();
 
-        let mut rng = rng();
+        let mut rng = StdRng::seed_from_u64(7);
         commitments_a.shuffle(&mut rng);
         commitments_b.shuffle(&mut rng);
 
@@ -532,6 +533,10 @@ mod byzantine_settlement_tests {
                 node_a.state.get_nonce(addr),
                 node_b.state.get_nonce(addr),
                 "Determinism failed for account {addr:?}"
+            );
+            assert!(
+                node_a.state.get_nonce(addr) > 0,
+                "claims must have been applied for account {addr:?}"
             );
         }
     }
