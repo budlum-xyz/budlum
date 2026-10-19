@@ -71,7 +71,8 @@ mod tests {
             "config/testnet-genesis.json",
             "config/devnet-genesis.json",
         ] {
-            let raw = std::fs::read_to_string(path)
+            let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+            let raw = std::fs::read_to_string(&full)
                 .unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
             let json: serde_json::Value = serde_json::from_str(&raw)
                 .unwrap_or_else(|error| panic!("{path} is not valid JSON: {error}"));
