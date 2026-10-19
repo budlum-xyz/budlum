@@ -469,6 +469,12 @@ impl AiRegistry {
         // Hardening: when model.require_execution_proof, only verifiers that
         // Already attached a structurally-valid execution proof count toward
         // Agreement - attestation alone cannot finalize execution-class models.
+        // The stored output reference is the earliest one for the agreed
+        // commitment, the same choice `try_finalize_with_proofs` makes.
+        let first_output_ref = entries
+            .iter()
+            .find(|r| r.output_commitment == result.output_commitment)
+            .map_or_else(|| result.output_ref.clone(), |r| r.output_ref.clone());
         let candidates: Vec<(Address, [u8; 32])> = entries
             .iter()
             .filter(|r| r.output_commitment == result.output_commitment)
@@ -496,7 +502,7 @@ impl AiRegistry {
             let outcome = AiInferenceOutcome {
                 request_id: result.request_id,
                 output_commitment: result.output_commitment,
-                output_ref: result.output_ref.clone(),
+                output_ref: first_output_ref,
                 agreeing_verifiers,
                 finalized_at_block: result.submitted_at_block,
                 callback,
