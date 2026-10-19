@@ -334,7 +334,6 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     let mut transform_kind = TransformKind::None;
     let transformed: Vec<u8> = match (codec, class) {
         (FormatCodec::Json, _) => {
-            steps.push(PipeStep::Transform);
             match crate::bud_format_columnar::columnar_encode(
                 data,
                 crate::bud_format_columnar::ColumnarMode::Exact,
@@ -359,7 +358,6 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
         }
         (FormatCodec::Log, _) => match crate::bud_format_logfield::LogFieldColumnar::encode(data) {
             Some(col) => {
-                steps.push(PipeStep::Transform);
                 transform_kind = TransformKind::LogField;
                 col.to_blob()
             }
@@ -368,6 +366,10 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
         _ => data.to_vec(),
     };
     let _ = (codec, class);
+    // The step is recorded only when a transform really ran.
+    if transform_kind != TransformKind::None {
+        steps.push(PipeStep::Transform);
+    }
     // 3) chunk it - FastCDC (content-defined) for binary/arbitrary classes, structural
     //    16KB for the rest. FastCDC: edit-resistant dedup anchors + a lossless join.
     let chunks: Vec<StructuralChunk> = if fcdc {
@@ -795,6 +797,20 @@ mod tests {
         let back = engine_restore_full(&blob, res.transform_kind.to_u8(), true)
             .expect("restore with one rotten data shard");
         assert_eq!(back, bin);
+    }
+
+    #[test]
+    fn the_transform_step_is_recorded_only_when_a_transform_ran() {
+        // A JSON object is not an array of records: no columnar transform.
+        let r = engine_store(br#"{"a":1,"b":[1,2,3]}"#, false, 1).expect("store");
+        assert_eq!(r.transform_kind, TransformKind::None);
+        assert!(!r.steps.contains(&PipeStep::Transform));
+        // Records that columnar restores exactly do record it.
+        let rows = br#"[{"a":1,"b":"x"},{"a":2,"b":"y"},{"a":3,"b":"z"}]"#;
+        let r = engine_store(rows, false, 1).expect("store");
+        if r.transform_kind == TransformKind::Columnar {
+            assert!(r.steps.contains(&PipeStep::Transform));
+        }
     }
 
     #[test]
