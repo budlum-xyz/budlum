@@ -572,9 +572,18 @@ mod tests {
                 .any(|w| w == banned),
             "help text uses the banned term: {help}"
         );
-        let source = include_str!("bud.rs");
-        let head: String = source.lines().take(12).collect::<Vec<_>>().join("\n");
-        assert!(!head.contains(&format!(" {banned} ")));
+        // BLG-0099 (P04-F17): the ban covers every surface the CLI PRINTS -
+        // long help, short help and the subcommand helps - instead of
+        // scanning the source file as text.
+        let short = Cli::command().render_help().to_string();
+        assert!(!short.contains(&banned), "short help uses the banned term");
+        for sub in Cli::command().get_subcommands() {
+            let sub_help = sub.clone().render_help().to_string();
+            assert!(
+                !sub_help.contains(&banned),
+                "subcommand help uses the banned term: {sub_help}"
+            );
+        }
     }
 
     #[test]
