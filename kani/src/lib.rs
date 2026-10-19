@@ -327,9 +327,10 @@ pub const MAX_MIRROR_VALIDATORS: usize = 4;
 /// The sum of at most `MAX_MIRROR_VALIDATORS` values of `u64` cannot overflow
 /// a `u128`, so no saturation is needed or used.
 ///
-/// No test in `budlum-core` compares this copy with the production walk. The
-/// bound `voted <= total` is true for any non-negative terms, so the harness
-/// below also proves the exact selection rule (see its comment).
+/// `bitmap_stake_accounting_matches_the_kani_mirror` in `budlum-core` compares
+/// this copy with the stake `FinalityCert::verify` reports. The bound
+/// `voted <= total` is true for any non-negative terms, so the harness below
+/// also proves the exact selection rule (see its comment).
 #[must_use]
 pub fn bitmap_voted_stake(
     stakes: &[u64; MAX_MIRROR_VALIDATORS],
