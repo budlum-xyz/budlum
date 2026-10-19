@@ -506,9 +506,7 @@ impl QcFaultProof {
             merkle_tree::combine_sha3,
             merkle_tree::promote_sha3,
         )
-        .ok_or_else(|| {
-            "Merkle proof invalid: index has bits above the proof path".to_string()
-        })?;
+        .ok_or_else(|| "Merkle proof invalid: index has bits above the proof path".to_string())?;
         let computed_root = hex::encode(computed);
         if computed_root != merkle_root {
             return Err(format!(

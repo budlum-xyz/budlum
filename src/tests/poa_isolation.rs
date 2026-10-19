@@ -488,7 +488,10 @@ mod poa_compliance_gate {
             .expect("the freeze passes");
         bc.unfreeze_poa_account(12, addr(12), target, [6u8; 32])
             .expect("the unfreeze passes");
-        assert!(!bc.state.poa_compliance.is_frozen(ComplianceDomainKind::PoA, &target));
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &target));
 
         // The governance queue lands through the same verified path.
         bc.state.pending_poa_freezes.push(PendingPoaCompliance {
@@ -498,6 +501,9 @@ mod poa_compliance_gate {
             reason_hash: [7u8; 32],
         });
         assert_eq!(bc.apply_pending_poa_compliance(), 1);
-        assert!(bc.state.poa_compliance.is_frozen(ComplianceDomainKind::PoA, &target));
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &target));
     }
 }

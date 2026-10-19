@@ -114,16 +114,16 @@ fn a_relayed_message_must_be_signed_by_its_declared_sender() {
     let impostor = crate::crypto::primitives::KeyPair::generate().unwrap();
     let mut forged = relayed_message(relayer, 1);
     forged.sign_sender_ed25519(&impostor);
-    let err = bc
-        .submit_relayed_cross_domain_message(forged)
-        .unwrap_err();
+    let err = bc.submit_relayed_cross_domain_message(forged).unwrap_err();
     assert!(err.contains("signer is not the declared sender"), "{err}");
     // A real signature over an id whose body was tampered afterwards: the
     // envelope opens but the id no longer matches the preimage, so the
     // pre-registration attack dies at the id check behind the envelope.
     let mut tampered = signed_relayed_message(&keypair, 1);
     tampered.recipient = addr(0xEF);
-    let err = bc.submit_relayed_cross_domain_message(tampered).unwrap_err();
+    let err = bc
+        .submit_relayed_cross_domain_message(tampered)
+        .unwrap_err();
     assert!(err.contains("preimage"), "{err}");
     assert_eq!(bc.state.message_registry.len(), 0, "nothing registered");
 }
@@ -187,16 +187,16 @@ fn system_bridge_path_bypasses_relayer_gate() {
 
 fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingReport {
     SlashingReport::consensus_double_sign(
-                offender,
-                SlashingProof::DoubleSign {
-                    height: 7,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "bb".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                reporter,
-            )
+        offender,
+        SlashingProof::DoubleSign {
+            height: 7,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        },
+        reporter,
+    )
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn a_provable_report_from_a_stranger_slashes_and_refunds() {
             signature_1: keys.sign(&h1).to_vec(),
             signature_2: keys.sign(&h2).to_vec(),
         },
-                Some(reporter),
+        Some(reporter),
     );
 
     let outcome = bc

@@ -274,8 +274,8 @@ impl TokenomicsParams {
         let ratio = self
             .validator_annual_yield_ratio_fixed
             .min(FIXED_POINT_SCALE);
-        let annual_yield = (u128::from(validator_stake) * u128::from(ratio))
-            / u128::from(FIXED_POINT_SCALE);
+        let annual_yield =
+            (u128::from(validator_stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
         let epochs_per_year = u128::from(self.epochs_per_year.max(1));
         let epoch_yield = annual_yield / epochs_per_year;
         // With the cap, epoch_yield <= validator_stake and fits u64. The

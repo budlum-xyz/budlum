@@ -2155,7 +2155,8 @@ mod tests {
     fn the_poa_gate_state_crosses_the_wire_inside_the_digest() {
         use crate::core::account::AccountState;
         let mut st = AccountState::new();
-        st.poa_onboarding.add_admin(0, crate::core::address::Address::from([1u8; 32]));
+        st.poa_onboarding
+            .add_admin(0, crate::core::address::Address::from([1u8; 32]));
         let mut snapshot = StateSnapshotV2::from_state(
             &st,
             StateSnapshotV2Params {

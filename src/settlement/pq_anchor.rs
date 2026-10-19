@@ -1139,13 +1139,8 @@ mod tests {
         fn certificates_from_the_old_epoch_do_not_rotate_again() {
             let mut cold = cold();
             let certs_old = certs(&cold, 1200, "epoch one compromised");
-            rotate_anchor_key_with_committee(
-                &mut cold,
-                1200,
-                "epoch one compromised",
-                &certs_old,
-            )
-            .expect("first rotation succeeds");
+            rotate_anchor_key_with_committee(&mut cold, 1200, "epoch one compromised", &certs_old)
+                .expect("first rotation succeeds");
             assert_eq!(cold.key_epoch, 2);
             let err = rotate_anchor_key_with_committee(
                 &mut cold,
