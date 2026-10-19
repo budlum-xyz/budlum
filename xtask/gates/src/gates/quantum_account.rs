@@ -28,7 +28,10 @@ fn read(root: &Path, rel: &str) -> Result<String, String> {
 }
 
 fn body_of(src: &str, name: &str) -> Option<String> {
-    let at = src.find(&format!("fn {name}("))?;
+    // `fn name(` or a generic `fn name<F>(`.
+    let at = src
+        .find(&format!("fn {name}("))
+        .or_else(|| src.find(&format!("fn {name}<")))?;
     let open = src[at..].find('{')? + at;
     let mut depth = 0usize;
     let mut out = String::new();
@@ -77,6 +80,8 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .to_string(),
         );
     }
+    // Needles are read from code: comments and strings are blanked first.
+    let acct = super::rust_literals::scrub(&acct);
     let seed = body_of(&acct, "seed_from_entropy").unwrap_or_default();
     if seed.contains("SeedError") && seed.contains("entropy.len()") {
         checked += 1;
@@ -98,14 +103,20 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .to_string(),
         );
     }
-    let calls = reg.matches(".validate_all()").count();
-    if calls >= 2 {
+    // The call has to sit in the insert function and in the replace function,
+    // not just appear twice somewhere (a test or a doc line would do).
+    let reg_code = super::rust_literals::scrub(&reg);
+    let insert = body_of(&reg_code, "register").unwrap_or_default();
+    let replace = body_of(&reg_code, "update")
+        .or_else(|| body_of(&reg_code, "replace"))
+        .unwrap_or_default();
+    if insert.contains(".validate_all()") && replace.contains(".validate_all()") {
         checked += 1;
     } else {
-        problems.push(format!(
-            "`registry.rs` calls `validate_all` {calls} times. Insert and replace each need it: \
-             an account that skips the guard on update can be swapped into a policy that fails \
-             the rules while still holding its address."
+        problems.push(String::from(
+            "`registry.rs` does not call `validate_all` in both the insert (`register`) and the \
+             replace (`update`) function. An account that skips the guard on update can be \
+             swapped into a policy that fails the rules while still holding its address.",
         ));
     }
     if reg.contains("address_from_public_key(&account.pq_public_key)") {
@@ -177,4 +188,16 @@ pub fn self_test() -> Result<String, String> {
         "quantum account canary OK (guarded tree PASSes; an unguarded replace and an \
          undivided address hash each FAIL).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_fn_bodies_are_found() {
+        let src = "impl R {\n    pub fn update<F>(&mut self, f: F) {\n        x.validate_all();\n    }\n    pub fn register(&mut self) {}\n}\n";
+        assert!(body_of(src, "update").unwrap().contains("validate_all"));
+        assert!(!body_of(src, "register").unwrap().contains("validate_all"));
+    }
 }
