@@ -277,6 +277,11 @@ fn byte_index(chars: &[char], idx: usize) -> usize {
     chars[..idx].iter().map(|c| c.len_utf8()).sum()
 }
 
+/// Source with test items, comments and string literals removed: code only.
+pub(crate) fn code_only(src: &str) -> String {
+    strip_noise(&strip_test_mods(src))
+}
+
 /// Blank out string literals, including raw strings, and line comments that
 /// carry doc links. What remains is code.
 fn strip_noise(src: &str) -> String {
