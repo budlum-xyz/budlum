@@ -501,6 +501,7 @@ impl PermissionlessRegistry {
         current_epoch: u64,
     ) {
         let key = (role, account);
+        let unbonding_epochs = self.params.unbonding_epochs;
         match self.registrations.get_mut(&key) {
             Some(reg) => {
                 if matches!(reg.status, MemberStatus::Slashed) {
@@ -511,7 +512,14 @@ impl PermissionlessRegistry {
                     return;
                 }
                 if total_stake == 0 {
-                    self.registrations.remove(&key);
+                    // A full exit keeps the entry under the unbonding lock so a
+                    // later report can still cut it. Removing it would free the
+                    // stake at once.
+                    if matches!(reg.status, MemberStatus::Active) {
+                        reg.status = MemberStatus::Unbonding {
+                            release_epoch: current_epoch.saturating_add(unbonding_epochs),
+                        };
+                    }
                 } else {
                     reg.stake = total_stake;
                 }
@@ -1110,6 +1118,17 @@ mod tests {
         // A smaller total still applies, including a full exit.
         reg.upsert_stake(addr(11), roles::VALIDATOR, 0, 2);
         assert_eq!(reg.get(&addr(11), roles::VALIDATOR).unwrap().stake, 0);
+    }
+
+    #[test]
+    fn upsert_stake_to_zero_keeps_the_entry_under_the_unbonding_lock() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(12), 10_000, 0).unwrap();
+        reg.upsert_stake(addr(12), roles::VALIDATOR, 0, 5);
+        let entry = reg.get(&addr(12), roles::VALIDATOR).expect("entry kept");
+        let release_epoch = 5 + reg.params().unbonding_epochs;
+        assert_eq!(entry.status, MemberStatus::Unbonding { release_epoch });
+        assert!(reg.withdraw(addr(12), roles::VALIDATOR, 5).is_err());
     }
 
     /// BLG-0087 (P04-F05, decision A): Slashed is not a dead end. The member
