@@ -518,20 +518,25 @@ impl SemanticAnalyzer {
             Stmt::If(cond, then_branch, else_branch) => {
                 let cond_ty = self.analyze_expr(cond, env, errors);
                 self.check_condition_type(&cond_ty, "if", errors);
+                // A branch has its own scope, like `for` and `match`: a name
+                // bound inside it is not visible after it.
+                let mut then_env = env.clone();
                 for s in then_branch {
-                    self.analyze_stmt(s, env, errors);
+                    self.analyze_stmt(s, &mut then_env, errors);
                 }
                 if let Some(eb) = else_branch {
+                    let mut else_env = env.clone();
                     for s in eb {
-                        self.analyze_stmt(s, env, errors);
+                        self.analyze_stmt(s, &mut else_env, errors);
                     }
                 }
             }
             Stmt::While(cond, body) => {
                 let cond_ty = self.analyze_expr(cond, env, errors);
                 self.check_condition_type(&cond_ty, "while", errors);
+                let mut body_env = env.clone();
                 for s in body {
-                    self.analyze_stmt(s, env, errors);
+                    self.analyze_stmt(s, &mut body_env, errors);
                 }
             }
             Stmt::For {
