@@ -1586,9 +1586,11 @@ impl StorageRegistry {
                         reason: "SealedGenerated output_len must be non-zero".into(),
                     });
                 }
-                // Public digest must match the sealed fields (no seed).
-                let expect = crate::storage::generated::sealed_generated_commitment(sealed);
-                let _ = expect; // commitment is part of source_commitment_bytes via id
+                // The seed is off chain so the recipe cannot run, but the
+                // public fields still meet the ceilings a public recipe meets.
+                sealed
+                    .check_public_bounds()
+                    .map_err(|reason| StorageError::InvalidManifest { reason })?;
             }
             crate::storage::generated::ContentSource::Hybrid { .. } => {
                 return Err(StorageError::InvalidManifest {
