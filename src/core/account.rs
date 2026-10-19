@@ -1002,7 +1002,7 @@ impl AccountState {
         let total = self
             .validators
             .values()
-            .filter(|v| v.active && !v.slashed)
+            .filter(|v| v.is_eligible(self.epoch_index))
             .fold(0u128, |acc, v| acc + u128::from(v.stake));
         // The supply cap keeps this far below u64::MAX. A tampered state
         // could exceed it: report the largest value instead of wrapping, so
@@ -1013,7 +1013,7 @@ impl AccountState {
         let mut validators: Vec<&Validator> = self
             .validators
             .values()
-            .filter(|v| v.active && !v.slashed)
+            .filter(|v| v.is_eligible(self.epoch_index))
             .collect();
         validators.sort_by_key(|a| a.address);
         validators
@@ -1563,16 +1563,33 @@ impl AccountState {
                 if let Some(validator) = self.validators.get_mut(&report.offender) {
                     let penalty = outcome.as_ref().map(|o| o.penalty).unwrap_or(0);
                     validator.stake = validator.stake.saturating_sub(penalty);
-                    validator.slashed = true;
-                    validator.active = false;
-                    validator.jailed = true;
-                    validator.jail_until = self.epoch_index.saturating_add(7);
-                    tracing::info!(
-                        offender = %report.offender,
-                        penalty,
-                        remaining_stake = validator.stake,
-                        "Validator bond cut and jailed after a slashing report"
-                    );
+                    if report.condition() == crate::registry::SlashingCondition::LivenessFault {
+                        // BLG-0087 (P04-F05, decision A+B): a liveness fault is
+                        // a TIMED jail, not a permanent slash. Writing
+                        // `slashed = true` here made the release impossible -
+                        // every activation predicate requires `!slashed` - and
+                        // the remaining bond stayed locked for good. The jail
+                        // flag with its expiry is the whole penalty.
+                        validator.jailed = true;
+                        validator.jail_until = self.epoch_index.saturating_add(7);
+                        tracing::info!(
+                            offender = %report.offender,
+                            penalty,
+                            jail_until = validator.jail_until,
+                            "Validator jailed for a liveness fault (timed; not slashed)"
+                        );
+                    } else {
+                        validator.slashed = true;
+                        validator.active = false;
+                        validator.jailed = true;
+                        validator.jail_until = self.epoch_index.saturating_add(7);
+                        tracing::info!(
+                            offender = %report.offender,
+                            penalty,
+                            remaining_stake = validator.stake,
+                            "Validator bond cut and jailed after a slashing report"
+                        );
+                    }
                 }
             }
         }
