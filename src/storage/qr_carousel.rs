@@ -88,6 +88,8 @@ pub enum CarouselError {
     BadBlockLen,
     /// Derived or declared `k` is zero or above [`MAX_K`].
     BadK(u16),
+    /// k does not equal ceil(total_len / block_len).
+    InvalidGeometry,
     /// Drop buffer shorter than the header, or body cut off.
     Truncated,
     /// First four bytes were not [`DROP_MAGIC`].
@@ -131,6 +133,9 @@ impl std::fmt::Display for CarouselError {
                 "carousel block_len out of range: zero, or header plus body over one QR frame"
             ),
             Self::BadK(k) => write!(f, "carousel k={k} out of range 1..={MAX_K}"),
+            Self::InvalidGeometry => {
+                write!(f, "carousel k does not match total length and block length")
+            }
             Self::Truncated => write!(f, "carousel drop truncated"),
             Self::BadMagic => write!(f, "carousel drop bad magic"),
             Self::BadVersion(v) => write!(f, "carousel drop unsupported version {v}"),
@@ -163,6 +168,29 @@ pub struct CarouselParams {
 }
 
 impl CarouselParams {
+    // Public struct fields and decoded wire fields pass through the same gate.
+    fn validate(self) -> Result<(), CarouselError> {
+        if self.block_len == 0 || self.block_len > MAX_BLOCK_LEN {
+            return Err(CarouselError::BadBlockLen);
+        }
+        if self.k == 0 || self.k > MAX_K {
+            return Err(CarouselError::BadK(self.k));
+        }
+        if self.total_len == 0 {
+            return Err(CarouselError::Empty);
+        }
+        if self.total_len > MAX_CAROUSEL_BYTES as u32 {
+            return Err(CarouselError::TooLarge {
+                len: self.total_len as usize,
+                max: MAX_CAROUSEL_BYTES,
+            });
+        }
+        if self.total_len.div_ceil(u32::from(self.block_len)) != u32::from(self.k) {
+            return Err(CarouselError::InvalidGeometry);
+        }
+        Ok(())
+    }
+
     /// Derive params from a payload and a chosen block length.
     ///
     /// # Errors
@@ -271,25 +299,12 @@ impl Drop {
         let body = bytes
             .get(DROP_HEADER_LEN..)
             .ok_or(CarouselError::Truncated)?;
-        if block_len == 0 || block_len > MAX_BLOCK_LEN {
-            return Err(CarouselError::BadBlockLen);
-        }
-        if k == 0 || k > MAX_K {
-            return Err(CarouselError::BadK(k));
-        }
-        // `total_len` is the one header field the decoder turns straight into
-        // an allocation (`finish` reserves it). Bound it before it can ask for
-        // gigabytes: an honest carousel never exceeds [`MAX_CAROUSEL_BYTES`],
-        // and an empty payload is refused by the encoder too.
-        if total_len == 0 {
-            return Err(CarouselError::Empty);
-        }
-        if total_len > MAX_CAROUSEL_BYTES as u32 {
-            return Err(CarouselError::TooLarge {
-                len: total_len as usize,
-                max: MAX_CAROUSEL_BYTES,
-            });
-        }
+        let params = CarouselParams {
+            k,
+            block_len,
+            total_len,
+        };
+        params.validate()?;
         if body.len() != usize::from(block_len) {
             return Err(CarouselError::BodyLenMismatch {
                 block_len,
@@ -304,11 +319,7 @@ impl Drop {
         }
         Ok(Self {
             seq,
-            params: CarouselParams {
-                k,
-                block_len,
-                total_len,
-            },
+            params,
             degree,
             body: body.to_vec(),
         })
@@ -569,40 +580,37 @@ impl CarouselDecoder {
     ///
     /// Parameter mismatch across drops.
     pub fn push(&mut self, drop: &Drop) -> Result<(), CarouselError> {
-        // `Drop` fields are public, so a hand-built drop can carry a body of
-        // another length. `xor_into` would then cut the longer one silently.
+        // BLG-0432: validate every caller-supplied field before recording the
+        // stream or allocating decoder state, including hand-built Drops.
+        drop.params.validate()?;
         if drop.body.len() != usize::from(drop.params.block_len) {
             return Err(CarouselError::BodyLenMismatch {
                 block_len: drop.params.block_len,
                 got: drop.body.len(),
             });
         }
+        let k = drop.params.k;
+        let (expected_degree, indices) = if is_systematic_seq(drop.seq, k) {
+            let pos = (drop.seq % (u32::from(k) * 2)) as usize;
+            (1, vec![pos])
+        } else {
+            repair_selection(drop.seq, k)
+        };
+        if drop.degree != expected_degree {
+            return Err(CarouselError::BadDegree {
+                degree: drop.degree,
+                k,
+            });
+        }
         match self.params {
             None => {
-                if drop.params.k == 0 || drop.params.k > MAX_K {
-                    return Err(CarouselError::BadK(drop.params.k));
-                }
                 self.params = Some(drop.params);
-                self.solved = vec![None; usize::from(drop.params.k)];
-                self.pivots = vec![None; usize::from(drop.params.k)];
+                self.solved = vec![None; usize::from(k)];
+                self.pivots = vec![None; usize::from(k)];
             }
             Some(p) if p != drop.params => return Err(CarouselError::ParamMismatch),
             Some(_) => {}
         }
-        let k = drop.params.k;
-        let indices = if drop.degree == 1 && is_systematic_seq(drop.seq, k) {
-            let cycle = u32::from(k).saturating_mul(2).max(1);
-            let pos = (drop.seq % cycle) as usize;
-            vec![pos]
-        } else {
-            let (_d, idxs) = repair_selection(drop.seq, k);
-            // Trust recomputed selection; degree on the wire is advisory after check.
-            if idxs.len() != usize::from(drop.degree) && drop.degree != 1 {
-                // Degree-1 non-systematic should not appear in our encoder; accept
-                // repair selection length as source of truth.
-            }
-            idxs
-        };
 
         // Reduce by already-solved blocks.
         let mut mask = bitset_new(usize::from(k));
@@ -1276,15 +1284,48 @@ mod tests {
             degree: 1,
             body: vec![0u8; 1],
         };
-        dec.push(&drop).unwrap();
-        assert!(dec.is_complete());
         assert_eq!(
-            dec.finish().unwrap_err(),
+            dec.push(&drop).unwrap_err(),
             CarouselError::TooLarge {
                 len: u32::MAX as usize,
                 max: MAX_CAROUSEL_BYTES
             }
         );
+        assert!(
+            dec.params().is_none(),
+            "a refused drop cannot select stream parameters"
+        );
+        assert!(!dec.is_complete());
+    }
+
+    #[test]
+    fn malformed_geometry_and_degree_do_not_poison_the_decoder() {
+        let enc = CarouselEncoder::new(b"ABCDEFGHIJKLMNOPQRSTUVWX", 8).unwrap();
+        let mut bad_geometry = enc.drop_at(0);
+        bad_geometry.params.total_len = 8;
+        assert_eq!(
+            Drop::from_bytes(&bad_geometry.to_bytes()),
+            Err(CarouselError::InvalidGeometry)
+        );
+        let mut dec = CarouselDecoder::new();
+        assert_eq!(dec.push(&bad_geometry), Err(CarouselError::InvalidGeometry));
+        assert!(dec.params().is_none());
+        for seq in [0, 3] {
+            let mut bad_degree = enc.drop_at(seq);
+            bad_degree.degree = if bad_degree.degree == 1 { 2 } else { 1 };
+            assert_eq!(
+                dec.push(&bad_degree),
+                Err(CarouselError::BadDegree {
+                    degree: bad_degree.degree,
+                    k: enc.params().k
+                })
+            );
+            assert!(dec.params().is_none());
+        }
+        for seq in 0..u32::from(enc.params().k) {
+            dec.push(&enc.drop_at(seq)).unwrap();
+        }
+        assert_eq!(dec.finish().unwrap(), b"ABCDEFGHIJKLMNOPQRSTUVWX");
     }
 
     #[test]
