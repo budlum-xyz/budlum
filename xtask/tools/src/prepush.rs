@@ -106,8 +106,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// If `cargo fmt` accepts a broken file.
 pub fn self_test() -> Result<String, String> {
-    let tmp = std::env::temp_dir().join(format!("budlum-prepush-canary-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp = crate::support::make_temp_dir("budlum-prepush-canary")?;
     std::fs::create_dir_all(tmp.join("src")).map_err(|e| format!("canary directory: {e}"))?;
 
     std::fs::write(
@@ -123,9 +122,28 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| format!("canary source: {e}"))?;
 
-    let code = run_capturing_status("cargo", &["fmt", "--", "--check"], &tmp)?;
+    let out = std::process::Command::new("cargo")
+        .args(["fmt", "--", "--check"])
+        .current_dir(&tmp)
+        .output()
+        .map_err(|e| format!("the canary could not run cargo fmt: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
+    let out = out?;
+    let code = out.status.code().unwrap_or(-1);
+    let report = String::from_utf8_lossy(&out.stdout);
+    canary_verdict(code, &report)
+}
 
+/// The canary counts only when rustfmt reports a diff with its findings
+/// code. A missing component or a toolchain error also exits non-zero and
+/// must not read as a refusal.
+fn canary_verdict(code: i32, report: &str) -> Result<String, String> {
+    if code != 0 && (code != 1 || !report.contains("Diff in")) {
+        return Err(format!(
+            "CANARY FAILED: `cargo fmt --check` exited with {code} without reporting a diff; \
+             rustfmt did not look at the file."
+        ));
+    }
     if code == 0 {
         return Err(
             "CANARY FELL: `cargo fmt --check` accepted a deliberately broken file; \
@@ -188,6 +206,14 @@ pub fn ensure_components(root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_reported_diff_counts_as_a_refusal() {
+        assert!(canary_verdict(1, "Diff in main.rs at line 1:").is_ok());
+        assert!(canary_verdict(1, "error: rustfmt is not installed").is_err());
+        assert!(canary_verdict(101, "Diff in x").is_err());
+        assert!(canary_verdict(0, "").is_err());
+    }
 
     #[test]
     fn install_hook_refuses_a_non_git_tree() {
