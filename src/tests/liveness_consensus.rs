@@ -239,10 +239,21 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
         stake_before - expected_penalty,
         "stake must be reduced by the configured liveness ratio"
     );
-    // And the offender is jailed (slash sets Slashed on any offence).
+    // And the offender is in a TIMED jail (BLG-0087, decision B): out of the
+    // active set, not slashed, so the release loop can bring it back.
+    let jailed = bc
+        .state
+        .validators
+        .get(&absentee)
+        .expect("still a validator");
+    assert!(jailed.jailed, "the absentee must be jailed");
     assert!(
-        !bc.state.registry.is_active(&absentee, roles::VALIDATOR),
-        "slashed validator must no longer be active"
+        !jailed.active,
+        "a jailed validator is out of the active set"
+    );
+    assert!(
+        !jailed.slashed,
+        "a liveness fault is a timed jail, not a permanent slash"
     );
 }
 
@@ -428,8 +439,9 @@ fn a_liveness_slash_is_releasable() {
         .expect("a slashed validator stays in the map; that is where the term lives");
 
     assert!(
-        v.slashed,
-        "the absentee is slashed once liveness slashing is enabled"
+        !v.slashed,
+        "a liveness fault is a TIMED jail (BLG-0087, decision B): `slashed` would make \
+         the release loop, which requires `!slashed`, refuse to ever reactivate it"
     );
     assert!(
         v.jailed,

@@ -2764,17 +2764,23 @@ impl AccountState {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
         }
-        {
-            // BLG-0090 (P04-F08): the PoA admission records were consensus gate
-            // state in neither the root nor the snapshot digest - hidden today,
-            // wide open the moment the write path connected. Folded always (the
-            // fold is domain-tagged, so "empty" and "hashes to zero" stay apart).
+        // BLG-0090 (P04-F08): the PoA admission records were consensus gate
+        // state in neither the root nor the snapshot digest - hidden today,
+        // wide open the moment the write path connected. They fold in as soon
+        // as they hold anything (an empty registry leaves the root, and with
+        // it every pinned genesis hash, byte-exact - the convention of the
+        // identity and vault folds above), under a domain tag of their own.
+        let poa_admission_root = self.poa_onboarding.root();
+        if poa_admission_root != crate::registry::poa_onboarding::PoAOnboarding::new().root() {
             final_hasher.update(b"poa_admission_v1");
-            final_hasher.update(self.poa_onboarding.root());
-            // BLG-0091 (P04-F09): the compliance ledger decides whether an
-            // operator's audit export is refused; it is state like any other.
+            final_hasher.update(poa_admission_root);
+        }
+        // BLG-0091 (P04-F09): the compliance ledger decides whether an
+        // operator's audit export is refused; it is state like any other.
+        let poa_compliance_root = self.poa_compliance.root();
+        if poa_compliance_root != crate::registry::PoaComplianceRegistry::new().root() {
             final_hasher.update(b"poa_compliance_v1");
-            final_hasher.update(self.poa_compliance.root());
+            final_hasher.update(poa_compliance_root);
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
