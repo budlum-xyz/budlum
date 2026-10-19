@@ -411,11 +411,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .collect(),
                         authorization_sig: sub.authorization_sig.clone(),
                         public_digest: sub.public_digest.to_vec(),
-                        nullifier_proofs: sub
-                            .nullifier_proofs
-                            .iter()
-                            .map(|p| p.to_vec())
-                            .collect(),
+                        nullifier_proofs: sub.nullifier_proofs.iter().map(|p| p.to_vec()).collect(),
                     },
                 )),
             ),
