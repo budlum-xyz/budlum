@@ -28,6 +28,8 @@ pub enum NftError {
     NotOwner,
     #[error("Duplicate ID")]
     DuplicateId,
+    #[error("Invalid author name")]
+    InvalidName,
     #[error("Invalid tag")]
     InvalidTag,
     #[error("Too many tags")]
