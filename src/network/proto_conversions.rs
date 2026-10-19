@@ -183,6 +183,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::PoaOnboarding(poa_tx) => (
+                pb::ProtoTransactionType::PoaOnboarding as i32,
+                Some(pb::proto_transaction::TypePayload::PoaOnboarding(
+                    pb::ProtoPoaOnboardingTx {
+                        data: bincode::serialize(poa_tx).unwrap_or_default(),
+                    },
+                )),
+            ),
             TransactionType::Vault(vault_tx) => (
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
@@ -1016,6 +1024,16 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 TransactionType::Identity(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid IdentityTx payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::PoaOnboarding => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PoaOnboarding(p)) => p,
+                    _ => return Err("Missing or mismatched PoA onboarding payload".into()),
+                };
+                TransactionType::PoaOnboarding(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid PoA onboarding payload: {e}"))?,
                 )
             }
             pb::ProtoTransactionType::Vault => {
