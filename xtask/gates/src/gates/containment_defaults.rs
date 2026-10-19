@@ -161,9 +161,7 @@ mod tests {
     #[test]
     fn gated_entry_needs_true_in_production_text() {
         assert!(has_gated_entry(
-            "x(bytecode,\n gas_limit, true, ctx)"
-                .replace("x", "execute_bytecode_inner")
-                .as_str()
+            "execute_bytecode_inner(bytecode,\n gas_limit, true, ctx)"
         ));
         assert!(!has_gated_entry(
             "execute_bytecode_inner(bytecode, gas_limit, false, ctx)"

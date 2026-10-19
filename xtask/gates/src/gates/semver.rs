@@ -36,6 +36,7 @@
 //! infrastructure error of this tree (fail-closed, as before), not a
 //! reason to resolve afresh.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -277,9 +278,9 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
     } else {
         msg.push_str(" covering:");
         for f in &uncovered {
-            msg.push_str(&format!("\n  {} ({} item(s))", f.lint, f.items.len()));
+            write!(msg, "\n  {} ({} item(s))", f.lint, f.items.len()).expect("writing to a String cannot fail");
             for item in f.items.iter().take(5) {
-                msg.push_str(&format!("\n    {item}"));
+                write!(msg, "\n    {item}").expect("writing to a String cannot fail");
             }
         }
     }
@@ -568,6 +569,34 @@ fn scratch_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn infra_cases_are_not_masked(tmp: &Path, filled_exc: &Path) -> Result<(), String> {
+    // An infra crash must be rejected even when the exceptions file is full:
+    // a crash says "unknown", not "no breakage". Each case carries a real
+    // breakage line beside it so the infra pattern is what the canary pins.
+    let infra_cases = [
+        "error: could not document `budlum-core`",
+        "error[E0432]: unresolved import",
+        "error: running cargo-metadata failed",
+        "error: failed to build rustdoc",
+        "error: no such command: `semver-checks`",
+        // The two lines the in-tree rustdoc build adds: a lock file that
+        // `--locked` refuses to rewrite, and a JSON file semver-checks
+        // cannot read. Both mean "unknown", never "no breakage".
+        "error: cannot update the lock file /x/Cargo.lock because --locked was passed",
+        "error: failed to load rustdoc from file at `/x/budlum_core.json`",
+    ];
+    for case in infra_cases {
+        let report = format!("{case}\n--- failure struct_missing: pub struct removed\n");
+        if classify_report(&report, filled_exc).is_ok() {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(format!(
+                "self-test: an infrastructure error was masked by an exception: {case}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// # Errors
 ///
 /// Returns the first canary that misbehaves. The canaries mirror the shell
@@ -604,30 +633,7 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // An infra crash must be rejected even when the exceptions file is full:
-    // a crash says "unknown", not "no breakage". Each case carries a real
-    // breakage line beside it so the infra pattern is what the canary pins.
-    let infra_cases = [
-        "error: could not document `budlum-core`",
-        "error[E0432]: unresolved import",
-        "error: running cargo-metadata failed",
-        "error: failed to build rustdoc",
-        "error: no such command: `semver-checks`",
-        // The two lines the in-tree rustdoc build adds: a lock file that
-        // `--locked` refuses to rewrite, and a JSON file semver-checks
-        // cannot read. Both mean "unknown", never "no breakage".
-        "error: cannot update the lock file /x/Cargo.lock because --locked was passed",
-        "error: failed to load rustdoc from file at `/x/budlum_core.json`",
-    ];
-    for case in infra_cases {
-        let report = format!("{case}\n--- failure struct_missing: pub struct removed\n");
-        if classify_report(&report, &filled_exc).is_ok() {
-            let _ = fs::remove_dir_all(&tmp);
-            return Err(format!(
-                "self-test: an infrastructure error was masked by an exception: {case}"
-            ));
-        }
-    }
+    infra_cases_are_not_masked(&tmp, &filled_exc)?;
 
     // Unrecognised output: neither a breakage report nor a known crash, so
     // fail-closed.

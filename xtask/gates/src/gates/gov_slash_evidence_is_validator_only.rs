@@ -22,6 +22,36 @@ fn collect(root: &Path) -> Result<String, String> {
     std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))
 }
 
+/// Blank a nested block comment starting at `pos`, keeping the newlines.
+///
+/// Rust block comments nest (`/* outer /* inner */ tail */`); a flat scan
+/// stops at the first `*/` and leaves the tail looking like live code
+/// (CWE-697). Track depth instead.
+fn blank_block_comment(bytes: &[u8], pos: &mut usize, out: &mut String) {
+    out.push(' ');
+    out.push(' ');
+    *pos += 2;
+    let mut depth = 1usize;
+    while *pos < bytes.len() && depth > 0 {
+        if bytes[*pos..].starts_with(b"/*") {
+            depth += 1;
+            out.push(' ');
+            out.push(' ');
+            *pos += 2;
+            continue;
+        }
+        if bytes[*pos..].starts_with(b"*/") {
+            depth -= 1;
+            out.push(' ');
+            out.push(' ');
+            *pos += 2;
+            continue;
+        }
+        out.push(if bytes[*pos] == b'\n' { '\n' } else { ' ' });
+        *pos += 1;
+    }
+}
+
 /// Strip Rust comments, ordinary strings and raw strings (preserving line
 /// structure) so dead text cannot satisfy the gate (CWE-697).
 fn strip_rust_noise(src: &str) -> String {
@@ -37,31 +67,7 @@ fn strip_rust_noise(src: &str) -> String {
             continue;
         }
         if bytes[pos..].starts_with(b"/*") {
-            // Rust block comments nest (`/* outer /* inner */ tail */`); a
-            // flat scan stops at the first `*/` and leaves the tail looking
-            // like live code. Track depth instead (CWE-697).
-            out.push(' ');
-            out.push(' ');
-            pos += 2;
-            let mut depth = 1usize;
-            while pos < bytes.len() && depth > 0 {
-                if bytes[pos..].starts_with(b"/*") {
-                    depth += 1;
-                    out.push(' ');
-                    out.push(' ');
-                    pos += 2;
-                    continue;
-                }
-                if bytes[pos..].starts_with(b"*/") {
-                    depth -= 1;
-                    out.push(' ');
-                    out.push(' ');
-                    pos += 2;
-                    continue;
-                }
-                out.push(if bytes[pos] == b'\n' { '\n' } else { ' ' });
-                pos += 1;
-            }
+            blank_block_comment(bytes, &mut pos, &mut out);
             continue;
         }
         if bytes[pos] == b'r' || bytes[pos] == b'b' {
