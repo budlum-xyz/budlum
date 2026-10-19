@@ -441,7 +441,7 @@ pub fn trace_matrix(
             values[row_start + COL_CHAIN_ID] =
                 Goldilocks::new(public_inputs.chain_id & 0xFFFF_FFFF);
         }
-        // Event_digest accumulator: 8 × u32 limbs, initialised to 0
+        // Event_digest accumulator: 8 x u32 limbs, initialised to 0
         // On the first row, then updated on every Log row by
         // `prev + (val mod 2^32)` per limb (additive accumulator).
         // The first limb tracks the current event; remaining limbs
@@ -762,7 +762,7 @@ pub fn trace_matrix(
                 Some([step.src2_val, bud_vm::DOMAIN_NULLIFIER, 0, 0, 0, 0, 0, 0])
             }
             bud_isa::Opcode::VerifyInference if !step.inference_is_expand => {
-                // Kademe 3a: state = [model_c, input_c, 0..0]; the AIR binds
+                // Stage 3a: state = [model_c, input_c, 0..0]; the AIR binds
                 // the resulting poseidon_out to rd via the equality
                 // constraint (rd = 1 iff output_c == Poseidon(model_c,
                 // input_c)). Expansion rows take the default None branch
@@ -810,7 +810,7 @@ pub fn trace_matrix(
             _ => None,
         };
 
-        // Kademe 3a: poseidon_out must be visible outside the gadget block:
+        // Stage 3a: poseidon_out must be visible outside the gadget block:
         // the VerifyInference equality witness below runs on EVERY
         // VerifyInference row (including expansion rows, where the gadget
         // block itself is skipped and poseidon_out stays zero).
@@ -859,7 +859,7 @@ pub fn trace_matrix(
                     }
                     s = next;
                 } else {
-                    // Final round output = MDS row 0 · sbox (matches AIR / poseidon4_hash_state).
+                    // Final round output = MDS row 0 * sbox (matches AIR / poseidon4_hash_state).
                     let mut sum: u128 = 0;
                     for j in 0..8 {
                         sum = (sum + mds[0][j] as u128 * sbox[j] as u128) % P as u128;
@@ -916,7 +916,7 @@ pub fn trace_matrix(
             }
         }
 
-        // VerifyInference (kademe 3a): equality witness for
+        // VerifyInference (stage 3a): equality witness for
         // (Poseidon(model, input) - claimed_output). Same field-subtraction
         // discipline as NullifierCheck: the AIR computes the difference
         // in Goldilocks, so the inverse witness must be the inverse of
@@ -1160,7 +1160,7 @@ pub fn trace_matrix(
             values[row_start + COL_STACK_PTR] =
                 Goldilocks::new(trace[n_cpu - 1].stack_pointer as u64);
             // Carry event_digest (and other accumulators) into
-            // Padding so the active→padding transition does not zero them.
+            // Padding so the active->padding transition does not zero them.
             let last_start = (n_cpu - 1) * TRACE_WIDTH;
             for j in 0..8 {
                 values[row_start + COL_EVENT_DIGEST_0 + j] =
@@ -4976,7 +4976,7 @@ mod tests {
     /// width is a remote kill switch on any node that accepts proofs, reached
     /// by flipping bytes rather than by producing anything valid.
     ///
-    /// The envelope carries a separate `degree_bits` that the L1 bounds against
+    /// The envelope carries a separate `degree_bits` that the caller bounds against
     /// `MAX_DEGREE_BITS`. This is the other one, inside the serialized proof,
     /// and nothing compared them. The test drives the crate's own entry point
     /// so it covers every caller rather than the one that remembered to check.
@@ -5876,10 +5876,10 @@ mod tests {
     #[test]
     fn proves_all_comparisons() {
         let program = vec![
-            inst(Opcode::Lt, 1, 2, 3, 0),  // 5 < 10 → 1
-            inst(Opcode::Gt, 2, 2, 3, 0),  // 5 > 10 → 0
-            inst(Opcode::Lte, 3, 2, 3, 0), // 5 <= 10 → 1
-            inst(Opcode::Gte, 4, 2, 3, 0), // 5 >= 10 → 0
+            inst(Opcode::Lt, 1, 2, 3, 0),  // 5 < 10 -> 1
+            inst(Opcode::Gt, 2, 2, 3, 0),  // 5 > 10 -> 0
+            inst(Opcode::Lte, 3, 2, 3, 0), // 5 <= 10 -> 1
+            inst(Opcode::Gte, 4, 2, 3, 0), // 5 >= 10 -> 0
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         prove_and_verify(program, |vm| {
@@ -9776,7 +9776,7 @@ mod tests {
         // Round index from row 6 (round 5) so we have two rows
         // Claiming round=5. The AIR's round transition
         // `nxt_round - cur_round - 1 = 0` is then violated on the
-        // 4→5 transition.
+        // 4->5 transition.
         let row_5 = (1 + 5) * TRACE_WIDTH;
         let row_6 = (1 + 6) * TRACE_WIDTH;
         matrix.values[row_5 + COL_VM_MERKLE_ROUND] = matrix.values[row_6 + COL_VM_MERKLE_ROUND];
@@ -9835,7 +9835,7 @@ mod tests {
     ///
     /// Commit 3.5 target: valid 64-depth path. Partial fixes landed in
     /// (pre-round currents, single-round hash align, original-only
-    /// Root check, expand gas). Still ignored until full prove is green.
+    /// Root check, expand gas). The test below is not ignored.
     /// Diagnostic: check expansion Poseidon chain + leaf bind on matrix
     /// Without running the full STARK (isolates witness vs AIR constraint bugs).
     #[test]
@@ -10049,7 +10049,7 @@ mod tests {
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(1024);
-        let key: u64 = 2; // binary 10 → bit0=0, bit1=1
+        let key: u64 = 2; // binary 10 -> bit0=0, bit1=1
         let siblings: [u64; 64] = {
             let mut arr = [0u64; 64];
             arr[0] = 10;
@@ -10722,7 +10722,7 @@ mod tests {
                 vm.registers[3] = 10;
             },
             |trace| {
-                // 5 < 10 → should be 1. Tamper to 0.
+                // 5 < 10 -> should be 1. Tamper to 0.
                 trace[0].dst_val = 0;
             },
         );
@@ -10869,7 +10869,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_verify_merkle_with_incorrect_root() {
+    fn proves_verify_merkle_returning_zero_for_an_incorrect_root() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
             inst(Opcode::Halt, 0, 0, 0, 0),
@@ -10952,7 +10952,7 @@ mod tests {
     #[test]
     fn rejects_verify_inference_row_with_zero_selector() {
         // Program: load some values, run VerifyInference, then Halt. The
-        // proof window at address 42 is all zeros, so the kademe 3a chain
+        // proof window at address 42 is all zeros, so the stage 3a chain
         // (output_c == Poseidon(model_c, input_c)) does not hold: rd = 0.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 42),
