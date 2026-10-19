@@ -526,7 +526,10 @@ mod tests {
             dup.verify_no_duplicate_guardians(),
             Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key")
         );
-        assert!(dup.validate_all().is_err(), "a padded guardian list must die at validation");
+        assert!(
+            dup.validate_all().is_err(),
+            "a padded guardian list must die at validation"
+        );
         let clean = account(vec![a, b]);
         assert!(clean.validate_all().is_ok());
         let mut corrupt_root = clean.clone();
@@ -559,11 +562,22 @@ mod tests {
             on_test.digest(),
             "chain id must enter the recovery digest"
         );
-        assert_eq!(on_main.digest(), on_main.digest(), "digest is a pure function");
-        assert_eq!(on_main.chain_id, 45_262, "the proposal carries its chain binding");
+        assert_eq!(
+            on_main.digest(),
+            on_main.digest(),
+            "digest is a pure function"
+        );
+        assert_eq!(
+            on_main.chain_id, 45_262,
+            "the proposal carries its chain binding"
+        );
         let mut later_nonce = on_main.clone();
         later_nonce.account_nonce = 1;
-        assert_ne!(on_main.digest(), later_nonce.digest(), "account nonce is signed");
+        assert_ne!(
+            on_main.digest(),
+            later_nonce.digest(),
+            "account nonce is signed"
+        );
         assert_ne!(
             GuardianVote::signed_message(&on_main.digest()),
             GuardianVote::signed_message(&later_nonce.digest()),
@@ -768,13 +782,15 @@ mod tests {
         // a vote record that names this proposal but carries someone else's signature
         let mut forged = honest[1].clone();
         forged.signature = honest[0].signature;
-        assert!(BftGuardianFinality::finalize(
-            vec![honest[0].clone(), forged],
-            &guardians,
-            2,
-            &proposal
-        )
-        .is_err());
+        assert!(
+            BftGuardianFinality::finalize(
+                vec![honest[0].clone(), forged],
+                &guardians,
+                2,
+                &proposal
+            )
+            .is_err()
+        );
         // one honest vote is below the threshold of two
         assert!(
             BftGuardianFinality::finalize(honest[..1].to_vec(), &guardians, 2, &proposal).is_err()

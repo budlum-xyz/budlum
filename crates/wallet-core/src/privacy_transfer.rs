@@ -120,7 +120,12 @@ pub fn authorization_message(
 #[must_use]
 pub fn intent_authorization_message(intent: &PrivateTransferIntent) -> [u8; 32] {
     let digest = public_digest(&intent.nullifiers, &intent.output_commitments);
-    authorization_message(intent.chain_id, &intent.sender, intent.sender_nonce, &digest)
+    authorization_message(
+        intent.chain_id,
+        &intent.sender,
+        intent.sender_nonce,
+        &digest,
+    )
 }
 
 /// Build parameters for a simple 1-in → 1-out (+ optional change) transfer.
