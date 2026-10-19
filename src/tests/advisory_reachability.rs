@@ -350,9 +350,37 @@ mod tests {
             "the lru waiver names a version other than the locked {locked}; \
              re-read the advisory against the new version before re-scoping it"
         );
+        let until = entry
+            .split("effectiveUntil = ")
+            .nth(1)
+            .expect("the lru waiver must carry an expiry");
+        let mut parts = until
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|p| !p.is_empty())
+            .take(3)
+            .map(|p| p.parse::<i64>().expect("date part"));
+        let year = parts.next().expect("year");
+        let month = parts.next().expect("month");
+        let day = parts.next().expect("day");
+        // Days since 1970-01-01 for a proleptic Gregorian date.
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let mp = (month + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let expiry_days = era * 146_097 + doe - 719_468;
+        let now_days = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs()
+                / 86_400,
+        )
+        .expect("days fit");
         assert!(
-            entry.contains("effectiveUntil = "),
-            "the lru waiver must carry an expiry"
+            now_days < expiry_days,
+            "the lru waiver has expired; re-read the advisory before renewing it"
         );
         assert!(
             !osv.lines().any(|l| {
