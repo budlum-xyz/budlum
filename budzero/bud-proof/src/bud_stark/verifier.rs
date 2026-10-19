@@ -387,6 +387,15 @@ where
         }
     }
 
+    // Whether the LogUp aux trace must exist is decided by the program shape
+    // (the AIR has preprocessed program columns), never by the proof. A proof
+    // that drops its aux commitment would otherwise skip every LogUp guarded
+    // constraint, including the Program CTL that binds executed instructions
+    // to the committed program.
+    if preprocessed_width > 0 && commitments.aux_trace.is_none() {
+        return Err(VerificationError::InvalidProofShape);
+    }
+
     let has_aux_trace = commitments.aux_trace.is_some();
     // P15-F01: the proof must not choose to run without the aux trace. An AIR
     // whose constraints depend on it (BudAir: register, memory and program
