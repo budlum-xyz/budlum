@@ -5359,6 +5359,11 @@ impl BudlumApiServer for RpcServer {
 
         let current_block = self.chain.get_height().await;
         let mut registry = crate::pollen::MarketplaceRegistry::new();
+        for policy in self.chain.pollen_get_encryption_policies().await {
+            registry
+                .set_encryption_policy(policy)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        }
         registry
             .register_data_asset(asset)
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
