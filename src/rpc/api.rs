@@ -339,6 +339,9 @@ pub trait BudlumApi {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        // BLG-0116 (P05-F09): the burner declares the Ethereum destination
+        // at burn time.
+        recipient_eth: [u8; 20],
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_unlockBridgeTransfer")]

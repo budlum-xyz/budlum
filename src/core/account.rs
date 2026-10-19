@@ -729,7 +729,7 @@ impl AccountState {
     /// `upsert_stake` takes the new TOTAL stake, so the total is the existing
     /// Active bond plus `amount`. Every check runs before the balance debit, so
     /// a refused bond cannot consume funds.
-    fn bond_role(
+    fn bond_independent_role(
         &mut self,
         address: &Address,
         role: crate::registry::role::RoleId,
@@ -791,7 +791,7 @@ impl AccountState {
         address: &Address,
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
-        self.bond_role(address, crate::registry::role::roles::RELAYER, amount)
+        self.bond_independent_role(address, crate::registry::role::roles::RELAYER, amount)
     }
 
     /// Bond `amount` into the Prover role. Unlike the relayer role, prover
@@ -802,7 +802,7 @@ impl AccountState {
         address: &Address,
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
-        self.bond_role(address, crate::registry::role::roles::PROVER, amount)
+        self.bond_independent_role(address, crate::registry::role::roles::PROVER, amount)
     }
 
     /// Bond `amount` into the STORAGE_OPERATOR role (permissionless).
@@ -812,7 +812,7 @@ impl AccountState {
         address: &Address,
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
-        self.bond_role(
+        self.bond_independent_role(
             address,
             crate::registry::role::roles::STORAGE_OPERATOR,
             amount,

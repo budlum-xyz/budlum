@@ -291,8 +291,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
         // Register the burn message
         if let Some(ref message) = event.message {
             if let Err(e) = self.messages.insert(message.clone()) {
-                self.bridge
-                    .unwind_burn(message_id, BridgeStatus::Minted { domain });
+                self.bridge.unwind_burn(
+                    &message_id,
+                    crate::cross_domain::bridge::BridgeStatus::Minted { domain },
+                );
                 return Err(PipelineError::MessageRegistry(e));
             }
 

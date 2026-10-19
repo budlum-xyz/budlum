@@ -118,9 +118,7 @@ impl std::error::Error for PoaComplianceError {}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PoaComplianceRegistry {
-    #[serde(with = "crate::core::map_keys")]
     screenings: BTreeMap<Address, ScreeningRecord>,
-    #[serde(with = "crate::core::map_keys")]
     freezes: BTreeMap<Address, FreezeRecord>,
     #[serde(with = "crate::core::map_keys")]
     travel_rules: BTreeMap<[u8; 32], TravelRuleRecord>,

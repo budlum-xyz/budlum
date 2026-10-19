@@ -426,6 +426,7 @@ impl BridgeState {
             },
             source_event_hash: event.leaf_hash(),
             expiry_height,
+            recipient_eth: None,
         };
 
         self.asset_locations.insert(

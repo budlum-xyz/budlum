@@ -68,6 +68,7 @@ impl std::fmt::Display for RlpError {
             RlpError::InvalidLengthPrefix => write!(f, "rlp: invalid length prefix"),
             RlpError::NonCanonical => write!(f, "rlp: non-canonical encoding"),
             RlpError::TrailingBytes => write!(f, "rlp: trailing bytes after item"),
+            RlpError::TooManyItems => write!(f, "rlp: too many items"),
             RlpError::NestingTooDeep => write!(f, "rlp: nesting too deep"),
         }
     }
@@ -153,11 +154,11 @@ pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
 
 /// Decodes one item from `input[consumed..]`, returning the item and the
 /// remaining bytes.
-fn decode_at(
-    input: &[u8],
+fn decode_at<'a>(
+    input: &'a [u8],
     depth: usize,
     budget: &mut usize,
-) -> Result<(Item, &[u8]), RlpError> {
+) -> Result<(Item, &'a [u8]), RlpError> {
     if depth > MAX_DEPTH {
         return Err(RlpError::NestingTooDeep);
     }
@@ -204,7 +205,7 @@ fn decode_at(
     if first <= 0xf7 {
         let len = (first - 0xc0) as usize;
         let payload = take_exact(&input[1..], len)?;
-        let items = decode_list_items(payload, depth)?;
+        let items = decode_list_items(payload, depth, budget)?;
         return Ok((Item::List(items), &input[1 + len..]));
     }
     // Rule 5: a long list, 0xf8 through 0xff.
@@ -212,7 +213,7 @@ fn decode_at(
     let len = decode_length_value(&input[1..], len_of_len)?;
     let payload_start = 1 + len_of_len;
     let payload = take_exact(&input[payload_start..], len)?;
-    let items = decode_list_items(payload, depth)?;
+    let items = decode_list_items(payload, depth, budget)?;
     Ok((Item::List(items), &input[payload_start + len..]))
 }
 
@@ -249,7 +250,11 @@ fn take_exact(input: &[u8], n: usize) -> Result<&[u8], RlpError> {
 
 /// Decodes a list payload by splitting it into items, one after another, all of
 /// which must be consumed.
-fn decode_list_items(payload: &[u8], depth: usize) -> Result<Vec<Item>, RlpError> {
+fn decode_list_items(
+    payload: &[u8],
+    depth: usize,
+    budget: &mut usize,
+) -> Result<Vec<Item>, RlpError> {
     let mut items = Vec::new();
     let mut rest = payload;
     while !rest.is_empty() {
