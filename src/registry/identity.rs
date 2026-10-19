@@ -1542,6 +1542,7 @@ mod tests {
     fn a_root_reads_back_its_own_fields_or_dies() {
         let (mut credential, _) = credential();
         let root = credential.root();
+        let original_id = credential_id(&credential);
         credential.fields[1].commitment = hash_fields_bytes(&[b"edited-after-sealing"]);
         assert_ne!(
             credential.root(),
@@ -1570,7 +1571,6 @@ mod tests {
                 100,
             )
             .unwrap();
-        let good = credential_id(&credential);
         // `credential` here has an edited field; issue stores its (edited)
         // root, and the original root's id is unknown, not "wrong": the
         // refusal an auditor sees is UnknownCredential, because a credential
@@ -1588,7 +1588,7 @@ mod tests {
         // BLG-0099 (P04-F17): the result is the point - the edited
         // credential's id is unknown, and the refusal says so.
         assert!(matches!(
-            registry.is_credential_valid(&good, 500),
+            registry.is_credential_valid(&original_id, 500),
             Err(IdentityError::UnknownCredential)
         ));
     }
@@ -2069,7 +2069,7 @@ mod tests {
     fn a_second_issue_keeps_the_first_credential_valid() {
         let mut registry = IdentityRegistry::new();
         let issuer = issuer_record();
-        let issuer_id = issuer.subject;
+        let subject_id = subject_record().subject;
         registry
             .apply(
                 &ConsensusKind::PoA,
@@ -2088,7 +2088,9 @@ mod tests {
             .unwrap();
         let (first, _) = credential();
         let mut second = first.clone();
-        second.schema = "kycc-plus-v1".to_string();
+        // The id is H(root | issuer | issued_at) and the root folds the field
+        // commitments only, so the second credential differs in a field.
+        second.fields[0].commitment = hash_fields_bytes(&[b"a-different-legal-name"]);
         let first_id = credential_id(&first);
         let second_id = credential_id(&second);
         assert_ne!(first_id, second_id);
@@ -2102,7 +2104,7 @@ mod tests {
                 150,
             )
             .unwrap();
-        let root_after_first = registry.record(&issuer_id).unwrap().credential_root;
+        let root_after_first = registry.record(&subject_id).unwrap().credential_root;
         registry
             .apply(
                 &ConsensusKind::PoA,
@@ -2112,7 +2114,7 @@ mod tests {
                 150,
             )
             .unwrap();
-        let record = registry.record(&issuer_id).unwrap();
+        let record = registry.record(&subject_id).unwrap();
         let root_after_second = record.credential_root;
         assert_ne!(
             root_after_first, root_after_second,

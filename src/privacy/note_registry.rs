@@ -628,8 +628,8 @@ mod tests {
         r.prune_spent_nullifiers(1);
 
         assert_eq!(r.spent_nullifier_count(), 2);
-        assert!(r.is_nullifier_spent(&h(10)));
-        assert!(r.is_nullifier_spent(&h(11)));
+        assert!(r.is_nullifier_spent(&n1));
+        assert!(r.is_nullifier_spent(&n2));
         assert_eq!(r.state_root(), root_before);
     }
 }

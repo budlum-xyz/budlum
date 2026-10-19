@@ -1121,6 +1121,13 @@ mod relay_outcomes {
 
     #[async_trait::async_trait]
     impl ChainAdapter for ConsistentAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }
@@ -1268,6 +1275,13 @@ mod relay_outcomes {
 
     #[async_trait::async_trait]
     impl ChainAdapter for CountingAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }

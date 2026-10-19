@@ -1327,8 +1327,8 @@ mod tests {
         );
         assert_eq!(reg.slashing_history()[0].penalty, 0);
         assert!(
-            !reg.is_active_relayer(&a),
-            "the member still moves into the Slashed status"
+            reg.is_active_relayer(&a),
+            "a liveness fault is a timed jail, not a registry Slashed (BLG-0087, decision B)"
         );
     }
 
@@ -1497,7 +1497,7 @@ mod tests {
         let at = src
             .find("pub fn slash_from_report(")
             .expect("slash_from_report must still exist");
-        let body = &src[at..(at + 2400).min(src.len())];
+        let body = &src[at..(at + 4000).min(src.len())];
 
         assert!(
             body.contains("tracing::warn!"),

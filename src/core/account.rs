@@ -2763,6 +2763,8 @@ impl AccountState {
         if !self.invalid_votes.is_empty() {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
+        }
+        {
             // BLG-0090 (P04-F08): the PoA admission records were consensus gate
             // state in neither the root nor the snapshot digest - hidden today,
             // wide open the moment the write path connected. Folded always (the
@@ -3794,10 +3796,13 @@ mod tests {
         assert!(st
             .registry
             .is_active(&who, crate::registry::role::roles::ATTESTER));
-        // A role outside the family is refused by name.
+        // A role outside the family is refused by name (funded, so the
+        // refusal cannot be the stake check).
+        let other = Address::from([6u8; 32]);
+        st.add_balance(&other, 1_000_000);
         let err = st
             .bond_role(
-                &Address::from([6u8; 32]),
+                &other,
                 crate::registry::role::roles::VALIDATOR,
                 crate::registry::MIN_REGISTRATION_STAKE,
             )

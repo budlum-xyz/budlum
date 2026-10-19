@@ -25,6 +25,29 @@ use bincode::Options;
 /// attacker would want.
 const MAX_RECEIPT_PROOF_BYTES: u64 = 4 * 1024;
 
+/// Test adapters have no external anchor to give, so the default
+/// `verify_observation` (BLG-0129) refuses them. This is the self-check they
+/// stand in with: decode the proof and verify it against the root the result
+/// itself carries. Valid for a stub only - it proves the result is
+/// self-consistent, nothing about the external chain.
+#[cfg(test)]
+pub(crate) fn self_checked_observation<A: ChainAdapter + ?Sized>(
+    adapter: &A,
+    result: &RelayerExternalResult,
+) -> Result<(), AdapterError> {
+    let proof: MerkleProof = bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_RECEIPT_PROOF_BYTES)
+        .deserialize(&result.receipt_proof)
+        .map_err(|e| {
+            AdapterError::ProofVerificationFailed(format!(
+                "adapter returned a receipt proof that does not decode within \
+                 {MAX_RECEIPT_PROOF_BYTES} bytes: {e}"
+            ))
+        })?;
+    adapter.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)
+}
+
 /// Errors from chain adapter operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {

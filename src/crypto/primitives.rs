@@ -1153,13 +1153,17 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
         }
         _ => {
             let exe = std::env::current_exe().expect("test binary path");
+            // `--exact` matches the full test path, which includes the module
+            // (without the crate name). A bare function name matches nothing,
+            // and a probe that runs nothing prints nothing - the red-green
+            // canary below is what notices that.
+            let test_path = format!(
+                "{}::keypair_generate_does_not_leak_public_key_via_println",
+                module_path!().split_once("::").map_or("", |(_, rest)| rest)
+            );
             let run_probe = |mode: &str| {
                 std::process::Command::new(&exe)
-                    .args([
-                        "keypair_generate_does_not_leak_public_key_via_println",
-                        "--exact",
-                        "--nocapture",
-                    ])
+                    .args([test_path.as_str(), "--exact", "--nocapture"])
                     .env("BUDLUM_STDOUT_PROBE", mode)
                     .output()
                     .expect("spawn probe")
@@ -1172,11 +1176,7 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
             // Canary: the same detector must see hex that IS printed.
             let canary = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
             let out = std::process::Command::new(&exe)
-                .args([
-                    "keypair_generate_does_not_leak_public_key_via_println",
-                    "--exact",
-                    "--nocapture",
-                ])
+                .args([test_path.as_str(), "--exact", "--nocapture"])
                 .env("BUDLUM_STDOUT_PROBE", "canary")
                 .env("BUDLUM_STDOUT_CANARY", canary)
                 .output()
