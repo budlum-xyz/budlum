@@ -60,7 +60,15 @@ use std::path::{Path, PathBuf};
 const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates/wallet-core"];
 
 /// Types whose byte length is not fixed, so concatenation is ambiguous.
-const VARIABLE_TYPES: &[&str] = &["Vec<u8>", "String", "BoundedBytes", "Vec<String>"];
+const VARIABLE_TYPES: &[&str] = &[
+    "Vec<u8>",
+    "String",
+    "BoundedBytes",
+    "Vec<String>",
+    "Option<Vec<u8>>",
+    "Vec<Vec<u8>>",
+    "Bytes",
+];
 
 /// Method calls that convert a field to bytes rather than naming a new field.
 /// `self.block_hash.as_bytes()` ends in `as_bytes`, and taking the last path
@@ -265,6 +273,8 @@ fn parse_fields(src: &str) -> (BTreeSet<String>, BTreeMap<String, Vec<String>>) 
                 continue;
             }
             if let Some(rest) = stripped.strip_prefix("pub") {
+                // `pub(crate) name: T` is a field too.
+                let rest = rest.strip_prefix("(crate)").unwrap_or(rest);
                 if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
                     doc.clear();
                     continue;
@@ -827,5 +837,18 @@ mod scan_root_tests {
                 "scan root `{root}` is not a directory of the repository"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod type_tests {
+    use super::*;
+
+    #[test]
+    fn wider_types_and_crate_fields_are_variable_length() {
+        let src = "pub struct S {\n    pub a: Option<Vec<u8>>,\n    pub(crate) b: Vec<Vec<u8>>,\n    pub c: Bytes,\n    pub d: u64,\n}\n";
+        let (variable, _) = parse_fields(src);
+        assert!(variable.contains("a") && variable.contains("b") && variable.contains("c"));
+        assert!(!variable.contains("d"));
     }
 }
