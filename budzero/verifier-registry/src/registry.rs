@@ -6,7 +6,7 @@
 //!
 //! ## Invariants
 //! - The ONLY gate is meeting [`MIN_REGISTRATION_STAKE`]. No whitelist.
-//! - Slashing one role automatically jails **all** other roles held by the
+//! - Slashing one role automatically cuts **all** other roles held by the
 //!   Same address (cross-role slashing).
 //! - Evidence-gated slashing: only consensus-verified reports are acted on.
 //! - Deterministic `state_root` for snapshot/consensus commitment.
@@ -417,7 +417,11 @@ impl VerifierRegistry {
         match self.registrations.get_mut(&key) {
             Some(reg) => {
                 if matches!(reg.status, MemberStatus::Slashed) {
-                    reg.stake = total_stake;
+                    // BLG-0253 (P16-F10): a slashed entry may only shrink.
+                    // Writing the caller's uncut total back undid the slash
+                    // on the next mirrored Stake/Unstake, which made the
+                    // "terminal" status below even less coherent.
+                    reg.stake = reg.stake.min(total_stake);
                     return;
                 }
                 if total_stake == 0 {
@@ -546,10 +550,20 @@ impl VerifierRegistry {
 
         let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
-        reg.status = MemberStatus::Slashed;
+        // BLG-0253 (P16-F10, mirroring the node's twin at
+        // src/registry/permissionless.rs, BLG-0087 decision B): Slashed had
+        // no exit at all - a 1% liveness cut froze the remaining stake
+        // forever, because begin_unbonding required Active and withdraw
+        // required Unbonding. A liveness fault is a timed event: cut the
+        // stake, keep the entry Active so it can leave with the remainder
+        // after the node's epoch clock has served the jail. DoubleSign and
+        // MaliciousBehaviour stay terminal.
+        if condition != SlashingCondition::LivenessFault {
+            reg.status = MemberStatus::Slashed;
+        }
         let remaining_stake = reg.stake;
 
-        self.slash_cross_role(account, role, slash_ratio_fixed);
+        self.slash_cross_role(account, role, condition, slash_ratio_fixed);
 
         Ok(SlashOutcome {
             condition,
@@ -558,7 +572,13 @@ impl VerifierRegistry {
         })
     }
 
-    fn slash_cross_role(&mut self, account: Address, primary_role: RoleId, slash_ratio_fixed: u64) {
+    fn slash_cross_role(
+        &mut self,
+        account: Address,
+        primary_role: RoleId,
+        condition: SlashingCondition,
+        slash_ratio_fixed: u64,
+    ) {
         let other_keys: Vec<RoleId> = self
             .registrations
             .keys()
@@ -578,7 +598,12 @@ impl VerifierRegistry {
                 }
                 let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
                 reg.stake = reg.stake.saturating_sub(penalty);
-                reg.status = MemberStatus::Slashed;
+                // BLG-0253: the liveness exemption applies to the sweep
+                // too - a cross-role jail over an unrelated role would lock
+                // that role's bond with no exit, the exact defect just fixed.
+                if condition != SlashingCondition::LivenessFault {
+                    reg.status = MemberStatus::Slashed;
+                }
             }
         }
     }
@@ -1092,6 +1117,62 @@ mod tests {
         assert!(!reg.is_active_attester(&account));
     }
 
+    /// BLG-0253 (P16-F10): a liveness fault is a timed cut with an exit;
+    /// the remaining stake must be withdrawable after the unbonding window.
+    #[test]
+    fn liveness_fault_leaves_an_exit_for_the_remainder() {
+        let account = addr(51);
+        let mut reg = VerifierRegistry::new();
+        reg.register_validator(account, 10_000, 0).unwrap();
+        let one_percent = FIXED_POINT_SCALE / 100;
+        let outcome = reg
+            .slash(account, roles::VALIDATOR, SlashingCondition::LivenessFault, one_percent)
+            .expect("a live registration can be slashed for liveness");
+        assert_eq!(outcome.penalty, 100, "1% of 10_000");
+        assert!(
+            reg.is_active(&account, roles::VALIDATOR),
+            "a timed jail must not make the entry terminal in the registry"
+        );
+        let release = reg
+            .begin_unbonding(account, roles::VALIDATOR, 4)
+            .expect("the remainder may exit through the normal unbonding path");
+        let got = reg
+            .withdraw(account, roles::VALIDATOR, release)
+            .expect("withdraw after the window");
+        assert_eq!(got, 9_900, "the cut is the penalty; the rest comes back");
+        assert!(reg.get(&account, roles::VALIDATOR).is_none());
+    }
+
+    /// The terminal classes stay terminal, with the exit refused.
+    #[test]
+    fn double_sign_slash_still_locks_the_remainder_out() {
+        let account = addr(52);
+        let mut reg = VerifierRegistry::new();
+        reg.register_validator(account, 10_000, 0).unwrap();
+        reg.slash(account, roles::VALIDATOR, SlashingCondition::DoubleSign, FIXED_POINT_SCALE / 2)
+            .unwrap();
+        let exit = reg.begin_unbonding(account, roles::VALIDATOR, 9);
+        assert!(
+            matches!(exit, Err(RegistryError::NotActive { .. })),
+            "a terminal slash must not open the exit, got {exit:?}"
+        );
+    }
+
+    /// BLG-0253: the mirror may only shrink a slashed entry.
+    #[test]
+    fn upsert_cannot_undraw_a_slash() {
+        let account = addr(53);
+        let mut reg = VerifierRegistry::new();
+        reg.register_validator(account, 10_000, 0).unwrap();
+        reg.slash(account, roles::VALIDATOR, SlashingCondition::DoubleSign, FIXED_POINT_SCALE / 2)
+            .unwrap();
+        reg.upsert_stake(account, roles::VALIDATOR, 10_000, 3);
+        let after = reg.get(&account, roles::VALIDATOR).unwrap();
+        assert_eq!(after.stake, 5_000, "the slash survives the mirror");
+        reg.upsert_stake(account, roles::VALIDATOR, 4_000, 4);
+        assert_eq!(reg.get(&account, roles::VALIDATOR).unwrap().stake, 4_000, "shrinks may follow");
+    }
+
     #[test]
     fn malicious_slash_burns_entire_bond() {
         let mut reg = VerifierRegistry::new();
@@ -1155,7 +1236,23 @@ mod tests {
 
         let result = reg.slash_from_report(&report).unwrap();
         assert!(result.is_some());
-        assert!(!reg.is_active_master_verifier(&addr(11)));
+        // BLG-0253 (P16-F10, decision mirrored from the node's BLG-0087):
+        // a liveness report is a timed cut, not a terminal status. The
+        // penalty stands and the entry stays Active so the remainder can
+        // leave through the unbonding path; the record is the slash.
+        let outcome = result.expect("an actionable report slashes");
+        assert!(outcome.penalty > 0, "the liveness cut is real");
+        assert_eq!(
+            outcome.remaining_stake,
+            10_000 - outcome.penalty,
+            "the cut lands on the stake"
+        );
+        assert!(
+            reg.is_active_master_verifier(&addr(11)),
+            "a liveness fault must not terminalize the registration"
+        );
+        let hist = reg.slashing_history_for(&addr(11));
+        assert_eq!(hist.len(), 1, "the slash itself is recorded");
     }
 
     /// The slashing history stops at the cap: the newest are kept, the oldest dropped.
