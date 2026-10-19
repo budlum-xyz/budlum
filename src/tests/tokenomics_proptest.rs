@@ -199,4 +199,44 @@ mod tests {
             );
         }
     }
+
+    proptest! {
+        /// BLG-0080 (P03-F23) + BLG-0077 (P03-F20): parameter sweep the old
+        /// tests never did. The burn can never exceed the money it comes
+        /// from, whatever ratio a hand-built parameter set carries — the
+        /// ratios are capped inside the formula, not only at genesis.
+        #[test]
+        fn metabolic_burn_never_exceeds_the_fee(
+            fee in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+        ) {
+            let mut params = TokenomicsParams::default();
+            params.tx_fee_burn_ratio_fixed = ratio;
+            assert!(params.metabolic_burn(fee) <= fee);
+        }
+
+        #[test]
+        fn annual_burn_never_exceeds_the_reserve(
+            reserve in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+        ) {
+            let mut params = TokenomicsParams::default();
+            params.burn_reserve = reserve;
+            params.annual_burn_ratio_fixed = ratio;
+            assert!(params.annual_burn_amount() <= reserve);
+        }
+
+        /// The epoch reward can never exceed the stake it is paid on.
+        #[test]
+        fn epoch_reward_never_exceeds_the_stake(
+            stake in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+            epochs in 0u64..=1_000_000u64,
+        ) {
+            let mut params = TokenomicsParams::default();
+            params.validator_annual_yield_ratio_fixed = ratio;
+            params.epochs_per_year = epochs;
+            assert!(params.calculate_epoch_reward(stake) <= stake);
+        }
+    }
 }
