@@ -113,6 +113,7 @@ pub fn open_deal_escrowed(
         )
         .map_err(|e| format!("open_deal failed: {e:?}"))?;
 
+    state.storage_registry.set_deal_payer(deal_id, payer);
     debit_escrow(state, &payer, &operator, &escrow)?;
     Ok(deal_id)
 }
@@ -208,6 +209,9 @@ pub fn accept_reallocation_escrowed(
         )
         .map_err(|e| format!("accept_reallocation_ticket failed: {e:?}"))?;
 
+    state
+        .storage_registry
+        .set_deal_payer(replacement_deal_id, payer);
     debit_escrow(state, &payer, &operator, &escrow)?;
     Ok(replacement_deal_id)
 }

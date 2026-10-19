@@ -308,6 +308,11 @@ pub struct StorageDeal {
     pub deal_start_epoch: u64,
     pub deal_end_epoch: u64,
     pub status: DealStatus,
+    /// Account that escrowed the fee at open. The unearned part of the fee
+    /// goes back to it when the content is pruned. `None` for deals written
+    /// before the field existed, which refund nothing.
+    #[serde(default)]
+    pub payer: Option<Address>,
 }
 
 impl StorageDeal {
@@ -2117,6 +2122,7 @@ impl StorageRegistry {
             merkle_proof,
             storage_root,
             merkle_depth: 64,
+            payer: None,
         };
 
         self.deals.insert(deal_id, deal);
@@ -3975,6 +3981,36 @@ impl StorageRegistry {
             .collect()
     }
 
+    /// Record who escrowed the fee of `deal_id`. Called once, right after the
+    /// deal opens.
+    pub fn set_deal_payer(&mut self, deal_id: u64, payer: Address) {
+        if let Some(deal) = self.deals.get_mut(&deal_id) {
+            deal.payer = Some(payer);
+        }
+    }
+
+    /// The unearned fee `prune_content` would leave stranded, per payer: for
+    /// every active deal of the manifest, the fee of the epochs that have not
+    /// completed at `now_epoch`. Read before the prune, while the deals are
+    /// still active. Deals without a recorded payer refund nothing.
+    pub fn prune_fee_refunds(
+        &self,
+        manifest_id: &ContentId,
+        now_epoch: u64,
+    ) -> Vec<(Address, u64)> {
+        self.deals_for_manifest(manifest_id)
+            .iter()
+            .filter(|d| d.is_active())
+            .filter_map(|d| {
+                let payer = d.payer?;
+                let elapsed = now_epoch.saturating_sub(d.deal_start_epoch);
+                let remaining = d.duration_epochs().saturating_sub(elapsed);
+                let refund = d.total_fee(remaining);
+                (refund > 0).then_some((payer, refund))
+            })
+            .collect()
+    }
+
     /// Every deal in id order, without collecting.
     pub fn deals_iter(&self) -> impl Iterator<Item = &StorageDeal> {
         self.deals.values()
@@ -4263,25 +4299,40 @@ impl StorageRegistry {
 /// Audit logs and the (future) `GlobalBlockHeader.storage_root` aggregation
 /// (vision §8.4).
 pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
-    hash_fields_bytes(&[
+    let status = [match deal.status {
+        DealStatus::Active => 0,
+        DealStatus::Slashed => 1,
+        DealStatus::Expired => 2,
+    }];
+    let deal_id = deal.deal_id.to_le_bytes();
+    let domain_id = deal.domain_id.to_le_bytes();
+    let bond = deal.economics.operator_bond.to_le_bytes();
+    let fee_rate = deal.economics.fee_per_byte_epoch.to_le_bytes();
+    let shard_bytes = deal.shard_bytes.to_le_bytes();
+    let replica = [deal.replica_index];
+    let start = deal.deal_start_epoch.to_le_bytes();
+    let end = deal.deal_end_epoch.to_le_bytes();
+    let mut fields: Vec<&[u8]> = vec![
         b"BDLM_STORAGE_DEAL_V1",
-        &deal.deal_id.to_le_bytes(),
-        &deal.domain_id.to_le_bytes(),
+        &deal_id,
+        &domain_id,
         &deal.manifest_id.0,
         &deal.shard_id.0,
         deal.operator.as_bytes(),
-        &deal.economics.operator_bond.to_le_bytes(),
-        &deal.economics.fee_per_byte_epoch.to_le_bytes(),
-        &deal.shard_bytes.to_le_bytes(),
-        &[deal.replica_index],
-        &deal.deal_start_epoch.to_le_bytes(),
-        &deal.deal_end_epoch.to_le_bytes(),
-        &[match deal.status {
-            DealStatus::Active => 0,
-            DealStatus::Slashed => 1,
-            DealStatus::Expired => 2,
-        }],
-    ])
+        &bond,
+        &fee_rate,
+        &shard_bytes,
+        &replica,
+        &start,
+        &end,
+        &status,
+    ];
+    // The payer is committed only when set, so a deal without one keeps the
+    // leaf it always had.
+    if let Some(payer) = deal.payer.as_ref() {
+        fields.push(payer.as_bytes());
+    }
+    hash_fields_bytes(&fields)
 }
 
 #[cfg(test)]
@@ -5537,6 +5588,7 @@ mod tests {
             merkle_proof: None,
             storage_root: None,
             merkle_depth: 64,
+            payer: None,
         };
         let before = storage_deal_leaf_hash(&a);
         a.shard_bytes = 1_048_576;
@@ -6957,6 +7009,27 @@ mod tests {
 
         reg.prune_content(&manifest_id, 151);
         assert_eq!(reg.dictionaries.reference_count(&dict), Some(0));
+    }
+
+    #[test]
+    fn prune_fee_refund_covers_only_the_unserved_epochs() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let payer = Address::from([0x55u8; 32]);
+        // No payer recorded: nothing to refund.
+        assert!(reg.prune_fee_refunds(&m.manifest_id, 150).is_empty());
+        reg.set_deal_payer(deal_id, payer);
+        let deal = reg.get_deal(deal_id).unwrap().clone();
+        let refunds = reg.prune_fee_refunds(&m.manifest_id, 150);
+        let expected = deal.total_fee(50);
+        if expected == 0 {
+            assert!(refunds.is_empty());
+        } else {
+            assert_eq!(refunds, vec![(payer, expected)]);
+        }
+        // Past the end of the term: nothing left to refund.
+        assert!(reg.prune_fee_refunds(&m.manifest_id, 250).is_empty());
     }
 
     #[test]
@@ -8742,6 +8815,7 @@ mod demand_driven_replication_tests {
                 merkle_proof: None,
                 storage_root: None,
                 merkle_depth: 64,
+                payer: None,
             };
             self.deals.insert(deal_id, deal);
             self.deals_by_shard
