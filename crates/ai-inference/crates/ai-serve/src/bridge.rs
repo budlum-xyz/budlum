@@ -155,6 +155,17 @@ impl Bridge {
         {
             return Err(StartupRefusal::NoPerTokenWeights);
         }
+        let mut seen = std::collections::BTreeSet::new();
+        if !shards.iter().all(|s| seen.insert(s.content_id)) {
+            return Err(StartupRefusal::NotReadyOnDevice(String::from(
+                "two shards carry the same content id",
+            )));
+        }
+        if semantics.weight_bits == 0 || semantics.context_tokens == 0 {
+            return Err(StartupRefusal::NotReadyOnDevice(String::from(
+                "the semantic profile has a zero weight width or context length",
+            )));
+        }
 
         // 3. Prompt, determinism and residency. This is the composite check:
         //    it verifies the prompt the model will be given, refuses a device
@@ -423,6 +434,37 @@ mod tests {
             matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("do not fit")),
             "expected a device refusal before any chain error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn duplicate_shard_ids_and_zero_semantics_are_refused() {
+        let mut dup = shards();
+        dup[1].content_id = dup[0].content_id;
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &dup,
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("duplicate shard ids");
+        assert!(matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("same")));
+
+        let mut zero = semantics();
+        zero.weight_bits = 0;
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &shards(),
+            roomy(),
+            zero,
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("zero weight width");
+        assert!(matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("zero")));
     }
 
     /// Attribution is checked first, before anything expensive.
