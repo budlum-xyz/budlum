@@ -184,45 +184,6 @@ fn key_material_in(enum_body: &str) -> Vec<String> {
     found
 }
 
-/// Is the test present as a real `#[test] fn`, allowing attributes between
-/// the marker and the name?
-fn test_is_present(locks: &str, name: &str) -> bool {
-    let needle = "#[test]";
-    let mut i = 0;
-    while let Some(rel) = locks[i..].find(needle) {
-        let mut j = i + rel + needle.len();
-        loop {
-            while j < locks.len() && locks.as_bytes()[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if locks[j..].starts_with("#[") {
-                if let Some(end) = locks[j..].find(']') {
-                    j += end + 1;
-                    continue;
-                }
-            }
-            break;
-        }
-        if locks[j..].starts_with("fn") {
-            let mut k = j + 2;
-            while k < locks.len() && locks.as_bytes()[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if locks[k..].starts_with(name) {
-                let mut m = k + name.len();
-                while m < locks.len() && locks.as_bytes()[m].is_ascii_whitespace() {
-                    m += 1;
-                }
-                if locks[m..].starts_with('(') {
-                    return true;
-                }
-            }
-        }
-        i = j;
-    }
-    false
-}
-
 /// One group of checks: how many it contributed and what it found.
 struct Checks {
     checked: usize,
@@ -445,7 +406,7 @@ fn check_tests(locks: &str) -> Checks {
     let checked = 1;
     let mut problems = Vec::new();
     for test in REQUIRED_TESTS {
-        if !test_is_present(locks, test) {
+        if !super::capability_modules_are_wired::test_is_live(locks, test) {
             problems.push(format!(
                 "required regression test `{test}` is missing or is not a `#[test]`."
             ));
@@ -669,7 +630,7 @@ fn write_fixture(
     }
     let mut locks = String::new();
     for n in names {
-        let _ = writeln!(locks, "#[test]\nfn {n}() {{}}\n");
+        let _ = writeln!(locks, "#[test]\nfn {n}() {{ assert!(true); }}\n");
     }
 
     std::fs::write(root.join(MANIFEST), manifest_src)
