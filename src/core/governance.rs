@@ -67,7 +67,9 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         ProposalType::SlashValidator { .. }
         | ProposalType::WhitelistVerifier { .. }
         | ProposalType::DewhitelistVerifier { .. }
-        | ProposalType::PoaRemoveAdmin { .. } => GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS,
+        | ProposalType::PoaRemoveAdmin { .. }
+        | ProposalType::FreezePoaAccount { .. }
+        | ProposalType::UnfreezePoaAccount { .. } => GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS,
     }
 }
 
@@ -252,6 +254,24 @@ pub enum ProposalType {
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
+    },
+    /// Freeze an account on a PoA domain's compliance ledger (BLG-0091 /
+    /// P04-F09). Replaces the bare `bool` authority: the vote IS the
+    /// authority, the named admin is the audit trail, and the domain kind
+    /// is read from the domain record at application.
+    FreezePoaAccount {
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
+    },
+    /// The reverse of [`Self::FreezePoaAccount`] (BLG-0091): a freeze with
+    /// no unfreeze is a life sentence handed out by a compliance screen.
+    UnfreezePoaAccount {
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
     },
 }
 
@@ -735,7 +755,9 @@ impl GovernanceState {
                 | ProposalType::ParameterUpdate(_, _)
                 | ProposalType::VerifyHubApp { .. }
                 | ProposalType::PoaAddAdmin { .. }
-                | ProposalType::PoaRemoveAdmin { .. } => None,
+                | ProposalType::PoaRemoveAdmin { .. }
+                | ProposalType::FreezePoaAccount { .. }
+                | ProposalType::UnfreezePoaAccount { .. } => None,
             };
             if let Some(a) = action {
                 proposal.status = ProposalStatus::Executed;
@@ -775,6 +797,24 @@ pub enum GovernanceAction {
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
+    },
+    /// Freeze an account on a PoA domain's compliance ledger (BLG-0091 /
+    /// P04-F09). Replaces the bare `bool` authority: the vote IS the
+    /// authority, the named admin is the audit trail, and the domain kind
+    /// is read from the domain record at application.
+    FreezePoaAccount {
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
+    },
+    /// The reverse of [`Self::FreezePoaAccount`] (BLG-0091): a freeze with
+    /// no unfreeze is a life sentence handed out by a compliance screen.
+    UnfreezePoaAccount {
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
     },
 }
 

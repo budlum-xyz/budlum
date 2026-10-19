@@ -333,13 +333,14 @@ mod poa_compliance_gate {
             .expect("the domain registers");
 
         let err = bc
-            .freeze_poa_account(7, true, addr(0x42), [9u8; 32])
+            .freeze_poa_account(7, addr(7), addr(0x42), [9u8; 32])
             .expect_err("freezing in a permissionless domain must be refused");
         assert!(
             err.contains("Poa") || err.contains("PoA") || err.contains("Permissionless"),
             "the reason must state that the domain is permissionless, got: {err}"
         );
         assert!(!bc
+            .state
             .poa_compliance
             .is_frozen(ComplianceDomainKind::PoA, &addr(0x42)));
     }
@@ -351,9 +352,10 @@ mod poa_compliance_gate {
         bc.register_consensus_domain(poa_domain(8))
             .expect("the domain registers");
 
-        bc.freeze_poa_account(8, false, addr(0x43), [9u8; 32])
+        bc.freeze_poa_account(8, addr(0x43), addr(0x43), [9u8; 32])
             .expect_err("an unauthorized freeze must be refused");
         assert!(!bc
+            .state
             .poa_compliance
             .is_frozen(ComplianceDomainKind::PoA, &addr(0x43)));
     }
@@ -365,9 +367,10 @@ mod poa_compliance_gate {
         bc.register_consensus_domain(poa_domain(9))
             .expect("the domain registers");
 
-        bc.freeze_poa_account(9, true, addr(0x44), [0u8; 32])
+        bc.freeze_poa_account(9, addr(9), addr(0x44), [0u8; 32])
             .expect_err("a zero reason digest must be refused");
         assert!(!bc
+            .state
             .poa_compliance
             .is_frozen(ComplianceDomainKind::PoA, &addr(0x44)));
     }
@@ -377,7 +380,7 @@ mod poa_compliance_gate {
     fn an_unknown_domain_cannot_be_frozen() {
         let mut bc = chain();
         let err = bc
-            .freeze_poa_account(4242, true, addr(0x45), [9u8; 32])
+            .freeze_poa_account(4242, addr(1), addr(0x45), [9u8; 32])
             .expect_err("an unknown domain must be refused");
         assert!(err.contains("unknown domain"), "{err}");
     }
@@ -438,7 +441,7 @@ mod poa_compliance_gate {
             .expect("with no freeze the packet must pass");
 
         // Operator dondurulur.
-        bc.freeze_poa_account(11, true, operator, [8u8; 32])
+        bc.freeze_poa_account(11, operator, operator, [8u8; 32])
             .expect("yetkili dondurma");
 
         let err = bc
@@ -458,15 +461,43 @@ mod poa_compliance_gate {
             .expect("the domain registers");
         let target = addr(0x46);
 
-        bc.freeze_poa_account(10, true, target, [7u8; 32])
+        bc.freeze_poa_account(10, addr(10), target, [7u8; 32])
             .expect("an authorised freeze must pass");
 
         assert!(bc
+            .state
             .poa_compliance
             .is_frozen(ComplianceDomainKind::PoA, &target));
         assert!(
-            !bc.poa_compliance.audit_events().is_empty(),
+            !bc.state.poa_compliance.audit_events().is_empty(),
             "the freeze must enter the audit trail"
         );
+    }
+
+    /// BLG-0091 (P04-F09): the unfreeze exists and clears the gate, and a
+    /// governance-queued request is applied through the same verified path.
+    #[test]
+    fn an_unfreeze_clears_the_gate_and_the_queue_applies() {
+        use crate::core::account::PendingPoaCompliance;
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(12))
+            .expect("the domain registers");
+        let target = addr(0x47);
+
+        bc.freeze_poa_account(12, addr(12), target, [5u8; 32])
+            .expect("the freeze passes");
+        bc.unfreeze_poa_account(12, addr(12), target, [6u8; 32])
+            .expect("the unfreeze passes");
+        assert!(!bc.state.poa_compliance.is_frozen(ComplianceDomainKind::PoA, &target));
+
+        // The governance queue lands through the same verified path.
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: 12,
+            admin: addr(12),
+            target,
+            reason_hash: [7u8; 32],
+        });
+        assert_eq!(bc.apply_pending_poa_compliance(), 1);
+        assert!(bc.state.poa_compliance.is_frozen(ComplianceDomainKind::PoA, &target));
     }
 }

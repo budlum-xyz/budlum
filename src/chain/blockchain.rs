@@ -130,7 +130,7 @@ pub struct Blockchain {
     /// It is meaningful only for `ConsensusKind::PoA` domains; a freeze call on a
     /// permissionless domain is rejected (`ensure_poa`). The ledger does not only
     /// keep records, it establishes a real gate through `ensure_not_frozen`.
-    pub poa_compliance: crate::registry::PoaComplianceRegistry,
+
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
@@ -957,7 +957,6 @@ impl Blockchain {
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
             sovereign_registry: crate::domain::SovereignDomainRegistry::new(),
-            poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
@@ -1151,6 +1150,7 @@ impl Blockchain {
                 "AuditExportBundle names a template that is not registered".to_string()
             })?;
         if self
+            .state
             .poa_compliance
             .is_frozen(crate::registry::ComplianceDomainKind::PoA, &operator)
         {
@@ -1162,23 +1162,62 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Freeze an address in a PoA domain.
+    /// Freeze an address in a PoA domain (BLG-0091 / P04-F09).
     ///
-    /// Freezing may only be done in permissioned (PoA) domains and only by an
-    /// authorized administrator; both are verified inside
-    /// `PoaComplianceRegistry`. The reason digest cannot be zero - a freeze
-    /// without evidence makes the record unauditable.
+    /// Freezing may only be done in permissioned (PoA) domains and only on a
+    /// NAMED admin's authority - the bare `bool` that anybody could pass is
+    /// gone. The admin must be an admin of the domain in the admission
+    /// registry, or the domain's registered operator when the domain has no
+    /// admins yet. The reason digest cannot be zero - a freeze without
+    /// evidence makes the record unauditable.
     ///
     /// # Errors
     ///
     /// Returns an error if the domain is not registered, is not PoA, if the
-    /// administrator is unauthorized, or if the reason digest is zero.
+    /// named admin holds no authority on it, or if the reason digest is zero.
     pub fn freeze_poa_account(
         &mut self,
         domain_id: u32,
-        admin_authorized: bool,
+        admin: crate::core::address::Address,
         address: crate::core::address::Address,
         reason_hash: [u8; 32],
+    ) -> Result<(), String> {
+        self.apply_poa_compliance_request(
+            domain_id,
+            admin,
+            address,
+            reason_hash,
+            false,
+        )
+    }
+
+    /// BLG-0091 (P04-F09): the reverse of [`Self::freeze_poa_account`],
+    /// with the same authority rules.
+    pub fn unfreeze_poa_account(
+        &mut self,
+        domain_id: u32,
+        admin: crate::core::address::Address,
+        address: crate::core::address::Address,
+        reason_hash: [u8; 32],
+    ) -> Result<(), String> {
+        self.apply_poa_compliance_request(
+            domain_id,
+            admin,
+            address,
+            reason_hash,
+            true,
+        )
+    }
+
+    /// Shared body of the freeze/unfreeze pair: domain kind from the record,
+    /// named admin verified, ledger write in consensus state.
+    fn apply_poa_compliance_request(
+        &mut self,
+        domain_id: u32,
+        admin: crate::core::address::Address,
+        address: crate::core::address::Address,
+        reason_hash: [u8; 32],
+        unfreeze: bool,
     ) -> Result<(), String> {
         let domain = self
             .domain_registry
@@ -1191,15 +1230,61 @@ impl Blockchain {
         } else {
             crate::registry::ComplianceDomainKind::Permissionless
         };
-        self.poa_compliance
-            .freeze_suspicious(
-                kind,
-                admin_authorized,
-                address,
-                reason_hash,
-                self.chain.len() as u64,
-            )
-            .map_err(|e| format!("{e:?}"))
+        // The named admin must actually hold authority on this domain: an
+        // admin in the admission registry, or the registered operator while
+        // the domain has no admins yet.
+        let admin_is_admin = self
+            .state
+            .poa_onboarding
+            .registry()
+            .is_admin(domain_id, &admin);
+        let admin_is_operator = domain.operator == Some(admin);
+        if !admin_is_admin && !admin_is_operator {
+            return Err(format!(
+                "admin {} holds no authority on domain {domain_id}",
+                admin.to_hex()
+            ));
+        }
+        let height = self.chain.len() as u64;
+        let result = if unfreeze {
+            self.state
+                .poa_compliance
+                .unfreeze(kind, admin, address, reason_hash, height)
+        } else {
+            self.state
+                .poa_compliance
+                .freeze_suspicious(kind, admin, address, reason_hash, height)
+        };
+        result.map_err(|e| format!("{e:?}"))
+    }
+
+    /// Apply the governance-queued PoA compliance requests (BLG-0091),
+    /// mirroring `apply_pending_domain_unfreezes`: the queue is drained at
+    /// block close and each request runs the same verification path as the
+    /// direct API.
+    pub fn apply_pending_poa_compliance(&mut self) -> usize {
+        let freezes = self.state.pending_poa_freezes.clone();
+        let unfreezes = self.state.pending_poa_unfreezes.clone();
+        self.state.pending_poa_freezes.clear();
+        self.state.pending_poa_unfreezes.clear();
+        let mut applied = 0;
+        for req in freezes {
+            if self
+                .freeze_poa_account(req.domain_id, req.admin, req.target, req.reason_hash)
+                .is_ok()
+            {
+                applied += 1;
+            }
+        }
+        for req in unfreezes {
+            if self
+                .unfreeze_poa_account(req.domain_id, req.admin, req.target, req.reason_hash)
+                .is_ok()
+            {
+                applied += 1;
+            }
+        }
+        applied
     }
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
@@ -5050,6 +5135,7 @@ impl Blockchain {
         self.state = committed_state;
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
+        let _compliance = self.apply_pending_poa_compliance();
         self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
@@ -5365,6 +5451,7 @@ impl Blockchain {
         self.state = commit_state;
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
+        let _compliance = self.apply_pending_poa_compliance();
         self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
@@ -7368,7 +7455,6 @@ impl Clone for Blockchain {
             max_pending_certs: self.max_pending_certs,
             domain_registry: self.domain_registry.clone(),
             sovereign_registry: self.sovereign_registry.clone(),
-            poa_compliance: self.poa_compliance.clone(),
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),

@@ -30,7 +30,7 @@
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComplianceDomainKind {
@@ -49,6 +49,7 @@ pub enum ScreeningStatus {
 pub enum ComplianceAction {
     ScreeningUpdated,
     AccountFrozen,
+    AccountUnfrozen,
     TravelRuleMetadataRecorded,
 }
 
@@ -81,6 +82,10 @@ pub struct ComplianceAuditEvent {
     pub address: Address,
     pub block: u64,
     pub evidence_hash: [u8; 32],
+    /// BLG-0091 (P04-F09): the admin whose authority the caller stood on.
+    /// `#[serde(default)]` keeps old serialized logs readable.
+    #[serde(default)]
+    pub admin: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,8 +118,10 @@ impl std::error::Error for PoaComplianceError {}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PoaComplianceRegistry {
-    screenings: HashMap<Address, ScreeningRecord>,
-    freezes: HashMap<Address, FreezeRecord>,
+    #[serde(with = "crate::core::map_keys")]
+    screenings: BTreeMap<Address, ScreeningRecord>,
+    #[serde(with = "crate::core::map_keys")]
+    freezes: BTreeMap<Address, FreezeRecord>,
     #[serde(with = "crate::core::map_keys")]
     travel_rules: BTreeMap<[u8; 32], TravelRuleRecord>,
     audit_log: Vec<ComplianceAuditEvent>,
@@ -164,20 +171,24 @@ impl PoaComplianceRegistry {
             address,
             block,
             evidence_hash,
+            admin: Address::zero(),
         });
         Ok(())
     }
 
+    /// BLG-0091 (P04-F09): freeze on the authority of a NAMED admin, not a
+    /// bare `bool` anybody could pass. The caller verifies the admin against
+    /// the domain's admin set first; the name lands in the audit trail.
     pub fn freeze_suspicious(
         &mut self,
         domain: ComplianceDomainKind,
-        admin_authorized: bool,
+        admin: Address,
         address: Address,
         reason_hash: [u8; 32],
         block: u64,
     ) -> Result<(), PoaComplianceError> {
         Self::ensure_poa(domain)?;
-        if !admin_authorized {
+        if admin == Address::zero() {
             return Err(PoaComplianceError::AdminRequired);
         }
         let evidence_hash = Self::ensure_non_zero(reason_hash)?;
@@ -194,6 +205,34 @@ impl PoaComplianceRegistry {
             address,
             block,
             evidence_hash,
+            admin,
+        });
+        Ok(())
+    }
+
+    /// BLG-0091 (P04-F09): the missing reverse. A freeze with no unfreeze is
+    /// a life sentence handed out by a compliance screen - the same named
+    /// admin authority, and the audit log keeps both edges.
+    pub fn unfreeze(
+        &mut self,
+        domain: ComplianceDomainKind,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
+        block: u64,
+    ) -> Result<(), PoaComplianceError> {
+        Self::ensure_poa(domain)?;
+        if admin == Address::zero() {
+            return Err(PoaComplianceError::AdminRequired);
+        }
+        let evidence_hash = Self::ensure_non_zero(reason_hash)?;
+        self.freezes.remove(&address);
+        self.audit_log.push(ComplianceAuditEvent {
+            action: ComplianceAction::AccountUnfrozen,
+            address,
+            block,
+            evidence_hash,
+            admin,
         });
         Ok(())
     }
@@ -223,6 +262,7 @@ impl PoaComplianceRegistry {
             address: subject,
             block,
             evidence_hash,
+            admin: Address::zero(),
         });
         Ok(())
     }
@@ -242,6 +282,41 @@ impl PoaComplianceRegistry {
 
     pub fn audit_events(&self) -> &[ComplianceAuditEvent] {
         &self.audit_log
+    }
+
+    /// BLG-0091 (P04-F09): the deterministic fold of the compliance ledger -
+    /// screenings, freezes and the audit trail. This is what enters the
+    /// state root, so a snapshot that drops a freeze diverges at the next
+    /// block instead of quietly clearing the gate.
+    pub fn root(&self) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"BDLM_POA_COMPLIANCE_ROOT_V1");
+        for (addr, rec) in &self.screenings {
+            hasher.update(addr.as_bytes());
+            hasher.update([rec.status as u8]);
+            hasher.update(rec.oracle_reference_hash);
+            hasher.update(rec.updated_block.to_le_bytes());
+        }
+        for (addr, rec) in &self.freezes {
+            hasher.update(addr.as_bytes());
+            hasher.update(rec.reason_hash);
+            hasher.update(rec.frozen_at_block.to_le_bytes());
+        }
+        for (tx_hash, rec) in &self.travel_rules {
+            hasher.update(tx_hash);
+            hasher.update(rec.subject.as_bytes());
+            hasher.update(rec.metadata_hash);
+            hasher.update(rec.recorded_block.to_le_bytes());
+        }
+        for event in &self.audit_log {
+            hasher.update([event.action as u8]);
+            hasher.update(event.address.as_bytes());
+            hasher.update(event.block.to_le_bytes());
+            hasher.update(event.evidence_hash);
+            hasher.update(event.admin.as_bytes());
+        }
+        hasher.finalize().into()
     }
 
     pub fn export_audit_json(&self) -> Result<String, serde_json::Error> {
@@ -322,7 +397,7 @@ mod tests {
     fn poa_compliance_requires_admin_for_freeze() {
         let mut registry = PoaComplianceRegistry::new();
         let err = registry
-            .freeze_suspicious(ComplianceDomainKind::PoA, false, addr(3), hash(3), 12)
+            .freeze_suspicious(ComplianceDomainKind::PoA, Address::zero(), addr(3), hash(3), 12)
             .unwrap_err();
         assert_eq!(err, PoaComplianceError::AdminRequired);
         assert!(!registry.is_frozen(ComplianceDomainKind::PoA, &addr(3)));
@@ -332,7 +407,7 @@ mod tests {
     fn poa_compliance_freeze_is_poa_only() {
         let mut registry = PoaComplianceRegistry::new();
         registry
-            .freeze_suspicious(ComplianceDomainKind::PoA, true, addr(4), hash(4), 13)
+            .freeze_suspicious(ComplianceDomainKind::PoA, addr(1), addr(4), hash(4), 13)
             .unwrap();
         assert!(registry.is_frozen(ComplianceDomainKind::PoA, &addr(4)));
         assert!(!registry.is_frozen(ComplianceDomainKind::Permissionless, &addr(4)));
@@ -351,7 +426,7 @@ mod tests {
             )
             .unwrap();
         registry
-            .freeze_suspicious(ComplianceDomainKind::PoA, true, addr(5), hash(6), 21)
+            .freeze_suspicious(ComplianceDomainKind::PoA, addr(1), addr(5), hash(6), 21)
             .unwrap();
         assert_eq!(registry.audit_events().len(), 2);
         assert_eq!(
@@ -381,7 +456,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .freeze_suspicious(ComplianceDomainKind::PoA, true, addr(6), [0u8; 32], 31)
+                .freeze_suspicious(ComplianceDomainKind::PoA, addr(1), addr(6), [0u8; 32], 31)
                 .unwrap_err(),
             PoaComplianceError::ZeroEvidenceHash
         );
@@ -441,10 +516,30 @@ mod tests {
     fn poa_compliance_exports_audit_json() {
         let mut registry = PoaComplianceRegistry::new();
         registry
-            .freeze_suspicious(ComplianceDomainKind::PoA, true, addr(8), hash(8), 41)
+            .freeze_suspicious(ComplianceDomainKind::PoA, addr(1), addr(8), hash(8), 41)
             .unwrap();
         let json = registry.export_audit_json().unwrap();
         assert!(json.contains("AccountFrozen"));
         assert!(json.contains("evidence_hash"));
+    }
+
+
+    /// BLG-0091 (P04-F09): freeze and unfreeze are both under the root, and
+    /// the unfreeze actually clears the gate.
+    #[test]
+    fn a_freeze_moves_the_root_and_an_unfreeze_clears_the_gate() {
+        let mut reg = PoaComplianceRegistry::new();
+        let before = reg.root();
+        reg.freeze_suspicious(ComplianceDomainKind::PoA, addr(1), addr(2), hash(2), 5)
+            .unwrap();
+        let frozen_root = reg.root();
+        assert_ne!(before, frozen_root, "a freeze must move the root");
+        assert!(reg.is_frozen(ComplianceDomainKind::PoA, &addr(2)));
+        reg.unfreeze(ComplianceDomainKind::PoA, addr(1), addr(2), hash(3), 6)
+            .unwrap();
+        assert!(!reg.is_frozen(ComplianceDomainKind::PoA, &addr(2)));
+        assert_ne!(reg.root(), frozen_root, "the audit trail keeps both edges");
+        // Determinism: same state, same fold.
+        assert_eq!(reg.root(), reg.root());
     }
 }

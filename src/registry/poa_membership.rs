@@ -212,6 +212,40 @@ impl PoaMembershipRegistry {
         self.admins.contains_key(&(domain, *account))
     }
 
+    /// BLG-0090 (P04-F08): fold the registry (admins + members) together
+    /// with the onboarding layer's KYC expiry map - one digest over the
+    /// whole admission state, computed by [`PoaOnboarding::root`].
+    pub fn root_with_expiry(
+        &self,
+        kyc_expiry: &BTreeMap<(DomainId, Address), u64>,
+    ) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"BDLM_POA_ADMISSION_ROOT_V1");
+        for ((domain, admin), ()) in &self.admins {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(admin.as_bytes());
+        }
+        for ((domain, account), member) in &self.members {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(account.as_bytes());
+            hasher.update(member.kyc_commitment);
+            hasher.update([member.status as u8]);
+            if let Some(decider) = member.decided_by {
+                hasher.update([1u8]);
+                hasher.update(decider.as_bytes());
+            } else {
+                hasher.update([0u8]);
+            }
+        }
+        for ((domain, account), expiry) in kyc_expiry {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(account.as_bytes());
+            hasher.update(expiry.to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
+
     /// Step 1 of admission: a candidate submits a KYC commitment. This does NOT
     /// Grant any authority - it only creates a `Pending` record.
     pub fn submit_application(
