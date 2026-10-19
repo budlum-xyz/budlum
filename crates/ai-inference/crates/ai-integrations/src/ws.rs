@@ -165,6 +165,18 @@ mod tests {
     }
 
     #[test]
+    fn repeated_connected_does_not_downgrade_and_odd_messages_are_ignored() {
+        let mut tracker = SessionTracker::new();
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        assert_eq!(tracker.state(), ConnState::Authenticated);
+        tracker.observe(&serde_json::json!({"T": 5, "msg": 7}));
+        tracker.observe(&serde_json::json!(null));
+        assert_eq!(tracker.state(), ConnState::Authenticated);
+    }
+
+    #[test]
     fn connected_message_alone_is_not_authenticated() {
         let mut tracker = SessionTracker::new();
         tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
