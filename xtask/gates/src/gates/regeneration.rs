@@ -801,6 +801,25 @@ fn verify_canonical_parts(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Source text with block and line comments removed, so a pin or an
+/// instruction field that only appears in a comment does not count.
+fn without_comments(text: &str) -> String {
+    let blocks = crate::gates::rust_literals::strip_block_comments(text);
+    let mut out = String::with_capacity(blocks.len());
+    for line in blocks.split_inclusive('\n') {
+        match line.find("//") {
+            Some(pos) => {
+                out.push_str(&line[..pos]);
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
 /// Verify the ZKVM-side canonical table (`budzero/bud-proof/src/canonical_set.rs`)
 /// still lists exactly the four hashes this gate pins. If the proof side
 /// drifts away from the gate - or the gate from the proof side - one of them
@@ -809,6 +828,7 @@ fn verify_proof_side_canonical_set(root: &Path) -> Result<(), String> {
     let path = root.join("budzero/bud-proof/src/canonical_set.rs");
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("cannot read the proof-side canonical set: {e}"))?;
+    let text = without_comments(&text);
     for (i, pin) in canonical_program_hash_pins().iter().enumerate() {
         if !text.contains(pin) {
             return Err(format!(
@@ -836,13 +856,23 @@ pub fn run(root: &Path) -> Result<String, String> {
     // Reproduce the storage challenge program from the ISA rule and compare it
     //    with what is written in the tree.
     let deal_path = root.join("src/domain/storage_deal.rs");
-    if let Ok(text) = fs::read_to_string(&deal_path) {
-        if text.contains("Opcode::VerifyMerkle") {
+    {
+        let text = fs::read_to_string(&deal_path).map_err(|e| {
+            format!("regeneration: cannot read src/domain/storage_deal.rs for the storage challenge program: {e}")
+        })?;
+        let text = without_comments(&text);
+        if !text.contains("Opcode::VerifyMerkle") {
+            return Err(String::from(
+                "regeneration: src/domain/storage_deal.rs no longer builds the VerifyMerkle \
+                 storage challenge program this gate reproduces from the ISA rule.",
+            ));
+        }
+        {
             let regenerated_hash = keccak256(&canonical_program_bytes(&first));
             // The program in the tree consists of these two instructions; the imm
             // and register fields are written in the source. On drift the hash will not match.
             let expects_imm_256 = text.contains("imm: 256");
-            let expects_regs = text.contains("rd: 1") && text.contains("rs1: 2");
+            let expects_regs = text.contains("rd: 1,") && text.contains("rs1: 2,");
             if !(expects_imm_256 && expects_regs) {
                 return Err(format!(
                     "regeneration: the storage challenge program has drifted. \
