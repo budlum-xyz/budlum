@@ -79,7 +79,9 @@ impl Default for RpcSecurityConfig {
             api_key: None,
             allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
             cors_origins: Vec::new(),
-            rate_limit_per_minute: None,
+            // Secure default (P21-F01): a limiter that is off by default
+            // leaves API-key guessing unthrottled on the public listener.
+            rate_limit_per_minute: Some(120),
             trusted_proxies: Vec::new(),
             max_request_body_size: Some(16 * 1024 * 1024),
             max_connections: Some(10),
@@ -6819,6 +6821,11 @@ mod tests {
         let mut req = HttpRequest::builder().uri("/").body(()).unwrap();
         req.extensions_mut().insert(remote);
         req
+    }
+
+    #[test]
+    fn p21_f01_default_config_has_a_rate_limit() {
+        assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
     }
 
     #[test]
