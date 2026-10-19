@@ -57,7 +57,7 @@ fn path_is_allowed(file: &str, roots: &[&str]) -> bool {
     roots.iter().any(|r| file.starts_with(r)) && !file.split('/').any(|seg| seg == "..")
 }
 
-/// Yama listesini oku.
+/// Read the patch list.
 fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
     let mut out = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -71,11 +71,11 @@ fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
             None => (true, line),
         };
         if path.is_empty() {
-            return Err(format!("patches.txt:{}: yol bos", lineno + 1));
+            return Err(format!("patches.txt:{}: the path is empty", lineno + 1));
         }
         if !seen.insert(path.to_string()) {
             return Err(format!(
-                "patches.txt:{}: {path} listede iki kez var",
+                "patches.txt:{}: {path} is listed twice",
                 lineno + 1
             ));
         }
@@ -442,5 +442,18 @@ mod path_tests {
         assert!(path_is_allowed("browser/app/x.cpp", &roots));
         assert!(!path_is_allowed("browser/../../etc/x", &roots));
         assert!(!path_is_allowed("other/x", &roots));
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    #[test]
+    fn list_errors_are_in_english() {
+        let dup = parse_list("patches/a.patch\npatches/a.patch\n").unwrap_err();
+        assert!(dup.contains("listed twice"), "{dup}");
+        let empty = parse_list("!\n").unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
     }
 }

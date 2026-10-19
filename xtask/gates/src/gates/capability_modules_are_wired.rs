@@ -975,9 +975,6 @@ fn self_test_extraction(problems: &mut Vec<String>) {
     }
 }
 
-/// # Errors
-///
-/// The canaries that did not behave.
 /// Canaries for `strip_test_mods`: a call from inside a test module must
 /// vanish, and a `#[cfg(test)]` item that opens no brace must not swallow
 /// the block after it.
@@ -1124,6 +1121,9 @@ fn self_test_mentions_canaries(problems: &mut Vec<String>) {
     }
 }
 
+/// # Errors
+///
+/// The canaries that did not behave.
 pub fn self_test() -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
 

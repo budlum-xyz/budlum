@@ -1,14 +1,14 @@
 //! `syn`-based AST security gates.
 //!
-//! Substring+brace-walk gate'ler (`zero_address_sender_is_verified`,
+//! Substring and brace-walk gates (`zero_address_sender_is_verified`,
 //! `tee_trust_boundary_is_structural`, `gov_slash_evidence_is_validator_only`)
 //! could not model parser-level reasoning: each round found a new
-//! varyant (closure, nested helper, nested conditional, move closure,
+//! variant (closure, nested helper, nested conditional, move closure,
 //! collection item). This module verifies the same three guards on a REAL Rust AST;
 //! function bodies are walked with `syn::visit`, and closures
 //! and nested blocks are distinguished as AST nodes.
 //!
-//! Korumalar:
+//! Guards:
 //!   1. zero-address: inside `validate_transaction_with_context`, success in the zero-address
 //!      branch (`Ok(())` / `return Ok(())`) must be DIRECTLY inside the `if tx.verify()`
 //!      block (not in a closure, nested fn item, nested if, match
@@ -414,7 +414,7 @@ impl<'ast> Visit<'ast> for TeeVisitor {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.in_sign_with_privacy && is_ok_call(node) {
             // The source is ordered (pre-order): if the guards come after the success
-            // islenirse asagida yakalanir.
+            // a guard seen after this point is reported as coming after the success.
             self.saw_success = true;
         }
         visit::visit_expr_call(self, node);
@@ -969,7 +969,7 @@ pub fn self_test() -> Result<String, String> {
         "good .any tail tree rejected",
     );
 
-    // Zero-address: guard'siz, nested-item, closure-decoy, failed-verify.
+    // Zero-address: unguarded, nested-item, closure-decoy, failed-verify.
     expect_problem(
         &mut problems,
         ZA_BAD,
