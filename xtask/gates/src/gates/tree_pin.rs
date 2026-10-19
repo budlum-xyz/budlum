@@ -75,10 +75,16 @@ fn collect_dir(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> 
         let Ok(kind) = entry.file_type() else {
             continue;
         };
+        let path = entry.path();
         if kind.is_symlink() {
+            if is_pinned_file(&path) {
+                return Err(format!(
+                    "tree-pin: {} is a symlink; a pinned source file must be a regular file",
+                    path.display()
+                ));
+            }
             continue;
         }
-        let path = entry.path();
         if kind.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue; // build output, not source
@@ -379,4 +385,22 @@ pub fn self_test() -> Result<String, String> {
         "tree-pin self-test: add/delete/modify detection on sources and build \
         inputs (including state.json), markdown left out, tampered pins and missing pin file all behave",
     ))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_symlinked_source_file_is_refused() {
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("tree-pin-link")
+            .expect("scratch dir");
+        std::fs::create_dir_all(dir.join("budzero")).expect("fixture");
+        std::fs::write(dir.join("outside.rs"), "fn x() {}\n").expect("fixture");
+        std::os::unix::fs::symlink(dir.join("outside.rs"), dir.join("budzero/x.rs"))
+            .expect("symlink");
+        let out = collect_tree_files(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.is_err());
+    }
 }
