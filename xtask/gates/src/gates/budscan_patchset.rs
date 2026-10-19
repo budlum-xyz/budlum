@@ -52,6 +52,11 @@ fn forbidden_brand_tokens() -> Vec<String> {
         .collect()
 }
 
+/// Is the file below a permitted tree, with no `..` segment that leaves it?
+fn path_is_allowed(file: &str, roots: &[&str]) -> bool {
+    roots.iter().any(|r| file.starts_with(r)) && !file.split('/').any(|seg| seg == "..")
+}
+
 /// Yama listesini oku.
 fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
     let mut out = Vec::new();
@@ -256,7 +261,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
         problems.extend(hunk_count_errors(rel, &diff));
         for file in &touched {
-            if !allowed_roots.iter().any(|r| file.starts_with(r)) {
+            if !path_is_allowed(file, &allowed_roots) {
                 problems.push(format!(
                     "{rel}: {file} is outside the permitted trees ({})",
                     allowed_roots.join(", ")
@@ -425,4 +430,17 @@ pub fn self_test() -> Result<String, String> {
          the 'b/' prefix is stripped, a miscounted hunk is refused, the brand list is populated \
          and the gate does not pass on a tree it cannot read",
     ))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn traversal_out_of_a_permitted_tree_is_refused() {
+        let roots = ["browser/", "dom/"];
+        assert!(path_is_allowed("browser/app/x.cpp", &roots));
+        assert!(!path_is_allowed("browser/../../etc/x", &roots));
+        assert!(!path_is_allowed("other/x", &roots));
+    }
 }
