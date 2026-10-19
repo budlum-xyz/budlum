@@ -237,10 +237,10 @@ mod tests {
         let _ = bc.produce_block(producer);
         let _ = bc.produce_block(producer);
 
-        // Timestamps should be non-decreasing
+        // Timestamps must be strictly increasing
         assert!(
-            bc.chain[2].timestamp >= bc.chain[1].timestamp,
-            "consecutive block timestamps must be non-decreasing"
+            bc.chain[2].timestamp > bc.chain[1].timestamp,
+            "consecutive block timestamps must be strictly increasing"
         );
     }
 
