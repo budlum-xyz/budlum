@@ -276,7 +276,9 @@ pub fn classify_target(target: &str) -> TargetKind {
     } else if let Some(host) = host_part(&lower) {
         if host.parse::<std::net::IpAddr>().is_ok() {
             TargetKind::IpAddress
-        } else if host == "localhost" || (lower.contains("://") && looks_like_hostname(host)) {
+        } else if host == "localhost"
+            || (!host.is_empty() && (lower.contains("://") || has_numeric_port(&lower)))
+        {
             TargetKind::DnsName
         } else {
             TargetKind::Opaque
@@ -348,6 +350,13 @@ pub fn check_egress(
     })
 }
 
+/// `name:port` with a non-empty name and an all-digit port.
+fn has_numeric_port(lower: &str) -> bool {
+    lower.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 fn looks_like_hostname(lower: &str) -> bool {
     if lower.starts_with('/') || lower.parse::<std::net::IpAddr>().is_ok() {
         return false;
@@ -401,6 +410,9 @@ mod tests {
             TargetKind::IpAddress
         );
         assert_eq!(classify_target("localhost:4001"), TargetKind::DnsName);
+        // A dotless host in a URL or with a port is still a name to resolve.
+        assert_eq!(classify_target("http://intranet/x"), TargetKind::DnsName);
+        assert_eq!(classify_target("intranet:4001"), TargetKind::DnsName);
     }
 
     #[test]
