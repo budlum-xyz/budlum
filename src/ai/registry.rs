@@ -838,16 +838,19 @@ impl AiRegistry {
         // `submit_agent_payment` refuses a `payment_id` found among them,
         // and `payment_id` is caller-supplied rather than derived, so the
         // receipt is the replay guard, not a record of one.
+        let retired_requests: BTreeSet<AiRequestId> = expired_request_ids
+            .iter()
+            .chain(prunable_outcomes.iter())
+            .copied()
+            .collect();
         let before = self.execution_proofs.len();
-        self.execution_proofs.retain(|(request_id, _), _| {
-            !expired_request_ids.contains(request_id) && !prunable_outcomes.contains(request_id)
-        });
+        self.execution_proofs
+            .retain(|(request_id, _), _| !retired_requests.contains(request_id));
         pruned += before - self.execution_proofs.len();
 
         let before_verified = self.fully_verified_proofs.len();
-        self.fully_verified_proofs.retain(|(request_id, _)| {
-            !expired_request_ids.contains(request_id) && !prunable_outcomes.contains(request_id)
-        });
+        self.fully_verified_proofs
+            .retain(|(request_id, _)| !retired_requests.contains(request_id));
         pruned += before_verified - self.fully_verified_proofs.len();
 
         (pruned, refunds)
