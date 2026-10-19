@@ -145,7 +145,20 @@ fn skipped_ext(path: &Path) -> bool {
         .is_some_and(|e| SKIP_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
 }
 
-fn walk_into(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Directory names that mark imported third-party source.
+const SURFACE_DIRS: &[&str] = &[
+    "vendor",
+    "third_party",
+    "third-party",
+    "external",
+    "upstream",
+];
+
+/// Build-output directory names that are only skipped outside an import
+/// surface: copied source can sit in `vendor/x/build/`.
+const BUILD_OUTPUT_DIRS: &[&str] = &["dist", "build", "coverage"];
+
+fn walk_into(dir: &Path, in_surface: bool, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -162,8 +175,11 @@ fn walk_into(dir: &Path, out: &mut Vec<PathBuf>) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if kind.is_dir() {
-            if !SKIP_DIRS.contains(&name.as_ref()) {
-                walk_into(&path, out);
+            let skip = SKIP_DIRS.contains(&name.as_ref())
+                && !(in_surface && BUILD_OUTPUT_DIRS.contains(&name.as_ref()));
+            if !skip {
+                let inside = in_surface || SURFACE_DIRS.contains(&name.as_ref());
+                walk_into(&path, inside, out);
             }
         } else if kind.is_file() && !skipped_ext(&path) {
             out.push(path);
@@ -173,7 +189,7 @@ fn walk_into(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn sorted_walk(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    walk_into(root, &mut out);
+    walk_into(root, false, &mut out);
     out.sort();
     out
 }
@@ -232,11 +248,14 @@ fn is_import_surface(rel: &str) -> bool {
 fn has_boundary_note(root: &Path, file: &Path) -> bool {
     let mut dir = file.parent();
     while let Some(d) = dir {
-        if d.join(BOUNDARY_NOTE).is_file() {
-            return true;
-        }
+        // One note at the repo root would cover every import surface, so the
+        // walk stops before the root. An empty note records nothing.
         if d == root {
             break;
+        }
+        let note = d.join(BOUNDARY_NOTE);
+        if note.metadata().is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return true;
         }
         dir = d.parent();
     }
@@ -463,4 +482,28 @@ pub fn self_test() -> Result<String, String> {
     }
 
     Ok(String::from("fsf-import-boundaries: 11 canaries"))
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn root_or_empty_note_is_no_boundary_and_build_dirs_in_vendor_are_read() {
+        let root = std::env::temp_dir().join(format!("fsf-boundary-{}", std::process::id()));
+        let nested = root.join("vendor/x/build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("a.c"), "gpl-3.0").unwrap();
+        std::fs::write(root.join(BOUNDARY_NOTE), "root note").unwrap();
+        std::fs::write(root.join("vendor").join(BOUNDARY_NOTE), "").unwrap();
+        let file = nested.join("a.c");
+        let root_only = has_boundary_note(&root, &file);
+        std::fs::write(root.join("vendor/x").join(BOUNDARY_NOTE), "real note").unwrap();
+        let with_note = has_boundary_note(&root, &file);
+        let walked = sorted_walk(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(!root_only);
+        assert!(with_note);
+        assert!(walked.iter().any(|p| p.ends_with("vendor/x/build/a.c")));
+    }
 }
