@@ -1,4 +1,4 @@
-![Budlum](assets/budlum-banner.png)
+![Budlum](assets/budlum-consensus-of-consensuses.png)
 
 Budlum is the next layer of the internet, focused on data sovereignty and social flourishing.
 

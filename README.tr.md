@@ -1,4 +1,4 @@
-![Budlum](assets/budlum-banner-tr.png)
+![Budlum](assets/budlum-konsensuslerin-konsensusu.png)
 
 Budlum veri egemenliğine ve toplumsal yeşermeye odaklanmış internetin bir sonraki katmanıdır.
 
