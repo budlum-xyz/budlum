@@ -390,6 +390,8 @@ pub enum ViewGrantError {
     NamedPolicyNeedsGrantee,
     OwnerOnlyMustNotNameGrantee,
     DuplicateLiveGrant,
+    /// The grant id counter reached `u64::MAX`.
+    GrantIdSpaceExhausted,
     /// The address named as issuer is not the owner of the content, so it has
     /// no word to give about who may view it.
     NotOwner {
@@ -425,6 +427,7 @@ impl std::fmt::Display for ViewGrantError {
             ),
             Self::UnknownContent => write!(f, "no manifest describes this content"),
             Self::Authorization(e) => write!(f, "grant authorization refused: {e}"),
+            Self::GrantIdSpaceExhausted => write!(f, "view grant id counter is exhausted"),
             Self::DuplicateLiveGrant => {
                 write!(
                     f,
@@ -437,12 +440,66 @@ impl std::fmt::Display for ViewGrantError {
 
 /// In-memory grant book. Deterministic `BTreeMap` for state root hashing later.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(try_from = "ViewGrantRegistryWire")]
 pub struct ViewGrantRegistry {
     next_id: u64,
     grants: BTreeMap<u64, ViewGrant>,
     /// Live index: content → grant ids (includes revoked; filter at read).
     #[serde(with = "crate::core::map_keys")]
     by_content: BTreeMap<ContentId, Vec<u64>>,
+}
+
+/// The stored shape of [`ViewGrantRegistry`]. A loaded row passes through
+/// [`TryFrom`], so three fields that disagree are refused instead of
+/// trusted: a stale `next_id` would let `issue` overwrite a stored grant.
+#[derive(Deserialize)]
+struct ViewGrantRegistryWire {
+    next_id: u64,
+    grants: BTreeMap<u64, ViewGrant>,
+    #[serde(with = "crate::core::map_keys")]
+    by_content: BTreeMap<ContentId, Vec<u64>>,
+}
+
+impl TryFrom<ViewGrantRegistryWire> for ViewGrantRegistry {
+    type Error = &'static str;
+
+    fn try_from(wire: ViewGrantRegistryWire) -> Result<Self, Self::Error> {
+        for (id, grant) in &wire.grants {
+            if *id != grant.grant_id {
+                return Err("view grant row is stored under another id");
+            }
+            if *id >= wire.next_id {
+                return Err("view grant id is not below next_id");
+            }
+            let indexed = wire
+                .by_content
+                .get(&grant.content_id)
+                .is_some_and(|ids| ids.contains(id));
+            if !indexed {
+                return Err("view grant is missing from the content index");
+            }
+        }
+        let mut indexed_rows: usize = 0;
+        for (content_id, ids) in &wire.by_content {
+            for id in ids {
+                match wire.grants.get(id) {
+                    Some(grant) if grant.content_id == *content_id => {}
+                    _ => return Err("content index names a grant that does not match"),
+                }
+            }
+            indexed_rows = indexed_rows.saturating_add(ids.len());
+        }
+        // Every grant is indexed at least once (above) and every index entry
+        // names a matching grant, so equal counts mean no entry repeats.
+        if indexed_rows != wire.grants.len() {
+            return Err("content index repeats a grant");
+        }
+        Ok(Self {
+            next_id: wire.next_id,
+            grants: wire.grants,
+            by_content: wire.by_content,
+        })
+    }
 }
 
 impl ViewGrantRegistry {
@@ -486,7 +543,10 @@ impl ViewGrantRegistry {
             return Err(ViewGrantError::DuplicateLiveGrant);
         }
         let grant_id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let next_id = grant_id
+            .checked_add(1)
+            .ok_or(ViewGrantError::GrantIdSpaceExhausted)?;
+        self.next_id = next_id;
         let grant = ViewGrant {
             grant_id,
             content_id,
@@ -748,6 +808,42 @@ mod tests {
 
     fn cid(b: u8) -> ContentId {
         ContentId([b; 32])
+    }
+
+    /// P28-F17: a stored registry whose three fields disagree is refused.
+    #[test]
+    fn a_registry_row_whose_fields_disagree_is_refused_on_load() {
+        let mut reg = ViewGrantRegistry::new();
+        let g = reg
+            .issue(cid(1), addr(2), None, [3u8; 32], ViewPolicy::PublicKeyId, 5)
+            .unwrap();
+        let good = bincode::serialize(&reg).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&good).is_ok());
+
+        let mut stale = reg.clone();
+        stale.next_id = g;
+        let bytes = bincode::serialize(&stale).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+
+        let mut unindexed = reg.clone();
+        unindexed.by_content.clear();
+        let bytes = bincode::serialize(&unindexed).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+
+        let mut repeated = reg.clone();
+        repeated.by_content.entry(cid(1)).or_default().push(g);
+        let bytes = bincode::serialize(&repeated).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_full_grant_id_counter_refuses_instead_of_reusing_an_id() {
+        let mut reg = ViewGrantRegistry::new();
+        reg.next_id = u64::MAX;
+        assert_eq!(
+            reg.issue(cid(1), addr(2), None, [3u8; 32], ViewPolicy::PublicKeyId, 5),
+            Err(ViewGrantError::GrantIdSpaceExhausted)
+        );
     }
 
     /// Every field of a view claim moves the digest.
