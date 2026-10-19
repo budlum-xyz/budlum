@@ -48,7 +48,7 @@ use crate::storage::qr_frame::{
 };
 use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MAX_QR_PAYLOAD, THREE_QR_EC};
 use crate::storage::qr_payload::{
-    pack_payload, packed_is_zlib, unpack_payload, PayloadError, PayloadKind, MAX_PAYLOAD_CONTENT,
+    packed_is_zlib, unpack_payload, PayloadError, PayloadKind, MAX_PAYLOAD_CONTENT,
     THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_VERSION,
 };
 use crate::storage::qr_png::{frame_to_qr_png, matrix_to_png, QrPngError};
@@ -776,6 +776,47 @@ fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
     Ok((k, bound_drops))
 }
 
+/// Whether `content` is the body `manifest` describes: its data shards, in
+/// index order, partition the bytes and every shard id is the id of its slice,
+/// or a single shard is a whole copy of the bytes (replication).
+fn body_matches_manifest(manifest: &ContentManifest, content: &[u8]) -> bool {
+    use crate::storage::manifest::ShardKind;
+    if content.is_empty() {
+        return false;
+    }
+    if manifest.content_size != 0 && manifest.content_size != content.len() as u64 {
+        return false;
+    }
+    let whole = ContentId::of(content);
+    if manifest
+        .shards
+        .iter()
+        .any(|s| s.size as usize == content.len() && s.shard_id == whole)
+    {
+        return true;
+    }
+    let mut data: Vec<&ShardRef> = manifest
+        .shards
+        .iter()
+        .filter(|s| s.kind == ShardKind::Data)
+        .collect();
+    data.sort_by_key(|s| s.index);
+    let mut off = 0usize;
+    for shard in data {
+        let Some(end) = off.checked_add(shard.size as usize) else {
+            return false;
+        };
+        let Some(slice) = content.get(off..end) else {
+            return false;
+        };
+        if ContentId::of(slice) != shard.shard_id {
+            return false;
+        }
+        off = end;
+    }
+    off == content.len()
+}
+
 /// The recipe-shaped truth about an already-encoded feed: what a publish pins
 /// and what a viewer can rebuild from the frames alone.
 ///
@@ -800,7 +841,12 @@ pub fn qr_feed_preview(
     // produced (client-side encryption). That is the one clear-body case that
     // is still nobody's plaintext, and the visibility enforcement below reads
     // this rather than asking a client to seal the same bytes twice.
-    let declared_ciphertext = manifest.is_some_and(|m| m.encryption.is_encrypted());
+    //
+    // The claim alone is not enough (P28-F02): the supplied body has to be the
+    // bytes that manifest describes, or any caller could attach a client-side
+    // encryption claim to plaintext and have the guard below switched off.
+    let declared_ciphertext =
+        manifest.is_some_and(|m| m.encryption.is_encrypted() && body_matches_manifest(m, content));
     // The pipe writes the pacing it pins, not the pacing a caller asks for, so a
     // policy naming any other rate is refused here rather than reported wrongly
     // by the preview below.
@@ -1240,8 +1286,11 @@ pub fn qr_feed_preview(
         }
         (receipt.content_id, receipt.provider_commitment)
     } else {
-        let packed = pack_payload(PayloadKind::ContentBytes, content)?;
-        (ContentId::of(&packed), [0u8; 32])
+        // Without a manifest the object a publish stores is the container the
+        // carousel carries, so that is the id reported (P28-F03). A clear-body
+        // container of the caller's bytes is not what any publish of this feed
+        // produces, and for a sealed feed it would be a hash of the plaintext.
+        (ContentId::of(&pipe.packed), [0u8; 32])
     };
 
     let recipe = VideoRecipe::from_encoded(
@@ -1431,6 +1480,7 @@ pub fn qr_feed_frames_burst(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::qr_payload::pack_payload;
 
     fn body(n: usize) -> Vec<u8> {
         (0..n)
@@ -1548,6 +1598,43 @@ mod tests {
         // frames carry the uploader's ciphertext, not plaintext.
         assert!(!p.publicly_reemitable);
         assert!(p.a4_agreement);
+    }
+
+    /// P28-F02: a client-side encryption claim over a body that is not the
+    /// manifest's bytes does not switch the unsealed-gated guard off.
+    #[test]
+    fn a_ciphertext_claim_over_a_foreign_body_is_still_unsealed_gated() {
+        let data = body(2048);
+        let manifest = crate::storage::ContentManifest::from_bytes_sliced(&data, 256)
+            .unwrap()
+            .with_encryption(crate::storage::ContentEncryption::ClientSide(
+                crate::storage::ContentCipher::XChaCha20Poly1305,
+            ));
+        let other = body(2049);
+        assert!(matches!(
+            qr_feed_preview(&other, &EmitPolicy::default(), Some(&manifest)),
+            Err(EmitError::UnsealedGated)
+        ));
+        let mut tampered = data.clone();
+        tampered[0] ^= 1;
+        assert!(matches!(
+            qr_feed_preview(&tampered, &EmitPolicy::default(), Some(&manifest)),
+            Err(EmitError::UnsealedGated)
+        ));
+    }
+
+    /// P28-F03: without a manifest the reported id is the id of the container
+    /// the feed carries.
+    #[test]
+    fn a_manifestless_preview_reports_the_id_of_the_carried_container() {
+        let policy = EmitPolicy {
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let data = body(300);
+        let p = qr_feed_preview(&data, &policy, None).expect("sealed preview");
+        let plain_container = pack_payload(PayloadKind::ContentBytes, &data).unwrap();
+        assert_ne!(p.content_id, ContentId::of(&plain_container));
     }
 
     #[test]
