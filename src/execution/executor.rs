@@ -2341,7 +2341,6 @@ impl Executor {
                         crate::ai::execution::validate_gas_budget(
                             &sizing,
                             proof.proof_bytes.len(),
-                            u64::MAX,
                         )
                         .map_err(|e| BudlumError::validation("ai_exec_proof_size", e))?;
                     }
