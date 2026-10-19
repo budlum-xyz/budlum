@@ -98,10 +98,16 @@ impl std::fmt::Display for PoaMembershipError {
             }
             PoaMembershipError::MissingKyc => write!(f, "missing KYC commitment"),
             PoaMembershipError::LastAdmin => {
-                write!(f, "the last admin of a PoA domain cannot be removed by admins")
+                write!(
+                    f,
+                    "the last admin of a PoA domain cannot be removed by admins"
+                )
             }
             PoaMembershipError::InvalidValidityHorizon { requested, max } => {
-                write!(f, "KYC validity horizon {requested} exceeds the bound {max}")
+                write!(
+                    f,
+                    "KYC validity horizon {requested} exceeds the bound {max}"
+                )
             }
         }
     }
@@ -141,7 +147,11 @@ impl PoaMembershipRegistry {
     /// unpermissioned with pending applications in flight - governance can
     /// still take the last seat away through its own action, where the
     /// decision is recorded as such.
-    pub fn remove_admin(&mut self, domain: DomainId, admin: Address) -> Result<(), PoaMembershipError> {
+    pub fn remove_admin(
+        &mut self,
+        domain: DomainId,
+        admin: Address,
+    ) -> Result<(), PoaMembershipError> {
         if !self.admins.contains_key(&(domain, admin)) {
             return Err(PoaMembershipError::NotFound {
                 account: admin,
@@ -215,10 +225,7 @@ impl PoaMembershipRegistry {
     /// BLG-0090 (P04-F08): fold the registry (admins + members) together
     /// with the onboarding layer's KYC expiry map - one digest over the
     /// whole admission state, computed by [`PoaOnboarding::root`].
-    pub fn root_with_expiry(
-        &self,
-        kyc_expiry: &BTreeMap<(DomainId, Address), u64>,
-    ) -> [u8; 32] {
+    pub fn root_with_expiry(&self, kyc_expiry: &BTreeMap<(DomainId, Address), u64>) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_POA_ADMISSION_ROOT_V1");

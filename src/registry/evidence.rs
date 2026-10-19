@@ -337,7 +337,7 @@ impl SlashingReport {
                 count,
                 threshold,
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -357,7 +357,7 @@ impl SlashingReport {
                 tag: "relayer_invalid_proof".into(),
                 data: reason.into_bytes(),
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -380,7 +380,7 @@ impl SlashingReport {
                 tag: "relayer_griefing".into(),
                 data: reason.into_bytes(),
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -401,7 +401,7 @@ impl SlashingReport {
                 tag: "relayer_front_running".into(),
                 data: reason.into_bytes(),
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -422,7 +422,7 @@ impl SlashingReport {
                 tag: "relayer_wrong_relay".into(),
                 data: reason.into_bytes(),
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -439,7 +439,7 @@ impl SlashingReport {
                 tag: "attester_invalid_attestation".into(),
                 data: reason.into_bytes(),
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -456,7 +456,7 @@ impl SlashingReport {
                 tag: "content_validator_malicious".into(),
                 data: reason.into_bytes(),
             },
-                        reporter,
+            reporter,
         )
     }
 
@@ -665,16 +665,16 @@ mod tests {
     #[test]
     fn double_sign_shape_ok() {
         let r = SlashingReport::consensus_double_sign(
-                addr(1),
-                SlashingProof::DoubleSign {
-                    height: 10,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "bb".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                None,
-            );
+            addr(1),
+            SlashingProof::DoubleSign {
+                height: 10,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
         assert!(r.validate_shape().is_ok());
         assert_eq!(r.condition(), SlashingCondition::DoubleSign);
         assert!(r.is_actionable().is_ok());
@@ -683,16 +683,16 @@ mod tests {
     #[test]
     fn identical_hashes_rejected() {
         let r = SlashingReport::consensus_double_sign(
-                addr(1),
-                SlashingProof::DoubleSign {
-                    height: 10,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "aa".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                None,
-            );
+            addr(1),
+            SlashingProof::DoubleSign {
+                height: 10,
+                block_hash_1: "aa".into(),
+                block_hash_2: "aa".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
         assert_eq!(r.validate_shape(), Err(EvidenceError::NonConflictingHashes));
     }
 
@@ -716,16 +716,16 @@ mod tests {
     #[test]
     fn zero_offender_rejected() {
         let r = SlashingReport::consensus_double_sign(
-                Address::zero(),
-                SlashingProof::DoubleSign {
-                    height: 10,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "bb".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                None,
-            );
+            Address::zero(),
+            SlashingProof::DoubleSign {
+                height: 10,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
     }
 
@@ -744,30 +744,29 @@ mod tests {
     fn slashing_proof_condition_invariant_double_sign_vs_liveness() {
         let offender = addr(0x42);
         let r = SlashingReport::consensus_double_sign(
-                offender,
-                SlashingProof::DoubleSign {
-                    height: 100,
-                    block_hash_1: "h1".into(),
-                    block_hash_2: "h2".into(),
-                    signature_1: vec![1, 2, 3],
-                    signature_2: vec![4, 5, 6],
-                },
-                None,
-            );
+            offender,
+            SlashingProof::DoubleSign {
+                height: 100,
+                block_hash_1: "h1".into(),
+                block_hash_2: "h2".into(),
+                signature_1: vec![1, 2, 3],
+                signature_2: vec![4, 5, 6],
+            },
+            None,
+        );
         assert_eq!(r.condition(), SlashingCondition::DoubleSign);
 
-        let r2 =
-            SlashingReport::consensus_liveness(
-                offender,
-                roles::VALIDATOR,
-                SlashingProof::Liveness {
-                    window_start_epoch: 10,
-                    window_end_epoch: 20,
-                    missed: 5,
-                    expected: 10,
-                },
-                None,
-            );
+        let r2 = SlashingReport::consensus_liveness(
+            offender,
+            roles::VALIDATOR,
+            SlashingProof::Liveness {
+                window_start_epoch: 10,
+                window_end_epoch: 20,
+                missed: 5,
+                expected: 10,
+            },
+            None,
+        );
         assert_eq!(r2.condition(), SlashingCondition::LivenessFault);
     }
 
@@ -962,16 +961,16 @@ mod tests {
         // is no signature to check, so this route must refuse it rather than
         // wave it through as verified.
         let r = SlashingReport::consensus_liveness(
-                addr(1),
-                roles::VALIDATOR,
-                SlashingProof::Liveness {
-                    window_start_epoch: 1,
-                    window_end_epoch: 10,
-                    missed: 9,
-                    expected: 10,
-                },
-                None,
-            );
+            addr(1),
+            roles::VALIDATOR,
+            SlashingProof::Liveness {
+                window_start_epoch: 1,
+                window_end_epoch: 10,
+                missed: 9,
+                expected: 10,
+            },
+            None,
+        );
         assert_eq!(
             r.verify_double_sign(),
             Err(EvidenceError::WrongProofForVerification)
@@ -1005,7 +1004,10 @@ mod tests {
         let r = SlashingReport::new(offender, roles::VALIDATOR, big, None);
         assert!(matches!(
             r.validate_shape(),
-            Err(EvidenceError::FieldTooLarge { field: "block_hash_1", .. })
+            Err(EvidenceError::FieldTooLarge {
+                field: "block_hash_1",
+                ..
+            })
         ));
         let big_sig = SlashingProof::DoubleSign {
             height: 7,
@@ -1017,7 +1019,10 @@ mod tests {
         let r = SlashingReport::new(offender, roles::VALIDATOR, big_sig, None);
         assert!(matches!(
             r.validate_shape(),
-            Err(EvidenceError::FieldTooLarge { field: "signature_1", .. })
+            Err(EvidenceError::FieldTooLarge {
+                field: "signature_1",
+                ..
+            })
         ));
         // Whatever the caller claims, `new` produces Unverified only.
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
@@ -1037,7 +1042,10 @@ mod tests {
             signature_2: vec![0xBB; 64],
         };
         let mut r = SlashingReport::new(offender, roles::VALIDATOR, proof, None);
-        assert!(r.promote_self_proven().is_err(), "junk signatures cannot certify");
+        assert!(
+            r.promote_self_proven().is_err(),
+            "junk signatures cannot certify"
+        );
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
         // A liveness claim has no self-contained proof at all.
         let proof = SlashingProof::Liveness {

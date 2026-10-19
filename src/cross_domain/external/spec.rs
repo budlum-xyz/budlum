@@ -36,6 +36,7 @@
 //!   reinterpretation - see [`crate::cross_domain::external::versioning`].
 
 use crate::core::address::Address;
+use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 
 /// The identity of an adapter. Stable across upgrades of the adapter itself,
