@@ -348,3 +348,58 @@ fn a_storage_field_with_an_unknown_type_is_refused() {
               }\n";
     bud_compiler::compile(ok, IsaProfile::Production).expect("u64 is a valid storage type");
 }
+
+/// Runs the real `bud-cli` binary: a valid program must exit zero and print
+/// its events as JSON, a program that does not compile must exit non-zero.
+#[test]
+fn the_cli_binary_runs_a_program_and_refuses_a_broken_one() {
+    let root = workspace_root();
+    let dir = std::env::temp_dir().join(format!("bud_cli_e2e_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let state = dir.join("state.json");
+    std::fs::copy(root.join("state.json"), &state).expect("copy state file");
+    let bin = env!("CARGO_BIN_EXE_bud-cli");
+
+    let good = std::process::Command::new(bin)
+        .current_dir(&root)
+        .args(["run", "--program", "example.bud", "--json", "--state-in"])
+        .arg(&state)
+        .arg("--state-out")
+        .arg(dir.join("state_out.json"))
+        .output()
+        .expect("run bud-cli");
+    let stdout = String::from_utf8_lossy(&good.stdout);
+    assert!(
+        good.status.success(),
+        "run must succeed: {stdout} {}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let start = stdout.find('{').expect("json object in the output");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout[start..]).expect("the output carries valid json");
+    assert_eq!(json["success"], serde_json::Value::Bool(true));
+    assert_eq!(
+        json["events"],
+        serde_json::json!([137, 63, 3700, 0, 1]),
+        "example.bud emits sum, diff, product, is_eq, is_gt"
+    );
+
+    let broken = dir.join("broken.bud");
+    std::fs::write(&broken, "contract Broken { pub fn main( {").expect("write broken program");
+    let bad = std::process::Command::new(bin)
+        .current_dir(&root)
+        .args(["run", "--program"])
+        .arg(&broken)
+        .arg("--state-in")
+        .arg(&state)
+        .arg("--state-out")
+        .arg(dir.join("state_bad.json"))
+        .output()
+        .expect("run bud-cli on a broken program");
+    assert!(
+        !bad.status.success(),
+        "a program that does not compile must exit non-zero"
+    );
+
+    std::fs::remove_dir_all(&dir).expect("remove temp dir");
+}
