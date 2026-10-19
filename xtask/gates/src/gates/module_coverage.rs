@@ -22,25 +22,56 @@ use std::path::Path;
 use serde_json::Value;
 
 /// Module name and the repository-relative path prefix it owns.
+///
+/// The table must cover every directory of the two measured trees. A file
+/// under `src/` or `budzero/` that no prefix owns fails the gate (see
+/// [`unclassified`]), so a new module cannot sit outside the ratchet, and
+/// [`missing_prefix_dirs`] fails a prefix whose directory does not exist.
 const MODULE_PREFIXES: &[(&str, &str)] = &[
-    ("budlum:consensus", "src/consensus/"),
-    ("budlum:crypto", "src/crypto/"),
-    ("budlum:rpc", "src/rpc/"),
+    ("budlum:account_abstraction", "src/account_abstraction/"),
+    ("budlum:ai", "src/ai/"),
+    ("budlum:ai_inference", "src/ai_inference/"),
+    ("budlum:bns", "src/bns/"),
+    ("budlum:budlumxyz", "src/budlumxyz/"),
     ("budlum:chain", "src/chain/"),
+    ("budlum:cli", "src/cli/"),
+    ("budlum:consensus", "src/consensus/"),
     ("budlum:core", "src/core/"),
+    ("budlum:cross_domain", "src/cross_domain/"),
+    ("budlum:crypto", "src/crypto/"),
+    ("budlum:deed", "src/deed/"),
     ("budlum:domain", "src/domain/"),
+    ("budlum:execution", "src/execution/"),
+    ("budlum:gateway", "src/gateway/"),
+    ("budlum:light_client", "src/light_client/"),
+    ("budlum:mempool", "src/mempool/"),
     ("budlum:network", "src/network/"),
+    ("budlum:pollen", "src/pollen/"),
+    ("budlum:privacy", "src/privacy/"),
+    ("budlum:prover", "src/prover/"),
+    ("budlum:registry", "src/registry/"),
+    ("budlum:relayer", "src/relayer/"),
+    ("budlum:rpc", "src/rpc/"),
+    ("budlum:sdk", "src/sdk/"),
+    ("budlum:settlement", "src/settlement/"),
+    ("budlum:sharding", "src/sharding/"),
+    ("budlum:socialfi", "src/socialfi/"),
     ("budlum:storage", "src/storage/"),
     ("budlum:tokenomics", "src/tokenomics/"),
-    ("budlum:node_di", "src/node_di/"),
-    ("budlum:cli", "src/cli/"),
-    ("budlum:docs", "src/docs/"),
-    ("budzero:vm", "budzero/src/"),
-    ("budzero:proof", "budzero/bud-proof/src/"),
-    ("budzero:isa", "budzero/bud-isa/src/"),
-    ("budzero:node", "budzero/bud-node/src/"),
-    ("budzero:compiler", "budzero/bud-compiler/src/"),
+    ("budlum:bin", "src/bin/"),
+    ("budlum:tests", "src/tests/"),
+    ("budzero:cli", "budzero/bud-cli/"),
+    ("budzero:compiler", "budzero/bud-compiler/"),
+    ("budzero:isa", "budzero/bud-isa/"),
+    ("budzero:node", "budzero/bud-node/"),
+    ("budzero:proof", "budzero/bud-proof/"),
+    ("budzero:state", "budzero/bud-state/"),
+    ("budzero:vm", "budzero/bud-vm/"),
+    ("budzero:verifier_registry", "budzero/verifier-registry/"),
 ];
+
+/// Files directly in `src/` (lib.rs, main.rs, error.rs, ...).
+const ROOT_MODULE: &str = "budlum:root";
 
 const BASELINES: &str = ".github/module-coverage-baselines.json";
 
@@ -79,10 +110,49 @@ fn normalize(path: &str) -> &str {
 }
 
 fn module_of(path: &str) -> &'static str {
+    if let Some(rest) = path.strip_prefix("src/") {
+        if !rest.contains('/') {
+            return ROOT_MODULE;
+        }
+    }
     MODULE_PREFIXES
         .iter()
         .find(|(_, prefix)| path.starts_with(prefix))
         .map_or("__other__", |(name, _)| name)
+}
+
+/// Report files under the two measured trees that no module owns.
+fn unclassified(cov: &Value) -> Vec<String> {
+    let files = cov["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["files"].as_array())
+        .flatten();
+    let mut out: Vec<String> = Vec::new();
+    for f in files {
+        let name = f["filename"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('\\', "/");
+        let rel = normalize(&name);
+        let measured = rel.starts_with("src/") || rel.starts_with("budzero/");
+        if measured && module_of(rel) == "__other__" {
+            out.push(rel.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Prefixes in [`MODULE_PREFIXES`] whose directory is not in the tree.
+fn missing_prefix_dirs(root: &Path) -> Vec<&'static str> {
+    MODULE_PREFIXES
+        .iter()
+        .filter(|(_, prefix)| !root.join(prefix.trim_end_matches('/')).is_dir())
+        .map(|(_, prefix)| *prefix)
+        .collect()
 }
 
 /// Aggregate the report's file summaries per module.
@@ -179,8 +249,19 @@ fn floors(path: &Path) -> Result<BTreeMap<String, f64>, String> {
 }
 
 fn evaluate(root: &Path, report: &Path) -> Result<String, String> {
-    let rows = analyze(&read_json(report)?);
+    let cov = read_json(report)?;
+    let rows = analyze(&cov);
     let mut msg = table(&rows);
+    let orphans = unclassified(&cov);
+    if !orphans.is_empty() {
+        let shown: Vec<&str> = orphans.iter().take(10).map(String::as_str).collect();
+        return Err(format!(
+            "{msg}FAIL: {} measured file(s) belong to no module in the coverage table, \
+             so no floor can ever cover them (add the module to MODULE_PREFIXES): {}",
+            orphans.len(),
+            shown.join(", ")
+        ));
+    }
     let baselines = root.join(BASELINES);
     if !baselines.is_file() {
         let _ = write!(
@@ -218,6 +299,13 @@ pub fn run(root: &Path, report: &Path) -> Result<String, String> {
     if !report.is_file() {
         return Err(format!("no coverage report at {}", report.display()));
     }
+    let missing = missing_prefix_dirs(root);
+    if !missing.is_empty() {
+        return Err(format!(
+            "module coverage table names directories that do not exist: {}",
+            missing.join(", ")
+        ));
+    }
     evaluate(root, report)
 }
 
@@ -232,7 +320,7 @@ pub fn self_test() -> Result<String, String> {
          "summary": {"lines": {"count": 100, "covered": 50}}},
         {"filename": "/x/budlum/src/crypto/hash.rs",
          "summary": {"lines": {"count": 100, "covered": 90}}},
-        {"filename": "/x/budlum/budzero/src/lib.rs",
+        {"filename": "/x/budlum/budzero/bud-vm/src/lib.rs",
          "summary": {"lines": {"count": 10, "covered": 8}}},
     ]}]});
     let rows = analyze(&fake);
@@ -256,6 +344,21 @@ pub fn self_test() -> Result<String, String> {
     if gate(&rows, &high).is_empty() {
         return Err(String::from(
             "canary: a floor of 51 above 50% measured passed",
+        ));
+    }
+    // A measured file that no module owns must fail the gate.
+    let orphan = serde_json::json!({"data": [{"files": [
+        {"filename": "/x/budlum/src/brand_new_module/x.rs",
+         "summary": {"lines": {"count": 10, "covered": 10}}},
+    ]}]});
+    if unclassified(&orphan).len() != 1 {
+        return Err(String::from(
+            "canary: a file under src/ that no module owns was not reported",
+        ));
+    }
+    if !unclassified(&fake).is_empty() {
+        return Err(String::from(
+            "canary: owned files were reported as unclassified",
         ));
     }
     let absent: BTreeMap<String, f64> = [(String::from("budlum:rpc"), 1.0)].into();
@@ -313,5 +416,45 @@ pub fn self_test() -> Result<String, String> {
         )),
         Ok(msg) => Err(format!("canary: no baselines file did not SKIP:\n{msg}")),
         Err(e) => Err(format!("canary: no baselines file failed instead of SKIP:\n{e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("module-coverage self-test");
+    }
+
+    #[test]
+    fn the_table_matches_the_tree() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert_eq!(
+            super::missing_prefix_dirs(&root),
+            Vec::<&str>::new(),
+            "a prefix names a directory that is not in the tree"
+        );
+        // Every top-level directory of src/ and every crate of budzero/ is
+        // owned by some prefix, so a new module cannot sit outside the table.
+        for tree in ["src", "budzero"] {
+            for e in std::fs::read_dir(root.join(tree))
+                .expect("read tree")
+                .flatten()
+            {
+                if !e.path().is_dir() {
+                    continue;
+                }
+                let name = e.file_name().to_string_lossy().into_owned();
+                if tree == "budzero" && !e.path().join("Cargo.toml").is_file() {
+                    continue;
+                }
+                let probe = format!("{tree}/{name}/x.rs");
+                assert_ne!(
+                    super::module_of(&probe),
+                    "__other__",
+                    "{tree}/{name} is owned by no coverage module"
+                );
+            }
+        }
     }
 }
