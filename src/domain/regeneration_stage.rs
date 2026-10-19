@@ -539,6 +539,7 @@ impl RegenerationLedger {
         &mut self,
         target: &StageSnapshot,
         stress: Stress,
+        policy: &ReversionPolicy,
         canonical: &dyn Fn(Stage, u64) -> Option<[u8; 32]>,
     ) -> Result<Reversion, ReversionError> {
         if self.validate().is_ok() {
@@ -546,6 +547,13 @@ impl RegenerationLedger {
         }
         if target.stage != Stage::Polyp {
             return Err(ReversionError::ForgedTrailTargetNotPolyp { to: target.stage });
+        }
+        // The only legal target here is Polyp, so this is always a full
+        // reversion. The policy switch applies to this door like any other
+        // (P24-F02). The lifetime budget is not checked: the counters of a
+        // forged trail carry no meaning.
+        if !policy.allow_full_reversion {
+            return Err(ReversionError::FullReversionForbidden);
         }
         if canonical(target.stage, target.height) != Some(target.commitment) {
             return Err(ReversionError::TargetNotCanonical {
@@ -1301,10 +1309,35 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .unwrap_err();
             assert_eq!(err, ReversionError::LedgerIsValid);
+        }
+
+        #[test]
+        fn the_forgery_door_obeys_the_full_reversion_policy() {
+            let mut ledger = with_forged_trail();
+            let policy = ReversionPolicy {
+                allow_full_reversion: false,
+                ..ReversionPolicy::default()
+            };
+            let err = ledger
+                .revert_after_forgery(
+                    &StageSnapshot {
+                        stage: Stage::Polyp,
+                        height: 0,
+                        commitment: [0x11; 32],
+                        carried: Default::default(),
+                    },
+                    Stress::RepairFailed,
+                    &policy,
+                    &canonical,
+                )
+                .unwrap_err();
+            assert_eq!(err, ReversionError::FullReversionForbidden);
+            assert_eq!(ledger.stage, Stage::Ephyra);
         }
 
         #[test]
@@ -1319,6 +1352,7 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .unwrap_err();
@@ -1340,6 +1374,7 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .unwrap_err();
@@ -1358,6 +1393,7 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .expect("forgery recovery succeeds");
