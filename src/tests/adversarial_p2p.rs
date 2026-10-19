@@ -86,6 +86,10 @@ async fn test_p2p_topology_latency_drift_simulation() {
     future_block.hash = future_block.calculate_hash();
 
     // Usually accepted if within drift window (e.g. 15s in Bitcoin/Ethereum)
+    let future_ts = future_block.timestamp;
+    shadow
+        .validate_and_add_block(future_block.clone())
+        .expect("shadow follows the accepted block");
     let future_res = bc.validate_and_add_block(future_block);
     assert!(
         future_res.is_ok(),
@@ -98,16 +102,15 @@ async fn test_p2p_topology_latency_drift_simulation() {
     // Timestamp is a deterministic constant (GENESIS_TIMESTAMP == 0), so
     // "older than genesis" is not representable; regressing against the tip
     // Exercises the same monotonicity guard.
-    let mut past_block =
-        crate::core::block::Block::new(2, bc.chain.last().unwrap().hash.clone(), vec![]);
-    past_block.timestamp = bc.chain.last().unwrap().timestamp - 1000;
+    let Some((mut past_block, _)) = shadow.produce_block(crate::core::address::Address::zero())
+    else {
+        panic!("shadow block production failed");
+    };
+    past_block.timestamp = future_ts - 1000;
     past_block.hash = past_block.calculate_hash();
 
     // MUST be rejected
     let past_res = bc.validate_and_add_block(past_block);
-    assert!(
-        past_res.is_err(),
-        "clock-regressed block must be rejected, got {:?}",
-        past_res.ok()
-    );
+    let err = past_res.expect_err("clock-regressed block must be rejected");
+    assert!(err.contains("not monotonic"), "unexpected rejection: {err}");
 }
