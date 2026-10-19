@@ -84,6 +84,7 @@ fn sign_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address
         checkpoint_hash: hash.to_string(),
         voter_id: voter,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     v.sig_bls = sign_bls(sk, &v.signing_message());
     v

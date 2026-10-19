@@ -1739,6 +1739,7 @@ impl Node {
                                            checkpoint_hash: precommit.checkpoint_hash,
                                            voter_id: voter_addr.to_hex(),
                                            sig_bls: precommit.sig_bls,
+                                           auth_sig: precommit.auth_sig,
                                        };
                                        let topic = gossipsub::IdentTopic::new("blocks");
                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
@@ -1782,6 +1783,7 @@ impl Node {
                                                checkpoint_hash: prevote.checkpoint_hash,
                                                voter_id: voter_addr.to_hex(),
                                                sig_bls: prevote.sig_bls,
+                                               auth_sig: prevote.auth_sig,
                                            };
                                            let topic = gossipsub::IdentTopic::new("blocks");
                                            let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
@@ -2841,7 +2843,7 @@ impl Node {
                                                self.sync_if_behind(peer_id, peer_best_height).await;
                                            }
 
-                                           NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls } => {
+                                           NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig } => {
                                                let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
                                                if !rate_limit_ok {
                                                    warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Prevote.");
@@ -2864,6 +2866,7 @@ impl Node {
                                                    checkpoint_hash,
                                                    voter_id: voter_addr,
                                                    sig_bls,
+                                                   auth_sig,
                                                };
                                                match self.chain.handle_prevote(prevote).await {
                                                    Ok(_) => {
@@ -2878,7 +2881,7 @@ impl Node {
                                                }
                                            }
 
-                                           NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls } => {
+                                           NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig } => {
                                                let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
                                                if !rate_limit_ok {
                                                    warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Precommit.");
@@ -2901,6 +2904,7 @@ impl Node {
                                                    checkpoint_hash,
                                                    voter_id: voter_addr,
                                                    sig_bls,
+                                                   auth_sig,
                                                };
                                                match self.chain.handle_precommit(precommit).await {
                                                    Ok(Some(cert)) => {

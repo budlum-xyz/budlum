@@ -583,6 +583,7 @@ mod tests {
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: snapshot.validators[i].address,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let sig = sign_bls(sk, &vote.signing_message());
             let mut signed = vote;
@@ -598,6 +599,7 @@ mod tests {
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: snapshot.validators[i].address,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let sig = sign_bls(sk, &pc.signing_message());
             let mut signed = pc;
