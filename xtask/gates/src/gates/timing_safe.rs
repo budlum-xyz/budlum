@@ -209,7 +209,7 @@ mod tests {
     fn missing_scan_directory_is_an_error() {
         let dir = std::env::temp_dir().join(format!("timing-safe-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).expect("fixture dir");
         let out = run(&dir);
         let _ = fs::remove_dir_all(&dir);
         assert!(out.is_err());
