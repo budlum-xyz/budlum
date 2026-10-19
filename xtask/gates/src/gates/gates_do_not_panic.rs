@@ -130,8 +130,7 @@ pub fn scan(rel: &str, source: &str) -> Vec<PanicPoint> {
             continue;
         }
         if is_panic_point(line) {
-            let mut text = line.trim().to_string();
-            text.truncate(120);
+            let text = truncate_chars(line.trim(), 120);
             let ordinal = {
                 let n = seen.entry(text.clone()).or_insert(0);
                 *n += 1;
@@ -147,6 +146,13 @@ pub fn scan(rel: &str, source: &str) -> Vec<PanicPoint> {
         i += 1;
     }
     out
+}
+
+/// The first `max` characters of `s`. `String::truncate(120)` panics when byte
+/// 120 falls inside a multi-byte character, and the baseline key is made of
+/// characters anyway.
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
 }
 
 /// Is this line the signature of a self-test or canary function?
@@ -243,9 +249,8 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let mut found: Vec<PanicPoint> = Vec::new();
     for path in &files {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
@@ -416,4 +421,20 @@ pub fn self_test() -> Result<String, String> {
     }
 
     Ok(String::from("gates-do-not-panic: 9 canaries"))
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+
+    #[test]
+    fn long_line_with_wide_characters_does_not_panic() {
+        let line = format!("a{}.unwrap()", "\u{00f6}".repeat(130));
+        let points = scan("x.rs", &line);
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].text.chars().count(),
+            100 + ".unwrap()".len().min(20)
+        );
+    }
 }
