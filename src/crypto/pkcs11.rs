@@ -25,6 +25,16 @@ pub struct Pkcs11Signer {
     bls_mechanism: Option<u64>,
     pq_mechanism: Option<u64>,
     strict_vendor_native: bool,
+    /// HSM-held BLS public key, read from the slot's PUBLIC_KEY object
+    /// (P02-F01 decision A). `None` when the slot carries no such object.
+    bls_public_key_bytes: Option<Vec<u8>>,
+    /// HSM-held PQ public key, read the same way (P02-F01 decision A).
+    pq_public_key_bytes: Option<Vec<u8>>,
+    /// Operator-configured expectations (P02-F01 decision B). When set, the
+    /// HSM-read key must equal it; a mismatch is a fail-closed startup error,
+    /// and a slot with no readable key may be announced only through these.
+    expected_bls_public_key: Option<Vec<u8>>,
+    expected_pq_public_key: Option<Vec<u8>>,
 }
 
 struct Pkcs11Inner {
@@ -129,6 +139,11 @@ impl Pkcs11Signer {
             .map_err(CryptoError::KeyGeneration)?;
         let bls_key = None;
         let pq_key = None;
+        // P02-F01 decision A: the consensus public halves live in the slot as
+        // PUBLIC_KEY objects. They used to be hard-coded `None` here, so a
+        // mainnet HSM validator could never register its BLS or PQ key.
+        let bls_public_key_bytes = Self::extract_public_key_by_label(&session, BLS_DATA_LABEL);
+        let pq_public_key_bytes = Self::extract_public_key_by_label(&session, PQ_DATA_LABEL);
 
         Ok(Self {
             module_path,
@@ -145,7 +160,85 @@ impl Pkcs11Signer {
             bls_mechanism: None,
             pq_mechanism: None,
             strict_vendor_native: false,
+            bls_public_key_bytes,
+            pq_public_key_bytes,
+            expected_bls_public_key: None,
+            expected_pq_public_key: None,
         })
+    }
+
+    /// Read the PUBLIC_KEY object carrying `label`, exactly one (P02-F01).
+    ///
+    /// Zero objects is `None` - the slot may legitimately hold only the Ed25519
+    /// identity. More than one is refused: announcing one consensus key while
+    /// signing with another is a consensus fault, the same rule the Ed25519
+    /// extractor follows.
+    fn extract_public_key_by_label(
+        session: &cryptoki::session::Session,
+        label: &str,
+    ) -> Option<Vec<u8>> {
+        let template = vec![
+            cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PUBLIC_KEY),
+            cryptoki::object::Attribute::Label(label.into()),
+        ];
+        let objects = match session.find_objects(&template) {
+            Ok(objects) => objects,
+            Err(e) => {
+                tracing::warn!("PKCS#11: public key search for label {label} failed: {e}");
+                return None;
+            }
+        };
+        if objects.is_empty() {
+            return None;
+        }
+        if objects.len() > 1 {
+            tracing::warn!(
+                "PKCS#11: {} PUBLIC_KEY objects carry label {label}; refusing to guess",
+                objects.len()
+            );
+            return None;
+        }
+        let attr = session
+            .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
+            .ok()?;
+        match attr.first() {
+            Some(cryptoki::object::Attribute::Value(value)) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    /// Operator-configured expectations, cross-checked against the slot
+    /// (P02-F01 decision B).
+    ///
+    /// With both sides present they must match byte for byte; with only the
+    /// expectation present it becomes the announced key and the vendor
+    /// binding test in [`Self::with_vendor_mechanisms`] proves the pairing.
+    pub fn with_expected_consensus_public_keys(
+        mut self,
+        bls_public_key: Option<Vec<u8>>,
+        pq_public_key: Option<Vec<u8>>,
+    ) -> Result<Self, CryptoError> {
+        if let Some(expected) = &bls_public_key {
+            if let Some(read) = &self.bls_public_key_bytes {
+                if read != expected {
+                    return Err(CryptoError::KeyGeneration(
+                        "HSM BLS public key does not match the operator-configured key".into(),
+                    ));
+                }
+            }
+        }
+        if let Some(expected) = &pq_public_key {
+            if let Some(read) = &self.pq_public_key_bytes {
+                if read != expected {
+                    return Err(CryptoError::KeyGeneration(
+                        "HSM PQ public key does not match the operator-configured key".into(),
+                    ));
+                }
+            }
+        }
+        self.expected_bls_public_key = bls_public_key;
+        self.expected_pq_public_key = pq_public_key;
+        Ok(self)
     }
 
     /// Set vendor-native BLS/PQ mechanism IDs.
@@ -164,6 +257,51 @@ impl Pkcs11Signer {
             tracing::info!("PKCS#11: vendor PQ mechanism 0x{:08X}", id);
         }
         self
+    }
+
+    /// The consensus public half this signer announces (P02-F01).
+    ///
+    /// Operator expectation (decision B) wins as the announced identity; the
+    /// HSM-read object (decision A) is the fallback. Both were cross-checked
+    /// for equality at build time when both existed.
+    fn announced_bls_public_key(&self) -> Option<Vec<u8>> {
+        self.expected_bls_public_key
+            .clone()
+            .or_else(|| self.bls_public_key_bytes.clone())
+    }
+
+    /// The PQ counterpart of [`Self::announced_bls_public_key`].
+    fn announced_pq_public_key(&self) -> Option<Vec<u8>> {
+        self.expected_pq_public_key
+            .clone()
+            .or_else(|| self.pq_public_key_bytes.clone())
+    }
+
+    /// Startup binding test (P02-F01 decision B): the announced consensus
+    /// public keys must pair with the keys the HSM actually signs with.
+    ///
+    /// Announcing one BLS key and signing with another is a consensus fault
+    /// with no recovery, so the pairing is proven once at startup against a
+    /// fixed message instead of at the first checkpoint.
+    pub fn verify_consensus_key_bindings(&self) -> Result<(), CryptoError> {
+        const BINDING_MSG: &[u8] = b"BUDLUM_HSM_CONSENSUS_KEY_BINDING_V1";
+        if self.bls_mechanism.is_some() {
+            if let Some(pk) = self.announced_bls_public_key() {
+                let sig = self.bls_sign(BINDING_MSG)?;
+                crate::chain::finality::verify_bls_sig(&pk, BINDING_MSG, &sig).map_err(|e| {
+                    CryptoError::KeyGeneration(format!("HSM BLS key binding test failed: {e}"))
+                })?;
+            }
+        }
+        if self.pq_mechanism.is_some() {
+            if let Some(pk) = self.announced_pq_public_key() {
+                let sig = self.pq_sign(BINDING_MSG)?;
+                crate::crypto::primitives::PqKeyPair::verify(&pk, BINDING_MSG, &sig).map_err(
+                    |e| CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}")),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Require vendor-native BLS/PQ signing and fail closed on any fallback.
@@ -611,17 +749,21 @@ impl ConsensusSigner for Pkcs11Signer {
     }
 
     fn bls_public_key(&self) -> Option<Vec<u8>> {
-        self.bls_key
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|k| k.public_key.clone()))
+        self.announced_bls_public_key().or_else(|| {
+            self.bls_key
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|k| k.public_key.clone()))
+        })
     }
 
     fn pq_public_key(&self) -> Option<Vec<u8>> {
-        self.pq_key
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|k| k.public_key_bytes().to_vec()))
+        self.announced_pq_public_key().or_else(|| {
+            self.pq_key
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|k| k.public_key_bytes().to_vec()))
+        })
     }
 
     fn backend_name(&self) -> &'static str {
