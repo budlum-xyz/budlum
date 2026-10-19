@@ -48,34 +48,86 @@ fn strip_test_modules(text: &str) -> String {
     super::capability_modules_are_wired::strip_test_mods(text)
 }
 
-/// Is this line a `chain_id: <int literal>` struct field?
+/// Length of the integer literal at the start of `text`, suffix included.
 ///
-/// Returns the offending literal when it is.
+/// Accepts decimal, `0x`, `0o`, `0b`, digit separators and a type suffix such
+/// as `u64`. Returns 0 when `text` does not start with a literal.
+fn int_literal_len(text: &str) -> usize {
+    let b = text.as_bytes();
+    if !b.first().is_some_and(u8::is_ascii_digit) {
+        return 0;
+    }
+    let mut i = 0;
+    let radix_prefix = b.len() > 1 && b[0] == b'0' && matches!(b[1], b'x' | b'o' | b'b');
+    if radix_prefix {
+        i = 2;
+    }
+    while i < b.len()
+        && (b[i].is_ascii_digit() || b[i] == b'_' || (radix_prefix && b[i].is_ascii_hexdigit()))
+    {
+        i += 1;
+    }
+    // A type suffix, for example `u64` or `usize`.
+    if i < b.len() && matches!(b[i], b'u' | b'i') {
+        let mut j = i + 1;
+        while j < b.len() && b[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        i = j;
+    }
+    i
+}
+
+/// Does the text after a literal end the value (`,`, `}`, `;`, end, `as T`)?
+fn value_ends(tail: &str) -> bool {
+    let tail = tail.trim_start();
+    let tail = tail.strip_prefix("as ").map_or(tail, |t| {
+        t.trim_start()
+            .trim_start_matches(|c: char| c.is_alphanumeric() || c == '_')
+    });
+    let tail = tail.trim_start();
+    tail.is_empty() || tail.starts_with([',', '}', ';', ')'])
+}
+
+/// Is this line a `chain_id` struct field or assignment with an integer literal?
+///
+/// Returns the offending literal when it is. Every `chain_id` on the line is
+/// looked at, not only the first.
 fn hardcoded_chain_id(line: &str) -> Option<String> {
     let trimmed = line.trim();
     // A constant definition is where the number belongs.
     if trimmed.starts_with("const ") || trimmed.starts_with("pub const ") {
         return None;
     }
-    let idx = trimmed.find("chain_id:")?;
-    // Only a field named exactly `chain_id`, not `expected_chain_id:` etc.
-    let before = trimmed[..idx].chars().next_back();
-    if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+    // A `let mut` local is a default that later code replaces, for example a
+    // command-line flag default. An immutable binding is final.
+    if trimmed.starts_with("let mut ") {
         return None;
     }
-    let after = trimmed[idx + "chain_id:".len()..].trim();
-    // A type annotation (`chain_id: u64`) is a declaration, not a value.
-    let value: String = after
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '_')
-        .collect();
-    if value.is_empty() {
-        return None;
-    }
-    // The digits must be the whole value, ending at `,` or `}`.
-    let tail = after[value.len()..].trim_start();
-    if tail.is_empty() || tail.starts_with(',') || tail.starts_with('}') {
-        return Some(value);
+    for (idx, _) in trimmed.match_indices("chain_id") {
+        // Only a name that is exactly `chain_id`, not `expected_chain_id`.
+        let before = trimmed[..idx].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let rest = trimmed[idx + "chain_id".len()..].trim_start();
+        let value_text = if let Some(v) = rest.strip_prefix(':') {
+            // `chain_id: u64 = 1;` is a typed `let`; `chain_id: u64,` is a declaration.
+            let v = v.trim_start();
+            if int_literal_len(v) == 0 && trimmed.starts_with("let ") {
+                v.split_once('=').map_or("", |(_, r)| r.trim_start())
+            } else {
+                v
+            }
+        } else if rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=>") {
+            rest[1..].trim_start()
+        } else {
+            continue;
+        };
+        let len = int_literal_len(value_text);
+        if len > 0 && value_ends(&value_text[len..]) {
+            return Some(value_text[..len].to_string());
+        }
     }
     None
 }
@@ -139,7 +191,16 @@ pub fn run(root: &Path) -> Result<String, String> {
         };
         scanned += 1;
         let code = strip_test_modules(&text);
-        for (n, line) in code.lines().enumerate() {
+        let lines: Vec<&str> = code.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            // A value written on the line after `chain_id:` is joined to it.
+            let joined;
+            let line = if line.trim_end().ends_with("chain_id:") && n + 1 < lines.len() {
+                joined = format!("{line} {}", lines[n + 1].trim());
+                joined.as_str()
+            } else {
+                line
+            };
             if let Some(v) = hardcoded_chain_id(line) {
                 hits.push(format!("{rel}:{}  chain_id: {v}", n + 1));
             }
@@ -235,6 +296,29 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffix_hex_cast_assignment_and_second_match_are_flagged() {
+        for l in [
+            "chain_id: 1u64,",
+            "chain_id: 0x1,",
+            "chain_id: 1 as u64,",
+            "expected_chain_id: x, chain_id: 1 }",
+            "chain_id = 1;",
+            "let chain_id = 1;",
+            "let chain_id: u64 = 1;",
+        ] {
+            assert!(hardcoded_chain_id(l).is_some(), "{l}");
+        }
+        for l in [
+            "pub chain_id: u64,",
+            "let chain_id: u64 = cfg.id;",
+            "chain_id == 1",
+            "chain_id: x as u64,",
+        ] {
+            assert!(hardcoded_chain_id(l).is_none(), "{l}");
+        }
+    }
 
     #[test]
     fn bodyless_test_item_does_not_hide_next_function() {
