@@ -456,6 +456,14 @@ fn has_rebinding(before: &str, binding: &str) -> bool {
     false
 }
 
+/// A line that draws a challenge, whatever the sampling call is named.
+fn is_challenge_draw(line: &str) -> bool {
+    line.contains("sample_algebra_element")
+        || line.contains(".sample(")
+        || line.contains(".sample_bits(")
+        || line.contains(".sample_array(")
+}
+
 /// Check that one side absorbs `security_parameters()` before its first
 /// challenge.
 fn check_absorption(src: &str, name: &str, problems: &mut Vec<String>, checked: &mut usize) {
@@ -465,7 +473,7 @@ fn check_absorption(src: &str, name: &str, problems: &mut Vec<String>, checked: 
     let stops: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.contains("sample_algebra_element()"))
+        .filter(|(_, l)| is_challenge_draw(l))
         .map(|(i, _)| i)
         .collect();
     let Some(&stop) = stops.first() else {
@@ -520,12 +528,6 @@ fn check_absorption(src: &str, name: &str, problems: &mut Vec<String>, checked: 
                  outside the transcript."
             ));
         }
-        problems.push(format!(
-            "{name}.rs reads `security_parameters()` but never observes the \
-             value (or its binding) into the challenger before the first \
-             challenge. An unrelated observe call leaves the FRI parameters \
-             outside the transcript."
-        ));
     }
 }
 
@@ -1055,4 +1057,18 @@ pub fn self_test() -> Result<String, String> {
          comment lookalikes and a nested comment next to the real call are \
          handled correctly; the derived tree passes.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_sampling_call_before_the_absorption_is_a_problem() {
+        let src = "fn f() {\n    let bits = challenger.sample_bits(4);\n    let sec = security_parameters();\n    challenger.observe(sec);\n    let x = challenger.sample_algebra_element();\n}\n";
+        let mut problems = Vec::new();
+        let mut checked = 0usize;
+        check_absorption(src, "prover", &mut problems, &mut checked);
+        assert!(!problems.is_empty());
+    }
 }
