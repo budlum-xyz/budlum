@@ -744,10 +744,14 @@ async fn main() {
                 }
             }
         };
-        let expected_bls_key =
-            decode_expected(config.pkcs11_bls_public_key.as_deref(), "pkcs11-bls-public-key");
-        let expected_pq_key =
-            decode_expected(config.pkcs11_pq_public_key.as_deref(), "pkcs11-pq-public-key");
+        let expected_bls_key = decode_expected(
+            config.pkcs11_bls_public_key.as_deref(),
+            "pkcs11-bls-public-key",
+        );
+        let expected_pq_key = decode_expected(
+            config.pkcs11_pq_public_key.as_deref(),
+            "pkcs11-pq-public-key",
+        );
         match signer_result.map(|s| {
             let s = match s.with_expected_consensus_public_keys(expected_bls_key, expected_pq_key) {
                 Ok(s) => s,
