@@ -120,6 +120,9 @@ fn render_from_recipe(
 /// is less code than counting bytes and gives the same guarantee.
 pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 
+/// The most bytes the generation cache holds in total.
+pub const MAX_GENERATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 /// A bounded cache so the recipe is not run over and over.
 ///
 /// # What it changes and what it does not
@@ -163,8 +166,17 @@ impl GenerationCache {
         if self.entries.iter().any(|(key, _)| key == &id) {
             return;
         }
-        while self.entries.len() >= MAX_GENERATION_CACHE_ENTRIES {
-            self.entries.pop_front();
+        if bytes.len() > MAX_GENERATION_CACHE_BYTES {
+            return;
+        }
+        let mut held: usize = self.entries.iter().map(|(_, b)| b.len()).sum();
+        while self.entries.len() >= MAX_GENERATION_CACHE_ENTRIES
+            || held.saturating_add(bytes.len()) > MAX_GENERATION_CACHE_BYTES
+        {
+            match self.entries.pop_front() {
+                Some((_, old)) => held = held.saturating_sub(old.len()),
+                None => break,
+            }
         }
         self.entries.push_back((id, bytes));
     }
@@ -461,6 +473,19 @@ mod tests {
         );
         let (_dir2, storage2, cid2) = corrupt_store(b"", b"x");
         assert!(read_local_storage(&storage2, &cid2).is_err());
+    }
+
+    #[test]
+    fn the_generation_cache_is_bounded_in_bytes() {
+        let mut cache = GenerationCache::default();
+        let big = MAX_GENERATION_CACHE_BYTES / 2 + 1;
+        for n in 0u8..3 {
+            cache.insert(ContentId([n; 32]), vec![0u8; big]);
+        }
+        let held: usize = cache.entries.iter().map(|(_, b)| b.len()).sum();
+        assert!(held <= MAX_GENERATION_CACHE_BYTES);
+        assert!(cache.get(&ContentId([2u8; 32])).is_some());
+        assert!(cache.get(&ContentId([0u8; 32])).is_none());
     }
 
     #[test]
