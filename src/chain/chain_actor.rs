@@ -102,7 +102,6 @@ pub enum ChainCommand {
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
     AddBalance(Address, u64, oneshot::Sender<Result<(), String>>),
     FundDevelopmentAccount(Address, oneshot::Sender<Result<(), String>>),
-    StoragePrune([u8; 32]),
     GetStateSnapshotData(
         u64,
         oneshot::Sender<Option<crate::chain::snapshot::StateSnapshot>>,
@@ -1511,12 +1510,6 @@ impl ChainHandle {
         }
         rx.await
             .map_err(|e| format!("faucet response channel closed: {e}"))?
-    }
-
-    pub async fn storage_prune(&self, cid: [u8; 32]) {
-        if let Err(e) = self.tx.send(ChainCommand::StoragePrune(cid)).await {
-            tracing::error!(error = %e, "Failed to send StoragePrune command to chain actor");
-        }
     }
 
     pub async fn get_state_snapshot_data(
@@ -3480,17 +3473,6 @@ impl ChainActor {
                     }
                     let _ = res_tx.send(res);
                 }
-                ChainCommand::StoragePrune(cid) => {
-                    // The storage registry root is part of the state root, and
-                    // a bond return moves balances. Changing either outside a
-                    // block splits the root between nodes. Registry pruning
-                    // runs only inside block application (NftBurn), so a
-                    // manual trigger is refused.
-                    tracing::warn!(
-                        cid = %hex::encode(cid),
-                        "Manual storage prune refused: registry state changes only inside blocks"
-                    );
-                }
                 ChainCommand::GetTransactionByHash(hash, tx) => {
                     let tx_obj = self.blockchain.get_transaction_by_hash(&hash);
                     let _ = tx.send(tx_obj);
@@ -5132,23 +5114,6 @@ mod proof_cache_tests {
         let after = actor.account_proof(&who);
         assert_eq!(after.balance, 150);
         assert_ne!(before.root, after.root);
-    }
-
-    #[tokio::test]
-    async fn manual_storage_prune_does_not_change_the_registry() {
-        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-        let (mut actor, handle) = ChainActor::new(bc);
-        let manifest = crate::storage::ContentManifest::from_bytes_sliced(b"prune me", 8)
-            .expect("manifest builds");
-        let id = manifest.manifest_id;
-        actor
-            .blockchain
-            .state
-            .storage_registry
-            .register_manifest(&manifest);
-        tokio::spawn(actor.run());
-        handle.storage_prune(id.0).await;
-        assert!(handle.get_storage_manifest(id).await.is_some());
     }
 
     #[test]
