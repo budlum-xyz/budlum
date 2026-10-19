@@ -57,20 +57,34 @@ mod tests {
     /// deliberate decision rather than an accident.
     #[test]
     fn network_event_loop_has_no_bare_lock_unwrap() {
-        let offenders: Vec<_> = code_lines(NODE_RS)
+        // Whitespace is removed so a rustfmt-split chain is still seen, and
+        // `.read()`, `.write()` and `.expect(` are covered like `.lock().unwrap()`.
+        let flat: String = code_lines(NODE_RS)
             .into_iter()
-            .filter(|(_, line)| line.contains(".lock().unwrap()"))
+            .flat_map(|(_, line)| {
+                line.split_whitespace()
+                    .collect::<String>()
+                    .chars()
+                    .collect::<Vec<_>>()
+            })
             .collect();
+        let offenders: Vec<&str> = [
+            ".lock().unwrap()",
+            ".read().unwrap()",
+            ".write().unwrap()",
+            ".lock().expect(",
+            ".read().expect(",
+            ".write().expect(",
+        ]
+        .into_iter()
+        .filter(|pattern| flat.contains(pattern))
+        .collect();
 
         assert!(
             offenders.is_empty(),
-            "node.rs contains bare .lock().unwrap() at {:?} - a poisoned mutex \
-             would panic the node instead of failing the request. Match on the \
-             Result, or use unwrap_or_else with an explicit logged exit.",
-            offenders
-                .iter()
-                .map(|(n, l)| format!("line {n}: {l}"))
-                .collect::<Vec<_>>()
+            "node.rs contains a bare lock unwrap or expect ({offenders:?}) - a poisoned \
+             lock would panic the node instead of failing the request. Match on the \
+             Result, or use unwrap_or_else with an explicit logged exit."
         );
     }
 
