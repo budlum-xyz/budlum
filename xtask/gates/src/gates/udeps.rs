@@ -139,7 +139,7 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     let broken_failed = run(&dir, &broken).is_err();
-    let clean = dir.join("temiz.txt");
+    let clean = dir.join("clean.txt");
     std::fs::write(
         &clean,
         "info: Loading depinfo from \"x.d\"\nAll deps seem to have been used.\n",
