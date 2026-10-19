@@ -213,3 +213,7 @@ pub mod consensus_bypass_locks;
 pub mod block_clock;
 #[cfg(test)]
 pub mod real_chain_fixtures;
+// Effect-asserting locks for the slashing matrix and the overflow rule
+// (P49-F04, P49-F06).
+#[cfg(test)]
+pub mod audit_p49_locks;
