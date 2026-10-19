@@ -397,15 +397,16 @@ impl<P: BpqsParams, H: BpqsHash> Drop for BpqsSigner<P, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::ParamsTestFast;
+    use crate::hash::Sha3_256Hash;
+    use crate::params::{BpqsParams, ParamsL3};
 
-    type T = ParamsTestFast;
-    type H = crate::primitives::blake2b::Blake2b256;
+    type T = ParamsL3;
+    type H = Sha3_256Hash;
 
     fn signed() -> BpqsSignature<T> {
-        let window = EpochWindow::new(0).unwrap();
-        let signer = BpqsSigner::<T, H>::ceremonial_keygen(&[7u8; 32], window).unwrap();
-        signer.sign_at_height(b"canonical-check", 0).unwrap()
+        let window = EpochWindow(4);
+        let mut signer = BpqsSigner::<T, H>::ceremonial_keygen([7u8; 32], window).unwrap();
+        signer.sign_at_height(0, b"canonical-check").unwrap()
     }
 
     // BLG-0045: check_canonical is the malleability gate; every refusal arm
@@ -419,29 +420,20 @@ mod tests {
     fn check_canonical_refuses_nonzero_used_lane_padding() {
         let mut sig = signed();
         sig.chains[0][T::N] = 1;
-        assert!(matches!(
-            check_canonical(&sig),
-            Err(BpqsError::Malformed(_))
-        ));
+        assert!(matches!(check_canonical(&sig), Err(BpqsError::Malformed(_))));
     }
 
     #[test]
     fn check_canonical_refuses_nonzero_unused_lane() {
         let mut sig = signed();
         sig.chains[T::LEN][0] = 1;
-        assert!(matches!(
-            check_canonical(&sig),
-            Err(BpqsError::Malformed(_))
-        ));
+        assert!(matches!(check_canonical(&sig), Err(BpqsError::Malformed(_))));
     }
 
     #[test]
     fn check_canonical_refuses_nonzero_unused_path_entry() {
         let mut sig = signed();
         sig.path[T::T_LOG2][0] = 1;
-        assert!(matches!(
-            check_canonical(&sig),
-            Err(BpqsError::Malformed(_))
-        ));
+        assert!(matches!(check_canonical(&sig), Err(BpqsError::Malformed(_))));
     }
 }

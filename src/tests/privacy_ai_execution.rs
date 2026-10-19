@@ -32,7 +32,8 @@ fn private_transfer_submit_spend_and_create() {
     let mut state = funded_state(from, 1_000_000);
 
     let c_in = hash_from_field(1);
-    let n1 = hash_from_field(2);
+    let proof = budlum_note_packing::hash_from_field(0xA11CE);
+    let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(3);
     state.note_registry.insert_note(c_in).unwrap();
 
@@ -42,6 +43,7 @@ fn private_transfer_submit_spend_and_create() {
         spent_commitments: vec![c_in],
         nullifiers: vec![n1],
         output_commitments: vec![c_out],
+            nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: sig,
         public_digest: digest,
     };
@@ -70,7 +72,8 @@ fn private_transfer_double_spend_fails() {
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
     let c_in = hash_from_field(9);
-    let n1 = hash_from_field(8);
+    let proof = budlum_note_packing::hash_from_field(0xA11CE);
+    let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(7);
     state.note_registry.insert_note(c_in).unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
@@ -78,6 +81,7 @@ fn private_transfer_double_spend_fails() {
         spent_commitments: vec![c_in],
         nullifiers: vec![n1],
         output_commitments: vec![c_out],
+            nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: kp.sign(&digest).to_vec(),
         public_digest: digest,
     };
@@ -102,6 +106,7 @@ fn private_transfer_double_spend_fails() {
         spent_commitments: vec![c2],
         nullifiers: vec![n1],
         output_commitments: vec![c_out2],
+            nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: kp.sign(&digest2).to_vec(),
         public_digest: digest2,
     };
