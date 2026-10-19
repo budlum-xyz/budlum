@@ -280,6 +280,11 @@ mod integration_tests {
         blockchain.add_transaction(tx1.clone()).unwrap();
         let miner = test_addr_from_byte(3);
         let _ = blockchain.produce_block(miner);
+        assert!(
+            blockchain.chain.len() > 1,
+            "the transaction must be included in a block before the replay"
+        );
+        assert_eq!(blockchain.state.get_nonce(&pubkey), 1);
 
         let result = blockchain.add_transaction(tx1);
         assert!(result.is_err(), "Replay attack should be prevented");
