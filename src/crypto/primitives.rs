@@ -332,7 +332,9 @@ impl PqKeyPair {
         // secret half would announce one identity and sign with another, so
         // a fixed probe is signed and verified at parse time.
         const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
-        let probe = kp.sign(PAIRING_PROBE).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        let probe = kp
+            .sign(PAIRING_PROBE)
+            .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
         Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
             CryptoError::InvalidKey("PQ public and secret halves do not match".into())
         })?;
@@ -342,7 +344,6 @@ impl PqKeyPair {
     pub fn public_key_bytes(&self) -> &[u8] {
         &self.public_key
     }
-
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let secret_key = dilithium5::SecretKey::from_bytes(&self.secret_key)
@@ -407,7 +408,9 @@ impl PqKeyPair {
         };
         // F10: the halves must pair; see the dilithium impl above.
         const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
-        let probe = kp.sign(PAIRING_PROBE).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        let probe = kp
+            .sign(PAIRING_PROBE)
+            .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
         Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
             CryptoError::InvalidKey("PQ public and secret halves do not match".into())
         })?;
@@ -417,7 +420,6 @@ impl PqKeyPair {
     pub fn public_key_bytes(&self) -> &[u8] {
         &self.public_key
     }
-
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let seed = ml_dsa::Seed::try_from(self.secret_key.as_slice())
@@ -488,7 +490,6 @@ impl PqKeyPair {
         &self.public_key
     }
 
-
     pub fn sign(&self, _message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
             "PQ signing not available: enable `pq-dilithium` or `pq-ml-dsa` feature".to_string(),
@@ -549,9 +550,7 @@ impl ValidatorKeys {
         }
         write_key_file(path.as_ref(), &bytes)?;
         // F11: the plaintext key buffer does not outlive the write.
-        for b in &mut bytes {
-            *b = 0;
-        }
+        bytes.fill(0);
         Ok(())
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
@@ -637,8 +636,8 @@ impl ValidatorKeys {
         }
         Ok(())
     }
-
 }
+
 impl KeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
@@ -1116,6 +1115,7 @@ mod tests {
 }
 
 /// Does the captured stdout contain a run of 64 hex characters?
+#[cfg(test)]
 fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stdout);
     let bytes = text.as_bytes();
@@ -1251,7 +1251,7 @@ fn test_bls_proof_of_possession() {
 
     let other = BlsKeypair::generate().expect("generate another key");
     let mut wrong_key = entry;
-    wrong_key.bls_public_key = other.public_key;
+    wrong_key.bls_public_key = other.public_key.clone();
     assert!(!crate::chain::finality::verify_pop(
         &wrong_key,
         DEFAULT_CHAIN_ID
