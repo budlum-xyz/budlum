@@ -358,8 +358,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    let air_src = std::fs::read_to_string(&air).unwrap_or_default();
-    let prover_src = std::fs::read_to_string(&prover).unwrap_or_default();
+    let air_src = std::fs::read_to_string(&air)
+        .map_err(|e| format!("FAIL: {} could not be read: {e}", air.display()))?;
+    let prover_src = std::fs::read_to_string(&prover)
+        .map_err(|e| format!("FAIL: {} could not be read: {e}", prover.display()))?;
     let code = strip_line_comments(&air_src);
 
     let mut problems: Vec<String> = Vec::new();
