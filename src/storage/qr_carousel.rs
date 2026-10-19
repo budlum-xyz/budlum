@@ -569,6 +569,14 @@ impl CarouselDecoder {
     ///
     /// Parameter mismatch across drops.
     pub fn push(&mut self, drop: &Drop) -> Result<(), CarouselError> {
+        // `Drop` fields are public, so a hand-built drop can carry a body of
+        // another length. `xor_into` would then cut the longer one silently.
+        if drop.body.len() != usize::from(drop.params.block_len) {
+            return Err(CarouselError::BodyLenMismatch {
+                block_len: drop.params.block_len,
+                got: drop.body.len(),
+            });
+        }
         match self.params {
             None => {
                 if drop.params.k == 0 || drop.params.k > MAX_K {
@@ -1275,6 +1283,28 @@ mod tests {
             CarouselError::TooLarge {
                 len: u32::MAX as usize,
                 max: MAX_CAROUSEL_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn a_hand_built_drop_with_the_wrong_body_length_is_refused() {
+        let mut dec = CarouselDecoder::new();
+        let drop = Drop {
+            seq: 0,
+            params: CarouselParams {
+                k: 1,
+                block_len: 4,
+                total_len: 4,
+            },
+            degree: 1,
+            body: vec![0u8; 3],
+        };
+        assert_eq!(
+            dec.push(&drop).unwrap_err(),
+            CarouselError::BodyLenMismatch {
+                block_len: 4,
+                got: 3
             }
         );
     }
