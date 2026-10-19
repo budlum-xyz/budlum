@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 const TX: &str = "src/core/transaction.rs";
 
 /// Roots holding shipped library code, for resolving carried structs.
-const SCAN_ROOTS: &[&str] = &["src", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "crates/wallet-core"];
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -266,7 +266,9 @@ fn collect_rs(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    for entry in entries.flatten() {
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
         let Ok(p_kind) = entry.file_type() else {
             continue;
         };
@@ -640,7 +642,8 @@ fn verdict(tmp: &Path, case: &str, want: &Expect) -> Result<(), String> {
         (Err(msg), Expect::Finding) => {
             if msg.contains("no transaction module")
                 || msg.contains("no struct carried")
-                || msg.contains("TransactionType") && msg.contains("no")
+                || msg.contains("no `pub enum TransactionType`")
+                || msg.contains("`TransactionType` has no body")
             {
                 Err(format!(
                     "BROKEN: {case} measured nothing instead of finding: {msg}"
@@ -719,4 +722,17 @@ pub fn self_test() -> Result<String, String> {
          a covered variant, a declared exclusion, a two-level helper chain and an \
          array return all pass.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_scan_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for r in SCAN_ROOTS {
+            assert!(repo.join(r).is_dir(), "missing scan root {r}");
+        }
+    }
 }
