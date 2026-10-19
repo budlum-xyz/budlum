@@ -7,20 +7,36 @@
 
 use std::path::Path;
 
+/// Parse a baseline value: a finite percentage from 0 to 100.
+///
+/// `parse::<f64>` also accepts `nan`, `inf` and `-5`; a `NaN` baseline makes
+/// `pct < base` false for every report, which would turn the ratchet off.
+fn parse_baseline(text: &str) -> Result<f64, String> {
+    let v = text
+        .trim_end_matches('%')
+        .trim()
+        .parse::<f64>()
+        .map_err(|e| format!("the baseline is not a number: {e}"))?;
+    if !v.is_finite() || !(0.0..=100.0).contains(&v) {
+        return Err(format!(
+            "the baseline {v} is not a percentage from 0 to 100"
+        ));
+    }
+    Ok(v)
+}
+
 fn baseline(root: &Path) -> Result<f64, String> {
     let f = root.join(".github/coverage-baseline.txt");
     let text = std::fs::read_to_string(&f)
         .map_err(|e| format!("the baseline could not be read ({}): {e}", f.display()))?;
     // The file holds a plain float (`64.30`), as the shell gate's `float()`
     // read it; a trailing `%` is tolerated for hand-edited values.
-    text.lines()
+    let line = text
+        .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .ok_or_else(|| format!("the baseline could not be read ({})", f.display()))?
-        .trim_end_matches('%')
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| format!("the baseline is not a number: {e}"))
+        .ok_or_else(|| format!("the baseline could not be read ({})", f.display()))?;
+    parse_baseline(line)
 }
 
 /// Pull the line-coverage percentage out of the llvm-cov JSON export:
@@ -43,7 +59,10 @@ fn percent_from_json(text: &str) -> Option<f64> {
 /// Returns a finding when the measured coverage is below the baseline.
 pub fn run(root: &Path, report: &Path) -> Result<String, String> {
     if !report.is_file() {
-        return Err(format!("coverage raporu yok: {}", report.display()));
+        return Err(format!(
+            "the coverage report is missing: {}",
+            report.display()
+        ));
     }
     let base = baseline(root)?;
     let text = std::fs::read_to_string(report).map_err(|e| e.to_string())?;
@@ -53,6 +72,11 @@ pub fn run(root: &Path, report: &Path) -> Result<String, String> {
             report.display()
         ));
     };
+    if !pct.is_finite() {
+        return Err(format!(
+            "the measured coverage {pct} is not a finite number"
+        ));
+    }
     let msg = format!("coverage: lines {pct:.2}% | baseline: {base:.2}%");
     if pct < base {
         return Err(format!(
@@ -98,6 +122,15 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baseline_must_be_a_finite_percentage() {
+        assert!(parse_baseline("nan").is_err());
+        assert!(parse_baseline("inf").is_err());
+        assert!(parse_baseline("-5").is_err());
+        assert!(parse_baseline("100.5").is_err());
+        assert_eq!(parse_baseline("64.30%"), Ok(64.30));
+    }
 
     #[test]
     fn parses_percent() {
