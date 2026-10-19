@@ -4,7 +4,7 @@
 //
 // This file encodes the end of the era in which "an emptiness check is enough":
 // - RelayerResult now carries bincode(MerkleProof) plus a result-fact leaf and a root
-//   Anchoring gerektirir (executor::TransactionType::RelayerResult kolu).
+//   anchoring (the executor::TransactionType::RelayerResult arm).
 // - BudlumxyzRegisterApp now carries the BUDLUMXYZ_REGISTER_MIN_FEE requirement.
 // - The BnsRegister fee check (H1, executor) is sealed as a regression.
 
