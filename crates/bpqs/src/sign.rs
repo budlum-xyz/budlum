@@ -318,6 +318,59 @@ mod sign_tests {
     }
 
     #[test]
+    fn wrong_public_key_refuses() {
+        let mut signer = committee();
+        let other = BpqsSigner::<P, H>::ceremonial_keygen([43u8; 32], EpochWindow(8))
+            .unwrap_or_else(|e| panic!("keygen: {e}"));
+        let sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(verify_at_height::<H, P>(other.public(), 0, b"m", &sig).is_err());
+    }
+
+    #[test]
+    fn params_name_mismatch_refuses() {
+        let mut signer = committee();
+        let sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut public = signer.public().clone();
+        public.params_name = "another-row";
+        assert_eq!(
+            verify_at_height::<H, P>(&public, 0, b"m", &sig),
+            Err(BpqsError::Malformed(
+                "keybook entry and signature are from different parameter rows"
+            ))
+        );
+    }
+
+    #[test]
+    fn epoch_beyond_headroom_refuses_at_sign_and_verify() {
+        let mut signer = committee();
+        let past = (1u64 << P::T_LOG2) * 8;
+        assert_eq!(
+            signer.sign_at_height(past, b"m"),
+            Err(BpqsError::Malformed(
+                "epoch beyond the tree's headroom; committee renewal ceremony required"
+            ))
+        );
+        let mut sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
+        sig.epoch = 1u32 << P::T_LOG2;
+        assert_eq!(
+            verify_at_height::<H, P>(signer.public(), past, b"m", &sig),
+            Err(BpqsError::Malformed("epoch beyond tree headroom"))
+        );
+    }
+
+    #[test]
+    fn height_beyond_u32_epochs_refuses() {
+        let mut signer = committee();
+        assert!(signer.sign_at_height(u64::MAX, b"m").is_err());
+    }
+
+    #[test]
     fn tampered_path_refuses() {
         let mut signer = committee();
         let mut sig = signer
