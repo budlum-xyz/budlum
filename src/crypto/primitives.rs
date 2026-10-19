@@ -1028,6 +1028,46 @@ pub fn verify_ml_dsa_87_signature(
 mod tests {
     use super::*;
 
+    // ---- BLG-0046 (F10): key-file parsing is exact. ----
+
+    #[test]
+    fn bls_from_bytes_refuses_a_zero_scalar() {
+        let zeros = vec![0u8; 128];
+        assert!(BlsKeypair::from_bytes(&zeros).is_err());
+    }
+
+    #[test]
+    fn bls_from_bytes_demands_exact_length() {
+        let good = BlsKeypair::generate().unwrap().to_bytes();
+        assert_eq!(good.len(), 128);
+        assert!(BlsKeypair::from_bytes(&good).is_ok());
+        let mut long = good;
+        long.push(0);
+        assert!(BlsKeypair::from_bytes(&long).is_err());
+        let short = vec![0u8; 127];
+        assert!(BlsKeypair::from_bytes(&short).is_err());
+    }
+
+    #[test]
+    fn validator_key_file_partial_bls_tail_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk.bin");
+        let keys = ValidatorKeys::generate().unwrap();
+        keys.save(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(0x7f);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(ValidatorKeys::load(&path).is_err());
+    }
+
+    #[cfg(any(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
+    #[test]
+    fn pq_from_bytes_refuses_mismatched_halves() {
+        let a = PqKeyPair::generate();
+        let b = PqKeyPair::generate();
+        assert!(PqKeyPair::from_bytes(a.public_key_bytes(), &b.secret_key).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_over_a_wide_mode_file_resets_mode_and_leaves_no_temp() {
