@@ -40,6 +40,8 @@ const FRAME_COMPRESSED: u8 = 0x02;
 const FRAME_LAST: u8 = 0x04;
 /// Extra repair rows kept beyond k. Rank needs k rows; the rest is slack.
 const PENDING_SLACK: usize = 256;
+/// The most bytes `derive_stream` may build.
+const MAX_STREAM_BYTES: u64 = 1 << 30;
 /// The most memory `eliminate` may use for its dense rows.
 const ELIM_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
@@ -79,7 +81,14 @@ impl Karusel {
     /// (proof: repair_drop(0) == repair_drop(0), k copies) - loss resistance was empty.
     pub fn repair_drop(&self, abs_seq: u64) -> (u32, Vec<u8>) {
         let k = self.k as u64;
-        let mut rng = LcRng::new(0x9E3779B97F4A7C15u64.wrapping_mul(abs_seq).wrapping_add(1));
+        // The wire header holds 32 bits, and the receiver seeds from those bits:
+        // the sender must do the same, or the two derive different drops.
+        let wire_seq = abs_seq as u32;
+        let mut rng = LcRng::new(
+            0x9E3779B97F4A7C15u64
+                .wrapping_mul(u64::from(wire_seq))
+                .wrapping_add(1),
+        );
         // FIX 2 (caught by the canary): the degree ceiling is k-1 - uniform 4..=24 was
         // mostly clamped to k for small k, and the "XOR of all blocks" drop was
         // duplicated repeatedly (at k=11 only 6 of 11 drops were unique).
@@ -113,7 +122,7 @@ impl Karusel {
         // 65537 hash - LOSSY; the decoder could not re-derive the mask. Spec section 3:
         // the header carries the ABSOLUTE seq and both ends derive the composition
         // from the SAME rule. Sender and receiver derive it independently from the same inputs.
-        (abs_seq as u32, sym)
+        (wire_seq, sym)
     }
 
     /// Drop composition - the sender and the decoder run the SAME rule (the wire contract).
@@ -182,6 +191,17 @@ impl LcRng {
 /// `turns`: the carousel turns to produce (1 turn suffices for streaming; >1 for loss resistance).
 pub fn derive_stream(data: &[u8], compression: u8, turns: u64) -> Option<Vec<u8>> {
     if data.is_empty() || turns == 0 {
+        return None;
+    }
+    // The stream is built in memory: refuse a turn count whose output would
+    // pass the ceiling (every turn writes 2 * k frames of one block each).
+    let blocks = data.len().div_ceil(BLOCK) as u64;
+    let frame_bytes = (DAMLA_HDR_LEN + BLOCK) as u64;
+    let total = turns
+        .checked_mul(blocks)?
+        .checked_mul(2)?
+        .checked_mul(frame_bytes)?;
+    if total > MAX_STREAM_BYTES {
         return None;
     }
     // 1) compress (if it shrinks)
@@ -356,7 +376,10 @@ impl KaruselDecoder {
                 for (a, b) in pay.iter_mut().zip(s.iter()) {
                     *a ^= b;
                 }
-            } else if !rem.contains(&i) {
+            } else if let Some(at) = rem.iter().position(|&r| r == i) {
+                // The same block twice in one drop cancels in the XOR.
+                rem.swap_remove(at);
+            } else {
                 rem.push(i);
             }
         }
@@ -532,6 +555,37 @@ mod tests {
         let k = Karusel::new(data).unwrap();
         let h = stream_header(k.k, data.len(), data.len(), false, body_digest(data));
         KaruselDecoder::new(&h).unwrap()
+    }
+
+    #[test]
+    fn repair_drop_above_32_bits_matches_the_receiver_rule() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let kar = Karusel::new(&data).unwrap();
+        let abs_seq = (1u64 << 32) + 3;
+        let (seq, sym) = kar.repair_drop(abs_seq);
+        let idx = Karusel::composition(kar.k, seq, true);
+        let mut want = vec![0u8; sym.len()];
+        for &i in &idx {
+            for (a, b) in want.iter_mut().zip(kar.blocks[i].iter()) {
+                *a ^= b;
+            }
+        }
+        assert_eq!(sym, want);
+    }
+
+    #[test]
+    fn a_repeated_index_in_a_drop_cancels() {
+        let data: Vec<u8> = (0..600u32).map(|i| (i % 253) as u8).collect();
+        let mut dec = decoder_for(&data);
+        dec.add_drop(&[0, 0, 1], &data[BLOCK..2 * BLOCK]);
+        assert_eq!(dec.solved[1].as_deref(), Some(&data[BLOCK..2 * BLOCK]));
+    }
+
+    #[test]
+    fn derive_stream_refuses_a_turn_count_that_overflows_the_ceiling() {
+        assert!(derive_stream(b"some data to carry", 0, u64::MAX).is_none());
+        assert!(derive_stream(b"some data to carry", 0, 1 << 40).is_none());
+        assert!(derive_stream(b"some data to carry", 0, 1).is_some());
     }
 
     fn feed_stream(stream: &[u8]) -> (KaruselDecoder, Vec<u8>) {
