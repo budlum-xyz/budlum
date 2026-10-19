@@ -1772,9 +1772,19 @@ fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
             put_u8(out, 0);
             encode_identity_record(record, out);
         }
-        crate::registry::IdentityTx::Issue { credential } => {
+        crate::registry::IdentityTx::Issue { credential, consent } => {
             put_u8(out, 1);
             encode_credential_commitment(credential, out);
+            // BLG-0095: the consent is committed whole, key and signature
+            // included, so a relay cannot strip it or swap another valid one.
+            match consent {
+                Some(consent) => {
+                    put_u8(out, 1);
+                    put_bytes(out, &consent.public_key);
+                    put_bytes(out, &consent.signature);
+                }
+                None => put_u8(out, 0),
+            }
         }
         crate::registry::IdentityTx::Revoke { credential } => {
             put_u8(out, 2);
@@ -2270,7 +2280,10 @@ mod v29_signing_tests {
         let register =
             |record: IdentityRecord| TransactionType::Identity(IdentityTx::Register { record });
         let issue = |credential: CredentialCommitment| {
-            TransactionType::Identity(IdentityTx::Issue { credential })
+            TransactionType::Identity(IdentityTx::Issue {
+            credential,
+            consent: None,
+        })
         };
 
         let base_register = hash_of(register(base_record.clone()));
