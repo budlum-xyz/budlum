@@ -100,8 +100,8 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
 /// which defaults to success.
 fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
     match b.len() {
-        0 => Ok(false),  // status 0 (fail)
-        32 => Ok(true),  // pre-Byzantium postState root
+        0 => Ok(false), // status 0 (fail)
+        32 => Ok(true), // pre-Byzantium postState root
         // BLG-0125 (P05-F18): the status byte is EXACTLY 0 or 1. Any other
         // nonzero value (0x02, 0xff) used to read as "success".
         1 => match b[0] {

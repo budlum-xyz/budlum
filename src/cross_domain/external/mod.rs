@@ -882,7 +882,11 @@ mod tests {
 
     #[test]
     fn the_adapter_accepts_a_well_formed_update_with_a_verifier_installed() {
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 64, 128, 0);
         let attestation = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -905,7 +909,11 @@ mod tests {
 
     #[test]
     fn a_participation_one_short_of_the_threshold_is_refused() {
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let mut evidence = sync_evidence(&adapter, 64, 128, 0);
         evidence.payload[280..344].copy_from_slice(&bits_for(341));
         let err = adapter
@@ -919,7 +927,11 @@ mod tests {
 
     #[test]
     fn a_finalized_slot_ahead_of_the_attested_one_is_refused() {
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 200, 128, 0);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -931,7 +943,11 @@ mod tests {
     fn a_period_that_does_not_match_the_slot_is_refused() {
         // The period is derived, not believed: otherwise one committee's
         // signature could be presented for another period.
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 64, 128, 9);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -941,7 +957,11 @@ mod tests {
 
     #[test]
     fn a_lying_declaration_is_refused_when_the_policy_requires_the_match() {
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let mut evidence = sync_evidence(&adapter, 64, 128, 0);
         evidence.declared_height = 65;
         let err = adapter
@@ -955,7 +975,11 @@ mod tests {
 
     #[test]
     fn depth_and_age_come_from_the_caller_not_the_adapter() {
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 64, 128, 0);
 
         let mut policy = VerificationPolicy::strict(1_000);
@@ -975,7 +999,11 @@ mod tests {
         // the harness must admit it. This is the check that the probe offsets
         // actually line up with the layout - a probe that patches the wrong
         // bytes would show up here as Accepted.
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let golden = sync_evidence(&adapter, 64, 128, 0);
         let adapter = adapter.with_golden(golden);
         let report = admit(&adapter, &VerificationPolicy::strict(1_000));

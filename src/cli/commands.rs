@@ -317,7 +317,6 @@ pub struct NodeConfig {
 
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub storage_mandatory_sharding: bool,
-
     // --- Outbound bridge (relayer) ---
     //
     // `RelayerWorker::with_adapters` existed and nothing called it, because
@@ -328,7 +327,6 @@ pub struct NodeConfig {
     // surface that reads as "production" while the leg cannot operate was the
     // finding. Outbound EVM relay stays off until the real receipt flow
     // lands; there is nothing safe to point the adapter at.
-
 }
 
 impl Default for NodeConfig {
@@ -1045,7 +1043,6 @@ impl NodeConfig {
         let profile_cap = self.network.security_config().max_peers.max(1);
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
     }
-
 
     pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
         let mode = crate::storage::NodeMode::from_role(&self.role)

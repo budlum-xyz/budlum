@@ -815,14 +815,7 @@ mod settlement_prod_tests {
         let event = event_tree.events()[1].clone();
         let proof = event_tree.proof(1).unwrap();
         let verified = blockchain
-            .verify_domain_event_proof(
-                pow.id,
-                44,
-                0,
-                expected_block_hash,
-                event.clone(),
-                &proof,
-            )
+            .verify_domain_event_proof(pow.id, 44, 0, expected_block_hash, event.clone(), &proof)
             .unwrap();
         assert_eq!(verified.event.event_index, 1);
 
@@ -833,14 +826,7 @@ mod settlement_prod_tests {
         let mut wrong_index = proof.clone();
         wrong_index.index = 2;
         assert!(blockchain
-            .verify_domain_event_proof(
-                pow.id,
-                44,
-                0,
-                expected_block_hash,
-                event,
-                &wrong_index
-            )
+            .verify_domain_event_proof(pow.id, 44, 0, expected_block_hash, event, &wrong_index)
             .is_err());
 
         let missing_event = event_tree.events()[0].clone();

@@ -813,7 +813,13 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(err, RelayerError::Expired { current_height: 110, .. }),
+            matches!(
+                err,
+                RelayerError::Expired {
+                    current_height: 110,
+                    ..
+                }
+            ),
             "got: {err}"
         );
     }

@@ -24,13 +24,13 @@ use crate::domain::{
 };
 use crate::execution::executor::Executor;
 use crate::mempool::pool::Mempool;
+use crate::settlement::cold_quorum::DeviceSignature;
 use crate::settlement::pq_anchor::AnchorEmission;
 use crate::settlement::ColdWalletState;
 use crate::settlement::{
     merkle_root, GlobalBlockHeader, ProofVerificationError, SettlementProofVerifier,
     VerifiedDomainEvent,
 };
-use crate::settlement::cold_quorum::DeviceSignature;
 use crate::storage::db::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -134,7 +134,6 @@ pub struct Blockchain {
     /// It is meaningful only for `ConsensusKind::PoA` domains; a freeze call on a
     /// permissionless domain is rejected (`ensure_poa`). The ledger does not only
     /// keep records, it establishes a real gate through `ensure_not_frozen`.
-
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
@@ -1190,13 +1189,7 @@ impl Blockchain {
         address: crate::core::address::Address,
         reason_hash: [u8; 32],
     ) -> Result<(), String> {
-        self.apply_poa_compliance_request(
-            domain_id,
-            admin,
-            address,
-            reason_hash,
-            false,
-        )
+        self.apply_poa_compliance_request(domain_id, admin, address, reason_hash, false)
     }
 
     /// BLG-0091 (P04-F09): the reverse of [`Self::freeze_poa_account`],
@@ -1208,13 +1201,7 @@ impl Blockchain {
         address: crate::core::address::Address,
         reason_hash: [u8; 32],
     ) -> Result<(), String> {
-        self.apply_poa_compliance_request(
-            domain_id,
-            admin,
-            address,
-            reason_hash,
-            true,
-        )
+        self.apply_poa_compliance_request(domain_id, admin, address, reason_hash, true)
     }
 
     /// Shared body of the freeze/unfreeze pair: domain kind from the record,
@@ -2245,7 +2232,7 @@ impl Blockchain {
             reason,
             certificates,
         )
-            .map_err(|e| format!("anchor key rotation: {e}"))
+        .map_err(|e| format!("anchor key rotation: {e}"))
     }
 
     pub fn verify_domain_event_proof(

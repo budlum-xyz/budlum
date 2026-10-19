@@ -606,8 +606,7 @@ impl IdentityRegistry {
             // the subject themself (self-issuance). The old check also let
             // "any key_id on the SUBJECT's record" vouch for the issuer,
             // which an unregistered issuer could pass.
-            let issuer_known =
-                self.records.contains_key(&issuer) || issuer == subject;
+            let issuer_known = self.records.contains_key(&issuer) || issuer == subject;
             if !issuer_known {
                 return Err(IdentityError::UnknownSubject {
                     did: did_of(&issuer),
@@ -751,11 +750,7 @@ impl IdentityRegistry {
         for (id, credential) in &self.credentials {
             acc = hash_fields_bytes(&[&acc, b"cred", id.as_bytes()]);
             acc = hash_fields_bytes(&[&acc, b"cred-subject", credential.subject.as_bytes()]);
-            acc = hash_fields_bytes(&[
-                &acc,
-                b"cred-schema",
-                credential.schema.as_bytes(),
-            ]);
+            acc = hash_fields_bytes(&[&acc, b"cred-schema", credential.schema.as_bytes()]);
             match credential.expires_at {
                 Some(expiry) => {
                     acc = hash_fields_bytes(&[&acc, b"cred-expiry", &expiry.to_le_bytes()]);
@@ -1004,21 +999,21 @@ pub fn authorize_issue_consent(
     chain_id: u64,
 ) -> Result<(), IdentityError> {
     let digest = issue_consent_digest(credential, chain_id);
-    let signer = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
-        &consent.public_key,
-    )
-    .map_err(|e| IdentityError::BadApproval(format!("consent key: {e}")))?;
+    let signer =
+        crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&consent.public_key)
+            .map_err(|e| IdentityError::BadApproval(format!("consent key: {e}")))?;
     crate::crypto::primitives::verify_ml_dsa_87_signature(
         &digest,
         &consent.signature,
         &consent.public_key,
     )
     .map_err(|e| IdentityError::BadApproval(format!("consent signature: {e}")))?;
-    let record = registry
-        .record(&credential.subject)
-        .ok_or_else(|| IdentityError::UnknownSubject {
-            did: did_of(&credential.subject),
-        })?;
+    let record =
+        registry
+            .record(&credential.subject)
+            .ok_or_else(|| IdentityError::UnknownSubject {
+                did: did_of(&credential.subject),
+            })?;
     let key_live = record
         .methods
         .iter()
@@ -1071,7 +1066,10 @@ pub fn execute_identity_tx(
             }
             registry.apply(domain, IdentityOp::Register { record }, epoch)
         }
-        IdentityTx::Issue { credential, consent } => {
+        IdentityTx::Issue {
+            credential,
+            consent,
+        } => {
             if &credential.issuer != from {
                 return Err(IdentityError::BadApproval(format!(
                     "issue: sender {} is not the issuer {}",
@@ -2097,11 +2095,23 @@ mod tests {
         assert_ne!(first_id, second_id);
         // Setup through the Op layer: the consent door is pinned elsewhere.
         registry
-            .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: first.clone() }, 150)
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: first.clone(),
+                },
+                150,
+            )
             .unwrap();
         let root_after_first = registry.record(&issuer_id).unwrap().credential_root;
         registry
-            .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: second.clone() }, 150)
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: second.clone(),
+                },
+                150,
+            )
             .unwrap();
         let record = registry.record(&issuer_id).unwrap();
         let root_after_second = record.credential_root;
@@ -2129,7 +2139,11 @@ mod tests {
         let mut registry = IdentityRegistry::new();
         let issuer = issuer_record();
         registry
-            .apply(&ConsensusKind::PoA, IdentityOp::Register { record: issuer }, 100)
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register { record: issuer },
+                100,
+            )
             .unwrap();
         // The subject registers a wallet key as a live method (its wallet
         // address is the method handle) and two guardians as the quorum.

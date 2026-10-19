@@ -320,10 +320,7 @@ pub mod test_adapter {
         // A STUB: it stands in for plumbing, so it self-checks on purpose.
         // The default now fails closed (BLG-0129), and the stub has no
         // anchor to give.
-        fn verify_observation(
-            &self,
-            result: &RelayerExternalResult,
-        ) -> Result<(), AdapterError> {
+        fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
             let proof: MerkleProof = bincode::options()
                 .with_fixint_encoding()
                 .with_limit(MAX_RECEIPT_PROOF_BYTES)

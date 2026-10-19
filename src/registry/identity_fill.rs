@@ -156,9 +156,7 @@ impl std::fmt::Display for FillError {
             Self::BadReceiptSignature => {
                 f.write_str("presentation receipt signature does not verify")
             }
-            Self::WrongSigner => {
-                f.write_str("presentation receipt signer is not the subject")
-            }
+            Self::WrongSigner => f.write_str("presentation receipt signer is not the subject"),
         }
     }
 }

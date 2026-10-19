@@ -265,8 +265,13 @@ pub fn verify_evm_receipt(
         .map(|raw| decode_header_or_err(raw))
         .collect();
     let confs = confs?;
-    verify_chain(&target, &confs, proof.required_confirmations, trusted_checkpoint)
-        .map_err(|e| VerifyError::Header(e.to_string()))?;
+    verify_chain(
+        &target,
+        &confs,
+        proof.required_confirmations,
+        trusted_checkpoint,
+    )
+    .map_err(|e| VerifyError::Header(e.to_string()))?;
 
     // 2. MPT verify: receiptsRoot → receipt bytes.
     let receipt_bytes = mpt::verify(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
@@ -576,10 +581,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        assert_eq!(
-            verify_fixture(&proof).unwrap_err(),
-            VerifyError::TxFailed
-        );
+        assert_eq!(verify_fixture(&proof).unwrap_err(), VerifyError::TxFailed);
     }
 
     // ---- Negative: too few confirmations ----

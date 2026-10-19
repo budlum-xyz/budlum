@@ -1419,7 +1419,9 @@ mod bridge_fee_split {
         let id = transfer.message_id;
         bridge.mint(&event.message.unwrap(), 0).unwrap();
         assert!(bridge.burn_with_event(id, 2, 20, 0, 20, [7u8; 20]).is_err());
-        bridge.burn_with_event(id, 2, 20, 0, 200, [7u8; 20]).unwrap();
+        bridge
+            .burn_with_event(id, 2, 20, 0, 200, [7u8; 20])
+            .unwrap();
 
         // The lock expiry (50) passes while the burn is still live.
         assert!(bridge.sweep_expired_locks(60).is_empty());
@@ -1433,7 +1435,9 @@ mod bridge_fee_split {
             bridge.transfer(&id).unwrap().status,
             BridgeStatus::Minted { domain: 2 }
         );
-        bridge.burn_with_event(id, 2, 201, 0, 400, [7u8; 20]).unwrap();
+        bridge
+            .burn_with_event(id, 2, 201, 0, 400, [7u8; 20])
+            .unwrap();
     }
 
     /// BLG-0120 (P05-F13): the state machine refuses a lock with no expiry
@@ -1448,9 +1452,7 @@ mod bridge_fee_split {
         let zero = bridge.lock(1, 2, 100, 0, a, owner, recipient, 10, 0);
         assert!(zero.is_err());
         assert!(
-            zero.unwrap_err()
-                .to_string()
-                .contains("expiry must be set"),
+            zero.unwrap_err().to_string().contains("expiry must be set"),
             "zero expiry must be refused"
         );
         let past = bridge.lock(1, 2, 100, 0, a, owner, recipient, 10, 50);
@@ -1470,8 +1472,13 @@ mod bridge_fee_split {
             .lock(1, 2, 100, 0, a, owner, recipient, 10, 500)
             .unwrap();
         let id = transfer.message_id;
-        bridge.burn_with_event(id, 2, 200, 0, 500, [9u8; 20]).unwrap();
-        assert_eq!(bridge.get_transfer(&id).unwrap().recipient_eth, Some([9u8; 20]));
+        bridge
+            .burn_with_event(id, 2, 200, 0, 500, [9u8; 20])
+            .unwrap();
+        assert_eq!(
+            bridge.get_transfer(&id).unwrap().recipient_eth,
+            Some([9u8; 20])
+        );
     }
 
     /// BLG-0126 (P05-F19): a message minted after its expiry is refused,
@@ -1498,10 +1505,7 @@ mod bridge_fee_split {
             .unwrap();
         let message2 = event2.message.unwrap();
         let err = bridge2.mint(&message2, 51).unwrap_err();
-        assert!(
-            err.to_string().contains("expired"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("expired"), "got: {err}");
         assert_eq!(
             bridge2.get_transfer(&transfer2.message_id).unwrap().status,
             BridgeStatus::Locked { domain: 1 }
@@ -1531,10 +1535,7 @@ mod bridge_fee_split {
         bridge.mint(&m1, 12).unwrap();
         // ...and the earlier one is then refused.
         let err = bridge.mint(&m0, 13).unwrap_err();
-        assert!(
-            err.to_string().contains("already processed"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("already processed"), "got: {err}");
         assert_eq!(
             bridge.get_transfer(&t0.message_id).unwrap().status,
             BridgeStatus::Locked { domain: 1 }

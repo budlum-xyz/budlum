@@ -718,16 +718,16 @@ impl FinalityAggregator {
             return;
         }
         let report = SlashingReport::consensus_double_sign(
-                voter,
-                crate::registry::evidence::SlashingProof::DoubleSign {
-                    height: self.checkpoint_height,
-                    block_hash_1: hash_1,
-                    block_hash_2: hash_2,
-                    signature_1: sig_1,
-                    signature_2: sig_2,
-                },
-                None,
-            );
+            voter,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: self.checkpoint_height,
+                block_hash_1: hash_1,
+                block_hash_2: hash_2,
+                signature_1: sig_1,
+                signature_2: sig_2,
+            },
+            None,
+        );
         self.detected_equivocations.push(report);
     }
 

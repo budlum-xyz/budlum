@@ -1772,7 +1772,10 @@ fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
             put_u8(out, 0);
             encode_identity_record(record, out);
         }
-        crate::registry::IdentityTx::Issue { credential, consent } => {
+        crate::registry::IdentityTx::Issue {
+            credential,
+            consent,
+        } => {
             put_u8(out, 1);
             encode_credential_commitment(credential, out);
             // BLG-0095: the consent is committed whole, key and signature
@@ -2282,9 +2285,9 @@ mod v29_signing_tests {
             |record: IdentityRecord| TransactionType::Identity(IdentityTx::Register { record });
         let issue = |credential: CredentialCommitment| {
             TransactionType::Identity(IdentityTx::Issue {
-            credential,
-            consent: None,
-        })
+                credential,
+                consent: None,
+            })
         };
 
         let base_register = hash_of(register(base_record.clone()));

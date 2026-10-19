@@ -977,18 +977,18 @@ impl AccountState {
                 self.registry.register_verifier(*address, amount, epoch)?;
             }
             roles::AI_VERIFIER => {
-                self.registry.register_ai_verifier(*address, amount, epoch)?;
+                self.registry
+                    .register_ai_verifier(*address, amount, epoch)?;
             }
             roles::ATTESTER => {
                 self.registry.register_attester(*address, amount, epoch)?;
             }
             roles::CONTENT_VALIDATOR => {
-                self.registry.register_content_validator(*address, amount, epoch)?;
+                self.registry
+                    .register_content_validator(*address, amount, epoch)?;
             }
             other => {
-                return Err(crate::registry::RegistryError::UnsupportedRole {
-                    role: other,
-                });
+                return Err(crate::registry::RegistryError::UnsupportedRole { role: other });
             }
         }
         let account = self.get_or_create(address);
@@ -1916,9 +1916,7 @@ impl AccountState {
                 // permissioned domain - the first admin arrives here, and
                 // later ones can too.
                 self.poa_onboarding.add_admin(*domain_id, *admin);
-                tracing::info!(
-                    "Executing Governance: PoA domain {domain_id} admin {admin} added"
-                );
+                tracing::info!("Executing Governance: PoA domain {domain_id} admin {admin} added");
             }
             ProposalType::PoaRemoveAdmin { domain_id, admin } => {
                 // BLG-0094 (P04-F12): governance may take the last admin -
@@ -2765,16 +2763,16 @@ impl AccountState {
         if !self.invalid_votes.is_empty() {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
-        // BLG-0090 (P04-F08): the PoA admission records were consensus gate
-        // state in neither the root nor the snapshot digest - hidden today,
-        // wide open the moment the write path connected. Folded always (the
-        // fold is domain-tagged, so "empty" and "hashes to zero" stay apart).
-        final_hasher.update(b"poa_admission_v1");
-        final_hasher.update(self.poa_onboarding.root());
-        // BLG-0091 (P04-F09): the compliance ledger decides whether an
-        // operator's audit export is refused; it is state like any other.
-        final_hasher.update(b"poa_compliance_v1");
-        final_hasher.update(self.poa_compliance.root());
+            // BLG-0090 (P04-F08): the PoA admission records were consensus gate
+            // state in neither the root nor the snapshot digest - hidden today,
+            // wide open the moment the write path connected. Folded always (the
+            // fold is domain-tagged, so "empty" and "hashes to zero" stay apart).
+            final_hasher.update(b"poa_admission_v1");
+            final_hasher.update(self.poa_onboarding.root());
+            // BLG-0091 (P04-F09): the compliance ledger decides whether an
+            // operator's audit export is refused; it is state like any other.
+            final_hasher.update(b"poa_compliance_v1");
+            final_hasher.update(self.poa_compliance.root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
@@ -2884,16 +2882,16 @@ mod tests {
             release_epoch: 10,
         });
         let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
-                who,
-                crate::registry::evidence::SlashingProof::DoubleSign {
-                    height: 7,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "bb".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                None,
-            );
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
         assert_eq!(state.slash_from_report(&report).unwrap(), None);
         let ratio = state.registry.params().slash_ratio(report.condition());
         let cut = crate::core::chain_config::slash_penalty(1_000, ratio);
@@ -2912,16 +2910,16 @@ mod tests {
         let who = Address::from([9u8; 32]);
         state.add_validator(who, 1_000);
         let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
-                who,
-                crate::registry::evidence::SlashingProof::DoubleSign {
-                    height: 7,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "bb".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                None,
-            );
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
         let outcome = state
             .slash_from_report(&report)
             .unwrap()
@@ -2937,16 +2935,16 @@ mod tests {
         // A second report cannot cut the same bond twice: the ledger flag
         // marks it already slashed, so the mirror is skipped.
         let again = crate::registry::evidence::SlashingReport::consensus_double_sign(
-                who,
-                crate::registry::evidence::SlashingProof::DoubleSign {
-                    height: 8,
-                    block_hash_1: "cc".into(),
-                    block_hash_2: "dd".into(),
-                    signature_1: vec![3],
-                    signature_2: vec![4],
-                },
-                None,
-            );
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 8,
+                block_hash_1: "cc".into(),
+                block_hash_2: "dd".into(),
+                signature_1: vec![3],
+                signature_2: vec![4],
+            },
+            None,
+        );
         let _ = state.slash_from_report(&again);
         assert_eq!(
             state.get_validator(&who).unwrap().stake,
@@ -3597,16 +3595,16 @@ mod tests {
             });
         }
         let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
-                who,
-                crate::registry::evidence::SlashingProof::DoubleSign {
-                    height: 7,
-                    block_hash_1: "aa".into(),
-                    block_hash_2: "bb".into(),
-                    signature_1: vec![1],
-                    signature_2: vec![2],
-                },
-                None,
-            );
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
         assert!(state.slash_from_report(&report).unwrap().is_some());
         let record_bytes =
             bincode::serialize(&state.registry.slashing_history()[0].report).unwrap_or_default();
@@ -3766,8 +3764,7 @@ mod tests {
     fn poa_gate_state_moves_the_account_state_root() {
         let mut st = AccountState::new();
         let before = st.calculate_state_root();
-        st.poa_onboarding
-            .add_admin(0, Address::from([1u8; 32]));
+        st.poa_onboarding.add_admin(0, Address::from([1u8; 32]));
         let after_admin = st.calculate_state_root();
         assert_ne!(before, after_admin);
         st.poa_compliance

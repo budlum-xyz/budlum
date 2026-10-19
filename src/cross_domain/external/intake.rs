@@ -181,10 +181,7 @@ impl AdapterSpec {
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
         match self {
-            Self::EthereumSync {
-                network,
-                committee,
-            } => {
+            Self::EthereumSync { network, committee } => {
                 let adapter = EthereumSyncAdapter::new(network, committee.clone(), bls);
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
@@ -1394,14 +1391,11 @@ mod tests {
                     versions,
                     bond_atoms: economics_bond(),
                     poster: addr(9),
-                    golden: Some(golden),
+                    golden,
                 },
                 Some(Box::new(StrictTestBls)),
             )
             .unwrap_err();
-        assert!(
-            matches!(err, IntakeError::CommitteeNotPinned),
-            "got: {err}"
-        );
+        assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 }

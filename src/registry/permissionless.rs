@@ -1088,43 +1088,43 @@ mod tests {
         reg.upsert_stake(addr(11), roles::VALIDATOR, 0, 2);
         assert_eq!(reg.get(&addr(11), roles::VALIDATOR).unwrap().stake, 0);
 
-    /// BLG-0087 (P04-F05, decision A): Slashed is not a dead end. The member
-    /// can unbond the remaining stake and withdraw it after the delay;
-    /// unbonding is not an escape from a later slash (the unbonding queue is
-    /// still cut on any further report).
-    #[test]
-    fn a_slashed_member_can_exit_through_unbonding() {
-        let mut reg = PermissionlessRegistry::new();
-        reg.register_validator(addr(7), MIN_REGISTRATION_STAKE, 0)
+        /// BLG-0087 (P04-F05, decision A): Slashed is not a dead end. The member
+        /// can unbond the remaining stake and withdraw it after the delay;
+        /// unbonding is not an escape from a later slash (the unbonding queue is
+        /// still cut on any further report).
+        #[test]
+        fn a_slashed_member_can_exit_through_unbonding() {
+            let mut reg = PermissionlessRegistry::new();
+            reg.register_validator(addr(7), MIN_REGISTRATION_STAKE, 0)
+                .unwrap();
+            reg.slash_role_only(
+                addr(7),
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                200,
+            )
             .unwrap();
-        reg.slash_role_only(
-            addr(7),
-            roles::VALIDATOR,
-            SlashingCondition::DoubleSign,
-            200,
-        )
-        .unwrap();
-        assert!(matches!(
-            reg.registrations
-                .get(&(roles::VALIDATOR, addr(7)))
-                .unwrap()
-                .status,
-            MemberStatus::Slashed
-        ));
-        let release = reg.begin_unbonding(addr(7), roles::VALIDATOR, 5).unwrap();
-        assert_eq!(release, 5 + reg.params().unbonding_epochs);
-        assert!(reg.withdraw(addr(7), roles::VALIDATOR, release).is_ok());
-    }
+            assert!(matches!(
+                reg.registrations
+                    .get(&(roles::VALIDATOR, addr(7)))
+                    .unwrap()
+                    .status,
+                MemberStatus::Slashed
+            ));
+            let release = reg.begin_unbonding(addr(7), roles::VALIDATOR, 5).unwrap();
+            assert_eq!(release, 5 + reg.params().unbonding_epochs);
+            assert!(reg.withdraw(addr(7), roles::VALIDATOR, release).is_ok());
+        }
 
-    /// BLG-0087 (P04-F05, decision B): a liveness fault is a timed jail. The
-    /// entry is not Slashed at the registry level, so the release after the
-    /// jail expiry actually works.
-    #[test]
-    fn a_liveness_fault_does_not_slash_the_registry_entry() {
-        let mut reg = PermissionlessRegistry::new();
-        reg.register_validator(addr(8), MIN_REGISTRATION_STAKE, 0)
-            .unwrap();
-        let report = SlashingReport::consensus_liveness(
+        /// BLG-0087 (P04-F05, decision B): a liveness fault is a timed jail. The
+        /// entry is not Slashed at the registry level, so the release after the
+        /// jail expiry actually works.
+        #[test]
+        fn a_liveness_fault_does_not_slash_the_registry_entry() {
+            let mut reg = PermissionlessRegistry::new();
+            reg.register_validator(addr(8), MIN_REGISTRATION_STAKE, 0)
+                .unwrap();
+            let report = SlashingReport::consensus_liveness(
                 addr(8),
                 roles::VALIDATOR,
                 crate::registry::evidence::SlashingProof::Liveness {
@@ -1135,16 +1135,19 @@ mod tests {
                 },
                 None,
             );
-        let outcome = reg.slash_from_report(&report).unwrap();
-        assert!(outcome.is_some());
-        let entry = reg.registrations.get(&(roles::VALIDATOR, addr(8))).unwrap();
-        assert!(
-            matches!(entry.status, MemberStatus::Active),
-            "a liveness fault must not write Slashed: {:?}",
-            entry.status
-        );
-        assert!(entry.stake < MIN_REGISTRATION_STAKE, "the stake is still cut");
-    }
+            let outcome = reg.slash_from_report(&report).unwrap();
+            assert!(outcome.is_some());
+            let entry = reg.registrations.get(&(roles::VALIDATOR, addr(8))).unwrap();
+            assert!(
+                matches!(entry.status, MemberStatus::Active),
+                "a liveness fault must not write Slashed: {:?}",
+                entry.status
+            );
+            assert!(
+                entry.stake < MIN_REGISTRATION_STAKE,
+                "the stake is still cut"
+            );
+        }
     }
 
     #[test]
@@ -1299,16 +1302,16 @@ mod tests {
             .expect("registration");
 
         let report = crate::registry::evidence::SlashingReport::consensus_liveness(
-                a,
-                roles::RELAYER,
-                crate::registry::evidence::SlashingProof::Liveness {
-                    window_start_epoch: 0,
-                    window_end_epoch: 10,
-                    missed: 5,
-                    expected: 10,
-                },
-                None,
-            );
+            a,
+            roles::RELAYER,
+            crate::registry::evidence::SlashingProof::Liveness {
+                window_start_epoch: 0,
+                window_end_epoch: 10,
+                missed: 5,
+                expected: 10,
+            },
+            None,
+        );
         let outcome = reg
             .slash_from_report(&report)
             .expect("the report is actionable")

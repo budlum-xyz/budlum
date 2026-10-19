@@ -584,7 +584,10 @@ mod tests {
         state.next_sync_committee[0] = [0xAA; BLS_PUBKEY_LEN];
         let original_period = state.current_period;
         let original_committee = state.current_sync_committee.clone();
-        assert_eq!(rotate_period(&mut state), Err(SyncCommitteeError::RotationBranchRequired));
+        assert_eq!(
+            rotate_period(&mut state),
+            Err(SyncCommitteeError::RotationBranchRequired)
+        );
         assert_eq!(state.current_period, original_period);
         assert_eq!(state.current_sync_committee, original_committee);
     }

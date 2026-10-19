@@ -209,7 +209,13 @@ fn a_credential_id_is_content_derived_so_a_forged_issuer_reaches_nothing() {
     // BLG-0095: the door now needs the subject's consent for a third-party
     // issuance; this test is about ids, so it sets up through the Op layer.
     registry
-        .apply(&POA, IdentityOp::Issue { credential: real.clone() }, 200)
+        .apply(
+            &POA,
+            IdentityOp::Issue {
+                credential: real.clone(),
+            },
+            200,
+        )
         .unwrap();
 
     // The stranger copies the victim's bytes and names itself issuer. If the
@@ -267,7 +273,13 @@ fn a_revocation_is_not_a_toggle() {
     // Setup through the Op layer: this test is about revocation semantics
     // (BLG-0095 moved third-party issuance consent to the door).
     registry
-        .apply(&POA, IdentityOp::Issue { credential: c.clone() }, 200)
+        .apply(
+            &POA,
+            IdentityOp::Issue {
+                credential: c.clone(),
+            },
+            200,
+        )
         .unwrap();
     execute_identity_tx(
         &mut registry,
@@ -392,7 +404,13 @@ fn the_same_credential_cannot_be_issued_twice() {
     // Setup through the Op layer: this test is about revocation semantics
     // (BLG-0095 moved third-party issuance consent to the door).
     registry
-        .apply(&POA, IdentityOp::Issue { credential: c.clone() }, 200)
+        .apply(
+            &POA,
+            IdentityOp::Issue {
+                credential: c.clone(),
+            },
+            200,
+        )
         .unwrap();
     let err = execute_identity_tx(
         &mut registry,

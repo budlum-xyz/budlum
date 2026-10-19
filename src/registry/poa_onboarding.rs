@@ -498,15 +498,9 @@ impl PoAOnboarding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PoAOnboardingTx {
     /// Extend the admin set (an existing admin, or governance, bootstraps).
-    AddAdmin {
-        domain: DomainId,
-        admin: Address,
-    },
+    AddAdmin { domain: DomainId, admin: Address },
     /// Remove an admin (BLG-0094). The last admin of a domain refuses.
-    RemoveAdmin {
-        domain: DomainId,
-        admin: Address,
-    },
+    RemoveAdmin { domain: DomainId, admin: Address },
     /// A candidate applies for themselves; nothing else is accepted.
     SubmitApplication {
         domain: DomainId,
@@ -601,7 +595,14 @@ pub fn execute_poa_onboarding_tx(
             member,
             kyc_commitment,
             validity_horizon,
-        } => state.renew_kyc(domain, *sender, member, kyc_commitment, at_block, validity_horizon),
+        } => state.renew_kyc(
+            domain,
+            *sender,
+            member,
+            kyc_commitment,
+            at_block,
+            validity_horizon,
+        ),
     }
 }
 
@@ -637,7 +638,6 @@ mod tests {
         assert!(poa.approve(0, admin, member, 0, 1_000).is_ok());
         assert!(poa.whitelist(0, 0).contains(&member));
     }
-
 
     /// BLG-0089 (P04-F07): the first admin of a domain arrives through
     /// governance (`add_admin` at the trust root); the door appoints only
@@ -717,7 +717,11 @@ mod tests {
             .renew_kyc(0, addr(9), member, kyc(2), 5, 10)
             .unwrap();
         assert_eq!(
-            onboarding.registry().get(0, &member).unwrap().kyc_commitment,
+            onboarding
+                .registry()
+                .get(0, &member)
+                .unwrap()
+                .kyc_commitment,
             kyc(2),
             "the refreshed dossier must be written to the record"
         );
@@ -745,7 +749,9 @@ mod tests {
     fn a_validity_horizon_beyond_the_bound_is_refused() {
         let mut onboarding = PoAOnboarding::new();
         onboarding.add_admin(0, addr(9));
-        onboarding.submit_application(0, addr(3), kyc(1), 0).unwrap();
+        onboarding
+            .submit_application(0, addr(3), kyc(1), 0)
+            .unwrap();
         let err = onboarding
             .approve(0, addr(9), addr(3), 1, MAX_KYC_VALIDITY_HORIZON + 1)
             .unwrap_err();

@@ -102,16 +102,16 @@ impl LivenessTracker {
                     .copied()
                     .unwrap_or(epoch);
                 reports.push(SlashingReport::consensus_liveness(
-                *validator,
-                roles::VALIDATOR,
-                crate::registry::evidence::SlashingProof::Liveness {
-                    window_start_epoch: start,
-                    window_end_epoch: epoch,
-                    missed: current,
-                    expected: current,
-                },
-                None,
-            ));
+                    *validator,
+                    roles::VALIDATOR,
+                    crate::registry::evidence::SlashingProof::Liveness {
+                        window_start_epoch: start,
+                        window_end_epoch: epoch,
+                        missed: current,
+                        expected: current,
+                    },
+                    None,
+                ));
                 self.reported.insert(*validator, ());
             }
         }

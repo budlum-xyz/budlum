@@ -126,7 +126,9 @@ pub fn build_bud_to_eth_claim(
 
     // BLG-0116 (P05-F09): the recipient is the one the burn committed,
     // not a free parameter the caller picks here.
-    let recipient_eth = transfer.recipient_eth.ok_or(BudToEthError::InvalidRecipient)?;
+    let recipient_eth = transfer
+        .recipient_eth
+        .ok_or(BudToEthError::InvalidRecipient)?;
 
     Ok(BudToEthClaim {
         message_id: *message_id,
@@ -220,7 +222,9 @@ mod tests {
         assert_eq!(err, BudToEthError::NotBurned);
 
         // Burned, but the finality proof is empty: FinalityProofMissing.
-        bridge.burn_with_event(id, 2, 20, 0, 500, [9u8; 20]).unwrap();
+        bridge
+            .burn_with_event(id, 2, 20, 0, 500, [9u8; 20])
+            .unwrap();
         let err = build_bud_to_eth_claim(
             &bridge,
             &id,

@@ -142,11 +142,7 @@ pub struct ZkVmFinalityAdapter {
 impl ZkVmFinalityAdapter {
     /// Builds an adapter for one network.
     #[must_use]
-    pub fn new(
-        network: &str,
-        program_hash: Option<[u8; 32]>,
-        chain_id: Option<u64>,
-    ) -> Self {
+    pub fn new(network: &str, program_hash: Option<[u8; 32]>, chain_id: Option<u64>) -> Self {
         let id = AdapterId::from_name(&format!("budzkvm-{network}"));
         Self {
             network: network.to_string(),

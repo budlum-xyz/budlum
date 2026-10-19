@@ -294,8 +294,8 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
     };
     if !bytes.is_empty() && bytes[0] == 0 {
         return Err(RlpError::NonCanonical); // leading-zero integer encoding,
-        // including the bare 0x00 spelling of zero (BLG-0122/P05-F15):
-        // canonical zero is the empty string, checked below.
+                                            // including the bare 0x00 spelling of zero (BLG-0122/P05-F15):
+                                            // canonical zero is the empty string, checked below.
     }
     if bytes.is_empty() {
         return Ok(0); // the empty string is the integer 0, canonically

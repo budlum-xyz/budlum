@@ -502,8 +502,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         }
         if update.aggregate_pubkey != committee.aggregate_pubkey {
             return Err(AdapterError::ConsensusRule {
-                rule: "the update's aggregate public key is not the pinned committee's"
-                    .to_string(),
+                rule: "the update's aggregate public key is not the pinned committee's".to_string(),
             });
         }
 
@@ -520,7 +519,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         // under another one.
         verifier
             .verify_aggregate(
-                &signing_root_v2(update),
+                &signing_root_v2(&update),
                 &committee.aggregate_pubkey,
                 &update.signature,
                 signers,
@@ -755,7 +754,11 @@ mod slashable_policy_tests {
 
     #[test]
     fn a_policy_that_requires_slashable_backing_is_refused() {
-        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(AcceptAllBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
         let ev = evidence(&adapter);
         assert!(adapter
             .verify(&ev, &VerificationPolicy::strict(1_000))
@@ -773,12 +776,17 @@ mod slashable_policy_tests {
     /// naming its own key is refused.
     #[test]
     fn a_payload_key_that_is_not_the_pinned_committee_is_refused() {
-        let adapter =
-            EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(AcceptAllBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
         let mut ev = evidence(&adapter);
         // The attacker's own aggregate key.
         ev.payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0xEE; 96]);
-        let err = adapter.verify(&ev, &VerificationPolicy::strict(1_000)).unwrap_err();
+        let err = adapter
+            .verify(&ev, &VerificationPolicy::strict(1_000))
+            .unwrap_err();
         assert!(
             matches!(err, AdapterError::ConsensusRule { .. }),
             "got: {err:?}"
@@ -789,8 +797,11 @@ mod slashable_policy_tests {
     /// and nothing else.
     #[test]
     fn rotation_must_open_the_committed_root() {
-        let mut adapter =
-            EthereumSyncAdapter::new("testnet", Some(test_committee()), Some(Box::new(AcceptAllBls)));
+        let mut adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
         // The wrong key: does not hash to [0xbb; 32].
         let wrong = PinnedCommittee {
             period: 1,
@@ -852,7 +863,9 @@ mod slashable_policy_tests {
     fn committee_less_admission_is_closed() {
         let adapter = EthereumSyncAdapter::new("testnet", None, Some(Box::new(AcceptAllBls)));
         let ev = evidence(&adapter);
-        let err = adapter.verify(&ev, &VerificationPolicy::strict(1_000)).unwrap_err();
+        let err = adapter
+            .verify(&ev, &VerificationPolicy::strict(1_000))
+            .unwrap_err();
         assert!(
             matches!(err, AdapterError::ConsensusRule { .. }),
             "got: {err:?}"

@@ -397,7 +397,10 @@ impl ColdWalletState {
     /// S2: pin the trusted committee at installation. A wallet without a
     /// pinned committee refuses every quorum (fail closed).
     #[must_use]
-    pub fn with_trusted_devices(mut self, devices: Vec<super::cold_quorum::SignerIdentity>) -> Self {
+    pub fn with_trusted_devices(
+        mut self,
+        devices: Vec<super::cold_quorum::SignerIdentity>,
+    ) -> Self {
         self.trusted_devices = devices;
         self
     }
@@ -722,10 +725,12 @@ impl ColdWalletState {
     ) -> Result<VerifiedSettlement, ColdSettleError> {
         // S2: the identity set is state, not caller input.
         if self.trusted_devices.len() != self.policy.device_count as usize {
-            return Err(ColdSettleError::Quorum(QuorumError::IdentitySetSizeMismatch {
-                device_count: self.policy.device_count,
-                presented: self.trusted_devices.len(),
-            }));
+            return Err(ColdSettleError::Quorum(
+                QuorumError::IdentitySetSizeMismatch {
+                    device_count: self.policy.device_count,
+                    presented: self.trusted_devices.len(),
+                },
+            ));
         }
         let identities = self.trusted_devices.clone();
         let payload = Self::payload_for(request, self.key_epoch);
@@ -773,7 +778,11 @@ impl ColdWalletState {
     /// BLG-0071 (P03-F14): crate-visible only, like [`Self::sign`] is
     /// module-visible. The sole caller is the committee-gated rotation in
     /// `pq_anchor`; an unauthenticated caller must not bump the key epoch.
-    pub(crate) fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
+    pub(crate) fn rotate_key(
+        &mut self,
+        at_height: u64,
+        reason: &str,
+    ) -> Result<u32, RotationError> {
         if reason.is_empty() {
             return Err(RotationError::EmptyReason);
         }
@@ -861,7 +870,8 @@ mod tests {
         let mut cold = ColdWalletState::new(ColdWalletPolicy {
             required_quorum: 0,
             ..policy()
-        }).with_trusted_devices(quorum_identities());
+        })
+        .with_trusted_devices(quorum_identities());
         let err = cold.sign(&request(10, 1, 500), 1, 0).unwrap_err();
         assert!(matches!(err, ColdRefusal::InvalidPolicy { .. }));
         assert_eq!(cold.signed_count, 0);
@@ -1131,7 +1141,8 @@ mod tests {
         let mut cold = ColdWalletState::new(ColdWalletPolicy {
             refusal_history_capacity: 0,
             ..policy()
-        }).with_trusted_devices(quorum_identities());
+        })
+        .with_trusted_devices(quorum_identities());
         let _ = cold.sign(&request(10, 1, 500), 1, 1);
         assert!(cold.refusals.is_empty());
     }
@@ -1177,7 +1188,8 @@ mod tests {
         let mut cold = ColdWalletState::new(ColdWalletPolicy {
             min_height_advance: 10,
             ..policy()
-        }).with_trusted_devices(quorum_identities());
+        })
+        .with_trusted_devices(quorum_identities());
         cold.sign(&request(100, 1, 500), 1, 2).expect("sign");
         let err = cold.sign(&request(105, 2, 500), 1, 2).unwrap_err();
         assert_eq!(
@@ -1256,9 +1268,7 @@ mod tests {
             // would have passed the old count check.
             let mut cold = ColdWalletState::new(quorum_policy());
             let req = request(100, 1, 500);
-            let err = cold
-                .sign_with_quorum(&req, 1, &[])
-                .unwrap_err();
+            let err = cold.sign_with_quorum(&req, 1, &[]).unwrap_err();
             match err {
                 ColdSettleError::Quorum(err) => {
                     assert_eq!(err.kind(), "quorum-not-reached");
@@ -1280,9 +1290,7 @@ mod tests {
             let req = request(100, 1, 500);
             let mut sigs = signatures_for(&req, 1, 3);
             sigs[0].signature[10] ^= 0x01;
-            let err = cold
-                .sign_with_quorum(&req, 1, &sigs)
-                .unwrap_err();
+            let err = cold.sign_with_quorum(&req, 1, &sigs).unwrap_err();
             match err {
                 ColdSettleError::Quorum(err) => {
                     assert_eq!(err.kind(), "quorum-invalid-signature");
@@ -1302,9 +1310,7 @@ mod tests {
             let mut cold = ColdWalletState::new(quorum_policy());
             let req = request(100, 1, 2_000); // above the 1000 ceiling
             let sigs = signatures_for(&req, 1, 3);
-            let err = cold
-                .sign_with_quorum(&req, 1, &sigs)
-                .unwrap_err();
+            let err = cold.sign_with_quorum(&req, 1, &sigs).unwrap_err();
             match err {
                 ColdSettleError::Policy(ColdRefusal::ValueAboveCeiling { .. }) => {}
                 other => panic!("expected a policy refusal, got {other:?}"),
