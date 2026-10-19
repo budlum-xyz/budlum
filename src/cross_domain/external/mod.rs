@@ -38,9 +38,12 @@
 //!
 //! # WIRING STATUS - read this before trusting anything below
 //!
-//! **Wired through [`intake`].** The two consensus decisions the earlier
-//! version of this notice deferred were made, in writing, in
-//! `intake.rs`'s module docs:
+//! **Wired through [`intake`]** - with the limit spelled out here
+//! (BLG-0166/P07-F21): the attestation is NOT part of any block or header
+//! yet. `state_digest` is an RPC value a consumer can compare; nothing in
+//! consensus commits it until the `GlobalBlockHeader` root lands. The two
+//! consensus decisions the earlier version of this notice deferred were
+//! made, in writing, in `intake.rs`'s module docs:
 //!
 //! 1. The registry lives on `Blockchain` as `external_intake`
 //!    ([`IntakeState`]), persisted by the storage layer and clocked from
@@ -515,7 +518,7 @@ mod tests {
         assert!(policy.window(1).is_some());
         assert_eq!(policy.current_version_at(0), Some(1));
 
-        policy.schedule_fork(1, 2, 500, 100).unwrap();
+        policy.schedule_fork(1, 2, 500, 100, &[1, 2]).unwrap();
 
         // Before the fork: only v1.
         assert!(policy.gate(1, 400).is_ok());
@@ -550,7 +553,7 @@ mod tests {
     #[test]
     fn a_grace_window_wider_than_the_domain_allows_is_refused() {
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 100);
-        let err = policy.schedule_fork(1, 2, 500, 10_000).unwrap_err();
+        let err = policy.schedule_fork(1, 2, 500, 10_000, &[1, 2]).unwrap_err();
         assert!(matches!(err, ForkError::GraceTooWide { .. }));
     }
 
@@ -560,7 +563,7 @@ mod tests {
         // formats are current forever, which is the state that produces silent
         // divergence between nodes.
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000);
-        policy.schedule_fork(1, 2, 500, 50).unwrap();
+        policy.schedule_fork(1, 2, 500, 50, &[1, 2]).unwrap();
         let old = policy.window(1).expect("v1 stays readable after sunset");
         assert_eq!(old.sunset_height, Some(550));
     }
@@ -569,7 +572,7 @@ mod tests {
     fn forking_into_a_known_version_or_from_an_unknown_one_is_refused() {
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000);
         assert!(matches!(
-            policy.schedule_fork(1, 1, 500, 10).unwrap_err(),
+            policy.schedule_fork(1, 1, 500, 10, &[1, 2]).unwrap_err(),
             ForkError::SameVersion { .. }
         ));
         assert!(matches!(
@@ -577,12 +580,12 @@ mod tests {
             // looks the old version up in the windows and refuses when it was
             // never scheduled. Passing the unknown number as the new version
             // schedules it successfully, which is the opposite of the claim.
-            policy.schedule_fork(9, 2, 500, 10).unwrap_err(),
+            policy.schedule_fork(9, 2, 500, 10, &[1, 2]).unwrap_err(),
             ForkError::UnknownOldVersion { .. }
         ));
-        policy.schedule_fork(1, 2, 500, 10).unwrap();
+        policy.schedule_fork(1, 2, 500, 10, &[1, 2]).unwrap();
         assert!(matches!(
-            policy.schedule_fork(2, 2, 600, 10).unwrap_err(),
+            policy.schedule_fork(2, 2, 600, 10, &[1, 2]).unwrap_err(),
             ForkError::SameVersion { .. }
         ));
     }
@@ -590,6 +593,42 @@ mod tests {
     // ---------------------------------------------------------------------
     // profile
     // ---------------------------------------------------------------------
+
+    /// BLG-0161 (P07-F16): a fork lands only on a version the adapter
+    /// accepts, and a policy whose every window has sunset cannot serve.
+    #[test]
+    fn a_fork_only_lands_on_a_version_the_adapter_accepts() {
+        let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000);
+        let err = policy
+            .schedule_fork(1, 7, 500, 10, &[1, 2])
+            .expect_err("version 7 is not in the accepted set");
+        assert!(
+            matches!(
+                err,
+                crate::cross_domain::external::ForkError::VersionNotAccepted { version: 7 }
+            ),
+            "got: {err:?}"
+        );
+        let all_sunset = VersionPolicy {
+            windows: vec![
+                crate::cross_domain::external::VersionWindow {
+                    version: 1,
+                    valid_from_height: 1,
+                    sunset_height: Some(2),
+                },
+                crate::cross_domain::external::VersionWindow {
+                    version: 2,
+                    valid_from_height: 2,
+                    sunset_height: Some(3),
+                },
+            ],
+            ..VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000)
+        };
+        assert!(
+            !all_sunset.is_consistent(),
+            "a policy whose every window has sunset must not be consistent"
+        );
+    }
 
     #[test]
     fn the_profile_carries_no_score() {
