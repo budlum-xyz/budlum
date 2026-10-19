@@ -212,7 +212,7 @@ impl QuantumAccount {
 
     /// Calls all KQ-* guards from a single entry point.
     ///
-    /// `verify_multisig_threshold`, `verify_recovery_policy` ve
+    /// `verify_multisig_threshold`, `verify_recovery_policy` and `verify_storage_bound`.
     /// Because `verify_storage_bound` and friends are each `pub` separately, the gate cannot see
     /// that they are called from a production path; this function verifies all three in order
     /// and returns on the first error. This is the only surface the integration that wires

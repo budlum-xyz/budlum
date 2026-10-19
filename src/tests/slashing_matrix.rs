@@ -1,8 +1,8 @@
-//!: Slashing test matrisi.
+//! Slashing test matrix.
 //!
 //! Separate test scenarios: double-sign, downtime and liveness, and an invalid
 //! attestation. On top of the verifier registry, for each slashing condition
-//! Pozitif (slash tetiklenir) ve negatif (honest validator slash'lanmaz).
+//! Positive (slash fires) and negative (an honest validator is not slashed).
 
 #[cfg(test)]
 mod tests {

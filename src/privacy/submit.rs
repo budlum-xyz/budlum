@@ -15,7 +15,7 @@ pub const ML_DSA_87_AUTH_SIG_LEN: usize = crate::crypto::primitives::ML_DSA_87_S
 /// Chain-submitted private transfer (from wallet intent).
 ///
 /// `spent_commitments` are required in v1 so the note set can be updated
-/// Without a full membership STARK inside L1; nullifiers remain the public
+/// Without a full membership STARK inside the chain; nullifiers remain the public
 /// Double-spend tags. TEE path may later replace spent_commitments with a
 /// Proof-only membership argument.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

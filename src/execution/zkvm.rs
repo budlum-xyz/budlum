@@ -176,7 +176,7 @@ impl ZkVmExecutor {
 /// Produce a real STARK proof for a BudZKVM bytecode program, returning the
 /// Proof envelope, its public inputs and the decoded program.
 ///
-/// This is the proving counterpart used by the L1 ↔ BudZKVM proof bridge (and
+/// This is the proving counterpart used by the chain ↔ BudZKVM proof bridge (and
 /// By tests): it runs the VM, derives the canonical public inputs and generates
 /// A `ProofEnvelope` that `budlum-core` can verify natively.
 pub fn prove_bytecode(

@@ -415,7 +415,7 @@ pub const COL_REG_IS_INIT: usize = 735;
 /// filled from the public input itself, so nothing else touched them; the
 /// register image goes there. Widening the public input instead would mean
 /// changing `ExecutionPublicInputs`, which is declared twice and constructed
-/// in 62 places across the L1, the CLI, the benchmarks and the fuzz targets,
+/// in 62 places across the chain, the CLI, the benchmarks and the fuzz targets,
 /// for a commitment that fits in space already reserved and already carried.
 ///
 /// Same fold as [`COL_MEM_INIT_ACC`], with the same caveat: fixed constants
@@ -1916,7 +1916,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // Every other accumulator in this AIR already had its first row
             // pinned: the memory image fold, the register image fold, `clk`,
             // `pc`, and all three LogUp running sums. This one was the
-            // exception, and the sequence it accumulates is the one the L1
+            // exception, and the sequence it accumulates is the one the chain
             // reads back as "what this execution announced".
             // The first row folds its own contribution in the same way, for
             // the same reason the Log term is here: the prover writes row

@@ -7,7 +7,7 @@
 #   journalctl -u budlum-core -f
 
 [Unit]
-Description=Budlum Core Layer-1 Node
+Description=Budlum Core Node
 Documentation=https://github.com/rade/budlum-core
 After=network-online.target
 Wants=network-online.target

@@ -8,7 +8,7 @@
 # caught CVE-2026-32314 / GHSA-vxx9-2994-q338 - a remotely triggerable panic
 # (DoS) in yamux that requires NO authentication, CVSS 8.7. On the same tree
 # `cargo audit` said "0 vulnerabilities found", because this record has no
-# RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404). In an L1 node's
+# RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404). In a chain node's
 # P2P multiplexer this is a class cargo-audit structurally cannot see.
 #
 # Gate policy: a finding = FAIL (NO `continue-on-error`). Exceptions live in

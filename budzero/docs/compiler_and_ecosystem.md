@@ -105,17 +105,17 @@ let ok = Prover::verify(&proof, num_steps);
 println!("Proof valid: {}", ok);
 ```
 
-## Budlum L1 integration
+## Budlum chain integration
 
-BudZKVM bytecode can now run inside the Budlum L1 `infra` repository as a `TransactionType::ContractCall`. In this integration:
+BudZKVM bytecode can now run inside the Budlum chain `infra` repository as a `TransactionType::ContractCall`. In this integration:
 
 1. the client places the BudZKVM bytecode into the `tx.data` field as a little-endian `u64` instruction byte string,
-2. L1's `src/execution/zkvm.rs` decodes the bytecode,
+2. chain's `src/execution/zkvm.rs` decodes the bytecode,
 3. the VM runs with a gas limit,
 4. a proof is produced with `bud-proof` and verified,
 5. only after a successful execution are the sender's fee and nonce state updated.
 
-The bytecode produced in the CLI and the L1 transaction payload format therefore stay the same.
+The bytecode produced in the CLI and the chain transaction payload format therefore stay the same.
 
 ## Conclusion and what comes next
 

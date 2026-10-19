@@ -24,7 +24,7 @@ libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf69
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-# Bitswap wire codec; pinned to the same major as the L1 crate so a node can
+# Bitswap wire codec; pinned to the same major as the chain crate so a node can
 # speak to peers built from either tree.
 bincode = "1"
 

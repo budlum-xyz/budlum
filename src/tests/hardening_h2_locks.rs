@@ -101,7 +101,7 @@ mod tests {
         assert!(!pm.can_admit_subnet(Some(s)));
     }
 
-    /// REGRESSION: L1 account Merkle trie uses 256-bit keys.
+    /// REGRESSION: chain account Merkle trie uses 256-bit keys.
     #[test]
     fn l1_merkle_trie_is_256bit_keys() {
         let mut trie = crate::storage::merkle_trie::MerkleTrie::new();

@@ -434,7 +434,7 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Submit a ZK proof (L1 ↔ BudZKVM bridge). Permissionless: anyone may
+    /// Submit a ZK proof (chain ↔ BudZKVM bridge). Permissionless: anyone may
     /// Submit; a valid proof is accepted regardless of registration. Registered
     /// Provers additionally earn a reward. Invalid proofs burn the fee.
     #[method(name = "bud_submitZkProof")]

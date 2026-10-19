@@ -132,7 +132,7 @@ The S-box intermediates take 96 columns in the trace (4 rounds x 8 elements x 3 
 4. Fiat-Shamir randomness is drawn.
 5. With that randomness a **3-column** auxiliary trace is produced (register, memory+storage, program CTL LogUp).
 6. The AIR constraints are evaluated reading the main and auxiliary windows together.
-7. The proof is serialized with `postcard` (bounded, DoS protected) and carried to the CLI, the tests or the L1 integration layer.
+7. The proof is serialized with `postcard` (bounded, DoS protected) and carried to the CLI, the tests or the chain integration layer.
 
 On the current Plonky3 path the auxiliary trace uses **LogUp fractional sums**. Three random challenges (alpha, beta, gamma) are drawn from the Fiat-Shamir transcript; gamma is used to build the fractional sums in the denominator.
 

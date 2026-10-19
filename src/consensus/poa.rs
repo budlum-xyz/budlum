@@ -413,7 +413,7 @@ impl PoAEngine {
 
 impl ConsensusEngine for PoAEngine {
     /// The identity master registry opens writes on the PoA authority's
-    /// chain and nowhere else (KIMLIK-MIMARI §2). This is that declaration:
+    /// chain and nowhere else (identity architecture note §2). This is that declaration:
     /// the gate reads it from the engine the node itself started with.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {
         crate::domain::ConsensusKind::PoA

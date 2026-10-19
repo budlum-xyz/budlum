@@ -1,7 +1,7 @@
 # AI inference layer
 
 The **off-chain skeleton** of the decentralised artificial intelligence layer
-of Budlum L1.
+of Budlum chain.
 
 > The chain side lives in `src/ai_inference/` and `src/ai/`; the off-chain
 > skeleton stands in this directory as its own Cargo workspace, in the same
