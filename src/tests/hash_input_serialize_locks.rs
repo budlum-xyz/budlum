@@ -40,20 +40,30 @@ fn code_lines(rel: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// Statements (split on `;`, whitespace removed) where `bincode::serialize` is
+/// followed by `unwrap_or_default`. Wrapped chains are caught as well.
+fn swallowing_statements(code: &[(usize, String)]) -> Vec<String> {
+    let text: Vec<&str> = code.iter().map(|(_, l)| l.as_str()).collect();
+    text.join("\n")
+        .split(';')
+        .map(|st| st.split_whitespace().collect::<String>())
+        .filter(|st| {
+            st.find("bincode::serialize")
+                .is_some_and(|at| st[at..].contains("unwrap_or_default"))
+        })
+        .map(|st| st.chars().take(80).collect())
+        .collect()
+}
+
 /// The three hash-input sites must not reintroduce the swallow.
 #[test]
 fn hash_inputs_do_not_swallow_a_serialize_failure() {
     for rel in ["src/core/transaction.rs", "src/chain/snapshot.rs"] {
-        let offenders: Vec<usize> = code_lines(rel)
-            .into_iter()
-            .filter(|(_, line)| line.contains("bincode::serialize"))
-            .filter(|(_, line)| line.contains("unwrap_or_default"))
-            .map(|(n, _)| n)
-            .collect();
+        let offenders = swallowing_statements(&code_lines(rel));
         assert!(
             offenders.is_empty(),
             "{rel} feeds a hash from `bincode::serialize(..).unwrap_or_default()` \
-             at lines {offenders:?}; an empty Vec on failure makes two different \
+             in {offenders:?}; an empty Vec on failure makes two different \
              values commit to the same digest"
         );
     }
@@ -64,21 +74,20 @@ fn hash_inputs_do_not_swallow_a_serialize_failure() {
 /// A source check that silently matches nothing passes forever after a rename.
 #[test]
 fn the_serialize_swallow_scan_can_detect_a_violation() {
-    let planted = [
-        "        let bytes = bincode::serialize(val).unwrap_or_default();",
-        "/// let bytes = bincode::serialize(val).unwrap_or_default();",
-    ];
-    let caught = planted
-        .iter()
-        .filter(|line| {
-            let t = line.trim_start();
-            !t.starts_with("//") && !t.starts_with("///")
-        })
-        .filter(|line| line.contains("bincode::serialize") && line.contains("unwrap_or_default"))
-        .count();
+    let planted: Vec<(usize, String)> = [
+        "        let bytes = bincode::serialize(val)",
+        "            .unwrap_or_default();",
+        "/// let other = bincode::serialize(val).unwrap_or_default();",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, l)| (i + 1, (*l).to_string()))
+    .filter(|(_, l)| !l.trim_start().starts_with("//"))
+    .collect();
     assert_eq!(
-        caught, 1,
-        "the scan must catch the real line and ignore the doc-comment one"
+        swallowing_statements(&planted).len(),
+        1,
+        "the scan must catch the wrapped line and ignore the doc-comment one"
     );
 }
 
