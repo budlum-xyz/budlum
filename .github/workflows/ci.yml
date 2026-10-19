@@ -1952,6 +1952,10 @@ jobs:
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
+        # This job does not install cargo-vet; the dedicated Cargo Vet job
+        # makes the ratchet decision, so a missing tool is allowed here only.
+        env:
+          BUDLUM_VET_OPTIONAL: "1"
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
       - name: Rust gates clippy (pedantic, no allow)
         run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
