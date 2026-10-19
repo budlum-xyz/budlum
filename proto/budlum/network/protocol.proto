@@ -663,6 +663,8 @@ message ProtoPrivateTransferSubmit {
     repeated bytes output_commitments = 3;
     bytes authorization_sig = 4;
     bytes public_digest = 5;
+    // BLG-0058: one nullifier derivation proof per input.
+    repeated bytes nullifier_proofs = 6;
 }
 
 message ProtoPrivacyNoteInsert {
