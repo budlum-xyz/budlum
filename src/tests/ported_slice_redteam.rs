@@ -341,7 +341,9 @@ fn issuance_refuses_a_credential_from_the_future_or_born_dead() {
     );
 
     // `expires_at == issued_at` is the boundary: dead on arrival.
-    let dead = credential(9, 100, Some(100));
+    let mut dead = credential(9, 100, Some(100));
+    // Self-issued, like the probe above: the time rule answers, not consent.
+    dead.subject = addr(9);
     let err = execute_identity_tx(
         &mut registry,
         &addr(9),
@@ -378,12 +380,16 @@ fn an_unregistered_subject_cannot_be_handed_a_credential() {
             0,
         )
         .unwrap();
-    // The subject `0x01..` was never registered.
+    // The subject `0x01..` was never registered, and it is not the issuer, so
+    // the third-party consent gate (BLG-0095) answers before the registry is
+    // asked who the subject is. Either refusal is a non-issuance; what must
+    // never happen is the credential landing.
+    let c = credential(9, 100, Some(1_000));
     let err = execute_identity_tx(
         &mut registry,
         &addr(9),
         IdentityTx::Issue {
-            credential: credential(9, 100, Some(1_000)),
+            credential: c.clone(),
             consent: None,
         },
         &POA,
@@ -392,15 +398,25 @@ fn an_unregistered_subject_cannot_be_handed_a_credential() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, IdentityError::UnknownSubject { .. }),
+        matches!(
+            err,
+            IdentityError::UnknownSubject { .. } | IdentityError::BadApproval(_)
+        ),
         "a credential was issued to a DID the registry does not know: {err:?}"
+    );
+    assert!(
+        registry.credential(&credential_id(&c)).is_none(),
+        "the refused credential must not be stored"
     );
 }
 
 #[test]
 fn the_same_credential_cannot_be_issued_twice() {
     let mut registry = two_dids();
-    let c = credential(9, 100, Some(1_000));
+    // Self-issued, so the door's consent gate (BLG-0095) is not the refusal
+    // under test.
+    let mut c = credential(9, 100, Some(1_000));
+    c.subject = addr(9);
     // Setup through the Op layer: this test is about revocation semantics
     // (BLG-0095 moved third-party issuance consent to the door).
     registry

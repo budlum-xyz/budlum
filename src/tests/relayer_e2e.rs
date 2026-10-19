@@ -209,6 +209,9 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
         .unwrap();
     let lock_message = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_message, 0).unwrap();
+    // The state-level mint is the row flip only; the credit half is the
+    // caller's (BLG-0108), and the burn debits what was credited.
+    bc.state.add_balance(&recipient(), 100);
 
     let burn_event = bc
         .burn_bridge_transfer_with_event(lock_message.message_id, 2, 20, 0, 1_000, [7u8; 20])
@@ -487,6 +490,8 @@ fn full_internal_relay_cycle_burn_unlock() {
         .unwrap();
     let lock_msg = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_msg, 0).unwrap();
+    // Credit half of the mint (BLG-0108): the burn below debits it again.
+    bc.state.add_balance(&recipient(), 100);
 
     // 3. Burn on Domain 2 via the blockchain wrapper so production relay
     // Enqueue wiring is exercised.
