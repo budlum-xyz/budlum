@@ -188,6 +188,11 @@ pub enum RegistryError {
     UnsupportedRole {
         role: RoleId,
     },
+    /// Adding the amount would overflow the recorded stake.
+    StakeOverflow {
+        account: Address,
+        role: RoleId,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -222,6 +227,9 @@ impl std::fmt::Display for RegistryError {
             ),
             RegistryError::AlreadySlashed { account, role } => {
                 write!(f, "{account} is already slashed as {role}")
+            }
+            RegistryError::StakeOverflow { account, role } => {
+                write!(f, "stake of {account} as {role} would overflow")
             }
         }
     }
@@ -535,7 +543,13 @@ impl PermissionlessRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        reg.stake = reg.stake.saturating_add(amount);
+        if !matches!(reg.status, MemberStatus::Active) {
+            return Err(RegistryError::NotActive { account, role });
+        }
+        reg.stake = reg
+            .stake
+            .checked_add(amount)
+            .ok_or(RegistryError::StakeOverflow { account, role })?;
         Ok(reg.stake)
     }
 
@@ -971,6 +985,17 @@ mod tests {
         reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         assert!(reg.is_active(&addr(1), roles::VALIDATOR));
+    }
+
+    #[test]
+    fn add_stake_refuses_overflow_and_inactive_members() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(4), u64::MAX, 0).unwrap();
+        let err = reg.add_stake(addr(4), roles::VALIDATOR, 1).unwrap_err();
+        assert!(matches!(err, RegistryError::StakeOverflow { .. }));
+        reg.begin_unbonding(addr(4), roles::VALIDATOR, 0).unwrap();
+        let err = reg.add_stake(addr(4), roles::VALIDATOR, 1).unwrap_err();
+        assert!(matches!(err, RegistryError::NotActive { .. }));
     }
 
     #[test]
