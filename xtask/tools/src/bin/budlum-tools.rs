@@ -27,8 +27,8 @@
 //! | `--self-test` | (new: the canary of every tool) |
 
 use budlum_tools::{
-    audit_deps, backup_drill, devnet, docker_smoke, multinode_smoke, prepush, repo_root, sbom,
-    seed_corpus, smoke_rpc,
+    audit_deps, backup_drill, checked_repo_root, devnet, docker_smoke, multinode_smoke, prepush,
+    sbom, seed_corpus, smoke_rpc,
 };
 use budlum_tools::{audit_guard, clippy_extra_report, fsf_fit, step_reachability};
 
@@ -58,7 +58,13 @@ fn usage() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let root = repo_root();
+    let root = match checked_repo_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("FAIL: {e}");
+            std::process::exit(2);
+        }
+    };
 
     // The tools ported from scripts keep the exact stdout, stderr and exit
     // code of the script, so they return a full report.
