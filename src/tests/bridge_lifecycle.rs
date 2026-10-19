@@ -187,45 +187,78 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
     bc.state.add_balance(&owner, 1_000);
     bc.state.add_balance(&recipient, 0);
 
+    // The relayer's fee leg is part of the supply: the mint pays it out of the
+    // arriving asset, so conservation counts the relayer's balance too.
+    let relayer = addr(99);
     let sum = |bc: &Blockchain| -> u64 {
-        bc.state.get_balance(&owner) + bc.state.get_balance(&recipient)
+        bc.state.get_balance(&owner)
+            + bc.state.get_balance(&recipient)
+            + bc.state.get_balance(&relayer)
     };
     let start = sum(&bc);
     assert_eq!(start, 1_000);
+
+    // The two legs of the arriving asset, as the production mint splits them.
+    let params = *bc.state.registry.params();
+    let (held, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(400),
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .expect("a 400 transfer covers the fee");
+    let (held, fee) = (held.get(), fee.get());
+    assert_eq!(held + fee, 400);
 
     // Lock: the owner's units move into the bridge.
     let (_transfer, lock_event) = bc
         .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 400, 1_000)
         .expect("lock");
-    assert_eq!(sum(&bc), start, "lock must move units, not destroy them");
     let lock_message = lock_event.message.clone().expect("lock carries a message");
+    // The lock debits the owner into escrow (BLG-0118): the units leave the
+    // live balances and sit in the transfer row until the mint credits them,
+    // so conservation counts the escrow.
+    let escrowed = bc
+        .state
+        .bridge_state
+        .transfer(&lock_message.message_id)
+        .map(|t| t.amount.get())
+        .expect("the lock registered its transfer");
+    assert_eq!(escrowed, 400);
+    assert_eq!(
+        sum(&bc) + escrowed,
+        start,
+        "lock must move units into escrow, not destroy them"
+    );
 
-    // Mint on the target side: the production mint credits the recipient.
+    // Mint on the target side: the row flips, the recipient and the relayer
+    // are credited the two legs.
     bc.state
         .bridge_state
         .mint(&lock_message, 20)
         .expect("mint the locked transfer");
-    bc.state.get_or_create(&recipient).balance += 400;
+    bc.state.get_or_create(&recipient).balance += held;
+    bc.state.get_or_create(&relayer).balance += fee;
     assert_eq!(sum(&bc), start, "mint is the credit half of lock");
 
-    // Burn on the target side: the fix - the burn TAKES the units back.
+    // Burn on the target side: the fix - the burn TAKES the recipient's
+    // units back (what it was credited, not the relayer's fee).
     let message_id = lock_message.message_id;
     let burn_event = bc
         .burn_bridge_transfer_with_event(message_id, 2, 40, 0, 0, [7u8; 20])
         .expect("burn the minted transfer");
     assert_eq!(
         sum(&bc),
-        start - 400,
+        start - held,
         "burn must debit the minted units (BLG-0108)"
     );
 
-    // Unlock on the source side: the owner is credited back.
+    // Unlock on the source side: the owner is credited back what was burned.
     let burn_message = burn_event.message.clone().expect("burn carries a message");
     bc.state
         .bridge_state
         .unlock(message_id, 2, 40)
         .expect("unlock the burned transfer");
-    bc.state.get_or_create(&owner).balance += 400;
+    bc.state.get_or_create(&owner).balance += held;
     assert_eq!(
         sum(&bc),
         start,
