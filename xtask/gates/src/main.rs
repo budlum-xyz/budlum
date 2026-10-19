@@ -116,6 +116,7 @@ mod gates {
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
     pub mod one_house_guards;
+    pub mod ownerless_dependencies;
     pub mod paid_content;
     pub mod parallel_execution;
     pub mod pinned_downloads;
@@ -757,6 +758,18 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::cargo_vet::self_test,
+    },
+    Gate {
+        name: "ownerless-dependencies",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "ownerless-dependencies reads a cargo-supply-chain JSON file; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::ownerless_dependencies::run),
+        run_args: None,
+        self_test: gates::ownerless_dependencies::self_test,
     },
     Gate {
         name: "udeps",

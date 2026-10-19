@@ -27,6 +27,37 @@ pub const CYCLONEDX_VERSION: &str = "0.5.9";
 /// for it, which is why it is removed first and named explicitly afterwards.
 const TOOL_OUTPUT: &str = "budlum-core.cdx.json";
 
+/// The fewest components a real SBOM of this repository can have. The tree
+/// carries hundreds of dependencies; a handful of components means
+/// production was cut short and a signature over it would be meaningless.
+pub const MIN_COMPONENTS: usize = 50;
+
+/// Is this document a complete CycloneDX SBOM? The check the provenance
+/// workflow used to run as an inline Python snippet (Z6): the format name is
+/// `CycloneDX`, and `components` is an array of at least [`MIN_COMPONENTS`].
+///
+/// # Errors
+///
+/// A description of what is wrong with the document.
+pub fn verify(doc: &Value) -> Result<usize, String> {
+    match doc.get("bomFormat").and_then(Value::as_str) {
+        Some("CycloneDX") => {}
+        other => {
+            return Err(format!("bomFormat is not 'CycloneDX': {other:?}"));
+        }
+    }
+    let count = doc
+        .get("components")
+        .and_then(Value::as_array)
+        .map_or(0, <[Value]>::len);
+    if count < MIN_COMPONENTS {
+        return Err(format!(
+            "only {count} components; production is incomplete (at least {MIN_COMPONENTS} expected)"
+        ));
+    }
+    Ok(count)
+}
+
 /// Generate the SBOM.
 ///
 /// # Errors
@@ -81,6 +112,11 @@ pub fn run(root: &Path) -> Result<String, String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .map_err(|e| format!("{} could not be read: {e}", sbom_file.display()))?;
     let parsed = json::parse(&text).map_err(|e| format!("the SBOM is not parseable JSON: {e}"))?;
+
+    // A signature over an empty or broken SBOM says only that it came out of
+    // this job, so the document is judged before anything is reported.
+    verify(&parsed)
+        .map_err(|e| format!("the SBOM at {} is not usable: {e}", sbom_file.display()))?;
 
     let size =
         std::fs::metadata(&sbom_file).map_or_else(|_| "?".to_string(), |m| m.len().to_string());
@@ -202,6 +238,35 @@ mod tests {
         assert!(r.contains("- **Component count:** 56"));
         assert!(r.contains("@ `abc`"));
         assert!(r.contains("generate-sbom"));
+    }
+
+    fn doc_with(format: &str, components: usize) -> Value {
+        let items = vec!["{}"; components].join(",");
+        json::parse(&format!(
+            r#"{{"bomFormat":"{format}","components":[{items}]}}"#
+        ))
+        .expect("json")
+    }
+
+    #[test]
+    fn a_complete_cyclonedx_document_is_accepted() {
+        assert_eq!(
+            verify(&doc_with("CycloneDX", MIN_COMPONENTS)),
+            Ok(MIN_COMPONENTS)
+        );
+    }
+
+    #[test]
+    fn a_short_or_foreign_or_malformed_document_is_refused() {
+        assert!(verify(&doc_with("CycloneDX", MIN_COMPONENTS - 1)).is_err());
+        assert!(verify(&doc_with("SPDX", MIN_COMPONENTS)).is_err());
+        let no_components = json::parse(r#"{"bomFormat":"CycloneDX"}"#).expect("json");
+        assert!(verify(&no_components).is_err());
+        let not_a_list =
+            json::parse(r#"{"bomFormat":"CycloneDX","components":"many"}"#).expect("json");
+        assert!(verify(&not_a_list).is_err());
+        let no_format = json::parse(r#"{"components":[]}"#).expect("json");
+        assert!(verify(&no_format).is_err());
     }
 
     #[test]
