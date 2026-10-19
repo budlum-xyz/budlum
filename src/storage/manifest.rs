@@ -1125,6 +1125,18 @@ mod tests {
         assert_eq!(m1.shard_count, m2.shard_count);
     }
 
+    /// The browser core (`crates/budscan`, `BudManifest::manifest_id`) keeps a
+    /// copy of this preimage; the vector is pinned there with the same bytes.
+    /// If this changes, the browser verifies against a stale formula.
+    #[test]
+    fn manifest_id_of_a_single_stored_shard_matches_the_browser_vector() {
+        let m = ContentManifest::from_bytes_sliced(b"hello", 1024).unwrap();
+        assert_eq!(
+            hex::encode(m.manifest_id.0),
+            "eb4912748b11896901a5ab57022cb8e117554dfb67233933fd3ea2e9fc076ca1"
+        );
+    }
+
     #[test]
     fn manifest_id_changes_when_chunk_size_changes() {
         let m1 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
