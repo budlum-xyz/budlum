@@ -22,6 +22,23 @@ use std::path::Path;
 /// writes. The condition is re-checked here, not trusted from the file.
 const UNFOLDED: [(&str, &str); 1] = [("access_events", "record_proven_read")];
 
+/// Ways a field is written, with `{name}` for the field. Any of them outside
+/// the owning function breaks the single-writer claim.
+const WRITE_FORMS: [&str; 12] = [
+    "self.{name}.entry(",
+    "self.{name}.insert(",
+    "self.{name}.remove(",
+    "self.{name}.clear()",
+    "self.{name}.get_mut(",
+    "self.{name}.retain(",
+    "self.{name}.extend(",
+    "self.{name}.append(",
+    "self.{name}.values_mut(",
+    "self.{name}.iter_mut(",
+    "self.{name}.drain(",
+    "&mut self.{name}",
+];
+
 fn read(root: &Path, rel: &str) -> Result<String, String> {
     let f = root.join(rel);
     if !f.is_file() {
@@ -90,15 +107,19 @@ fn span_of(src: &str, name: &str) -> Option<(usize, usize)> {
         } else if c == '"' {
             in_str = true;
         } else if c == '\'' {
-            in_char = true;
+            // A char literal is `'x'` or `'\..'`; a lifetime (`&'a`) is not one
+            // and must not swallow the code up to the next quote.
+            let literal = next == '\\' || bytes.get(i + 2).is_some_and(|(_, c2)| *c2 == '\'');
+            in_char = literal;
         } else if c == '{' {
             depth += 1;
             if open.is_none() {
                 open = Some(pos);
             }
         } else if c == '}' {
-            depth -= 1;
-            if depth == 0 {
+            // A stray `}` before the first `{` must not underflow.
+            depth = depth.saturating_sub(1);
+            if depth == 0 && open.is_some() {
                 if let Some(o) = open {
                     return Some((at + o, at + pos + 1));
                 }
@@ -282,8 +303,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         let span = span_of(&src, owner);
         let alone = span.is_some_and(|(start, end)| {
             let mut ok = src.contains(&format!("fn {owner}"));
-            for suffix in [".entry(", ".insert(", ".remove(", ".clear()"] {
-                let pat = format!("self.{name}{suffix}");
+            for pat in WRITE_FORMS.iter().map(|f| f.replace("{name}", name)) {
                 let mut at = 0usize;
                 while let Some(j) = src[at..].find(&pat) {
                     let pos = at + j;
@@ -516,6 +536,17 @@ mod decl_tests {
         assert_eq!(
             struct_fields(text),
             vec![String::from("a"), String::from("b")]
+        );
+    }
+
+    #[test]
+    fn a_lifetime_does_not_end_the_body_early_and_a_stray_brace_does_not_panic() {
+        let src = "fn root(x: &'a str) -> u8 { let y = 1; if y > 0 { 2 } else { 3 } }\nfn z() {}";
+        let (a, b) = span_of(src, "root").unwrap();
+        assert!(src[a..b].ends_with("3 } }"));
+        assert!(
+            span_of("fn root() } {", "root").is_some()
+                || span_of("fn root() } {", "root").is_none()
         );
     }
 }
