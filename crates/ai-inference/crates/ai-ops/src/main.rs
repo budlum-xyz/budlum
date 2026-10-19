@@ -165,7 +165,7 @@ fn main() {
             println!("eval set: {}", set.name);
             println!("records: {}", set.len());
             println!(
-                "content digest (B.U.D. hash): {}",
+                "eval set digest (not a B.U.D. content id): {}",
                 digest_hex(&set.digest())
             );
             // A golden rule that passes on an empty answer grades nothing.
