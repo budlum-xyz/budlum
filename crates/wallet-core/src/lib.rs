@@ -53,12 +53,12 @@ mod privacy_transfer;
 mod tee;
 
 pub use privacy_crypto::{
-    DOMAIN_NULLIFIER, address_to_recipient_tag, field_from_hash, hash_from_field, is_packed,
-    poseidon4_hash, poseidon4_hash3, privacy_commit, privacy_nullifier,
+    address_to_recipient_tag, field_from_hash, hash_from_field, is_packed, poseidon4_hash,
+    poseidon4_hash3, privacy_commit, privacy_nullifier, DOMAIN_NULLIFIER,
 };
 pub use privacy_transfer::{
-    PrivateNoteInput, PrivateNoteOutput, PrivateTransferIntent, PrivateTransferRequest,
-    derive_blinding, derive_spend_secret,
+    derive_blinding, derive_spend_secret, PrivateNoteInput, PrivateNoteOutput,
+    PrivateTransferIntent, PrivateTransferRequest,
 };
 pub use tee::{
     TeeAttestation, TeeBackendKind, TeeQuoteVerifier, TeeQuoter, TeeRuntime, TeeRuntimeStatus,
@@ -1563,14 +1563,6 @@ impl Wallet {
 mod tests {
     use super::*;
 
-    /// BLG-0278 (P17-F12): the deterministic fallback must be a working
-    /// signer, not a half-path. In non-production builds every signature
-    /// takes this exact route, so this test pins what the fallback produces:
-    /// verify-able under the wallet's key, and deterministic (same message,
-    /// same signature - the FIPS 204 default property that hedging removes).
-    /// The determinism half only holds on the fallback, so the test runs
-    /// exactly where the fallback is the whole story.
-    #[cfg(not(feature = "production"))]
     /// BLG-0281 (P17-F15): rotation is counter-indexed, so the property the
     /// design depends on must be pinned: same (seed, counter) -> same key no
     /// matter what key the wallet currently holds, distinct counters ->
@@ -1581,7 +1573,7 @@ mod tests {
     #[test]
     fn view_key_rotation_is_a_pure_function_of_seed_and_counter() {
         let seed = [9u8; 32];
-        let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
+        let mut w = WalletPrivacyConfig::default();
         let k0 = w.rotate_view_key(&seed, 0);
         let k1 = w.rotate_view_key(&seed, 1);
         assert_ne!(k0, k1, "distinct counters must derive distinct keys");
@@ -1597,7 +1589,7 @@ mod tests {
             k0,
             "rotation must be reproducible"
         );
-        let mut other_wallet = Wallet::from_entropy(&[0x67u8; 16]).unwrap();
+        let mut other_wallet = WalletPrivacyConfig::default();
         assert_eq!(
             other_wallet.rotate_view_key(&seed, 0),
             k0,
@@ -1606,6 +1598,14 @@ mod tests {
         let _ = &mut other_wallet;
     }
 
+    /// BLG-0278 (P17-F12): the deterministic fallback must be a working
+    /// signer, not a half-path. In non-production builds every signature
+    /// takes this exact route, so this test pins what the fallback produces:
+    /// verify-able under the wallet's key, and deterministic (same message,
+    /// same signature - the FIPS 204 default property that hedging removes).
+    /// The determinism half only holds on the fallback, so the test runs
+    /// exactly where the fallback is the whole story.
+    #[cfg(not(feature = "production"))]
     #[test]
     fn deterministic_fallback_signatures_verify_and_are_stable() {
         let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
@@ -2158,11 +2158,9 @@ mod tests {
         assert_eq!(reduced.threshold, 2);
         assert!(reduced.remove_guardian(g2.public_key()).is_err());
         assert!(reduced.remove_guardian(unknown.public_key()).is_err());
-        assert!(
-            reduced
-                .rotate_guardian(g1.public_key(), g2.public_key())
-                .is_err()
-        );
+        assert!(reduced
+            .rotate_guardian(g1.public_key(), g2.public_key())
+            .is_err());
     }
 
     #[test]
@@ -2292,28 +2290,24 @@ mod tests {
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        assert!(
-            RecoveryProposal::new(
-                owner.public_key(),
-                owner.public_key(),
-                &policy,
-                1_000,
-                45_262,
-                0
-            )
-            .is_err()
-        );
-        assert!(
-            RecoveryProposal::new(
-                owner.public_key(),
-                new_owner.public_key(),
-                &policy,
-                u64::MAX,
-                45_262,
-                0
-            )
-            .is_err()
-        );
+        assert!(RecoveryProposal::new(
+            owner.public_key(),
+            owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0
+        )
+        .is_err());
+        assert!(RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            u64::MAX,
+            45_262,
+            0
+        )
+        .is_err());
     }
 
     // ===== - WalletPrivacyConfig (section 10 #5 + view key) =====
