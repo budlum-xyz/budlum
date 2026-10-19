@@ -243,6 +243,23 @@ pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
 }
 
+/// The state machine reads the epoch length from the chain id while the
+/// consensus engine reads it from the selected network. One chain must use
+/// one value, so a chain id that maps to another epoch length is refused.
+pub fn check_epoch_len_matches_chain_id(
+    chain_id: u64,
+    engine_epoch_len: u64,
+) -> Result<(), String> {
+    let state_epoch_len = epoch_len_for_chain_id(chain_id);
+    if state_epoch_len == engine_epoch_len {
+        Ok(())
+    } else {
+        Err(format!(
+            "chain id {chain_id} uses epoch length {state_epoch_len} but the selected network uses {engine_epoch_len}"
+        ))
+    }
+}
+
 pub const SLOT_MS: u64 = 1000;
 
 pub fn slot_ms_for_chain_id(chain_id: u64) -> u64 {
@@ -451,6 +468,15 @@ mod tests {
         assert_eq!(Network::Testnet.chain_id().value(), 45261);
         assert_eq!(Network::Devnet.chain_id().value(), 45262);
         assert_eq!(Network::Mainnet.default_port(), 4001);
+    }
+
+    #[test]
+    fn a_chain_id_with_another_epoch_length_is_refused() {
+        let devnet = Network::Devnet;
+        assert!(
+            check_epoch_len_matches_chain_id(devnet.chain_id().value(), devnet.epoch_len()).is_ok()
+        );
+        assert!(check_epoch_len_matches_chain_id(1337, devnet.epoch_len() + 1).is_err());
     }
 
     #[test]
