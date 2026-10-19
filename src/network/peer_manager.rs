@@ -676,7 +676,10 @@ impl PeerManager {
                 continue;
             };
             let remaining = Duration::from_secs(ban.expires_unix - now_unix);
-            let entry = self.peers.entry(pid).or_default();
+            // The table ceiling applies to a reload too: a long ban file must not grow it.
+            let Some(entry) = self.get_or_create(&pid) else {
+                continue;
+            };
             entry.banned_until = Some(Instant::now() + remaining);
             entry.ban_expires_unix = Some(ban.expires_unix);
             entry.score = BAN_THRESHOLD;
@@ -1544,5 +1547,21 @@ mod tests {
         manager.set_handshaked(&honest, true);
         assert!(manager.is_handshaked(&honest));
         assert!(manager.is_banned(&banned), "a running ban must survive");
+    }
+
+    #[test]
+    fn reloading_a_long_ban_list_respects_the_table_ceiling() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        let expires_unix = unix_now_secs() + 600;
+        let bans: Vec<PersistedBan> = (0..16)
+            .map(|_| PersistedBan {
+                peer_id: PeerId::random().to_base58(),
+                expires_unix,
+            })
+            .collect();
+        manager.reload_banned_peers(&bans);
+        assert!(manager.peers.len() <= 4);
+        assert!(manager.get_banned_peers().len() <= 4);
     }
 }
