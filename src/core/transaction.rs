@@ -436,6 +436,14 @@ pub enum TransactionType {
     /// execution body. (Written without naming types: the signing gate reads
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
+    /// Bond into a permissionless application role of the verifier family
+    /// (BLG-0092 / P04-F10): the role id and the bond amount in the signed
+    /// header, nothing else. The five role seats that had no production
+    /// registration path - without one, the ATTESTER stake stayed at zero
+    /// and the storage-attestation authority check never ran.
+    RoleBond {
+        role: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1230,6 +1238,7 @@ impl Transaction {
             // registry arms already price.
             TransactionType::Vault(_) => schedule.contract_call_gas * 2,
             TransactionType::PoaOnboarding(_) => schedule.contract_call_gas * 2,
+            TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
             // also verifies the operator's consent signature, so it adds
@@ -1468,6 +1477,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::Vault(_) => 46,
         TransactionType::Storage(_) => 47,
         TransactionType::PoaOnboarding(_) => 48,
+        TransactionType::RoleBond { .. } => 49,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -2184,6 +2194,10 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         }
         TransactionType::Identity(identity_tx) => encode_identity_tx(identity_tx, out),
         TransactionType::PoaOnboarding(poa_tx) => encode_poa_onboarding_tx(poa_tx, out),
+        TransactionType::RoleBond { role } => {
+            put_u8(out, 49);
+            put_u32(out, *role);
+        }
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
         TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
     }
