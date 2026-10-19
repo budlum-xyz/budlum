@@ -44,8 +44,8 @@ pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
 pub use types::{
     AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
     AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
-    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiResultId,
-    AiVerifierQos, AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
+    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
+    AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]
