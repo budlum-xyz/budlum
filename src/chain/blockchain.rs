@@ -2761,11 +2761,28 @@ impl Blockchain {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
 
+        // Decision K4-A: the unlock gives the owner back what was burned - the
+        // amount the recipient held, i.e. the transfer minus the relayer fee
+        // the mint paid out of the arriving asset. The fee stays with the
+        // relayer, so the lock/mint/burn/unlock cycle conserves supply
+        // exactly.
+        let params = *self.state.registry.params();
+        let (returned, _relayer_fee) = crate::cross_domain::bridge::split_bridge_fee(
+            transfer.amount,
+            params.bridge_relayer_fee_ppm,
+            params.bridge_relayer_min_fee,
+        )
+        .map_err(|e| e.to_string())?;
+        let owner = transfer.owner;
+
         let settled_height = self.chain.len() as u64;
         self.state
             .bridge_state
             .unlock(transfer_id, message.source_domain, settled_height)
             .map_err(|e| e.to_string())?;
+        self.state
+            .try_add_balance(&owner, returned.get())
+            .map_err(|e| format!("Bridge unlock (owner credit): {e}"))?;
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.state.bridge_state)

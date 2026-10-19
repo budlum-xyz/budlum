@@ -1907,6 +1907,7 @@ mod settlement_prod_tests {
         bc.submit_domain_commitment(burn_commitment).unwrap();
 
         let burn_proof = burn_tree.proof(0).unwrap();
+        let alice_before = bc.state.get_balance(&alice);
         bc.unlock_bridge_transfer_from_verified_event(
             pos.id,
             101,
@@ -1916,6 +1917,14 @@ mod settlement_prod_tests {
             &burn_proof,
         )
         .unwrap();
+        // Decision K4-A: the unlock returns what the recipient burned - the
+        // 1000 transfer minus the 10 relayer fee that stays with the relayer.
+        assert_eq!(bc.state.get_balance(&bob), 0, "the burn took bob's 990");
+        assert_eq!(
+            bc.state.get_balance(&alice),
+            alice_before + 990,
+            "the unlock must credit the owner the burned amount"
+        );
 
         let final_header = bc.seal_global_header(None).unwrap();
         assert_ne!(final_header.bridge_state_root, [0u8; 32]);
