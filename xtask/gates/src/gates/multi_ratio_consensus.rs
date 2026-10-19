@@ -84,6 +84,26 @@ fn candidates(body: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// The number of match arms that offer at least one candidate: `=> vec![` not
+/// followed at once by `]`.
+fn non_empty_arms(body: &str) -> usize {
+    body.match_indices("=> vec![")
+        .filter(|(i, m)| !body[i + m.len()..].trim_start().starts_with(']'))
+        .count()
+}
+
+/// The f64 literal after `ratio:` in one candidate literal.
+fn ratio_of(candidate: &str) -> Option<f64> {
+    let (_, rest) = candidate.split_once("ratio:")?;
+    let lit: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '_' | 'e' | 'E' | '-' | '+'))
+        .filter(|c| *c != '_')
+        .collect();
+    lit.parse::<f64>().ok()
+}
+
 /// Shape of the list itself: not emptied, and every format class still offered.
 fn sayim(body: &str, list: &[(usize, String)], arms: usize) -> (usize, Vec<String>) {
     let mut ok = 0usize;
@@ -126,7 +146,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    let arms = body.matches("=> vec![").count();
+    let arms = non_empty_arms(&body);
     let (bulunan, sorunlar) = sayim(&body, &list, arms);
     checked += bulunan;
     problems.extend(sorunlar);
@@ -181,15 +201,25 @@ pub fn run(root: &Path) -> Result<String, String> {
             )),
             Some(v) => ids.push(v),
         }
-        if c.contains("ratio:") {
-            checked += 1;
-        } else {
-            problems.push(format!("candidate #{n} declares no `ratio`."));
+        match ratio_of(c) {
+            Some(r) if r.is_finite() && r > 1.0 => checked += 1,
+            Some(r) => problems.push(format!(
+                "candidate #{n} has ratio {r}; a candidate ratio has to be finite and above one."
+            )),
+            None => problems.push(format!("candidate #{n} declares no readable `ratio`.")),
         }
     }
     if ids.is_empty() {
         problems.push(String::from(
             "no pipe id could be read from the candidate list.",
+        ));
+    }
+    let mut sorted_ids = ids.clone();
+    sorted_ids.sort_unstable();
+    if sorted_ids.windows(2).any(|w| w[0] == w[1]) {
+        problems.push(String::from(
+            "two candidates share one `pipe_id`; the settlement records the id, so a shared id \
+             cannot say which pipeline won.",
         ));
     }
     if checked == 0 {
@@ -240,4 +270,20 @@ pub fn self_test() -> Result<String, String> {
         "ratio consensus canary OK (deterministic lists PASS; an optical candidate and a \
          zero pipe id each FAIL).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ratio_and_empty_arms_are_read() {
+        assert_eq!(ratio_of("RatioCandidate { ratio: 17.19, x }"), Some(17.19));
+        assert_eq!(ratio_of("RatioCandidate { ratio: 0.0, x }"), Some(0.0));
+        assert_eq!(ratio_of("RatioCandidate { ratio: f64::NAN, x }"), None);
+        assert_eq!(
+            non_empty_arms("A => vec![], B => vec![ R {} ], C => vec![\n],"),
+            1
+        );
+    }
 }
