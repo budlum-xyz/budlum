@@ -559,14 +559,16 @@ mod tests {
 
     #[test]
     fn a_bridge_address_with_the_wrong_shape_cannot_be_registered() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 19], TEST_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 19], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("exactly 20 bytes"), "got: {err}");
     }
 
     #[test]
     fn a_zero_deposit_topic_cannot_be_registered() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("zero deposit topic"), "got: {err}");
     }
@@ -577,14 +579,16 @@ mod tests {
         // is a legitimate thing for a test to do and not a legitimate thing
         // to relay with: every receipt leaf binds to `bridge_address`, so a
         // zero address binds to nothing in particular.
-        let adapter = EvmChainAdapter::test_default();
+        let adapter = EvmChainAdapter::test_default().with_trusted_checkpoint(1, [1; 32]);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("zero bridge address"), "got: {err}");
 
         let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
         assert!(
             registry
-                .register(Box::new(EvmChainAdapter::test_default()))
+                .register(Box::new(
+                    EvmChainAdapter::test_default().with_trusted_checkpoint(1, [1; 32])
+                ))
                 .is_err(),
             "a zero-address adapter must not reach the registry: the node would \
              advertise Ethereum support while pointing at no contract"
@@ -595,7 +599,8 @@ mod tests {
     fn zero_confirmations_cannot_be_registered() {
         // A deposit from a block that can still be reorged away would be
         // minted against a transaction that did not happen.
-        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
+        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
 
         adapter.required_confirmations = 0;
@@ -644,15 +649,16 @@ mod tests {
     #[test]
     fn a_configured_adapter_registers() {
         // The refusal has to stay narrow, or it is just a ban on Ethereum.
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
 
         let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
         registry
-            .register(Box::new(EvmChainAdapter::new(
-                vec![7u8; 20],
-                TEST_DEPOSIT_TOPIC0,
-            )))
+            .register(Box::new(
+                EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+                    .with_trusted_checkpoint(1, [1; 32]),
+            ))
             .expect("a configured adapter must register");
     }
 
@@ -858,10 +864,31 @@ mod tests {
         }
     }
 
-    fn floor_three() -> EvmChainAdapter {
+    /// `adapter` anchored at the target header of `source`'s fixture chain -
+    /// the interim finality anchor (BLG-0111) the chain must touch for the
+    /// later, more specific refusals to be reachable.
+    fn anchored_to(adapter: EvmChainAdapter, source: &EvmChainAdapter) -> EvmChainAdapter {
+        let f = fixtures::build_fixture(
+            &source.bridge_address,
+            source.deposit_topic0,
+            b"deposit-payload",
+            true,
+            3,
+        );
+        let target = crate::cross_domain::evm::header::decode_header(&f.target_header)
+            .expect("the fixture target header decodes");
+        adapter.with_trusted_checkpoint(target.number, target.hash)
+    }
+
+    fn unanchored_floor_three() -> EvmChainAdapter {
         let mut adapter = EvmChainAdapter::new(vec![0xcc; 20], [0xab; 32]);
         adapter.required_confirmations = 3;
         adapter
+    }
+
+    fn floor_three() -> EvmChainAdapter {
+        let base = unanchored_floor_three();
+        anchored_to(unanchored_floor_three(), &base)
     }
 
     /// BLG-0136 (P06-F07, decision B interim): even a fully proven package
@@ -947,9 +974,11 @@ mod tests {
     /// A bridge address other than this adapter's finds no deposit log.
     #[test]
     fn an_observation_from_another_bridge_is_refused() {
-        let adapter = floor_three();
         let mut other = EvmChainAdapter::new(vec![0xdd; 20], [0xab; 32]);
         other.required_confirmations = 3;
+        // Anchored at the other chain's header: the refusal under test is the
+        // emitter, not the checkpoint.
+        let adapter = anchored_to(unanchored_floor_three(), &other);
         let observation = observation_for(&other, 3);
         let err = adapter
             .verify_observation(&observation)

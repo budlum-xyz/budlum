@@ -1242,7 +1242,8 @@ mod tests {
 
         #[test]
         fn a_valid_three_of_six_quorum_signs_and_counts_proven_devices() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 500);
             let sigs = signatures_for(&req, cold.key_epoch, 3);
             let out = cold
@@ -1266,7 +1267,8 @@ mod tests {
             // `sign_with_quorum` must refuse the same request when the
             // signatures themselves are absent, even though the claimed count
             // would have passed the old count check.
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 500);
             let err = cold.sign_with_quorum(&req, 1, &[]).unwrap_err();
             match err {
@@ -1286,7 +1288,8 @@ mod tests {
 
         #[test]
         fn a_forged_signature_is_refused_and_no_refusal_history_is_spent() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 500);
             let mut sigs = signatures_for(&req, 1, 3);
             sigs[0].signature[10] ^= 0x01;
@@ -1307,7 +1310,8 @@ mod tests {
             // quorum over a value the policy forbids is refused by the policy
             // layer, and that refusal belongs in the history - the committee
             // genuinely attempted it.
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 2_000); // above the 1000 ceiling
             let sigs = signatures_for(&req, 1, 3);
             let err = cold.sign_with_quorum(&req, 1, &sigs).unwrap_err();
@@ -1320,7 +1324,8 @@ mod tests {
 
         #[test]
         fn rotation_invalidates_earlier_quorum_signatures() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             cold.rotate_key(100, "epoch one compromised")
                 .expect("rotation succeeds");
             let req = request(100, 1, 500);
@@ -1340,7 +1345,8 @@ mod tests {
 
         #[test]
         fn a_rotated_community_can_still_sign_at_the_new_epoch() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             cold.rotate_key(100, "epoch one compromised")
                 .expect("rotation succeeds");
             let req = request(100, 1, 500);
