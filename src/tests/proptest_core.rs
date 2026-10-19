@@ -36,4 +36,14 @@ proptest! {
         let _ = bincode::deserialize::<Transaction>(&bytes);
         // If it doesn't panic, the test passes.
     }
+
+    /// The wire decoder: random bytes through the protobuf message and the
+    /// conversion into a Transaction must not panic.
+    #[test]
+    fn wire_transaction_decoding_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..1024)) {
+        use prost::Message;
+        if let Ok(proto) = crate::network::proto_conversions::pb::ProtoTransaction::decode(bytes.as_slice()) {
+            let _ = Transaction::try_from(proto);
+        }
+    }
 }
