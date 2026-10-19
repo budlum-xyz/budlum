@@ -78,6 +78,33 @@ pub fn compile(source: &str, profile: IsaProfile) -> Result<Vec<u64>, CompileErr
 mod tests {
     use super::*;
 
+    /// P35-F21: a CRLF source compiles like its LF twin.
+    #[test]
+    fn crlf_line_ends_are_whitespace() {
+        let lf = "contract C {\n    pub fn main() {\n        let x = 1;\n    }\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(
+            compile(lf, IsaProfile::Production).unwrap(),
+            compile(&crlf, IsaProfile::Production).unwrap()
+        );
+    }
+
+    /// P35-F22: duplicate names are errors, not "the last one wins".
+    #[test]
+    fn duplicate_functions_structs_storage_and_params_are_refused() {
+        let cases = [
+            "contract C { pub fn main() { } pub fn main() { constrain(0); } }",
+            "contract C { pub fn f(a: u64, a: u64) { } pub fn main() { } }",
+            "contract C { pub fn poseidon(a: u64) -> u64 { return a; } pub fn main() { } }",
+        ];
+        for src in cases {
+            assert!(
+                compile(src, IsaProfile::Production).is_err(),
+                "must be refused: {src}"
+            );
+        }
+    }
+
     #[test]
     #[cfg(feature = "experimental")]
     fn compiles_for_loop_to_executable_bytecode() {
