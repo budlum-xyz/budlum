@@ -246,15 +246,41 @@ impl Storage {
     /// The temporary file is written beside the destination and renamed only
     /// After all bytes are durable, so a crash never presents a partial file as
     /// A usable backup.
+    /// Reads every row twice and accepts the result only when both passes
+    /// agree and no durable commit is in flight. sled offers no point in time
+    /// iterator, so a commit landing mid-scan would otherwise be copied
+    /// half way (P26-F13).
+    fn read_consistent_entries(&self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let read = || -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            let mut rows = Vec::new();
+            for item in self.db.iter() {
+                let (key, value) = item?;
+                rows.push((key.to_vec(), value.to_vec()));
+            }
+            Ok(rows)
+        };
+        let first = read()?;
+        if first.iter().any(|(key, _)| key == b"IN_PROGRESS_HEIGHT") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a durable commit is in progress; snapshot refused",
+            ));
+        }
+        let second = read()?;
+        if first != second {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the database changed during the snapshot scan; retry",
+            ));
+        }
+        Ok(first)
+    }
+
     pub fn create_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
         use std::io::Write;
 
         self.db.flush()?;
-        let mut snapshot = Vec::new();
-        for item in self.db.iter() {
-            let (key, value) = item?;
-            snapshot.push((key.to_vec(), value.to_vec()));
-        }
+        let snapshot = self.read_consistent_entries()?;
         let entries_payload = encode(&snapshot)?;
         let backup = DatabaseBackupV1 {
             format_version: 1,
@@ -2101,6 +2127,19 @@ mod tests {
             .unwrap();
         let err = storage.get_content(&cid).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn snapshot_is_refused_while_a_commit_is_in_flight() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let out = dir.path().join("backup.bin");
+        storage.create_snapshot(&out).expect("quiet db snapshots");
+        storage.db().insert(b"IN_PROGRESS_HEIGHT", b"5").unwrap();
+        let err = storage
+            .create_snapshot(dir.path().join("b2.bin"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[test]
