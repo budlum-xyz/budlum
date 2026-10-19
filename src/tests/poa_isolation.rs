@@ -308,14 +308,19 @@ mod poa_compliance_gate {
         Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None)
     }
 
+    /// A PoA domain whose registered operator is `addr(id)` - the operator
+    /// holds compliance authority while the domain has no admins yet
+    /// (BLG-0091).
     fn poa_domain(id: u32) -> ConsensusDomain {
-        default_domain(
+        let mut d = default_domain(
             id,
             ConsensusKind::PoA,
             u64::from(id) + 900,
             "poa-authority-quorum",
             0,
-        )
+        );
+        d.operator = Some(addr(u8::try_from(id).expect("test domain ids are small")));
+        d
     }
 
     /// Freezing in a permissionless domain is REFUSED.
