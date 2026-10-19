@@ -637,6 +637,37 @@ fn record_relay_outcome(
     Ok(())
 }
 
+/// The quarantine ledger lives next to the relay report it belongs to.
+fn quarantine_path_for(output: &str) -> String {
+    format!("{output}.quarantine")
+}
+
+/// Read the persisted ledger; a missing file is an empty ledger, an
+/// unreadable or malformed one is an error so a ban is never dropped.
+fn load_quarantine(path: &str) -> Result<bud_proof::quarantine::QuarantineLedger, String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(bud_proof::quarantine::QuarantineLedger::new());
+    }
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read quarantine ledger: {e}"))?;
+    bud_proof::quarantine::QuarantineLedger::from_text(&text)
+}
+
+/// Write the ledger through a temp file and a rename. An empty ledger writes
+/// nothing, so clean runs leave no file behind.
+fn save_quarantine(
+    path: &str,
+    ledger: &bud_proof::quarantine::QuarantineLedger,
+) -> Result<(), String> {
+    if ledger.is_empty() {
+        return Ok(());
+    }
+    let temp = format!("{path}.tmp");
+    fs::write(&temp, ledger.to_text())
+        .map_err(|e| format!("Failed to write quarantine ledger: {e}"))?;
+    fs::rename(&temp, path).map_err(|e| format!("Failed to replace quarantine ledger: {e}"))
+}
+
 /// The system clock, or the caller-pinned timestamp. Naming the clock error
 /// type keeps the stamp-failure path explicit for the relay.
 fn clock_stamp(preferred: Option<u64>) -> Result<u64, bud_proof::relayer::ClockError> {
@@ -662,6 +693,13 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
     };
     let (envelope, expected_inputs, program) =
         load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
+    // The ban ledger survives between runs: a program banned earlier is
+    // refused before any verification work.
+    let quarantine_path = quarantine_path_for(req.output);
+    let quarantine = load_quarantine(&quarantine_path)?;
+    if quarantine.is_banned(&expected_inputs.program_hash) {
+        return Err("program is quarantined by an earlier relay run; refusing it".into());
+    }
     let at = clock_stamp(req.verified_at)
         .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?;
 
@@ -693,9 +731,10 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
     // and the derived ban are observable on every relay run.
     let mut ledger = NodeLedger {
         alarms: bud_proof::alarm_log::AlarmLog::new(),
-        quarantine: bud_proof::quarantine::QuarantineLedger::new(),
+        quarantine,
     };
     record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash)?;
+    save_quarantine(&quarantine_path, &ledger.quarantine)?;
     if !ledger.alarms.is_empty() {
         let entries: Vec<&bud_proof::alarm_log::AlarmEntry> = ledger.alarms.iter().collect();
         info!(
@@ -1141,6 +1180,23 @@ mod tests {
         };
         assert!(record_relay_outcome(&mut ledger, &report, [7u8; 32]).is_ok());
         assert!(!ledger.alarms.is_empty());
+    }
+
+    #[test]
+    fn quarantine_ledger_survives_a_save_and_load() {
+        let path = std::env::temp_dir().join(format!("budcli-quarantine-{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+        assert!(load_quarantine(&path).unwrap().is_empty());
+        let mut ledger = bud_proof::quarantine::QuarantineLedger::new();
+        ledger.ban(
+            [3u8; 32],
+            bud_proof::quarantine::QuarantineReason::InvalidProof,
+        );
+        save_quarantine(&path, &ledger).unwrap();
+        let loaded = load_quarantine(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(loaded.is_banned(&[3u8; 32]));
     }
 
     #[test]
