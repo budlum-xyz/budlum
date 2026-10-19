@@ -167,7 +167,12 @@ fn the_pool_admission_path_still_validates_before_inserting() {
     let at = src
         .find("pub fn add_transaction(&mut self, transaction: Transaction)")
         .expect("Blockchain::add_transaction was renamed; re-derive this lock");
-    let body = &src[at..at + 400];
+    // The body ends at the first closing brace at method indentation.
+    let end = src[at..]
+        .find("\n    }\n")
+        .map(|offset| at + offset)
+        .expect("the end of Blockchain::add_transaction was not found");
+    let body = &src[at..end];
 
     let validate = body.find("validate_pool_transaction").expect(
         "Blockchain::add_transaction no longer validates before insertion - \
