@@ -4361,7 +4361,7 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .social_delete(content_id, &auth, at_epoch)
+                        .social_delete(self.blockchain.chain_id, content_id, &auth, at_epoch)
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
