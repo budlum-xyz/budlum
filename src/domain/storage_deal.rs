@@ -2210,6 +2210,30 @@ impl StorageRegistry {
     /// Canonical epochs, including challenges opened through distinct deals.
     pub(crate) const MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS: u64 = 4;
 
+    /// Longest answer window a caller may ask for, in epochs.
+    pub const MAX_CHALLENGE_WINDOW_EPOCHS: u64 = 1024;
+
+    /// A challenge opened over RPC must start at the current epoch or
+    /// earlier (a far-future `challenge_epoch` would push the per operator
+    /// rate limit minimum out for good) and must close within
+    /// `MAX_CHALLENGE_WINDOW_EPOCHS` (a huge `deadline_epoch` would never
+    /// finalize as missed).
+    pub fn validate_challenge_window(
+        challenge_epoch: u64,
+        deadline_epoch: u64,
+        current_epoch: u64,
+    ) -> Result<(), StorageError> {
+        if challenge_epoch > current_epoch
+            || deadline_epoch > challenge_epoch.saturating_add(Self::MAX_CHALLENGE_WINDOW_EPOCHS)
+        {
+            return Err(StorageError::InvalidEpochRange {
+                start: challenge_epoch,
+                end: deadline_epoch,
+            });
+        }
+        Ok(())
+    }
+
     pub fn open_challenge_with_entropy(
         &mut self,
         request: &RetrievalChallengeRequest,
@@ -5649,6 +5673,26 @@ mod tests {
         assert_eq!(deal3.merkle_depth, 64);
         assert_eq!(reg.deals_for_shard(&m.manifest_id, &shard_id).len(), 3);
         assert_eq!(reg.deals_for_manifest(&m.manifest_id).len(), 3);
+    }
+
+    #[test]
+    fn challenge_window_refuses_future_start_and_unbounded_deadline() {
+        assert!(StorageRegistry::validate_challenge_window(10, 20, 10).is_ok());
+        assert!(StorageRegistry::validate_challenge_window(5, 20, 10).is_ok());
+        assert!(matches!(
+            StorageRegistry::validate_challenge_window(u64::MAX - 5, u64::MAX, 10),
+            Err(StorageError::InvalidEpochRange { .. })
+        ));
+        assert!(matches!(
+            StorageRegistry::validate_challenge_window(10, u64::MAX, 10),
+            Err(StorageError::InvalidEpochRange { .. })
+        ));
+        assert!(StorageRegistry::validate_challenge_window(
+            10,
+            10 + StorageRegistry::MAX_CHALLENGE_WINDOW_EPOCHS,
+            10
+        )
+        .is_ok());
     }
 
     #[test]
