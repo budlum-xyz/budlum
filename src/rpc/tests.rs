@@ -71,9 +71,7 @@ mod rpc_tests {
         // The receipt is signed by the subject's account key (BLG-0097), and
         // the V4 address IS that key, so the subject is derived from it.
         let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
-        let subject = Address::from(
-            <[u8; 32]>::try_from(subject_keys.public_key_bytes()).expect("32-byte ed25519 key"),
-        );
+        let subject = Address::from(subject_keys.public_key_bytes());
         let issuer = Address::from([2u8; 32]);
         let requester = Address::from([3u8; 32]);
         let mut registry = IdentityRegistry::new();
@@ -772,9 +770,7 @@ mod rpc_tests {
         // Ed25519 public key, so the relayer is derived from the key that
         // signs.
         let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let relayer = Address::from(
-            <[u8; 32]>::try_from(relayer_keys.public_key_bytes()).expect("32-byte ed25519 key"),
-        );
+        let relayer = Address::from(relayer_keys.public_key_bytes());
         chain
             .credit_development_account(&relayer, 5_000)
             .await
