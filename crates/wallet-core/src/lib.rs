@@ -53,12 +53,12 @@ mod privacy_transfer;
 mod tee;
 
 pub use privacy_crypto::{
-    address_to_recipient_tag, field_from_hash, hash_from_field, is_packed, poseidon4_hash,
-    poseidon4_hash3, privacy_commit, privacy_nullifier, DOMAIN_NULLIFIER,
+    DOMAIN_NULLIFIER, address_to_recipient_tag, field_from_hash, hash_from_field, is_packed,
+    poseidon4_hash, poseidon4_hash3, privacy_commit, privacy_nullifier,
 };
 pub use privacy_transfer::{
-    derive_blinding, derive_spend_secret, PrivateNoteInput, PrivateNoteOutput,
-    PrivateTransferIntent, PrivateTransferRequest,
+    PrivateNoteInput, PrivateNoteOutput, PrivateTransferIntent, PrivateTransferRequest,
+    derive_blinding, derive_spend_secret,
 };
 pub use tee::{
     TeeAttestation, TeeBackendKind, TeeQuoteVerifier, TeeQuoter, TeeRuntime, TeeRuntimeStatus,
@@ -304,10 +304,7 @@ impl std::error::Error for HedgedRndExhausted {}
 #[cfg(feature = "production")]
 impl HedgedRnd {
     fn take(&mut self, dst: &mut [u8]) -> Result<(), HedgedRndExhausted> {
-        let end = self
-            .pos
-            .checked_add(dst.len())
-            .ok_or(HedgedRndExhausted)?;
+        let end = self.pos.checked_add(dst.len()).ok_or(HedgedRndExhausted)?;
         let src = self.bytes.get(self.pos..end).ok_or(HedgedRndExhausted)?;
         dst.copy_from_slice(src);
         self.pos = end;
@@ -1456,8 +1453,12 @@ impl Wallet {
         // BLG-0275 (P17-F09): the signature covers the binding message, not
         // the bare digest; the binding data travels on the intent so the
         // verifier reconstructs it from public fields.
-        let auth_msg =
-            privacy_transfer::authorization_message(chain_id, &wallet_address, sender_nonce, &digest);
+        let auth_msg = privacy_transfer::authorization_message(
+            chain_id,
+            &wallet_address,
+            sender_nonce,
+            &digest,
+        );
         let authorization_sig = self.sign(&auth_msg);
 
         Ok(PrivateTransferIntent {
@@ -1584,10 +1585,18 @@ mod tests {
         let k0 = w.rotate_view_key(&seed, 0);
         let k1 = w.rotate_view_key(&seed, 1);
         assert_ne!(k0, k1, "distinct counters must derive distinct keys");
-        assert_ne!(k0, derive_view_key(&seed), "rotation #0 must differ from the unrotated key");
+        assert_ne!(
+            k0,
+            derive_view_key(&seed),
+            "rotation #0 must differ from the unrotated key"
+        );
         // Re-deriving counter 0 after the wallet moved on to k1 returns the
         // SAME k0: no hidden dependence on current state.
-        assert_eq!(w.rotate_view_key(&seed, 0), k0, "rotation must be reproducible");
+        assert_eq!(
+            w.rotate_view_key(&seed, 0),
+            k0,
+            "rotation must be reproducible"
+        );
         let mut other_wallet = Wallet::from_entropy(&[0x67u8; 16]).unwrap();
         assert_eq!(
             other_wallet.rotate_view_key(&seed, 0),
@@ -2098,9 +2107,15 @@ mod tests {
         assert!(!rotated.guardians.contains(&g1.public_key()));
         assert!(rotated.guardians.contains(&replacement.public_key()));
 
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &rotated, 1_000, 45_262, 0)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &rotated,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let digest = proposal.digest();
         let compromised_quorum = [
             GuardianApproval {
@@ -2143,9 +2158,11 @@ mod tests {
         assert_eq!(reduced.threshold, 2);
         assert!(reduced.remove_guardian(g2.public_key()).is_err());
         assert!(reduced.remove_guardian(unknown.public_key()).is_err());
-        assert!(reduced
-            .rotate_guardian(g1.public_key(), g2.public_key())
-            .is_err());
+        assert!(
+            reduced
+                .rotate_guardian(g1.public_key(), g2.public_key())
+                .is_err()
+        );
     }
 
     #[test]
@@ -2154,9 +2171,15 @@ mod tests {
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000, 45_262, 0)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
 
         assert_eq!(proposal.current_address, owner.address());
         assert_eq!(proposal.new_address, new_owner.address());
@@ -2173,14 +2196,23 @@ mod tests {
         let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000, 45_262, 0)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let changed_target = RecoveryProposal::new(
             owner.public_key(),
             other_new_owner.public_key(),
             &policy,
-            1_000, 45_262, 0)
+            1_000,
+            45_262,
+            0,
+        )
         .unwrap();
         let mut changed_timelock = proposal.clone();
         changed_timelock.executable_after += 1;
@@ -2202,9 +2234,15 @@ mod tests {
             100,
         )
         .unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000, 45_262, 0)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let digest = proposal.digest();
         let one = [GuardianApproval {
             public_key: g1.public_key(),
@@ -2255,14 +2293,27 @@ mod tests {
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         assert!(
-            RecoveryProposal::new(owner.public_key(), owner.public_key(), &policy, 1_000, 45_262, 0).is_err()
+            RecoveryProposal::new(
+                owner.public_key(),
+                owner.public_key(),
+                &policy,
+                1_000,
+                45_262,
+                0
+            )
+            .is_err()
         );
-        assert!(RecoveryProposal::new(
-            owner.public_key(),
-            new_owner.public_key(),
-            &policy,
-            u64::MAX, 45_262, 0)
-        .is_err());
+        assert!(
+            RecoveryProposal::new(
+                owner.public_key(),
+                new_owner.public_key(),
+                &policy,
+                u64::MAX,
+                45_262,
+                0
+            )
+            .is_err()
+        );
     }
 
     // ===== - WalletPrivacyConfig (section 10 #5 + view key) =====
