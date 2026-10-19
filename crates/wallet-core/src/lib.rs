@@ -1407,6 +1407,27 @@ impl Wallet {
         })
     }
 
+    /// The smallest blinding counter this wallet will still hand out.
+    ///
+    /// P17-F06: the counter lives in memory only, and `from_mnemonic` and
+    /// `from_entropy` start it at 0. A caller that restores a wallet must
+    /// persist this value and give it back through
+    /// [`Self::resume_blinding_counter`], or the first restored note reuses a
+    /// blinding the old wallet already spent.
+    #[must_use]
+    pub fn next_blinding_counter(&self) -> u64 {
+        self.next_blinding_counter
+    }
+
+    /// Restore the blinding counter saved from an earlier session. It only
+    /// moves forward: a value below the current one is ignored, so a stale
+    /// save cannot reopen counters that were already used.
+    pub fn resume_blinding_counter(&mut self, next: u64) {
+        if next > self.next_blinding_counter {
+            self.next_blinding_counter = next;
+        }
+    }
+
     /// Convenience: create a fresh output note commitment for receiving funds
     /// (wallet is recipient). Returns (blinding, commitment_fe, commitment_hash).
     pub fn prepare_receive_note(
@@ -1491,6 +1512,19 @@ mod tests {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
         assert_eq!(words.len(), 24, "must have 24 words");
+    }
+
+    /// P17-F06: a restored wallet resumes the saved counter and never goes back.
+    #[test]
+    fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        wallet.set_note_privacy_enabled(true);
+        wallet.resume_blinding_counter(5);
+        assert_eq!(wallet.next_blinding_counter(), 5);
+        assert!(wallet.prepare_receive_note(10, 4).is_err());
+        assert!(wallet.prepare_receive_note(10, 5).is_ok());
+        wallet.resume_blinding_counter(2);
+        assert_eq!(wallet.next_blinding_counter(), 6, "a stale save is ignored");
     }
 
     #[test]
