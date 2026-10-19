@@ -392,8 +392,10 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     // must sit under the same cap, so the square side is bounded by
     // sqrt(MAX_GENERATED_BYTES / 3) ~= 1182. Refuse anything larger rather
     // than let a hostile caller exhaust memory or CPU (CWE-400).
-    let max_side = ((u64::from(MAX_GENERATED_BYTES) / 3) as f64).sqrt() as u64;
-    if u64::from(size) > max_side {
+    // BLG-0419: compare squared dimensions directly. u16 dimensions fit
+    // comfortably in u64 even after multiplying by the three RGB channels.
+    let raster_bytes = u64::from(size) * u64::from(size) * 3;
+    if raster_bytes > u64::from(MAX_GENERATED_BYTES) {
         return Err(RenderError::MissingParam("png size"));
     }
     // Scale the pixel buffer to the requested size with a deterministic
@@ -647,6 +649,19 @@ pub fn render_and_verify(
 mod tests {
     use super::*;
     use crate::storage::generated::GeneratorId;
+
+    #[test]
+    fn png_size_limit_is_exact_integer_arithmetic() {
+        let spec = avatar_spec();
+        let pixels = vec![0; spec.output_len as usize];
+        assert!(super::render_png(&spec, &pixels, 1182).is_ok());
+        for size in [0, 1183, u16::MAX] {
+            assert_eq!(
+                super::render_png(&spec, &pixels, size),
+                Err(RenderError::MissingParam("png size"))
+            );
+        }
+    }
 
     #[test]
     fn svg_expansion_is_bounded_before_rendering() {
