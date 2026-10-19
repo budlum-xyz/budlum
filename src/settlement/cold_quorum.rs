@@ -584,9 +584,20 @@ mod tests {
     fn a_signature_from_a_device_not_in_the_identity_set_is_refused() {
         let payload = payload();
         let signers = dev_fixture_device_signers();
-        // Only devices 4..=6 are known; signatures come from 1..=3.
-        let identities: Vec<SignerIdentity> =
+        // Only devices 4..=6 are known as ids 4..=6; ids 7..=9 pad the set to
+        // the committee size with unrelated keys. Signatures come from 1..=3,
+        // ids the set does not hold.
+        let mut identities: Vec<SignerIdentity> =
             signers[3..].iter().map(|s| s.identity.clone()).collect();
+        for pad in 7u8..=9 {
+            identities.push(SignerIdentity {
+                device_id: u32::from(pad),
+                label: format!("pad-{pad}"),
+                verifying_key: SigningKey::from_bytes(&[pad; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            });
+        }
         let sigs = three_of_six(&payload, 1);
         let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
             .expect_err("unknown devices must fail");
