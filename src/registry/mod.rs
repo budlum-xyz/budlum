@@ -44,12 +44,12 @@ pub use identity::{
 // binary consumes them (idle-code policy: test-only, not shipped).
 #[cfg(test)]
 pub use identity::{credential_issue_digest, credential_revoke_digest};
+#[cfg(test)]
+pub use identity_fill::{build_presentation, fill_template};
 pub use identity_fill::{
     check_receipt, credential_proof, document_digest_of, template_slots, value_digest_of,
     FillError, PresentationReceipt, ReceiptEntry, SlotDisclosure,
 };
-#[cfg(test)]
-pub use identity_fill::{build_presentation, fill_template};
 pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::LivenessTracker;
 

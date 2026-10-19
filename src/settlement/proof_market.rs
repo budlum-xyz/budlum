@@ -1665,5 +1665,4 @@ mod tests {
         assert_eq!(expired, 1);
         assert_eq!(market.escrow_balance(&creator), 500);
     }
-
 }

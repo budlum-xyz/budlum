@@ -2338,11 +2338,8 @@ impl Executor {
                             ],
                             biases: vec![0i32; dims.iter().skip(1).map(|d| *d as usize).sum()],
                         };
-                        crate::ai::execution::validate_gas_budget(
-                            &sizing,
-                            proof.proof_bytes.len(),
-                        )
-                        .map_err(|e| BudlumError::validation("ai_exec_proof_size", e))?;
+                        crate::ai::execution::validate_gas_budget(&sizing, proof.proof_bytes.len())
+                            .map_err(|e| BudlumError::validation("ai_exec_proof_size", e))?;
                     }
                 }
                 if let Ok(envelope) =

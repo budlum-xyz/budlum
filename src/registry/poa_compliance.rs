@@ -395,7 +395,13 @@ mod tests {
     fn poa_compliance_requires_admin_for_freeze() {
         let mut registry = PoaComplianceRegistry::new();
         let err = registry
-            .freeze_suspicious(ComplianceDomainKind::PoA, Address::zero(), addr(3), hash(3), 12)
+            .freeze_suspicious(
+                ComplianceDomainKind::PoA,
+                Address::zero(),
+                addr(3),
+                hash(3),
+                12,
+            )
             .unwrap_err();
         assert_eq!(err, PoaComplianceError::AdminRequired);
         assert!(!registry.is_frozen(ComplianceDomainKind::PoA, &addr(3)));
@@ -520,7 +526,6 @@ mod tests {
         assert!(json.contains("AccountFrozen"));
         assert!(json.contains("evidence_hash"));
     }
-
 
     /// BLG-0091 (P04-F09): freeze and unfreeze are both under the root, and
     /// the unfreeze actually clears the gate.
