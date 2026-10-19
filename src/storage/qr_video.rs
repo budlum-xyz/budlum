@@ -188,6 +188,11 @@ impl QrVideo {
             off += len;
             png_frames.push(png);
         }
+        // One byte string per video: bytes after the last frame would change
+        // `blob_commitment` and leave the content alone.
+        if off != blob.len() {
+            return Err(QrVideoError::BadBlob);
+        }
         Ok(Self {
             fps,
             stream_commitment: stream,
@@ -518,6 +523,25 @@ mod tests {
         let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"kare".to_vec()], 10).unwrap();
         let mut blob = v.to_bytes();
         blob[4] = 2;
+        assert_eq!(
+            QrVideo::from_bytes(&blob).unwrap_err(),
+            QrVideoError::BadBlob
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_the_last_frame_are_refused() {
+        let content = b"qr-video-trailing".repeat(8);
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
+        let frames: Vec<_> = enc.frames.iter().take(3).cloned().collect();
+        let video =
+            QrVideo::from_optical_frames(&enc.recipe, &enc.stream_commitment, &frames, DEFAULT_FPS)
+                .unwrap();
+        let mut blob = video.to_bytes();
+        assert!(QrVideo::from_bytes(&blob).is_ok());
+        blob.push(0);
         assert_eq!(
             QrVideo::from_bytes(&blob).unwrap_err(),
             QrVideoError::BadBlob
