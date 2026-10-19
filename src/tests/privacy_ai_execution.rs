@@ -221,3 +221,118 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
     );
     let _ = verifier;
 }
+
+fn transfer_fixture(
+    kp: &KeyPair,
+    state: &mut AccountState,
+) -> (PrivateTransferSubmit, [u8; 32], [u8; 32]) {
+    let c_in = hash_from_field(21);
+    let proof = hash_from_field(0xA11CE);
+    let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
+    let c_out = hash_from_field(23);
+    state.note_registry.insert_note(c_in).unwrap();
+    let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![c_in],
+        nullifiers: vec![n1],
+        output_commitments: vec![c_out],
+        nullifier_proofs: vec![proof],
+        authorization_sig: kp.sign(&digest).to_vec(),
+        public_digest: digest,
+    };
+    (sub, c_in, c_out)
+}
+
+fn signed_tx(kp: &KeyPair, chain_id: u64, tx_type: TransactionType) -> Transaction {
+    let from = Address::from(kp.public_key_bytes());
+    let mut tx =
+        Transaction::new_with_chain_id(from, Address::zero(), 0, 100, 0, vec![], chain_id, tx_type);
+    tx.sign(kp);
+    tx
+}
+
+#[test]
+fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
+    use crate::core::chain_config::Network;
+    for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
+        let kp = KeyPair::generate().unwrap();
+        let from = Address::from(kp.public_key_bytes());
+        let mut state = funded_state(from, 1_000_000);
+        let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
+        let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
+        let err = Executor::apply_transaction(&mut state, &tx)
+            .expect_err("the privacy gate must refuse this chain id");
+        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(state.note_registry.contains_commitment(&c_in));
+        assert!(!state.note_registry.contains_commitment(&c_out));
+    }
+}
+
+#[test]
+fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
+    use crate::core::chain_config::Network;
+    for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
+        let kp = KeyPair::generate().unwrap();
+        let from = Address::from(kp.public_key_bytes());
+        let mut state = funded_state(from, 1_000_000);
+        let c = hash_from_field(42);
+        let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
+        let err = Executor::apply_transaction(&mut state, &tx)
+            .expect_err("the privacy gate must refuse this chain id");
+        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(!state.note_registry.contains_commitment(&c));
+    }
+}
+
+#[test]
+fn private_transfer_with_a_bad_authorization_signature_is_refused() {
+    let kp = KeyPair::generate().unwrap();
+    let other = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (mut sub, c_in, _) = transfer_fixture(&kp, &mut state);
+    sub.authorization_sig = other.sign(&sub.public_digest).to_vec();
+    let tx = signed_tx(
+        &kp,
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        TransactionType::PrivateTransferSubmit(sub),
+    );
+    let err = Executor::apply_transaction(&mut state, &tx).expect_err("a foreign signature");
+    assert!(err.contains("authorization_sig invalid"), "got: {err}");
+    assert!(state.note_registry.contains_commitment(&c_in));
+}
+
+#[test]
+fn private_transfer_with_a_mismatched_public_digest_is_refused() {
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (mut sub, c_in, _) = transfer_fixture(&kp, &mut state);
+    sub.public_digest[0] ^= 0xFF;
+    sub.authorization_sig = kp.sign(&sub.public_digest).to_vec();
+    let tx = signed_tx(
+        &kp,
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        TransactionType::PrivateTransferSubmit(sub),
+    );
+    let err = Executor::apply_transaction(&mut state, &tx).expect_err("a digest mismatch");
+    assert!(err.contains("public_digest does not match"), "got: {err}");
+    assert!(state.note_registry.contains_commitment(&c_in));
+}
+
+#[test]
+fn private_transfer_spending_an_unregistered_commitment_is_refused() {
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
+    state.note_registry = L1NoteRegistry::default();
+    let tx = signed_tx(
+        &kp,
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        TransactionType::PrivateTransferSubmit(sub),
+    );
+    assert!(Executor::apply_transaction(&mut state, &tx).is_err());
+    assert!(!state.note_registry.contains_commitment(&c_in));
+    assert!(!state.note_registry.contains_commitment(&c_out));
+}
