@@ -351,9 +351,7 @@ mod integration_tests {
 
         let validators = state.get_active_validators();
 
-        if validators.len() < 2 {
-            return;
-        }
+        assert_eq!(validators.len(), 2, "both validators are active");
 
         let expected = engine.expected_proposer(0, &validators).unwrap();
 
@@ -369,11 +367,13 @@ mod integration_tests {
 
         let expected_my_slot = engine.expected_proposer(my_slot, &validators).unwrap();
 
-        if expected_my_slot.address == pubkey1 {
-            let result = engine.prepare_block(&mut block, &state);
-            assert!(result.is_ok());
-            assert!(block.signature.is_some());
-        }
+        assert_eq!(
+            expected_my_slot.address, pubkey1,
+            "round robin hands the other slot to the second validator"
+        );
+        let result = engine.prepare_block(&mut block, &state);
+        assert!(result.is_ok());
+        assert!(block.signature.is_some());
     }
     #[test]
     fn test_finality_checkpoint_enforcement() {
