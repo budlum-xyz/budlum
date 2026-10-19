@@ -185,17 +185,22 @@ fn system_bridge_path_bypasses_relayer_gate() {
 
 // --- 2. Anti-spam fee -------------------------------------------------------
 
-fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingReport {
+fn double_sign_report(
+    keys: &crate::crypto::primitives::KeyPair,
+    reporter: Option<Address>,
+) -> SlashingReport {
+    let offender = Address::from(keys.public_key_bytes());
+    let (h1, h2) = ([0x55u8; 32], [0x66u8; 32]);
     SlashingReport::consensus_double_sign(
         offender,
         SlashingProof::DoubleSign {
             height: 7,
             kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
             epoch: None,
-            block_hash_1: "aa".into(),
-            block_hash_2: "bb".into(),
-            signature_1: vec![1],
-            signature_2: vec![2],
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            signature_1: keys.sign(&h1).to_vec(),
+            signature_2: keys.sign(&h2).to_vec(),
         },
         reporter,
     )
@@ -204,7 +209,8 @@ fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingR
 #[test]
 fn actionable_report_refunds_fee() {
     let mut bc = fresh_chain();
-    let offender = addr(0x11);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x12);
     bc.state.add_balance(&offender, 1_000_000);
     bc.state.bond_relayer(&offender, 10_000).unwrap(); // registered so slashable
@@ -215,7 +221,7 @@ fn actionable_report_refunds_fee() {
 
     let before = bc.state.get_balance(&reporter);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+        .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap();
     assert!(outcome.is_some(), "validator should have been slashed");
     // Fee refunded because the report was actionable.
@@ -368,15 +374,78 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
 }
 
 #[test]
+fn a_self_asserted_consensus_verified_report_with_forged_data_is_refused() {
+    let victim_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let attacker_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let victim = Address::from(victim_keys.public_key_bytes());
+    let attacker = addr(0x1C);
+
+    let mut bc = fresh_chain();
+    bc.state.add_validator(victim, 10_000);
+    bc.state.sync_validator_registration(&victim);
+    let fee = bc.state.registry.params().slashing_report_fee;
+    bc.state.add_balance(&attacker, fee);
+    let stake_before = bc
+        .state
+        .registry
+        .get(&victim, roles::VALIDATOR)
+        .unwrap()
+        .stake;
+
+    let (h1, h2) = ([0x33u8; 32], [0x44u8; 32]);
+    let proofs = [
+        // Made-up hashes and signatures.
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        },
+        // Well formed, but signed by another key.
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            signature_1: attacker_keys.sign(&h1).to_vec(),
+            signature_2: attacker_keys.sign(&h2).to_vec(),
+        },
+    ];
+    for proof in proofs {
+        let report = SlashingReport::consensus_double_sign(victim, proof, Some(attacker));
+        assert!(bc.submit_registry_slashing_report(report).is_err());
+    }
+    assert_eq!(
+        bc.state
+            .registry
+            .get(&victim, roles::VALIDATOR)
+            .unwrap()
+            .stake,
+        stake_before,
+        "an innocent validator keeps every unit of stake"
+    );
+    assert_eq!(
+        bc.state.get_balance(&attacker),
+        fee,
+        "a refused report costs nothing"
+    );
+}
+
+#[test]
 fn report_fee_insufficient_balance_rejected_without_state_change() {
     let mut bc = fresh_chain();
-    let offender = addr(0x15);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x16); // no balance
     bc.state.add_validator(offender, 10_000);
     bc.state.sync_validator_registration(&offender);
 
     let err = bc
-        .submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+        .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap_err();
     assert!(err.contains("insufficient balance"));
     // Offender not slashed.
@@ -387,11 +456,12 @@ fn report_fee_insufficient_balance_rejected_without_state_change() {
 fn consensus_internal_report_pays_no_fee() {
     // Reporter: None -> no fee charged (used by consensus-generated reports).
     let mut bc = fresh_chain();
-    let offender = addr(0x17);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     bc.state.add_validator(offender, 10_000);
     bc.state.sync_validator_registration(&offender);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(offender, None))
+        .submit_registry_slashing_report(double_sign_report(&keys, None))
         .unwrap();
     assert!(outcome.is_some());
 }
@@ -406,7 +476,10 @@ fn report_against_unregistered_still_refunds_fee() {
     bc.state.add_balance(&reporter, fee);
     let before = bc.state.get_balance(&reporter);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(addr(0x19), Some(reporter)))
+        .submit_registry_slashing_report(double_sign_report(
+            &crate::crypto::primitives::KeyPair::generate().unwrap(),
+            Some(reporter),
+        ))
         .unwrap();
     assert_eq!(outcome, None);
     assert_eq!(bc.state.get_balance(&reporter), before);
@@ -514,12 +587,13 @@ fn liveness_does_not_affect_double_sign_flow() {
     // Regression: the double-sign path still slashes at its own (50%) rate,
     // Unaffected by liveness wiring.
     let mut bc = fresh_chain();
-    let offender = addr(0x24);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let stake = 10_000u64;
     bc.state.add_validator(offender, stake);
     bc.state.sync_validator_registration(&offender);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(offender, None))
+        .submit_registry_slashing_report(double_sign_report(&keys, None))
         .unwrap()
         .unwrap();
     assert_eq!(outcome.penalty, stake / 2);
@@ -542,7 +616,8 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
         45262,
         None,
     );
-    let offender = addr(0x11);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x12);
     bc.state.add_balance(&offender, 1_000_000);
     bc.state.bond_relayer(&offender, 10_000).unwrap();
@@ -550,7 +625,7 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
     let fee = bc.state.registry.params().slashing_report_fee;
     bc.state.add_balance(&reporter, fee);
 
-    bc.submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+    bc.submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap()
         .expect("validator should have been slashed");
 
