@@ -296,7 +296,7 @@ pub(crate) fn test_is_live(src: &str, name: &str) -> bool {
             continue;
         }
         let head = &code[..at];
-        let attrs = &head[head.rfind(['}', ';']).map_or(0, |i| i + 1)..];
+        let attrs = &head[head.rfind(['}', ';', '{']).map_or(0, |i| i + 1)..];
         if !attrs.contains("#[test]") || attrs.contains("#[ignore") || attrs.contains("#[cfg(") {
             continue;
         }

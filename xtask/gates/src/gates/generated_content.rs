@@ -16,7 +16,10 @@ fn code_of(root: &Path) -> Result<String, String> {
             f.display()
         ));
     }
-    std::fs::read_to_string(&f).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    // Comments and string literals are blanked: `meter.charge` or `IdMismatch`
+    // in prose must not satisfy a check.
+    Ok(super::rust_literals::scrub(&text))
 }
 
 /// A float is `f32`/`f64` (types, `as` casts) or a `N.Nf` literal, with
@@ -51,8 +54,26 @@ fn has_id_check(text: &str) -> bool {
         return false;
     };
     let rest = &text[start..];
-    let end = rest.find("}\n").map_or(rest.len(), |e| e + 2);
-    let body = &rest[..end.min(rest.len())];
+    // The whole function body, brace-matched: the first `}\n` is usually an
+    // inner block.
+    let body = rest.find('{').map_or(rest, |open| {
+        let mut depth = 0i32;
+        let mut end = rest.len();
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[..end]
+    });
     body.contains("ContentId::of") || body.contains("IdMismatch")
 }
 
@@ -188,4 +209,18 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "generated-content canary OK (clean PASSes, float/metreless/no-edition FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_check_may_sit_after_an_inner_block() {
+        let src = "fn generate_and_verify() {\n    if x {\n        y();\n    }\n    if id != want { return Err(IdMismatch); }\n}\n";
+        assert!(has_id_check(src));
+        assert!(!has_id_check(
+            "fn generate_and_verify() {\n    y();\n}\nfn other() { IdMismatch }\n"
+        ));
+    }
 }
