@@ -144,7 +144,10 @@ fn off_scale_pairs(src: &str) -> Vec<String> {
             continue;
         }
         if let Some(val) = extract_rate(line, "cpu_picodollars_per_nano:") {
-            if disk_line == Some(i - 1) && disk_val > 0 && val > 0 {
+            if i.checked_sub(1).is_some_and(|prev| disk_line == Some(prev))
+                && disk_val > 0
+                && val > 0
+            {
                 let (hi, lo) = if disk_val > val {
                     (disk_val, val)
                 } else {
@@ -607,4 +610,15 @@ fn second_rate_pair_off(good: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_processor_rate_on_the_first_line_does_not_panic() {
+        let src = "cpu_picodollars_per_nano: 5,\ndisk_picodollars_per_byte_epoch: 7,\n";
+        assert!(off_scale_pairs(src).is_empty());
+    }
 }
