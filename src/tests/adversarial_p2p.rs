@@ -9,24 +9,31 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_sybil_role_rejection() {
-    // Scenario: A malicious node attempts to submit consensus votes
-    // Without having the STAKED role.
-    let consensus = Arc::new(PoWEngine::new(0));
+    // Scenario: a node that holds no validator role submits a block to a PoS
+    // chain that has an active validator set. The block is well formed, so the
+    // only reason left to refuse it is the missing producer.
+    use crate::consensus::pos::{PoSConfig, PoSEngine};
+
+    let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), None));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
+    let validator = Address::from([0x55; 32]);
+    bc.state.add_validator(validator, 10_000);
 
     let attacker = Address::from([0x66; 32]);
-    // Attacker is NOT registered as a validator
     assert!(!bc.state.validators.contains_key(&attacker));
 
-    // Malicious block from attacker
-    let block = crate::core::block::Block::new(1, bc.chain[0].hash.clone(), vec![]);
-    // Block.producer = Some(attacker); // producer is Option<Address>
+    let mut block = crate::core::block::Block::new(1, bc.chain[0].hash.clone(), vec![]);
+    block.slot = 1;
+    block.state_root = "11".repeat(32);
+    block.hash = block.calculate_hash();
 
-    // The chain must reject this block
-    let res = bc.validate_and_add_block(block);
-    // Blockchain::validate_and_add_block internally calls consensus.full_validate
-    // Which checks producer eligibility.
-    assert!(res.is_err());
+    let err = bc
+        .validate_and_add_block(block)
+        .expect_err("a block without a staked producer must be rejected");
+    assert!(
+        err.contains("Block has no producer"),
+        "unexpected rejection reason: {err}"
+    );
 }
 
 #[tokio::test]
