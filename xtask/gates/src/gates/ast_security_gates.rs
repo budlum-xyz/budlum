@@ -62,6 +62,15 @@ fn is_err_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Err"))
 }
 
+/// Is the expression a call of `Err(..)`? Parentheses are looked through.
+fn expr_is_err_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call(c) => is_err_call(c),
+        Expr::Paren(p) => expr_is_err_call(&p.expr),
+        _ => false,
+    }
+}
+
 /// Walk the inside of the `if tx.verify() { .. }` block; success counts only as a direct
 /// (nesting == 0) `Ok(())` / `return Ok(())`. An `Ok(())` inside a closure, nested
 /// fn item, nested if, match arm or loop is a decoy (
@@ -139,7 +148,7 @@ fn stmt_fails_closed(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(Expr::Return(ret), _) => match &ret.expr {
             None => true,
-            Some(e) => compact(e).contains("Err"),
+            Some(e) => expr_is_err_call(e),
         },
         Stmt::Expr(Expr::Call(call), None) => is_err_call(call),
         _ => false,
@@ -255,7 +264,7 @@ impl<'ast> Visit<'ast> for GuardErrCheck {
     fn visit_expr_return(&mut self, node: &'ast ExprReturn) {
         if self.nesting == 0 {
             if let Some(expr) = &node.expr {
-                if compact(expr).contains("Err") {
+                if expr_is_err_call(expr) {
                     self.found = true;
                 }
             }
@@ -380,21 +389,31 @@ impl<'ast> Visit<'ast> for TeeVisitor {
             if let Some(kind) = which {
                 let mut g = GuardErrCheck::default();
                 g.visit_block(&node.then_branch);
-                let ok = g.found;
+                // The condition must refuse: `!verify_..(..)` or `backend != ..`.
+                // An inverted test (`if verify_..(..) { return Err }`) is no guard.
+                let refuses = if kind == 1 {
+                    cond.contains("!=")
+                } else {
+                    cond.starts_with('!')
+                };
+                let ok = g.found && refuses;
                 let after_success = self.saw_success;
+                // A later `if` that mentions the same word never clears a guard
+                // that was already found.
                 match kind {
-                    0 => {
-                        self.measurement_guard = ok;
+                    0 if ok && !self.measurement_guard => {
+                        self.measurement_guard = true;
                         self.measurement_after_success = after_success;
                     }
-                    1 => {
-                        self.backend_guard = ok;
+                    1 if ok && !self.backend_guard => {
+                        self.backend_guard = true;
                         self.backend_after_success = after_success;
                     }
-                    _ => {
-                        self.report_guard = ok;
+                    2 if ok && !self.report_guard => {
+                        self.report_guard = true;
                         self.report_after_success = after_success;
                     }
+                    _ => {}
                 }
                 return;
             }
@@ -957,4 +976,50 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "AST security gates self-test OK: good tree passes, decoy variants rejected.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEE_ONLY: Checks = Checks {
+        zero_address: false,
+        tee: true,
+        gov_slash: false,
+    };
+
+    fn tee_src(m: &str, b: &str, r: &str, extra: &str) -> String {
+        format!(
+            "fn sign_with_privacy() {{ let q = w.quote(); verifier.verify_quote(q); {m} {b} {r} {extra} Ok(()) }}"
+        )
+    }
+
+    const M: &str = "if !a.verify_measurement(t) { return Err(E); }";
+    const B: &str = "if a.backend != k { return Err(E); }";
+    const R: &str = "if !a.verify_report_data(d) { return Err(E); }";
+
+    #[test]
+    fn real_guards_pass() {
+        assert!(judge_file(&tee_src(M, B, R, ""), TEE_ONLY).is_empty());
+    }
+
+    #[test]
+    fn inverted_guards_fail() {
+        let inv_m = "if a.verify_measurement(t) { return Err(E); }";
+        assert!(!judge_file(&tee_src(inv_m, B, R, ""), TEE_ONLY).is_empty());
+        let inv_b = "if a.backend == k { return Err(E); }";
+        assert!(!judge_file(&tee_src(M, inv_b, R, ""), TEE_ONLY).is_empty());
+    }
+
+    #[test]
+    fn later_decoy_if_does_not_overwrite_a_guard() {
+        let decoy = "if a.backend_name.is_empty() { log(); }";
+        assert!(judge_file(&tee_src(M, B, R, decoy), TEE_ONLY).is_empty());
+    }
+
+    #[test]
+    fn return_ok_of_error_type_is_not_a_refusal() {
+        let m = "if !a.verify_measurement(t) { return Ok(Error::X); }";
+        assert!(!judge_file(&tee_src(m, B, R, ""), TEE_ONLY).is_empty());
+    }
 }
