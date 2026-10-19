@@ -3050,12 +3050,14 @@ impl Blockchain {
                 // Exists yet, so successful verification cannot mint a reward.
                 let reward = 0;
                 let rewarded = false;
-                self.proof_claims.record(AcceptedProofClaim {
-                    key,
-                    final_state_root,
-                    prover: submitter,
-                    rewarded,
-                });
+                self.proof_claims
+                    .record(AcceptedProofClaim {
+                        key,
+                        final_state_root,
+                        prover: submitter,
+                        rewarded,
+                    })
+                    .map_err(|e| format!("proof claim refused: {e}"))?;
                 // The recording half of 1e: bind the domain's progress to this
                 // proof's final root. The next proof cannot claim behind this
                 // progress (the gate above), and when other surfaces (bridge
