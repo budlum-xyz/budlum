@@ -185,7 +185,7 @@ mod tests {
         ledger.quarantine_entity(old, QuarantineReason::Equivocation("x".into()), 10);
         ledger.record_alarm("OLD", "an old alarm", 10, 2);
         ledger.record_alarm("NEW", "a fresh alarm", 90_000, 2);
-        let dropped = ledger.prune_expired(100_000, 100_000);
+        let dropped = ledger.prune_expired(100_000, 50_000);
         assert_eq!(dropped, 1, "only the old alarm is over the horizon");
         assert!(ledger.alarms.values().all(|a| a.code == "NEW"));
         assert!(

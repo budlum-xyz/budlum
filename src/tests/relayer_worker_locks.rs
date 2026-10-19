@@ -39,6 +39,13 @@ struct HonestAdapter {
 
 #[async_trait::async_trait]
 impl ChainAdapter for HonestAdapter {
+    fn verify_observation(
+        &self,
+        result: &crate::core::transaction::RelayerExternalResult,
+    ) -> Result<(), AdapterError> {
+        crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+    }
+
     fn chain_type(&self) -> ExternalChain {
         self.chain
     }
@@ -113,6 +120,13 @@ struct ContradictoryAdapter;
 
 #[async_trait::async_trait]
 impl ChainAdapter for ContradictoryAdapter {
+    fn verify_observation(
+        &self,
+        result: &crate::core::transaction::RelayerExternalResult,
+    ) -> Result<(), AdapterError> {
+        crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+    }
+
     fn chain_type(&self) -> ExternalChain {
         ExternalChain::Ethereum
     }
@@ -178,6 +192,13 @@ struct ZeroRootAdapter;
 
 #[async_trait::async_trait]
 impl ChainAdapter for ZeroRootAdapter {
+    fn verify_observation(
+        &self,
+        result: &crate::core::transaction::RelayerExternalResult,
+    ) -> Result<(), AdapterError> {
+        crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+    }
+
     fn chain_type(&self) -> ExternalChain {
         ExternalChain::Ethereum
     }
@@ -239,6 +260,13 @@ struct ChainSwappingAdapter;
 
 #[async_trait::async_trait]
 impl ChainAdapter for ChainSwappingAdapter {
+    fn verify_observation(
+        &self,
+        result: &crate::core::transaction::RelayerExternalResult,
+    ) -> Result<(), AdapterError> {
+        crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+    }
+
     fn chain_type(&self) -> ExternalChain {
         ExternalChain::Ethereum
     }
@@ -378,6 +406,13 @@ struct SubstitutingAdapter;
 
 #[async_trait::async_trait]
 impl ChainAdapter for SubstitutingAdapter {
+    fn verify_observation(
+        &self,
+        result: &crate::core::transaction::RelayerExternalResult,
+    ) -> Result<(), AdapterError> {
+        crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+    }
+
     fn chain_type(&self) -> ExternalChain {
         ExternalChain::Ethereum
     }
@@ -469,6 +504,13 @@ async fn a_malformed_receipt_proof_from_an_adapter_is_refused() {
 
     #[async_trait::async_trait]
     impl ChainAdapter for GarbageProofAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }
@@ -818,10 +860,10 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
 
     let mut registry = AdapterRegistry::new();
     registry
-        .register(Box::new(EvmChainAdapter::new(
-            vec![0xaa; 20],
-            deposit_topic0_bytes(),
-        )))
+        .register(Box::new(
+            EvmChainAdapter::new(vec![0xaa; 20], deposit_topic0_bytes())
+                .with_trusted_checkpoint(1, [1; 32]),
+        ))
         .expect("a properly configured adapter must register");
 
     let err =
