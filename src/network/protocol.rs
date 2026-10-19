@@ -24,7 +24,6 @@ pub const MAX_HEADER_LOCATOR_HASHES: usize = 64;
 pub enum MessageError {
     TooLarge(usize),
     ParseError(String),
-    VersionMismatch { expected: u32, got: u32 },
 }
 
 /// Snapshot block batches share the same `BlocksByHeight` transport envelope,

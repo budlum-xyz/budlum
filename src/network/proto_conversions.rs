@@ -35,6 +35,9 @@ fn serialize_payload_or_log<T: serde::Serialize>(what: &str, value: &T) -> Vec<u
     }
 }
 
+/// The only transaction wire version this node encodes and accepts.
+const TX_WIRE_VERSION: u32 = 2;
+
 impl From<&Transaction> for pb::ProtoTransaction {
     fn from(tx: &Transaction) -> Self {
         let (tx_type_i32, type_payload) = match &tx.tx_type {
@@ -490,7 +493,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
             chain_id: tx.chain_id,
             signature_version: tx.signature_version,
             tx_type: tx_type_i32,
-            wire_version: 2,
+            wire_version: TX_WIRE_VERSION,
             type_payload,
             signer_public_key: tx.signer_public_key.clone(),
             authorization: tx
@@ -860,6 +863,12 @@ fn convert_proto_to_relayer_result(
 impl TryFrom<pb::ProtoTransaction> for Transaction {
     type Error = String;
     fn try_from(proto: pb::ProtoTransaction) -> Result<Self, Self::Error> {
+        if proto.wire_version != TX_WIRE_VERSION {
+            return Err(format!(
+                "Unsupported transaction wire version {}, expected {TX_WIRE_VERSION}",
+                proto.wire_version
+            ));
+        }
         let timestamp = proto
             .timestamp
             .parse::<u128>()
@@ -2545,6 +2554,23 @@ mod tests {
 
         proto.tx_type = 999; // Unknown transaction type tag
         assert!(Transaction::try_from(proto).is_err());
+    }
+
+    #[test]
+    fn a_transaction_with_a_foreign_wire_version_is_refused() {
+        let tx = Transaction::new(
+            crate::core::address::Address::from([1u8; 32]),
+            crate::core::address::Address::from([2u8; 32]),
+            10,
+            vec![],
+        );
+        let mut proto = pb::ProtoTransaction::from(&tx);
+        assert!(Transaction::try_from(proto.clone()).is_ok());
+        for version in [0u32, 1, 3] {
+            proto.wire_version = version;
+            let error = Transaction::try_from(proto.clone()).expect_err("foreign version");
+            assert!(error.contains("wire version"));
+        }
     }
 
     #[test]
