@@ -5121,6 +5121,23 @@ impl Blockchain {
     /// Which needs to know which validators produced during the closing epoch.
     /// Passing it keeps this function a pure `(state, block, history) -> state`
     /// Map, which is what every replay path depends on.
+    ///
+    /// BLG-0296 (P18-F11) - the precondition this function had and never
+    /// stated: every transaction it applies was already admitted through
+    /// `validate_transaction` (the sender's nonce equal to the account nonce
+    /// is one of its checks), at ingest, at the gates pointed at from
+    /// `blockchain.rs` and the mempool. `apply_transaction` bumps the nonce
+    /// with `saturating_add(1)` and does not re-check equality, so this
+    /// replay path equals the live path ONLY for blocks that passed those
+    /// gates - a block hand-crafted with wrong nonces (or a storage archive
+    /// written before the gates existed) would replay a different per-account
+    /// nonce order than the network would ever have accepted. That is a
+    /// given of the ingest contract, not a silent hope: callers feed stored
+    /// or freshly-validated blocks; nothing here re-admits. Making the
+    /// executor itself re-check would be a consensus-visible tightening of
+    /// replay for blocks whose bytes are already final - a fork risk on old
+    /// archives, refused deliberately; the invariant above is the load-bearing
+    /// statement, now written down.
     fn apply_block_effects(
         base_state: &AccountState,
         block: &Block,
