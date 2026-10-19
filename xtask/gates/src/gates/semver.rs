@@ -307,10 +307,10 @@ pub fn run_args(_root: &Path, args: &[&str]) -> Verdict {
     // changes directory into the current root, so a relative baseline would
     // otherwise resolve against the wrong place.
     let Ok(current) = fs::canonicalize(current_s) else {
-        return Err(format!("current root yok: {current_s}"));
+        return Err(format!("current root not found: {current_s}"));
     };
     let Ok(baseline) = fs::canonicalize(baseline_s) else {
-        return Err(format!("baseline root yok: {baseline_s}"));
+        return Err(format!("baseline root not found: {baseline_s}"));
     };
     if !current.join("Cargo.toml").is_file() {
         return Err(format!(
@@ -440,8 +440,32 @@ fn compare(current: &Path, baseline: &Path, exc: &Path) -> Verdict {
 const RUSTDOC_JSON_FLAGS: &str = "-Z unstable-options --output-format=json \
      --document-private-items --document-hidden-items --cap-lints=allow";
 
-/// The package name in `root/Cargo.toml`: the first `name = "..."` line,
-/// which in a root manifest belongs to `[package]`.
+/// The `name = "..."` value inside the `[package]` table of a manifest.
+fn package_name_in(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let name = line
+            .strip_prefix("name")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(str::trim)
+            .and_then(|v| v.strip_prefix('"'))
+            .and_then(|v| v.strip_suffix('"'));
+        if let Some(name) = name {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// The package name in `root/Cargo.toml`.
 fn package_name(root: &Path) -> Result<String, String> {
     let manifest = root.join("Cargo.toml");
     let text = fs::read_to_string(&manifest).map_err(|e| {
@@ -450,23 +474,12 @@ fn package_name(root: &Path) -> Result<String, String> {
             manifest.display()
         )
     })?;
-    text.lines()
-        .map(str::trim)
-        .find_map(|line| {
-            line.strip_prefix("name")
-                .map(str::trim_start)
-                .and_then(|rest| rest.strip_prefix('='))
-                .map(str::trim)
-                .and_then(|v| v.strip_prefix('"'))
-                .and_then(|v| v.strip_suffix('"'))
-                .map(str::to_string)
-        })
-        .ok_or_else(|| {
-            format!(
-                "error: running cargo-metadata failed: no package name in {}",
-                manifest.display()
-            )
-        })
+    package_name_in(&text).ok_or_else(|| {
+        format!(
+            "error: running cargo-metadata failed: no package name in {}",
+            manifest.display()
+        )
+    })
 }
 
 /// Build the root package's rustdoc JSON inside `root`, under its own
@@ -810,6 +823,13 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&d);
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn the_package_name_comes_from_the_package_table() {
+        let text = "[lib]\nname = \"other\"\n\n[package]\nname = \"budlum-core\"\n";
+        assert_eq!(package_name_in(text).as_deref(), Some("budlum-core"));
+        assert_eq!(package_name_in("[lib]\nname = \"other\"\n"), None);
     }
 
     #[test]
