@@ -225,7 +225,7 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
 }
 
 #[test]
-fn relay_ledger_root_changes_with_relays() {
+fn relay_ledger_root_ignores_pending_relays() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("root_change.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
@@ -282,6 +282,8 @@ fn expired_relays_detects_past_expiry() {
             .len(),
         0
     ); // not expired yet (chain len < 200)
+    assert_eq!(bc.universal_relayer.expired_relays(199).len(), 0);
+    assert_eq!(bc.universal_relayer.expired_relays(200).len(), 1);
 }
 
 #[test]
