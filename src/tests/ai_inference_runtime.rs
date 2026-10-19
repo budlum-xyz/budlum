@@ -925,3 +925,14 @@ fn prune_does_not_refund_cancelled_or_reclaimed_requests() {
         "cancelled escrow was already refunded at cancellation; prune must not pay twice"
     );
 }
+
+#[test]
+fn unsigned_ai_inference_result_transaction_is_not_admitted() {
+    let operator = Address::from([0x11; 32]);
+    let (_, request) = model_and_request(Address::from([0x22; 32]));
+    let tx = result_transaction(operator, request.request_id, 1);
+    assert!(
+        !tx.verify(),
+        "a result transaction without a valid outer signature must fail verification"
+    );
+}
