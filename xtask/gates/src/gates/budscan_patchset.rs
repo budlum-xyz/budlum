@@ -403,6 +403,21 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    // Canary 4d: the path check has to refuse a traversal and an outside tree.
+    if path_is_allowed("browser/../../etc/x", &["browser/"]) {
+        problems.push(String::from(
+            "VACUOUS: a path that climbs out of the allowed tree passed",
+        ));
+    }
+    if path_is_allowed("other/x", &["browser/"]) {
+        problems.push(String::from(
+            "VACUOUS: a path outside every allowed tree passed",
+        ));
+    }
+    if !path_is_allowed("browser/app/x.cpp", &["browser/"]) {
+        problems.push(String::from("a path inside the allowed tree was refused"));
+    }
+
     // Canary 5: the brand list must not be empty, otherwise the scan searches for nothing.
     // The same outcome arises if the syllables do not join; the joined form is what is measured.
     if forbidden_brand_tokens().iter().any(|t| t.len() < 5) {
