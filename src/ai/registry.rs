@@ -2071,9 +2071,10 @@ impl AiRegistry {
         }
 
         // Domain: callback_queue
-        hasher.update(b"BDLM_AI_CALLBACK_QUEUE");
+        hasher.update(b"BDLM_AI_CALLBACK_QUEUE_V2");
         for (addr, events) in &self.callback_queue {
             hasher.update(addr.as_bytes());
+            hasher.update((events.len() as u64).to_le_bytes());
             for event in events {
                 hasher.update(event.request_id.0);
                 hasher.update(event.output_commitment);
