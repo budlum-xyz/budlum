@@ -264,3 +264,10 @@ fn test_bns_expired_name_refuses_writes() {
         Err(BnsError::Expired)
     ));
 }
+
+#[test]
+fn test_bns_default_registry_matches_new() {
+    let reg = BnsRegistry::default();
+    assert_eq!(reg.base_cost, BnsRegistry::new().base_cost);
+    assert!(reg.is_empty());
+}
