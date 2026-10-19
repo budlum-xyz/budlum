@@ -44,10 +44,7 @@ use crate::cross_domain::external::quorum::{
 };
 use crate::cross_domain::external::registry::{ExternalDomainRegistry, RegistryError};
 use crate::cross_domain::external::selftest::{admit, AdmissionReport};
-use crate::cross_domain::external::spec::{
-    AdapterDescriptor, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
-    RawConsensusEvidence, VerificationPolicy,
-};
+use crate::cross_domain::external::spec::{AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter, FinalityAttestation, RawConsensusEvidence, VerificationPolicy};;
 use crate::cross_domain::external::versioning::VersionPolicy;
 use crate::cross_domain::external::zkvm_proof::ZkVmFinalityAdapter;
 use serde::{Deserialize, Serialize};
@@ -252,8 +249,16 @@ pub struct IntakeState {
     /// Multi-prover quorum rounds for vote-based domains. Serialized with
     /// the rest of the intake, so round progress is inside `state_digest`
     /// and two nodes cannot disagree about a round without disagreeing
-    /// about the digest. `default` keeps old serialized states readable:
-    /// a state written before rounds existed has no rounds.
+    /// about the digest.
+    ///
+    /// BLG-0154 (P07-F09): `serde(default)` does NOT keep old serialized
+    /// states readable here. Storage is bincode, which is not
+    /// self-describing - a state written before this field existed ends
+    /// before it, and the decode fails rather than defaulting. The old doc
+    /// claimed compatibility that never worked. The honest contract: a
+    /// state from before a trailing field was added cannot decode, and the
+    /// loader treats that as CRITICAL (refuses to start with a silently
+    /// empty intake). A shape change needs a migration, not an attribute.
     #[serde(default)]
     pub quorum: QuorumRounds,
 }
@@ -497,10 +502,24 @@ impl IntakeState {
             Err(other) => return Err(IntakeError::Registry(other.clone())),
         };
         let local_height = self.registry.height();
-        let state = self
+        // BLG-0160 (P07-F15): the round is already AgreedClaim
+        // or Disputed when a later step fails, and the error path used to
+        // persist that half-applied state - a round that says agreed with
+        // nothing committed, refusing every later vote. The quorum fold is
+        // transactional: if the consequence (commit, fault) fails, the round
+        // goes back to what it was before the vote was folded.
+        let quorum_before = self.quorum.clone();
+        let fold = self
             .quorum
-            .submit(key, evidence, &verdict_for_round, local_height)?;
-        match state {
+            .submit(key, evidence, &verdict_for_round, local_height);
+        let state = match fold {
+            Ok(state) => state,
+            Err(err) => {
+                self.quorum = quorum_before;
+                return Err(err.into());
+            }
+        };
+        let outcome = match state {
             RoundState::AgreedClaim { attestation, .. } => {
                 let winner = *attestation;
                 // The carrier is the first prover whose claim matches the
@@ -509,10 +528,21 @@ impl IntakeState {
                 let carrier = self
                     .quorum
                     .round_of(&key, evidence.declared_height)
-                    .and_then(|round| first_carrier(round, &winner.state_root))
-                    .ok_or(IntakeError::MissingCarrier)?;
-                self.registry.commit_attestation(&winner, carrier)?;
-                Ok(Some(winner))
+                    .and_then(|round| first_carrier(round, &winner.state_root));
+                let carrier = match carrier {
+                    Some(carrier) => carrier,
+                    None => {
+                        self.quorum = quorum_before;
+                        return Err(IntakeError::MissingCarrier);
+                    }
+                };
+                match self.registry.commit_attestation(&winner, carrier) {
+                    Ok(()) => Ok(Some(winner)),
+                    Err(err) => {
+                        self.quorum = quorum_before;
+                        Err(IntakeError::Registry(err))
+                    }
+                }
             }
             RoundState::Disputed => {
                 // The fault reason names the groups by their stable keys, so
@@ -529,16 +559,23 @@ impl IntakeState {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                self.registry.mark_faulted(
+                match self.registry.mark_faulted(
                     &key,
                     &format!(
                         "quorum round at external height {} froze in dispute; answers: [{standings}]",
                         evidence.declared_height
                     ),
-                )?;
-                Ok(None)
+                ) {
+                    Ok(()) => Ok(None),
+                    Err(err) => {
+                        self.quorum = quorum_before;
+                        Err(IntakeError::Registry(err))
+                    }
+                }
             }
             RoundState::AgreedRefusal { .. } | RoundState::Open => Ok(None),
+        };
+        outcome
         }
     }
 
@@ -581,18 +618,11 @@ impl IntakeState {
         }
         // The intake commits winning claims to the attestation book, and the
         // quorum module's own docs name the rule: `AcceptMostCommon` is
-        // "never for a state root that will be committed to". This surface
-        // commits, so the permissive behaviours are refused here - a policy
-        // that shrugs at disputes is not protection, it is the appearance
-        // of it.
-        if matches!(policy.dispute, DisputeBehavior::AcceptMostCommon)
-            || matches!(
-                policy.low_participants,
-                LowParticipantsBehavior::AcceptMostCommon
-            )
-        {
-            return Err(IntakeError::PermissiveQuorumPolicy);
-        }
+        // "never for a state root that will be committed to". BLG-0163
+        // (P07-F18): that refusal is enforced by `QuorumRounds::set_policy`
+        // itself - the pub setter used to bypass it - and the intake maps it
+        // to its own named error. The shape rules below are this surface's
+        // own: it is the surface that commits.
         if policy.agreement_threshold == 0 {
             return Err(IntakeError::InvalidQuorumPolicy {
                 reason: "the agreement threshold is zero",
@@ -620,6 +650,20 @@ impl IntakeState {
             return Err(IntakeError::InvalidQuorumPolicy {
                 reason: "fewer provers are bonded than the threshold needs",
             });
+        }
+        // The intake commits winning claims to the attestation book, and the
+        // quorum module's own docs name the rule: `AcceptMostCommon` is
+        // "never for a state root that will be committed to". A policy that
+        // shrugs at disputes is not protection, it is the appearance of it.
+        // `QuorumRounds::set_policy` is `pub(super)` (BLG-0163/P07-F18), so
+        // this refusal cannot be bypassed from outside the module.
+        if matches!(policy.dispute, DisputeBehavior::AcceptMostCommon)
+            || matches!(
+                policy.low_participants,
+                LowParticipantsBehavior::AcceptMostCommon
+            )
+        {
+            return Err(IntakeError::PermissiveQuorumPolicy);
         }
         self.quorum.set_policy(*key, policy);
         Ok(())
@@ -711,6 +755,7 @@ impl IntakeState {
 mod tests {
     use super::*;
     use crate::cross_domain::external::ethereum::layout;
+    use crate::cross_domain::external::quorum::{DisputeBehavior, LowParticipantsBehavior};
     use crate::cross_domain::external::spec::AdapterId;
 
     fn addr(b: u8) -> Address {
@@ -1241,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_split_that_cannot_recover_freezes_the_domain_faulted() {
+    fn a_recoverable_split_decides_deterministically() {
         let (mut state, key) = quorum_state();
         let spec = eth_spec();
         let honest_a = quorum_evidence(&spec, addr(2));
@@ -1281,6 +1326,56 @@ mod tests {
             reg.record.state,
             crate::cross_domain::external::DomainState::Faulted,
             "an unrecoverable split must freeze the domain"
+        );
+    }
+
+    /// BLG-0158 (P07-F13): the dispute-to-fault wiring through `IntakeState`
+    /// - the branch that calls `mark_faulted` when a round freezes in a
+    /// dispute - had no test through the intake at all. A three-way split
+    /// under a 3-of-3 policy reaches `Disputed` (no group can ever reach the
+    /// threshold), and the domain must come out Faulted.
+    #[test]
+    fn a_disputed_round_faults_the_domain_through_the_intake() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        for prover in [addr(2), addr(3), addr(4)] {
+            state
+                .bond_prover(&key, prover, economics_bond())
+                .expect("bonding a fresh prover must pass");
+        }
+        state
+            .set_quorum_policy(
+                &key,
+                crate::cross_domain::external::QuorumPolicy::strict(3, 3),
+            )
+            .expect("a 3-of-3 policy with three bonded provers installs");
+        let spec = eth_spec();
+        let a = quorum_evidence(&spec, addr(2));
+        let mut b = quorum_evidence(&spec, addr(3));
+        b.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        b.declared_root = [0xdd; 32];
+        let mut c = quorum_evidence(&spec, addr(4));
+        c.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        c.declared_root = [0xee; 32];
+        let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&c, Some(Box::new(StrictTestBls)));
+        let round = state
+            .quorum
+            .round_of(&key, a.declared_height)
+            .expect("round exists");
+        assert!(
+            matches!(
+                round.state,
+                crate::cross_domain::external::RoundState::Disputed
+            ),
+            "three different claims under a 3-of-3 policy must freeze in dispute"
+        );
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::profile::DomainState::Faulted,
+            "a disputed round must fault the domain through the intake"
         );
     }
 

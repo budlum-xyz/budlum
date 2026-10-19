@@ -54,7 +54,8 @@
 
 use crate::core::address::Address;
 use crate::cross_domain::external::quorum::{
-    decide, group_answers, lead_is_unassailable, Answer, AnswerGroup, QuorumOutcome, QuorumPolicy,
+    decide, group_answers, lead_is_unassailable, Answer, AnswerGroup, DisputeBehavior,
+    LowParticipantsBehavior, QuorumOutcome, QuorumPolicy,
 };
 use crate::cross_domain::external::selftest::RefusalKind;
 use crate::cross_domain::external::spec::{
@@ -227,6 +228,7 @@ impl QuorumRounds {
     /// is: two nodes disagreeing about the threshold decide differently.
     pub(super) fn set_policy(&mut self, domain: DomainKey, policy: QuorumPolicy) {
         self.policies.insert(domain, policy);
+        Ok(())
     }
 
     /// The policy of a domain, if it runs quorum rounds.
@@ -356,9 +358,15 @@ impl QuorumRounds {
 
     /// Sweeps rounds older than [`ROUND_RETENTION_BLOCKS`]. Called from the
     /// same block-commit hook that drives the registry clock.
+    ///
+    /// BLG-0164 (P07-F19): a `Disputed` round is evidence - who disputed
+    /// what - and the challenge game can resolve it far later than the
+    /// retention window. Sweeping it erased the record while the domain
+    /// stayed Faulted. Disputed rounds are kept until they resolve.
     pub fn sweep(&mut self, local_height: u64) {
         self.rounds.retain(|_, round| {
-            local_height.saturating_sub(round.opened_at) <= ROUND_RETENTION_BLOCKS
+            matches!(round.state, RoundState::Disputed)
+                || local_height.saturating_sub(round.opened_at) <= ROUND_RETENTION_BLOCKS
         });
     }
 
