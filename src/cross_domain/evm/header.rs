@@ -343,7 +343,7 @@ mod tests {
         let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
         let one = decode_header(&header_bytes(target.hash, 11, [0u8; 32])).unwrap();
         let cp = (one.number, one.hash);
-        assert!(verify_chain(&target, &[one.clone()], 1, Some(&cp)).is_ok());
+        assert!(verify_chain(&target, std::slice::from_ref(&one), 1, Some(&cp)).is_ok());
         let wrong: (u64, [u8; 32]) = (one.number, [0xAA; 32]);
         assert_eq!(
             verify_chain(&target, std::slice::from_ref(&one), 1, Some(&wrong)).unwrap_err(),

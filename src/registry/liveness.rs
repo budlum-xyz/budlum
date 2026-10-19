@@ -157,7 +157,6 @@ impl LivenessTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::evidence::SlashingProof;
 
     fn addr(b: u8) -> Address {
         Address::from([b; 32])
