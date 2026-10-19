@@ -3756,7 +3756,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// BLG-0090/0091 (P04-F08/F09): the PoA gate state is ROOTED - an
     /// admission write or a compliance freeze moves the state root, so a
     /// node that skipped them diverges instead of agreeing silently.
@@ -3809,6 +3808,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn hub_registry_mutation_changes_account_state_root() {
         use crate::budlumxyz::types::AppCategory;
 

@@ -210,8 +210,10 @@ mod tests {
             fee in 0u64..=4_000_000_000_000_000u64,
             ratio in 0u64..=u64::MAX,
         ) {
-            let mut params = TokenomicsParams::default();
-            params.tx_fee_burn_ratio_fixed = ratio;
+            let params = TokenomicsParams {
+                tx_fee_burn_ratio_fixed: ratio,
+                ..TokenomicsParams::default()
+            };
             assert!(params.metabolic_burn(fee) <= fee);
         }
 
@@ -220,9 +222,11 @@ mod tests {
             reserve in 0u64..=4_000_000_000_000_000u64,
             ratio in 0u64..=u64::MAX,
         ) {
-            let mut params = TokenomicsParams::default();
-            params.burn_reserve = reserve;
-            params.annual_burn_ratio_fixed = ratio;
+            let params = TokenomicsParams {
+                burn_reserve: reserve,
+                annual_burn_ratio_fixed: ratio,
+                ..TokenomicsParams::default()
+            };
             assert!(params.annual_burn_amount() <= reserve);
         }
 
@@ -233,9 +237,11 @@ mod tests {
             ratio in 0u64..=u64::MAX,
             epochs in 0u64..=1_000_000u64,
         ) {
-            let mut params = TokenomicsParams::default();
-            params.validator_annual_yield_ratio_fixed = ratio;
-            params.epochs_per_year = epochs;
+            let params = TokenomicsParams {
+                validator_annual_yield_ratio_fixed: ratio,
+                epochs_per_year: epochs,
+                ..TokenomicsParams::default()
+            };
             assert!(params.calculate_epoch_reward(stake) <= stake);
         }
     }

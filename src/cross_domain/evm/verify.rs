@@ -475,7 +475,6 @@ mod tests {
         }
     }
     use super::fixtures::{build_fixture, conf_refs, header_rlp, Fixture};
-    use super::*;
     use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
     // ---- Pozitif: tam happy-path ----
@@ -723,7 +722,10 @@ mod tests {
             deposit_topic0: &[0u8; 32],
             sync_attestation: None,
         };
-        let _ = verify_fixture(&proof); // Err beklenir, panic YOK.
+        assert!(
+            verify_fixture(&proof).is_err(),
+            "a wholly garbage proof must be refused, not accepted"
+        );
     }
 
     // ---- Sync-committee attestation ----
