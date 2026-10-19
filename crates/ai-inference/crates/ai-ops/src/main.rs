@@ -134,6 +134,14 @@ fn main() {
                     Ok(()) => {}
                 }
                 let set = EvalDataSet::from_golden(dp.clone(), &records);
+                // The file is read a second time and must give the same
+                // digest, so a dataset edited while the plan is being drafted
+                // is not bound under a digest of bytes that no longer exist.
+                let reread = EvalDataSet::from_golden(dp.clone(), &load_records(&dp));
+                if reread.digest() != set.digest() {
+                    eprintln!("the dataset changed while the plan was being drafted");
+                    std::process::exit(1);
+                }
                 plan.dataset_hashes.push(set.digest());
                 // train/eval identity: the plan carries the eval-set digest
                 // it will be graded under, and the binding survives the push.
