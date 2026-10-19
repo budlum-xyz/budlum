@@ -349,10 +349,15 @@ mod hardening_tests {
         use crate::rpc::RpcSecurityConfig;
         let from_default = RpcSecurityConfig::default();
         let from_op = RpcSecurityConfig::operator_default();
-        let from_env_no_auth = RpcSecurityConfig {
-            auth_required: false,
-            ..Default::default()
-        };
+        std::env::remove_var("BUDLUM_TUR6_RPC_TEST_KEY_OFF");
+        let from_env_no_auth = RpcSecurityConfig::from_env(
+            false,
+            Some("BUDLUM_TUR6_RPC_TEST_KEY_OFF"),
+            vec![],
+            vec![],
+            None,
+        )
+        .expect("auth_required=false must not need an api key");
         // `from_default` is now `true`, so there is no warning.
         assert!(from_default.auth_required);
         // `operator_default` is deliberately `false`, so the warning fires.
