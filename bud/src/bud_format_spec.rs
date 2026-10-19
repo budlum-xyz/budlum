@@ -69,9 +69,21 @@ pub fn byte_equal_k10(input: &[u8], mime: &str) -> bool {
         },
         b"qr-derivative-bytes",
     );
+    recipe_reads_back(&t, input)
+}
+
+/// Does the recipe give `input` back, and does it commit to it? The body must
+/// decode to the input within the input's own size, and both commitments must
+/// match what was committed to.
+fn recipe_reads_back(t: &R3Recipe, input: &[u8]) -> bool {
+    if t.commitment != crate::bud_format_container::content_id(input)
+        || t.qr_derivative_commit != crate::bud_format_container::content_id(b"qr-derivative-bytes")
+    {
+        return false;
+    }
     match zstd::bulk::Decompressor::new()
         .ok()
-        .and_then(|mut d| d.decompress(&t.body, 512 * 1024 * 1024).ok())
+        .and_then(|mut d| d.decompress(&t.body, input.len().max(1)).ok())
     {
         Some(back) => back == input,
         None => t.codec == Codec::None && t.body == input,
@@ -141,7 +153,10 @@ pub fn three_meter_is_honest(s: &ThreeMeterK14b) -> bool {
 /// The QR derivative growth limit: the derivative cannot exceed 2x the original plus a 1 KB
 /// constant (spec K-QR-GENISLEME; the carousel drop headers are bounded).
 pub fn qr_derivative_growth_limit(derived_len: usize, original_len: usize) -> bool {
-    derived_len <= original_len * 2 + 1024
+    original_len
+        .checked_mul(2)
+        .and_then(|twice| twice.checked_add(1024))
+        .is_some_and(|limit| derived_len <= limit)
 }
 
 #[cfg(test)]
@@ -188,6 +203,19 @@ mod tests {
         );
         let log = b"2026-08-17 INFO recipe #1 verified\n".repeat(64);
         assert!(byte_equal_k10(&log, "text/plain"));
+    }
+
+    #[test]
+    fn k10_refuses_a_recipe_whose_commitment_is_wrong() {
+        let input = b"a recipe is only as good as its commitment".repeat(20);
+        let compress = |d: &[u8]| zstd::bulk::compress(d, 3).unwrap_or_else(|_| d.to_vec());
+        let good = R3Recipe::produce(&input, "text/plain", compress, b"qr-derivative-bytes");
+        assert!(recipe_reads_back(&good, &input));
+        let mut bad = good.clone();
+        bad.commitment = [0u8; 32];
+        assert!(!recipe_reads_back(&bad, &input));
+        // A length that overflows the limit is refused, not wrapped.
+        assert!(!qr_derivative_growth_limit(1, usize::MAX));
     }
 
     #[test]
