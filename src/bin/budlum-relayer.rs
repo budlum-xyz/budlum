@@ -100,6 +100,44 @@ impl Default for RelayerConfig {
     }
 }
 
+/// Largest RPC response body the relayer reads.
+const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Most blocks one `eth_getLogs` scan covers.
+const MAX_LOG_SCAN_BLOCKS: u64 = 2_000;
+
+/// Refuse a response body longer than the cap.
+fn check_body_len(len: usize) -> Result<(), String> {
+    if len > MAX_RPC_BODY_BYTES {
+        return Err(format!("response body of {len} bytes is too large"));
+    }
+    Ok(())
+}
+
+/// Read a JSON body but refuse one over the cap, also while it streams in.
+async fn read_json_bounded(mut resp: reqwest::Response) -> Result<serde_json::Value, String> {
+    if let Some(len) = resp.content_length() {
+        check_body_len(usize::try_from(len).unwrap_or(usize::MAX))?;
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        check_body_len(body.len().saturating_add(chunk.len()))?;
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
+}
+
+/// The block range of the next scan: it starts after the cursor and never
+/// spans more than `MAX_LOG_SCAN_BLOCKS` blocks.
+fn scan_window(last_block: u64, latest: u64) -> (u64, u64) {
+    let from = last_block.saturating_add(1);
+    let to = match from.checked_add(MAX_LOG_SCAN_BLOCKS - 1) {
+        Some(cap) => latest.min(cap),
+        None => latest,
+    };
+    (from, to)
+}
+
 /// Minimal Ethereum deposit event (eth_getLogs'dan parse).
 #[derive(Debug, Clone)]
 pub struct EthDepositEvent {
@@ -157,8 +195,7 @@ impl BudlumClient {
             .send()
             .await
             .map_err(|e| format!("Budlum RPC send failed ({method}): {e}"))?;
-        let json: serde_json::Value = resp
-            .json()
+        let json = read_json_bounded(resp)
             .await
             .map_err(|e| format!("Budlum RPC json parse failed: {e}"))?;
         if let Some(err) = json.get("error") {
@@ -241,8 +278,7 @@ impl EthClient {
             .send()
             .await
             .map_err(|e| format!("Eth RPC {method} send failed: {e}"))?;
-        let json: serde_json::Value = resp
-            .json()
+        let json = read_json_bounded(resp)
             .await
             .map_err(|e| format!("Eth RPC json fail: {e}"))?;
         if let Some(err) = json.get("error") {
@@ -628,8 +664,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         if latest <= last_block {
             continue;
         }
-        let from = last_block + 1;
-        let to = latest;
+        let (from, to) = scan_window(last_block, latest);
         eprintln!("EthToBud: scanning deposits from {from} to {to}");
 
         // 2. Get deposit logs
@@ -944,9 +979,19 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_cursor, block_by_number_params, burn_hashes_from_block, parse_hex_height,
+        advance_cursor, block_by_number_params, burn_hashes_from_block, check_body_len,
+        parse_hex_height, scan_window, MAX_LOG_SCAN_BLOCKS, MAX_RPC_BODY_BYTES,
         MAX_WINDOW_ATTEMPTS, STATUS_NOTICE,
     };
+
+    #[test]
+    fn a_scan_window_and_a_body_are_bounded() {
+        assert_eq!(scan_window(10, 20), (11, 20));
+        assert_eq!(scan_window(10, 1_000_000), (11, 10 + MAX_LOG_SCAN_BLOCKS));
+        assert_eq!(scan_window(u64::MAX, u64::MAX), (u64::MAX, u64::MAX));
+        assert!(check_body_len(MAX_RPC_BODY_BYTES).is_ok());
+        assert!(check_body_len(MAX_RPC_BODY_BYTES + 1).is_err());
+    }
 
     /// A failed window is retried and only skipped after the attempt limit.
     #[test]
