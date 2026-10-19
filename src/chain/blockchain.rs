@@ -4760,9 +4760,12 @@ impl Blockchain {
             .get_sorted_transactions(crate::consensus::MAX_TRANSACTIONS_PER_BLOCK);
         let mut valid_txs = Vec::new();
         let mut temp_state = self.state.clone();
-        temp_state.current_block_height = self.chain.len() as u64;
-        temp_state.current_block_unix_secs = Self::block_timestamp_secs(block_timestamp_ms);
-        temp_state.current_block_entropy = Self::block_context_entropy(previous_hash, &[]);
+        let set_block_context = |s: &mut crate::core::account::AccountState| {
+            s.current_block_height = self.chain.len() as u64;
+            s.current_block_unix_secs = Self::block_timestamp_secs(block_timestamp_ms);
+            s.current_block_entropy = Self::block_context_entropy(previous_hash, &[]);
+        };
+        set_block_context(&mut temp_state);
         let mut included = std::collections::HashSet::new();
         let mut progress = true;
         let mut contract_calls: u64 = 0;
@@ -4793,6 +4796,44 @@ impl Blockchain {
                     valid_txs.push(tx.clone());
                     included.insert(tx.hash.clone());
                     progress = true;
+                } else {
+                    // BLG-0289 (P18-F04): a refused transaction may have left
+                    // partial mutations in the simulation state - the
+                    // documented contract of `apply_transaction_checked`, and
+                    // the three arms that used to write before their last
+                    // check are fixed (executor.rs), but the selection loop
+                    // must not TRUST that. Building on contaminated state
+                    // diverges from what validators replay from the clean
+                    // base, and the producer ships a block that fails its own
+                    // block check. So on refusal the simulation is rebuilt the
+                    // way replay runs: fresh clone of the real base, the
+                    // accepted set re-applied in order - and anything that
+                    // fails THAT pass was riding contamination, so it leaves
+                    // the block. Conservative in both directions: nothing
+                    // contaminated stays in, nothing honest is dropped (a
+                    // clean re-apply of an accepted transaction can only fail
+                    // if its acceptance had depended on the refusal's side
+                    // effects).
+                    temp_state = self.state.clone();
+                    set_block_context(&mut temp_state);
+                    let mut rebuilt = Vec::with_capacity(valid_txs.len());
+                    let mut keep = std::collections::HashSet::new();
+                    for accepted in &valid_txs {
+                        if Executor::apply_transaction_checked(&mut temp_state, accepted)
+                            .is_ok()
+                        {
+                            keep.insert(accepted.hash.clone());
+                            rebuilt.push(accepted.clone());
+                        }
+                    }
+                    contract_calls = rebuilt
+                        .iter()
+                        .filter(|t| {
+                            t.tx_type == crate::core::transaction::TransactionType::ContractCall
+                        })
+                        .count() as u64;
+                    valid_txs = rebuilt;
+                    included = keep;
                 }
             }
         }
