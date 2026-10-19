@@ -1893,6 +1893,36 @@ mod tests {
         assert!(vm.stack.is_empty());
     }
 
+    /// P16-F19: the stack limit, an empty pop and a jump below zero all end
+    /// the run with a typed error. None of them is a panic.
+    #[test]
+    fn stack_limit_empty_pop_and_negative_jump_are_typed_errors() {
+        let mut overflow: Vec<u64> = (0..1025).map(|_| inst(Opcode::Push, 0, 1, 0, 0)).collect();
+        overflow.push(inst(Opcode::Halt, 0, 0, 0, 0));
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&overflow);
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(VmError::StackOverflow));
+
+        let pop = vec![
+            inst(Opcode::Pop, 2, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&pop);
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(VmError::StackUnderflow));
+
+        let jump = vec![
+            inst(Opcode::Jmp, 0, 0, 0, -5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&jump);
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(VmError::InvalidPc));
+    }
+
     #[test]
     fn call_and_ret_use_return_stack() {
         let program = vec![
