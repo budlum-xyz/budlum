@@ -403,6 +403,15 @@ impl PoAOnboarding {
 
     // ---- enforcement -----------------------------------------------------
 
+    /// BLG-0090 (P04-F08): the deterministic fold of the admission state -
+    /// admin set, member dossiers, KYC expiries and the audit trail. This
+    /// enters the state root and the snapshot digest, so a snapshot that
+    /// drops an admission record diverges instead of quietly unpermissioning
+    /// a domain.
+    pub fn root(&self) -> [u8; 32] {
+        self.registry.root_with_expiry(&self.kyc_expiry)
+    }
+
     /// Is `domain` a permissioned domain at all?
     ///
     /// True once it has an admin. See
