@@ -460,12 +460,12 @@ mod tests {
         }
         reg.register("alice-1.bud".into(), owner, 1, 10).unwrap();
         assert!(reg
-            .register_subdomain("alice-1.bud", "App".into(), owner, &owner)
+            .register_subdomain("alice-1.bud", "App".into(), owner, &owner, 1)
             .is_err());
         assert!(reg
-            .register_subdomain("alice-1.bud", "a.b".into(), owner, &owner)
+            .register_subdomain("alice-1.bud", "a.b".into(), owner, &owner, 1)
             .is_err());
-        reg.register_subdomain("alice-1.bud", "app".into(), owner, &owner)
+        reg.register_subdomain("alice-1.bud", "app".into(), owner, &owner, 1)
             .unwrap();
     }
 
@@ -489,7 +489,7 @@ mod tests {
         let owner = Address::from([1u8; 32]);
         reg.register("alice.bud".into(), owner, 1, 10).unwrap();
         let root_before = reg.root();
-        reg.set_content("alice.bud", &owner, ContentId([0x55; 32]))
+        reg.set_content("alice.bud", &owner, ContentId([0x55; 32]), 1)
             .unwrap();
         assert_ne!(root_before, reg.root());
     }
@@ -505,13 +505,13 @@ mod tests {
 
         let mut a = BnsRegistry::new();
         a.register("alice.bud".into(), owner, 1, 10).unwrap();
-        a.register_subdomain("alice.bud", "ab".into(), sub_owner, &owner)
+        a.register_subdomain("alice.bud", "ab".into(), sub_owner, &owner, 1)
             .unwrap();
         let mut b = BnsRegistry::new();
         b.register("alice.bud".into(), owner, 1, 10).unwrap();
-        b.register_subdomain("alice.bud", "a".into(), sub_owner, &owner)
+        b.register_subdomain("alice.bud", "a".into(), sub_owner, &owner, 1)
             .unwrap();
-        b.register_subdomain("alice.bud", "b".into(), sub_owner, &owner)
+        b.register_subdomain("alice.bud", "b".into(), sub_owner, &owner, 1)
             .unwrap();
         assert_ne!(
             a.root(),
