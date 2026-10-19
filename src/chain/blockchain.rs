@@ -9314,19 +9314,22 @@ mod tests {
     fn a_vote_from_a_far_future_epoch_must_not_move_the_tracker() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
-        let before = bc.state.invalid_votes.current_epoch;
-        bc.note_invalid_vote(u64::MAX, Address::from([1u8; 32]));
+        let voter = Address::from([1u8; 32]);
+        let before = bc.state.invalid_votes.current_epoch();
+        bc.note_invalid_vote(u64::MAX, voter);
         assert_eq!(
-            bc.state.invalid_votes.current_epoch, before,
+            bc.state.invalid_votes.current_epoch(),
+            before,
             "a u64::MAX-epoch vote moved the tracker forward"
         );
-        assert!(
-            bc.state.invalid_votes.counts.is_empty(),
+        assert_eq!(
+            bc.state.invalid_votes.invalid_count(&voter),
+            0,
             "the far-ahead vote was counted anyway"
         );
         // The current epoch still counts: the guard is a bound, not a lockout.
-        bc.note_invalid_vote(bc.state.epoch_index, Address::from([1u8; 32]));
-        assert_eq!(bc.state.invalid_votes.counts.len(), 1);
+        bc.note_invalid_vote(bc.state.epoch_index, voter);
+        assert_eq!(bc.state.invalid_votes.invalid_count(&voter), 1);
     }
 
     #[test]

@@ -196,10 +196,10 @@ mod tests {
     #[test]
     fn expired_messages_are_pruned_and_live_ones_stay() {
         let mut registry = CrossDomainMessageRegistry::new();
-        let mut old = make(1);
+        let mut old = make_message(1);
         old.expiry_height = 10;
         old.message_id = old.calculate_message_id();
-        let mut fresh = make(2);
+        let mut fresh = make_message(2);
         fresh.expiry_height = 90_000;
         fresh.message_id = fresh.calculate_message_id();
         registry.insert(old).unwrap();
