@@ -40,6 +40,19 @@ pub struct PendingDomainUnfreeze {
     pub justification_hash: [u8; 32],
 }
 
+/// BLG-0091 (P04-F09): a governance-queued PoA compliance freeze/unfreeze,
+/// applied by `Blockchain::apply_pending_poa_compliance` where the domain
+/// kind can be read from the domain record (never from the transaction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPoaCompliance {
+    pub domain_id: u32,
+    /// The admin the request stands on (audit trail; verified at apply).
+    pub admin: Address,
+    /// The account being frozen or unfrozen.
+    pub target: Address,
+    pub reason_hash: [u8; 32],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub public_key: Address,
@@ -377,6 +390,14 @@ pub struct AccountState {
     /// Populated by executor when `GovernanceAction::UnfreezeConsensusDomain` is executed,
     /// Drained by `Blockchain` after `apply_block_effects`.
     pub pending_domain_unfreezes: Vec<PendingDomainUnfreeze>,
+    /// BLG-0090/0091 (P04-F08/F09): the PoA compliance ledger (screening,
+    /// freeze, travel-rule) in consensus state - rooted and snapshotted
+    /// with everything else that decides writes.
+    pub poa_compliance: crate::registry::PoaComplianceRegistry,
+    /// BLG-0091: governance-queued compliance freezes/unfreezes awaiting
+    /// application (see [`PendingPoaCompliance`]).
+    pub pending_poa_freezes: Vec<PendingPoaCompliance>,
+    pub pending_poa_unfreezes: Vec<PendingPoaCompliance>,
     /// Bounded proof tasks and the receipts that settle them.
     ///
     /// `settlement::proof_market` models a task's whole life, from pending
@@ -439,6 +460,9 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            pending_poa_freezes: Vec::new(),
+            pending_poa_unfreezes: Vec::new(),
             proof_market: crate::settlement::ProofMarketState::new(),
         }
     }
@@ -493,6 +517,9 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            pending_poa_freezes: Vec::new(),
+            pending_poa_unfreezes: Vec::new(),
             proof_market: crate::settlement::ProofMarketState::new(),
         };
         state.load_from_storage()?;
@@ -556,6 +583,9 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            pending_poa_freezes: Vec::new(),
+            pending_poa_unfreezes: Vec::new(),
             proof_market: crate::settlement::ProofMarketState::new(),
         }
     }
@@ -643,6 +673,9 @@ impl AccountState {
             invalid_votes: snapshot.invalid_votes.clone().unwrap_or_default(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
+            pending_poa_freezes: Vec::new(),
+            pending_poa_unfreezes: Vec::new(),
             // An assigned task names the prover that took it and the epoch it
             // was taken in. A restart that dropped that would release every
             // prover from work it had already committed to, so this is
@@ -1851,6 +1884,41 @@ impl AccountState {
                     "Executing Governance: PoA domain {domain_id} admin {admin} removed"
                 );
             }
+            ProposalType::FreezePoaAccount {
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+            } => {
+                // BLG-0091 (P04-F09): queued for the blockchain layer, which
+                // reads the domain kind from the domain record and verifies
+                // the named admin before the ledger moves.
+                self.pending_poa_freezes.push(PendingPoaCompliance {
+                    domain_id: *domain_id,
+                    admin: *admin,
+                    target: *address,
+                    reason_hash: *reason_hash,
+                });
+                tracing::info!(
+                    "Executing Governance: PoA freeze of {address} on domain {domain_id} queued"
+                );
+            }
+            ProposalType::UnfreezePoaAccount {
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+            } => {
+                self.pending_poa_unfreezes.push(PendingPoaCompliance {
+                    domain_id: *domain_id,
+                    admin: *admin,
+                    target: *address,
+                    reason_hash: *reason_hash,
+                });
+                tracing::info!(
+                    "Executing Governance: PoA unfreeze of {address} on domain {domain_id} queued"
+                );
+            }
             ProposalType::ParameterUpdate(key, value) => {
                 // Wire ParameterUpdate into RegistryParams with bounds.
                 match self.apply_registry_parameter_update(key, value) {
@@ -2650,6 +2718,16 @@ impl AccountState {
         if !self.invalid_votes.is_empty() {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
+        // BLG-0090 (P04-F08): the PoA admission records were consensus gate
+        // state in neither the root nor the snapshot digest - hidden today,
+        // wide open the moment the write path connected. Folded always (the
+        // fold is domain-tagged, so "empty" and "hashes to zero" stay apart).
+        final_hasher.update(b"poa_admission_v1");
+        final_hasher.update(self.poa_onboarding.root());
+        // BLG-0091 (P04-F09): the compliance ledger decides whether an
+        // operator's audit export is refused; it is state like any other.
+        final_hasher.update(b"poa_compliance_v1");
+        final_hasher.update(self.poa_compliance.root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
@@ -3626,6 +3704,29 @@ mod tests {
     }
 
     #[test]
+    /// BLG-0090/0091 (P04-F08/F09): the PoA gate state is ROOTED - an
+    /// admission write or a compliance freeze moves the state root, so a
+    /// node that skipped them diverges instead of agreeing silently.
+    #[test]
+    fn poa_gate_state_moves_the_account_state_root() {
+        let mut st = AccountState::new();
+        let before = st.calculate_state_root();
+        st.poa_onboarding
+            .add_admin(0, Address::from([1u8; 32]));
+        let after_admin = st.calculate_state_root();
+        assert_ne!(before, after_admin);
+        st.poa_compliance
+            .freeze_suspicious(
+                crate::registry::ComplianceDomainKind::PoA,
+                Address::from([1u8; 32]),
+                Address::from([2u8; 32]),
+                [7u8; 32],
+                1,
+            )
+            .unwrap();
+        assert_ne!(after_admin, st.calculate_state_root());
+    }
+
     fn hub_registry_mutation_changes_account_state_root() {
         use crate::budlumxyz::types::AppCategory;
 
