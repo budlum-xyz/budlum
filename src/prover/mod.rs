@@ -263,6 +263,8 @@ pub enum ProofError {
     },
     /// Insufficient balance to pay the submission fee.
     InsufficientFee { have: u64, need: u64 },
+    /// The claim registry is at its capacity (BLG-0294).
+    RegistryFull { cap: usize },
 }
 
 impl std::fmt::Display for ProofError {
@@ -286,11 +288,29 @@ impl std::fmt::Display for ProofError {
                     "insufficient balance for proof fee: have {have}, need {need}"
                 )
             }
+            ProofError::RegistryFull { cap } => {
+                write!(f, "proof claim registry is full ({cap} entries)")
+            }
         }
     }
 }
 
 impl std::error::Error for ProofError {}
+
+/// Hard capacity of [`ProofClaimRegistry`] (BLG-0294, P18-F09).
+///
+/// The registry had no bound and no pruning, and it is consensus-critical,
+/// which rules the two options apart from how they look elsewhere: pruning
+/// old claims would erase the record that makes "first valid wins" a finality
+/// statement - a claim dropped for domain height H lets a *new* proof assert a
+/// different root for H today. So no horizon is safe here while proofs are
+/// accepted for any past height, and the bound is enforced by refusal
+/// instead: entries cost a burned fee (post BLG-0287 operator gate), reaching
+/// 100k means paying it 100k times, and past the cap every node refuses the
+/// same way, so the boundary is deterministic. Write-per-save stays too - the
+/// submission path runs outside block execution, and a crash that lost a
+/// save would reopen the exact conflict the record exists to close.
+pub const MAX_PROOF_CLAIMS: usize = 100_000;
 
 /// Registry of accepted proof claims implementing the "first valid wins" policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -337,8 +357,15 @@ impl ProofClaimRegistry {
     }
 
     /// Persist a newly accepted claim.
-    pub fn record(&mut self, claim: AcceptedProofClaim) {
+    ///
+    /// BLG-0294: refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
+    /// bound; the caller maps the refusal onto the submission path.
+    pub fn record(&mut self, claim: AcceptedProofClaim) -> Result<(), ProofError> {
+        if self.claims.len() >= MAX_PROOF_CLAIMS {
+            return Err(ProofError::RegistryFull { cap: MAX_PROOF_CLAIMS });
+        }
         self.claims.insert(claim.key, claim);
+        Ok(())
     }
 }
 
@@ -362,6 +389,45 @@ mod tests {
         }
     }
 
+    /// BLG-0294: the cap refuses at the boundary and the refusal is total -
+    /// the registry state is untouched, so a full registry still answers
+    /// its recorded claims and still classifies duplicates correctly.
+    /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by
+    /// testing the boundary: pre-fill to cap-1 with distinct keys.
+    #[test]
+    fn registry_refuses_past_the_cap() {
+        let mut reg = ProofClaimRegistry::new();
+        for h in 0..(MAX_PROOF_CLAIMS as u64 - 1) {
+            reg.record(AcceptedProofClaim {
+                key: key(h),
+                final_state_root: [1u8; 32],
+                prover: Address::from([9u8; 32]),
+                rewarded: false,
+            })
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| unreachable!("fill below the cap cannot fail: {e}"));
+        }
+        assert_eq!(reg.len(), MAX_PROOF_CLAIMS - 1);
+        let err = reg
+            .record(AcceptedProofClaim {
+                key: key(MAX_PROOF_CLAIMS as u64),
+                final_state_root: [2u8; 32],
+                prover: Address::from([9u8; 32]),
+                rewarded: false,
+            })
+            .expect_err("one past the cap must be refused");
+        assert!(matches!(err, ProofError::RegistryFull { cap } if cap == MAX_PROOF_CLAIMS));
+        assert_eq!(reg.len(), MAX_PROOF_CLAIMS - 1, "refusal must not mutate");
+        assert_eq!(
+            reg.classify(key(0), [1u8; 32]).unwrap(),
+            ClaimDecision::Duplicate,
+            "recorded claims stay live at the cap"
+        );
+        // A duplicate of a recorded claim is classified, not recorded: the
+        // cap must not turn idempotent resubmissions into refusals.
+        assert_eq!(reg.classify(key(5), [1u8; 32]).unwrap(), ClaimDecision::Duplicate);
+    }
+
     #[test]
     fn first_claim_is_new_then_duplicate() {
         let mut reg = ProofClaimRegistry::new();
@@ -372,7 +438,8 @@ mod tests {
             final_state_root: [1u8; 32],
             prover: Address::from([9u8; 32]),
             rewarded: true,
-        });
+        })
+        .expect("first record is under the cap");
         // Same result again -> idempotent.
         assert_eq!(
             reg.classify(k, [1u8; 32]).unwrap(),
@@ -389,7 +456,8 @@ mod tests {
             final_state_root: [1u8; 32],
             prover: Address::from([9u8; 32]),
             rewarded: false,
-        });
+        })
+        .expect("first record is under the cap");
         assert_eq!(
             reg.classify(k, [2u8; 32]),
             Err(ProofError::ConflictingClaim {
