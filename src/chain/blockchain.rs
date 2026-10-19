@@ -3450,8 +3450,17 @@ impl Blockchain {
             return Err("no external domain is registered under this key".to_string());
         };
         let mut versions = reg.versions.clone();
+        // BLG-0161 (P07-F16): the fork lands only on a version the adapter
+        // itself accepts - `reg.record.accepted_evidence_versions` is policy
+        // output and cannot vouch for what the adapter takes.
         versions
-            .schedule_fork(old_version, new_version, fork_height, grace_heights)
+            .schedule_fork(
+                old_version,
+                new_version,
+                fork_height,
+                grace_heights,
+                &reg.record.descriptor.accepted_evidence_versions,
+            )
             .map_err(|e: crate::cross_domain::external::ForkError| {
                 // The refusal plus the operator's next step: a fork refusal
                 // is always about the schedule, and the fix differs by rule.
@@ -3470,6 +3479,9 @@ impl Blockchain {
                     }
                     crate::cross_domain::external::ForkError::GraceTooWide { .. } => {
                         "narrow the grace window to the domain's limit"
+                    }
+                    crate::cross_domain::external::ForkError::VersionNotAccepted { .. } => {
+                        "fork only to a version the adapter accepts"
                     }
                 };
                 format!("{e}; {hint}")
