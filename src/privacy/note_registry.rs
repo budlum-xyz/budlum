@@ -40,8 +40,10 @@ pub const MAX_SPENT_NULLIFIERS: usize = 262_144;
 /// admitted, the two views cannot disagree about what is spent.
 #[must_use]
 pub fn is_note_hash(h: &NoteHash) -> bool {
-    budlum_note_packing::is_packed(h)
-        && budlum_note_packing::is_canonical_field(budlum_note_packing::field_from_hash(h))
+    // BLG-0284 (P17-F18): both halves of the shape check now live behind one
+    // fallible accessor in the crate that owns the packing, so admission and
+    // the zkVM's `is_spent(u64)` view fold through the SAME checked path.
+    budlum_note_packing::field_of_packed_hash(h).is_some()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
