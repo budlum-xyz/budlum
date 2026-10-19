@@ -868,6 +868,7 @@ mod tests {
     };
     use crate::cross_domain::external::versioning::VersionPolicy;
     use crate::cross_domain::external::{ChallengeReward, DomainEconomics, ProverFee};
+    use crate::cross_domain::AdapterId;
 
     struct Fix;
 
