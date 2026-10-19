@@ -84,7 +84,14 @@ macro_rules! gen_pow_difficulty_tests {
             #[test]
             fn $name() {
                 let engine = PoWEngine::new($diff);
-                assert_eq!(engine.info().contains(&$diff.to_string()), $diff > 0 || engine.info().contains("0"));
+                assert_eq!(
+                    engine.info(),
+                    format!(
+                        "PoW (difficulty: {}, binary target: {} leading zero bits)",
+                        $diff,
+                        $diff * 4
+                    )
+                );
             }
         )*
     }
