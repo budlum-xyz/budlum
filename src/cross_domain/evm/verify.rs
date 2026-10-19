@@ -242,7 +242,10 @@ pub struct SyncAttestation<'a> {
 /// On success the caller gets a `VerifiedDeposit` holding every proven field
 /// the mint needs. On failure it gets a `VerifyError` naming the step at which
 /// the proof turned out to be invalid.
-pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {
+pub fn verify_evm_receipt(
+    proof: &EvmDepositProof<'_>,
+    trusted_checkpoint: Option<&(u64, [u8; 32])>,
+) -> Result<VerifiedDeposit, VerifyError> {
     // The receipt proof cannot prove a transaction hash, but the relay result
     // still needs a non-empty identifier to correlate the proof with the
     // external action it claims to observe. Refuse the ambiguous value before
@@ -259,7 +262,7 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
         .map(|raw| decode_header_or_err(raw))
         .collect();
     let confs = confs?;
-    verify_chain(&target, &confs, proof.required_confirmations)
+    verify_chain(&target, &confs, proof.required_confirmations, trusted_checkpoint)
         .map_err(|e| VerifyError::Header(e.to_string()))?;
 
     // 2. MPT verify: receiptsRoot → receipt bytes.
@@ -290,14 +293,32 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
     // indistinguishable from one that is switched off. What it does buy is
     // that a proof which *claims* PoS finality has that claim checked rather
     // than trusted.
-    if let Some(ref attestation) = proof.sync_attestation {
-        verify_execution_block_finality(
-            attestation.state,
-            attestation.aggregate,
-            attestation.beacon,
-            attestation.chain,
-            &target.hash,
-        )?;
+    // BLG-0111 (P05-F04, karar B with A interim): finality evidence is
+    // MANDATORY in one of two forms. B is the standing rule - a sync
+    // committee attestation is verified rather than trusted. A is the
+    // interim form - the chain must touch the operator's trusted
+    // checkpoint (already enforced inside `verify_chain`). Neither ->
+    // the deposit refuses: counting confirmations alone is a bet that no
+    // reorg is that deep, not proof that none can be.
+    match &proof.sync_attestation {
+        Some(attestation) => {
+            verify_execution_block_finality(
+                attestation.state,
+                attestation.aggregate,
+                attestation.beacon,
+                attestation.chain,
+                &target.hash,
+            )?;
+        }
+        None => {
+            if trusted_checkpoint.is_none() {
+                return Err(VerifyError::Header(
+                    "no finality evidence: neither a sync-committee attestation nor a \
+                     trusted checkpoint is configured"
+                        .into(),
+                ));
+            }
+        }
     }
 
     // 6. Replay protection lives in the caller's domain. What is returned
@@ -434,6 +455,17 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// BLG-0111 (P05-F04): the fixtures anchor at their own target header -
+    /// the checkpoint rule is pinned by its own tests; every other fixture
+    /// test keeps its old contract under that anchor.
+    fn verify_fixture(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {
+        match decode_header_or_err(proof.target_header) {
+            Ok(target) => verify_evm_receipt(proof, Some(&(target.number, target.hash))),
+            Err(_) => verify_evm_receipt(proof, Some(&(u64::MAX, [0xFF; 32]))),
+        }
+    }
     use super::fixtures::{build_fixture, conf_refs, header_rlp, Fixture};
     use super::*;
     use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
@@ -457,7 +489,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof),
+            verify_fixture(&proof),
             Err(VerifyError::EmptyTransactionHash)
         );
     }
@@ -480,7 +512,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let verified = verify_evm_receipt(&proof).unwrap();
+        let verified = verify_fixture(&proof).unwrap();
         assert_eq!(verified.tx_hash, "0xabc123");
         assert_eq!(verified.deposit_log_data, data);
         assert_eq!(verified.block_number, 100);
@@ -513,8 +545,8 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let first = verify_evm_receipt(&under("0xaaaa")).unwrap();
-        let second = verify_evm_receipt(&under("0xbbbb")).unwrap();
+        let first = verify_fixture(&under("0xaaaa")).unwrap();
+        let second = verify_fixture(&under("0xbbbb")).unwrap();
         assert_ne!(first.tx_hash, second.tx_hash);
         assert_eq!(
             (first.block_hash, first.receipt_key.clone()),
@@ -542,7 +574,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::TxFailed
         );
     }
@@ -565,7 +597,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let err = verify_evm_receipt(&proof).unwrap_err();
+        let err = verify_fixture(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Header(_)));
     }
 
@@ -590,7 +622,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let err = verify_evm_receipt(&proof).unwrap_err();
+        let err = verify_fixture(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Header(_)));
     }
 
@@ -614,7 +646,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::LogNotFound
         );
     }
@@ -639,7 +671,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::LogNotFound
         );
     }
@@ -662,7 +694,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let err = verify_evm_receipt(&proof).unwrap_err();
+        let err = verify_fixture(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Mpt(_)));
     }
 
@@ -686,7 +718,7 @@ mod tests {
             deposit_topic0: &[0u8; 32],
             sync_attestation: None,
         };
-        let _ = verify_evm_receipt(&proof); // Err beklenir, panic YOK.
+        let _ = verify_fixture(&proof); // Err beklenir, panic YOK.
     }
 
     // ---- Sync-committee attestation ----
@@ -757,7 +789,7 @@ mod tests {
 
         let proof = proof_with_attestation(&f, &confs, &emitter, &topic0, None);
         assert!(
-            verify_evm_receipt(&proof).is_ok(),
+            verify_fixture(&proof).is_ok(),
             "N-confirmation finality must keep working; this is what every \
              existing caller relies on"
         );
@@ -798,7 +830,7 @@ mod tests {
             }),
         );
 
-        let err = verify_evm_receipt(&proof)
+        let err = verify_fixture(&proof)
             .expect_err("an attestation nobody signed must not pass as finality");
         assert!(
             matches!(
@@ -849,7 +881,7 @@ mod tests {
             }),
         );
 
-        let err = verify_evm_receipt(&proof)
+        let err = verify_fixture(&proof)
             .expect_err("a bitmap claiming 512 signers over 512 zero keys must not pass");
         assert!(
             matches!(err, VerifyError::SyncCommittee(_)),
@@ -891,7 +923,7 @@ mod tests {
             }),
         );
 
-        let err = verify_evm_receipt(&proof).expect_err("a reverted transaction must be refused");
+        let err = verify_fixture(&proof).expect_err("a reverted transaction must be refused");
         assert_eq!(
             err,
             VerifyError::TxFailed,
@@ -931,7 +963,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::SyncCommittee(SyncCommitteeError::ExecutionBlockNotInBeaconBody),
             "a committee signature over a header that does not contain the \
              target block says nothing about the target block"
@@ -952,7 +984,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::SyncCommittee(SyncCommitteeError::PeriodMismatch {
                 slot_period: 3,
                 state_period: 0,
@@ -974,7 +1006,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::SyncCommittee(SyncCommitteeError::InvalidPubkey),
             "a header that does commit to the target reaches the key checks"
         );
