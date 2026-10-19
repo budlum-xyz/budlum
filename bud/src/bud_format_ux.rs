@@ -72,9 +72,13 @@ pub fn qr_capacity_bytes(version: u32) -> usize {
     }
 }
 
-/// Content -> frame count (BLOCK=200 bytes + a 20 B header -> a 200 B payload
-/// per frame). Each droplet carries a BLOCK=200 B payload; the QR v40 capacity
-/// is 2953 B, so one frame carries 14 droplets.
+/// The header every droplet frame carries before its payload (the same 20 bytes
+/// as the QR video frame header).
+const DROPLET_HEADER_BYTES: usize = 20;
+
+/// Content -> frame count. Each droplet carries `bytes_per_droplet` of payload
+/// and travels with a 20 B header, so a BLOCK=200 B droplet takes 220 B in a
+/// frame; the QR v40 capacity is 2953 B, so one frame carries 13 droplets.
 pub fn qr_frame_count(
     content_bytes: usize,
     bytes_per_droplet: usize,
@@ -85,7 +89,10 @@ pub fn qr_frame_count(
     }
     // A frame that cannot hold even one droplet carries nothing; report 0
     // instead of dividing by zero.
-    let droplets_per_frame = frame_capacity / bytes_per_droplet;
+    let Some(wire_bytes) = bytes_per_droplet.checked_add(DROPLET_HEADER_BYTES) else {
+        return 0;
+    };
+    let droplets_per_frame = frame_capacity / wire_bytes;
     if droplets_per_frame == 0 {
         return 0;
     }
@@ -94,7 +101,7 @@ pub fn qr_frame_count(
 }
 
 /// A long video (for example 2 hours, 4 GB) -> how many frames, rounds and
-/// segments. BLOCK=200 B, QR v40 -> 14 droplets per frame. 4 GB = 4*2^30 bytes.
+/// segments. BLOCK=200 B plus a 20 B header, QR v40 -> 13 droplets per frame. 4 GB = 4*2^30 bytes.
 pub struct VideoUx {
     pub frames: usize,          // total frames (a systematic round)
     pub rounds: usize,          // carousel rounds (1 round = every block)
@@ -106,7 +113,7 @@ pub struct VideoUx {
 pub fn video_ux(bytes: usize) -> VideoUx {
     let bytes_per_droplet = 200usize;
     let frame_capacity = qr_capacity_bytes(40); // v40
-    let droplets_per_frame = (frame_capacity / bytes_per_droplet).max(1);
+    let droplets_per_frame = (frame_capacity / (bytes_per_droplet + DROPLET_HEADER_BYTES)).max(1);
     let droplets = bytes.div_ceil(bytes_per_droplet);
     let frames = droplets.div_ceil(droplets_per_frame);
     let segment_size = 256 * 1024 * 1024;
@@ -187,7 +194,11 @@ mod tests {
         // v1 QR (17 B) cannot hold a 200 B droplet: 0 frames, no divide-by-zero.
         assert_eq!(qr_frame_count(100, 200, qr_capacity_bytes(1)), 0);
         // One droplet per frame exactly.
-        assert_eq!(qr_frame_count(400, 200, 200), 2);
+        assert_eq!(qr_frame_count(400, 200, 220), 2);
+        // A frame of exactly 200 B cannot hold a droplet with its header.
+        assert_eq!(qr_frame_count(400, 200, 200), 0);
+        // 14 droplets do not fit one v40 frame: 13 do.
+        assert_eq!(qr_frame_count(2800, 200, qr_capacity_bytes(40)), 2);
     }
 
     #[test]
