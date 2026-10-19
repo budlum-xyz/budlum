@@ -2717,6 +2717,22 @@ impl Executor {
                         hex::encode(justification_hash)
                     );
                 }
+                crate::core::governance::GovernanceAction::PoaAddAdmin { .. }
+                | crate::core::governance::GovernanceAction::PoaRemoveAdmin { .. }
+                | crate::core::governance::GovernanceAction::FreezePoaAccount { .. }
+                | crate::core::governance::GovernanceAction::UnfreezePoaAccount { .. } => {
+                    // The PoA admin and compliance decisions are applied by
+                    // `AccountState::execute_proposal`, which reads the
+                    // `ProposalType` directly, and `execute_passed_proposals`
+                    // does not emit them (BLG-0089/0091/0094). A second
+                    // writer would apply the same vote twice, so an arrival
+                    // here stops the block, like `VerifyHubApp` above.
+                    return Err(BudlumError::validation(
+                        "poa_governance_wrong_path",
+                        "a PoA governance decision arrived as a GovernanceAction; it is applied \
+                         by AccountState::execute_proposal, so applying it here would run it twice",
+                    ));
+                }
             }
         }
 
