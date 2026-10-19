@@ -856,6 +856,18 @@ impl AiRegistry {
         request_id: &AiRequestId,
         current_block: u64,
     ) -> Result<(Address, u64), String> {
+        let claim = self.check_reclaimable(request_id, current_block)?;
+        self.reclaimed_fees.insert(*request_id);
+        Ok(claim)
+    }
+
+    /// Read-only form of [`Self::reclaim_fee`]: applies every rule and changes nothing.
+    /// The status query uses it, so no registry copy is needed.
+    pub fn check_reclaimable(
+        &self,
+        request_id: &AiRequestId,
+        current_block: u64,
+    ) -> Result<(Address, u64), String> {
         let request = self
             .requests
             .get(request_id)
@@ -903,12 +915,7 @@ impl AiRegistry {
             ));
         }
 
-        let requester = request.requester;
-        let max_fee = request.max_fee;
-
-        self.reclaimed_fees.insert(*request_id);
-
-        Ok((requester, max_fee))
+        Ok((request.requester, request.max_fee))
     }
 
     /// Cancel a pending inference request.

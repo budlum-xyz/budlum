@@ -811,6 +811,15 @@ mod tests {
         .unwrap();
 
         // Deadline has passed (current_block=200 > deadline_block=110, result_deadline=60)
+        // The read-only check changes nothing (P10-F08): it can run twice.
+        assert_eq!(
+            registry.check_reclaimable(&req_id, 200),
+            Ok((requester, 500))
+        );
+        assert_eq!(
+            registry.check_reclaimable(&req_id, 200),
+            Ok((requester, 500))
+        );
         let result = registry.reclaim_fee(&req_id, 200);
         assert!(
             result.is_ok(),
@@ -819,6 +828,7 @@ mod tests {
         let (reclaimed_requester, max_fee) = result.unwrap();
         assert_eq!(reclaimed_requester, requester);
         assert_eq!(max_fee, 500);
+        assert!(registry.check_reclaimable(&req_id, 200).is_err());
     }
 
     #[test]
