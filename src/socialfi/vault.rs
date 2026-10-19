@@ -84,6 +84,9 @@ pub enum VaultError {
     /// would be the caller declaring an authority it does not have.
     #[error("token {id} belongs to {}; the sender named it as if it were theirs", .holder.to_hex())]
     NotOwner { id: u64, holder: Address },
+    /// The folder already holds the most members one folder may hold.
+    #[error("folder {0} is full")]
+    FolderFull(u64),
 }
 
 /// The folder-to-membership map. Pure state, no clock, no ownership: those
@@ -95,6 +98,9 @@ pub struct VaultRegistry {
 }
 
 impl VaultRegistry {
+    /// Most members one folder can hold. It bounds the membership scans.
+    pub const MAX_MEMBERS_PER_FOLDER: usize = 1_000;
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -169,6 +175,9 @@ impl VaultRegistry {
         if list.contains(&member) {
             return Err(VaultError::AlreadyMember(member, folder));
         }
+        if list.len() >= Self::MAX_MEMBERS_PER_FOLDER {
+            return Err(VaultError::FolderFull(folder));
+        }
         list.push(member);
         Ok(())
     }
@@ -213,6 +222,13 @@ impl VaultRegistry {
         }
         if self.contains(to, member) {
             return Err(VaultError::AlreadyMember(member, to));
+        }
+        if self
+            .members
+            .get(&to)
+            .is_some_and(|m| m.len() >= Self::MAX_MEMBERS_PER_FOLDER)
+        {
+            return Err(VaultError::FolderFull(to));
         }
         self.extract_member(from, member)?;
         self.add_member(to, member)?;
@@ -411,6 +427,16 @@ mod tests {
             }
         }
         assert_eq!(vault.add_member(depth, 1), Err(VaultError::Cycle(depth, 1)));
+    }
+
+    #[test]
+    fn a_folder_refuses_members_past_the_cap() {
+        let mut v = VaultRegistry::new();
+        v.register_folder(1).unwrap();
+        for id in 0..VaultRegistry::MAX_MEMBERS_PER_FOLDER as u64 {
+            v.add_member(1, 10_000 + id).unwrap();
+        }
+        assert_eq!(v.add_member(1, 99_999), Err(VaultError::FolderFull(1)));
     }
 
     fn two_folders() -> (VaultRegistry, u64, u64) {
