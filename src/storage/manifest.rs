@@ -69,6 +69,10 @@ impl ShardRef {
 /// that was not produced by any of them.
 pub const MIN_AEAD_CIPHERTEXT_BYTES: u64 = 16;
 
+/// Most shards one manifest may list. The check runs before any per-shard work, so a hostile
+/// manifest cannot make validation allocate or loop without bound.
+pub const MAX_MANIFEST_SHARDS: usize = 65_536;
+
 /// How the bytes behind a manifest were protected before they left the
 /// uploader.
 ///
@@ -732,6 +736,12 @@ impl ContentManifest {
         if self.shards.is_empty() {
             return Err("ContentManifest must have at least one shard".into());
         }
+        if self.shards.len() > MAX_MANIFEST_SHARDS {
+            return Err(format!(
+                "ContentManifest lists {} shards, above the {MAX_MANIFEST_SHARDS} allowed",
+                self.shards.len()
+            ));
+        }
         if self.shards.len() as u32 != self.shard_count {
             return Err(format!(
                 "shard_count {} does not match the {} shards present",
@@ -1151,6 +1161,15 @@ mod tests {
         let m1 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         let m2 = ContentManifest::from_bytes_sliced(b"hello WORLD", 4).unwrap();
         assert_ne!(m1.manifest_id, m2.manifest_id);
+    }
+
+    #[test]
+    fn a_manifest_cannot_list_more_shards_than_the_ceiling() {
+        let mut manifest = ContentManifest::from_shards(vec![shard(0, ShardKind::Data)]).unwrap();
+        let first = manifest.shards[0].clone();
+        manifest.shards = vec![first; MAX_MANIFEST_SHARDS + 1];
+        let err = manifest.validate_untrusted().unwrap_err();
+        assert!(err.contains("allowed"), "{err}");
     }
 
     #[test]
