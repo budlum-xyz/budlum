@@ -38,7 +38,12 @@ fn verified_gateway_content(
 fn read_local_storage(storage: &Storage, cid: &ContentId) -> Result<Option<Vec<u8>>, String> {
     match storage.get_content(cid) {
         Ok(chunk) => verified_gateway_content("local sled storage", cid, chunk).map(Some),
-        Err(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(format!(
+            "gateway content from local sled storage does not match ContentId {}",
+            hex::encode(&cid.0[..8])
+        )),
+        Err(e) => Err(format!("local sled storage read failed: {e}")),
     }
 }
 
