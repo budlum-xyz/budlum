@@ -439,7 +439,9 @@ mod tests {
     #[test]
     fn duplicate_shard_ids_and_zero_semantics_are_refused() {
         let mut dup = shards();
-        dup[1].content_id = dup[0].content_id;
+        if let [first, second, ..] = dup.as_mut_slice() {
+            second.content_id = first.content_id;
+        }
         let err = Bridge::start(
             cfg(),
             &[9; 32],

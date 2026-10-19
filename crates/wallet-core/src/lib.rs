@@ -221,7 +221,7 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     for i in 0..(entropy_bits / 8) {
         let mut byte = 0u8;
         for j in 0..8 {
-            byte = (byte << 1) | (bits[i * 8 + j] as u8);
+            byte = (byte << 1) | bits[i * 8 + j];
         }
         entropy.push(byte);
     }
@@ -229,7 +229,7 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     // Extract checksum
     let mut checksum = 0u8;
     for j in 0..checksum_bits {
-        checksum = (checksum << 1) | (bits[entropy_bits + j] as u8);
+        checksum = (checksum << 1) | bits[entropy_bits + j];
     }
     // Zeroizing a Vec empties it, so the bits are wiped after the last read.
     bits.zeroize();
@@ -365,9 +365,6 @@ fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
             Err(_) => None,
         }
     };
-    #[cfg(not(feature = "production"))]
-    let hedged: Option<Signature<MlDsa87>> = None;
-
     // BLG-0278 (P17-F12): the fallback is now a named decision, not a
     // silent one. ML-DSA's DETERMINISTIC mode is the FIPS 204 approved default;
     // the hedge is defense-in-depth against side channels on platforms that
@@ -378,7 +375,10 @@ fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
     // verify` pins the fallback path's correctness), and the feature gate
     // means non-production builds always take this exact path, so the tested
     // code is the shipped code for the fallback.
+    #[cfg(feature = "production")]
     let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| deterministic_fallback(sk, message));
+    #[cfg(not(feature = "production"))]
+    let sig: Signature<MlDsa87> = deterministic_fallback(sk, message);
     let enc: EncodedSignature<MlDsa87> = sig.encode();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
     out.copy_from_slice(enc.as_ref());
@@ -472,12 +472,12 @@ impl RecoveryProposal {
         hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V3");
         hasher.update(self.chain_id.to_be_bytes());
         hasher.update(self.account_nonce.to_be_bytes());
-        hasher.update(&self.current_owner);
-        hasher.update(&self.current_address);
-        hasher.update(&self.new_owner);
-        hasher.update(&self.new_address);
-        hasher.update(&self.created_block.to_be_bytes());
-        hasher.update(&self.executable_after.to_be_bytes());
+        hasher.update(self.current_owner);
+        hasher.update(self.current_address);
+        hasher.update(self.new_owner);
+        hasher.update(self.new_address);
+        hasher.update(self.created_block.to_be_bytes());
+        hasher.update(self.executable_after.to_be_bytes());
         hasher.finalize().into()
     }
 
@@ -1041,11 +1041,11 @@ impl Wallet {
 
         #[cfg(not(feature = "production"))]
         {
-            return Err(WalletError::ProductionEntropyUnavailable(
+            Err(WalletError::ProductionEntropyUnavailable(
                 "Wallet::generate requires the 'production' feature for real CSPRNG entropy. \
                  Use Wallet::from_entropy() for test/dev, or build with --features production."
                     .into(),
-            ));
+            ))
         }
 
         #[cfg(feature = "production")]
@@ -1891,7 +1891,6 @@ mod tests {
         // This test is a seal - it preserves wallet-core's permissionless principle.
         // README: "anyone can be a relayer, security through stake + slashing."
         // wallet-core is a WALLET, not a RELAYER.
-        assert!(true, "wallet-core has no relayer registration/stake code");
     }
 
     #[test]

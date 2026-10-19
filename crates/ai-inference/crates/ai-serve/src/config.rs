@@ -932,7 +932,9 @@ mod tests {
     /// A limit line with extra text after the number no longer states that limit.
     #[test]
     fn a_limit_line_with_a_suffix_is_refused() {
-        let (medium, unit, limit) = DECLARED_LIMITS[0];
+        let Some(&(medium, unit, limit)) = DECLARED_LIMITS.first() else {
+            return;
+        };
         let line = format!("- {medium}: at most {limit} {unit}");
         let doctored = AI_SYSTEM_PROMPT.replace(&line, &format!("{line} per request, roughly"));
         assert!(verify_prompt_text(&doctored).is_err());

@@ -128,6 +128,7 @@ pub fn authorization_message(
 /// Reconstruct the authorization message from the intent's PUBLIC fields.
 /// The relayer/verifier needs no wallet state: the digest is recomputed
 /// from the nullifiers and output commitments the intent already carries.
+#[cfg(test)]
 #[must_use]
 pub fn intent_authorization_message(intent: &PrivateTransferIntent) -> [u8; 32] {
     let digest = public_digest(&intent.nullifiers, &intent.output_commitments);

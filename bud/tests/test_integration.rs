@@ -286,16 +286,16 @@ fn json_columnar_exact_byte_identical() {
 
 /// Parses a JSON array and returns its records as sorted strings, so two
 /// arrays compare as record sets.
-fn record_set(json: &[u8]) -> Vec<String> {
-    let value: serde_json::Value = serde_json::from_slice(json).expect("json array");
+fn record_set(json: &[u8]) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
     let mut rows: Vec<String> = value
         .as_array()
-        .expect("array")
+        .ok_or_else(|| String::from("not a json array"))?
         .iter()
         .map(|r| r.to_string())
         .collect();
     rows.sort();
-    rows
+    Ok(rows)
 }
 
 #[test]
