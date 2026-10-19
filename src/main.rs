@@ -1616,7 +1616,7 @@ async fn main() {
         // Existed and was never called, which left the fix inert in
         // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
-        let mut relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
+        let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
             .with_cursor_path(Some(cursor_path));
 
         // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address`

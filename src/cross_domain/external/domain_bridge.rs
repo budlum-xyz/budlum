@@ -396,7 +396,8 @@ mod tests {
     /// event root or transaction root - the fields are attested or empty.
     #[test]
     fn unattested_commitment_fields_are_refused() {
-        let rows: [(&str, fn(&mut DomainCommitment)); 3] = [
+        type Mutation = fn(&mut DomainCommitment);
+        let rows: [(&str, Mutation); 3] = [
             ("domain_block_hash", |c| c.domain_block_hash = [9; 32]),
             ("event_root", |c| c.event_root = [9; 32]),
             ("tx_root", |c| c.tx_root = [9; 32]),

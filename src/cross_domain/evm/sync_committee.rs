@@ -583,7 +583,7 @@ mod tests {
         let mut state = dummy_state();
         state.next_sync_committee[0] = [0xAA; BLS_PUBKEY_LEN];
         let original_period = state.current_period;
-        let original_committee = state.current_sync_committee.clone();
+        let original_committee = state.current_sync_committee;
         assert_eq!(
             rotate_period(&mut state),
             Err(SyncCommitteeError::RotationBranchRequired)
