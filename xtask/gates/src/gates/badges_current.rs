@@ -31,6 +31,10 @@ fn badge_count(readme: &str) -> Option<String> {
 
 fn measured_count(log: &str) -> Option<String> {
     log.lines().rev().find_map(|l| {
+        // Only a libtest summary line counts, not any line that says "passed".
+        if !l.trim_start().starts_with("test result:") {
+            return None;
+        }
         let idx = l.find(" passed")?;
         let num: String = l[..idx]
             .chars()
@@ -238,6 +242,7 @@ pub fn run(root: &Path, log: &Path) -> Result<String, String> {
         }
         check_ci_badge(&tr)?;
         check_rust_badge(root, &tr)?;
+        check_license_badge(root, &tr)?;
         " README.tr.md carries the same count and pins."
     } else {
         ""
@@ -355,4 +360,16 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "badge canary OK (drift/red/empty/tr-drift FAIL).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measured_count_ignores_lines_that_are_not_a_summary() {
+        let log = "test result: ok. 42 passed; 0 failed\nstray output 12 passed\n";
+        assert_eq!(measured_count(log).as_deref(), Some("42"));
+        assert_eq!(measured_count("only 7 passed here"), None);
+    }
 }
