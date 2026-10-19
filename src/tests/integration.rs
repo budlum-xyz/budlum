@@ -1711,9 +1711,11 @@ mod integration_tests {
             0,
             "no locked bridge inventory at genesis"
         );
-        // finality_lag = height - finalized; genesis shape is whatever the
-        // chain recorded - just must be a finite scrape value.
-        let _ = metrics.finality_lag.get();
+        // finality_lag = height - finalized, from the same scrape.
+        assert_eq!(
+            metrics.finality_lag.get(),
+            metrics.chain_height.get() - metrics.finalized_height.get()
+        );
     }
 
     /// Prometheus text scrape must list every registered series after a real
