@@ -382,6 +382,23 @@ impl BudGateway {
     }
 }
 
+/// Every content identity a name record points at. The Pollen guard in the
+/// RPC handlers must check all of them: the gateway serves `storage_root`
+/// while `content_id` is the other identity, and a record may hold two
+/// different values. Checking only one lets the owner pick the unprotected one.
+pub fn pollen_guard_ids(resolved: &crate::bns::types::BnsResolved) -> Vec<ContentId> {
+    let mut ids = Vec::with_capacity(2);
+    if let Some(root) = resolved.storage_root {
+        ids.push(ContentId(root));
+    }
+    if let Some(cid) = resolved.content_id {
+        if !ids.contains(&cid) {
+            ids.push(cid);
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +653,27 @@ mod tests {
         // No answer for an identity that is not cached - returning an old entry
         // under the wrong identity would make everything the gateway serves suspect.
         assert_eq!(cache.get(&ContentId([255u8; 32])), None);
+    }
+
+    #[test]
+    fn pollen_guard_ids_cover_both_storage_root_and_content_id() {
+        let resolved = crate::bns::types::BnsResolved {
+            name: "n".to_string(),
+            owner: crate::core::address::Address::zero(),
+            address: None,
+            storage_root: Some([1u8; 32]),
+            storage_domain_id: None,
+            content_id: Some(ContentId([2u8; 32])),
+            is_expired: false,
+        };
+        let ids = pollen_guard_ids(&resolved);
+        assert!(ids.contains(&ContentId([1u8; 32])));
+        assert!(ids.contains(&ContentId([2u8; 32])));
+
+        let only_root = crate::bns::types::BnsResolved {
+            content_id: None,
+            ..resolved.clone()
+        };
+        assert_eq!(pollen_guard_ids(&only_root), vec![ContentId([1u8; 32])]);
     }
 }
