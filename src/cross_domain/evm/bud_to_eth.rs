@@ -96,7 +96,6 @@ pub fn build_bud_to_eth_claim(
     finalized_header_hash: Hash32,
     finality_proof: Vec<u8>,
     burn_event_proof: Vec<u8>,
-    recipient_eth: [u8; 20],
     bridge_cap: u128,
 ) -> Result<BudToEthClaim, BudToEthError> {
     // 1. Check that the transfer exists and is in the Burned status.
@@ -123,6 +122,10 @@ pub fn build_bud_to_eth_claim(
     let mut asset_id = [0u8; 32];
     let len = bytes.len().min(32);
     asset_id[..len].copy_from_slice(&bytes[..len]);
+
+    // BLG-0116 (P05-F09): the recipient is the one the burn committed,
+    // not a free parameter the caller picks here.
+    let recipient_eth = transfer.recipient_eth.ok_or(BudToEthError::InvalidRecipient)?;
 
     Ok(BudToEthClaim {
         message_id: *message_id,
@@ -151,7 +154,6 @@ mod tests {
             [0u8; 32],
             vec![], // an empty finality proof
             vec![],
-            [0u8; 20],
             DEFAULT_BRIDGE_CAP,
         )
         .unwrap_err();

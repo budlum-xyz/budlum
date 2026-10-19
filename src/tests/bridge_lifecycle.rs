@@ -211,7 +211,7 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
     // Burn on the target side: the fix - the burn TAKES the units back.
     let message_id = lock_message.message_id;
     let burn_event = bc
-        .burn_bridge_transfer_with_event(message_id, 2, 40, 0, 0)
+        .burn_bridge_transfer_with_event(message_id, 2, 40, 0, 0, [7u8; 20])
         .expect("burn the minted transfer");
     assert_eq!(
         sum(&bc),

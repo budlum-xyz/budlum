@@ -206,7 +206,7 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
     bc.state.bridge_state.mint(&lock_message, 0).unwrap();
 
     let burn_event = bc
-        .burn_bridge_transfer_with_event(lock_message.message_id, 2, 20, 0, 1_000)
+        .burn_bridge_transfer_with_event(lock_message.message_id, 2, 20, 0, 1_000, [7u8; 20])
         .unwrap();
     let burn_message_id = burn_event.message.unwrap().message_id;
 
@@ -481,7 +481,7 @@ fn full_internal_relay_cycle_burn_unlock() {
     // 3. Burn on Domain 2 via the blockchain wrapper so production relay
     // Enqueue wiring is exercised.
     let burn_event = bc
-        .burn_bridge_transfer_with_event(lock_msg.message_id, 2, 20, 0, 1000)
+        .burn_bridge_transfer_with_event(lock_msg.message_id, 2, 20, 0, 1000, [7u8; 20])
         .unwrap();
     let burn_msg = burn_event.message.clone().unwrap();
     let burn_msg_id = burn_msg.message_id;

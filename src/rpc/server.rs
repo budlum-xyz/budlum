@@ -2778,6 +2778,9 @@ impl BudlumApiServer for RpcServer {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        // BLG-0116 (P05-F09): the burner declares the Ethereum destination
+        // here, at burn time - the claim cannot name a different one.
+        recipient_eth: [u8; 20],
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Bridge burn with event requires operator auth
         self.require_operator("bud_burnBridgeTransferWithEvent")?;
@@ -2789,6 +2792,7 @@ impl BudlumApiServer for RpcServer {
                 domain_height,
                 event_index,
                 expiry_height,
+                recipient_eth,
             )
             .await
             .map_err(|e| {

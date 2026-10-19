@@ -2484,6 +2484,12 @@ impl Blockchain {
                 "Insufficient balance for bridge lock: owner has {owner_balance}, needed {amount}"
             ));
         }
+        // BLG-0118 (P05-F11): the registry insert runs BEFORE the debit,
+        // and any later failure rolls the row and the balance back. The old
+        // order (row -> debit -> registry) left a debited owner and a live
+        // transfer when the registry refused the message.
+        let bridge_before = self.state.bridge_state.clone();
+        let balance_before = self.state.get_balance(&owner);
         let result = self
             .state
             .bridge_state
@@ -2499,16 +2505,25 @@ impl Blockchain {
                 expiry_height,
             )
             .map_err(|e| e.to_string())?;
+        if let Some(message) = result.1.message.clone() {
+            if let Err(e) = self.submit_cross_domain_message(message.clone()) {
+                self.state.bridge_state = bridge_before;
+                return Err(e);
+            }
+        }
         let owner_account = self.state.get_or_create(&owner);
         owner_account.balance = owner_account.balance.saturating_sub(amount);
 
         if let Some(store) = &self.storage {
-            store
-                .save_bridge_state(&self.state.bridge_state)
-                .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
+            if let Err(e) = store.save_bridge_state(&self.state.bridge_state) {
+                self.state.bridge_state = bridge_before;
+                if let Some(owner_account) = self.state.accounts.get_mut(&owner) {
+                    owner_account.balance = balance_before;
+                }
+                return Err(format!("Failed to persist bridge state: {e}"));
+            }
         }
         if let Some(message) = result.1.message.clone() {
-            self.submit_cross_domain_message(message.clone())?;
             self.enqueue_bridge_relay(result.1.clone(), &message);
         }
         Ok(result)
@@ -2571,6 +2586,7 @@ impl Blockchain {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        recipient_eth: [u8; 20],
     ) -> Result<DomainEvent, String> {
         // BLG-0108 (P05-F01): burn is the debit half of mint. The minted
         // units sit with the transfer's recipient, so the burn takes them
@@ -2601,6 +2617,7 @@ impl Blockchain {
                 domain_height,
                 event_index,
                 expiry_height,
+                recipient_eth,
             )
             .map_err(|e| e.to_string())?;
         let burner_account = self.state.get_or_create(&burner);
@@ -2696,10 +2713,19 @@ impl Blockchain {
         if transfer.owner != message.recipient {
             return Err("Verified bridge burn recipient mismatch".into());
         }
-        let expected_payload_hash = crate::cross_domain::bridge::bridge_payload_hash(
-            transfer.asset_id,
-            transfer.amount.get(),
-        );
+        // BLG-0116 (P05-F09): the burn payload commits the Ethereum
+        // destination - the derivation must fold the row's declared one.
+        let expected_payload_hash = match transfer.recipient_eth {
+            Some(recipient_eth) => crate::cross_domain::bridge::bridge_burn_payload_hash(
+                transfer.asset_id,
+                transfer.amount.get(),
+                &recipient_eth,
+            ),
+            None => crate::cross_domain::bridge::bridge_payload_hash(
+                transfer.asset_id,
+                transfer.amount.get(),
+            ),
+        };
         if message.payload_hash != expected_payload_hash {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
@@ -3190,8 +3216,18 @@ impl Blockchain {
         message: &crate::cross_domain::CrossDomainMessage,
     ) {
         let current_height = self.chain.len() as u64;
-        self.universal_relayer
-            .enqueue_relay(source_event, message, current_height);
+        // BLG-0117 (P05-F10): production runs the relay-enqueue stage
+        // THROUGH `BridgeRelayerPipeline` - the same pipeline the four-stage
+        // tests exercise - built around this chain's own state instead of
+        // sitting beside it as an unwired copy.
+        {
+            let mut stages = crate::cross_domain::bridge_relayer::BridgeRelayerPipeline::from_parts(
+                &mut self.state.bridge_state,
+                &mut self.universal_relayer,
+                &mut self.state.message_registry,
+            );
+            stages.enqueue_stage(&source_event, message, current_height);
+        }
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_universal_relayer(&self.universal_relayer) {
                 tracing::error!(error = %e, "Failed to persist universal relayer state");

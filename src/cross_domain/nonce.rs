@@ -65,6 +65,20 @@ impl ReplayNonceStore {
         }
     }
 
+    /// The nonce [`Self::next_nonce`] would hand out next, without consuming
+    /// it (BLG-0117/P05-F10): lets a caller build the message and register
+    /// it BEFORE the state mutates, so a registry refusal needs no rollback
+    /// of a whole `BridgeState`.
+    pub fn peek_nonce(
+        &self,
+        source_domain: DomainId,
+        target_domain: DomainId,
+        sender: Address,
+    ) -> u64 {
+        let key = (source_domain, target_domain, sender);
+        self.outbound_nonces.get(&key).copied().unwrap_or(0)
+    }
+
     pub fn next_nonce(
         &mut self,
         source_domain: DomainId,

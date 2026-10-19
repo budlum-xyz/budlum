@@ -917,7 +917,7 @@ mod settlement_prod_tests {
             .is_err());
 
         let burn_event = blockchain
-            .burn_bridge_transfer_with_event(message_id, pos.id, 56, 0, 2_000)
+            .burn_bridge_transfer_with_event(message_id, pos.id, 56, 0, 2_000, [7u8; 20])
             .unwrap();
         let mut burn_tree = DomainEventTree::new();
         burn_tree.push(burn_event.clone());
@@ -1908,7 +1908,7 @@ mod settlement_prod_tests {
         .unwrap();
 
         let burn_event = bc
-            .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 101, 0, 5000)
+            .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 101, 0, 5000, [7u8; 20])
             .unwrap();
 
         let mut burn_tree = DomainEventTree::new();
@@ -1977,7 +1977,7 @@ mod settlement_prod_tests {
         );
 
         let burn_event = bc
-            .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 201, 0, 9000)
+            .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 201, 0, 9000, [7u8; 20])
             .unwrap();
         let mut burn_tree = DomainEventTree::new();
         burn_tree.push(burn_event.clone());

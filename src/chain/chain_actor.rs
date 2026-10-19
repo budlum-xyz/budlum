@@ -382,6 +382,7 @@ pub enum ChainCommand {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        recipient_eth: [u8; 20],
         response: oneshot::Sender<Result<crate::cross_domain::DomainEvent, String>>,
     },
     UnlockBridgeTransfer {
@@ -2506,6 +2507,7 @@ impl ChainHandle {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        recipient_eth: [u8; 20],
     ) -> Result<crate::cross_domain::DomainEvent, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2516,6 +2518,7 @@ impl ChainHandle {
                 domain_height,
                 event_index,
                 expiry_height,
+                recipient_eth,
                 response: tx,
             })
             .await;
@@ -4155,6 +4158,7 @@ impl ChainActor {
                     domain_height,
                     event_index,
                     expiry_height,
+                    recipient_eth,
                     response,
                 } => {
                     let _ = response.send(self.blockchain.burn_bridge_transfer_with_event(
@@ -4163,6 +4167,7 @@ impl ChainActor {
                         domain_height,
                         event_index,
                         expiry_height,
+                        recipient_eth,
                     ));
                 }
                 ChainCommand::UnlockBridgeTransfer {

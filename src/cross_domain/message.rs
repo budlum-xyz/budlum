@@ -153,7 +153,11 @@ impl CrossDomainMessage {
 
     pub fn calculate_message_id(&self) -> MessageId {
         let kind = self.kind.as_bytes();
-        let correlation_id = self.correlation_id.unwrap_or([0u8; 32]);
+        // BLG-0121 (P05-F14): presence is folded in through the shared
+        // `presence_tagged` helper - `None` and `Some([0; 32])` used to
+        // hash identically (the zero-id collision class the header fix
+        // closed in core/hash.rs:22).
+        let correlation_id = crate::core::hash::presence_tagged(self.correlation_id);
         hash_fields_bytes(&[
             b"BDLM_CROSS_DOMAIN_MESSAGE_V2",
             &correlation_id,
@@ -220,5 +224,33 @@ mod tests {
         let mut tampered = message_a.clone();
         tampered.nonce += 1;
         assert!(!tampered.verify_id());
+    }
+
+    /// BLG-0121 (P05-F14): a `None` correlation and a present one are
+    /// DIFFERENT identities - the id folds presence, not just bytes. A
+    /// correlated id of all zeros must not collapse into "no correlation".
+    #[test]
+    fn correlation_presence_changes_the_message_id() {
+        let base = CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 3,
+            event_index: 0,
+            nonce: 4,
+            sender: crate::core::address::Address::from([1u8; 32]),
+            recipient: crate::core::address::Address::from([2u8; 32]),
+            payload_hash: [7u8; 32],
+            kind: MessageKind::BridgeLock,
+            expiry_height: 500,
+        };
+        let plain = CrossDomainMessage::new(base.clone());
+        let zeros = CrossDomainMessage::new_correlated(base.clone(), [0u8; 32]);
+        let real = CrossDomainMessage::new_correlated(base, [5u8; 32]);
+        assert_ne!(
+            plain.message_id, zeros.message_id,
+            "Some(all-zeros) must not equal None"
+        );
+        assert_ne!(plain.message_id, real.message_id);
+        assert_ne!(zeros.message_id, real.message_id);
     }
 }
