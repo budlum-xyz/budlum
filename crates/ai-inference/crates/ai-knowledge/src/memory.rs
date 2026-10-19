@@ -6,6 +6,7 @@
 //! in a local file only.
 
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 /// The summary record of one task run.
@@ -133,13 +134,31 @@ impl TaskMemory {
             serde_json::to_string(&redacted)
                 .map_err(|e| format!("could not encode the record: {e}"))?
         };
-        let mut text = std::fs::read_to_string(&self.path).unwrap_or_default();
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
+        // Append in place: a failed read must never truncate the history.
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&self.path)
+            .map_err(|e| format!("could not open the memory: {e}"))?;
+        let len = file
+            .metadata()
+            .map_err(|e| format!("could not stat the memory: {e}"))?
+            .len();
+        let mut chunk = String::new();
+        if len > 0 {
+            let mut last = [0u8; 1];
+            file.seek(std::io::SeekFrom::End(-1))
+                .and_then(|_| file.read_exact(&mut last))
+                .map_err(|e| format!("could not read the memory: {e}"))?;
+            if last[0] != b'\n' {
+                chunk.push('\n');
+            }
         }
-        text.push_str(&line);
-        text.push('\n');
-        std::fs::write(&self.path, text).map_err(|e| format!("could not write the memory: {e}"))?;
+        chunk.push_str(&line);
+        chunk.push('\n');
+        file.write_all(chunk.as_bytes())
+            .map_err(|e| format!("could not write the memory: {e}"))?;
         self.push_record(rec);
         Ok(())
     }
@@ -251,6 +270,29 @@ mod tests {
             created_at: "2026-08-14".into(),
         }))
         .unwrap();
+    }
+
+    #[test]
+    fn append_keeps_history_when_the_file_is_not_utf8() {
+        let dir = std::env::temp_dir().join("ai_inference-mem-test-nonutf8");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("memory.jsonl");
+        let mut mem = TaskMemory::open(&path).unwrap();
+        sample_records(&mut mem);
+        let mut raw = std::fs::read(&path).unwrap();
+        let before = raw.len();
+        raw.extend_from_slice(b"\xff\n");
+        std::fs::write(&path, &raw).unwrap();
+        mem.append(MemoryRecord::Decision(TaskDecision {
+            task_id: "t3".into(),
+            decision: "keep the log".into(),
+            rationale: None,
+            created_at: "2026-08-16".into(),
+        }))
+        .unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.len() > before + 2);
+        assert_eq!(&after[..before], &raw[..before]);
     }
 
     #[test]
