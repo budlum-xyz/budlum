@@ -49,6 +49,9 @@ struct RegEvent {
 #[derive(Clone, Copy)]
 struct MemEvent {
     clk: u64,
+    /// The table: `TID_MEMORY`, `TID_STACK` or `TID_STORAGE`.
+    tid: u64,
+    /// The address inside the table.
     addr: u64,
     val: u64,
     is_write: bool,
@@ -57,8 +60,15 @@ struct MemEvent {
     is_init: bool,
 }
 
-const STACK_BASE: u64 = 1 << 60;
-const STORAGE_BASE: u64 = 2 << 60;
+const TID_MEMORY: u64 = 1;
+const TID_STACK: u64 = 2;
+const TID_STORAGE: u64 = 3;
+
+/// The sort key of a memory event. The AIR computes the same number from the
+/// table id and the address columns.
+fn mem_key(tid: u64, addr: u64) -> u64 {
+    (tid << 32).wrapping_add(addr)
+}
 
 pub struct Plonky3Adapter;
 
@@ -96,6 +106,50 @@ fn build_config() -> MyConfig {
     MyConfig::new_with_security(pcs, challenger, security)
 }
 
+/// Whether the VM writes `rd` for this opcode. The AIR sums 22 selectors into
+/// `writes_rd`. This list also holds the reserved `VerifyInference`: the AIR
+/// leaves it out because its selector is zero on every row.
+fn opcode_writes_rd(op: bud_isa::Opcode) -> bool {
+    use bud_isa::Opcode as O;
+    matches!(
+        op,
+        O::Add
+            | O::Sub
+            | O::Mul
+            | O::Div
+            | O::Inv
+            | O::And
+            | O::Not
+            | O::Load
+            | O::Pop
+            | O::Eq
+            | O::Neq
+            | O::Lt
+            | O::Gt
+            | O::Lte
+            | O::Gte
+            | O::SRead
+            | O::Poseidon
+            | O::Syscall
+            | O::VerifyMerkle
+            | O::VerifyInference
+            | O::PrivacyCommit
+            | O::NullifierCheck
+            | O::SumConservation
+    )
+}
+
+/// The value `rd` holds while this step runs. An opcode that writes no
+/// register leaves it alone, so the register file after the step is the same
+/// file the step started from.
+fn rd_value_kept(step: &Step) -> u64 {
+    if step.dst_idx == 0 {
+        0
+    } else {
+        step.registers[step.dst_idx as usize]
+    }
+}
+
 fn register_events(trace: &[Step]) -> Vec<RegEvent> {
     let mut events = Vec::new();
 
@@ -129,11 +183,18 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
             sub_clk: 2,
             is_init: false,
         });
+        let writes_rd = opcode_writes_rd(step.instruction.opcode);
         events.push(RegEvent {
             clk,
             idx: step.dst_idx as u64,
-            val: if step.dst_idx == 0 { 0 } else { step.dst_val },
-            is_write: true,
+            val: if step.dst_idx == 0 {
+                0
+            } else if writes_rd {
+                step.dst_val
+            } else {
+                rd_value_kept(step)
+            },
+            is_write: writes_rd,
             sub_clk: 3,
             is_init: false,
         });
@@ -182,6 +243,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
         if let Some(addr) = step.memory_addr {
             events.push(MemEvent {
                 clk,
+                tid: TID_MEMORY,
                 addr: addr as u64,
                 val: step.memory_val.unwrap_or(0),
                 is_write: step.is_memory_write,
@@ -194,7 +256,8 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
             bud_isa::Opcode::Push => {
                 events.push(MemEvent {
                     clk,
-                    addr: STACK_BASE + step.stack_pointer as u64 - 1,
+                    tid: TID_STACK,
+                    addr: (step.stack_pointer as u64).wrapping_sub(1),
                     val: step.src1_val,
                     is_write: true,
                     is_init: false,
@@ -203,7 +266,8 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
             bud_isa::Opcode::Pop => {
                 events.push(MemEvent {
                     clk,
-                    addr: STACK_BASE + step.stack_pointer as u64,
+                    tid: TID_STACK,
+                    addr: step.stack_pointer as u64,
                     val: step.dst_val,
                     is_write: false,
                     is_init: false,
@@ -212,7 +276,8 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
             bud_isa::Opcode::Call => {
                 events.push(MemEvent {
                     clk,
-                    addr: STACK_BASE + step.stack_pointer as u64 - 1,
+                    tid: TID_STACK,
+                    addr: (step.stack_pointer as u64).wrapping_sub(1),
                     val: step.pc as u64 + 1,
                     is_write: true,
                     is_init: false,
@@ -221,7 +286,8 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
             bud_isa::Opcode::Ret => {
                 events.push(MemEvent {
                     clk,
-                    addr: STACK_BASE + step.stack_pointer as u64,
+                    tid: TID_STACK,
+                    addr: step.stack_pointer as u64,
                     val: step.dst_val,
                     is_write: false,
                     is_init: false,
@@ -235,7 +301,8 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                 };
                 events.push(MemEvent {
                     clk,
-                    addr: STORAGE_BASE + slot as u64,
+                    tid: TID_STORAGE,
+                    addr: slot as u64,
                     val: step.dst_val,
                     is_write: false,
                     is_init: false,
@@ -249,7 +316,8 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                 };
                 events.push(MemEvent {
                     clk,
-                    addr: STORAGE_BASE + slot as u64,
+                    tid: TID_STORAGE,
+                    addr: slot as u64,
                     val: step.src1_val,
                     is_write: true,
                     is_init: false,
@@ -258,13 +326,13 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
             _ => {}
         }
     }
-    events.sort_by_key(|e| (e.addr, e.clk));
+    events.sort_by_key(|e| (e.tid, e.addr, e.clk));
     // Mark the pre-execution rows now that the events are grouped by address.
-    let mut prev_addr: Option<u64> = None;
+    let mut prev_cell: Option<(u64, u64)> = None;
     for e in events.iter_mut() {
-        let first_at_addr = prev_addr != Some(e.addr);
-        prev_addr = Some(e.addr);
-        e.is_init = first_at_addr && !e.is_write && e.val != 0;
+        let first_at_cell = prev_cell != Some((e.tid, e.addr));
+        prev_cell = Some((e.tid, e.addr));
+        e.is_init = first_at_cell && !e.is_write && e.val != 0;
     }
     events
 }
@@ -274,11 +342,15 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
 /// Callers need this to compute `initial_state_root`: the commitment covers
 /// exactly the pre-written words the program read, and getting the set or the
 /// order wrong produces a proof the AIR rejects.
+///
+/// Each read is `(key, value)` with `key = table id * 2^32 + address`, the
+/// number the AIR folds. A memory cell and a storage slot with one address
+/// have two keys.
 pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
     memory_events(trace)
         .into_iter()
         .filter(|e| e.is_init)
-        .map(|e| (e.addr, e.val))
+        .map(|e| (mem_key(e.tid, e.addr), e.val))
         .collect()
 }
 
@@ -432,7 +504,14 @@ pub fn trace_matrix(
         // r1, r2` then asked the AIR for `0 == rs1 + rs2`, so any program
         // writing to r0 could run and never be proved. The zeroing now happens
         // where it belongs, on the register bus, gated by COL_RD_IDX_INV.
-        values[row_start + COL_RD_VAL_NEW] = Goldilocks::new(step.dst_val);
+        // An opcode that writes no register reads `rd` at its current value,
+        // which is what the register bus expects of it.
+        values[row_start + COL_RD_VAL_NEW] =
+            Goldilocks::new(if opcode_writes_rd(step.instruction.opcode) {
+                step.dst_val
+            } else {
+                rd_value_kept(step)
+            });
         // Inverse witness deciding, in circuit, whether this row writes to r0.
         values[row_start + COL_RD_IDX_INV] = Goldilocks::new(if step.dst_idx == 0 {
             0
@@ -509,7 +588,7 @@ pub fn trace_matrix(
         }
 
         if opcode == bud_isa::Opcode::Eq || opcode == bud_isa::Opcode::Neq {
-            let diff = step.src1_val.wrapping_sub(step.src2_val);
+            let diff = bud_vm::field_sub_goldilocks(step.src1_val, step.src2_val);
             let inv = if diff != 0 {
                 bud_vm::field_inverse_goldilocks(diff)
             } else {
@@ -520,7 +599,7 @@ pub fn trace_matrix(
 
         // SumConservation equality witness (rs1 - rs2).
         if opcode == bud_isa::Opcode::SumConservation {
-            let diff = step.src1_val.wrapping_sub(step.src2_val);
+            let diff = bud_vm::field_sub_goldilocks(step.src1_val, step.src2_val);
             let inv = if diff != 0 {
                 bud_vm::field_inverse_goldilocks(diff)
             } else {
@@ -701,8 +780,8 @@ pub fn trace_matrix(
             }
             bud_isa::Opcode::SWrite => {
                 // HIGH CWE-345: SWrite feeds the state-write chain.
-                // slot = imm (matching the AIR's storage_addr = STORAGE_BASE +
-                // COL_IMM and the memory-event slot resolution), val = rs1.
+                // slot = imm (matching the AIR's storage_addr = COL_IMM and
+                // the memory-event slot resolution), val = rs1.
                 // prev accumulator lanes come from the trace's current
                 // COL_STATE_WRITES_0..7 (zero on the first row, carried
                 // otherwise).
@@ -1023,7 +1102,10 @@ pub fn trace_matrix(
             // Inverse-witness for final root equality check.
             // Rd_val_new is constrained to equal (final == root) as a field boolean.
             let root = step.src1_val;
-            let diff = final_merkle.wrapping_sub(root);
+            // Field subtraction, as for NullifierCheck above: the AIR forms
+            // `final - root` in Goldilocks, so `wrapping_sub` gives a wrong
+            // inverse witness whenever `final < root`.
+            let diff = bud_vm::field_sub_goldilocks(final_merkle, root);
             let inv = if diff != 0 {
                 bud_vm::field_inverse_goldilocks(diff)
             } else {
@@ -1135,13 +1217,33 @@ pub fn trace_matrix(
                 0
             };
             values[row_start + COL_REG_SAME_INV] = Goldilocks::new(inv);
+
+            // The step to the next row, in bits. The events are sorted by
+            // `(idx, clk, sub_clk)` and no two are equal, so the step is
+            // never negative.
+            let next = &events[i + 1];
+            let step = if next.idx == e.idx {
+                (next.clk * 4 + next.sub_clk as u64) - (e.clk * 4 + e.sub_clk as u64) - 1
+            } else {
+                next.idx - e.idx - 1
+            };
+            debug_assert!(step < (1u64 << REG_ORD_BITS));
+            for b in 0..REG_ORD_BITS {
+                values[row_start + COL_REG_ORD_BITS_BASE + b] = Goldilocks::new((step >> b) & 1);
+            }
         }
     }
 
     for (i, e) in mem_events.iter().enumerate() {
         let row_start = i * TRACE_WIDTH;
         values[row_start + COL_MEM_CLK] = Goldilocks::new(e.clk);
+        values[row_start + COL_MEM_TID] = Goldilocks::new(e.tid);
         values[row_start + COL_MEM_ADDR] = Goldilocks::new(e.addr);
+        // An address past 32 bits has no bit form. Its bits stay the low 32,
+        // and the AIR refuses the row.
+        for b in 0..MEM_ADDR_BITS {
+            values[row_start + COL_MEM_ADDR_BITS_BASE + b] = Goldilocks::new((e.addr >> b) & 1);
+        }
         values[row_start + COL_MEM_VAL] = Goldilocks::new(e.val);
         values[row_start + COL_MEM_IS_WRITE] = if e.is_write {
             Goldilocks::new(1)
@@ -1151,8 +1253,34 @@ pub fn trace_matrix(
         values[row_start + COL_MEM_ACTIVE] = Goldilocks::new(1);
         values[row_start + COL_MEM_IS_INIT] = Goldilocks::new(u64::from(e.is_init));
 
-        if i < n_mem - 1 && mem_events[i + 1].addr == e.addr {
+        if i < n_mem - 1 && mem_events[i + 1].tid == e.tid && mem_events[i + 1].addr == e.addr {
             values[row_start + COL_MEM_SAME] = Goldilocks::new(1);
+        }
+
+        // Inverse witness for `COL_MEM_SAME`, only read where this row and the
+        // next one both hold a memory event. It inverts the step between the
+        // two sort keys.
+        if i < n_mem - 1 {
+            let next = &mem_events[i + 1];
+            let diff = mem_key(next.tid, next.addr).wrapping_sub(mem_key(e.tid, e.addr));
+            let inv = if diff != 0 {
+                bud_vm::field_inverse_goldilocks(diff)
+            } else {
+                0
+            };
+            values[row_start + COL_MEM_SAME_INV] = Goldilocks::new(inv);
+
+            // The step to the next row, in bits. The events are sorted by
+            // `(tid, addr, clk)` and no two are equal, so the step is never
+            // negative on an honest trace.
+            let step = if next.tid == e.tid && next.addr == e.addr {
+                next.clk.wrapping_sub(e.clk).wrapping_sub(1)
+            } else {
+                diff.wrapping_sub(1)
+            };
+            for b in 0..MEM_ORD_BITS {
+                values[row_start + COL_MEM_ORD_BITS_BASE + b] = Goldilocks::new((step >> b) & 1);
+            }
         }
     }
 
@@ -1164,7 +1292,7 @@ pub fn trace_matrix(
         let mut acc = Goldilocks::ZERO;
         for (i, e) in mem_events.iter().enumerate() {
             if e.is_init {
-                let term = Goldilocks::new(e.addr) * gamma + Goldilocks::new(e.val);
+                let term = Goldilocks::new(mem_key(e.tid, e.addr)) * gamma + Goldilocks::new(e.val);
                 acc = if i == 0 { term } else { acc * beta + term };
             }
             values[i * TRACE_WIDTH + COL_MEM_INIT_ACC] = acc;
@@ -1378,6 +1506,29 @@ fn aux_trace_generator(
             // honest side any other way leaves the argument unbalanced on
             // every program that writes to r0.
             let rd_idx_z = rd_idx * row[COL_RD_IDX_INV];
+            let writes_rd = is_add
+                + is_sub
+                + is_mul
+                + is_div
+                + is_inv
+                + is_and
+                + is_not
+                + is_load
+                + is_pop
+                + is_eq
+                + is_neq
+                + is_lt
+                + is_gt
+                + is_lte
+                + is_gte
+                + is_sread
+                + is_poseidon
+                + is_syscall
+                + is_verify_merkle
+                + is_privacy_commit
+                + is_nullifier_check
+                + is_sum_conservation
+                + is_verify_inference;
             let c_rd = register_term(
                 alpha,
                 beta,
@@ -1385,7 +1536,7 @@ fn aux_trace_generator(
                 clk_rd,
                 rd_idx,
                 rd_val_new * rd_idx_z,
-                Goldilocks::ONE,
+                writes_rd,
             );
             let c_reg = register_term(
                 alpha,
@@ -1406,8 +1557,9 @@ fn aux_trace_generator(
                 s_reg -= (gamma - c_reg).inverse();
             }
 
-            // Memory LogUp (includes SRead/SWrite via STORAGE_BASE)
+            // Memory LogUp (includes SRead/SWrite as table id 3)
             let m_active = row[COL_MEM_ACTIVE];
+            let m_tid = row[COL_MEM_TID];
             let m_clk = row[COL_MEM_CLK];
             let m_addr = row[COL_MEM_ADDR];
             let m_val = row[COL_MEM_VAL];
@@ -1419,7 +1571,7 @@ fn aux_trace_generator(
             // multiplied by `rs1_idx` itself while this side produced a
             // boolean.
             let rs1_idx_z = rs1_idx * row[COL_RS1_IDX_INV];
-            let is_real_mem_op = (is_load + is_store) * rs1_idx_z;
+            let is_real_mem_op = is_load * rs1_idx_z + is_store;
             let is_stack_op = is_push + is_pop + is_call + is_ret;
             let is_storage_op = is_sread + is_swrite;
             // Merkle path reads join the demand side: an expansion row reads
@@ -1434,12 +1586,13 @@ fn aux_trace_generator(
             let is_any_mem_op = is_real_mem_op + is_stack_op + is_storage_op + is_merkle_mem_op;
 
             let stack_ptr = row[COL_STACK_PTR];
-            let stack_base = Goldilocks::from_u64(STACK_BASE);
-            let storage_base = Goldilocks::from_u64(STORAGE_BASE);
-            let stack_addr = stack_base
-                + (is_push + is_call) * stack_ptr
-                + (is_pop + is_ret) * (stack_ptr - Goldilocks::ONE);
-            let storage_addr = storage_base + row[COL_IMM];
+            let stack_addr =
+                (is_push + is_call) * stack_ptr + (is_pop + is_ret) * (stack_ptr - Goldilocks::ONE);
+            let storage_addr = row[COL_IMM];
+            let cpu_mem_tid = is_real_mem_op
+                + is_merkle_mem_op
+                + Goldilocks::from_u64(TID_STACK) * is_stack_op
+                + Goldilocks::from_u64(TID_STORAGE) * is_storage_op;
 
             let merkle_path_addr = row[COL_IMM];
             let eight = Goldilocks::from_u64(8);
@@ -1465,21 +1618,13 @@ fn aux_trace_generator(
             let c_cpu_mem = register_term(
                 alpha,
                 beta,
-                Goldilocks::ONE,
+                cpu_mem_tid,
                 clk,
                 final_mem_addr,
                 cpu_mem_val,
                 is_write,
             );
-            let c_mem = register_term(
-                alpha,
-                beta,
-                Goldilocks::ONE,
-                m_clk,
-                m_addr,
-                m_val,
-                m_is_write,
-            );
+            let c_mem = register_term(alpha, beta, m_tid, m_clk, m_addr, m_val, m_is_write);
 
             if is_any_mem_op != Goldilocks::ZERO {
                 s_mem += (gamma - c_cpu_mem).inverse();
@@ -1693,10 +1838,54 @@ impl ProverAdapter for Plonky3Adapter {
         })
     }
 
+    /// Verify under the default activation state, in which the staged
+    /// opcodes (`VerifyMerkle`, `VerifyInference`) are off. A program that
+    /// uses one is refused; see [`Plonky3Adapter::verify_with_activation`].
     fn verify(
         envelope: &ProofEnvelope,
         expected_inputs: &ExecutionPublicInputs,
         program: &[u64],
+    ) -> Result<(), VerifyError> {
+        Self::verify_with_activation(
+            envelope,
+            expected_inputs,
+            program,
+            bud_isa::MainnetActivation::default(),
+        )
+    }
+}
+
+/// True when every 64 bit scalar public input is below the Goldilocks
+/// modulus, so it is the canonical representative of its field element.
+fn has_canonical_scalars(pi: &ExecutionPublicInputs) -> bool {
+    [
+        pi.chain_id,
+        pi.sender,
+        pi.nonce,
+        pi.block_height,
+        pi.gas_limit,
+        pi.gas_used,
+        pi.exit_code,
+        pi.trace_len,
+    ]
+    .iter()
+    .all(|&v| v < bud_vm::GOLDILOCKS_P)
+}
+
+impl Plonky3Adapter {
+    /// Verify a proof exactly as [`ProverAdapter::verify`] does, but under an
+    /// explicit activation state.
+    ///
+    /// [`ProverAdapter::verify`] uses [`bud_isa::MainnetActivation::default`],
+    /// in which `VerifyMerkle` and `VerifyInference` are off: a proof whose
+    /// program contains either is refused with
+    /// `VerifyError::InvalidEnvelope` before the STARK is looked at. A network
+    /// that has activated them passes its own state here.
+    pub fn verify_with_activation(
+        envelope: &ProofEnvelope,
+        expected_inputs: &ExecutionPublicInputs,
+        program: &[u64],
+        activation: bud_isa::MainnetActivation,
     ) -> Result<(), VerifyError> {
         debug!(
             version = envelope.proof_format_version,
@@ -1709,6 +1898,12 @@ impl ProverAdapter for Plonky3Adapter {
         // cannot be a canonical program and is refused before it is hashed.
         envelope.validate_shape()?;
         expected_inputs.validate_shape()?;
+        // Each 64 bit public field enters the AIR as `lo + hi * 2^32`, a
+        // Goldilocks element. A value at or above the modulus has the same
+        // element as `value - p`, so one proof would verify for two inputs.
+        if !has_canonical_scalars(expected_inputs) {
+            return Err(VerifyError::PublicInputsMismatch);
+        }
         if program.len() > crate::adapter::MAX_TRACE_LEN {
             return Err(VerifyError::InvalidEnvelope(format!(
                 "program length {} exceeds the {} cap",
@@ -1752,6 +1947,23 @@ impl ProverAdapter for Plonky3Adapter {
 
         if computed_prog_hash != expected_inputs.program_hash {
             return Err(VerifyError::PublicInputsMismatch);
+        }
+
+        // The AIR proves that a program ran; it does not decide whether the
+        // chain allows the program to run. An opcode that is not activated
+        // is refused here, on the program the proof is bound to, so that a
+        // staged opcode cannot enter through a proof even though the
+        // execution path would have refused to run it. Words that do not
+        // decode are left to the AIR, which has no row for them.
+        for word in program {
+            if let Ok(instruction) = bud_isa::Instruction::decode_any(*word) {
+                if !activation.allows(instruction.opcode) {
+                    return Err(VerifyError::InvalidEnvelope(format!(
+                        "opcode {:?} is not activated",
+                        instruction.opcode
+                    )));
+                }
+            }
         }
 
         let config = build_config();
@@ -1802,7 +2014,26 @@ impl Plonky3Adapter {
         expected_inputs: &ExecutionPublicInputs,
         program: &[u64],
     ) -> Result<(), VerifyError> {
-        <Self as ProverAdapter>::verify(envelope, expected_inputs, program)?;
+        Self::verify_canonical_program_with_activation(
+            envelope,
+            expected_inputs,
+            program,
+            bud_isa::MainnetActivation::default(),
+        )
+    }
+
+    /// [`Plonky3Adapter::verify_canonical_program`] under an explicit
+    /// activation state. The canonical set holds a program that uses
+    /// `VerifyMerkle` (the storage challenge), so a verifier that has not
+    /// activated that opcode refuses it here rather than accepting it by way
+    /// of the canonical set.
+    pub fn verify_canonical_program_with_activation(
+        envelope: &ProofEnvelope,
+        expected_inputs: &ExecutionPublicInputs,
+        program: &[u64],
+        activation: bud_isa::MainnetActivation,
+    ) -> Result<(), VerifyError> {
+        Self::verify_with_activation(envelope, expected_inputs, program, activation)?;
         if !crate::canonical_set::is_canonical_program_hash(&expected_inputs.program_hash) {
             return Err(VerifyError::NonCanonicalProgram(
                 expected_inputs.program_hash,
@@ -1933,6 +2164,267 @@ mod tests {
             Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
             "the untouched envelope must still verify"
         );
+    }
+
+    /// Run a program honestly and return what the verifier answers, with the
+    /// event and state write digests the run published. `prove_and_verify`
+    /// leaves both at zero, which only suits a program that emits nothing.
+    fn verify_honest_run(program: &[u64]) -> Result<(), VerifyError> {
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(program);
+        assert!(receipt.success, "the honest run must succeed");
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+            state_writes_digest: receipt.state_writes_digest,
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, program).expect("prove");
+        Plonky3Adapter::verify(&envelope, &pi, program)
+    }
+
+    /// Prove a hand-built step list and return what the verifier answers.
+    ///
+    /// The trace goes through `trace_matrix` unchanged and the proof is made
+    /// with the lower-level prover, so nothing between the forged steps and
+    /// the AIR gets a chance to refuse them first. The public inputs are
+    /// derived from the steps and from the two gas figures the caller states,
+    /// which is what a prover claiming a different run would publish.
+    fn verify_forged_trace(
+        program: &[u64],
+        trace: &[Step],
+        gas_limit: u64,
+        gas_used: u64,
+    ) -> Result<(), VerifyError> {
+        verify_forged_matrix(program, trace, gas_limit, gas_used, |_| {})
+    }
+
+    /// Same as [`verify_forged_trace`], with a hook that edits the finished
+    /// matrix before it is proved. For forgeries a step list cannot express,
+    /// because the trace builder derives the cell from honest state.
+    fn verify_forged_matrix(
+        program: &[u64],
+        trace: &[Step],
+        gas_limit: u64,
+        gas_used: u64,
+        edit: impl FnOnce(&mut [Goldilocks]),
+    ) -> Result<(), VerifyError> {
+        verify_forged_matrix_with_aux(program, trace, gas_limit, gas_used, edit, |_, _, _| {})
+    }
+
+    /// Same as [`verify_forged_matrix`], with a second hook that edits the
+    /// finished bus columns. The honest bus builder counts a memory row as
+    /// one if its flag is nonzero. The AIR counts it as the flag itself. A
+    /// matrix whose flag is not 0 or 1 needs this hook, or the bus is wrong
+    /// for a reason other than the rule under test.
+    fn verify_forged_matrix_with_aux(
+        program: &[u64],
+        trace: &[Step],
+        gas_limit: u64,
+        gas_used: u64,
+        edit: impl FnOnce(&mut [Goldilocks]),
+        fix_aux: impl FnOnce(
+                &RowMajorMatrix<Goldilocks>,
+                &[MyExtensionField],
+                &mut RowMajorMatrix<Goldilocks>,
+            ) + 'static,
+    ) -> Result<(), VerifyError> {
+        verify_forged_matrix_full(program, trace, gas_limit, gas_used, None, edit, fix_aux)
+    }
+
+    /// Same as [`verify_forged_matrix`], with the starting memory reads the
+    /// public root commits to stated by the caller, not derived from the
+    /// trace. For forgeries whose only rule left to refuse them is the one
+    /// under test, because the root the honest derivation gives would refuse
+    /// them first.
+    fn verify_forged_matrix_with_reads(
+        program: &[u64],
+        trace: &[Step],
+        gas_limit: u64,
+        gas_used: u64,
+        memory_reads: Vec<(u64, u64)>,
+        edit: impl FnOnce(&mut [Goldilocks]),
+    ) -> Result<(), VerifyError> {
+        verify_forged_matrix_full(
+            program,
+            trace,
+            gas_limit,
+            gas_used,
+            Some(memory_reads),
+            edit,
+            |_, _, _| {},
+        )
+    }
+
+    fn verify_forged_matrix_full(
+        program: &[u64],
+        trace: &[Step],
+        gas_limit: u64,
+        gas_used: u64,
+        memory_reads: Option<Vec<(u64, u64)>>,
+        edit: impl FnOnce(&mut [Goldilocks]),
+        fix_aux: impl FnOnce(
+                &RowMajorMatrix<Goldilocks>,
+                &[MyExtensionField],
+                &mut RowMajorMatrix<Goldilocks>,
+            ) + 'static,
+    ) -> Result<(), VerifyError> {
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &memory_reads.unwrap_or_else(|| initial_memory_reads(trace)),
+                ),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(trace)),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit,
+            gas_used,
+            exit_code: 0,
+            trace_len: trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(trace, program, &pi);
+        edit(&mut matrix.values);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: trace.len(),
+            program: program.to_vec(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some({
+                let main = matrix.clone();
+                let honest = crate::plonky3_prover::aux_trace_generator(
+                    matrix.clone(),
+                    n_cpu,
+                    program.to_vec(),
+                );
+                Box::new(move |challenges: &[MyExtensionField]| {
+                    let mut aux = honest(challenges);
+                    fix_aux(&main, challenges, &mut aux);
+                    aux
+                })
+            }),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+        Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            program,
+            bud_isa::MainnetActivation::full(),
+        )
+    }
+
+    /// The `VerifyMerkle` fixture the forgery tests below start from: the
+    /// one-sibling path of `proves_verify_merkle_valid_1_depth`, run through
+    /// the honest VM.
+    fn merkle_one_depth_run() -> (Vec<u64>, Vm) {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let key: u64 = 0;
+        let mut siblings = [0u64; 64];
+        siblings[0] = 1;
+        let leaf: u64 = 0xBEEF;
+        let mut cur = leaf;
+        for &sib in siblings.iter() {
+            cur = bud_vm::merkle_poseidon_round(cur, sib);
+        }
+        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
+        for (i, &sib) in siblings.iter().enumerate() {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&sib.to_le_bytes());
+        }
+        vm.registers[2] = cur;
+        vm.registers[3] = leaf;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.trace.len(), 66, "the original row, 64 rounds, Halt");
+        (program, vm)
+    }
+
+    /// Point a forged `VerifyMerkle` trace at the root its (altered) rounds
+    /// actually produce: re-run the chain from the leaf over whatever
+    /// siblings the expansion rows now carry, and make the original row, its
+    /// root operand and every register snapshot agree on the result. This is
+    /// what a prover forging a path does, because the root register is the
+    /// prover's to choose.
+    fn rechain_merkle_trace(trace: &mut [Step]) {
+        let mut cur = trace[0].src2_val;
+        for step in trace.iter_mut().filter(|s| s.merkle_is_expand) {
+            step.merkle_current = Some(cur);
+            let sib = step.merkle_sibling.expect("expansion rows carry one");
+            let bit = (step.merkle_key.expect("and the key") >> step.merkle_round.unwrap()) & 1;
+            cur = if bit == 0 {
+                bud_vm::merkle_poseidon_round(cur, sib)
+            } else {
+                bud_vm::merkle_poseidon_round(sib, cur)
+            };
+        }
+        trace[0].merkle_current = Some(cur);
+        trace[0].src1_val = cur;
+        for step in trace.iter_mut() {
+            step.registers[2] = cur;
+        }
     }
 
     /// Run the program, tamper the trace, and assert that proving FAILS.
@@ -2250,32 +2742,31 @@ mod tests {
     #[test]
     fn the_register_fold_shares_the_memory_fold_weakness() {
         const P: u128 = 0xFFFF_FFFF_0000_0001;
-        let beta = u128::from(MEM_INIT_BETA);
+        let gamma = u128::from(REG_INIT_GAMMA);
 
-        // The `beta` chain is what makes row order matter. With fixed
-        // constants, a prover solving for a target accumulator solves a linear
-        // system rather than searching, so the work is polynomial in the row
-        // count instead of exponential in the digest width.
-        assert_ne!(beta % P, 0, "the fold constant is live");
         assert_ne!(
-            beta % P,
-            1,
-            "a constant of one would drop row order entirely"
+            REG_INIT_BETA, MEM_INIT_BETA,
+            "the register fold keeps its own beta"
+        );
+        assert_ne!(
+            REG_INIT_GAMMA, MEM_INIT_GAMMA,
+            "the register fold keeps its own gamma"
         );
 
-        // Two-row folds collide when the second row absorbs the difference the
-        // first introduced, scaled by beta.
-        let fold = |x0: u128, x1: u128| ((x0 * beta) % P + x1) % P;
-        let (r0, r1) = (7u128, 11u128);
-        let s0 = 9u128;
-        // s1 = r1 + (r0 - s0) * beta
-        let s1 = (r1 + (P - (s0 - r0) % P) * beta) % P;
+        // Same first read. The second read moves from register 2 to register 3
+        // and the value absorbs the difference: v2 = v1 + (i1 - i2) * GAMMA.
+        let (i1, v1) = (2u128, 20u128);
+        let i2 = 3u128;
+        let v2 = (v1 + (P - (i2 - i1) % P) * gamma) % P;
+        let first = (1u64, 10u64);
+        let reads_a = [first, (i1 as u64, v1 as u64)];
+        let reads_b = [first, (i2 as u64, v2 as u64)];
 
-        assert_ne!((r0, r1), (s0, s1));
+        assert_ne!(reads_a, reads_b, "the two read lists must differ");
         assert_eq!(
-            fold(r0, r1),
-            fold(s0, s1),
-            "two different row sequences fold to one accumulator"
+            crate::adapter::register_image_commitment_of_reads(&reads_a),
+            crate::adapter::register_image_commitment_of_reads(&reads_b),
+            "two different register read lists reach one production commitment"
         );
     }
 
@@ -2328,9 +2819,9 @@ mod tests {
     ///
     /// Carried as an open finding for a long time: `COL_STACK_PTR` is
     /// constrained only in transition (`+1` on push and call, `-1` on pop and
-    /// ret, `0` otherwise) with no range check. The stack sits at `1 << 60` in
-    /// a 64-bit address space, so the question is whether a prover can drive
-    /// the pointer up until it collides with other memory.
+    /// ret, `0` otherwise) with no range check. The stack is table 2 of the
+    /// memory argument, with 32 bit slots, so the question is whether a prover
+    /// can drive the pointer up until it leaves that range.
     ///
     /// It cannot, through three constraints that already exist and were never
     /// read together:
@@ -2716,6 +3207,151 @@ mod tests {
         );
     }
 
+    fn store_through_r0_program() -> Vec<u64> {
+        vec![
+            inst(Opcode::Load, 2, 0, 0, 99),  // r2 = 99
+            inst(Opcode::Store, 0, 0, 2, 16), // mem[0 + 16] = r2, base is r0
+            inst(Opcode::Load, 1, 0, 0, 16),  // r1 = 16
+            inst(Opcode::Load, 3, 1, 0, 0),   // r3 = mem[16]
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ]
+    }
+
+    /// An honest `Store` whose base register is r0 writes memory, so it must
+    /// put a demand on the memory bus like every other `Store`.
+    #[test]
+    fn proves_store_through_r0() {
+        let program = store_through_r0_program();
+        let mut vm = Vm::new(64);
+        assert!(vm.run_receipt(&program).success);
+        assert_eq!(vm.registers[3], 99);
+        prove_and_verify(program, |_| {});
+    }
+
+    /// `Store rs1=r0` is not load-immediate: only `Load` has that meaning. A
+    /// prover that drops the write from the memory argument could let a later
+    /// `Load` read a value no write ever put there.
+    #[test]
+    fn rejects_a_store_through_r0_that_skips_memory() {
+        let program = store_through_r0_program();
+        let mut vm = Vm::new(64);
+        assert!(vm.run_receipt(&program).success);
+        assert_eq!(vm.registers[3], 99);
+
+        // The forgery: the Store claims it touched no memory, and the Load
+        // that read the word back claims memory held zero.
+        assert_eq!(vm.trace[1].instruction.opcode, Opcode::Store);
+        assert_eq!(vm.trace[3].instruction.opcode, Opcode::Load);
+        vm.trace[1].memory_addr = None;
+        vm.trace[1].memory_val = None;
+        vm.trace[3].memory_val = Some(0);
+        vm.trace[3].dst_val = 0;
+        for step in vm.trace.iter_mut().skip(3) {
+            step.registers[3] = 0;
+        }
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let (matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a Store through r0 skipped the memory argument and the proof \
+             verified; a later Load can then read a word nothing wrote"
+        );
+    }
+
+    /// A negative immediate is the field element `P - |imm|` in the VM, the
+    /// trace and the AIR alike. `Load rd, r0, imm` copies it to `rd`.
+    #[test]
+    fn proves_load_imm_negative() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, -1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        assert!(vm.run_receipt(&program).success);
+        assert_eq!(vm.registers[1], bud_vm::GOLDILOCKS_P - 1);
+        prove_and_verify(program, |_| {});
+    }
+
+    /// Honest `Eq`, `Neq` and `SumConservation` with `rs1 < rs2`. The inverse
+    /// witness is the field inverse of `rs1 - rs2`; `wrapping_sub` gave
+    /// `2^64 - d`, which is not that element.
+    #[test]
+    fn proves_eq_neq_sc_when_rs1_lt_rs2() {
+        for op in [Opcode::Eq, Opcode::Neq, Opcode::SumConservation] {
+            let program = vec![
+                inst(Opcode::Load, 1, 0, 0, 1),
+                inst(Opcode::Load, 2, 0, 0, 2),
+                inst(op, 3, 1, 2, 0),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            prove_and_verify(program, |_| {});
+        }
+    }
+
     /// `Assert` had no prover coverage either, and BudL's `constrain(...)`
     /// lowers straight to it.
     #[test]
@@ -3016,7 +3652,7 @@ mod tests {
     /// the destination register.
     ///
     /// The memory argument carries it. `Pop` demands a read at
-    /// `STACK_BASE + stack_ptr - 1` whose value is `COL_RD_VAL_NEW`, and the
+    /// stack slot `stack_ptr - 1` whose value is `COL_RD_VAL_NEW`, and the
     /// matching `Push` supplied a write there carrying its `rs1`. Changing the
     /// popped value unbalances the argument against what was pushed.
     ///
@@ -3276,7 +3912,7 @@ mod tests {
     /// rules ties `next_pc` to anything, which is what made it worth testing.
     ///
     /// What holds it is the memory argument, one step removed. `Ret` demands a
-    /// read at `STACK_BASE + stack_ptr - 1` whose value is `COL_NEXT_PC`, and
+    /// read at stack slot `stack_ptr - 1` whose value is `COL_NEXT_PC`, and
     /// `Call` supplies a write at the same address whose value is `pc + 1`.
     /// Redirecting the return means either changing the value read, which
     /// unbalances the argument against what `Call` wrote, or changing the
@@ -3413,15 +4049,29 @@ mod tests {
     /// Someone optimising the Program CTL, or relaxing `IS_ACTIVE`, would
     /// otherwise reopen arbitrary control flow without editing a line that
     /// looks like it has anything to do with jumps.
+    ///
+    /// The fixture's first row is a real `Jmp` with `imm = 5`, so the jump
+    /// rule `next_pc == pc + imm` and the sequential rule both hold. Only the
+    /// Program CTL refuses the Halt row at pc 5.
+    /// `rejects_a_fall_through_that_skips_an_instruction` pins the sequential
+    /// rule on its own.
     #[test]
     fn rejects_a_jump_past_the_end_of_the_program() {
+        // A real jump whose target is past the program end. The VM refuses
+        // to step at pc 5, so `run_receipt` ends the trace with a synthetic
+        // Halt row at that pc. The jump row keeps `next_pc == pc + imm`, so
+        // the sequential rule has nothing to say and only the Program CTL
+        // can object to the Halt row at pc 5.
         let program = vec![
-            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Jmp, 0, 0, 0, 5),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(64);
         let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
+        assert!(
+            !receipt.success,
+            "the VM must refuse the out of range pc, or the fixture is not a bad jump"
+        );
 
         let program_bytes: Vec<u8> = program
             .iter()
@@ -3453,15 +4103,13 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
         assert!(n_cpu >= 2, "the fixture needs at least two CPU rows");
-
-        // Send the first row's successor outside the program and move the
-        // second row to match, so the `nxt_pc == next_pc` transition still
-        // holds and only the Program CTL has anything to object to.
-        let outside = program.len() as u64 + 5;
-        matrix.values[COL_NEXT_PC] = Goldilocks::new(outside);
-        matrix.values[TRACE_WIDTH + COL_PC] = Goldilocks::new(outside);
+        assert_eq!(
+            matrix.values[COL_NEXT_PC].as_canonical_u64(),
+            5,
+            "the first row must jump to the out of range pc"
+        );
 
         let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
         let air = BudAir {
@@ -3503,6 +4151,315 @@ mod tests {
              proof verified. Nothing in the AIR bounds `COL_PC`; the Program \
              CTL is the only thing between a prover and arbitrary control \
              flow, and it just stopped being that."
+        );
+    }
+
+    /// The default verifier refuses the staged opcodes, whatever the proof.
+    ///
+    /// The AIR proves that a program ran, not that the chain allows it to run.
+    /// `VerifyMerkle` and `VerifyInference` are off unless activated, and
+    /// the execution path refuses them, but a proof reaches the verifier
+    /// without passing through it. Both proofs below are honest and verify
+    /// under full activation; under the default they are refused before the
+    /// STARK is looked at, with an error that names the opcode.
+    #[test]
+    fn verifier_refuses_verify_merkle_under_default_activation() {
+        // VerifyMerkle: the honest one-sibling path.
+        let (program, vm) = merkle_one_depth_run();
+        let program_hash = {
+            let bytes: Vec<u8> = program.iter().flat_map(|&i| i.to_le_bytes()).collect();
+            let mut hasher = Keccak::v256();
+            hasher.update(&bytes);
+            let mut out = [0u8; 32];
+            hasher.finalize(&mut out);
+            out
+        };
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        assert!(Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full()
+        )
+        .is_ok());
+        for refused in [
+            Plonky3Adapter::verify(&envelope, &pi, &program),
+            Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::default(),
+            ),
+        ] {
+            match refused {
+                Err(VerifyError::InvalidEnvelope(msg)) => {
+                    assert!(
+                        msg.contains("VerifyMerkle"),
+                        "the error names the opcode: {msg}"
+                    );
+                }
+                other => panic!("VerifyMerkle must be refused by default, got {other:?}"),
+            }
+        }
+
+        // One opcode on does not turn the other on.
+        let only_inference = bud_isa::MainnetActivation {
+            verify_inference_enabled: true,
+            ..bud_isa::MainnetActivation::default()
+        };
+        assert!(matches!(
+            Plonky3Adapter::verify_with_activation(&envelope, &pi, &program, only_inference),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+
+        // VerifyInference: no expansion rows are needed to reach the gate.
+        let program = vec![
+            inst(Opcode::VerifyInference, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(16);
+        assert!(vm.run_receipt(&program).success);
+        let bytes: Vec<u8> = program.iter().flat_map(|&i| i.to_le_bytes()).collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        // The opcode is reserved: with every opcode activated the activation
+        // gate lets it through and the AIR refuses the proof.
+        let full = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
+        assert!(
+            full.is_err() && !matches!(full, Err(VerifyError::InvalidEnvelope(_))),
+            "a reserved VerifyInference must be refused by the AIR, got {full:?}"
+        );
+        match Plonky3Adapter::verify(&envelope, &pi, &program) {
+            Err(VerifyError::InvalidEnvelope(msg)) => {
+                assert!(
+                    msg.contains("VerifyInference"),
+                    "the error names the opcode: {msg}"
+                );
+            }
+            other => panic!("VerifyInference must be refused by default, got {other:?}"),
+        }
+    }
+
+    /// A row that falls through must land on the next instruction, not on
+    /// one the prover picks.
+    ///
+    /// The only link between consecutive rows is `nxt_pc == next_pc`, and
+    /// `next_pc` was constrained for jumps, calls, `Ret`, `Push`, `Pop` and
+    /// `Halt` only. Every other opcode left it free, so a `Load` could claim
+    /// its successor sits at pc 2 and the row for pc 1 was never executed.
+    ///
+    /// Here the program is `Load r1 = 0; Assert r1; Halt`, which the VM
+    /// refuses at the `Assert`. The forgery drops that step: the `Load` row
+    /// names pc 2 as its successor and the terminal row sits at pc 2. The
+    /// Program CTL is satisfied because both rows match real instructions, and
+    /// the gas claimed is the honest figure minus the skipped `Assert`.
+    #[test]
+    fn rejects_a_fall_through_that_skips_an_instruction() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Assert, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(!receipt.success, "the honest run fails at the Assert");
+        assert_eq!(vm.trace.len(), 2, "a Load row and the terminal row");
+
+        let assert_gas = Vm::gas_cost(Opcode::Assert);
+        let mut trace = vm.trace.clone();
+        trace[0].next_pc = 2;
+        trace[1].pc = 2;
+        trace[1].next_pc = 2;
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used - assert_gas);
+        assert!(
+            verdict.is_err(),
+            "a Load that claimed its successor sits two instructions on \
+             verified: the Assert in between was never executed and the \
+             proof says the program completed. verdict={verdict:?}"
+        );
+    }
+
+    /// A `VerifyMerkle` with no expansion rows after it proves nothing.
+    ///
+    /// The root comparison lives on the original row and the only thing that
+    /// ties its `merkle_current` to a walked path is the expansion block that
+    /// follows. Leave the block out and the cell is the prover's to write: it
+    /// is set to the claimed root, the comparison holds, and `rd` is 1.
+    #[test]
+    fn rejects_verify_merkle_without_expansion_rows() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        trace.drain(1..65);
+        trace[0].next_pc = 1;
+        assert_eq!(trace[0].dst_val, 1, "the claim being forged is a pass");
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "a VerifyMerkle row with no expansion block verified: its result \
+             was never derived from a path. verdict={verdict:?}"
+        );
+    }
+
+    /// A path that stops after its first round proves membership under a
+    /// root only one hash deep.
+    ///
+    /// The key is zero, so every direction bit is zero and the shortened walk
+    /// satisfies every per-row rule: round 0 is followed by a row that is not
+    /// an expansion, which the terminator treats as the end of the path. The
+    /// claimed root is the round-0 output, so the comparison holds.
+    #[test]
+    fn rejects_verify_merkle_that_stops_early() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        trace.drain(2..65);
+        trace[1].next_pc = 1;
+        rechain_merkle_trace(&mut trace);
+        assert_eq!(trace.len(), 3, "original row, round 0, Halt");
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "a Merkle path cut to one round verified against a root one hash \
+             deep. verdict={verdict:?}"
+        );
+    }
+
+    /// The path buffer address may not move between rows of one path.
+    ///
+    /// Each expansion row's memory address is `imm + 8 + 8 * round`, and `imm`
+    /// on an expansion row is exempt from the program table, so nothing tied
+    /// it to the instruction's. Round 0 here reads the word round 1 reads, one
+    /// slot over, and the root is recomputed from what it found there: the
+    /// walk is over words the program laid out, but not along the path the
+    /// instruction names.
+    #[test]
+    fn rejects_verify_merkle_with_a_shifted_sibling_address() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        let shifted = trace[1].memory_addr.unwrap() + 8;
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&vm.memory[shifted..shifted + 8]);
+        let word = u64::from_le_bytes(word);
+        trace[1].instruction.imm += 8;
+        trace[1].memory_addr = Some(shifted);
+        trace[1].memory_val = Some(word);
+        trace[1].merkle_sibling = Some(word);
+        rechain_merkle_trace(&mut trace);
+        assert_ne!(word, 1, "round 0 must now read a different word");
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "an expansion row whose address was shifted off the instruction's \
+             path buffer verified. verdict={verdict:?}"
+        );
+    }
+
+    /// A `VerifyMerkle` expansion row cannot stand alone.
+    ///
+    /// An expansion row is exempt from the program lookup, the register
+    /// argument and the gas charge, and nothing required it to belong to an
+    /// original `VerifyMerkle` row before it or to a path that runs its 64
+    /// rounds. The program here has no 0x1E in it. Its `Store` row is
+    /// replaced by a lone expansion row: the row for that pc is no longer
+    /// matched against the program, the register file is not asked about it,
+    /// and the store never happens. The proof still says the program ran to
+    /// the end, at the honest gas minus the skipped store.
+    #[test]
+    fn rejects_a_stray_merkle_expansion_row_that_stores() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Load, 2, 0, 0, 16),
+            inst(Opcode::Store, 0, 2, 1, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.trace.len(), 4);
+        assert_eq!(vm.trace[2].instruction.opcode, Opcode::Store);
+
+        let mut trace = vm.trace.clone();
+        let sibling = 5u64;
+        // The expansion block reads the value the previous non-expansion row
+        // carries; give it the one this round produces.
+        trace[1].merkle_current = Some(bud_vm::merkle_poseidon_round(0, sibling));
+        let imm = 16;
+        let stray = &mut trace[2];
+        stray.instruction = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm,
+        };
+        stray.src1_idx = 0;
+        stray.src2_idx = 0;
+        stray.dst_idx = 0;
+        stray.src1_val = 0;
+        stray.src2_val = 0;
+        stray.dst_val = 0;
+        stray.memory_addr = Some(imm as usize + 8);
+        stray.memory_val = Some(sibling);
+        stray.is_memory_write = false;
+        stray.merkle_key = Some(0);
+        stray.merkle_current = Some(0);
+        stray.merkle_sibling = Some(sibling);
+        stray.merkle_round = Some(0);
+        stray.merkle_is_expand = true;
+
+        let store_gas = Vm::gas_cost(Opcode::Store);
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used - store_gas);
+        assert!(
+            verdict.is_err(),
+            "a lone Merkle expansion row stood in for a Store and the proof \
+             verified: an instruction of the program was never executed. \
+             verdict={verdict:?}"
         );
     }
 
@@ -4114,6 +5071,43 @@ mod tests {
                     p.opened_values.aux_trace_local = None;
                 }),
             ),
+            (
+                "quotient chunk extended",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    let v = p.opened_values.quotient_chunks[0][0];
+                    p.opened_values.quotient_chunks[0].push(v);
+                }),
+            ),
+            (
+                "quotient chunk shortened",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.quotient_chunks[0].pop();
+                }),
+            ),
+            (
+                "extra quotient chunk added",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    let extra = p.opened_values.quotient_chunks[0].clone();
+                    p.opened_values.quotient_chunks.push(extra);
+                }),
+            ),
+            (
+                "aux opening shortened",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    if let Some(aux) = p.opened_values.aux_trace_local.as_mut() {
+                        aux.pop();
+                    }
+                }),
+            ),
+            (
+                "aux opening extended",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    if let Some(aux) = p.opened_values.aux_trace_local.as_mut() {
+                        let v = aux[0];
+                        aux.push(v);
+                    }
+                }),
+            ),
         ];
 
         for (ad, mutate) in mutations {
@@ -4159,6 +5153,43 @@ mod tests {
                 "{ad}: the refusal did not come from the shape gate"
             );
         }
+    }
+
+    /// Strip the aux (LogUp) trace from an honest proof: the commitment and
+    /// both openings together.
+    ///
+    /// This is the shape of P15-F01, but built from a proof that was made
+    /// with the aux trace, so the PCS opening argument still covers it and
+    /// the verifier must refuse. The forged shape, a proof that the prover
+    /// built with no aux generator at all, is not tested here: it needs the
+    /// verifier to take the aux flag from the AIR and not from the proof, and
+    /// that fix is in `bud_stark/verifier.rs`. The reason of the refusal is
+    /// not pinned, because it was not measured.
+    #[test]
+    fn rejects_a_proof_with_the_aux_trace_stripped() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (envelope, pi) = prove_and_verify_full(program.clone(), |_| {});
+        let mut stripped: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
+        assert!(
+            stripped.commitments.aux_trace.is_some(),
+            "the honest proof must carry an aux commitment, or the strip proves nothing"
+        );
+        stripped.commitments.aux_trace = None;
+        stripped.opened_values.aux_trace_local = None;
+        stripped.opened_values.aux_trace_next = None;
+
+        let forged = ProofEnvelope {
+            proof_bytes: postcard::to_allocvec(&stripped).unwrap(),
+            ..envelope.clone()
+        };
+        assert!(
+            Plonky3Adapter::verify(&forged, &pi, &program).is_err(),
+            "a proof with the aux commitment and openings removed verified"
+        );
     }
 
     /// A proof with the right shape but corrupted **content** must be refused.
@@ -4640,6 +5671,45 @@ mod tests {
 
         let res = Plonky3Adapter::verify(&envelope, &pi, &[]);
         assert!(res.is_err());
+    }
+
+    /// Garbage bytes behind an envelope that passes every header, hash and
+    /// program check must reach the proof decoder and be refused there.
+    ///
+    /// `rejects_invalid_proof_bytes` uses a zero public inputs hash, so it is
+    /// refused before decoding starts and never tests the decoder.
+    #[test]
+    fn rejects_garbage_proof_bytes_behind_a_valid_envelope() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 42),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (envelope, pi) = prove_and_verify_full(program.clone(), |_| {});
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "the untouched envelope must verify, or the refusals below prove nothing"
+        );
+
+        let honest = envelope.proof_bytes.clone();
+        let garbage: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![1, 2, 3, 4],
+            vec![0xFF; 512],
+            (0..honest.len()).map(|i| (i * 31 % 251) as u8).collect(),
+            honest[..honest.len() / 2].to_vec(),
+        ];
+        for bytes in garbage {
+            let mut broken = envelope.clone();
+            broken.proof_bytes = bytes;
+            let res = Plonky3Adapter::verify(&broken, &pi, &program);
+            assert!(
+                matches!(
+                    res,
+                    Err(VerifyError::DeserializationError(_)) | Err(VerifyError::InvalidProof)
+                ),
+                "garbage proof bytes must fail in the decoder or the verifier, got {res:?}"
+            );
+        }
     }
 
     #[test]
@@ -5213,7 +6283,12 @@ mod tests {
         // Verification must reject the proof because the
         // Is_verify_merkle selector was zeroed out on a row where
         // COL_OPCODE = 0x1E, which violates the new AIR constraint.
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(
             res.is_err(),
             "Expected verification to FAIL when is_verify_merkle is zeroed on a 0x1E row, but it succeeded!"
@@ -5947,7 +7022,7 @@ mod tests {
         let honest_word = matrix.values[sw_start + COL_RAW_INST].as_canonical_u64();
 
         // The forgery: the same value, written to a slot the contract never
-        // named. The memory argument places storage at `storage_base + imm`,
+        // named. The memory argument places storage at address `imm` of table 3,
         // so the storage row has to move with the immediate or the proof
         // fails on the bus instead of on the decode binding.
         matrix.values[sw_start + COL_IMM] = Goldilocks::new(9);
@@ -5961,9 +7036,10 @@ mod tests {
         for i in 0..rows {
             let row_start = i * TRACE_WIDTH;
             if matrix.values[row_start + COL_MEM_ACTIVE].as_canonical_u64() == 1
-                && matrix.values[row_start + COL_MEM_ADDR].as_canonical_u64() == STORAGE_BASE + 7
+                && matrix.values[row_start + COL_MEM_TID].as_canonical_u64() == TID_STORAGE
+                && matrix.values[row_start + COL_MEM_ADDR].as_canonical_u64() == 7
             {
-                matrix.values[row_start + COL_MEM_ADDR] = Goldilocks::new(STORAGE_BASE + 9);
+                set_mem_addr(&mut matrix.values, i, 9);
             }
         }
 
@@ -6478,6 +7554,1154 @@ mod tests {
             Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
             "an honest program that writes to r0 was rejected; the r0 rule has \
              been written against the wrong column"
+        );
+    }
+
+    /// Programs whose instruction at `at` names r5 as `rd` without writing it,
+    /// followed by an `Add` that reads r5. The VM leaves r5 at 3.
+    fn non_writing_rd_programs() -> Vec<(&'static str, Vec<u64>, usize)> {
+        vec![
+            (
+                "Store",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Load, 1, 0, 0, 8),
+                    inst(Opcode::Load, 2, 0, 0, 1),
+                    inst(Opcode::Store, 5, 1, 2, 0),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                3,
+            ),
+            (
+                "Push",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Load, 1, 0, 0, 7),
+                    inst(Opcode::Push, 5, 1, 0, 0),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                2,
+            ),
+            (
+                "Call and Ret",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Call, 5, 0, 0, 3),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                    inst(Opcode::Ret, 5, 0, 0, 0),
+                ],
+                1,
+            ),
+            (
+                "Jmp",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Jmp, 5, 0, 0, 1),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                1,
+            ),
+            (
+                "Jnz",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Load, 1, 0, 0, 7),
+                    inst(Opcode::Jnz, 5, 1, 0, 1),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                2,
+            ),
+            (
+                "Assert",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Load, 1, 0, 0, 7),
+                    inst(Opcode::Assert, 5, 1, 0, 0),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                2,
+            ),
+            (
+                "Log",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Load, 1, 0, 0, 7),
+                    inst(Opcode::Log, 5, 1, 0, 0),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                2,
+            ),
+            (
+                "SWrite",
+                vec![
+                    inst(Opcode::Load, 5, 0, 0, 3),
+                    inst(Opcode::Load, 1, 0, 0, 7),
+                    inst(Opcode::SWrite, 5, 1, 0, 1),
+                    inst(Opcode::Add, 6, 5, 0, 0),
+                    inst(Opcode::Halt, 0, 0, 0, 0),
+                ],
+                2,
+            ),
+        ]
+    }
+
+    /// An opcode that writes no register must not be able to give `rd` a
+    /// value.
+    ///
+    /// The register bus used to publish a write for the `rd` slot of every
+    /// row, so `Store r5, ...` could write anything into r5 as long as the
+    /// next reader of r5 agreed. The forged matrix below is the proof such a
+    /// prover would hand in: the Store row carries `rd_val_new = 1000`, the
+    /// register table holds a write of 1000 at the Store's slot, and every
+    /// later r5 event and the `Add` that reads it follow. Nothing but the
+    /// "does this opcode write" rule stands between it and acceptance.
+    #[test]
+    fn rejects_a_register_write_from_an_opcode_that_writes_none() {
+        const FORGED: u64 = 1000;
+        for (name, program, at) in non_writing_rd_programs() {
+            // The other programs are covered by the honest test. The forgery
+            // targets Store and Push only: the Add after Call and Ret sits two
+            // steps on, and Log and SWrite need the digests an honest run
+            // publishes, which this helper leaves at zero.
+            if !matches!(name, "Store" | "Push") {
+                continue;
+            }
+            let mut vm = Vm::new(1024);
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success, "{name}: the honest run must succeed");
+            assert_eq!(vm.registers[5], 3, "{name}: the VM must leave r5 alone");
+            let k = vm
+                .trace
+                .iter()
+                .position(|s| s.pc == at)
+                .expect("the non-writing step must be in the trace");
+            assert_eq!(vm.trace[k + 1].instruction.opcode, Opcode::Add);
+
+            let verdict =
+                verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                    let set = |values: &mut [Goldilocks], row: usize, col: usize, v: u64| {
+                        values[row * TRACE_WIDTH + col] = Goldilocks::new(v);
+                    };
+                    set(values, k, COL_RD_VAL_NEW, FORGED);
+                    set(values, k + 1, COL_RS1_VAL, FORGED);
+                    set(values, k + 1, COL_RD_VAL_NEW, FORGED);
+                    let rows = values.len() / TRACE_WIDTH;
+                    for row in 0..rows {
+                        let at_ = row * TRACE_WIDTH;
+                        if values[at_ + COL_REG_ACTIVE].as_canonical_u64() != 1 {
+                            continue;
+                        }
+                        let idx = values[at_ + COL_REG_IDX].as_canonical_u64();
+                        let clk = values[at_ + COL_REG_CLK].as_canonical_u64();
+                        let sub = values[at_ + COL_REG_SUB_CLK].as_canonical_u64();
+                        if idx == 5 && clk >= k as u64 {
+                            set(values, row, COL_REG_VAL, FORGED);
+                            if clk == k as u64 && sub == 3 {
+                                set(values, row, COL_REG_IS_WRITE, 1);
+                            }
+                        }
+                        if idx == 6 && clk == k as u64 + 1 && sub == 3 {
+                            set(values, row, COL_REG_VAL, FORGED);
+                        }
+                    }
+                });
+            assert!(
+                verdict.is_err(),
+                "{name}: an opcode that writes no register gave r5 a value of \
+                 its own choosing and the proof verified. verdict={verdict:?}"
+            );
+        }
+    }
+
+    /// An opcode that writes no register still names an `rd`, and honest
+    /// programs must stay provable: the slot is a read of r5's current value.
+    #[test]
+    fn proves_non_writing_opcode_with_nonzero_rd() {
+        for (name, program, _) in non_writing_rd_programs() {
+            let mut vm = Vm::new(1024);
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success, "{name}: the honest run must succeed");
+            assert_eq!(vm.registers[5], 3, "{name}: r5 must stay at 3");
+            let verdict = verify_honest_run(&program);
+            assert!(
+                verdict.is_ok(),
+                "{name}: an honest program with a non-zero rd on an opcode \
+                 that writes none must verify. verdict={verdict:?}"
+            );
+        }
+    }
+
+    /// The prover publishes a register write for the opcodes in
+    /// `opcode_writes_rd`, and the AIR sums selectors for the same set. The VM
+    /// is the truth. If the VM starts to write `rd` for another opcode, or
+    /// stops for one on the list, the honest trace no longer matches the
+    /// register table, so the two must agree for all 33 opcodes.
+    #[test]
+    fn opcode_writes_rd_matches_what_the_vm_does() {
+        const OLD: u64 = 0xDEAD_BEEF;
+        let mut seen = 0;
+        for byte in 0u64..=0xFF {
+            let Ok(decoded) = Instruction::decode_any(byte) else {
+                continue;
+            };
+            let op = decoded.opcode;
+            seen += 1;
+            let program = vec![inst(op, 5, 1, 2, 0)];
+            let mut vm = Vm::new(1024);
+            vm.registers[1] = 8;
+            vm.registers[2] = 3;
+            vm.registers[5] = OLD;
+            vm.stack.push(9);
+            vm.step(&program)
+                .unwrap_or_else(|e| panic!("{op:?}: the single instruction must run: {e:?}"));
+            assert!(!vm.trace.is_empty(), "{op:?}: the step must be traced");
+            let wrote = vm.registers[5] != OLD;
+            assert_eq!(
+                wrote,
+                opcode_writes_rd(op),
+                "{op:?}: the VM and `opcode_writes_rd` disagree on whether rd is written"
+            );
+        }
+        assert_eq!(seen, 33, "the opcode set changed; extend this test");
+    }
+
+    /// The register table columns that describe one event. Moving a row means
+    /// moving all of them. `COL_REG_INIT_ACC` is a running sum, so it stays.
+    const REG_TABLE_COLS: [usize; 9] = [
+        COL_REG_CLK,
+        COL_REG_IDX,
+        COL_REG_VAL,
+        COL_REG_IS_WRITE,
+        COL_REG_ACTIVE,
+        COL_REG_SAME,
+        COL_REG_SUB_CLK,
+        COL_REG_SAME_INV,
+        COL_REG_IS_INIT,
+    ];
+
+    /// The register table row that holds the event `(idx, clk, sub_clk)`.
+    fn find_reg_row(values: &[Goldilocks], idx: u64, clk: u64, sub: u64) -> usize {
+        (0..values.len() / TRACE_WIDTH)
+            .find(|&row| {
+                let at = |col: usize| values[row * TRACE_WIDTH + col].as_canonical_u64();
+                at(COL_REG_ACTIVE) == 1
+                    && at(COL_REG_IDX) == idx
+                    && at(COL_REG_CLK) == clk
+                    && at(COL_REG_SUB_CLK) == sub
+            })
+            .expect("the register event must be in the table")
+    }
+
+    /// The memory table columns that describe one event, with the bits of its
+    /// address. Moving a row means moving all of them. `COL_MEM_INIT_ACC` is a
+    /// running sum, so it stays. The order witness describes the step to the
+    /// next row, not the event, so it stays too.
+    const MEM_TABLE_COLS: [usize; 9 + MEM_ADDR_BITS] = {
+        let head = [
+            COL_MEM_CLK,
+            COL_MEM_TID,
+            COL_MEM_ADDR,
+            COL_MEM_VAL,
+            COL_MEM_IS_WRITE,
+            COL_MEM_ACTIVE,
+            COL_MEM_SAME,
+            COL_MEM_SAME_INV,
+            COL_MEM_IS_INIT,
+        ];
+        let mut cols = [0usize; 9 + MEM_ADDR_BITS];
+        let mut i = 0;
+        while i < head.len() {
+            cols[i] = head[i];
+            i += 1;
+        }
+        let mut b = 0;
+        while b < MEM_ADDR_BITS {
+            cols[head.len() + b] = COL_MEM_ADDR_BITS_BASE + b;
+            b += 1;
+        }
+        cols
+    };
+
+    /// Set the address of a memory row together with its bits.
+    fn set_mem_addr(values: &mut [Goldilocks], row: usize, addr: u64) {
+        values[row * TRACE_WIDTH + COL_MEM_ADDR] = Goldilocks::new(addr);
+        for b in 0..MEM_ADDR_BITS {
+            values[row * TRACE_WIDTH + COL_MEM_ADDR_BITS_BASE + b] =
+                Goldilocks::new((addr >> b) & 1);
+        }
+    }
+
+    /// The memory table row that holds the event `(tid, addr, clk)`.
+    fn find_mem_row(values: &[Goldilocks], tid: u64, addr: u64, clk: u64) -> usize {
+        (0..values.len() / TRACE_WIDTH)
+            .find(|&row| {
+                let at = |col: usize| values[row * TRACE_WIDTH + col].as_canonical_u64();
+                at(COL_MEM_ACTIVE) == 1
+                    && at(COL_MEM_TID) == tid
+                    && at(COL_MEM_ADDR) == addr
+                    && at(COL_MEM_CLK) == clk
+            })
+            .expect("the memory event must be in the table")
+    }
+
+    /// Writes 7 to address 5 and reads it back into r3. The table holds a
+    /// write and a read of one address, and a padding row after them.
+    fn memory_round_trip_program() -> Vec<u64> {
+        vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Store, 0, 1, 2, 0),
+            inst(Opcode::Load, 3, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ]
+    }
+
+    /// Writes 0 to address 0 and reads it back. The table holds a write and a
+    /// read of address 0, both with value 0, so an extra starting-image flag
+    /// on one of them leaves the public root unchanged.
+    fn memory_zero_round_trip_program() -> Vec<u64> {
+        vec![
+            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Store, 0, 1, 0, 0),
+            inst(Opcode::Load, 3, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ]
+    }
+
+    /// The register table is a sorted list with no gaps, and nothing used to
+    /// say so.
+    ///
+    /// Every transition rule of the table is gated by `r_active * nr_active`.
+    /// A row of padding in the middle closes all of them at once: the read
+    /// after the gap does not have to continue the write before it, and the
+    /// first read of a register is only asked to be zero when the row before it
+    /// is active. The forged matrix below moves the read of r9 one row down,
+    /// leaves an inactive row behind it, and makes the read 1000. The write
+    /// before the gap stays 7, the `Add` reads 1000, and the bus still
+    /// balances because every event is still there once.
+    #[test]
+    fn rejects_register_read_after_inactive_gap() {
+        const FORGED: u64 = 1000;
+        // r9 is the highest register used, so its rows are the last active
+        // rows and the row below them is padding.
+        let program = vec![
+            inst(Opcode::Load, 9, 0, 0, 7),
+            inst(Opcode::Add, 2, 9, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[1].instruction.opcode, Opcode::Add);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let rows = values.len() / TRACE_WIDTH;
+                let read = find_reg_row(values, 9, 1, 1);
+                let write2 = find_reg_row(values, 2, 1, 3);
+                assert!(read + 1 < rows, "a padding row must follow the table");
+                assert_eq!(values[at(read + 1, COL_REG_ACTIVE)].as_canonical_u64(), 0);
+                for col in REG_TABLE_COLS {
+                    values[at(read + 1, col)] = values[at(read, col)];
+                    values[at(read, col)] = Goldilocks::new(0);
+                }
+                // The write before the gap no longer continues into a read.
+                values[at(read - 1, COL_REG_SAME)] = Goldilocks::new(0);
+                values[at(read + 1, COL_REG_VAL)] = Goldilocks::new(FORGED);
+                values[at(write2, COL_REG_VAL)] = Goldilocks::new(FORGED);
+                values[at(1, COL_RS1_VAL)] = Goldilocks::new(FORGED);
+                values[at(1, COL_RD_VAL_NEW)] = Goldilocks::new(FORGED);
+            });
+        assert!(
+            verdict.is_err(),
+            "a read after an inactive gap returned a value nothing wrote and \
+             the proof verified. verdict={verdict:?}"
+        );
+    }
+
+    /// The LogUp argument compares multisets, so it cannot tell that two
+    /// writes of one register swapped places. Only the order constraint can.
+    ///
+    /// The forged matrix swaps the two r1 writes (7 then 9 becomes 9 then 7),
+    /// so the read that follows sees 7 and the `Add` is made to use it. Every
+    /// continuity rule holds on the swapped rows.
+    #[test]
+    fn rejects_reordered_register_writes() {
+        const FORGED: u64 = 7;
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Load, 1, 0, 0, 9),
+            inst(Opcode::Add, 2, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[2].instruction.opcode, Opcode::Add);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let first = find_reg_row(values, 1, 0, 3);
+                let second = find_reg_row(values, 1, 1, 3);
+                let read = find_reg_row(values, 1, 2, 1);
+                let write2 = find_reg_row(values, 2, 2, 3);
+                assert_eq!((second, read), (first + 1, first + 2));
+                for col in REG_TABLE_COLS {
+                    let a = values[at(first, col)];
+                    values[at(first, col)] = values[at(second, col)];
+                    values[at(second, col)] = a;
+                }
+                // Both writes and the read belong to r1, so the same flags
+                // are right for the new positions.
+                values[at(read, COL_REG_VAL)] = Goldilocks::new(FORGED);
+                values[at(write2, COL_REG_VAL)] = Goldilocks::new(FORGED);
+                values[at(2, COL_RS1_VAL)] = Goldilocks::new(FORGED);
+                values[at(2, COL_RD_VAL_NEW)] = Goldilocks::new(FORGED);
+            });
+        assert!(
+            verdict.is_err(),
+            "two writes of one register swapped places and the proof verified. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// The starting-file flag belongs to active rows only. Here a padding row
+    /// right after the table carries the flag. The honest program has no
+    /// starting registers, so the fold stays at zero and the public root
+    /// still matches.
+    #[test]
+    fn rejects_register_init_flag_on_padding_row() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Add, 2, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert!(
+            initial_register_reads(&vm.trace).is_empty(),
+            "the program must start from an all-zero register file"
+        );
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let rows = values.len() / TRACE_WIDTH;
+                let last = find_reg_row(values, 2, 1, 3);
+                assert!(last + 1 < rows, "a padding row must follow the table");
+                assert_eq!(values[at(last + 1, COL_REG_ACTIVE)].as_canonical_u64(), 0);
+                values[at(last + 1, COL_REG_IS_INIT)] = Goldilocks::new(1);
+            });
+        assert!(
+            verdict.is_err(),
+            "the starting-file flag was accepted on a padding row. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// The starting-file flag marks the first row of a register block and
+    /// nothing else. Here the second read of r0 inside its block carries it.
+    /// The value and index are zero, so the fold does not move and the public
+    /// root still matches.
+    #[test]
+    fn rejects_register_init_flag_inside_a_block() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Add, 2, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert!(
+            initial_register_reads(&vm.trace).is_empty(),
+            "the program must start from an all-zero register file"
+        );
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let inner = find_reg_row(values, 0, 0, 2);
+                assert!(inner > 0, "the row must not open the table");
+                assert_eq!(values[at(inner - 1, COL_REG_IDX)].as_canonical_u64(), 0);
+                assert_eq!(values[at(inner - 1, COL_REG_SAME)].as_canonical_u64(), 1);
+                values[at(inner, COL_REG_IS_INIT)] = Goldilocks::new(1);
+            });
+        assert!(
+            verdict.is_err(),
+            "the starting-file flag was accepted inside a register block. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// The events of one register must form one block. Here the events of r1
+    /// are split in two blocks with the block of r2 between them, and the
+    /// second r1 block starts with a read of zero that is not flagged as
+    /// starting state. Every flag and inverse witness is set to match the new
+    /// layout, so only the strict order of the table stands in the way.
+    #[test]
+    fn rejects_register_events_split_into_two_blocks() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Add, 2, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[1].instruction.opcode, Opcode::Add);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let first = find_reg_row(values, 1, 0, 3);
+                let second = first + 1;
+                let third = first + 2;
+                assert_eq!(find_reg_row(values, 1, 1, 1), second);
+                assert_eq!(find_reg_row(values, 2, 1, 3), third);
+                // Swap the last two rows: the table becomes r1 write, r2
+                // write, r1 read.
+                for col in REG_TABLE_COLS {
+                    let a = values[at(second, col)];
+                    values[at(second, col)] = values[at(third, col)];
+                    values[at(third, col)] = a;
+                }
+                let zero = Goldilocks::new(0);
+                // Every pair of neighbours holds two different registers, so
+                // no row continues into the next.
+                values[at(first, COL_REG_SAME)] = zero;
+                values[at(first, COL_REG_SAME_INV)] = Goldilocks::new(1);
+                values[at(second, COL_REG_SAME)] = zero;
+                values[at(second, COL_REG_SAME_INV)] = zero - Goldilocks::new(1);
+                values[at(third, COL_REG_SAME)] = zero;
+                values[at(third, COL_REG_SAME_INV)] = zero;
+                // The read of r1 in the second block returns zero, and the
+                // add that used it follows.
+                values[at(second, COL_REG_VAL)] = zero;
+                values[at(third, COL_REG_VAL)] = zero;
+                values[at(1, COL_RS1_VAL)] = zero;
+                values[at(1, COL_RD_VAL_NEW)] = zero;
+            });
+        assert!(
+            verdict.is_err(),
+            "the events of one register were accepted in two blocks. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// The memory table is a prefix: active rows first, padding after. Every
+    /// rule of the table is gated by `m_active * nm_active`, so an inactive
+    /// row between two active ones switches all of them off at once.
+    ///
+    /// The forged matrix moves the read of address 5 one row down and leaves
+    /// an inactive row behind the write. The read returns 1000 and r3 takes
+    /// that value.
+    #[test]
+    fn rejects_memory_read_after_inactive_gap() {
+        const FORGED: u64 = 1000;
+        let program = memory_round_trip_program();
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[3].instruction.opcode, Opcode::Load);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let rows = values.len() / TRACE_WIDTH;
+                let write = find_mem_row(values, TID_MEMORY, 5, 2);
+                let read = find_mem_row(values, TID_MEMORY, 5, 3);
+                assert_eq!(read, write + 1);
+                assert!(read + 1 < rows, "a padding row must follow the table");
+                assert_eq!(values[at(read + 1, COL_MEM_ACTIVE)].as_canonical_u64(), 0);
+                for col in MEM_TABLE_COLS {
+                    values[at(read + 1, col)] = values[at(read, col)];
+                    values[at(read, col)] = Goldilocks::new(0);
+                }
+                values[at(write, COL_MEM_SAME)] = Goldilocks::new(0);
+                values[at(read + 1, COL_MEM_VAL)] = Goldilocks::new(FORGED);
+                let reg = find_reg_row(values, 3, 3, 3);
+                values[at(reg, COL_REG_VAL)] = Goldilocks::new(FORGED);
+                values[at(3, COL_RD_VAL_NEW)] = Goldilocks::new(FORGED);
+            });
+        assert!(
+            verdict.is_err(),
+            "a memory read after an inactive gap returned a value nothing \
+             wrote and the proof verified. verdict={verdict:?}"
+        );
+    }
+
+    /// The memory flag is the multiplicity of the row on the memory bus, so
+    /// it must be 0 or 1. The prefix rule does not say so: it only forces the
+    /// flag to 1 on a row whose successor is active. The last active row is
+    /// free of it.
+    ///
+    /// The forged matrix copies the last read of address 5 into two more
+    /// rows. The first two copies continue the block with the same flag, and
+    /// the third carries `-1` as its flag. The third row cancels the second
+    /// on the bus, so the bus stays in balance. The ordering rules and the
+    /// same-address rules hold, and nothing but the booleanity of the flag
+    /// is left to refuse the table.
+    ///
+    /// The bus columns are rebuilt from the edited matrix, and then the
+    /// third row is counted with its flag, as the AIR counts it. Nothing
+    /// else is touched.
+    ///
+    /// Since the order rule of R4a-2, the two copies of one cell and one time
+    /// also fail the strict clock step, so this table is refused twice. No
+    /// table keeps the cancelling pair and passes the order rule, because the
+    /// two rows would need one term, which means one cell and one time. This
+    /// is an argument, not a mutation result: the check that removes the flag
+    /// rule was not run. The rule stays.
+    #[test]
+    fn rejects_memory_active_flag_not_boolean() {
+        let program = memory_round_trip_program();
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[3].instruction.opcode, Opcode::Load);
+
+        let verdict = verify_forged_matrix_with_aux(
+            &program,
+            &vm.trace,
+            vm.gas_limit,
+            vm.gas_used,
+            |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let rows = values.len() / TRACE_WIDTH;
+                let read = find_mem_row(values, TID_MEMORY, 5, 3);
+                assert!(read + 3 < rows, "two padding rows must follow the table");
+                assert_eq!(values[at(read + 1, COL_MEM_ACTIVE)].as_canonical_u64(), 0);
+                assert_eq!(values[at(read + 2, COL_MEM_ACTIVE)].as_canonical_u64(), 0);
+                for col in MEM_TABLE_COLS {
+                    values[at(read + 1, col)] = values[at(read, col)];
+                    values[at(read + 2, col)] = values[at(read, col)];
+                }
+                let zero = Goldilocks::new(0);
+                let one = Goldilocks::new(1);
+                // The first two rows of the run continue into the next row.
+                // The third one ends it, and carries the flag -1.
+                values[at(read, COL_MEM_SAME)] = one;
+                values[at(read, COL_MEM_SAME_INV)] = zero;
+                values[at(read + 1, COL_MEM_SAME)] = one;
+                values[at(read + 1, COL_MEM_SAME_INV)] = zero;
+                values[at(read + 2, COL_MEM_SAME)] = zero;
+                values[at(read + 2, COL_MEM_SAME_INV)] = zero;
+                values[at(read + 2, COL_MEM_ACTIVE)] = zero - one;
+            },
+            |main, challenges, aux| {
+                let (alpha, beta, gamma) = (challenges[0], challenges[1], challenges[2]);
+                let width = aux.width;
+                let rows = main.height();
+                for row in 0..rows - 1 {
+                    let at = |col: usize| main.values[row * TRACE_WIDTH + col];
+                    let flag = at(COL_MEM_ACTIVE);
+                    if flag.as_canonical_u64() <= 1 {
+                        continue;
+                    }
+                    let term = register_term(
+                        alpha,
+                        beta,
+                        at(COL_MEM_TID),
+                        at(COL_MEM_CLK),
+                        at(COL_MEM_ADDR),
+                        at(COL_MEM_VAL),
+                        at(COL_MEM_IS_WRITE),
+                    );
+                    // The builder took 1 for this row, the AIR takes the flag.
+                    let delta =
+                        (gamma - term).inverse() * MyExtensionField::from(Goldilocks::ONE - flag);
+                    let coeffs: Vec<Goldilocks> =
+                        p3_field::BasedVectorSpace::as_basis_coefficients_slice(&delta).to_vec();
+                    for later in row + 1..rows {
+                        for (k, c) in coeffs.iter().enumerate() {
+                            // The memory bus is the second extension column.
+                            aux.values[later * width + 2 + k] += *c;
+                        }
+                    }
+                }
+            },
+        );
+        assert!(
+            verdict.is_err(),
+            "a memory row with flag -1 was accepted and the proof verified. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// Swap two memory table rows. All columns of an event move together.
+    fn swap_mem_rows(values: &mut [Goldilocks], a: usize, b: usize) {
+        for col in MEM_TABLE_COLS {
+            values.swap(a * TRACE_WIDTH + col, b * TRACE_WIDTH + col);
+        }
+    }
+
+    /// Address 5 gets two writes and a read. Returns the program and the
+    /// honest run.
+    fn memory_reordered_writes_run() -> (Vec<u64>, Vm) {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Store, 0, 1, 2, 0),
+            inst(Opcode::Load, 4, 0, 0, 9),
+            inst(Opcode::Store, 0, 1, 4, 0),
+            inst(Opcode::Load, 3, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[5].instruction.opcode, Opcode::Load);
+        assert_eq!(vm.trace[5].dst_val, 9);
+        (program, vm)
+    }
+
+    /// Swap the two writes of address 5 and let the read return the earlier
+    /// one. Returns the first row of the three. The order witness stays as the
+    /// honest run left it.
+    fn forge_memory_reordered_writes(values: &mut [Goldilocks]) -> usize {
+        let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+        let early = find_mem_row(values, TID_MEMORY, 5, 2);
+        let late = find_mem_row(values, TID_MEMORY, 5, 4);
+        let read = find_mem_row(values, TID_MEMORY, 5, 5);
+        assert_eq!(late, early + 1);
+        assert_eq!(read, late + 1);
+        swap_mem_rows(values, early, late);
+        values[at(read, COL_MEM_VAL)] = Goldilocks::new(7);
+        let reg = find_reg_row(values, 3, 5, 3);
+        values[at(reg, COL_REG_VAL)] = Goldilocks::new(7);
+        values[at(5, COL_RD_VAL_NEW)] = Goldilocks::new(7);
+        early
+    }
+
+    /// The memory table is sorted by table id, address and then time. The bus
+    /// only compares the set of events, so it cannot see the order.
+    ///
+    /// Address 5 gets two writes and a read. The forged table lists the
+    /// later write first, so the read follows the earlier write and returns
+    /// its value. The set of events is the same.
+    #[test]
+    fn rejects_reordered_memory_writes() {
+        let (program, vm) = memory_reordered_writes_run();
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                forge_memory_reordered_writes(values);
+            });
+        assert!(
+            verdict.is_err(),
+            "a memory table out of time order was accepted. verdict={verdict:?}"
+        );
+    }
+
+    /// The order witness is a list of bits. The reordered table above has a
+    /// backward step of `-3` from its first row to its second. Here the first
+    /// bit of that row holds `-3` as a field element, so the sum of the bits
+    /// is the step, and only the booleanity of the bit refuses the row. The
+    /// second row gets the honest bits of its forward step, 2.
+    #[test]
+    fn rejects_memory_order_bit_not_boolean() {
+        let (program, vm) = memory_reordered_writes_run();
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let first = forge_memory_reordered_writes(values);
+                let zero = Goldilocks::new(0);
+                for b in 0..MEM_ORD_BITS {
+                    values[(first) * TRACE_WIDTH + COL_MEM_ORD_BITS_BASE + b] = zero;
+                    values[(first + 1) * TRACE_WIDTH + COL_MEM_ORD_BITS_BASE + b] =
+                        Goldilocks::new(u64::from(b == 1));
+                }
+                values[first * TRACE_WIDTH + COL_MEM_ORD_BITS_BASE] =
+                    Goldilocks::new(bud_vm::GOLDILOCKS_P - 3);
+            });
+        assert!(
+            verdict.is_err(),
+            "a backward step with a non-boolean order bit was accepted. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// All events of one address sit in one block of the memory table.
+    ///
+    /// Address 5 gets a write and a read, and address 6 gets a write in
+    /// between. The forged table puts the read of address 5 after the block of
+    /// address 6. A block start may read zero, so the read returns 0.
+    #[test]
+    fn rejects_memory_events_split_into_two_blocks() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Store, 0, 1, 2, 0),
+            inst(Opcode::Load, 4, 0, 0, 16),
+            inst(Opcode::Store, 0, 4, 2, 0),
+            inst(Opcode::Load, 3, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[5].instruction.opcode, Opcode::Load);
+        assert_eq!(vm.trace[5].dst_val, 7);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let zero = Goldilocks::new(0);
+                let write = find_mem_row(values, TID_MEMORY, 5, 2);
+                let read = find_mem_row(values, TID_MEMORY, 5, 5);
+                let other = find_mem_row(values, TID_MEMORY, 16, 4);
+                assert_eq!(read, write + 1);
+                assert_eq!(other, read + 1);
+                swap_mem_rows(values, read, other);
+                // Three blocks of one row each. The inverse witness is the
+                // inverse of the address step to the next row.
+                values[at(write, COL_MEM_SAME)] = zero;
+                values[at(write, COL_MEM_SAME_INV)] =
+                    Goldilocks::new(bud_vm::field_inverse_goldilocks(11));
+                values[at(read, COL_MEM_SAME)] = zero;
+                values[at(read, COL_MEM_SAME_INV)] =
+                    Goldilocks::new(bud_vm::field_inverse_goldilocks(bud_vm::GOLDILOCKS_P - 11));
+                values[at(other, COL_MEM_SAME)] = zero;
+                values[at(other, COL_MEM_SAME_INV)] = zero;
+                values[at(other, COL_MEM_VAL)] = zero;
+                let reg = find_reg_row(values, 3, 5, 3);
+                values[at(reg, COL_REG_VAL)] = zero;
+                values[at(5, COL_RD_VAL_NEW)] = zero;
+            });
+        assert!(
+            verdict.is_err(),
+            "the events of one address were accepted in two blocks. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// A forged run whose last `Load` reads memory at exactly `2^32`.
+    ///
+    /// The program builds `2^32` in r1 and then loads an immediate into r3.
+    /// The forged trace turns that last step into a `Load` through r1 that
+    /// reads 0. The address is the first one past the 32 bit range, so the sort
+    /// key `tid * 2^32 + addr` is still below `2^34`, and only the address bits
+    /// can refuse the row. Returns the forged program, the forged trace and
+    /// the two gas figures.
+    fn memory_load_at_2_pow_32() -> (Vec<u64>, Vec<Step>, u64, u64) {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 1 << 16),
+            inst(Opcode::Mul, 1, 1, 1, 0),
+            inst(Opcode::Load, 3, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[1].dst_val, 1 << 32);
+        assert_eq!(vm.trace[2].instruction.opcode, Opcode::Load);
+
+        // The load-immediate at pc 2 becomes a load through r1. Both Loads
+        // cost the same gas, so the gas figures stay.
+        let mut forged_program = program.clone();
+        forged_program[2] = inst(Opcode::Load, 3, 1, 0, 0);
+        let mut trace = vm.trace.clone();
+        let step = &mut trace[2];
+        step.instruction = Instruction {
+            opcode: Opcode::Load,
+            rd: 3,
+            rs1: 1,
+            rs2: 0,
+            imm: 0,
+        };
+        step.src1_idx = 1;
+        step.src1_val = 1 << 32;
+        step.dst_val = 0;
+        step.memory_addr = Some(1usize << 32);
+        step.memory_val = Some(0);
+        step.is_memory_write = false;
+        (forged_program, trace, vm.gas_limit, vm.gas_used)
+    }
+
+    /// A `Load` address is a number inside the memory table, below `2^32`. The
+    /// honest VM refuses an address outside its memory, but the AIR is what a
+    /// verifier trusts, and nothing else bounded the address.
+    ///
+    /// The row keeps the low 32 bits of the address as its bits, which are
+    /// zero here, so the bits do not add up to the address.
+    #[test]
+    fn rejects_memory_load_address_above_32_bits() {
+        let (program, trace, gas_limit, gas_used) = memory_load_at_2_pow_32();
+        let verdict = verify_forged_trace(&program, &trace, gas_limit, gas_used);
+        assert!(
+            verdict.is_err(),
+            "a load at address 2^32 was accepted. verdict={verdict:?}"
+        );
+    }
+
+    /// The address bits are bits. Here the first one holds `2^32`, so the
+    /// sum of the bits is the address and only the booleanity of the bit
+    /// refuses the row.
+    #[test]
+    fn rejects_memory_address_bit_not_boolean() {
+        let (program, trace, gas_limit, gas_used) = memory_load_at_2_pow_32();
+        let verdict = verify_forged_matrix(&program, &trace, gas_limit, gas_used, |values| {
+            let row = find_mem_row(values, TID_MEMORY, 1 << 32, 2);
+            values[row * TRACE_WIDTH + COL_MEM_ADDR_BITS_BASE] = Goldilocks::new(1 << 32);
+        });
+        assert!(
+            verdict.is_err(),
+            "an address bit of 2^32 was accepted. verdict={verdict:?}"
+        );
+    }
+
+    /// The table id is part of the cell, and the bus carries it.
+    ///
+    /// The program pushes 7 and then loads memory cell 0, which holds 0. The
+    /// forged table calls the stack write a write to memory cell 0 and moves it
+    /// in front of the load. The load then reads 7 from a block that has no
+    /// starting-image flag, so the public root stays the root of an empty
+    /// image. The CPU side of the bus still names the push as table 2, so only
+    /// the table id on the bus refuses the table.
+    #[test]
+    fn rejects_memory_stack_row_relabelled_as_memory_cell() {
+        let program = vec![
+            inst(Opcode::Load, 5, 0, 0, 7),
+            inst(Opcode::Push, 0, 5, 0, 0),
+            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Load, 3, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[3].instruction.opcode, Opcode::Load);
+        assert_eq!(vm.trace[3].dst_val, 0);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let load = find_mem_row(values, TID_MEMORY, 0, 3);
+                let push = find_mem_row(values, TID_STACK, 0, 1);
+                assert_eq!(push, load + 1);
+                swap_mem_rows(values, load, push);
+                // The first row is now the push, called a memory write. The
+                // two rows are one cell, so the first one continues into the
+                // second and the step is the clock step minus one.
+                values[at(load, COL_MEM_TID)] = Goldilocks::new(TID_MEMORY);
+                values[at(load, COL_MEM_SAME)] = Goldilocks::new(1);
+                values[at(load, COL_MEM_SAME_INV)] = Goldilocks::new(0);
+                for b in 0..MEM_ORD_BITS {
+                    values[at(load, COL_MEM_ORD_BITS_BASE + b)] =
+                        Goldilocks::new(u64::from(b == 0));
+                }
+                values[at(push, COL_MEM_VAL)] = Goldilocks::new(7);
+                let reg = find_reg_row(values, 3, 3, 3);
+                values[at(reg, COL_REG_VAL)] = Goldilocks::new(7);
+                values[at(3, COL_RD_VAL_NEW)] = Goldilocks::new(7);
+            });
+        assert!(
+            verdict.is_err(),
+            "a stack write was read back as memory cell 0 and the proof \
+             verified. verdict={verdict:?}"
+        );
+    }
+
+    /// An active memory row names table 1, 2 or 3. Here both rows of a cell
+    /// name table 0 or table 4.
+    ///
+    /// The CPU side of the bus names table 1 for these events, so the bus
+    /// refuses the table too. The range rule is a second wall: the sort key
+    /// is a 34 bit number only while the table id is small.
+    #[test]
+    fn rejects_memory_row_with_table_id_outside_one_to_three() {
+        let program = memory_round_trip_program();
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+
+        for forged_tid in [0u64, 4] {
+            let verdict =
+                verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                    let write = find_mem_row(values, TID_MEMORY, 5, 2);
+                    let read = find_mem_row(values, TID_MEMORY, 5, 3);
+                    for row in [write, read] {
+                        values[row * TRACE_WIDTH + COL_MEM_TID] = Goldilocks::new(forged_tid);
+                    }
+                });
+            assert!(
+                verdict.is_err(),
+                "a memory row with table id {forged_tid} was accepted. verdict={verdict:?}"
+            );
+        }
+    }
+
+    /// The root names the table of a starting read.
+    ///
+    /// The host seeds memory cell 5 with 7 and a program reads it. A second
+    /// program reads storage slot 5, which holds 7 too. Before the table id
+    /// was part of the fold, both reads gave one term, so the root of the
+    /// first run was the root of the second. The forged proof is the storage
+    /// run, stated with the root of the memory run.
+    #[test]
+    fn rejects_memory_image_root_that_names_a_storage_slot() {
+        let memory_program = vec![
+            inst(Opcode::Load, 2, 0, 0, 5),
+            inst(Opcode::Load, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut memory_vm = Vm::new(1024);
+        memory_vm.memory[5..13].copy_from_slice(&7u64.to_le_bytes());
+        let receipt = memory_vm.run_receipt(&memory_program);
+        assert!(receipt.success, "the memory run must succeed");
+        let memory_reads = initial_memory_reads(&memory_vm.trace);
+        assert_eq!(
+            memory_reads.len(),
+            1,
+            "the memory run reads one seeded cell"
+        );
+
+        let storage_program = vec![
+            inst(Opcode::SRead, 1, 0, 0, 5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        vm.storage.insert(5, 7);
+        let receipt = vm.run_receipt(&storage_program);
+        assert!(receipt.success, "the storage run must succeed");
+        assert_eq!(initial_memory_reads(&vm.trace).len(), 1);
+
+        let verdict = verify_forged_matrix_with_reads(
+            &storage_program,
+            &vm.trace,
+            vm.gas_limit,
+            vm.gas_used,
+            memory_reads,
+            |_| {},
+        );
+        assert!(
+            verdict.is_err(),
+            "the root of a seeded memory cell was accepted for a seeded \
+             storage slot. verdict={verdict:?}"
+        );
+    }
+
+    /// `m_same` gates the value continuity between two rows of one address.
+    /// Here it is cleared on the write of address 5, so the read after it only
+    /// has to be zero, and it is. Its value is 0 and it is not flagged as
+    /// starting state.
+    ///
+    /// Since the order rule of R4a-2, a cleared flag on two rows of one cell
+    /// also makes the step `-1`, which has no 34 bit form, so this table is
+    /// refused by the order rule as well as by the inverse witness. A cleared
+    /// flag cannot pass the order rule at all. This is an argument, not a
+    /// mutation result: the check that removes the inverse rule was not run.
+    #[test]
+    fn rejects_memory_same_flag_cleared_on_same_address() {
+        let program = memory_round_trip_program();
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert_eq!(vm.trace[3].instruction.opcode, Opcode::Load);
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let write = find_mem_row(values, TID_MEMORY, 5, 2);
+                let read = find_mem_row(values, TID_MEMORY, 5, 3);
+                assert_eq!(read, write + 1);
+                assert_eq!(values[at(write, COL_MEM_SAME)].as_canonical_u64(), 1);
+                values[at(write, COL_MEM_SAME)] = Goldilocks::new(0);
+                values[at(read, COL_MEM_VAL)] = Goldilocks::new(0);
+                let reg = find_reg_row(values, 3, 3, 3);
+                values[at(reg, COL_REG_VAL)] = Goldilocks::new(0);
+                values[at(3, COL_RD_VAL_NEW)] = Goldilocks::new(0);
+            });
+        assert!(
+            verdict.is_err(),
+            "a memory read returned zero after a write of 7 to the same \
+             address and the proof verified. verdict={verdict:?}"
+        );
+    }
+
+    /// The starting-image flag belongs to active rows only. Here a padding row
+    /// right after the memory table carries it. The program has no starting
+    /// memory, so the fold stays at zero and the public root still matches.
+    #[test]
+    fn rejects_memory_init_flag_on_padding_row() {
+        let program = memory_zero_round_trip_program();
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert!(
+            initial_memory_reads(&vm.trace).is_empty(),
+            "the program must start from an empty memory image"
+        );
+
+        let verdict =
+            verify_forged_matrix(&program, &vm.trace, vm.gas_limit, vm.gas_used, |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let rows = values.len() / TRACE_WIDTH;
+                let read = find_mem_row(values, TID_MEMORY, 0, 2);
+                assert!(read + 1 < rows, "a padding row must follow the table");
+                assert_eq!(values[at(read + 1, COL_MEM_ACTIVE)].as_canonical_u64(), 0);
+                values[at(read + 1, COL_MEM_IS_INIT)] = Goldilocks::new(1);
+            });
+        assert!(
+            verdict.is_err(),
+            "the starting-image flag was accepted on a padding row. \
+             verdict={verdict:?}"
+        );
+    }
+
+    /// The starting-image flag marks the first row of a cell block and nothing
+    /// else. Here the read after the write of memory cell 0 carries it.
+    ///
+    /// The flag moves the fold, so the forged matrix carries the new
+    /// accumulator on the rows after the read, and the public root is the root
+    /// of that one starting read. The fold, the root and the cell rules hold.
+    /// Only the rule on the flag inside a block is left to refuse the table.
+    #[test]
+    fn rejects_memory_init_flag_inside_a_block() {
+        let program = memory_zero_round_trip_program();
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the honest run must succeed");
+        assert!(
+            initial_memory_reads(&vm.trace).is_empty(),
+            "the program must start from an empty memory image"
+        );
+
+        let key = mem_key(TID_MEMORY, 0);
+        let verdict = verify_forged_matrix_with_reads(
+            &program,
+            &vm.trace,
+            vm.gas_limit,
+            vm.gas_used,
+            vec![(key, 0)],
+            |values| {
+                let at = |row: usize, col: usize| row * TRACE_WIDTH + col;
+                let rows = values.len() / TRACE_WIDTH;
+                let write = find_mem_row(values, TID_MEMORY, 0, 1);
+                let read = find_mem_row(values, TID_MEMORY, 0, 2);
+                assert_eq!(read, write + 1);
+                assert_eq!(values[at(write, COL_MEM_SAME)].as_canonical_u64(), 1);
+                values[at(read, COL_MEM_IS_INIT)] = Goldilocks::new(1);
+                // The fold of one starting read with value 0: key * gamma.
+                let acc = Goldilocks::new(key) * Goldilocks::new(MEM_INIT_GAMMA);
+                for row in read..rows {
+                    values[at(row, COL_MEM_INIT_ACC)] = acc;
+                }
+            },
+        );
+        assert!(
+            verdict.is_err(),
+            "the starting-image flag was accepted inside a memory block. \
+             verdict={verdict:?}"
         );
     }
 
@@ -7058,7 +9282,13 @@ mod tests {
                     proof_bytes,
                     degree_bits: degree_bits as u32,
                 };
-                Plonky3Adapter::verify(&envelope, &pi, &program).is_err()
+                Plonky3Adapter::verify_with_activation(
+                    &envelope,
+                    &pi,
+                    &program,
+                    bud_isa::MainnetActivation::full(),
+                )
+                .is_err()
             }
         };
 
@@ -7179,7 +9409,13 @@ mod tests {
             Ok(Ok(_)) => false,
         };
         let rejected_at_verification = match attempted {
-            Ok(Ok(envelope)) => Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            Ok(Ok(envelope)) => Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::full(),
+            )
+            .is_err(),
             _ => false,
         };
 
@@ -7189,6 +9425,102 @@ mod tests {
              and their result skipped. proving_rejected={rejected_at_proving}, \
              verification_rejected={rejected_at_verification}"
         );
+    }
+
+    /// A public scalar at or above the modulus is the same field element as
+    /// `value - p` (BLG-0218). One proof must not verify for both.
+    #[test]
+    fn rejects_a_non_canonical_public_scalar() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (envelope, pi) = prove_and_verify_full(program.clone(), |_| {});
+        assert!(pi.gas_used < 1 << 20);
+        let mut alias = pi.clone();
+        alias.gas_used += bud_vm::GOLDILOCKS_P;
+        let mut aliased = envelope.clone();
+        aliased.public_inputs_hash = alias.hash();
+        assert!(matches!(
+            Plonky3Adapter::verify(&aliased, &alias, &program),
+            Err(VerifyError::PublicInputsMismatch)
+        ));
+    }
+
+    /// An honest `VerifyMerkle` that does NOT match its claimed root must
+    /// still be provable (BLG-0219). The inverse witness of `final - root`
+    /// has to be taken in the field; with `wrapping_sub` it was wrong
+    /// whenever the path result was below the claimed root.
+    #[test]
+    fn proves_an_honest_verify_merkle_mismatch_when_final_is_below_root() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let key: u64 = 7;
+        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
+        let leaf: u64 = 0xBEEF;
+        let mut current = leaf;
+        for (i, &sibling) in siblings.iter().enumerate() {
+            let bit = (key >> i) & 1;
+            current = if bit == 0 {
+                bud_vm::merkle_poseidon_round(current, sibling)
+            } else {
+                bud_vm::merkle_poseidon_round(sibling, current)
+            };
+        }
+        // The claimed root is above the path result, so `final < root`.
+        assert!(current < bud_vm::GOLDILOCKS_P - 1);
+        let claimed_root = current + 1;
+        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
+        for (i, &sibling) in siblings.iter().enumerate() {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
+        }
+        vm.registers[2] = claimed_root;
+        vm.registers[3] = leaf;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.trace.len(), 66);
+        assert_eq!(vm.trace[0].dst_val, 0, "the honest result is a mismatch");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("honest proof");
+        Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        )
+        .expect("an honest mismatch must verify");
     }
 
     /// (security audit) negative test for the Merkle
@@ -7341,7 +9673,13 @@ mod tests {
                     proof_bytes,
                     degree_bits: degree_bits as u32,
                 };
-                Plonky3Adapter::verify(&envelope, &pi, &program).is_err()
+                Plonky3Adapter::verify_with_activation(
+                    &envelope,
+                    &pi,
+                    &program,
+                    bud_isa::MainnetActivation::full(),
+                )
+                .is_err()
             }
         };
 
@@ -7438,7 +9776,12 @@ mod tests {
             degree_bits: degree_bits as u32,
         };
 
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(
             res.is_err(),
             "Expected verification to FAIL with a skipped Merkle round, but it succeeded!"
@@ -7650,7 +9993,12 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(res.is_ok(), "1-depth should succeed: {:?}", res);
     }
 
@@ -7726,7 +10074,12 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(res.is_ok(), "2-depth should succeed: {:?}", res);
     }
 
@@ -7806,7 +10159,12 @@ mod tests {
         // Single-round transition or final root check is broken,
         // Verification will fail.
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(
             res.is_ok(),
             "Expected verification to SUCCEED for a valid 64-depth path, but it failed: {:?}",
@@ -7928,7 +10286,12 @@ mod tests {
             degree_bits: degree_bits as u32,
         };
 
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(
             res.is_err(),
             "Expected verification to FAIL with a tampered final accumulator, but it succeeded!"
@@ -8038,7 +10401,12 @@ mod tests {
             degree_bits: degree_bits as u32,
         };
 
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(
             res.is_err(),
             "Expected verification to FAIL with a tampered Poseidon S-box, but it succeeded!"
@@ -8502,7 +10870,13 @@ mod tests {
         // This proof SHOULD verify because we are proving that the VM
         // CORRECTLY COMPUTES '0' when the root doesn't match.
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
+        assert!(Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full()
+        )
+        .is_ok());
     }
 
     /// VerifyInference AIR binding soundness test.
@@ -8615,31 +10989,26 @@ mod tests {
             degree_bits: degree_bits as u32,
         };
 
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
         assert!(
             res.is_err(),
             "Expected verification to FAIL when is_verify_inference is zeroed on a 0x1F row, but it succeeded!"
         );
     }
 
-    /// Kademe 1 control (2026-08-28): with a 16-byte VM memory the
-    /// expansion guard (proof_addr+32 <= len) is false, so the trace holds
-    /// only the original VerifyInference row. The clean proof must verify
-    /// without any expansion rows.
-    #[test]
-    fn verify_inference_clean_proof_without_expansion_verifies() {
-        let program = vec![
-            inst(Opcode::VerifyInference, 1, 2, 3, 0),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(16); // too small for any expansion
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert!(
-            vm.trace.iter().all(|s| !s.inference_is_expand),
-            "no expansion rows expected with 16-byte memory"
-        );
-
+    /// Proves `trace` for `program` and verifies it with every opcode
+    /// activated. The error text says whether proving or verifying refused.
+    fn prove_and_verify_all_active(
+        trace: &[Step],
+        program: &[u64],
+        gas_used: u64,
+        gas_limit: u64,
+    ) -> Result<(), String> {
         let program_bytes: Vec<u8> = program
             .iter()
             .flat_map(|&i| i.to_le_bytes().to_vec())
@@ -8657,224 +11026,265 @@ mod tests {
             sender: 0,
             nonce: 0,
             block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
+            gas_limit,
+            gas_used,
             exit_code: 0,
-            trace_len: vm.trace.len() as u64,
+            trace_len: trace.len() as u64,
             event_digest: [0u8; 32],
             state_writes_digest: [0u8; 32],
         };
-
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
-        assert!(
-            res.is_ok(),
-            "no-expansion VerifyInference proof must verify, got {:?}",
-            res
-        );
+        let envelope = Plonky3Adapter::prove(trace, &pi, program)
+            .map_err(|e| format!("prove refused: {e:?}"))?;
+        Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            program,
+            bud_isa::MainnetActivation::full(),
+        )
+        .map(|_| ())
+        .map_err(|e| format!("verify refused: {e:?}"))
     }
 
-    /// Kademe 1 (2026-08-28): a clean VerifyInference proof with imm=0
-    /// (STARK proof type) must verify.
-    /// This was red before the LogUp fix: the Register and Program
-    /// arguments did not exclude COL_INFERENCE_IS_EXPAND rows, so every
-    /// VerifyInference proof (regardless of imm) returned InvalidProof.
+    /// No trace that contains opcode 0x1F can be proven, whatever the
+    /// immediate or the memory behind the register. The opcode is reserved
+    /// and the AIR forces its selector to zero on every row.
     #[test]
-    fn verify_inference_clean_proof_verifies() {
-        let program = vec![
-            inst(Opcode::VerifyInference, 1, 2, 3, 0),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&i| i.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: [0u8; 32],
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
-        assert!(
-            res.is_ok(),
-            "clean VerifyInference (imm=0, STARK) proof must verify, got {:?}",
-            res
-        );
-    }
-
-    /// Kademe 3a (2026-08-28): a program whose VerifyInference window holds
-    /// a valid commitment chain (output_c == Poseidon(model_c, input_c))
-    /// gets rd = 1, and the STARK proof of that trace must verify - the AIR
-    /// equality constraint must agree with the VM's answer.
-    #[test]
-    fn verify_inference_valid_chain_proof_verifies() {
+    fn rejects_verify_inference_in_any_trace() {
         let model_c = 0xABCD_EF01_2345_6789u64;
         let input_c = 0x1122_3344_5566_7788u64;
         let output_c = bud_vm::poseidon4_hash(model_c, input_c);
-        let program = vec![
-            inst(Opcode::VerifyInference, 2, 1, 0, 0),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
-        vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
-        vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
-        vm.registers[1] = 64; // proof address
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert_eq!(vm.registers[2], 1, "valid chain must answer 1");
+        for imm in [0i32, 1, 2] {
+            let program = vec![
+                inst(Opcode::VerifyInference, 2, 1, 0, imm),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            let mut vm = Vm::new(1024);
+            vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
+            vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
+            vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
+            vm.registers[1] = 64;
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success);
+            assert!(vm
+                .trace
+                .iter()
+                .any(|s| s.instruction.opcode == Opcode::VerifyInference));
 
-        // The initial state root commits the memory and register images; the
-        // proof window is at r1=64, so the register image is not all zeros.
-        let initial_root = crate::adapter::initial_state_root_of(
-            crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
-            crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
-        );
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&i| i.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: initial_root,
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
-        assert!(
-            res.is_ok(),
-            "valid-chain VerifyInference proof must verify, got {:?}",
-            res
-        );
+            // The initial register image is part of the statement, so the
+            // pre-set r1 is committed the same way the old tests did it.
+            let initial_root = crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            );
+            let program_bytes: Vec<u8> = program
+                .iter()
+                .flat_map(|&i| i.to_le_bytes().to_vec())
+                .collect();
+            let mut hasher = Keccak::v256();
+            hasher.update(&program_bytes);
+            let mut program_hash = [0u8; 32];
+            hasher.finalize(&mut program_hash);
+            let pi = ExecutionPublicInputs {
+                chain_id: 1,
+                program_hash,
+                initial_state_root: initial_root,
+                final_state_root: [0u8; 32],
+                sender: 0,
+                nonce: 0,
+                block_height: 0,
+                gas_limit: vm.gas_limit,
+                gas_used: vm.gas_used,
+                exit_code: 0,
+                trace_len: vm.trace.len() as u64,
+                event_digest: [0u8; 32],
+                state_writes_digest: [0u8; 32],
+            };
+            let res = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+                .map_err(|e| format!("prove refused: {e:?}"))
+                .and_then(|envelope| {
+                    Plonky3Adapter::verify_with_activation(
+                        &envelope,
+                        &pi,
+                        &program,
+                        bud_isa::MainnetActivation::full(),
+                    )
+                    .map_err(|e| format!("verify refused: {e:?}"))
+                });
+            let err = res.expect_err("a trace with VerifyInference must be refused");
+            assert!(
+                err.starts_with("verify refused"),
+                "the AIR must refuse VerifyInference (imm={imm}), got {err}"
+            );
+        }
     }
 
-    /// Kademe 1b: imm=1 (SNARK wrap) is a defined proof type and must also
-    /// verify while the circuit is fail-closed (VM still returns rd=0).
+    /// Inference expansion rows must not work as free filler. The honest
+    /// prefix ends in Halt, and extra rows with the expansion flag set are
+    /// spliced after the VerifyInference row. They add no gas and the row
+    /// count is not part of the statement, so the flag has to be refused.
     #[test]
-    fn verify_inference_snark_wrap_proof_verifies() {
+    fn rejects_inference_expansion_rows_used_as_filler() {
         let program = vec![
-            inst(Opcode::VerifyInference, 1, 2, 3, 1),
+            inst(Opcode::VerifyInference, 1, 2, 3, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(1024);
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
-        let program_bytes: Vec<u8> = program
+        let mut trace = vm.trace.clone();
+        let vi_idx = trace
             .iter()
-            .flat_map(|&i| i.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
+            .position(|s| s.instruction.opcode == Opcode::VerifyInference)
+            .expect("trace holds the VerifyInference row");
+        let fillers = 11u8;
+        {
+            let main = &mut trace[vi_idx];
+            main.inference_model_commitment = Some(5);
+            main.inference_input_commitment = Some(6);
+            main.inference_output_commitment = Some(7);
+            main.next_pc = main.pc;
+        }
+        for round in 0..fillers {
+            let mut row = trace[vi_idx].clone();
+            row.next_pc = if round == fillers - 1 {
+                row.pc + 1
+            } else {
+                row.pc
+            };
+            row.instruction.rd = 0;
+            row.instruction.imm = (round % 2) as i32;
+            row.dst_idx = 0;
+            row.dst_val = 0;
+            row.inference_proof_round = Some(round);
+            row.inference_is_expand = true;
+            trace.insert(vi_idx + 1 + round as usize, row);
+        }
 
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: [0u8; 32],
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
-        assert!(
-            res.is_ok(),
-            "VerifyInference imm=1 (SNARK wrap) must verify, got {:?}",
-            res
-        );
-    }
-
-    /// Kademe 2 (2026-08-28): the AIR refuses an undefined proof type -
-    /// imm=2 is neither STARK (0) nor SNARK wrap (1). Pinned by the
-    /// `imm * (imm - 1)` constraint on non-expansion VerifyInference rows.
-    #[test]
-    fn rejects_verify_inference_with_undefined_proof_type() {
-        let program = vec![
-            inst(Opcode::VerifyInference, 1, 2, 3, 2),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&i| i.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: [0u8; 32],
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        let res = prove_and_verify_all_active(&trace, &program, vm.gas_used, vm.gas_limit);
         assert!(
             res.is_err(),
-            "undefined proof type imm=2 must be rejected by the AIR, but it verified!"
+            "inference expansion rows used as filler must be refused, got {res:?}"
+        );
+    }
+
+    /// Positive control for the 0x1F tests: a trace without opcode 0x1F
+    /// proves and verifies, so the refusals above are not a broken setup.
+    #[test]
+    fn accepts_simple_trace_without_verify_inference() {
+        let program = vec![
+            inst(Opcode::Add, 1, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        let res = prove_and_verify_all_active(&vm.trace, &program, vm.gas_used, vm.gas_limit);
+        assert!(res.is_ok(), "an honest trace must verify, got {res:?}");
+    }
+
+    /// The expansion flag is zero on every row. The trace has no 0x1F row,
+    /// so the selector constraint cannot fire. The Halt row gets the flag,
+    /// its ROM multiplicity is zeroed, and the aux trace is built from that
+    /// same matrix. Without the flag constraint this forgery verifies.
+    #[test]
+    fn rejects_expand_flag_on_non_inference_row() {
+        let program = vec![
+            inst(Opcode::Add, 1, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert!(!vm
+            .trace
+            .iter()
+            .any(|s| s.instruction.opcode == Opcode::VerifyInference));
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let row = (0..n_cpu)
+            .find(|&i| {
+                matrix.values[i * TRACE_WIDTH + COL_OPCODE].as_canonical_u64()
+                    == Opcode::Halt as u64
+            })
+            .expect("trace holds a Halt row");
+        assert_eq!(
+            matrix.values[row * TRACE_WIDTH + COL_INFERENCE_IS_EXPAND],
+            Goldilocks::ZERO
+        );
+        matrix.values[row * TRACE_WIDTH + COL_INFERENCE_IS_EXPAND] = Goldilocks::new(1);
+        // The flagged row no longer fetches its ROM word, so its ROM
+        // multiplicity goes to zero too. Program CTL then balances and the
+        // flag constraint is the only thing left that can refuse the trace.
+        let pc = matrix.values[row * TRACE_WIDTH + COL_PC].as_canonical_u64() as usize;
+        matrix.values[pc * TRACE_WIDTH + COL_PROG_MULT] = Goldilocks::ZERO;
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let envelope = ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes: postcard::to_allocvec(&p3_proof).unwrap(),
+            degree_bits: degree_bits as u32,
+        };
+        let res = Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        );
+        assert!(
+            res.is_err(),
+            "the expansion flag on a non-0x1F row must be refused, got {res:?}"
         );
     }
 

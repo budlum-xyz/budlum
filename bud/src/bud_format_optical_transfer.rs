@@ -19,6 +19,10 @@ use sha3::{Digest, Sha3_256};
 pub const OPTX_MAGIC: [u8; 8] = *b"\xB5OPTX\0\0\0";
 pub const OPTX_VERSION: u8 = 1;
 
+/// The most segments one transfer may have. Split and join share it, so a
+/// set that `split_optical` makes is a set that `join_optical` accepts.
+const OPTX_MAX_SEGMENTS: usize = 1_000_000;
+
 /// An optical segment, one per code shown on screen.
 #[derive(Debug, Clone)]
 pub struct OptSegment {
@@ -51,7 +55,11 @@ pub fn split_optical(data: &[u8], seg_capacity: usize) -> Option<Vec<OptSegment>
     if data.is_empty() || seg_capacity == 0 {
         return None;
     }
-    let total = data.len().div_ceil(seg_capacity) as u32;
+    let count = data.len().div_ceil(seg_capacity);
+    if count > OPTX_MAX_SEGMENTS {
+        return None;
+    }
+    let total = u32::try_from(count).ok()?;
     let mut segs = Vec::with_capacity(total as usize);
     for (i, chunk) in data.chunks(seg_capacity).enumerate() {
         let d = chunk.to_vec();
@@ -75,7 +83,7 @@ pub fn join_optical(segs: &[OptSegment]) -> Option<Vec<u8>> {
         return None;
     }
     let total = segs[0].total;
-    if total == 0 || total > 1_000_000 {
+    if total == 0 || total as usize > OPTX_MAX_SEGMENTS {
         return None;
     }
     // Every segment must report the same total.
@@ -136,6 +144,14 @@ pub fn optx_digest(segs: &[OptSegment]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0648: split had no ceiling while join refused more than a million
+    /// segments, so a large transfer failed at the receiving end.
+    #[test]
+    fn split_refuses_more_segments_than_join_accepts() {
+        let data = vec![7u8; OPTX_MAX_SEGMENTS + 1];
+        assert!(split_optical(&data, 1).is_none());
+    }
 
     #[test]
     fn the_optical_round_trip_is_lossless() {

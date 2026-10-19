@@ -212,26 +212,53 @@ fn open_shard_pack(pack: &[u8]) -> Option<Vec<u8>> {
     }
     let original_len = usize::try_from(u64::from_le_bytes(pack[2..HDR].try_into().ok()?)).ok()?;
     let shard_len = original_len.div_ceil(4);
+    let record_len = shard_len.checked_add(32 + 4)?;
+    let total = record_len.checked_mul(6)?.checked_add(HDR)?;
+    if pack.len() > total {
+        return None;
+    }
+    let mut found: [Option<Vec<u8>>; 6] = Default::default();
+    // Pass 1: follow each record's own length field. This keeps working when
+    // a record was emptied and its bytes removed, so later records moved up.
     let mut pos = HDR;
-    let mut survivors: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
-    for index in 0..6 {
-        if pack.len() < pos + 32 + 4 {
-            return None;
-        }
-        let digest: [u8; 32] = pack[pos..pos + 32].try_into().ok()?;
-        pos += 32;
-        let len = u32::from_le_bytes(pack[pos..pos + 4].try_into().ok()?) as usize;
-        pos += 4;
-        if pack.len() < pos + len {
-            return None;
-        }
-        let shard = &pack[pos..pos + len];
+    for (index, slot) in found.iter_mut().enumerate() {
+        let Some(head) = pack.get(pos..pos + 36) else {
+            break;
+        };
+        let digest: [u8; 32] = head[..32].try_into().ok()?;
+        let len = u32::from_le_bytes(head[32..36].try_into().ok()?) as usize;
+        pos += 36;
+        let Some(shard) = pos.checked_add(len).and_then(|end| pack.get(pos..end)) else {
+            break;
+        };
         pos += len;
         if len == shard_len && shard_digest(index, shard) == digest {
-            survivors.push((index, shard.to_vec()));
+            *slot = Some(shard.to_vec());
         }
     }
-    if pos != pack.len() || survivors.len() < 4 {
+    // Pass 2: every record is `36 + shard_len` bytes, so its place follows
+    // from the header alone. A cut tail or a damaged length field cannot hide
+    // the records that are still whole. Digests make the union safe.
+    for (index, slot) in found.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let start = HDR + index * record_len;
+        let Some(rec) = pack.get(start..start + record_len) else {
+            continue;
+        };
+        let digest: [u8; 32] = rec[..32].try_into().ok()?;
+        let shard = &rec[36..];
+        if shard_digest(index, shard) == digest {
+            *slot = Some(shard.to_vec());
+        }
+    }
+    let survivors: Vec<(usize, Vec<u8>)> = found
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|s| (i, s)))
+        .collect();
+    if survivors.len() < 4 {
         return None;
     }
     let mds = CauchyMds::new(4, 2)?;
@@ -312,9 +339,20 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
                 data,
                 crate::bud_format_columnar::ColumnarMode::Exact,
             ) {
+                // The transform is kept only when it restores the exact input
+                // bytes. Key order, spacing, escapes and number spelling can
+                // differ after a decode, and a container that restores to
+                // other bytes must not be reported as stored.
                 Some(col) => {
-                    transform_kind = TransformKind::Columnar;
-                    crate::bud_format_columnar::columnar_to_blob(&col)?
+                    let blob = crate::bud_format_columnar::columnar_to_blob(&col)?;
+                    let restored = crate::bud_format_columnar::columnar_from_blob(&blob)
+                        .and_then(|c| crate::bud_format_columnar::columnar_decode(&c));
+                    if restored.as_deref() == Some(data) {
+                        transform_kind = TransformKind::Columnar;
+                        blob
+                    } else {
+                        data.to_vec()
+                    }
                 }
                 None => data.to_vec(),
             }
@@ -551,6 +589,16 @@ mod tests {
         assert_eq!(&blob[..8], &ENGINE_MAGIC);
     }
 
+    /// BLG-0581: a JSON array whose records list their keys in another order
+    /// restored to different bytes while the store reported success.
+    #[test]
+    fn json_that_does_not_roundtrip_exactly_is_stored_untransformed() {
+        let json = br#"[{"a":1,"b":2},{"b":3,"a":4}]"#.to_vec();
+        let res = engine_store(&json, false, 1).expect("engine");
+        let restored = engine_restore_container(&res.container, res.transform_kind.to_u8(), false);
+        assert_eq!(restored, Some(json));
+    }
+
     #[test]
     fn binary_engine_roundtrip() {
         // Binary → engine → .bud → restore = orijinal (transform yok)
@@ -711,6 +759,26 @@ mod tests {
             open_shard_pack(&three).is_none(),
             "three lost shards exceed a (4,2) code and must be refused"
         );
+    }
+
+    /// BLG-0603: a cut tail or a damaged length field must not lose the
+    /// records that are still whole.
+    #[test]
+    fn shard_pack_survives_truncation_and_bad_length_field() {
+        let encoded: Vec<u8> = (0u8..=255).cycle().take(4_001).collect();
+        let pack = pack_shards(&encoded).expect("pack");
+        let (start5, shard_len) = shard_record(&pack, 5);
+        let (start4, _) = shard_record(&pack, 4);
+        let cut = &pack[..start4 + 36 + shard_len / 2];
+        assert_eq!(open_shard_pack(cut).expect("truncated tail"), encoded);
+        let cut = &pack[..start5];
+        assert_eq!(open_shard_pack(cut).expect("one record cut"), encoded);
+        let (start1, _) = shard_record(&pack, 1);
+        let mut bad = pack.clone();
+        bad[start1 + 32] ^= 0x01;
+        assert_eq!(open_shard_pack(&bad).expect("bad len field"), encoded);
+        let (start3, _) = shard_record(&pack, 3);
+        assert!(open_shard_pack(&pack[..start3 + 10]).is_none());
     }
 
     /// The same recovery through the public restore path: a stored engine

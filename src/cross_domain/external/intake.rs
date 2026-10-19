@@ -274,7 +274,14 @@ pub enum IntakeError {
          AcceptMostCommon is never for a state root that will be committed to"
     )]
     PermissiveQuorumPolicy,
+    #[error("the quorum policy cannot decide safely: {reason}")]
+    InvalidQuorumPolicy { reason: &'static str },
 }
+
+/// The most seats one quorum round may hold. Rounds are consensus state and
+/// are digested on every call, so the seat count must have a bound the
+/// operator cannot lift.
+const MAX_QUORUM_PARTICIPANTS: usize = 256;
 
 impl IntakeState {
     #[must_use]
@@ -539,6 +546,34 @@ impl IntakeState {
             )
         {
             return Err(IntakeError::PermissiveQuorumPolicy);
+        }
+        if policy.agreement_threshold == 0 {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "the agreement threshold is zero",
+            });
+        }
+        if policy.agreement_threshold > policy.max_participants {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "the threshold is above the number of seats",
+            });
+        }
+        if policy.max_participants > MAX_QUORUM_PARTICIPANTS {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "too many seats",
+            });
+        }
+        // A threshold at or below half of the seats lets two rival groups
+        // both reach it, so the first group to fill wins a race.
+        if policy.agreement_threshold <= policy.max_participants / 2 {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "the threshold is not a strict majority of the seats",
+            });
+        }
+        let bonded = self.registry.domain(key).map_or(0, |reg| reg.provers.len());
+        if policy.agreement_threshold > bonded {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "fewer provers are bonded than the threshold needs",
+            });
         }
         self.quorum.set_policy(*key, policy);
         Ok(())
@@ -1004,6 +1039,38 @@ mod tests {
     }
 
     #[test]
+    fn a_quorum_policy_that_cannot_decide_safely_is_refused() {
+        use crate::cross_domain::external::QuorumPolicy;
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        for prover in [addr(2), addr(3)] {
+            state
+                .bond_prover(&key, prover, economics_bond())
+                .expect("bond");
+        }
+        let cases = [
+            QuorumPolicy::strict(0, 3),
+            QuorumPolicy::strict(4, 3),
+            QuorumPolicy::strict(2, 0),
+            QuorumPolicy::strict(1, 3),
+            QuorumPolicy::strict(2, 4),
+            QuorumPolicy::strict(3, MAX_QUORUM_PARTICIPANTS + 1),
+            // Three bonded provers, threshold four.
+            QuorumPolicy::strict(4, 5),
+        ];
+        for policy in cases {
+            let err = state.set_quorum_policy(&key, policy).unwrap_err();
+            assert!(
+                matches!(err, IntakeError::InvalidQuorumPolicy { .. }),
+                "policy {policy:?} must be refused, got: {err:?}"
+            );
+        }
+        state
+            .set_quorum_policy(&key, QuorumPolicy::strict(2, 3))
+            .expect("a strict majority with enough bonded provers installs");
+    }
+
+    #[test]
     fn bonding_the_same_prover_twice_is_refused_by_name() {
         let mut state = IntakeState::new();
         let key = register(&mut state);
@@ -1172,6 +1239,66 @@ mod tests {
             before, after,
             "a recorded answer is consensus state and must move the digest"
         );
+    }
+
+    #[test]
+    fn a_refused_submission_does_not_fault_the_domain() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let spec = eth_spec();
+        // An unbonded caller and a malformed payload: both are refusals about
+        // the caller's input.
+        let unbonded = quorum_evidence(&spec, addr(50));
+        assert!(
+            state
+                .submit_evidence(&unbonded, Some(Box::new(StrictTestBls)))
+                .is_err(),
+            "an unbonded caller must be refused"
+        );
+        let mut malformed = quorum_evidence(&spec, addr(9));
+        malformed.payload.truncate(1);
+        assert!(
+            state
+                .submit_evidence(&malformed, Some(Box::new(StrictTestBls)))
+                .is_err(),
+            "a malformed payload must be refused"
+        );
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_refused, 2);
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Admitted,
+            "a caller's bad input must not fault the domain"
+        );
+        // The poster (bonded) can still attest.
+        let good = quorum_evidence(&spec, addr(9));
+        state
+            .submit_evidence(&good, Some(Box::new(StrictTestBls)))
+            .expect("the domain must still serve");
+    }
+
+    #[test]
+    fn a_faulted_domain_takes_no_attestation() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        state
+            .bond_prover(&key, addr(2), economics_bond())
+            .expect("bond");
+        state
+            .registry
+            .mark_faulted(&key, "test dispute")
+            .expect("domain exists");
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(2));
+        let err = state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .unwrap_err();
+        assert!(
+            matches!(err, IntakeError::Registry(RegistryError::NotServing { .. })),
+            "a faulted domain must refuse new evidence, got: {err:?}"
+        );
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_accepted, 0);
     }
 
     #[test]

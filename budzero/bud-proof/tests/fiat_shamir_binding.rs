@@ -15,11 +15,11 @@
 //! `bud_stark` is our own verifier, not a dependency, so that question applies
 //! here directly. It is currently answered correctly:
 //!
-//!   prover.rs:184    challenger.observe_slice(public_values);
-//!   prover.rs:223    let alpha = challenger.sample_algebra_element();
+//!   prover.rs:196    challenger.observe_slice(public_values);
+//!   prover.rs:235    let alpha = challenger.sample_algebra_element();
 //!
-//!   verifier.rs:352  challenger.observe_slice(public_values);
-//!   verifier.rs:356  let rand_1 = challenger.sample_algebra_element();
+//!   verifier.rs:443  challenger.observe_slice(public_values);
+//!   verifier.rs:447  let rand_1 = challenger.sample_algebra_element();
 //!
 //! Public values go in before any challenge comes out, on both sides, and the
 //! instance data and commitments precede them in the same order.
@@ -255,6 +255,82 @@ fn alpha_and_zeta_follow_their_commitments() {
              evaluation point must depend on the folding it evaluates",
             zeta + 1,
             alpha + 1
+        );
+    }
+}
+
+/// The aux (LogUp) commitment is observed after the permutation challenges
+/// are sampled and before alpha.
+///
+/// The permutation challenges rand_1..3 cannot depend on the aux trace, since
+/// the aux trace is built from them. Alpha folds the constraints, which
+/// include the LogUp ones, so it has to depend on the aux commitment. If the
+/// observe is deleted on both sides, honest proofs still verify, but a prover
+/// can learn alpha before it fixes the aux trace.
+#[test]
+fn aux_commitment_is_observed_before_alpha() {
+    // Prover: the aux commitment is the first `commit` observed after the
+    // "commit to aux trace" span. Verifier: the observe names `aux_commit`.
+    let prover_lines = code(PROVER);
+    let span = prover_lines
+        .iter()
+        .position(|l| l.contains("commit to aux trace"))
+        .expect("prover: the aux trace commit span is gone");
+    let prover_observe = prover_lines
+        .iter()
+        .enumerate()
+        .skip(span)
+        .find(|(_, l)| l.contains("challenger.observe(commit.clone())"))
+        .map(|(i, _)| i)
+        .expect("prover: the aux commitment is no longer absorbed into the transcript");
+    let verifier_observe = first(VERIFIER, "challenger.observe(aux_commit.clone())");
+
+    for (name, body, observe) in [
+        ("prover", PROVER, prover_observe),
+        ("verifier", VERIFIER, verifier_observe),
+    ] {
+        let rand_3 = first(body, "let rand_3");
+        let alpha = code(body)
+            .iter()
+            .position(|l| l.contains("alpha") && l.contains("sample_algebra_element()"))
+            .unwrap_or_else(|| panic!("{name}: alpha is no longer sampled"));
+        assert!(
+            rand_3 < observe,
+            "{name}: the aux commitment is absorbed at line {} before the \
+             permutation challenges are sampled at line {}",
+            observe + 1,
+            rand_3 + 1
+        );
+        assert!(
+            observe < alpha,
+            "{name}: alpha is sampled at line {} before the aux commitment is \
+             absorbed at line {}. The prover could pick the aux trace after \
+             it knows the folding factor",
+            alpha + 1,
+            observe + 1
+        );
+    }
+}
+
+/// The randomization commitment is observed before zeta.
+///
+/// `MyPcs` is not hiding today, so `r_commit` is `None` and the observe never
+/// runs. The order is still pinned, so that turning on a hiding PCS cannot
+/// introduce a zeta that is fixed before the randomization commitment.
+#[test]
+fn randomization_commitment_is_observed_before_zeta() {
+    for (name, body) in [("prover", PROVER), ("verifier", VERIFIER)] {
+        let observe = first(body, "challenger.observe(r_commit)");
+        let zeta = code(body)
+            .iter()
+            .position(|l| l.contains("zeta") && l.contains("sample_algebra_element()"))
+            .unwrap_or_else(|| panic!("{name}: zeta is no longer sampled"));
+        assert!(
+            observe < zeta,
+            "{name}: zeta is sampled at line {} before the randomization \
+             commitment is absorbed at line {}",
+            zeta + 1,
+            observe + 1
         );
     }
 }

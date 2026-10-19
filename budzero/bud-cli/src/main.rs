@@ -8,6 +8,50 @@ use tiny_keccak::{Hasher, Keccak};
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
+const _: () = assert!(
+    bud_compiler::MIN_VM_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "MIN_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES, the proof address space"
+);
+
+/// Which opcode activation state the CLI executes and verifies under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ActivationArg {
+    /// The staged opcodes (`VerifyMerkle`, `VerifyInference`) stay closed:
+    /// the VM refuses them and the verifier refuses a proof whose program
+    /// contains one.
+    Default,
+    /// Every staged opcode is open. For a network that has activated them,
+    /// and for testing; never the production setting while they are closed.
+    Full,
+}
+
+impl ActivationArg {
+    fn state(self) -> bud_isa::MainnetActivation {
+        match self {
+            ActivationArg::Default => bud_isa::MainnetActivation::default(),
+            ActivationArg::Full => bud_isa::MainnetActivation::full(),
+        }
+    }
+
+    /// The activation state a signed relay report may be made under.
+    ///
+    /// The signed payload does not record the activation state. A report made
+    /// under `full` would be byte-compatible with one made under the closed
+    /// default, so a reader could not tell that a program the production
+    /// verifier refuses had been accepted. Only the closed state is allowed.
+    fn relay_state(self) -> Result<bud_isa::MainnetActivation, String> {
+        match self {
+            ActivationArg::Default => Ok(self.state()),
+            ActivationArg::Full => Err(
+                "relay refuses --activation full: the signed report does not record the \
+                 activation state, so it could not be told from a report made under the \
+                 closed default"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -22,6 +66,15 @@ struct Cli {
         help = "The unique chain identifier for execution context"
     )]
     chain_id: u64,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ActivationArg::Default,
+        help = "Opcode activation state for execution and verification: `default` keeps VerifyMerkle and VerifyInference closed (the VM refuses them; proofs whose program contains one are refused), `full` opens them"
+    )]
+    activation: ActivationArg,
 
     #[command(subcommand)]
     command: Commands,
@@ -207,6 +260,7 @@ struct ExecutionConfig {
     chain_id: u64,
     state_in_file: Option<String>,
     commit_state: bool,
+    activation: bud_isa::MainnetActivation,
 }
 
 struct ExecutionOutput {
@@ -234,7 +288,11 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     // HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
     // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
     // runs. The CLI default must be mainnet safe: mainnet_mode=true.
-    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, true);
+    //
+    // Only `--activation full` opens them: then the VM decodes without the
+    // gate, and the proof it just produced is verified under the same state.
+    let mainnet_mode = config.activation == bud_isa::MainnetActivation::default();
+    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode);
     if let Some(s) = config.sender {
         vm.context.sender = s;
         // Security review (MEDIUM): creating an automatically funded account for
@@ -363,7 +421,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     info!(proof_bytes = envelope.proof_bytes.len(), "Proof generated");
 
     info!("Verifying proof...");
-    let ok = Prover::verify(&envelope, &pi, &config.bytecode).is_ok();
+    let ok = bud_proof::Plonky3Adapter::verify_with_activation(
+        &envelope,
+        &pi,
+        &config.bytecode,
+        config.activation,
+    )
+    .is_ok();
 
     if !ok {
         if config.commit_state {
@@ -454,6 +518,7 @@ struct RelayRequest<'a> {
     payload_out: Option<&'a str>,
     reexecute: bool,
     spent_set: Option<&'a str>,
+    activation: bud_isa::MainnetActivation,
 }
 
 /// In-memory spent-set oracle for the relay's double-spend check (S1): the
@@ -583,12 +648,23 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
     let report = match &req.spent_set {
         Some(spent_set) => {
             let oracle = InMemorySpentSet::from_file(spent_set)?;
-            verify_and_report_with_spentset_at(&envelope, &expected_inputs, &program, &oracle, at)
+            verify_and_report_with_spentset_at(
+                &envelope,
+                &expected_inputs,
+                &program,
+                req.activation,
+                &oracle,
+                at,
+            )
         }
-        None if req.reexecute => {
-            verify_and_report_with_reexecution_at(&envelope, &expected_inputs, &program, at)
-        }
-        None => verify_and_report_at(&envelope, &expected_inputs, &program, at),
+        None if req.reexecute => verify_and_report_with_reexecution_at(
+            &envelope,
+            &expected_inputs,
+            &program,
+            req.activation,
+            at,
+        ),
+        None => verify_and_report_at(&envelope, &expected_inputs, &program, req.activation, at),
     };
 
     // Record the outcome into the node-side ledger (K3/K4) so the alarm chain
@@ -730,6 +806,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chain_id: cli.chain_id,
                 state_in_file: state_in.clone(),
                 commit_state: true,
+                activation: cli.activation.state(),
             })?;
 
             // ATOMIC STATE SAVE
@@ -799,6 +876,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chain_id: cli.chain_id,
                 state_in_file: None,
                 commit_state: false,
+                activation: cli.activation.state(),
             })?;
 
             let data = serde_json::to_string_pretty(&out.envelope)
@@ -846,6 +924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     chain_id: cli.chain_id,
                     state_in_file: Some(state_file.clone()),
                     commit_state: true,
+                    activation: cli.activation.state(),
                 })?;
 
                 out.state.save_atomic().map_err(|e| {
@@ -903,6 +982,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chain_id: cli.chain_id,
                 state_in_file: None,
                 commit_state: true,
+                activation: cli.activation.state(),
             })?;
 
             out.state
@@ -921,7 +1001,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (envelope, expected_inputs, program) =
                 load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
 
-            match Prover::verify(&envelope, &expected_inputs, &program) {
+            match bud_proof::Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &expected_inputs,
+                &program,
+                cli.activation.state(),
+            ) {
                 Ok(_) => {
                     println!("Result: VALID");
                 }
@@ -951,6 +1036,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 payload_out: payload_out.as_deref(),
                 reexecute: *reexecute,
                 spent_set: spent_set.as_deref(),
+                activation: cli.activation.relay_state()?,
             };
             let line = write_signed_relay_report(&req)?;
             println!("{line}");
@@ -1038,6 +1124,7 @@ mod tests {
             chain_id: 1,
             state_in_file: Some(path.to_string_lossy().into_owned()),
             commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
         })
         .expect("an empty Halt program had to run");
 
@@ -1050,8 +1137,55 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn relay_refuses_the_open_activation_state() {
+        assert_eq!(
+            ActivationArg::Default.relay_state().unwrap(),
+            bud_isa::MainnetActivation::default()
+        );
+        let err = ActivationArg::Full
+            .relay_state()
+            .expect_err("a signed report under the open state must be refused");
+        assert!(err.contains("does not record"), "{err}");
+    }
+
     /// The relay's argument set has to parse, and `--output` has to default:
     /// a monitor that forgets the path must still land on a known file.
+    /// The activation flag defaults to the closed state and has to be asked
+    /// for by name to open the staged opcodes; it is accepted after the
+    /// subcommand as well.
+    #[test]
+    fn activation_flag_defaults_to_closed_and_must_be_asked_for() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "bud-cli", "verify", "-f", "p.json", "-i", "i.json", "-b", "b.budc",
+            ];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args).expect("verify must parse")
+        };
+        assert_eq!(parse(&[]).activation, ActivationArg::Default);
+        assert_eq!(
+            parse(&["--activation", "default"]).activation,
+            ActivationArg::Default
+        );
+        assert_eq!(
+            parse(&["--activation", "full"]).activation,
+            ActivationArg::Full
+        );
+        assert_eq!(
+            ActivationArg::Default.state(),
+            bud_isa::MainnetActivation::default()
+        );
+        assert_eq!(
+            ActivationArg::Full.state(),
+            bud_isa::MainnetActivation::full()
+        );
+        assert!(
+            Cli::try_parse_from(["bud-cli", "--activation", "bogus", "test"]).is_err(),
+            "an unknown activation state is refused"
+        );
+    }
+
     #[test]
     fn relay_subcommand_parses_with_its_default_output() {
         let cli = Cli::try_parse_from([
@@ -1145,6 +1279,7 @@ mod tests {
             payload_out: None,
             reexecute: false,
             spent_set: None,
+            activation: bud_isa::MainnetActivation::default(),
         };
         let r = write_signed_relay_report(&req);
         assert!(r.is_err(), "a missing proof file had to be refused");
@@ -1192,6 +1327,7 @@ mod tests {
             chain_id: 1,
             state_in_file: Some(path.to_string_lossy().into_owned()),
             commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
         };
 
         let result = run_pipeline(config);

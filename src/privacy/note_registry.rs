@@ -81,7 +81,8 @@ impl L1NoteRegistry {
             return Err("note commitment already live".into());
         }
         if self.spent_nullifiers.contains(&commitment) {
-            // Defensive: commitment hash space must not collide with nullifiers in use
+            // Commitment hash space must not collide with nullifiers in use.
+            return Err("note commitment collides with a spent nullifier".into());
         }
         // Bounded live commitment set - fail-closed
         if self.live_commitments.len() >= MAX_LIVE_COMMITMENTS {
@@ -111,7 +112,7 @@ impl L1NoteRegistry {
     }
 
     /// Apply transfer with nullifier derivation proofs.
-    /// Each `proof[i]` must satisfy: `nullifier[i] == Poseidon(commitment[i], proof[i])`.
+    /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
     /// If proofs is empty, falls back to legacy behavior (no binding check).
     pub fn apply_transfer_with_proofs(
         &mut self,
@@ -134,9 +135,16 @@ impl L1NoteRegistry {
         }
 
         // Pre-check nullifiers
+        // The nullifiers of one transfer must also be distinct from each other.
+        // The set records a repeated value once, so `[n, n]` would spend two
+        // notes and leave a single nullifier behind.
+        let mut seen_nullifiers = BTreeSet::new();
         for n in nullifiers {
             if self.spent_nullifiers.contains(n) {
                 return Err("double-spend: nullifier already spent".into());
+            }
+            if !seen_nullifiers.insert(*n) {
+                return Err("duplicate nullifier in transfer".into());
             }
         }
         // Pre-check outputs unique + not already live
@@ -147,6 +155,9 @@ impl L1NoteRegistry {
             }
             if self.live_commitments.contains(c) {
                 return Err("output commitment already live".into());
+            }
+            if self.spent_nullifiers.contains(c) {
+                return Err("output commitment collides with a spent nullifier".into());
             }
         }
         // Every remaining refusal, decided before a single note moves.
@@ -194,6 +205,27 @@ impl L1NoteRegistry {
                 "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
                 self.spent_nullifiers.len(),
                 MAX_SPENT_NULLIFIERS
+            ));
+        }
+
+        // Bounded live set. Outputs are counted against the same ceiling as
+        // `insert_note`: a transfer replaces its inputs with its outputs, so
+        // the set grows by the difference. Without this check one input and
+        // sixteen outputs add fifteen notes per transfer and walk past
+        // MAX_LIVE_COMMITMENTS without any insert_note call.
+        let live_after = self
+            .live_commitments
+            .len()
+            .saturating_sub(spent_commitments.len())
+            .saturating_add(output_commitments.len());
+        if live_after > MAX_LIVE_COMMITMENTS {
+            return Err(format!(
+                "live commitment set full ({}/{}) - transfer would add {} notes",
+                self.live_commitments.len(),
+                MAX_LIVE_COMMITMENTS,
+                output_commitments
+                    .len()
+                    .saturating_sub(spent_commitments.len())
             ));
         }
 
@@ -310,6 +342,63 @@ mod tests {
         assert!(r
             .apply_transfer(&[commitment], &[nullifier], &[second])
             .is_err());
+    }
+
+    /// One nullifier cannot cover two inputs of the same transfer.
+    #[test]
+    fn a_repeated_nullifier_in_one_transfer_is_refused() {
+        let a = budlum_note_packing::hash_from_field(11);
+        let b = budlum_note_packing::hash_from_field(12);
+        let n = budlum_note_packing::hash_from_field(0x8000_0001);
+        let out = budlum_note_packing::hash_from_field(0x8100_0001);
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(a).unwrap();
+        r.insert_note(b).unwrap();
+        let err = r.apply_transfer(&[a, b], &[n, n], &[out]).unwrap_err();
+        assert!(err.contains("duplicate nullifier"));
+        assert!(r.contains_commitment(&a) && r.contains_commitment(&b));
+        assert_eq!(r.spent_count(), 0);
+    }
+
+    /// A commitment equal to a spent nullifier is not a note.
+    #[test]
+    fn a_commitment_equal_to_a_spent_nullifier_is_refused() {
+        let c = budlum_note_packing::hash_from_field(21);
+        let n = budlum_note_packing::hash_from_field(0x9000_0001);
+        let out = budlum_note_packing::hash_from_field(0x9100_0001);
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(c).unwrap();
+        r.apply_transfer(&[c], &[n], &[out]).unwrap();
+        assert!(r.insert_note(n).is_err());
+        let spare = budlum_note_packing::hash_from_field(22);
+        let next_n = budlum_note_packing::hash_from_field(0x9000_0002);
+        r.insert_note(spare).unwrap();
+        assert!(r.apply_transfer(&[spare], &[next_n], &[n]).is_err());
+        assert!(r.contains_commitment(&spare));
+    }
+
+    /// A transfer cannot grow the live set past MAX_LIVE_COMMITMENTS.
+    #[test]
+    fn transfer_outputs_respect_the_live_commitment_cap() {
+        let mut r = L1NoteRegistry::new();
+        for i in 0..MAX_LIVE_COMMITMENTS {
+            r.insert_note(budlum_note_packing::hash_from_field(i as u64 + 1))
+                .unwrap();
+        }
+        let input = budlum_note_packing::hash_from_field(1);
+        let nullifier = budlum_note_packing::hash_from_field(0x7000_0001);
+        let outs = [
+            budlum_note_packing::hash_from_field(0x7100_0001),
+            budlum_note_packing::hash_from_field(0x7100_0002),
+        ];
+        assert!(r.apply_transfer(&[input], &[nullifier], &outs).is_err());
+        assert_eq!(r.live_count(), MAX_LIVE_COMMITMENTS);
+        assert!(r.contains_commitment(&input));
+        assert!(!r.is_nullifier_spent(&nullifier));
+        // One for one keeps the size and is still allowed.
+        r.apply_transfer(&[input], &[nullifier], &outs[..1])
+            .unwrap();
+        assert_eq!(r.live_count(), MAX_LIVE_COMMITMENTS);
     }
 
     /// A registry hash is a packed hash, not an arbitrary 32 bytes.

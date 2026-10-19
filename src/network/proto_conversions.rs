@@ -191,6 +191,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::Storage(storage_tx) => (
+                pb::ProtoTransactionType::Storage as i32,
+                Some(pb::proto_transaction::TypePayload::Storage(
+                    pb::ProtoStorageTx {
+                        data: bincode::serialize(storage_tx).unwrap_or_default(),
+                    },
+                )),
+            ),
             TransactionType::AiModelRegister(spec) => (
                 pb::ProtoTransactionType::AiModelRegister as i32,
                 Some(pb::proto_transaction::TypePayload::AiModelRegister(
@@ -216,6 +224,12 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .map(|dims| dims.iter().map(|d| u32::from(*d)).collect())
                             .unwrap_or_default(),
                         modality_bits: spec.modalities.bits(),
+                        require_execution_proof: spec.require_execution_proof,
+                        execution_program_hash: spec
+                            .execution_program_hash
+                            .map(|d| d.to_vec())
+                            .unwrap_or_default(),
+                        execution_class: u32::from(spec.execution_class),
                     },
                 )),
             ),
@@ -1013,6 +1027,16 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         .map_err(|e| format!("Invalid VaultTx payload: {e}"))?,
                 )
             }
+            pb::ProtoTransactionType::Storage => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Storage(p)) => p,
+                    _ => return Err("Missing or mismatched Storage payload".into()),
+                };
+                TransactionType::Storage(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
+                )
+            }
             pb::ProtoTransactionType::AiModelRegister => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::AiModelRegister(p)) => p,
@@ -1050,9 +1074,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         d.copy_from_slice(&payload.execution_weights_digest);
                         Some(d)
                     },
-                    require_execution_proof: false,
-                    execution_program_hash: None,
-                    execution_class: 0,
+                    require_execution_proof: payload.require_execution_proof,
+                    execution_program_hash: decode_optional_hash32(
+                        payload.execution_program_hash,
+                        "AiModelRegister execution_program_hash",
+                    )?,
+                    execution_class: u8::try_from(payload.execution_class)
+                        .map_err(|_| "AiModelRegister execution_class exceeds u8".to_string())?,
                     execution_dims: if payload.execution_dims.is_empty() {
                         None
                     } else {
@@ -1953,12 +1981,22 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             pb::proto_network_message::Payload::Transaction(t) => {
                 Ok(NetworkMessage::Transaction(Transaction::try_from(t)?))
             }
-            pb::proto_network_message::Payload::GetHeaders(h) => Ok(NetworkMessage::GetHeaders {
-                locator: h.locator,
-                limit: h.limit,
-            }),
+            pb::proto_network_message::Payload::GetHeaders(h) => {
+                if h.locator.len() > crate::network::protocol::MAX_HEADER_LOCATOR_HASHES {
+                    return Err("GetHeaders locator exceeds the limit".into());
+                }
+                Ok(NetworkMessage::GetHeaders {
+                    locator: h.locator,
+                    limit: h.limit,
+                })
+            }
             pb::proto_network_message::Payload::Headers(h) => {
-                let mut headers = Vec::new();
+                // Refuse before the second allocation pass: the count limit
+                // used to be applied only after every header was converted.
+                if h.headers.len() > crate::network::protocol::MAX_HEADERS_PER_REQUEST as usize {
+                    return Err("Headers message exceeds the header limit".into());
+                }
+                let mut headers = Vec::with_capacity(h.headers.len());
                 for header in h.headers {
                     headers.push(BlockHeader::try_from(header)?);
                 }
@@ -1971,7 +2009,10 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 })
             }
             pb::proto_network_message::Payload::Blocks(b) => {
-                let mut blocks = Vec::new();
+                if b.blocks.len() > crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS {
+                    return Err("Blocks message exceeds the block limit".into());
+                }
+                let mut blocks = Vec::with_capacity(b.blocks.len());
                 for block in b.blocks {
                     blocks.push(Block::try_from(block)?);
                 }
@@ -1984,7 +2025,10 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 })
             }
             pb::proto_network_message::Payload::BlocksByHeight(b) => {
-                let mut blocks = Vec::new();
+                if b.blocks.len() > crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS {
+                    return Err("BlocksByHeight message exceeds the block limit".into());
+                }
+                let mut blocks = Vec::with_capacity(b.blocks.len());
                 for block in b.blocks {
                     blocks.push(Block::try_from(block)?);
                 }
@@ -2101,6 +2145,63 @@ mod tests {
             Transaction::try_from(proto_tx).expect("Failed to decode proto transaction");
 
         assert_eq!(tx, decoded_tx);
+    }
+
+    #[test]
+    fn oversized_item_counts_are_refused_before_conversion() {
+        let headers = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Headers(
+                pb::ProtoHeaders {
+                    headers: vec![
+                        pb::ProtoBlockHeader::default();
+                        crate::network::protocol::MAX_HEADERS_PER_REQUEST as usize + 1
+                    ],
+                },
+            )),
+        };
+        let err = NetworkMessage::try_from(headers).expect_err("too many headers");
+        assert!(err.contains("header limit"), "{err}");
+        let blocks = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Blocks(
+                pb::ProtoBlocks {
+                    blocks: vec![
+                        pb::ProtoBlock::default();
+                        crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS + 1
+                    ],
+                },
+            )),
+        };
+        let err = NetworkMessage::try_from(blocks).expect_err("too many blocks");
+        assert!(err.contains("block limit"), "{err}");
+    }
+
+    #[test]
+    fn ai_model_register_keeps_execution_fields_over_the_wire() {
+        let keypair = KeyPair::generate().unwrap();
+        let from = Address::from(keypair.public_key_bytes());
+        let spec = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId([1u8; 32]),
+            model_hash: [2u8; 32],
+            owner: from,
+            min_verifier_count: 3,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some([9u8; 32]),
+            execution_class: 1,
+            execution_dims: Some(vec![4, 8, 2]),
+            execution_weights_digest: Some([7u8; 32]),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        let mut tx = Transaction::new_with_fee(from, Address::zero(), 0, 1, 1, vec![]);
+        tx.tx_type = TransactionType::AiModelRegister(spec);
+        let decoded = Transaction::try_from(pb::ProtoTransaction::from(&tx)).expect("decode");
+        assert_eq!(tx.tx_type, decoded.tx_type);
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
@@ -2265,6 +2366,67 @@ mod tests {
                 to: 4,
                 member: 5,
             }),
+            TransactionType::Storage(crate::domain::StorageTx::RegisterManifest {
+                manifest: {
+                    let mut m = crate::storage::encode_object(
+                        &[5u8; 2048],
+                        crate::storage::ErasureScheme { k: 4, n: 6 },
+                    )
+                    .expect("encode")
+                    .to_manifest()
+                    .expect("manifest");
+                    m.owner = from;
+                    m
+                },
+            }),
+            TransactionType::Storage(crate::domain::StorageTx::DeclareOperatorClass {
+                class: crate::domain::storage_deal::OperatorClass::Mobile,
+            }),
+            TransactionType::Storage(crate::domain::StorageTx::DeclareSelfHostPolicy {
+                manifest_id: crate::storage::ContentId([1u8; 32]),
+                policy: crate::storage::MobileSelfContentPolicy {
+                    content_id: crate::storage::ContentId([2u8; 32]),
+                    owner: from,
+                    critical: true,
+                    required_paid_replicas: 2,
+                    self_host_allowed: false,
+                },
+                profile: crate::storage::MobileSelfProfile {
+                    owner: from,
+                    device_commitment: [3u8; 32],
+                    availability: crate::storage::MobileAvailabilityClass::Scheduled,
+                    max_storage_bytes: 1 << 20,
+                    metered_network_ok: true,
+                    battery_saver_aware: false,
+                    last_seen_block: 9,
+                },
+            }),
+            TransactionType::Storage(crate::domain::StorageTx::OpenDeal(Box::new(
+                crate::domain::StorageDealOpen {
+                    domain_id: 7,
+                    manifest_id: crate::storage::ContentId([1u8; 32]),
+                    shard_id: crate::storage::ContentId([2u8; 32]),
+                    operator: to,
+                    replica_index: 1,
+                    start_epoch: 3,
+                    end_epoch: 13,
+                    economics: crate::domain::StorageEconomicsParams {
+                        operator_bond: 1_000_000,
+                        fee_per_byte_epoch: 17,
+                    },
+                    merkle_proof: vec![9u8; 40],
+                    storage_root: [4u8; 32],
+                    operator_consent: crate::storage::GrantAuthorization {
+                        owner_key: [5u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+                        signature: vec![6u8; 64],
+                    },
+                },
+            ))),
+            TransactionType::Storage(crate::domain::StorageTx::AnswerCodingAudit {
+                audit_id: 11,
+                data_column: vec![1, 2, 3, 4],
+                parity_byte: 5,
+            }),
             TransactionType::Identity(crate::registry::IdentityTx::Register {
                 record: crate::registry::IdentityRecord::new(
                     from,
@@ -2330,6 +2492,9 @@ mod tests {
         assert!(Transaction::try_from(proto.clone()).is_err());
 
         proto.tx_type = pb::ProtoTransactionType::Vault as i32;
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Storage as i32;
         assert!(Transaction::try_from(proto.clone()).is_err());
 
         proto.tx_type = 999; // Unknown transaction type tag

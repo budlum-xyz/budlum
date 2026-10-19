@@ -27,12 +27,14 @@ use sha3::{Digest, Sha3_256};
 
 /// SHA3-256 node combine, the production hash for QC blob Merkle trees.
 ///
-/// Mirrors the internal-node hash of `QcBlob::merkle_layers` exactly: the two
-/// child digests concatenated into one SHA3-256 call, no domain prefix (the
-/// tree is already domain-separated by its position in the block).
+/// Mirrors the internal-node hash of `QcBlob::merkle_layers` exactly. The
+/// domain prefix (P01-F27) keeps an inner node out of the leaf preimage set:
+/// without it, a leaf and a pair of children that concatenated to the same
+/// bytes produced one digest serving both roles.
 #[must_use]
 pub fn combine_sha3(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
+    hasher.update(b"BDLM_QC_NODE_V2");
     hasher.update(left);
     hasher.update(right);
     let result = hasher.finalize();

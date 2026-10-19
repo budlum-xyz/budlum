@@ -2,10 +2,10 @@
 //!
 //! WIRING: the reversion ledger is driven by the node-health layer at
 //! [`super::regen_health`], which decides *when* a node reverts against the
-//! canonical commitment source. The remaining door is the node runtime's
-//! health tick, which will call `assess` per block and then execute the
-//! verdict here. Rules stay pinned by this module's tests and by
-//! `regen_health`'s.
+//! canonical commitment source. The node runtime's health tick,
+//! `crate::network::regen_health_tick`, calls `assess` once per finality beat
+//! and executes the verdict here. Rules stay pinned by this module's tests and
+//! by `regen_health`'s.
 //!
 //! # The biological model, and why it is not decoration
 //!
@@ -614,8 +614,8 @@ impl RegenerationLedger {
     /// nobody asked for and anything deeper leaves the damage in place.
     #[must_use]
     /// WIRING: wired through [`super::regen_health::assess`], which calls
-    /// this with the caller's snapshot table; the node runtime's health tick
-    /// is the remaining door. The selection rule is pinned here by tests.
+    /// this with the caller's snapshot table, and the node runtime's health
+    /// tick calls `assess`. The selection rule is pinned here by tests.
     pub fn cheapest_target(
         &self,
         damaged_below: u64,
@@ -668,7 +668,7 @@ fn saturating_event_count(len: usize) -> u32 {
 /// up.
 #[must_use]
 /// WIRING: wired through [`super::regen_health::assess`], which prices the
-/// converged decision; the node runtime's health tick is the remaining door.
+/// converged decision, and the node runtime's health tick calls `assess`.
 /// The economics are pinned here by tests.
 pub fn reversion_beats_repair(
     repair_cost: u64,

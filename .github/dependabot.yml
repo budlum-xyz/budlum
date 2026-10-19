@@ -96,6 +96,29 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+  # P58-F06: the standalone workspaces carry their own Cargo.lock and were not
+  # covered by any entry above. None of them depends on bincode, so no ignore is needed.
+  - package-ecosystem: "cargo"
+    directories:
+      - "/bud"
+      - "/crates/ai-inference"
+      - "/crates/bpqs"
+      - "/crates/budscan"
+      - "/crates/note-packing"
+      - "/crates/wallet-core"
+      - "/xtask/gates"
+      - "/xtask/tools"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
   - package-ecosystem: "docker"
     # The Dockerfile lives under ops/; with directory: "/" Dependabot ERRORED
     # with "No Dockerfiles nor Kubernetes YAML found in /".

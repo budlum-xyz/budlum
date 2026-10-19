@@ -464,13 +464,13 @@ SIGNED-PATH secret flow inventory (each item points at code):
      | variant | ns/perm | cond. jumps |
      | :-- | --: | --: |
      | `cmov` crate (shipped) | 5714 | 6 |
-     | masked select (pre-Strix) | 3796 | 41 |
+     | masked select (pre-fix) | 3796 | 41 |
      | correction by multiply | 7789 | 28 |
      | correction by mask-AND | 7745 | 28 |
      | shipped + `inline(always)` | 5674 | 6 |
 
      No variant is both faster and branch-free. The fast one is the leak
-     Strix reported, now quantified: removing the conditional-move backend
+     the review reported, now quantified: removing the conditional-move backend
      takes the jump count from 6 to 41. Replacing the select with arithmetic
      on a 0/1 is worse on BOTH axes. A hand-rolled `asm!` cmov was tried and
      rejected because this crate forbids `unsafe`, and trading a zero-unsafe

@@ -21,8 +21,14 @@ pub struct MediaTier {
     pub durability_years: u64,
     pub idle_w_per_tb: f64,
     pub write_once: bool,
+    /// False for media that cannot be bought and operated today.
+    pub available: bool,
     pub note: &'static str,
 }
+
+/// LTO-9 is about 5 USD per TB over 30 years: 5 / (30 * 12) USD per TB and
+/// month. The old value 0.00025 came from a wrong unit conversion.
+const LTO_USD_PER_TB_MONTH: f64 = 5.0 / 360.0;
 
 pub const MEDIA_TIERS: &[MediaTier] = &[
     MediaTier {
@@ -31,6 +37,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 5,
         idle_w_per_tb: 7.0,
         write_once: false,
+        available: true,
         note: "the price.rs floor (hot/warm)",
     },
     MediaTier {
@@ -39,6 +46,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 5,
         idle_w_per_tb: 6.0,
         write_once: false,
+        available: true,
         note: "F303: $30-45/TB; a zoned, append-only cold tier",
     },
     MediaTier {
@@ -47,6 +55,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 6,
         idle_w_per_tb: 6.0,
         write_once: false,
+        available: true,
         note: "F305: 36-44TB, $4/TB by 2029; density",
     },
     MediaTier {
@@ -55,14 +64,16 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 4,
         idle_w_per_tb: 2.0,
         write_once: false,
+        available: true,
         note: "F311: a hot tier; DWPD 0.1-0.3 for cold reads",
     },
     MediaTier {
         name: "LTO-tape",
-        usd_per_tb_month: 0.00025,
+        usd_per_tb_month: LTO_USD_PER_TB_MONTH,
         durability_years: 30,
         idle_w_per_tb: 0.0,
         write_once: true,
+        available: true,
         note: "F3/F307: deep cold, 0W idle (coded as the tape class)",
     },
     MediaTier {
@@ -71,6 +82,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 1000,
         idle_w_per_tb: 0.0,
         write_once: true,
+        available: false,
         note: "an optical archive; a read-write drive is required",
     },
     MediaTier {
@@ -79,6 +91,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 10_000,
         idle_w_per_tb: 0.0,
         write_once: true,
+        available: false,
         note: "F256: 7TB per plate, Azure AI reading - a future ultra-archive",
     },
     MediaTier {
@@ -87,6 +100,7 @@ pub const MEDIA_TIERS: &[MediaTier] = &[
         durability_years: 1000,
         idle_w_per_tb: 0.0,
         write_once: true,
+        available: false,
         note: "F168: $800M/TB - REFUSED (not economical)",
     },
 ];
@@ -100,7 +114,9 @@ pub fn tier_get(name: &str) -> Option<&'static MediaTier> {
 pub fn cheapest_tier(usd_ceiling: f64, allow_write_once: bool) -> Option<&'static MediaTier> {
     MEDIA_TIERS
         .iter()
-        .filter(|t| t.usd_per_tb_month <= usd_ceiling && (allow_write_once || !t.write_once))
+        .filter(|t| {
+            t.available && t.usd_per_tb_month <= usd_ceiling && (allow_write_once || !t.write_once)
+        })
         // `partial_cmp().unwrap()` panics on a NaN price. `total_cmp` accepts
         // NaN as ordered and gives a determinate ordering instead of a panic.
         .min_by(|a, b| a.usd_per_tb_month.total_cmp(&b.usd_per_tb_month))
@@ -146,6 +162,19 @@ mod tests {
             cheapest_tier(0.016, false).is_none()
                 || cheapest_tier(0.016, false).unwrap().usd_per_tb_month > 0.016
         );
+    }
+
+    /// BLG-0607: the tape price follows its stated source and unavailable
+    /// media are never picked, even when they are cheaper.
+    #[test]
+    fn tape_price_matches_its_source_and_unavailable_media_are_skipped() {
+        let tape = tier_get("LTO-tape").unwrap().usd_per_tb_month;
+        assert!((tape - 5.0 / 360.0).abs() < 1e-12);
+        assert!(tape < 0.016);
+        assert_eq!(cheapest_tier(0.016, true).unwrap().name, "LTO-tape");
+        assert!(MEDIA_TIERS
+            .iter()
+            .any(|t| !t.available && t.usd_per_tb_month < tape));
     }
 
     #[test]

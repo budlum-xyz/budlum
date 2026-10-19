@@ -393,9 +393,9 @@ pub(crate) mod fixtures {
         // Single-leaf trie: the key is RLP(tx_index=0), the leaf value is the
         // receipt.
         let receipt_bytes = receipt_rlp(success, vec![log_item(emitter, topic0, log_data)]);
-        // MPT key = keccak256(rlp(0)) nibbles; leaf path = full 64 nibbles.
+        // Plain trie: the path is the nibbles of rlp(0) = 0x80, as in Ethereum.
         let key_bytes = encode(&Item::String(vec![])); // rlp(0) = 0x80
-        let nibbles = to_nibbles(&keccak256(&key_bytes));
+        let nibbles = to_nibbles(&key_bytes);
 
         // Leaf node RLP.
         let leaf_node = Item::List(vec![

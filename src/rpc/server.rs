@@ -163,14 +163,20 @@ struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    mode: RpcMode,
 }
 
 impl RpcSecurityLayer {
-    fn new(config: RpcSecurityConfig, metrics: Option<Arc<crate::core::metrics::Metrics>>) -> Self {
+    fn new(
+        config: RpcSecurityConfig,
+        metrics: Option<Arc<crate::core::metrics::Metrics>>,
+        mode: RpcMode,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
+            mode,
         }
     }
 }
@@ -184,6 +190,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             config: self.config.clone(),
             per_ip_rates: self.per_ip_rates.clone(),
             metrics: self.metrics.clone(),
+            mode: self.mode.clone(),
         }
     }
 }
@@ -194,6 +201,7 @@ struct RpcSecurityService<S> {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    mode: RpcMode,
 }
 
 impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
@@ -216,6 +224,10 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
+        if self.mode == RpcMode::Operator && !is_operator_request_allowed(&req) {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
         let cors = cors_outcome(&self.config, &req);
         if cors == CorsOutcome::Deny {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
@@ -232,16 +244,8 @@ where
             }
         }
 
-        if !is_authorized(&self.config, &req) {
-            return Box::pin(async move {
-                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
-                if let CorsOutcome::Allow(ref origin) = cors {
-                    apply_cors_headers(&mut response, origin);
-                }
-                Ok(response)
-            });
-        }
-
+        // The limiter runs before the key check so that failed key guesses
+        // count against the client's budget.
         let client_ip = extract_client_ip(&self.config, &req);
         if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
             if let Some(ref m) = self.metrics {
@@ -256,6 +260,17 @@ where
                 Ok(response)
             });
         }
+
+        if !is_authorized(&self.config, &req) {
+            return Box::pin(async move {
+                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
+            });
+        }
+
         if let Some(ref m) = self.metrics {
             m.rpc_requests_total.inc();
         }
@@ -354,6 +369,7 @@ impl RpcServer {
         let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
+            self.mode.clone(),
         ));
 
         // jsonrpsee 0.26 moved the transport limits off the server builder and
@@ -783,7 +799,9 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
             .headers()
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
+            // Rightmost entry: the one the trusted proxy itself appended.
+            // Entries to its left are client-supplied and can be forged.
+            .and_then(|value| value.split(',').next_back())
             .map(str::trim)
             .and_then(|ip| ip.parse::<IpAddr>().ok())
         {
@@ -801,6 +819,48 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
     }
 
     direct_ip
+}
+
+/// The operator listener has no auth and always binds loopback. It accepts
+/// only a loopback `Host` and no `Origin` header, so a browser page cannot
+/// reach it.
+fn is_operator_request_allowed<B>(req: &HttpRequest<B>) -> bool {
+    if req.headers().contains_key("origin") {
+        return false;
+    }
+    req.headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_loopback_host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let valid_port = |rest: &str| {
+        rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok())
+    };
+    let name = if host.starts_with('[') {
+        let Some(end) = host.find(']') else {
+            return false;
+        };
+        if !valid_port(&host[end + 1..]) {
+            return false;
+        }
+        &host[..=end]
+    } else {
+        match host.split_once(':') {
+            None => host,
+            Some((name, port)) => {
+                if port.parse::<u16>().is_err() {
+                    return false;
+                }
+                name
+            }
+        }
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "[::1]"
 }
 
 fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
@@ -897,6 +957,13 @@ fn preflight_response(origin: &str) -> HttpResponse {
     let mut response = text_response(StatusCode::NO_CONTENT, "");
     apply_cors_headers(&mut response, origin);
     response
+}
+
+/// Upper bound for one `social_get_feed` page, whatever limit the caller asks for.
+const MAX_SOCIAL_FEED_LIMIT: usize = 200;
+
+fn clamp_feed_limit(limit: usize) -> usize {
+    limit.min(MAX_SOCIAL_FEED_LIMIT)
 }
 
 fn is_per_ip_rate_limited(
@@ -1265,8 +1332,7 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
 /// the same body.
 fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
     let code = match &e {
-        crate::storage::emit::EmitError::Empty
-        | crate::storage::emit::EmitError::ZeroBlockLen
+        crate::storage::emit::EmitError::ZeroBlockLen
         | crate::storage::emit::EmitError::TooLarge { .. }
         | crate::storage::emit::EmitError::BurstTooWide { .. }
         | crate::storage::emit::EmitError::FrameOutOfRange { .. }
@@ -1659,6 +1725,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         evidence: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: `submitter` is an unsigned field, so a public caller
+        // could vote under any bonded prover's name.
+        self.require_operator("bud_submitExternalEvidence")?;
         let evidence: crate::cross_domain::external::RawConsensusEvidence =
             serde_json::from_value(evidence).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
@@ -2585,14 +2654,13 @@ impl BudlumApiServer for RpcServer {
         match self.chain.build_state_update_transaction(commitment).await {
             Ok(tx) => {
                 let tx_clone = tx.clone();
-                self.chain.add_transaction(tx).await.map_err(|e| {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        format!("State update transaction rejected: {e}"),
-                        None::<()>,
-                    )
-                })?;
-                self.node.broadcast_tx_sync(tx_clone);
+                // The commitment is already applied above, so a refused
+                // transaction must not turn the call into an error: the
+                // caller would see a failure for state that did change.
+                match self.chain.add_transaction(tx).await {
+                    Ok(()) => self.node.broadcast_tx_sync(tx_clone),
+                    Err(e) => tracing::warn!("State update transaction rejected: {e}"),
+                }
             }
             Err(e) => {
                 tracing::warn!("Could not build state update transaction: {e}");
@@ -2997,6 +3065,12 @@ impl BudlumApiServer for RpcServer {
         &self,
         submission: crate::prover::ZkProofSubmission,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: `submission.message.sender` is an unsigned field and
+        // the proof fee is burned from that address when verification fails,
+        // so a public caller could burn the fee balance of any address
+        // (P18-F02). Until submissions carry a sender signature, the endpoint
+        // is restricted like its sibling domain-registration methods.
+        self.require_operator("bud_submitZkProof")?;
         match self.chain.submit_zk_proof(submission).await {
             Ok(crate::prover::ProofAcceptance::Accepted { rewarded, reward }) => {
                 Ok(serde_json::json!({
@@ -3220,6 +3294,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageRegisterManifest")?;
         let manifest_id = self
             .chain
             .register_storage_manifest(manifest.clone())
@@ -3264,10 +3340,35 @@ impl BudlumApiServer for RpcServer {
             ));
         }
         let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        // Same cap as the QR feed calls: the re-encode below is a full
+        // erasure encode, so the body size bounds its CPU cost.
+        if hex.len() / 2 > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body over verify cap {}",
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
         let data = hex::decode(hex).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
         })?;
-        crate::storage::verify_object_encoding(&data, &manifest).map_err(|e| {
+        // The encode is CPU bound: keep it off the async workers.
+        let (manifest, verdict) = tokio::task::spawn_blocking(move || {
+            let verdict = crate::storage::verify_object_encoding(&data, &manifest);
+            (manifest, verdict)
+        })
+        .await
+        .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("verify_encoding task failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        verdict.map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
         })?;
         Ok(serde_json::json!({
@@ -3857,6 +3958,8 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageOpenDeal")?;
         let clean_shard = shard_id.strip_prefix("0x").unwrap_or(&shard_id);
         let s_bytes = hex::decode(clean_shard).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid shard_id hex: {e}"), None::<()>)
@@ -3998,6 +4101,8 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageAcceptReallocation")?;
         let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
             ErrorObjectOwned::owned(
                 -32602,
@@ -4147,7 +4252,7 @@ impl BudlumApiServer for RpcServer {
                 .map(|d| {
                     serde_json::json!({
                         "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-                        "size": d.shard_id.0.len(),
+                        "size": d.shard_bytes,
                     })
                 })
                 .collect()
@@ -4231,6 +4336,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageOpenChallenge")?;
         // + the opener is required and must be non-zero
         let opener = request
             .opener
@@ -4294,6 +4401,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         response: RetrievalResponse,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageAnswerChallenge")?;
         let responder = response.responder;
 
         // Responder must cryptographically prove ownership of the
@@ -4759,7 +4868,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn social_get_feed(&self, limit: usize) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let nfts = self.chain.nft_get_feed(limit).await;
+        let nfts = self.chain.nft_get_feed(clamp_feed_limit(limit)).await;
         let list: Vec<_> = nfts
             .into_iter()
             .map(|nft| {
@@ -6880,6 +6989,138 @@ mod tests {
         assert!(!is_cors_preflight(&req));
     }
 
+    async fn status_through_layer(
+        mode: RpcMode,
+        host: Option<&str>,
+        origin: Option<&str>,
+    ) -> StatusCode {
+        let layer = RpcSecurityLayer::new(
+            match mode {
+                RpcMode::Operator => RpcSecurityConfig::operator_default(),
+                RpcMode::Public => RpcSecurityConfig {
+                    auth_required: false,
+                    allowed_ips: Vec::new(),
+                    ..Default::default()
+                },
+            },
+            None,
+            mode,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let mut builder = HttpRequest::builder().uri("/");
+        if let Some(host) = host {
+            builder = builder.header("host", host);
+        }
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        let mut req = builder.body(()).unwrap();
+        req.extensions_mut()
+            .insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000));
+        svc.call(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn failed_api_key_attempts_are_rate_limited() {
+        let layer = RpcSecurityLayer::new(
+            RpcSecurityConfig {
+                auth_required: true,
+                api_key: Some("right-key".into()),
+                allowed_ips: Vec::new(),
+                rate_limit_per_minute: Some(2),
+                ..Default::default()
+            },
+            None,
+            RpcMode::Public,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            let mut req = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "wrong-key")
+                .body(())
+                .unwrap();
+            req.extensions_mut()
+                .insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000));
+            statuses.push(svc.call(req).await.unwrap().status());
+        }
+        assert_eq!(statuses[0], StatusCode::UNAUTHORIZED);
+        assert_eq!(statuses[1], StatusCode::UNAUTHORIZED);
+        assert_eq!(statuses[2], StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn operator_rejects_foreign_host() {
+        let op = RpcMode::Operator;
+        assert_eq!(
+            status_through_layer(op.clone(), Some("evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("evil.example:8546"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("127.0.0.1.evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("127.0.0.1:abc"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        for host in [
+            "127.0.0.1:8546",
+            "127.0.0.1",
+            "localhost",
+            "LocalHost:8546",
+            "[::1]",
+            "[::1]:8546",
+        ] {
+            assert_eq!(
+                status_through_layer(op.clone(), Some(host), None).await,
+                StatusCode::OK,
+                "host {host}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_rejects_origin_header() {
+        assert_eq!(
+            status_through_layer(
+                RpcMode::Operator,
+                Some("127.0.0.1:8546"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn public_mode_ignores_host_and_origin_rules() {
+        assert_eq!(
+            status_through_layer(
+                RpcMode::Public,
+                Some("rpc.budlum.example"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
     #[test]
     fn operator_rpc_listener_must_bind_loopback() {
         assert!(validate_operator_bind_address(&RpcMode::Operator, "127.0.0.1:8546").is_ok());
@@ -6907,6 +7148,12 @@ mod tests {
             .as_bool()
             .unwrap_or(true));
         assert_eq!(stats["economy"]["status"], "decision_locked_not_wired");
+    }
+
+    #[test]
+    fn feed_limit_is_clamped() {
+        assert_eq!(clamp_feed_limit(usize::MAX), MAX_SOCIAL_FEED_LIMIT);
+        assert_eq!(clamp_feed_limit(5), 5);
     }
 
     #[test]
@@ -6988,6 +7235,25 @@ mod tests {
         assert_eq!(
             extract_client_ip(&config, &req),
             Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)))
+        );
+        assert!(!is_ip_allowed(&config, &req));
+    }
+
+    #[test]
+    fn forwarded_for_uses_the_entry_the_proxy_appended() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.5".into()],
+            trusted_proxies: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        req.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("10.0.0.5, 203.0.113.7"),
+        );
+        assert_eq!(
+            extract_client_ip(&config, &req),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
         );
         assert!(!is_ip_allowed(&config, &req));
     }

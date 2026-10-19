@@ -31,6 +31,8 @@ pub enum QrPngError {
     Matrix(QrMatrixError),
     /// Geometry overflow.
     Geometry,
+    /// zlib compression failed. No fallback output exists.
+    Compress,
 }
 
 impl std::fmt::Display for QrPngError {
@@ -38,6 +40,7 @@ impl std::fmt::Display for QrPngError {
         match self {
             Self::Matrix(e) => write!(f, "qr png: {e}"),
             Self::Geometry => write!(f, "qr png geometry"),
+            Self::Compress => write!(f, "qr png compression failed"),
         }
     }
 }
@@ -91,7 +94,7 @@ pub fn matrix_to_png(matrix: &QrMatrix) -> Result<Vec<u8>, QrPngError> {
             raw.push(v);
         }
     }
-    Ok(write_png_rgb8(side_px, side_px, &raw))
+    write_png_rgb8(side_px, side_px, &raw)
 }
 
 /// Encode optical frame bytes → QR → PNG in one step.
@@ -103,7 +106,7 @@ pub fn frame_to_qr_png(frame: &[u8]) -> Result<Vec<u8>, QrPngError> {
     matrix_to_png(&m)
 }
 
-fn write_png_rgb8(width: u32, height: u32, filtered_raw: &[u8]) -> Vec<u8> {
+fn write_png_rgb8(width: u32, height: u32, filtered_raw: &[u8]) -> Result<Vec<u8>, QrPngError> {
     let mut out = Vec::new();
     out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
     let mut ihdr = Vec::new();
@@ -115,10 +118,10 @@ fn write_png_rgb8(width: u32, height: u32, filtered_raw: &[u8]) -> Vec<u8> {
     ihdr.push(0);
     ihdr.push(0);
     write_chunk(&mut out, b"IHDR", &ihdr);
-    let idat = zlib_deflate(filtered_raw);
+    let idat = zlib_deflate(filtered_raw)?;
     write_chunk(&mut out, b"IDAT", &idat);
     write_chunk(&mut out, b"IEND", &[]);
-    out
+    Ok(out)
 }
 
 fn write_chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
@@ -132,45 +135,22 @@ fn write_chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
 }
 
 /// Deflate `data` at a fixed level so the PNG stays bit-equal across machines.
-fn zlib_deflate(data: &[u8]) -> Vec<u8> {
+/// A failed write is an error. There is no second output path.
+fn zlib_deflate(data: &[u8]) -> Result<Vec<u8>, QrPngError> {
+    let mut out = Vec::new();
+    zlib_deflate_via(data, &mut out)?;
+    Ok(out)
+}
+
+/// Same as [`zlib_deflate`] with a caller-chosen sink, so a test can force a write error.
+fn zlib_deflate_via<W: std::io::Write>(data: &[u8], sink: W) -> Result<(), QrPngError> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use std::io::Write;
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
-    if enc.write_all(data).is_err() {
-        // Vec-backed write only fails on allocation failure; fall back to the
-        // uncompressed form rather than losing the frame.
-        return zlib_stored(data);
-    }
-    enc.finish().unwrap_or_else(|_| zlib_stored(data))
-}
-
-/// Uncompressed zlib stream. Not the default path: only the allocation-failure
-/// fallback above and the size reference in tests. Kept compiled in both
-/// profiles because the fallback is reachable in release.
-fn zlib_stored(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + 16);
-    out.push(0x78);
-    out.push(0x01);
-    // IDAT chunks hold at most 65535 bytes; `chunks` bounds every slice so no
-    // cursor arithmetic can index past the payload.
-    let chunk_count = data.len().div_ceil(65535);
-    for (idx, chunk) in data.chunks(65535).enumerate() {
-        let final_block = idx + 1 == chunk_count;
-        out.push(u8::from(final_block));
-        let block16 = chunk.len() as u16;
-        out.extend_from_slice(&block16.to_le_bytes());
-        out.extend_from_slice(&(!block16).to_le_bytes());
-        out.extend_from_slice(chunk);
-    }
-    let mut a = 1u32;
-    let mut b = 0u32;
-    for &byte in data {
-        a = (a + u32::from(byte)) % 65521;
-        b = (b + a) % 65521;
-    }
-    out.extend_from_slice(&((b << 16) | a).to_be_bytes());
-    out
+    let mut enc = ZlibEncoder::new(sink, Compression::best());
+    enc.write_all(data).map_err(|_| QrPngError::Compress)?;
+    enc.finish().map_err(|_| QrPngError::Compress)?;
+    Ok(())
 }
 
 fn crc32_png(data: &[u8]) -> u32 {
@@ -227,6 +207,34 @@ mod tests {
     /// `flate2` 1.1.9 with `miniz_oxide` 0.8.9, `Compression::best()`.
     const GOLDEN_PNG_SHA256: &str =
         "1b78451705e302ef654ddf0d8e2ff6c1d3d0017688a86a2558d3a2a771435cd4";
+
+    /// A failed sink write must surface as an error, never as a stored-zlib PNG.
+    #[test]
+    fn deflate_write_failure_is_an_error_not_a_stored_fallback() {
+        struct FailFirstWrite {
+            calls: usize,
+            sink: Vec<u8>,
+        }
+        impl std::io::Write for FailFirstWrite {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    return Err(std::io::Error::other("injected"));
+                }
+                self.sink.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = FailFirstWrite {
+            calls: 0,
+            sink: Vec::new(),
+        };
+        let data = vec![0u8; 4096];
+        assert_eq!(zlib_deflate_via(&data, sink), Err(QrPngError::Compress));
+    }
 
     /// IDAT chunk length, scanned from the chunk stream (no fixed offset).
     fn idat_len(png: &[u8]) -> usize {

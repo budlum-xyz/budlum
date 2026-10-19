@@ -231,43 +231,48 @@ fn check_live_verifier_call(src: &str, problems: &mut Vec<String>) {
     // require the attestation RESULT to be used, so an
     // inert `verify_quote` call that does not drive the decision is rejected.
     let clean = strip_rust_noise(src);
-    let sign_with_privacy_block = clean.find("impl Wallet {").and_then(|impl_start| {
-        let impl_src = &clean[impl_start..];
-        let impl_open = impl_src.find('{')?;
-        let mut impl_depth = 0usize;
-        let mut impl_end = None;
-        for (idx, ch) in impl_src[impl_open..].char_indices() {
-            match ch {
-                '{' => impl_depth += 1,
-                '}' => {
-                    impl_depth = impl_depth.saturating_sub(1);
-                    if impl_depth == 0 {
-                        impl_end = Some(impl_open + idx);
-                        break;
+    // A wallet may carry several `impl Wallet { .. }` blocks: take the first
+    // one that holds the method.
+    let sign_with_privacy_block =
+        clean
+            .match_indices("impl Wallet {")
+            .find_map(|(impl_start, _)| {
+                let impl_src = &clean[impl_start..];
+                let impl_open = impl_src.find('{')?;
+                let mut impl_depth = 0usize;
+                let mut impl_end = None;
+                for (idx, ch) in impl_src[impl_open..].char_indices() {
+                    match ch {
+                        '{' => impl_depth += 1,
+                        '}' => {
+                            impl_depth = impl_depth.saturating_sub(1);
+                            if impl_depth == 0 {
+                                impl_end = Some(impl_open + idx);
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
-            }
-        }
-        let wallet_impl = &impl_src[..=impl_end?];
-        let method_start = wallet_impl.find("pub fn sign_with_privacy(")?;
-        let body = &wallet_impl[method_start..];
-        let open = body.find('{')?;
-        let mut depth = 0usize;
-        for (idx, ch) in body[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return Some(&body[..=open + idx]);
+                let wallet_impl = &impl_src[..=impl_end?];
+                let method_start = wallet_impl.find("pub fn sign_with_privacy(")?;
+                let body = &wallet_impl[method_start..];
+                let open = body.find('{')?;
+                let mut depth = 0usize;
+                for (idx, ch) in body[open..].char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                return Some(&body[..=open + idx]);
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
-            }
-        }
-        None
-    });
+                None
+            });
     let live_verifier_call = match sign_with_privacy_block {
         Some(body) => {
             // Each attestation predicate must appear in a fail-closed guard
