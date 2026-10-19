@@ -57,12 +57,16 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// `^\s*<key>\s*:` on any line.
-fn has_key(text: &str, key: &str) -> bool {
-    text.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix(key)
-            .is_some_and(|rest| rest.trim_start().starts_with(':'))
+/// Does a (comment-stripped) line name `word` as a whole word? This is the
+/// trigger test: `pull_request_target:` (map form), `on: pull_request_target`
+/// (scalar), `on: [push, pull_request_target]` (inline list) and
+/// `- pull_request_target` (block list) all name the trigger. Matching only a
+/// line that starts with the key missed the last three forms.
+fn names_word(line: &str, word: &str) -> bool {
+    line.match_indices(word).any(|(i, _)| {
+        let before = line[..i].chars().next_back();
+        let after = line[i + word.len()..].chars().next();
+        !before.is_some_and(|c| is_word(c) || c == '-') && !after.is_some_and(is_word)
     })
 }
 
@@ -147,10 +151,16 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
     }) {
         errors.push(format!("{rel}: missing top-level permissions block"));
     }
-    if has_key(text, "pull_request_target") {
+    if uncommented
+        .iter()
+        .any(|line| names_word(line, "pull_request_target"))
+    {
         errors.push(format!("{rel}: pull_request_target is forbidden"));
     }
-    if has_key(text, "workflow_run") {
+    if uncommented
+        .iter()
+        .any(|line| names_word(line, "workflow_run"))
+    {
         errors.push(format!(
             "{rel}: workflow_run is forbidden in the audit surface"
         ));
@@ -401,7 +411,7 @@ fn require_rejected(
 /// If any mutant passes the audit.
 pub fn red_team() -> Result<usize, String> {
     let sha = "actions/checkout@0123456789abcdef0123456789abcdef01234567";
-    let mutants: [(&str, String, &str); 6] = [
+    let mutants: [(&str, String, &str); 10] = [
         (
             "unpinned-action",
             CLEAN.replace(sha, "actions/checkout@main"),
@@ -421,6 +431,26 @@ pub fn red_team() -> Result<usize, String> {
             "forbidden-trigger",
             CLEAN.replace("pull_request:\n", "pull_request_target:\n"),
             "pull_request_target is forbidden",
+        ),
+        (
+            "forbidden-trigger-inline-list",
+            format!("{CLEAN}\non: [push, pull_request_target]\n"),
+            "pull_request_target is forbidden",
+        ),
+        (
+            "forbidden-trigger-scalar",
+            format!("{CLEAN}\non: pull_request_target\n"),
+            "pull_request_target is forbidden",
+        ),
+        (
+            "forbidden-trigger-block-list",
+            format!("{CLEAN}\n  - pull_request_target\n"),
+            "pull_request_target is forbidden",
+        ),
+        (
+            "workflow-run-inline",
+            format!("{CLEAN}\non: [workflow_run]\n"),
+            "workflow_run is forbidden",
         ),
         (
             "pull-write",
