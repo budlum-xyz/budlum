@@ -456,13 +456,13 @@ mod chaos_tests {
 
         let proof = tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, event.clone(), &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, [9u8; 32], event.clone(), &proof)
             .is_ok());
 
         let mut foreign_domain = event.clone();
         foreign_domain.domain_id = 99;
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, foreign_domain, &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, [9u8; 32], foreign_domain, &proof)
             .is_err());
 
         let mut payload_tampered = event;

@@ -398,6 +398,15 @@ impl GenesisConfig {
                     params.annual_burn_ratio_fixed
                 ));
             }
+            // BLG-0077 (P03-F20): the third ratio too. A yield above 100%
+            // per year can never be paid from the schedule and was not
+            // checked here at all.
+            if params.validator_annual_yield_ratio_fixed > scale {
+                return Err(format!(
+                    "Genesis bud_tokenomics validator_annual_yield_ratio_fixed {} is above the scale {scale}",
+                    params.validator_annual_yield_ratio_fixed
+                ));
+            }
         }
         Ok(())
     }
