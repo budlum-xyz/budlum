@@ -163,6 +163,16 @@ fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+/// A `continue-on-error` line is soft unless its value is the literal `false`.
+/// An expression, `True` or `yes` all count as soft.
+fn continue_on_error_is_soft(bare: &str) -> bool {
+    let Some(value) = bare.strip_prefix("continue-on-error:") else {
+        return false;
+    };
+    let value = value.split('#').next().unwrap_or_default().trim();
+    !value.eq_ignore_ascii_case("false")
+}
+
 /// Find every `continue-on-error` and `|| true` under each job.
 fn softeners_in(path: &Path, src: &str) -> Vec<Soft> {
     let file = path
@@ -198,7 +208,7 @@ fn softeners_in(path: &Path, src: &str) -> Vec<Soft> {
             continue;
         }
         let bare = t.strip_prefix("- ").unwrap_or(t);
-        if bare.starts_with("continue-on-error:") && bare.contains("true") {
+        if continue_on_error_is_soft(bare) {
             out.push(Soft {
                 file: file.clone(),
                 job: job.clone(),
@@ -210,6 +220,13 @@ fn softeners_in(path: &Path, src: &str) -> Vec<Soft> {
                 file: file.clone(),
                 job: job.clone(),
                 kind: "|| true",
+            });
+        }
+        if t.contains("||true") || t.contains("|| exit 0") || t.trim_end().ends_with("; true") {
+            out.push(Soft {
+                file: file.clone(),
+                job: job.clone(),
+                kind: "masked exit",
             });
         }
     }
@@ -352,6 +369,45 @@ jobs:
     }
     if found.iter().any(|s| s.job == "strict") {
         problems.push(String::from("VACUOUS: a strict job was called softened"));
+    }
+
+    // Softener shapes beyond the two literal ones.
+    let shapes = "\
+jobs:
+  a:
+    steps:
+      - run: cargo test ||true
+  b:
+    steps:
+      - run: cargo test || exit 0
+  c:
+    steps:
+      - run: cargo test; true
+  d:
+    continue-on-error: ${{ matrix.soft }}
+    steps:
+      - run: x
+  e:
+    continue-on-error: True
+    steps:
+      - run: x
+  f:
+    continue-on-error: false
+    steps:
+      - run: x
+";
+    let shape_jobs: BTreeSet<String> = softeners_in(Path::new("x.yml"), shapes)
+        .into_iter()
+        .map(|s| s.job)
+        .collect();
+    let expected: BTreeSet<String> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|j| (*j).to_string())
+        .collect();
+    if shape_jobs != expected {
+        problems.push(format!(
+            "BROKEN: softener shapes read as {shape_jobs:?}, expected {expected:?}"
+        ));
     }
 
     // An unlisted softener must be refused.
