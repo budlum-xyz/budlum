@@ -109,7 +109,11 @@ const BASELINE_PATH: &str = ".github/idle-code-baseline.txt";
 const ALWAYS_REACHED: &[&str] = &["main"];
 
 /// A scan finding too few items is vacuous and must fail rather than pass.
-const VACUITY_FLOOR: usize = 200;
+const VACUITY_FLOOR: usize = 2000;
+
+// The tree holds about 4600 public items. A floor of 200 passed a walk that had
+// lost 95 percent of them; 2000 still leaves room for the tree to shrink.
+const _: () = assert!(VACUITY_FLOOR >= 2000);
 
 /// How many findings are printed before the list is summarised.
 const MAX_REPORTED: usize = 40;
