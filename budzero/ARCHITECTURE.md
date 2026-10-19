@@ -1,6 +1,6 @@
 # BudZKVM Architecture
 
-BudZKVM is a ZKP-native execution environment designed from first principles for deterministic provability and high performance.
+BudZKVM is a ZKP-native Layer 1 execution environment designed from first principles for deterministic provability and high performance.
 
 ## 1. Programming Language: BudL (.bud)
 - **Statically Typed**: Optimized for Goldilocks field arithmetic.

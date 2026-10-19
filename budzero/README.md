@@ -16,7 +16,7 @@ A compact deterministic ISA, a gas-metered VM that emits execution traces, and a
   Consensus domains (PoW / PoS / PoA / BFT / ZK)
                     │
                     ▼
-         Budlum chain settlement (proofs + bridge)
+         Budlum L1 settlement (proofs + bridge)
                     │
                     ▼
          ┌─────────────────────┐
@@ -26,7 +26,7 @@ A compact deterministic ISA, a gas-metered VM that emits execution traces, and a
 ```
 
 Budlum-core depends on `bud-isa`, `bud-vm`, and `bud-proof` directly from this
-in-tree workspace (`budzero/`). chain and proof-system compatibility now share one
+in-tree workspace (`budzero/`). L1 and proof-system compatibility now share one
 repository commit.
 
 ---
@@ -83,7 +83,7 @@ This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is n
 Z-B 64-depth soundness proof is green. Merkle membership inside STARK proofs is
 cryptographically constrained; mainnet still requires `MainnetActivation` flip
 post-ceremony. **B.U.D.** proof-of-storage productization remains a separate
-integration  on top of this chain primitive.
+integration  on top of this L1 primitive.
 
 ---
 
@@ -136,4 +136,4 @@ PolyForm Shield 1.0.0, see [LICENSE.md](../LICENSE.md).
 
 ## See also
 
-- [Budlum chain](https://github.com/budlum-xyz/budlum), settlement, bridge, multi-consensus
+- [Budlum L1](https://github.com/budlum-xyz/budlum), settlement, bridge, multi-consensus
