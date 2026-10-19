@@ -49,6 +49,7 @@ const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
 /// [`RpcSecurityConfig::default`] so that every constructor in this file
 /// Produces a bounded listener.
 const RPC_DEFAULT_BODY_LIMIT: u32 = 16 * 1024 * 1024;
+const RPC_DEFAULT_RATE_LIMIT_PER_MINUTE: u64 = 120;
 const RPC_DEFAULT_CONNECTION_LIMIT: u32 = 500;
 
 // (security audit §5) `auth_required` defaults to `true` (secure
@@ -141,7 +142,9 @@ impl RpcSecurityConfig {
             api_key,
             allowed_ips,
             cors_origins,
-            rate_limit_per_minute,
+            // An unset limit falls back to the default, never to unlimited.
+            rate_limit_per_minute: rate_limit_per_minute
+                .or(Some(RPC_DEFAULT_RATE_LIMIT_PER_MINUTE)),
             trusted_proxies: Vec::new(),
             // Leaving these `None` handed the listener over to whatever the
             // Transport crate happened to default to, and the value differed
@@ -6877,6 +6880,15 @@ mod tests {
     #[test]
     fn p21_f01_default_config_has_a_rate_limit() {
         assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
+    }
+
+    #[test]
+    fn from_env_without_rate_limit_uses_default_limit() {
+        let ips = vec!["127.0.0.1".to_string()];
+        let cfg = RpcSecurityConfig::from_env(false, None, ips.clone(), Vec::new(), None).unwrap();
+        assert_eq!(cfg.rate_limit_per_minute, Some(120));
+        let cfg = RpcSecurityConfig::from_env(false, None, ips, Vec::new(), Some(7)).unwrap();
+        assert_eq!(cfg.rate_limit_per_minute, Some(7));
     }
 
     #[test]
