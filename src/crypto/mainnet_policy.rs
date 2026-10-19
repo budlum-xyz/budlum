@@ -229,6 +229,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_softhsm_in_module_path() {
+        let mut c = base();
+        c.pkcs11_module_path = Some("/usr/lib/softhsm/libsofthsm2.so");
+        assert_eq!(
+            check_mainnet_validator_key_policy(&c),
+            Err(MainnetKeyPolicyViolation::SoftwareHsmBackend)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_softhsm_behind_neutral_symlink() {
+        // BLG-0044: a symlink with a neutral name must not hide a software
+        // token, so the resolved path is checked too.
+        let dir = std::env::temp_dir().join(format!(
+            "bud_softhsm_link_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("libsofthsm2.so");
+        std::fs::write(&real, b"fake").unwrap();
+        let link = dir.join("neutral-name.so");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path_str = link.to_str().unwrap().to_string();
+        let cfg = MainnetValidatorKeyConfig {
+            signer_backend: Some("pkcs11"),
+            raw_signer_backend: Some("pkcs11"),
+            validator_key_file: None,
+            pkcs11_module_path: Some(path_str.as_str()),
+            pkcs11_token_pin_env: Some("BUD_HSM_PIN"),
+            resolve_pin_env: false,
+        };
+        let outcome = check_mainnet_validator_key_policy(&cfg);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome, Err(MainnetKeyPolicyViolation::SoftwareHsmBackend));
+    }
+
+    #[test]
     fn rejects_missing_pin_when_resolve_enabled() {
         let mut c = base();
         c.pkcs11_token_pin_env = Some("BUD_HSM_PIN_DOES_NOT_EXIST_XYZ");
