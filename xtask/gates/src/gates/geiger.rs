@@ -18,6 +18,14 @@ fn counters(line: &str) -> impl Iterator<Item = &str> {
         .take_while(|t| t.contains('/') && t.split('/').all(|p| p.parse::<u64>().is_ok()))
 }
 
+/// Is this crate name one of ours?
+fn is_first_party_name(name: &str) -> bool {
+    name == "verifier-registry"
+        || name == "budscan"
+        || name.starts_with("budlum-")
+        || name.starts_with("bud-")
+}
+
 /// The first-party crate name on a cargo-geiger row, if the row names one.
 ///
 /// A row is first-party when the token immediately before the version is
@@ -33,11 +41,10 @@ fn first_party_name(line: &str) -> Option<&str> {
         t.split('.').count() == 3 && t.split('.').all(|p| p.parse::<u64>().is_ok())
     })?;
     let name = tokens.get(version_at.checked_sub(1)?)?;
-    // `verifier-registry` budzero'nun sekizinci uyesi ve isim kalibina
-    // does not match; if it is not listed by name it is counted as third party
-    // sayilirdi.
-    (*name == "budlum-core" || *name == "verifier-registry" || name.starts_with("bud-"))
-        .then_some(*name)
+    // `verifier-registry` is the eighth budzero member and does not match the
+    // name pattern; if it were not listed by name it would count as third party.
+    // The `budlum-*` crates and `budscan` are first-party path crates too.
+    is_first_party_name(name).then_some(*name)
 }
 
 pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
@@ -192,5 +199,21 @@ mod tests {
         std::fs::write(&f, "error: linking with cc failed\n").unwrap();
         assert!(run(&dir, &f).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn path_crates_are_first_party() {
+        let row = "0/0  0/0  0/0  0/0  0/0   ?  budlum-bpqs 0.1.0";
+        assert_eq!(first_party_name(row), Some("budlum-bpqs"));
+        assert_eq!(
+            first_party_name("0/0 0/0 0/0 0/0 0/0 ? budscan 0.1.0"),
+            Some("budscan")
+        );
+        assert_eq!(first_party_name("0/0 0/0 0/0 0/0 0/0 ? serde 1.0.0"), None);
     }
 }
