@@ -882,8 +882,9 @@ impl StateSnapshotV2 {
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
-        // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4, f40f5f6 dersi:
-        // A one-sided root change is FORBIDDEN - bump it together with the prefix).
+        // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4; the
+        // lesson of f40f5f6: a one-sided root change is FORBIDDEN - bump it
+        // together with the prefix).
         if self.schema_version >= 4 {
             hasher.update(b"budlum.snapshot.v4");
         }
