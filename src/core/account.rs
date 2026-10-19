@@ -950,6 +950,53 @@ impl AccountState {
         Ok(amount)
     }
 
+    /// BLG-0092 (P04-F10): bond into a permissionless application role at
+    /// the registration floor. This is the production registration path for
+    /// the verifier family (VERIFIER/MASTER_VERIFIER, AI_VERIFIER, ATTESTER,
+    /// CONTENT_VALIDATOR) - RoleIds that had none, leaving the ATTESTER
+    /// authority check in the storage-attestation path permanently at zero
+    /// stake.
+    pub fn bond_role(
+        &mut self,
+        address: &Address,
+        role: crate::registry::role::RoleId,
+        amount: u64,
+    ) -> Result<u64, crate::registry::RegistryError> {
+        let required = self.registry.params().min_stake;
+        let available = self.spendable_balance(address);
+        if amount < required || available < amount {
+            return Err(crate::registry::RegistryError::InsufficientStake {
+                required,
+                provided: amount.min(available),
+            });
+        }
+        let epoch = self.epoch_index;
+        use crate::registry::role::roles;
+        match role {
+            roles::VERIFIER => {
+                self.registry.register_verifier(*address, amount, epoch)?;
+            }
+            roles::AI_VERIFIER => {
+                self.registry.register_ai_verifier(*address, amount, epoch)?;
+            }
+            roles::ATTESTER => {
+                self.registry.register_attester(*address, amount, epoch)?;
+            }
+            roles::CONTENT_VALIDATOR => {
+                self.registry.register_content_validator(*address, amount, epoch)?;
+            }
+            other => {
+                return Err(crate::registry::RegistryError::UnsupportedRole {
+                    role: other,
+                });
+            }
+        }
+        let account = self.get_or_create(address);
+        account.balance -= amount;
+        self.dirty_accounts.insert(*address);
+        Ok(amount)
+    }
+
     pub fn begin_ai_operator_unbonding(&mut self, address: &Address) -> Result<u64, String> {
         if self
             .ai_registry
@@ -3725,6 +3772,36 @@ mod tests {
             )
             .unwrap();
         assert_ne!(after_admin, st.calculate_state_root());
+    }
+
+    /// BLG-0092 (P04-F10): the verifier family registers through the bond
+    /// path - the ATTESTER seat gets real stake instead of a permanent zero.
+    #[test]
+    fn the_verifier_family_registers_through_the_bond_path() {
+        let mut st = AccountState::new();
+        let who = Address::from([5u8; 32]);
+        st.add_balance(&who, 1_000_000);
+        st.bond_role(
+            &who,
+            crate::registry::role::roles::ATTESTER,
+            crate::registry::MIN_REGISTRATION_STAKE,
+        )
+        .unwrap();
+        assert!(st
+            .registry
+            .is_active(&who, crate::registry::role::roles::ATTESTER));
+        // A role outside the family is refused by name.
+        let err = st
+            .bond_role(
+                &Address::from([6u8; 32]),
+                crate::registry::role::roles::VALIDATOR,
+                crate::registry::MIN_REGISTRATION_STAKE,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::registry::RegistryError::UnsupportedRole { .. }
+        ));
     }
 
     fn hub_registry_mutation_changes_account_state_root() {
