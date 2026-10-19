@@ -429,6 +429,13 @@ pub enum TransactionType {
     /// naming types: the signing gate reads the enum
     /// body's identifiers to resolve carried payload types.)
     Storage(crate::domain::storage_tx::StorageTx),
+    /// PoA admission door: a candidate applies for themselves, an admin of
+    /// the target domain decides, and the admin set changes only through
+    /// admins or governance. Ids, a dossier commitment and reasons - no
+    /// authority fields, because the sender IS the claimed actor at the one
+    /// execution body. (Written without naming types: the signing gate reads
+    /// the enum body's identifiers to resolve carried payload types.)
+    PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1222,6 +1229,7 @@ impl Transaction {
             // `NftRegistry` beside their own map, which is exactly what the
             // registry arms already price.
             TransactionType::Vault(_) => schedule.contract_call_gas * 2,
+            TransactionType::PoaOnboarding(_) => schedule.contract_call_gas * 2,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
             // also verifies the operator's consent signature, so it adds
@@ -1459,6 +1467,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::Identity(_) => 45,
         TransactionType::Vault(_) => 46,
         TransactionType::Storage(_) => 47,
+        TransactionType::PoaOnboarding(_) => 48,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1503,6 +1512,81 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
     encode_message_kind(&message.kind, out);
     put_u64(out, message.expiry_height);
 }
+/// Canonical preimage of a PoA admission transaction (BLG-0089).
+///
+/// Operation tag, domain id, and the addresses/commitments/reasons each arm
+/// carries - every field the execution body reads is under the signature, so
+/// a relay cannot retarget a decision or swap a dossier without changing the
+/// signing hash. Strings are length-prefixed; horizons are fixed-width.
+fn encode_poa_onboarding_tx(
+    tx: &crate::registry::poa_onboarding::PoAOnboardingTx,
+    out: &mut Vec<u8>,
+) {
+    use crate::registry::poa_onboarding::PoAOnboardingTx as T;
+    match tx {
+        T::AddAdmin { domain, admin } => {
+            put_u8(out, 0);
+            put_u64(out, *domain);
+            put_fixed(out, admin.as_bytes());
+        }
+        T::RemoveAdmin { domain, admin } => {
+            put_u8(out, 1);
+            put_u64(out, *domain);
+            put_fixed(out, admin.as_bytes());
+        }
+        T::SubmitApplication {
+            domain,
+            kyc_commitment,
+        } => {
+            put_u8(out, 2);
+            put_u64(out, *domain);
+            put_fixed(out, kyc_commitment);
+        }
+        T::Approve {
+            domain,
+            member,
+            validity_horizon,
+        } => {
+            put_u8(out, 3);
+            put_u64(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_u64(out, *validity_horizon);
+        }
+        T::Reject {
+            domain,
+            member,
+            reason,
+        } => {
+            put_u8(out, 4);
+            put_u64(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_string(out, reason);
+        }
+        T::Revoke {
+            domain,
+            member,
+            reason,
+        } => {
+            put_u8(out, 5);
+            put_u64(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_string(out, reason);
+        }
+        T::RenewKyc {
+            domain,
+            member,
+            kyc_commitment,
+            validity_horizon,
+        } => {
+            put_u8(out, 6);
+            put_u64(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_fixed(out, kyc_commitment);
+            put_u64(out, *validity_horizon);
+        }
+    }
+}
+
 /// Canonical preimage of a vault transaction. Fixed-width ids throughout -
 /// there is nothing variable-length to length-prefix here, and the
 /// operation tag is the only separation the shape needs (an id is an id in
@@ -2099,6 +2183,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             }
         }
         TransactionType::Identity(identity_tx) => encode_identity_tx(identity_tx, out),
+        TransactionType::PoaOnboarding(poa_tx) => encode_poa_onboarding_tx(poa_tx, out),
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
         TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
     }
