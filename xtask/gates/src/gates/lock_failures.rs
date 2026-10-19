@@ -19,46 +19,11 @@ const SCAN_ROOTS: &[&str] = &[
     "crates/wallet-core",
 ];
 
-/// Remove `#[cfg(test)] mod ... { }` blocks (only `mod` items, mirroring the
-/// shell regex).
+/// Remove every `#[cfg(test)]` item. The shared stripper ends a body-less item
+/// at its own `;`, so code after `#[cfg(test)] mod tests;` is still scanned and
+/// a name containing "mod" cannot start a cut.
 fn strip_test_mods(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    loop {
-        let Some(at) = rest.find("#[cfg(test)]") else {
-            out.push_str(rest);
-            return out;
-        };
-        let head = &rest[at..];
-        let Some(brace_rel) = head.find('{') else {
-            return out;
-        };
-        let between = &head["#[cfg(test)]".len()..brace_rel];
-        if !between.contains("mod") {
-            out.push_str(&rest[..at + "#[cfg(test)]".len()]);
-            rest = &rest[at + "#[cfg(test)]".len()..];
-            continue;
-        }
-        out.push_str(&rest[..at]);
-        let brace = at + brace_rel;
-        let mut depth = 0i32;
-        let mut j = brace;
-        let b = rest.as_bytes();
-        while j < b.len() {
-            match b[j] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        rest = if j < rest.len() { &rest[j + 1..] } else { "" };
-    }
+    super::capability_modules_are_wired::strip_test_mods(text)
 }
 
 fn is_test_path(rel: &str) -> bool {
@@ -66,8 +31,17 @@ fn is_test_path(rel: &str) -> bool {
 }
 
 fn is_open_default(line: &str) -> bool {
-    let t = line.trim();
-    t.contains("unwrap_or(true)") || t.contains("unwrap_or_else(|_| true)")
+    // Spaces are dropped so `|_|true` and `|_| true` are one spelling.
+    let t: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "unwrap_or(true)",
+        "unwrap_or_else(|_|true)",
+        "unwrap_or_else(|e|true)",
+        "map_or(true,",
+        "Err(_)=>true",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
 }
 
 fn collect_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
@@ -251,5 +225,32 @@ mod scan_root_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn more_fail_open_spellings_are_seen() {
+        for l in [
+            "x.lock().map_or(true, |g| g.ok())",
+            "x.lock().unwrap_or_else(|e| true)",
+            "x.lock().unwrap_or_else(|_|true)",
+            "Err(_) => true,",
+            "x.lock().unwrap_or(true)",
+        ] {
+            assert!(is_open_default(l), "{l}");
+        }
+        assert!(!is_open_default("x.lock().unwrap_or(false)"));
+    }
+
+    #[test]
+    fn bodyless_test_mod_at_the_end_keeps_the_code_before_it() {
+        let src = "fn a() { m.lock().unwrap_or(true); }\n#[cfg(test)]\nmod tests;\n";
+        assert!(strip_test_mods(src).contains("unwrap_or(true)"));
+        let model = "#[cfg(test)]\nconst X: u8 = 1;\nfn model() { m.lock().unwrap_or(true); }\n";
+        assert!(strip_test_mods(model).contains("unwrap_or(true)"));
     }
 }
