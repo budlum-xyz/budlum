@@ -968,6 +968,16 @@ fn clamp_feed_limit(limit: usize) -> usize {
     limit.min(MAX_SOCIAL_FEED_LIMIT)
 }
 
+/// Upper bound for the length of one unpaginated list response (offers,
+/// data assets, grants, rankings, slashing history), so response size and
+/// serialization cost do not grow with chain state.
+const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
+
+fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
+    items.truncate(MAX_LIST_RESPONSE_ITEMS);
+    items
+}
+
 fn is_per_ip_rate_limited(
     config: &RpcSecurityConfig,
     per_ip_rates: &Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
@@ -5048,7 +5058,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn market_get_offers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let offers = self.chain.market_get_offers().await;
+        let offers = cap_list_response(self.chain.market_get_offers().await);
         Ok(serde_json::json!(offers))
     }
 
@@ -5148,22 +5158,22 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let assets = self.chain.pollen_get_data_assets().await;
+        let assets = cap_list_response(self.chain.pollen_get_data_assets().await);
         Ok(serde_json::json!(assets))
     }
 
     async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let grants = self.chain.pollen_get_access_grants().await;
+        let grants = cap_list_response(self.chain.pollen_get_access_grants().await);
         Ok(serde_json::json!(grants))
     }
 
     async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let authorizations = cap_list_response(self.chain.pollen_get_sale_authorizations().await);
         Ok(serde_json::json!(authorizations))
     }
 
     async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let receipts = self.chain.pollen_get_purchase_receipts().await;
+        let receipts = cap_list_response(self.chain.pollen_get_purchase_receipts().await);
         Ok(serde_json::json!(receipts))
     }
 
@@ -6493,7 +6503,7 @@ impl BudlumApiServer for RpcServer {
 
     /// Get all verifiers ranked by reliability score.
     async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let ranking = self.chain.get_ai_verifiers_by_reliability().await;
+        let ranking = cap_list_response(self.chain.get_ai_verifiers_by_reliability().await);
         let ranking_json: Vec<serde_json::Value> = ranking
             .iter()
             .enumerate()
@@ -6646,7 +6656,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let ranking = self.chain.get_ai_agent_ranking().await;
+        let ranking = cap_list_response(self.chain.get_ai_agent_ranking().await);
         let entries: Vec<serde_json::Value> = ranking
             .iter()
             .map(|(addr, score)| {
@@ -6748,7 +6758,7 @@ impl BudlumApiServer for RpcServer {
 
     async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let history: Vec<crate::registry::permissionless::SlashingRecord> =
-            self.chain.get_slashing_history().await;
+            cap_list_response(self.chain.get_slashing_history().await);
         let entries: Vec<serde_json::Value> = history
             .into_iter()
             .map(|entry| {
@@ -7180,6 +7190,13 @@ mod tests {
     fn feed_limit_is_clamped() {
         assert_eq!(clamp_feed_limit(usize::MAX), MAX_SOCIAL_FEED_LIMIT);
         assert_eq!(clamp_feed_limit(5), 5);
+    }
+
+    #[test]
+    fn list_responses_are_capped() {
+        let capped = cap_list_response(vec![0u8; MAX_LIST_RESPONSE_ITEMS + 50]);
+        assert_eq!(capped.len(), MAX_LIST_RESPONSE_ITEMS);
+        assert_eq!(cap_list_response(vec![1u8; 3]).len(), 3);
     }
 
     #[test]
