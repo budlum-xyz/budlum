@@ -10,9 +10,9 @@
 //!
 //! What is measured (the things that MUST be independent of platform and run):
 //!   * The resolution of the three networks (Mainnet=45260, Testnet=45261,
-//!     Devnet=45262) plus an undefined
-//!     Chain_id fallback'i (`GenesisConfig::new`): genesis blok hash'i,
-//!     one: the timestamp, tx_root, validator_set_hash, the state root, the
+//!     Devnet=45262) plus an undefined chain_id fallback
+//!     (`GenesisConfig::new`). For each: the genesis block hash, the
+//!     timestamp, tx_root, validator_set_hash, the state root, the
 //!     account count and the total circulation.
 //!   * The equality of the `state_root` in the block and the root of
 //!     `build_state` - a mirror of the node's fail-closed genesis and DB check
@@ -38,7 +38,7 @@ use std::sync::Arc;
 /// The genesis observation vector for one chain_id. It mirrors the resolution
 /// path inside `Blockchain::new_with_genesis`: `for_network` when the network is
 /// known,
-/// Yoksa `GenesisConfig::new` fallback'i.
+/// otherwise the `GenesisConfig::new` fallback.
 fn probe_chain(chain_id: u64) -> Vec<String> {
     let config = Network::from_chain_id(chain_id)
         .map_or_else(|| GenesisConfig::new(chain_id), GenesisConfig::for_network);
