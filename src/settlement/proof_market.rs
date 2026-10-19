@@ -576,6 +576,16 @@ impl ProofReceipt {
     pub fn is_paid(&self) -> bool {
         matches!(self.status, ReceiptStatus::Paid)
     }
+
+    /// BLG-0066: revoked receipts can never be paid and must be clearable.
+    pub fn is_revoked(&self) -> bool {
+        matches!(self.status, ReceiptStatus::Revoked { .. })
+    }
+
+    /// Settled means nothing more will happen: paid or revoked.
+    pub fn is_settled(&self) -> bool {
+        self.is_paid() || self.is_revoked()
+    }
 }
 
 /// Overall state tracking for the proof market.
@@ -589,6 +599,12 @@ pub struct ProofMarketState {
     pub total_rewards_paid: u64,
     /// Total number of completed tasks.
     pub total_tasks_completed: u64,
+    /// BLG-0062 (P03-F05): task IDs that have completed or expired. The
+    /// duplicate check must outlive the task's stay in `active_tasks` and its
+    /// receipt's stay in `pending_receipts`, or the same fields open a second
+    /// job and mint a second receipt once the first leaves the books.
+    #[serde(default)]
+    pub retired_task_ids: std::collections::BTreeSet<[u8; 32]>,
 }
 
 impl ProofMarketState {
@@ -604,6 +620,7 @@ impl ProofMarketState {
     pub fn is_empty(&self) -> bool {
         self.active_tasks.is_empty()
             && self.pending_receipts.is_empty()
+            && self.retired_task_ids.is_empty()
             && self.total_rewards_paid == 0
             && self.total_tasks_completed == 0
     }
@@ -663,6 +680,14 @@ impl ProofMarketState {
         {
             return Err("ProofMarketState task already completed".into());
         }
+        // BLG-0062: the ID is retired forever once used, even after the
+        // receipt is paid and pruned.
+        if self.retired_task_ids.contains(&task.task_id) {
+            return Err("ProofMarketState task already retired".into());
+        }
+        if self.retired_task_ids.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
+            return Err("ProofMarketState retired task set full".into());
+        }
         self.active_tasks.push(task);
         Ok(())
     }
@@ -697,6 +722,11 @@ impl ProofMarketState {
         // vanished through a path that reported failure, and nothing rolls
         // back, since `apply_block_checked` propagates with `?`.
         if self.pending_receipts.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
+            // BLG-0066: settle what can be settled before refusing; the cap
+            // must not jam forever behind paid or revoked receipts.
+            self.prune_paid_receipts();
+        }
+        if self.pending_receipts.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
             return Err("ProofMarketState pending receipt limit exceeded".into());
         }
         let total_tasks_completed = self
@@ -711,6 +741,7 @@ impl ProofMarketState {
 
         // Past every refusal: nothing below this line can fail.
         self.active_tasks.remove(idx);
+        self.retired_task_ids.insert(task_id);
         self.pending_receipts.push(receipt);
         self.total_tasks_completed = total_tasks_completed;
         Ok(())
@@ -738,17 +769,29 @@ impl ProofMarketState {
     /// Clears out expired tasks.
     pub fn prune_expired(&mut self, current_epoch: u64) -> usize {
         let before = self.active_tasks.len();
-        self.active_tasks
-            .retain(|t| t.deadline_epoch >= current_epoch || !t.is_active());
+        let mut retired = Vec::new();
+        self.active_tasks.retain(|t| {
+            let keep = t.deadline_epoch >= current_epoch || !t.is_active();
+            if !keep {
+                retired.push(t.task_id);
+            }
+            keep
+        });
+        // BLG-0062: an expired task's fields must not open a fresh task.
+        for id in retired {
+            self.retired_task_ids.insert(id);
+        }
         before - self.active_tasks.len()
     }
 
-    /// Prune paid receipts from pending_receipts Vec.
-    /// Without this, the Vec grows indefinitely, paid receipts are never
-    /// Removed, only marked as paid. Call this periodically after pay_receipt.
+    /// Prune settled receipts (paid **and** revoked) from `pending_receipts`.
+    ///
+    /// BLG-0066: revoked receipts can never be paid, so keeping them jammed
+    /// the market at MAX_PROOF_MARKET_PENDING_RECEIPTS for good. Only
+    /// genuinely unpaid receipts may hold the queue.
     pub fn prune_paid_receipts(&mut self) -> usize {
         let before = self.pending_receipts.len();
-        self.pending_receipts.retain(|r| !r.is_paid());
+        self.pending_receipts.retain(|r| !r.is_settled());
         before - self.pending_receipts.len()
     }
 
@@ -822,11 +865,17 @@ impl ProofMarketState {
             fields.push(task.min_prover_stake.to_le_bytes().to_vec());
             fields.push(task.status.root_bytes());
         }
+        for id in &self.retired_task_ids {
+            fields.push(id.to_vec());
+        }
         for receipt in &self.pending_receipts {
             fields.push(receipt.task_id.to_vec());
             fields.push(receipt.prover.as_bytes().to_vec());
             fields.push(receipt.verification_hash.to_vec());
             fields.push(receipt.reward_claimed.to_le_bytes().to_vec());
+            // BLG-0067: the verification epoch is part of the receipt and
+            // must be committed, or two views of one receipt can disagree.
+            fields.push(receipt.verified_epoch.to_le_bytes().to_vec());
             fields.push(receipt.status.root_bytes());
         }
         let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
@@ -1498,4 +1547,55 @@ mod tests {
              (before: {before})"
         );
     }
+    // ---- BLG-0062 / BLG-0066 (P03-F05, F09) ----
+
+    fn sample_task() -> ProofTask {
+        ProofTask::new(
+            ProofTaskKind::ZkProof {
+                circuit_id: [1u8; 32],
+                public_inputs_hash: [2u8; 32],
+            },
+            Address::from([1u8; 32]),
+            1,
+            10,
+            5,
+            [2u8; 32],
+            1,
+        )
+    }
+
+    #[test]
+    fn a_retired_task_id_cannot_open_a_second_job() {
+        let mut market = ProofMarketState::new();
+        let task = sample_task();
+        let id = task.task_id;
+        market.add_task(task.clone()).unwrap();
+        market.active_tasks[0]
+            .assign(Address::from([9u8; 32]), 1, 1)
+            .unwrap();
+        let receipt = ProofReceipt::new(id, Address::from([9u8; 32]), 2, [3u8; 32], 5);
+        market.complete_task(id, receipt, |_| Ok(())).unwrap();
+        market.pay_receipt(0).unwrap();
+        market.prune_paid_receipts();
+        // The receipt is gone from every list; the ID must still be refused.
+        let err = market.add_task(task).unwrap_err();
+        assert!(err.contains("retired"), "got: {err}");
+    }
+
+    #[test]
+    fn revoked_receipts_are_pruned_so_the_queue_cannot_jam() {
+        let mut market = ProofMarketState::new();
+        let task = sample_task();
+        let id = task.task_id;
+        market.add_task(task).unwrap();
+        market.active_tasks[0]
+            .assign(Address::from([9u8; 32]), 1, 1)
+            .unwrap();
+        let mut receipt = ProofReceipt::new(id, Address::from([9u8; 32]), 2, [3u8; 32], 5);
+        receipt.revoke("bad proof".into()).unwrap();
+        market.pending_receipts.push(receipt);
+        assert_eq!(market.prune_paid_receipts(), 1);
+        assert!(market.pending_receipts.is_empty());
+    }
+
 }
