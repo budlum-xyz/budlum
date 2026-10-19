@@ -32,6 +32,10 @@ pub const DEFAULT_FPS: u16 = 10;
 /// Max frames in one lab video (`DoS` bound).
 pub const MAX_VIDEO_FRAMES: u32 = 50_000;
 
+/// Largest PNG one frame of a BDLV blob may carry. An honest frame is a few hundred pixels
+/// square, so this leaves room while a hostile length field cannot ask for more.
+pub const MAX_FRAME_PNG_BYTES: usize = 4 * 1024 * 1024;
+
 /// Errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QrVideoError {
@@ -180,12 +184,13 @@ impl QrVideo {
         let mut png_frames = Vec::with_capacity(n);
         for _ in 0..n {
             let len = u32_le(blob, off)? as usize;
+            if len > MAX_FRAME_PNG_BYTES {
+                return Err(QrVideoError::BadBlob);
+            }
             off += 4;
-            let png = blob
-                .get(off..off + len)
-                .ok_or(QrVideoError::BadBlob)?
-                .to_vec();
-            off += len;
+            let end = off.checked_add(len).ok_or(QrVideoError::BadBlob)?;
+            let png = blob.get(off..end).ok_or(QrVideoError::BadBlob)?.to_vec();
+            off = end;
             png_frames.push(png);
         }
         // One byte string per video: bytes after the last frame would change
@@ -565,6 +570,27 @@ mod tests {
         let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"kare".to_vec()], 10).unwrap();
         let mut blob = v.to_bytes();
         blob[4] = 2;
+        assert_eq!(
+            QrVideo::from_bytes(&blob).unwrap_err(),
+            QrVideoError::BadBlob
+        );
+    }
+
+    #[test]
+    fn a_frame_over_the_png_byte_ceiling_is_refused() {
+        let content = b"qr-video-oversize".repeat(8);
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
+        let frames: Vec<_> = enc.frames.iter().take(1).cloned().collect();
+        let video =
+            QrVideo::from_optical_frames(&enc.recipe, &enc.stream_commitment, &frames, DEFAULT_FPS)
+                .unwrap();
+        let mut blob = video.to_bytes();
+        blob.truncate(76);
+        let len = MAX_FRAME_PNG_BYTES + 1;
+        blob.extend_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+        blob.resize(blob.len() + len, 0);
         assert_eq!(
             QrVideo::from_bytes(&blob).unwrap_err(),
             QrVideoError::BadBlob
