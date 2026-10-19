@@ -70,7 +70,7 @@ tails to prove the tail is invisible by design).
    then path validation against the member root.
 
 Wire shape: epoch (4 B) + LEN significant chain lanes (LEN x 32 B) +
-T_LOG2 path nodes (T_LOG2 x 32 B); L5 wire 2676 B, L3 wire 2164 B
+T_LOG2 path nodes (T_LOG2 x 32 B); L5 wire 2660 B, L3 wire 2148 B
 (pinned by `signature_wire_size_matches_the_cost_model`).
 
 ## 3. Threat model
