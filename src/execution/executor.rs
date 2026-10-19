@@ -119,6 +119,16 @@ impl Executor {
         Ok(())
     }
 
+    /// Apply one transaction to `state`.
+    ///
+    /// P18-F11: this does not compare `tx.nonce` with the account nonce; it
+    /// only advances the nonce. The caller must have run
+    /// `AccountState::validate_transaction` first (block validation, the
+    /// mempool and the producer do). Replaying stored blocks is safe only
+    /// because they were validated when they were accepted.
+    ///
+    /// On `Err` the state may be partly changed. A caller that keeps going
+    /// must work on a copy it can drop.
     pub fn apply_transaction_checked(
         state: &mut AccountState,
         tx: &Transaction,
@@ -494,6 +504,19 @@ impl Executor {
                         ));
                     }
                 }
+                // P18-F04: a governance vote from a non-validator is refused
+                // before the fee and nonce are touched. The callers keep the
+                // state of a failed transaction, so a refusal after the
+                // debit would leave a half-applied transaction behind.
+                if tx.to == Address::zero()
+                    && tx.data.len() == 9
+                    && state.get_validator(&tx.from).map_or(0, |v| v.stake) == 0
+                {
+                    return Err(BudlumError::validation(
+                        "governance_voter_not_validator",
+                        "Only validators can vote in governance",
+                    ));
+                }
                 let sender_acc = state.get_or_create(&tx.from);
                 sender_acc.balance = sender_acc.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -588,8 +611,10 @@ impl Executor {
                         requester: tx.from,
                         model_id: crate::ai::types::AiModelId(model_id),
                         input_commitment: crate::core::transaction::Transaction::signing_hash(tx),
+                        // P18-F12: an oversized payload is refused, not
+                        // replaced by an empty reference.
                         input_ref: crate::ai::types::BoundedBytes::try_new(tx.data.clone())
-                            .unwrap_or_default(),
+                            .map_err(|e| BudlumError::validation("ai_input_ref_too_large", e))?,
                         max_fee,
                         callback: Some(tx.from),
                         submitted_at_block: state.current_block_height,
@@ -621,7 +646,11 @@ impl Executor {
                     // type. The instance was reported on one path, so the
                     // class is closed on all of them.
                     let sender_balance = state.spendable_balance(&tx.from);
-                    if sender_balance < max_fee {
+                    // P18-F04: the escrow and the call fee are both paid from
+                    // this balance. Checking the escrow alone let the escrow
+                    // be deducted and the fee debit then fail, leaving a
+                    // half-applied transaction in the callers' state.
+                    if sender_balance < max_fee.saturating_add(tx.fee) {
                         return Err(BudlumError::validation(
                             "ai_insufficient_balance_for_escrow",
                             format!("Insufficient balance for max_fee escrow: have {sender_balance}, need {max_fee}"),
@@ -1680,6 +1709,18 @@ impl Executor {
                 // Reclaim escrowed max_fee for expired unfinalized request.
                 // Only the original requester can reclaim their fee.
                 let current_block = state.current_block_height;
+                // P18-F04: the requester is checked before `reclaim_fee`
+                // marks the fee reclaimed. Refusing afterwards left the
+                // request marked in the state a failed transaction leaves
+                // behind, so a stranger could lock the real requester out.
+                if let Some(request) = state.ai_registry.requests.get(request_id) {
+                    if request.requester != tx.from {
+                        return Err(BudlumError::validation(
+                            "ai_fee_reclaim_unauthorized",
+                            "Only the original requester can reclaim the escrowed fee",
+                        ));
+                    }
+                }
                 let (requester, max_fee) = state
                     .ai_registry
                     .reclaim_fee(request_id, current_block)
@@ -2754,6 +2795,37 @@ mod tests {
     #[test]
     fn ai_exec_dims_accepts_small_model() {
         assert!(check_ai_exec_dims(&[2, 1]).is_ok());
+    }
+
+    /// P18-F04: a refused governance vote leaves the sender untouched. The
+    /// fee and nonce used to be taken before the voter check, and the block
+    /// producer keeps the state of a transaction that returned an error.
+    #[test]
+    fn a_refused_governance_vote_does_not_touch_fee_or_nonce() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let who = Address::from([6u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 100);
+        let mut data = vec![1u8];
+        data.extend_from_slice(&7u64.to_le_bytes());
+        let mut tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            1,
+            0,
+            data,
+            DEFAULT_CHAIN_ID,
+            TransactionType::Vote,
+        );
+        tx.hash = tx.calculate_hash();
+        assert!(Executor::apply_transaction(&mut state, &tx).is_err());
+        assert_eq!(state.get_balance(&who), 100, "no fee on a refused vote");
+        assert_eq!(state.get_nonce(&who), 0, "no nonce spent on a refused vote");
     }
 
     /// BLG-0085: a jailed validator must not exit, or a later report finds
