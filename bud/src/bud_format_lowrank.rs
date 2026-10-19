@@ -48,11 +48,22 @@ pub fn low_rank_encode(
     c: usize,
     rank: usize,
 ) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
-    if r == 0 || c == 0 || a.len() != r * c || rank == 0 || rank > r.min(c) {
+    if r == 0 || c == 0 || rank == 0 || rank > r.min(c) {
+        return None;
+    }
+    // Checked sizes: a wrapped product in release would pass the length test.
+    let rc = r.checked_mul(c)?;
+    r.checked_mul(rank)?;
+    rank.checked_mul(c)?;
+    if a.len() != rc {
         return None;
     }
     let mut u = vec![0.0; r * rank];
     let mut v = vec![0.0; rank * c];
+    // The power iteration runs on a working copy that is deflated after each
+    // component, so every rank step finds a new direction and not the
+    // dominant one again.
+    let mut w = a.to_vec();
     // The power iteration, one step per rank, from a deterministic start.
     for k in 0..rank {
         let mut b = det_vec(7, c, k);
@@ -62,14 +73,14 @@ pub fn low_rank_encode(
             for i in 0..r {
                 let mut s = 0.0;
                 for j in 0..c {
-                    s += a[i * c + j] * b[j];
+                    s += w[i * c + j] * b[j];
                 }
                 ab[i] = s;
             }
             for j in 0..c {
                 let mut s = 0.0;
                 for i in 0..r {
-                    s += a[i * c + j] * ab[i];
+                    s += w[i * c + j] * ab[i];
                 }
                 b[j] = s;
             }
@@ -86,7 +97,7 @@ pub fn low_rank_encode(
         for i in 0..r {
             let mut s = 0.0;
             for j in 0..c {
-                s += a[i * c + j] * b[j];
+                s += w[i * c + j] * b[j];
             }
             sig += s * s;
         }
@@ -94,12 +105,18 @@ pub fn low_rank_encode(
         for i in 0..r {
             let mut s = 0.0;
             for j in 0..c {
-                s += a[i * c + j] * b[j];
+                s += w[i * c + j] * b[j];
             }
             u[i * rank + k] = s / sigma.max(1e-12);
         }
         for j in 0..c {
             v[k * c + j] = b[j] * sigma;
+        }
+        // Deflate: remove the component just found from the working copy.
+        for i in 0..r {
+            for j in 0..c {
+                w[i * c + j] -= u[i * rank + k] * v[k * c + j];
+            }
         }
     }
     // The residual is A minus U times V. THE LOSSLESSNESS GUARANTEE: the
@@ -118,7 +135,9 @@ pub fn low_rank_encode(
             let mut x = target - approx;
             for _ in 0..4 {
                 let s = approx + x;
-                if s == target {
+                // Compare bits: -0.0 and 0.0 are equal as numbers but not as
+                // stored values.
+                if s.to_bits() == target.to_bits() {
                     break;
                 }
                 x += target - s; // add back the remaining rounding error
@@ -138,7 +157,10 @@ pub fn low_rank_decode(
     c: usize,
     rank: usize,
 ) -> Option<Vec<f64>> {
-    if u.len() != r * rank || v.len() != rank * c || res.len() != r * c {
+    if Some(u.len()) != r.checked_mul(rank)
+        || Some(v.len()) != rank.checked_mul(c)
+        || Some(res.len()) != r.checked_mul(c)
+    {
         return None;
     }
     let mut a = vec![0.0; r * c];
@@ -237,6 +259,19 @@ mod tests {
             roundtrip_within(&rnd, 10, 10, 2, 1e-12),
             "general data, within a 1e-12 tolerance"
         );
+    }
+
+    #[test]
+    fn each_rank_step_finds_a_new_direction() {
+        // diag(10, 1, 0, 0) has rank 2. With deflation two components
+        // capture it, so the residual is near zero. Without it both found
+        // the dominant direction and the residual stayed near 10.
+        let mut a = vec![0.0; 16];
+        a[0] = 10.0;
+        a[5] = 1.0;
+        let (_u, _v, res) = low_rank_encode(&a, 4, 4, 2).unwrap();
+        let worst = res.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(worst < 1e-6, "residual stays small: {worst}");
     }
 
     #[test]
