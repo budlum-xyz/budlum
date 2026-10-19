@@ -24,10 +24,13 @@ use crate::domain::{
 };
 use crate::execution::executor::Executor;
 use crate::mempool::pool::Mempool;
+use crate::settlement::pq_anchor::AnchorEmission;
+use crate::settlement::ColdWalletState;
 use crate::settlement::{
     merkle_root, GlobalBlockHeader, ProofVerificationError, SettlementProofVerifier,
     VerifiedDomainEvent,
 };
+use crate::settlement::cold_quorum::DeviceSignature;
 use crate::storage::db::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -169,6 +172,13 @@ pub struct Blockchain {
     /// Last epoch rewarded per deal, preventing duplicate reward accrual
     /// When maintenance runs multiple times at the same height.
     pub storage_last_reward_epoch: BTreeMap<u64, u64>,
+    /// BLG-0076 (P03-F19): the anchor emission trace. `seal_global_header`
+    /// runs it on every seal; the default is GatedOff (skip).
+    pub anchor_emission: AnchorEmission,
+    /// BLG-0076 (P03-F19): the cold-wallet committee state, when the node
+    /// runs with a cold committee. `None` today; the rotation entry on this
+    /// chain exercises cold_wallet + cold_quorum through pq_anchor.
+    pub cold_wallet: Option<ColdWalletState>,
     /// Append-only in-memory event log consumed by RPC/gossip/reporting layers.
     pub storage_economics_events: Vec<StorageEconomicsEvent>,
 }
@@ -963,6 +973,8 @@ impl Blockchain {
             storage_burned_bond_total: 0,
             storage_operator_rewards: BTreeMap::new(),
             storage_last_reward_epoch: BTreeMap::new(),
+            anchor_emission: AnchorEmission::default(),
+            cold_wallet: None,
             storage_economics_events: Vec::new(),
         };
 
@@ -2091,7 +2103,48 @@ impl Blockchain {
         if let Some(metrics) = &self.metrics {
             metrics.settlement_global_headers_sealed.inc();
         }
+        // BLG-0076 (P03-F19): the production trace of the anchor pipeline.
+        // `emit_anchor_node_local` enforces the mode itself: GatedOff skips,
+        // Devnet writes the anchor line, ProductionApproved fails closed
+        // (decision record 2026-09-17, item 6). The window leaf is the
+        // sealed header itself; cross-domain and identity roots ride along.
+        let emission = &self.anchor_emission;
+        crate::settlement::pq_anchor::emit_anchor_node_local(
+            &emission.log_path,
+            emission.mode,
+            header.global_height,
+            &[header.calculate_hash_bytes()],
+            header.storage_root,
+            header.identity_root,
+            emission.key_epoch,
+            emission.signer.as_ref(),
+        )
+        .map_err(|e| format!("anchor emission: {e}"))?;
         Ok(header)
+    }
+
+    /// Rotate the anchor signing key with the cold-wallet committee
+    /// (BLG-0076 / P03-F19 production entry): pq_anchor's cold channel drives
+    /// cold_wallet's quorum signature and cold_quorum's verification. The
+    /// wallet must be configured on this chain; the committee is read from
+    /// its pinned trusted-device set (S2).
+    pub fn rotate_anchor_key_with_committee(
+        &mut self,
+        at_height: u64,
+        reason: &str,
+        certificates: &[DeviceSignature],
+    ) -> Result<u32, String> {
+        let state = self
+            .cold_wallet
+            .as_mut()
+            .ok_or_else(|| "cold wallet not configured on this chain".to_string())?;
+        crate::settlement::pq_anchor::rotate_anchor_key_with_committee(
+            state,
+            at_height,
+            reason,
+            certificates,
+        )
+            .map_err(|e| format!("anchor key rotation: {e}"))
     }
 
     pub fn verify_domain_event_proof(
@@ -7259,6 +7312,8 @@ impl Clone for Blockchain {
             storage_burned_bond_total: self.storage_burned_bond_total,
             storage_operator_rewards: self.storage_operator_rewards.clone(),
             storage_last_reward_epoch: self.storage_last_reward_epoch.clone(),
+            anchor_emission: self.anchor_emission.clone(),
+            cold_wallet: self.cold_wallet.clone(),
             storage_economics_events: self.storage_economics_events.clone(),
         }
     }
