@@ -708,4 +708,16 @@ fn spending_exactly_the_declared_limit_is_allowed() {
             "spending exactly at the ceiling must not trip the budget gate: {e}"
         );
     }
+
+    // One unit over the ceiling trips the same gate, so the boundary is `>`.
+    let mut over = pi.clone();
+    over.gas_limit = 5_000;
+    over.gas_used = 5_001;
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &over, &program))
+        .expect_err("spending above the declared limit must be refused");
+    assert!(
+        err.contains("declared limit"),
+        "the budget gate must name the declared limit: {err}"
+    );
 }
