@@ -119,7 +119,7 @@ fn live_path_epoch_change_isolates_votes() {
     agg2.add_prevote(pv2).expect("epoch 2 prevote");
     assert_eq!(agg2.prevotes.len(), 1);
     // The epoch 1 aggregator is still in its own window, unaffected.
-    assert_eq!(agg1.prevotes.len(), 3, "epoch 1 penceresi kirletilmemeli");
+    assert_eq!(agg1.prevotes.len(), 3, "the epoch 1 window must stay clean");
 
     // A stale vote: a validly signed epoch 1 vote sent to the epoch 2
     // aggregator is refused and does not enter its window.

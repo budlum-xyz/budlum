@@ -268,7 +268,9 @@ mod tests {
             "poa-authority-quorum",
             0,
         );
-        let operator = domain.operator.expect("varsayilan alan operator tasir");
+        let operator = domain
+            .operator
+            .expect("the default domain carries an operator");
         bc.register_consensus_domain(domain)
             .expect("the domain registers");
 
