@@ -56,10 +56,10 @@ fn one_unit_paragraph(text: &str) -> Option<String> {
     text.split("\n\n").find_map(|para| {
         let lower = para.to_lowercase();
         let obj = lower.contains("% of files") || lower.contains("% of objects");
-        let byt = lower.contains("% of bytes") || lower.contains("% of volume");
+        let by_bytes = lower.contains("% of bytes") || lower.contains("% of volume");
         let has_obj = obj || lower.contains("share of files") || lower.contains("share of objects");
-        let has_byt = byt || lower.contains("share of bytes") || lower.contains("share of volume");
-        ((obj && !has_byt) || (byt && !has_obj))
+        let has_bytes = by_bytes || lower.contains("share of bytes") || lower.contains("share of volume");
+        ((obj && !has_bytes) || (by_bytes && !has_obj))
             .then(|| para.lines().next().unwrap_or("").to_string())
     })
 }
