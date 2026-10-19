@@ -66,7 +66,7 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Remove `#[cfg(test)] mod tests { ... }` blocks, braces balanced.
-fn strip_test_mods(src: &str) -> String {
+pub(crate) fn strip_test_mods(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let bytes: Vec<char> = src.chars().collect();
     let mut i = 0;
