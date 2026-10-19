@@ -881,8 +881,10 @@ mod rpc_tests {
         // CWE-347). A caller-chosen request_id is bound too, so one signed
         // authorization cannot be replayed (MEDIUM, CWE-294).
         let request_id: u64 = 7;
+        let chain_id = bc.get_chain_id().await;
         let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V1",
+            b"BUD_OPEN_DEAL_V2",
+            &chain_id.to_le_bytes(),
             &1u32.to_le_bytes(),
             s_id.as_bytes(),
             op.as_bytes(),

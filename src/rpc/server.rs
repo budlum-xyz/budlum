@@ -4086,8 +4086,10 @@ impl BudlumApiServer for RpcServer {
         // The chain also refuses a second active deal over the same
         // (manifest, shard, operator, replica, range), so replay is closed on
         // both layers.
+        let chain_id = self.chain.get_chain_id().await;
         let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V1",
+            b"BUD_OPEN_DEAL_V2",
+            &chain_id.to_le_bytes(),
             &domain_id.to_le_bytes(),
             s_id.as_bytes(),
             op_addr.as_bytes(),
@@ -4175,9 +4177,11 @@ impl BudlumApiServer for RpcServer {
         // signed message binds every parameter that changes the debit; the
         // placement (manifest, shard, replica, bytes) is derived by the
         // chain from the ticket, so a signature cannot be replayed against
-        // a different slot. Same pattern as BUD_OPEN_DEAL_V1.
+        // a different slot. Same pattern as BUD_OPEN_DEAL_V2.
+        let chain_id = self.chain.get_chain_id().await;
         let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_ACCEPT_REALLOCATION_V1",
+            b"BUD_ACCEPT_REALLOCATION_V2",
+            &chain_id.to_le_bytes(),
             &ticket_id.to_le_bytes(),
             op_addr.as_bytes(),
             payer_addr.as_bytes(),
