@@ -276,7 +276,12 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     let mut height = 0u32;
     let mut channels = 0usize;
     let mut idat = Vec::new();
-    while off + 8 <= png.len() {
+    let mut saw_ihdr = false;
+    let mut saw_idat = false;
+    let mut idat_closed = false;
+    let mut saw_plte = false;
+    let mut saw_iend = false;
+    while off < png.len() {
         let len_bytes = png.get(off..off + 4).ok_or_else(|| "png len".to_string())?;
         let mut lb = [0u8; 4];
         lb.copy_from_slice(len_bytes);
@@ -284,12 +289,13 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
         let chunk_kind = png
             .get(off + 4..off + 8)
             .ok_or_else(|| "png ty".to_string())?;
-        let chunk_body = png
-            .get(off + 8..off + 8 + len)
+        let body_start = off.checked_add(8).ok_or("png chunk")?;
+        let crc_end = body_start
+            .checked_add(len)
+            .and_then(|end| end.checked_add(4))
             .ok_or_else(|| "png chunk".to_string())?;
-        let crc_end = off
-            .checked_add(12)
-            .and_then(|v| v.checked_add(len))
+        let chunk_body = png
+            .get(body_start..crc_end - 4)
             .ok_or_else(|| "png chunk".to_string())?;
         let crc_bytes = png
             .get(crc_end - 4..crc_end)
@@ -303,10 +309,15 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
             return Err("png crc".into());
         }
         off = crc_end;
+        // BLG-0431: CRC-valid chunks still need a valid PNG grammar.
+        if !saw_ihdr && chunk_kind != b"IHDR" {
+            return Err("ihdr must be first".into());
+        }
         if chunk_kind == b"IHDR" {
-            if chunk_body.len() < 13 {
+            if saw_ihdr || chunk_body.len() != 13 {
                 return Err("ihdr".into());
             }
+            saw_ihdr = true;
             let depth = chunk_body.get(8).copied().unwrap_or(0);
             let color = chunk_body.get(9).copied().unwrap_or(0);
             if depth != 8 {
@@ -332,11 +343,42 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
             hb.copy_from_slice(chunk_body.get(4..8).ok_or_else(|| "h".to_string())?);
             width = u32::from_be_bytes(wb);
             height = u32::from_be_bytes(hb);
+        } else if chunk_kind == b"PLTE" {
+            // Optional suggested palette for truecolour PNGs; greyscale must
+            // not carry one. This decoder does not support indexed colour.
+            if saw_plte
+                || saw_idat
+                || !matches!(channels, 3 | 4)
+                || len == 0
+                || len > 768
+                || len % 3 != 0
+            {
+                return Err("png palette placement".into());
+            }
+            saw_plte = true;
         } else if chunk_kind == b"IDAT" {
+            if idat_closed {
+                return Err("png noncontiguous idat".into());
+            }
+            saw_idat = true;
             idat.extend_from_slice(chunk_body);
         } else if chunk_kind == b"IEND" {
+            if len != 0 || !saw_idat || off != png.len() {
+                return Err("png iend".into());
+            }
+            saw_iend = true;
             break;
+        } else {
+            if chunk_kind.first().is_none_or(|byte| byte & 0x20 == 0) {
+                return Err("png unknown critical chunk".into());
+            }
+            if saw_idat {
+                idat_closed = true;
+            }
         }
+    }
+    if !saw_iend {
+        return Err("png missing iend".into());
     }
     if width == 0 || height == 0 || channels == 0 {
         return Err("no ihdr".into());
@@ -718,6 +760,40 @@ mod tests {
         c.extend_from_slice(data);
         c.extend_from_slice(&crc.sum().to_be_bytes());
         c
+    }
+
+    #[test]
+    fn png_grammar_rejects_crc_valid_chunk_aliases_before_inflate() {
+        let canonical = png_with_ihdr_and_idat(1, 1, &[]);
+        let magic = &canonical[..8];
+        let ihdr = &canonical[8..33];
+        let idat = chunk(b"IDAT", &[]);
+        let iend = chunk(b"IEND", &[]);
+        let cases = [
+            ([magic, ihdr, ihdr, &idat, &iend].concat(), "ihdr"),
+            (
+                [magic, &chunk(b"tEXt", b"note"), ihdr, &idat, &iend].concat(),
+                "ihdr must be first",
+            ),
+            (
+                [magic, ihdr, &chunk(b"ABCD", &[]), &idat, &iend].concat(),
+                "png unknown critical chunk",
+            ),
+            (
+                [magic, ihdr, &idat, &chunk(b"tEXt", b"note"), &idat, &iend].concat(),
+                "png noncontiguous idat",
+            ),
+            ([magic, ihdr, &idat].concat(), "png missing iend"),
+            ([canonical.as_slice(), &[0]].concat(), "png iend"),
+            ([canonical.as_slice(), &iend].concat(), "png iend"),
+            (
+                [magic, ihdr, &idat, &chunk(b"IEND", &[0])].concat(),
+                "png iend",
+            ),
+        ];
+        for (png, reason) in cases {
+            assert_eq!(decode_png_grey(&png).unwrap_err(), reason);
+        }
     }
 
     fn png_with_ihdr_and_idat(w: u32, h: u32, idat: &[u8]) -> Vec<u8> {
