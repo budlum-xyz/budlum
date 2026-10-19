@@ -141,9 +141,19 @@ impl VersionPolicy {
         new_version: u32,
         fork_height: u64,
         grace_heights: u64,
+        accepted_evidence_versions: &[u32],
     ) -> Result<(), ForkError> {
         if old_version == new_version {
             return Err(ForkError::SameVersion {
+                version: new_version,
+            });
+        }
+        // BLG-0161 (P07-F16): a fork may only land on a version the adapter
+        // actually accepts. Without this, an operator could schedule a
+        // version the adapter refuses and sunset the one it does, leaving
+        // the domain with no usable version.
+        if !accepted_evidence_versions.contains(&new_version) {
+            return Err(ForkError::VersionNotAccepted {
                 version: new_version,
             });
         }
@@ -250,6 +260,7 @@ impl VersionPolicy {
             return false;
         }
         let mut seen: Vec<u32> = Vec::with_capacity(self.windows.len());
+        let mut any_open = false;
         for window in &self.windows {
             if seen.contains(&window.version) {
                 return false;
@@ -260,11 +271,12 @@ impl VersionPolicy {
             {
                 return false;
             }
+            if window.sunset_height.is_none() {
+                any_open = true;
+            }
             seen.push(window.version);
         }
-        // At least one window must stay open-ended; a policy whose every
-        // window has a sunset serves nothing after the last one ends.
-        self.windows.iter().any(|w| w.sunset_height.is_none())
+        any_open
     }
 }
 
@@ -275,6 +287,8 @@ pub enum ForkError {
     SameVersion { version: u32 },
     #[error("version {version} is already scheduled")]
     VersionAlreadyScheduled { version: u32 },
+    #[error("version {version} is not in the adapter's accepted evidence versions")]
+    VersionNotAccepted { version: u32 },
     #[error("the outgoing version {version} was never scheduled")]
     UnknownOldVersion { version: u32 },
     #[error("the outgoing version {version} has already sunset and cannot be reused")]
