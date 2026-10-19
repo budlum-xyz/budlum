@@ -81,7 +81,7 @@ fn relayer_enqueues_and_tracks_pending_relays() {
 
     // Initially no pending relays
     assert_eq!(bc.pending_relay_count(), 0);
-    assert_eq!(bc.expired_relays().len(), 0);
+    assert_eq!(bc.universal_relayer.expired_relays(bc.chain.len() as u64).len(), 0);
 }
 
 #[test]
@@ -268,7 +268,7 @@ fn expired_relays_detects_past_expiry() {
     };
 
     bc.enqueue_bridge_relay(event, &message);
-    assert_eq!(bc.expired_relays().len(), 0); // not expired yet (chain len < 200)
+    assert_eq!(bc.universal_relayer.expired_relays(bc.chain.len() as u64).len(), 0); // not expired yet (chain len < 200)
 }
 
 #[test]

@@ -824,6 +824,15 @@ impl ColdWalletState {
 mod tests {
     use super::*;
 
+    /// The six fixture devices as the trusted set a wallet is pinned to
+    /// (BLG-0062-S2).
+    fn quorum_identities() -> Vec<SignerIdentity> {
+        crate::settlement::cold_quorum::dev_fixture_device_signers()
+            .iter()
+            .map(|d| d.identity.clone())
+            .collect()
+    }
+
     fn policy() -> ColdWalletPolicy {
         ColdWalletPolicy {
             chain_id: 7,
@@ -1197,9 +1206,7 @@ mod tests {
 
     mod quorum_gate {
         use super::*;
-        use crate::settlement::cold_quorum::{
-            dev_fixture_device_signers, DeviceSignature, SignerIdentity,
-        };
+        use crate::settlement::cold_quorum::{dev_fixture_device_signers, DeviceSignature};
 
         fn quorum_policy() -> ColdWalletPolicy {
             ColdWalletPolicy {
@@ -1207,13 +1214,6 @@ mod tests {
                 device_count: 6,
                 ..policy()
             }
-        }
-
-        fn quorum_identities() -> Vec<SignerIdentity> {
-            dev_fixture_device_signers()
-                .iter()
-                .map(|d| d.identity.clone())
-                .collect()
         }
 
         fn signatures_for(
