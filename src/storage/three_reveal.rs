@@ -20,6 +20,8 @@ pub enum RevealError {
     Forbidden,
     /// Sealed recipe presented without the full public opening.
     NeedFullRecipe,
+    /// The opening was sent but it does not open this sealed recipe.
+    WrongOpening,
     /// Nested re-emit error.
     Reemit(ReemitError),
 }
@@ -30,6 +32,9 @@ impl std::fmt::Display for RevealError {
             Self::Forbidden => write!(f, "three reveal forbidden without grant"),
             Self::NeedFullRecipe => {
                 write!(f, "three reveal needs full public recipe to open sealed")
+            }
+            Self::WrongOpening => {
+                write!(f, "three reveal opening does not open the sealed recipe")
             }
             Self::Reemit(e) => write!(f, "three reveal reemit: {e}"),
         }
@@ -74,7 +79,7 @@ impl RevealSession {
             ThreeRecipe::Public(p) => p.clone(),
             ThreeRecipe::Sealed(s) => {
                 let full = full.ok_or(RevealError::NeedFullRecipe)?;
-                s.open_with(full).map_err(|_| RevealError::NeedFullRecipe)?;
+                s.open_with(full).map_err(|_| RevealError::WrongOpening)?;
                 full.clone()
             }
         };
@@ -154,6 +159,22 @@ mod tests {
         assert_eq!(
             RevealSession::open(&recipe, Some(&full), &packed, false).unwrap_err(),
             RevealError::Forbidden
+        );
+    }
+
+    #[test]
+    fn a_wrong_opening_is_told_apart_from_a_missing_one() {
+        let (full, packed) = sample();
+        let recipe = ThreeRecipe::Sealed(full.seal());
+        assert_eq!(
+            RevealSession::open(&recipe, None, &packed, true).unwrap_err(),
+            RevealError::NeedFullRecipe
+        );
+        let mut other = full;
+        other.stream_id = [9u8; 32];
+        assert_eq!(
+            RevealSession::open(&recipe, Some(&other), &packed, true).unwrap_err(),
+            RevealError::WrongOpening
         );
     }
 
