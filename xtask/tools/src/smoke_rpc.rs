@@ -102,11 +102,18 @@ pub fn node_args(cfg: &Config, operator: u16, db: &Path) -> Vec<String> {
     ]
 }
 
-/// A reply passes when it carries a `"result"` member. This is the same
-/// substring test the shell version made.
+/// A reply passes when it parses as JSON, has a non-null top-level `result`
+/// member and no `error` member. A substring search would pass an error
+/// whose message merely contains the word.
 #[must_use]
 pub fn reply_has_result(body: &str) -> bool {
-    body.contains("\"result\"")
+    let Ok(value) = crate::json::parse(body) else {
+        return false;
+    };
+    value.get("error").is_none()
+        && value
+            .get("result")
+            .is_some_and(|r| *r != crate::json::Value::Null)
 }
 
 /// Kills and reaps the node when the run ends, however it ends.
@@ -172,6 +179,14 @@ pub fn run(root: &Path, cfg: &Config) -> Result<String, String> {
     let mut body = None;
     for attempt in 1..=TRIES {
         if let Ok(reply) = rpc::call(operator, "bud_chainId", "[]", REQUEST_TIME) {
+            // A reply from a stale listener must not stand in for a node
+            // that died on bind: the child has to still be running.
+            if matches!(guard.0.try_wait(), Ok(Some(_))) {
+                return Err(format!(
+                    "node exited early but port {operator} answered (stale listener?); log:\n{}",
+                    log_tail(&log_path)
+                ));
+            }
             body = Some(reply);
             break;
         }
@@ -383,6 +398,17 @@ mod tests {
         ));
         assert!(!reply_has_result(
             r#"{"jsonrpc":"2.0","error":{"code":-32601},"id":1}"#
+        ));
+    }
+
+    #[test]
+    fn an_error_text_that_mentions_result_is_not_a_result() {
+        assert!(!reply_has_result(
+            r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"no \"result\" here"},"id":1}"#
+        ));
+        assert!(!reply_has_result(r#"not json "result""#));
+        assert!(!reply_has_result(
+            r#"{"jsonrpc":"2.0","result":null,"id":1}"#
         ));
     }
 
