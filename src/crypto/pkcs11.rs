@@ -324,11 +324,17 @@ impl Pkcs11Signer {
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
             .map_err(|e| format!("Public key read failed: {e}"))?;
         if let Some(cryptoki::object::Attribute::Value(value)) = attr.first() {
-            if value.len() >= 32 {
+            // P02-F14: the exact length, not a silent cut. A 33-byte read
+            // truncated to 32 announced a key the HSM never held.
+            if value.len() == 32 {
                 let mut key = [0u8; 32];
-                key.copy_from_slice(&value[..32]);
+                key.copy_from_slice(value);
                 return Ok(key);
             }
+            return Err(format!(
+                "Ed25519 public key has unexpected length {} (want 32)",
+                value.len()
+            ));
         }
         Err("Failed to extract public key bytes".into())
     }
@@ -384,10 +390,16 @@ impl Pkcs11Signer {
         let sig = session
             .sign(&Self::ed25519_mechanism(), key_handle, msg)
             .map_err(|e| format!("HSM sign: {e}"))?;
-        if sig.len() < 64 {
-            return Err(format!("Undersized sig: {} bytes", sig.len()));
+        // P02-F14: the exact length, not a silent cut. A vendor signature
+        // longer than 64 bytes is a different encoding, not a longer Ed25519
+        // signature; truncating it verified nothing.
+        if sig.len() != 64 {
+            return Err(format!(
+                "HSM returned a signature of {} bytes (want 64)",
+                sig.len()
+            ));
         }
-        Ok(sig[..64].to_vec())
+        Ok(sig)
     }
 
     /// Checks the read public key against the private key that will sign in the slot, over
