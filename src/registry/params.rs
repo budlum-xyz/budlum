@@ -758,14 +758,20 @@ mod tests {
     /// out of existence.
     #[test]
     fn amount_parameters_have_upper_bounds() {
-        let mut p = RegistryParams::default();
-        p.min_stake = u64::MAX;
+        let p = RegistryParams {
+            min_stake: u64::MAX,
+            ..RegistryParams::default()
+        };
         assert!(p.validate().is_err(), "min_stake at u64::MAX must refuse");
-        p = RegistryParams::default();
-        p.bridge_relayer_min_fee = u64::MAX;
+        let p = RegistryParams {
+            bridge_relayer_min_fee: u64::MAX,
+            ..RegistryParams::default()
+        };
         assert!(p.validate().is_err());
-        p = RegistryParams::default();
-        p.ai_model_register_fee = u64::MAX;
+        let p = RegistryParams {
+            ai_model_register_fee: u64::MAX,
+            ..RegistryParams::default()
+        };
         assert!(p.validate().is_err());
         // The documented defaults still validate.
         assert!(RegistryParams::default().validate().is_ok());

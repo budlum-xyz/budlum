@@ -15,7 +15,7 @@ use crate::core::address::Address;
 use crate::core::chain_config::FIXED_POINT_SCALE;
 use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
 use crate::cross_domain::MessageKind;
-use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
+use crate::registry::evidence::{SlashingProof, SlashingReport};
 use crate::registry::role::roles;
 use crate::storage::db::Storage;
 use std::collections::HashSet;

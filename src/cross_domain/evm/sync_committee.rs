@@ -811,7 +811,10 @@ mod tests {
             sync_committee_bits: bits,
             sync_committee_signature: [0xFFu8; BLS_SIGNATURE_LEN],
         };
-        let _ = verify_sync_aggregate(&state, &agg, b"garbage"); // an Err is expected, and NO panic
+        assert!(
+            verify_sync_aggregate(&state, &agg, b"garbage").is_err(),
+            "a below-threshold garbage aggregate must be refused"
+        );
     }
 
     #[test]

@@ -48,7 +48,7 @@
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError, SignerIdentity};
+use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError};
 use super::cold_wallet::{ColdWalletState, RotationError};
 use crate::consensus::merkle_tree::{combine_sha3, merkle_root, promote_sha3};
 
@@ -1080,7 +1080,7 @@ mod tests {
             .with_trusted_devices(identities())
         }
 
-        fn identities() -> Vec<SignerIdentity> {
+        fn identities() -> Vec<crate::settlement::cold_quorum::SignerIdentity> {
             dev_fixture_device_signers()
                 .iter()
                 .map(|d| d.identity.clone())

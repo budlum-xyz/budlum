@@ -171,7 +171,7 @@ fn adding_new_role_type_is_non_breaking() {
 use crate::core::account::AccountState;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::execution::executor::Executor;
-use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
+use crate::registry::evidence::{SlashingProof, SlashingReport};
 
 fn funded_state(account: Address, balance: u64) -> AccountState {
     let mut state = AccountState::new();

@@ -66,7 +66,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError, SignerIdentity};
+use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError};
 
 /// The rotation log is an audit trail, not an append-only denial-of-service
 /// surface. Once this many entries exist the oldest entry is evicted; the
@@ -835,7 +835,7 @@ mod tests {
 
     /// The six fixture devices as the trusted set a wallet is pinned to
     /// (BLG-0062-S2).
-    fn quorum_identities() -> Vec<SignerIdentity> {
+    fn quorum_identities() -> Vec<crate::settlement::cold_quorum::SignerIdentity> {
         crate::settlement::cold_quorum::dev_fixture_device_signers()
             .iter()
             .map(|d| d.identity.clone())

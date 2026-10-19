@@ -182,7 +182,6 @@ mod tests {
     fn alarms_trim_by_age_and_quarantine_survives_until_released() {
         let mut ledger = QuarantineLedger::new();
         let old = QuarantineLedger::domain_target(1);
-        let fresh = QuarantineLedger::domain_target(2);
         ledger.quarantine_entity(old, QuarantineReason::Equivocation("x".into()), 10);
         ledger.record_alarm("OLD", "an old alarm", 10, 2);
         ledger.record_alarm("NEW", "a fresh alarm", 90_000, 2);

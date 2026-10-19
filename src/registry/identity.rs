@@ -596,12 +596,11 @@ impl IdentityRegistry {
         let id = credential_id(&credential);
         let root = credential.root();
         {
-            let record =
-                self.records
-                    .get(&subject)
-                    .ok_or_else(|| IdentityError::UnknownSubject {
-                        did: did_of(&subject),
-                    })?;
+            if !self.records.contains_key(&subject) {
+                return Err(IdentityError::UnknownSubject {
+                    did: did_of(&subject),
+                });
+            }
             // BLG-0095 (P04-F13): the issuer must be a REGISTERED DID - or
             // the subject themself (self-issuance). The old check also let
             // "any key_id on the SUBJECT's record" vouch for the issuer,
@@ -2129,9 +2128,9 @@ mod tests {
     }
 
     /// BLG-0099 (P04-F17): the happy paths that need a real wallet signature
-    /// - a consented third-party Issue and a guardian-quorum Recover. They
-    /// live behind `wallet-ml-dsa`: the build that carries the wallet is the
-    /// build that can sign. The refusal paths run unguarded everywhere.
+    ///   a consented third-party Issue and a guardian-quorum Recover. They
+    ///   live behind `wallet-ml-dsa`: the build that carries the wallet is the
+    ///   build that can sign. The refusal paths run unguarded everywhere.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_real_consent_and_a_real_quorum_pass_the_door() {

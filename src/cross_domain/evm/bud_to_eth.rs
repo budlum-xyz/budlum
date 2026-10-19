@@ -86,10 +86,6 @@ pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 /// from a Budlum node and produces a `BudToEthClaim`, the calldata to be sent to
 /// the Ethereum bridge contract. The Ethereum contract verifies Budlum finality
 /// and unlocks.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "BLG-0128 (P05-F21): a named parameter set (bridge, message, finality, cap) - replacing it with a struct changes the relayer's call surface for style only"
-)]
 pub fn build_bud_to_eth_claim(
     bridge: &BridgeState,
     message_id: &MessageId,

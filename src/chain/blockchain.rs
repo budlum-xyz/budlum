@@ -3811,8 +3811,6 @@ impl Blockchain {
         }
     }
 
-    /// Get expired relays for slashing.
-
     /// Merkle root of the relay ledger (for on-chain commitment).
     pub fn relay_ledger_root(&self) -> crate::domain::types::Hash32 {
         self.universal_relayer.ledger_root()

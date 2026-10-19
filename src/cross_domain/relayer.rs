@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn relay_config_defaults_are_reasonable() {
-        let config = RelayerConfig::default();
+        let _ = RelayerConfig::default();
     }
 
     #[test]
@@ -716,7 +716,7 @@ mod tests {
         tree.push(event_a.clone());
         let root = tree.root();
         let proof = tree.proof(0).unwrap();
-        relayer.enqueue_relay(event_a, &message_a, 10);
+        relayer.enqueue_relay(event_a, &message_a, 10).unwrap();
         relayer
             .process_relay(message_a.message_id, relayer_addr, &proof, 1, root, 15)
             .unwrap();
@@ -725,11 +725,11 @@ mod tests {
         // One relay that is never relayed and expires at 120 (a different
         // height, so a different message id from the first).
         let (event_b, message_b) = make_event_and_message(1, 2, 20);
-        relayer.enqueue_relay(event_b, &message_b, 20);
+        relayer.enqueue_relay(event_b, &message_b, 20).unwrap();
         // One relay with no expiry at all.
         let (event_c, mut message_c) = make_event_and_message(1, 2, 30);
         message_c.expiry_height = 0;
-        relayer.enqueue_relay(event_c, &message_c, 30);
+        relayer.enqueue_relay(event_c, &message_c, 30).unwrap();
         assert_ne!(message_a.message_id, message_b.message_id);
         assert_eq!(relayer.pending_count(), 2);
         let root_before = relayer.ledger_root();

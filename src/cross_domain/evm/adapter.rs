@@ -1,5 +1,3 @@
-#![allow(clippy::pedantic, clippy::nursery)]
-
 //! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
 //! fully live path (BLG-0135/P06-F06): the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
@@ -396,7 +394,8 @@ impl ChainAdapter for EvmChainAdapter {
             tx_hash: hash,
             success: true,
             message: None,
-            receipt_proof: bincode::serialize(&proof).unwrap_or_default(),
+            receipt_proof: bincode::serialize(&proof)
+                .map_err(|e| AdapterError::ProofGenerationFailed(e.to_string()))?,
             external_state_root: root,
         })
     }
