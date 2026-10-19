@@ -311,7 +311,7 @@ mod sign_tests {
     #[test]
     fn wrong_message_refuses() {
         let mut signer = committee();
-        let Nonesig = signer
+        let sig = signer
             .sign_at_height(0, b"good")
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(verify_at_height::<H, P>(signer.public(), 0, b"evil", &sig).is_err());
