@@ -1398,7 +1398,7 @@ jobs:
           retention-days: 90
 
   cargo-deny:
-    # : the root and budzero graphs are checked in separate matrix steps.
+    # Every committed lockfile graph is checked in its own matrix step.
     name: Cargo Deny (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1411,6 +1411,15 @@ jobs:
           # which cargo-deny discovers on its own.
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1441,6 +1450,15 @@ jobs:
         include:
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
