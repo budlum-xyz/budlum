@@ -14,6 +14,10 @@ pub const MAX_INFERENCE_REF_BYTES: usize = 65_536;
 /// Highest whitelisted execution class id (1 = FixedPointMlpV1, 0 = none).
 const MAX_EXECUTION_CLASS: u8 = 1;
 
+/// Most verifiers a model may require for one request. A larger quorum could
+/// never be met and would keep every request pending until its deadline.
+const MAX_MODEL_VERIFIER_COUNT: u32 = 64;
+
 /// Domain-separated AI Model Identifier (`[u8; 32]`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -205,6 +209,11 @@ impl AiModelSpec {
     pub fn validate(&self) -> Result<(), String> {
         if self.min_verifier_count == 0 {
             return Err("min_verifier_count must be >= 1".into());
+        }
+        if self.min_verifier_count > MAX_MODEL_VERIFIER_COUNT {
+            return Err(format!(
+                "min_verifier_count exceeds allowed maximum {MAX_MODEL_VERIFIER_COUNT}"
+            ));
         }
         if self.agreement_threshold == 0 || self.agreement_threshold > self.min_verifier_count {
             return Err("agreement_threshold must be between 1 and min_verifier_count".into());
@@ -1413,6 +1422,17 @@ mod tests {
         assert!(no_request.request_commitment.is_none());
         assert!(zero_request.request_commitment.is_some());
         assert_ne!(no_request.receipt_id, zero_request.receipt_id);
+    }
+
+    #[test]
+    fn spec_rejects_unbounded_verifier_count() {
+        let mut spec = valid_spec();
+        spec.min_verifier_count = MAX_MODEL_VERIFIER_COUNT + 1;
+        spec.agreement_threshold = MAX_MODEL_VERIFIER_COUNT + 1;
+        assert!(spec.validate().is_err());
+        spec.min_verifier_count = MAX_MODEL_VERIFIER_COUNT;
+        spec.agreement_threshold = MAX_MODEL_VERIFIER_COUNT;
+        assert!(spec.validate().is_ok());
     }
 
     fn sample_proof() -> AiExecutionProof {
