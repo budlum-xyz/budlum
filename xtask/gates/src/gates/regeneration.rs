@@ -672,7 +672,9 @@ struct Producer {
 /// These files are out of scan: the gate itself and the canary fixtures.
 fn is_scannable(path: &Path) -> bool {
     let s = path.to_string_lossy();
-    s.ends_with(".rs") && !s.contains("/target/") && !s.contains("regeneration.rs")
+    s.ends_with(".rs")
+        && !s.contains("/target/")
+        && path.file_name().is_none_or(|n| n != "regeneration.rs")
 }
 
 /// Walks the source tree and **discovers** EVERY point producing a program hash.
@@ -686,7 +688,7 @@ fn is_scannable(path: &Path) -> bool {
 /// The gate now says "find whatever is there and inspect it" rather than "inspect what I know about".
 fn discover_producers(root: &Path) -> Vec<Producer> {
     let mut out = Vec::new();
-    for base in ["src", "budzero", "wallet-core"] {
+    for base in ["src", "budzero", "crates"] {
         walk(&root.join(base), root, &mut out);
     }
     out.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -1321,6 +1323,15 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_gate_file_itself_is_out_of_scan() {
+        assert!(!is_scannable(Path::new(
+            "xtask/gates/src/gates/regeneration.rs"
+        )));
+        assert!(is_scannable(Path::new("src/domain/regeneration_stage.rs")));
+        assert!(is_scannable(Path::new("src/regeneration.rs.bak.rs")));
+    }
 
     /// The success message must keep the token the DDC workflow greps for.
     ///
