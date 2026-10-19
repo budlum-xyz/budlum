@@ -468,6 +468,16 @@ impl Mempool {
     /// refuses the transaction would be the free-deletion primitive again,
     /// this time paid for in bytes. So the victims are chosen first and
     /// removed only once the sum is known to be enough.
+    /// BLG-0298 (P18-F13, accepted with the bound written down): this sweep
+    /// is O(pool entries) in the worst case - it walks `by_fee` until the
+    /// byte budget is met. The bound that makes that acceptable is the entry
+    /// cap (20_000), and the sweep only runs when an admission is about to
+    /// be refused for bytes, so the cost is paid on the path that was about
+    /// to reject anyway. An index on charged-bytes-per-fee would replace one
+    /// linear scan with maintained bookkeeping on EVERY admission - trading
+    /// a rare worst case for a common per-insert cost, which is the worse
+    /// trade for a pool this size. Revisit only if the entry cap grows an
+    /// order of magnitude.
     fn evict_until_bytes_fit(&mut self, new_tx: &Transaction, needed: usize) -> bool {
         let mut victims: Vec<String> = Vec::new();
         let mut freed = 0usize;
