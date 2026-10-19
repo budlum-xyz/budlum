@@ -51,6 +51,11 @@ impl Pact {
         if mode_flag > 2 {
             return Err("KQ-STORAGE-PACT: mode_flag >2");
         }
+        // The mode and the residual must tell the same story: a pure
+        // production pact carries no residual, the other two modes do.
+        if (mode_flag == 0) != (residual == [0u8; 32]) {
+            return Err("KQ-STORAGE-PACT: mode_flag does not match residual_commitment");
+        }
         Ok(Self {
             id,
             recipe_hash,
@@ -290,5 +295,17 @@ mod tests {
         let pact = Pact::new([1u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 0).unwrap();
         reg.add_pact(pact);
         assert!(reg.verify_root().is_ok());
+    }
+
+    #[test]
+    fn pact_mode_must_match_the_residual_commitment() {
+        let z = [0u8; 32];
+        let r = [9u8; 32];
+        assert!(Pact::new([1u8; 32], z, z, z, r, 10, 0).is_err());
+        assert!(Pact::new([1u8; 32], z, z, z, z, 10, 1).is_err());
+        assert!(Pact::new([1u8; 32], z, z, z, z, 10, 2).is_err());
+        assert!(Pact::new([1u8; 32], z, z, z, z, 10, 0).is_ok());
+        assert!(Pact::new([1u8; 32], z, z, z, r, 10, 1).is_ok());
+        assert!(Pact::new([1u8; 32], z, z, z, r, 10, 2).is_ok());
     }
 }
