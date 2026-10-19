@@ -468,7 +468,7 @@ mod chaos_tests {
         let mut payload_tampered = event;
         payload_tampered.payload_hash = hash_fields_bytes(&[b"tampered"]);
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, payload_tampered, &proof,)
+            .verify_domain_event_proof(pow.id, 77, 0, [9u8; 32], payload_tampered, &proof,)
             .is_err());
     }
 
