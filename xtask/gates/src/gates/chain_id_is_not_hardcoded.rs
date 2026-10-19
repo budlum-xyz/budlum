@@ -38,43 +38,14 @@ use std::path::{Path, PathBuf};
 /// Roots holding shipped library code.
 const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
-/// Strip `#[cfg(test)] mod tests { ... }` bodies, brace-counted.
+/// Strip every `#[cfg(test)]` item.
 ///
 /// A literal inside a test is a fixture stating which chain it means, not a
-/// binding decision. Counting braces rather than cutting at the first `}`
-/// keeps nested blocks inside the test module from ending the skip early.
+/// binding decision. The shared stripper ends the item at its own terminator:
+/// a body-less item (`use`, `const`, `static`) must not swallow the next
+/// production function.
 fn strip_test_modules(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(pos) = rest.find("#[cfg(test)]") {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos..];
-        let Some(brace) = after.find('{') else {
-            break;
-        };
-        let mut depth = 0usize;
-        let mut end = None;
-        // `brace` is a byte offset; `skip(brace)` counted characters, so a
-        // wide character before the brace moved the start past it and the
-        // first `}` took `depth` below zero.
-        for (i, c) in after[brace..].char_indices() {
-            if c == '{' {
-                depth += 1;
-            } else if c == '}' {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = Some(brace + i + 1);
-                    break;
-                }
-            }
-        }
-        match end {
-            Some(e) => rest = &after[e..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
+    super::capability_modules_are_wired::strip_test_mods(text)
 }
 
 /// Is this line a `chain_id: <int literal>` struct field?
@@ -259,4 +230,20 @@ pub fn self_test() -> Result<String, String> {
          constant, parameter, field, type annotation, prefixed name and \
          test-module literals all pass.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bodyless_test_item_does_not_hide_next_function() {
+        let src = "#[cfg(test)]\nuse foo::bar;\nfn prod() {\n    let p = P { chain_id: 1, };\n}\n";
+        let stripped = strip_test_modules(src);
+        assert!(stripped.lines().any(|l| hardcoded_chain_id(l).is_some()));
+        let src =
+            "#[cfg(test)]\nconst X: u8 = 1;\nfn prod() {\n    let p = P { chain_id: 1, };\n}\n";
+        let stripped = strip_test_modules(src);
+        assert!(stripped.lines().any(|l| hardcoded_chain_id(l).is_some()));
+    }
 }
