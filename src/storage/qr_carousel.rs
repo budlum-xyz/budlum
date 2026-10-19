@@ -59,6 +59,13 @@ pub const MAX_BLOCK_LEN: u16 = 8 * 1024 - DROP_HEADER_LEN as u16;
 /// leaves ~11 spare equations at 5% frame loss (about 1 open in 2000 fails);
 /// the old fifty permillage left ~6 frames *in total* and failed 5 trials out
 /// of 5 at 8% loss.
+///
+/// The permillage is NOT carried by the recipe or the video header, yet
+/// `recipe.stream_id` is the fold of a pass whose length depends on it (P29-F04).
+/// A retune therefore invalidates every stored fold pin. Until the recipe
+/// carries the value itself, any change must be a deliberate format bump: the
+/// `oneshot_permillage_is_pinned_by_the_stream_id_fold` test names the
+/// constant so a retune cannot slip through unnoticed.
 pub const ONESHOT_REPAIR_PERMILLAGE: u32 = 150;
 
 /// Fixed drop header length before the body:
@@ -1033,6 +1040,16 @@ fn bitset_xor(dst: &mut [u64], src: &[u64]) {
 
 #[cfg(test)]
 mod tests {
+    /// P29-F04: `recipe.stream_id` folds a pass of `oneshot_drop_count`
+    /// frames, so the permillage and the pass length are part of the recipe
+    /// format. Changing either requires a recipe version bump.
+    #[test]
+    fn oneshot_permillage_is_pinned_by_the_stream_id_fold() {
+        assert_eq!(ONESHOT_REPAIR_PERMILLAGE, 150);
+        assert_eq!(oneshot_drop_count(101, ONESHOT_REPAIR_PERMILLAGE), 117);
+        assert_eq!(oneshot_drop_count(1, ONESHOT_REPAIR_PERMILLAGE), 2);
+    }
+
     use super::*;
 
     fn unhex(s: &str) -> Vec<u8> {
