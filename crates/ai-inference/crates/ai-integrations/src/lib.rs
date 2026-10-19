@@ -111,4 +111,19 @@ mod tests {
         assert_eq!(canonical_symbol("ETHUSDT", &known), "ETH");
         assert_eq!(canonical_symbol("SOL", &known), "SOL"); // unknown -> as it is
     }
+
+    #[test]
+    fn canonical_symbol_handles_multibyte_input() {
+        let known = std::collections::BTreeSet::from(["BTC".to_string()]);
+        assert_eq!(canonical_symbol("btc\u{e9}\u{df}", &known), "BTC");
+        assert_eq!(canonical_symbol("\u{e9}", &known), "\u{c9}");
+    }
+
+    #[test]
+    fn should_retry_policy_counts_attempts() {
+        let policy = crate::rest::RetryPolicy::default();
+        assert!(policy.should_retry(503, 0));
+        assert!(!policy.should_retry(503, 2));
+        assert!(!policy.should_retry(404, 0));
+    }
 }
