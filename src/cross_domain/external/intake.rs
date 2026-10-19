@@ -290,6 +290,22 @@ pub enum IntakeError {
     PermissiveQuorumPolicy,
     #[error("the quorum policy cannot decide safely: {reason}")]
     InvalidQuorumPolicy { reason: &'static str },
+    #[error("an agreed quorum round holds no entry that carried the winning claim")]
+    MissingCarrier,
+}
+
+/// The first prover in arrival order whose entry carries `state_root`.
+fn first_carrier(
+    round: &crate::cross_domain::external::intake_quorum::QuorumRound,
+    state_root: &[u8; 32],
+) -> Option<Address> {
+    round
+        .entries
+        .iter()
+        .find_map(|e: &RoundEntry| match &e.attestation {
+            Some(att) if &att.state_root == state_root => Some(e.prover),
+            _ => None,
+        })
 }
 
 /// The most seats one quorum round may hold. Rounds are consensus state and
@@ -487,19 +503,14 @@ impl IntakeState {
         match state {
             RoundState::AgreedClaim { attestation, .. } => {
                 let winner = *attestation;
+                // The carrier is the first prover whose claim matches the
+                // winner. A missing one breaks a round invariant, so it is
+                // refused instead of crediting whoever closed the round.
                 let carrier = self
                     .quorum
                     .round_of(&key, evidence.declared_height)
-                    .and_then(|round| {
-                        round
-                            .entries
-                            .iter()
-                            .find_map(|e: &RoundEntry| match &e.attestation {
-                                Some(att) if att.state_root == winner.state_root => Some(e.prover),
-                                _ => None,
-                            })
-                    })
-                    .unwrap_or(evidence.submitter);
+                    .and_then(|round| first_carrier(round, &winner.state_root))
+                    .ok_or(IntakeError::MissingCarrier)?;
                 self.registry.commit_attestation(&winner, carrier)?;
                 Ok(Some(winner))
             }
@@ -1239,8 +1250,11 @@ mod tests {
         let mut rival = quorum_evidence(&spec, addr(3));
         rival.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
         rival.declared_root = [0xdd; 32];
-        let mut rival_b = rival.clone();
-        rival_b.submitter = addr(9); // the poster is bonded too
+        // A third, different claim from the bonded poster: three seats, three
+        // distinct answers, threshold 2.
+        let mut rival_b = quorum_evidence(&spec, addr(9));
+        rival_b.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        rival_b.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&honest_a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&rival, Some(Box::new(StrictTestBls)));
         // 1 vs 1, threshold 2, one seat left: still recoverable, still open.
@@ -1253,21 +1267,42 @@ mod tests {
             crate::cross_domain::external::RoundState::Open
         ));
         let _ = state.submit_evidence(&rival_b, Some(Box::new(StrictTestBls)));
-        // 1 vs 2 at threshold 2: the rival group reached the threshold, so
-        // the round closed for the rival claim... unless the tie rule fired.
-        // With threshold 2 the rival group HAS quorum - the round agrees.
-        // To force the dispute, the policy would need threshold 3; that path
-        // is pinned in intake_quorum's own tests. What must hold here is
-        // that the round decided deterministically and the state is not
-        // silently Open.
+        // 1 vs 1 vs 1 with every seat taken: no group can reach 2.
         let round = state
             .quorum
             .round_of(&key, honest_a.declared_height)
             .expect("round exists");
-        assert!(
-            !matches!(round.state, crate::cross_domain::external::RoundState::Open),
-            "three answers under a 2-of-3 policy must have decided"
+        assert!(matches!(
+            round.state,
+            crate::cross_domain::external::RoundState::Disputed
+        ));
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Faulted,
+            "an unrecoverable split must freeze the domain"
         );
+    }
+
+    #[test]
+    fn the_carrier_is_the_first_prover_with_the_winning_claim() {
+        let (mut state, key) = quorum_state();
+        let spec = eth_spec();
+        let a = quorum_evidence(&spec, addr(2));
+        let b = quorum_evidence(&spec, addr(3));
+        let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
+        let round = state
+            .quorum
+            .round_of(&key, a.declared_height)
+            .expect("round exists");
+        let root = round.entries[0]
+            .attestation
+            .as_ref()
+            .expect("claim")
+            .state_root;
+        assert_eq!(first_carrier(round, &root), Some(addr(2)));
+        assert_eq!(first_carrier(round, &[0x99; 32]), None);
     }
 
     #[test]

@@ -225,7 +225,7 @@ impl QuorumRounds {
     /// Installs (or replaces) the quorum policy of one domain. Policy
     /// installation is a consensus action for the same reason registration
     /// is: two nodes disagreeing about the threshold decide differently.
-    pub fn set_policy(&mut self, domain: DomainKey, policy: QuorumPolicy) {
+    pub(super) fn set_policy(&mut self, domain: DomainKey, policy: QuorumPolicy) {
         self.policies.insert(domain, policy);
     }
 
