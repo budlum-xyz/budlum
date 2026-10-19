@@ -45,6 +45,22 @@ fn body_of(src: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Does the test `name` exist, is it not ignored and does it assert something?
+///
+/// A name that is present with an empty body or an `#[ignore]` enforces nothing.
+fn test_is_live(src: &str, name: &str) -> bool {
+    let Some(at) = src.find(&format!("fn {name}(")) else {
+        return false;
+    };
+    // The attributes sit between the previous item and the `fn`.
+    let head = &src[..at];
+    let start = head.rfind(['}', ';']).map_or(0, |i| i + 1);
+    if head[start..].contains("#[ignore") {
+        return false;
+    }
+    body_of(src, name).is_some_and(|b| b.contains("assert"))
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -80,7 +96,13 @@ pub fn run(root: &Path) -> Result<String, String> {
         checked += 1;
     }
     for v in &variants {
-        let label = v.trim_end_matches(',');
+        // `Light = 1,` states a discriminant, not a name: only the name counts.
+        let label = v
+            .split('=')
+            .next()
+            .unwrap_or(v)
+            .trim()
+            .trim_end_matches(',');
         if label.chars().any(|c| c.is_ascii_digit()) {
             problems.push(format!(
                 "variant `{v}` names a number. Multiplier tier labels do not exist in the AI inference layer: \
@@ -93,7 +115,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         "served_names_follow_tier_naming",
         "tier_names_contain_no_multiplier_labels",
     ] {
-        if tier.contains(&format!("fn {t}")) {
+        if test_is_live(&tier, t) {
             checked += 1;
         } else {
             problems.push(format!(
@@ -102,7 +124,12 @@ pub fn run(root: &Path) -> Result<String, String> {
             ));
         }
     }
-    let served = body_of(&tier, "served_model_name").unwrap_or_default();
+    let served: String = body_of(&tier, "served_model_name")
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
     if served.contains("\"ai_inference-") && served.contains("self") {
         checked += 1;
     } else {
@@ -149,7 +176,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("crates/ai-inference/crates/ai-data/src"))
         .map_err(|e| e.to_string())?;
-    let good = "pub enum ModelTier {\n    /// Everyday use.\n    Light,\n    /// Highest capacity.\n    Normal,\n}\n\nimpl ModelTier {\n    pub fn served_model_name(self, version: &str) -> String {\n        format!(\"ai_inference-{}-{version}\", self.name())\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn served_names_follow_tier_naming() {}\n    fn tier_names_contain_no_multiplier_labels() {}\n}\n";
+    let good = "pub enum ModelTier {\n    /// Everyday use.\n    Light,\n    /// Highest capacity.\n    Normal,\n}\n\nimpl ModelTier {\n    pub fn served_model_name(self, version: &str) -> String {\n        format!(\"ai_inference-{}-{version}\", self.name())\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn served_names_follow_tier_naming() { assert_eq!(1, 1); }\n    fn tier_names_contain_no_multiplier_labels() { assert_eq!(1, 1); }\n}\n";
     std::fs::write(
         dir.join("crates/ai-inference/crates/ai-core/src/tier.rs"),
         good,
@@ -193,4 +220,19 @@ pub fn self_test() -> Result<String, String> {
         "AI inference layer canary OK (clean tiers PASS; a numeric tier label and a missing dataset \
          verifier each FAIL).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_or_ignored_test_is_not_live() {
+        assert!(!test_is_live("fn t() {}", "t"));
+        assert!(!test_is_live(
+            "#[test]\n#[ignore]\nfn t() { assert!(true); }",
+            "t"
+        ));
+        assert!(test_is_live("#[test]\nfn t() { assert!(true); }", "t"));
+    }
 }
