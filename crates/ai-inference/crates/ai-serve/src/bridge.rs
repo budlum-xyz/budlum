@@ -149,7 +149,10 @@ impl Bridge {
         // 2. The model has a dense part. Checked before planning, because the
         //    planner treats "no per-token shards" as a plan with nothing to
         //    hold in fast memory rather than as a malformed model.
-        if !shards.iter().any(|s| s.demand == Demand::EveryToken) {
+        if !shards
+            .iter()
+            .any(|s| s.demand == Demand::EveryToken && s.bytes > 0)
+        {
             return Err(StartupRefusal::NoPerTokenWeights);
         }
 
@@ -574,6 +577,27 @@ mod tests {
         .expect_err("there is no dense part");
         assert_eq!(err, StartupRefusal::NoPerTokenWeights);
         assert!(err.to_string().contains("output head"), "{err}");
+    }
+
+    /// A per-token shard with no bytes is not a dense part.
+    #[test]
+    fn a_zero_byte_per_token_shard_does_not_start() {
+        let empty_dense = vec![WeightShard {
+            content_id: [3; 32],
+            bytes: 0,
+            demand: Demand::EveryToken,
+        }];
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &empty_dense,
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("the dense part has no weights");
+        assert_eq!(err, StartupRefusal::NoPerTokenWeights);
     }
 
     /// A placement names the shard it placed.
