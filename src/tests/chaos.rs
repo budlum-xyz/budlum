@@ -501,14 +501,19 @@ mod chaos_tests {
             authorities: vec![],
             signatures: vec![],
         };
-        assert!(blockchain
+        let err = blockchain
             .submit_verified_domain_commitment(make_commitment(&pow, &wrong_for_pow), wrong_for_pow)
-            .is_err());
+            .unwrap_err();
+        assert!(
+            err.contains("Expected PoWHeaderChain finality proof"),
+            "{err}"
+        );
 
         let wrong_for_poa = FinalityProof::PoWHeaderChain { headers: vec![] };
-        assert!(blockchain
+        let err = blockchain
             .submit_verified_domain_commitment(make_commitment(&poa, &wrong_for_poa), wrong_for_poa)
-            .is_err());
+            .unwrap_err();
+        assert!(err.contains("Expected PoA finality proof"), "{err}");
     }
 
     #[test]
