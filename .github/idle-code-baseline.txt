@@ -1046,7 +1046,7 @@ src/account_abstraction/quantum_account.rs	const	ADDRESS_DOMAIN_V2
 src/account_abstraction/quantum_account.rs	const	BUD_MAGIC
 src/account_abstraction/quantum_account.rs	const	MAX_MULTISIG_OWNERS
 src/account_abstraction/quantum_account.rs	const	MIN_SEED_ENTROPY_BYTES
-src/account_abstraction/quantum_account.rs	const	RECOVERY_DOMAIN_V1
+src/account_abstraction/quantum_account.rs	const	RECOVERY_DOMAIN_V2
 src/account_abstraction/quantum_account.rs	const	SEED_DOMAIN_V1
 src/account_abstraction/quantum_account.rs	const	STORAGE_PACT_DOMAIN
 src/account_abstraction/quantum_account.rs	enum	SeedError

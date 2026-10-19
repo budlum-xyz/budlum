@@ -26,7 +26,7 @@ use sha3::{Digest, Sha3_256};
 pub const MAX_MULTISIG_OWNERS: usize = 16;
 pub const ADDRESS_DOMAIN_V2: &[u8] = b"BUDLUM_ADDRESS_V2";
 pub const SEED_DOMAIN_V1: &[u8] = b"BUDLUM_MLDSA87_SEED_V1";
-pub const RECOVERY_DOMAIN_V1: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1";
+pub const RECOVERY_DOMAIN_V2: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V2";
 pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
 
 /// The minimum input bytes needed to derive a signing seed.
@@ -233,7 +233,29 @@ impl QuantumAccount {
     /// # Errors
     ///
     /// Returns the first error if any of the three checks refuses.
+    /// BLG-0276 (P17-F10): a guardian list that repeats a key is not a set -
+    /// [`guardian_root`](Self::guardian_root) dedups while the list length did
+    /// not, so the state-tree root and the account's own view of its
+    /// guardians could disagree, and a threshold chosen against the padded
+    /// length was unsatisfiable (or satisfiable by one key twice, depending
+    /// on which view the checker consulted). Refusing duplicates at
+    /// validation makes the two views one.
+    fn verify_no_duplicate_guardians(&self) -> Result<(), &'static str> {
+        // n <= MAX_MULTISIG_OWNERS (16), so the quadratic sweep is free and
+        // needs no allocation - a HashSet would be the slower "optimization".
+        let n = self.guardians.len();
+        for i in 0..n {
+            for j in i + 1..n {
+                if self.guardians[i] == self.guardians[j] {
+                    return Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key");
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_all(&self) -> Result<(), &'static str> {
+        self.verify_no_duplicate_guardians()?;
         self.verify_multisig_threshold()?;
         self.verify_recovery_policy()?;
         self.verify_storage_bound()?;
@@ -249,6 +271,11 @@ pub struct RecoveryProposal {
     pub new_address: [u8; 32],
     pub created_block: u64,
     pub executable_after: u64,
+    /// BLG-0276 (P17-F10): the chain this recovery is bound to. Before this
+    /// field the digest said nothing about chains, so guardian votes collected
+    /// on a testnet (or any fork that reused the keys) carried over verbatim
+    /// to mainnet - same keys, same proposal, same digest, valid forever.
+    pub chain_id: u64,
 }
 
 impl RecoveryProposal {
@@ -260,6 +287,7 @@ impl RecoveryProposal {
         new_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
         timelock: u64,
         created: u64,
+        chain_id: u64,
     ) -> Result<Self, &'static str> {
         if current_owner == new_owner {
             return Err("KQ-WALLET-RECOVERY-16: new==current");
@@ -276,13 +304,17 @@ impl RecoveryProposal {
             new_address,
             created_block: created,
             executable_after,
+            chain_id,
         })
     }
 
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
-        h.update(RECOVERY_DOMAIN_V1);
+        // V2 (BLG-0276): the chain id joins the preimage, first, so no
+        // encoding of any older field can shadow it.
+        h.update(RECOVERY_DOMAIN_V2);
+        h.update(self.chain_id.to_be_bytes());
         h.update(self.current_owner);
         h.update(self.current_address);
         h.update(self.new_owner);
@@ -448,6 +480,61 @@ mod tests {
         assert!(acc.validate_all().is_ok());
     }
 
+    #[test]
+    fn guardian_list_and_recovery_digest_are_pinned() {
+        // BLG-0276 (P17-F10), half one: a duplicated guardian key is now a
+        // refused account, so the deduped `guardian_root` and the list the
+        // threshold is chosen against can no longer disagree.
+        let mut a = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        a[0] = 1;
+        let mut b = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        b[0] = 2;
+        let account = |g: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>| QuantumAccount {
+            address: [0u8; 32],
+            pq_public_key: a,
+            storage_root: [0u8; 32],
+            pact_root: [0u8; 32],
+            guardian_root: QuantumAccount::guardian_root(&g),
+            guardians: g,
+            multisig_threshold: 2,
+            recovery_threshold: 2,
+            timelock_blocks: 0,
+            nonce: 0,
+            balance: 0,
+            storage_bytes: 0,
+        };
+        let dup = account(vec![a, a, b]);
+        assert_eq!(
+            dup.verify_no_duplicate_guardians(),
+            Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key")
+        );
+        assert!(dup.validate_all().is_err(), "a padded guardian list must die at validation");
+        let clean = account(vec![a, b]);
+        assert!(clean.validate_all().is_ok());
+        assert_eq!(
+            QuantumAccount::guardian_root(&[a, b]),
+            QuantumAccount::guardian_root(&[b, a]),
+            "the root is order-insensitive, so order is not a second channel"
+        );
+
+        // BLG-0276, half two: the recovery digest binds the chain. The same
+        // (owner, owner, block) proposal on two chains must not share a
+        // digest, or one chain's guardian votes finalize the other's.
+        let mut cur = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        cur[0] = 7;
+        let mut nxt = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        nxt[0] = 8;
+        let on_main = RecoveryProposal::new(cur, nxt, 100, 10, 45_262).expect("distinct owners");
+        let on_test = RecoveryProposal::new(cur, nxt, 100, 10, 45_263).expect("distinct owners");
+        assert_ne!(
+            on_main.digest(),
+            on_test.digest(),
+            "chain id must enter the recovery digest"
+        );
+        assert_eq!(on_main.digest(), on_main.digest(), "digest is a pure function");
+        assert_eq!(on_main.chain_id, 45_262, "the proposal carries its chain binding");
+    }
+
     /// `validate_all` must report all three gates passing; if one drops
     /// all of them must fail.
     #[test]
@@ -487,12 +574,12 @@ mod tests {
     fn a_recovery_proposal_respects_its_timelock() {
         let current = [1u8; ML_DSA_87_PUBLIC_KEY_LEN];
         let next = [2u8; ML_DSA_87_PUBLIC_KEY_LEN];
-        let p = RecoveryProposal::new(current, next, 100, 10).expect("distinct owners");
+        let p = RecoveryProposal::new(current, next, 100, 10, 45_262).expect("distinct owners");
         assert_eq!(p.executable_after, 110);
         assert!(!p.is_timelock_satisfied(109));
         assert!(p.is_timelock_satisfied(110));
-        assert!(RecoveryProposal::new(current, current, 100, 10).is_err());
-        assert!(RecoveryProposal::new(current, next, u64::MAX, 10).is_err());
+        assert!(RecoveryProposal::new(current, current, 100, 10, 45_262).is_err());
+        assert!(RecoveryProposal::new(current, next, u64::MAX, 10, 45_262).is_err());
     }
 
     #[test]
