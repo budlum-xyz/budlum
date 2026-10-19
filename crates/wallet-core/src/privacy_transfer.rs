@@ -8,7 +8,7 @@ use crate::privacy_crypto::{address_to_recipient_tag, privacy_commit, privacy_nu
 use crate::{BudlumAddress, WalletError};
 
 /// One spent input note (wallet-side witness).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PrivateNoteInput {
     pub amount: u64,
     /// Recipient tag used when the note was created (field limb).
@@ -16,6 +16,20 @@ pub struct PrivateNoteInput {
     pub blinding: u64,
     /// Spending key / nullifier secret (field limb).
     pub spend_secret: u64,
+}
+
+impl std::fmt::Debug for PrivateNoteInput {
+    /// BLG-0280 (P17-F14): `spend_secret` is the nullifier secret - the
+    /// derived Debug printed it, and wallets format witnesses into error and
+    /// test output. Redacted like the rest of the secret material.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateNoteInput")
+            .field("amount", &self.amount)
+            .field("recipient_tag", &self.recipient_tag)
+            .field("blinding", &self.blinding)
+            .field("spend_secret", &"[redacted]")
+            .finish()
+    }
 }
 
 impl PrivateNoteInput {
@@ -65,8 +79,48 @@ pub struct PrivateTransferIntent {
     pub outputs: Vec<PrivateNoteOutput>,
     /// Domain-separated digest over public halves for wallet signature.
     pub public_digest: [u8; 32],
-    /// ML-DSA-87 signature over `public_digest` (authorization).
+    /// BLG-0275 (P17-F09): the network and account the authorization is
+    /// bound to. The signature no longer covers `public_digest` alone;
+    /// see [`authorization_message`].
+    pub chain_id: u64,
+    pub sender: BudlumAddress,
+    pub sender_nonce: u64,
+    /// ML-DSA-87 signature over [`authorization_message`] (V2; the old text
+    /// "over `public_digest`" described V1, which replayed across chains and
+    /// across the sender's future transactions).
     pub authorization_sig: [u8; crate::ML_DSA_87_SIGNATURE_LEN],
+}
+
+/// The message the wallet's authorization signature covers
+/// (BLG-0275/P17-F09). V1 signed the bare `public_digest`: a captured
+/// authorization was valid on every Budlum network and for every future
+/// intent from that wallet - the only stop was the relayer's nullifier
+/// set, a state check, not a cryptographic binding. V2 binds chain id,
+/// sender and sender nonce into the preimage.
+#[must_use]
+pub fn authorization_message(
+    chain_id: u64,
+    sender: &BudlumAddress,
+    sender_nonce: u64,
+    public_digest: &[u8; 32],
+) -> [u8; 32] {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update(b"BUDLUM_PRIVATE_TRANSFER_AUTH_V1");
+    h.update(chain_id.to_le_bytes());
+    h.update(sender);
+    h.update(sender_nonce.to_le_bytes());
+    h.update(public_digest);
+    h.finalize().into()
+}
+
+/// Reconstruct the authorization message from the intent's PUBLIC fields.
+/// The relayer/verifier needs no wallet state: the digest is recomputed
+/// from the nullifiers and output commitments the intent already carries.
+#[must_use]
+pub fn intent_authorization_message(intent: &PrivateTransferIntent) -> [u8; 32] {
+    let digest = public_digest(&intent.nullifiers, &intent.output_commitments);
+    authorization_message(intent.chain_id, &intent.sender, intent.sender_nonce, &digest)
 }
 
 /// Build parameters for a simple 1-in → 1-out (+ optional change) transfer.
