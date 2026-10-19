@@ -299,17 +299,21 @@ impl Codegen {
                 self.emit(Opcode::Jnz, 0, cond_reg, 0, 0);
                 self.next_reg = saved_reg;
 
+                // Each branch gets a child scope, as sema checks: a `let` in a
+                // branch must not replace an outer variable.
                 if let Some(eb) = else_branch {
+                    let mut else_scope = scope.clone();
                     for s in eb {
-                        self.generate_stmt(s, scope, storage);
+                        self.generate_stmt(s, &mut else_scope, storage);
                     }
                 }
                 let jump_to_end_idx = self.instructions.len();
                 self.emit(Opcode::Jmp, 0, 0, 0, 0);
 
                 let then_start_idx = self.instructions.len();
+                let mut then_scope = scope.clone();
                 for s in then_branch {
-                    self.generate_stmt(s, scope, storage);
+                    self.generate_stmt(s, &mut then_scope, storage);
                 }
                 let end_idx = self.instructions.len();
 
@@ -331,8 +335,9 @@ impl Codegen {
                 self.emit(Opcode::Jmp, 0, 0, 0, 0);
 
                 let body_start_idx = self.instructions.len();
+                let mut body_scope = scope.clone();
                 for s in body {
-                    self.generate_stmt(s, scope, storage);
+                    self.generate_stmt(s, &mut body_scope, storage);
                 }
 
                 let current_idx = self.instructions.len();
