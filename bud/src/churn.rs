@@ -126,10 +126,12 @@ impl ChurnFixture {
 
     pub fn run(&self) -> ChurnResult {
         // Skeleton simulation - real disk IO in production
+        // A fixture with no disks repairs no disks; it must not underflow.
+        let others = self.n.saturating_sub(1);
         match self.kind {
             FixtureKind::SingleChurn => ChurnResult {
                 survived: true,
-                repair_disks: self.n - 1,
+                repair_disks: others,
                 traffic_mb: 256.0,
             },
             FixtureKind::DoubleChurn => {
@@ -143,7 +145,7 @@ impl ChurnFixture {
                 } else {
                     ChurnResult {
                         survived: true,
-                        repair_disks: self.n - 1,
+                        repair_disks: others,
                         traffic_mb: 512.0,
                     }
                 }
@@ -215,6 +217,17 @@ mod tests {
         assert!(QuadRing::repair_one_missing(&long, &parity).is_none());
     }
 
+    #[test]
+    fn a_fixture_with_no_disks_does_not_underflow() {
+        for kind in [FixtureKind::SingleChurn, FixtureKind::DoubleChurn] {
+            let f = ChurnFixture {
+                kind,
+                n: 0,
+                description: "",
+            };
+            assert_eq!(f.run().repair_disks, 0);
+        }
+    }
     #[test]
     fn all_fixtures_count_10() {
         assert_eq!(ChurnFixture::all().len(), 10);
