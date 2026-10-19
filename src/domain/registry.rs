@@ -77,6 +77,15 @@ impl ConsensusDomainRegistry {
         if domain.operator == Some(crate::core::address::Address::zero()) {
             return Err(format!("Domain {} has invalid zero operator", domain.id));
         }
+        // A new registration starts Active. Frozen and Retired are reached
+        // only through `transition_status_checked`; registering straight into
+        // them would skip the lifecycle guard (P25-F10).
+        if domain.status != DomainStatus::Active {
+            return Err(format!(
+                "Domain {} must register as Active, not {:?}",
+                domain.id, domain.status
+            ));
+        }
 
         if domain.finality_adapter == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
             if domain.kind != crate::domain::types::ConsensusKind::PoW {
@@ -379,6 +388,17 @@ mod tests {
     use super::*;
     use crate::domain::plugin::default_domain;
     use crate::domain::types::ConsensusKind;
+
+    #[test]
+    fn a_domain_cannot_register_as_frozen_or_retired() {
+        for status in [DomainStatus::Frozen, DomainStatus::Retired] {
+            let mut domain = default_domain(2, ConsensusKind::PoS, 1338, "pos", 0);
+            domain.status = status;
+            let mut registry = ConsensusDomainRegistry::new();
+            let err = registry.register(domain).unwrap_err();
+            assert!(err.contains("must register as Active"), "{err}");
+        }
+    }
 
     #[test]
     fn registry_root_is_order_independent_by_domain_id() {
