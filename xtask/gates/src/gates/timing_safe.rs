@@ -86,20 +86,28 @@ fn is_filtered(line: &str) -> bool {
 
 /// Collect candidate lines: `*.rs` files under [`SCAN_DIRS`] where a secret-ish name
 /// and a plain equality share the line, then drop the filtered ones.
-fn collect(root: &Path) -> Vec<String> {
+fn collect(root: &Path) -> Result<Vec<String>, String> {
     let mut hits = Vec::new();
     for dir in SCAN_DIRS {
         let base = root.join(dir);
-        collect_dir(&base, &mut hits);
+        collect_dir(&base, &mut hits)?;
     }
     hits.retain(|l| !is_filtered(l));
-    hits
+    Ok(hits)
 }
 
-fn collect_dir(dir: &Path, out: &mut Vec<String>) {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return;
-    };
+/// A line is a candidate when it pairs a secret name with a plain equality.
+fn is_candidate(line: &str) -> bool {
+    has_secret(line) && has_plain_eq(line)
+}
+
+fn collect_dir(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let rd = fs::read_dir(dir).map_err(|e| {
+        format!(
+            "[check-timing-safe] ERROR: cannot scan {}: {e}",
+            dir.display()
+        )
+    })?;
     let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for e in entries {
@@ -108,25 +116,26 @@ fn collect_dir(dir: &Path, out: &mut Vec<String>) {
         };
         let path = e.path();
         if path_kind.is_dir() {
-            collect_dir(&path, out);
+            collect_dir(&path, out)?;
         } else if path.extension().is_some_and(|x| x == "rs") {
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };
             for line in text.lines() {
-                if has_secret(line) && has_plain_eq(line) {
+                if is_candidate(line) {
                     out.push(format!("{}: {}", path.display(), line.trim()));
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// # Errors
 ///
 /// Returns every candidate line (the shell gate's "VIOLATION CANDIDATES" report).
 pub fn run(root: &Path) -> Result<String, String> {
-    let hits = collect(root);
+    let hits = collect(root)?;
     if hits.is_empty() {
         return Ok(String::from(
             "[check-timing-safe] CLEAN: no raw == / != over secret material.",
@@ -151,11 +160,7 @@ pub fn self_test() -> Result<String, String> {
     let canary = "fn is_authorized_canary(provided: &str, expected_secret: &str) -> bool {\n    // DELIBERATE VIOLATION: secret material compared with a raw ==.\n    provided == expected_secret\n}\nfn pin_check(pin: &str, api_key: &str) -> bool {\n    pin != api_key\n}\n";
     let mut hits: Vec<&str> = Vec::new();
     for line in canary.lines() {
-        if has_secret(line)
-            && has_plain_eq(line)
-            && !line.contains("ct_eq")
-            && !line.contains("constant_time")
-        {
+        if is_candidate(line) && !is_filtered(line) {
             hits.push(line);
         }
     }
@@ -198,6 +203,16 @@ mod tests {
         for l in lines {
             assert!(is_filtered(l), "line not filtered: {l}");
         }
+    }
+
+    #[test]
+    fn missing_scan_directory_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("timing-safe-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let out = run(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.is_err());
     }
 
     #[test]
