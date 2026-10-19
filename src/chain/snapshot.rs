@@ -519,7 +519,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// and the field shipped outside the digest was exactly the forgery surface
 /// the note-registry lesson closed. Pre-schema-7 pinned digests stay
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -637,6 +637,9 @@ pub struct StateSnapshotV2 {
     /// schema 7.
     #[serde(default)]
     pub poa_compliance: Option<crate::registry::PoaComplianceRegistry>,
+    /// Lifetime burned total, digested from schema 9.
+    #[serde(default)]
+    pub burned_total: u64,
     #[serde(default)]
     pub message_registry: Option<crate::cross_domain::message_registry::CrossDomainMessageRegistry>,
     #[serde(default)]
@@ -844,6 +847,7 @@ impl StateSnapshotV2 {
             bridge_state: Some(account_state.bridge_state.clone()),
             poa_onboarding: Some(account_state.poa_onboarding.clone()),
             poa_compliance: Some(account_state.poa_compliance.clone()),
+            burned_total: account_state.burned_total,
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
             external_bond_escrow: Some(account_state.external_bond_escrow.clone()),
@@ -1064,6 +1068,11 @@ impl StateSnapshotV2 {
         if self.schema_version >= 7 {
             hash_opt_serializable(&mut hasher, &self.poa_onboarding);
             hash_opt_serializable(&mut hasher, &self.poa_compliance);
+        }
+        // Schema 9: the lifetime burned total bounds mint headroom, so a node
+        // that dropped it would mint into room that burns had closed.
+        if self.schema_version >= 9 {
+            hasher.update(self.burned_total.to_le_bytes());
         }
 
         hasher.finalize().into()
@@ -1812,6 +1821,19 @@ mod tests {
         snap.balances.insert(Address::from([9u8; 32]), 1_000);
         let blob = serde_json::to_vec(&snap).unwrap();
         assert!(StateSnapshotV2::from_bytes(&blob).is_err());
+    }
+
+    #[test]
+    fn schema9_digest_binds_the_burned_total() {
+        let account_state = AccountState::new();
+        let mut a = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        let mut b = a.clone();
+        a.burned_total = 0;
+        b.burned_total = 5;
+        assert_ne!(a.calculate_digest(), b.calculate_digest());
+        a.schema_version = 8;
+        b.schema_version = 8;
+        assert_eq!(a.calculate_digest(), b.calculate_digest());
     }
 
     #[test]
