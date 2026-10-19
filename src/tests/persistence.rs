@@ -270,7 +270,10 @@ fn schema_2_snapshot_without_new_fields_still_deserializes() {
         "global_header_summary": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
         "snapshot_hash": "h"
     }"#;
-    let v2 = StateSnapshotV2::from_bytes(json.as_bytes())
+    let mut legacy: StateSnapshotV2 =
+        serde_json::from_str(json).expect("old schema-2 JSON must parse");
+    legacy.reseal_after_manual_edit();
+    let v2 = StateSnapshotV2::from_bytes(&serde_json::to_vec(&legacy).unwrap())
         .expect("old schema-2 snapshot must still deserialize");
     // From_bytes upgrades schema-2 to current (4) via C6 legacy-import
     assert_eq!(v2.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION);
