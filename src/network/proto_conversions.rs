@@ -1858,12 +1858,14 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 checkpoint_hash,
                 voter_id,
                 sig_bls,
+                auth_sig,
             } => pb::proto_network_message::Payload::Prevote(pb::ProtoPrevote {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: voter_id.clone(),
                 sig_bls: sig_bls.clone(),
+                auth_sig: auth_sig.clone(),
             }),
             NetworkMessage::Precommit {
                 epoch,
@@ -1871,12 +1873,14 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 checkpoint_hash,
                 voter_id,
                 sig_bls,
+                auth_sig,
             } => pb::proto_network_message::Payload::Precommit(pb::ProtoPrecommit {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: voter_id.clone(),
                 sig_bls: sig_bls.clone(),
+                auth_sig: auth_sig.clone(),
             }),
             NetworkMessage::FinalityCert {
                 epoch,
@@ -2070,6 +2074,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 checkpoint_hash: v.checkpoint_hash,
                 voter_id: v.voter_id,
                 sig_bls: v.sig_bls,
+                auth_sig: v.auth_sig,
             }),
             pb::proto_network_message::Payload::Precommit(v) => Ok(NetworkMessage::Precommit {
                 epoch: v.epoch,
@@ -2077,6 +2082,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 checkpoint_hash: v.checkpoint_hash,
                 voter_id: v.voter_id,
                 sig_bls: v.sig_bls,
+                auth_sig: v.auth_sig,
             }),
             pb::proto_network_message::Payload::FinalityCert(f) => {
                 Ok(NetworkMessage::FinalityCert {

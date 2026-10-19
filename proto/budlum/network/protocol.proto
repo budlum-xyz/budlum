@@ -566,6 +566,7 @@ message ProtoPrevote {
     string checkpoint_hash = 3;
     string voter_id = 4;
     bytes sig_bls = 5;
+    bytes auth_sig = 6;
 }
 
 message ProtoPrecommit {
@@ -574,6 +575,7 @@ message ProtoPrecommit {
     string checkpoint_hash = 3;
     string voter_id = 4;
     bytes sig_bls = 5;
+    bytes auth_sig = 6;
 }
 
 message ProtoFinalityCert {

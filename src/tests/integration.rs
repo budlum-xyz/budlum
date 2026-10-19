@@ -824,6 +824,7 @@ mod integration_tests {
             checkpoint_hash: hash.clone(),
             voter_id: validator_addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         vote1.sig_bls = sign_bls(&bls_sk, &vote1.signing_message());
         assert!(bc.handle_prevote(vote1).is_ok());
@@ -834,6 +835,7 @@ mod integration_tests {
             checkpoint_hash: hash.clone(),
             voter_id: validator_addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         vote2.sig_bls = sign_bls(&bls_sk, &vote2.signing_message());
         let result = bc.handle_precommit(vote2);
@@ -885,6 +887,7 @@ mod integration_tests {
             checkpoint_hash: "wrong_hash".to_string(),
             voter_id: v_addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         wrong_vote.sig_bls = sign_bls(&bls_sk, &wrong_vote.signing_message());
         let result = bc.handle_prevote(wrong_vote);
@@ -939,6 +942,7 @@ mod integration_tests {
             checkpoint_hash: "test_cp_hash".to_string(),
             voter_id: voter,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
 
         let msg = vote.signing_message();
@@ -1052,12 +1056,14 @@ mod integration_tests {
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = vote.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
 
             let signed_vote = Prevote {
                 sig_bls: sig,
+                auth_sig: Vec::new(),
                 ..vote
             };
             agg.add_prevote(signed_vote).unwrap();
@@ -1073,6 +1079,7 @@ mod integration_tests {
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
@@ -1131,11 +1138,13 @@ mod integration_tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = vote.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
         agg.add_prevote(Prevote {
             sig_bls: sig,
+            auth_sig: Vec::new(),
             ..vote
         })
         .unwrap();
@@ -1162,12 +1171,14 @@ mod integration_tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = vote1.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
 
         agg.add_prevote(Prevote {
             sig_bls: sig.clone(),
+            auth_sig: Vec::new(),
             ..vote1.clone()
         })
         .unwrap();
@@ -1175,6 +1186,7 @@ mod integration_tests {
         // Duplicate prevote from same validator should be rejected
         let result = agg.add_prevote(Prevote {
             sig_bls: sig,
+            auth_sig: Vec::new(),
             ..vote1
         });
         assert!(result.is_err());
@@ -1198,6 +1210,7 @@ mod integration_tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = pc.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
@@ -1232,11 +1245,13 @@ mod integration_tests {
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = vote.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
             agg.add_prevote(Prevote {
                 sig_bls: sig,
+                auth_sig: Vec::new(),
                 ..vote
             })
             .unwrap();
@@ -1249,6 +1264,7 @@ mod integration_tests {
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);

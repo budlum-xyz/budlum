@@ -141,6 +141,14 @@ pub struct Prevote {
     pub checkpoint_hash: String,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
+    /// BLG-0083 (P04-F01): an authentication signature over
+    /// [`Prevote::auth_signing_message`] under the voter's registered key.
+    /// A vote without a valid `auth_sig` is dropped WITHOUT counting an
+    /// invalid-vote tick against anyone: garbage cannot be attributed to a
+    /// keyholder. `#[serde(default)]` so old wire shapes deserialize; they
+    /// simply fail the auth gate.
+    #[serde(default)]
+    pub auth_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +158,10 @@ pub struct Precommit {
     pub checkpoint_hash: String,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
+    /// BLG-0083 (P04-F01): the vote-authentication signature; see
+    /// [`Prevote::auth_sig`].
+    #[serde(default)]
+    pub auth_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,11 +199,30 @@ impl Prevote {
         msg.extend_from_slice(self.checkpoint_hash.as_bytes());
         msg
     }
+
+    /// BLG-0083 (P04-F01): the message the voter authenticates with their
+    /// registered key. Domain-separated from the vote message so one
+    /// signature cannot serve as the other.
+    pub fn auth_signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+        msg.extend_from_slice(&self.signing_message());
+        msg
+    }
 }
 
 impl Precommit {
     pub fn signing_message(&self) -> Vec<u8> {
         checkpoint_signing_message(self.epoch, self.checkpoint_height, &self.checkpoint_hash)
+    }
+
+    /// BLG-0083 (P04-F01): the vote-authentication message; see
+    /// [`Prevote::auth_signing_message`].
+    pub fn auth_signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+        msg.extend_from_slice(&self.signing_message());
+        msg
     }
 }
 
@@ -1058,6 +1089,7 @@ mod tests {
             checkpoint_hash: hash.to_string(),
             voter_id: snap.validators[i].address,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         v.sig_bls = sign_msg(sks[i], &v.signing_message());
         v
@@ -1141,6 +1173,7 @@ mod tests {
             checkpoint_hash: "abc".into(),
             voter_id: Address::zero(),
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = vote.signing_message();
         assert!(msg.starts_with(b"BUDLUM_PREVOTE"));
@@ -1191,6 +1224,7 @@ mod tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: snap.validators[0].address,
             sig_bls: vec![0u8; 48], // not a valid BLS signature
+            auth_sig: Vec::new(),
         };
         let err = agg
             .add_prevote(vote)
@@ -1211,6 +1245,7 @@ mod tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: snap.validators[0].address,
             sig_bls: sign_msg(sks[0], &checkpoint_signing_message(1, 10, "cp_hash")),
+            auth_sig: Vec::new(),
         };
         assert!(agg.add_precommit(pc).is_err());
     }
@@ -1234,6 +1269,7 @@ mod tests {
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: snap.validators[i].address,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
 
             let sig_bytes = sign_msg(*sk, &pc.signing_message());
@@ -1328,6 +1364,7 @@ mod tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: snap.validators[0].address,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
 
@@ -1381,6 +1418,7 @@ mod tests {
             checkpoint_hash: "cp_hash".into(),
             voter_id: snap.validators[0].address,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
         let cert = FinalityCert {

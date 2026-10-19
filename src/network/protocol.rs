@@ -103,6 +103,7 @@ pub enum NetworkMessage {
         checkpoint_hash: String,
         voter_id: String,
         sig_bls: Vec<u8>,
+        auth_sig: Vec<u8>,
     },
 
     Precommit {
@@ -111,6 +112,7 @@ pub enum NetworkMessage {
         checkpoint_hash: String,
         voter_id: String,
         sig_bls: Vec<u8>,
+        auth_sig: Vec<u8>,
     },
 
     FinalityCert {
