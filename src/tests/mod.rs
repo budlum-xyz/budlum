@@ -175,8 +175,6 @@ pub mod audit_findings_locks;
 #[cfg(test)]
 pub mod f20_priority_findings;
 #[cfg(test)]
-pub mod p01_consensus_rounds;
-#[cfg(test)]
 pub mod hardening_h2_locks;
 #[cfg(test)]
 pub mod hardening_h4_locks;
@@ -186,6 +184,8 @@ pub mod hardening_h5_h7_locks;
 pub mod hardening_locks;
 pub mod mempool_dos_locks;
 pub mod network_hardening_locks;
+#[cfg(test)]
+pub mod p01_consensus_rounds;
 #[cfg(test)]
 pub mod regression_lock;
 pub mod slashing_matrix;
