@@ -64,6 +64,9 @@ pub struct RelayerConfig {
     pub poll_interval_secs: u64,
     /// Used for the minimum stake check; the default is 1000.
     pub min_stake: u64,
+    /// A file that keeps the scan cursor across restarts. `None` keeps it in
+    /// memory only, and a restart then starts again from the head.
+    pub cursor_file: Option<String>,
 }
 
 /// The relay direction.
@@ -96,8 +99,22 @@ impl Default for RelayerConfig {
             relayer_address: "0x0".to_string(),
             poll_interval_secs: 10,
             min_stake: 1000,
+            cursor_file: None,
         }
     }
+}
+
+/// The cursor saved in `path`, if the file holds one block number.
+fn read_cursor(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Save the cursor beside `path` and rename it over, so a crash cannot leave
+/// a truncated file.
+fn write_cursor(path: &str, block: u64) -> Result<(), String> {
+    let tmp = format!("{path}.tmp");
+    std::fs::write(&tmp, block.to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 /// Largest RPC response body the relayer reads.
@@ -446,6 +463,11 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
                     .parse()
                     .map_err(|e| format!("Invalid --poll-interval: {e}"))?;
             }
+            "--cursor-file" => {
+                i += 1;
+                config.cursor_file =
+                    Some(args.get(i).ok_or("--cursor-file requires a value")?.clone());
+            }
             "--min-stake" => {
                 i += 1;
                 config.min_stake = args
@@ -494,6 +516,7 @@ fn print_usage() {
     eprintln!(
         "  --min-stake <AMOUNT>       Min stake floor for permissionless gate (default: 1000)"
     );
+    eprintln!("  --cursor-file <PATH>       Keep the scan cursor across restarts");
     eprintln!("  -h, --help                 Show this help");
     eprintln!();
     eprintln!("Permissionless model (D1):");
@@ -631,7 +654,12 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
     eprintln!("EthToBud: WARNING {STATUS_NOTICE}");
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
+    let saved_cursor = config.cursor_file.as_deref().and_then(read_cursor);
     let mut last_block: u64 = loop {
+        if let Some(saved) = saved_cursor {
+            eprintln!("EthToBud: resuming from saved block {saved}");
+            break saved;
+        }
         interval.tick().await;
         match eth_client.get_block_number().await {
             Ok(bn) => {
@@ -678,6 +706,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         if deposits.is_empty() {
             last_block = to;
             window_attempts = 0;
+            save_cursor(&config, last_block);
             continue;
         }
         eprintln!("EthToBud: found {} deposit event(s)", deposits.len());
@@ -741,6 +770,17 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         }
         last_block = next_last;
         window_attempts = next_attempts;
+        save_cursor(&config, last_block);
+    }
+}
+
+/// Persist the cursor when a cursor file is configured. A failed write is
+/// logged and the loop goes on: the cursor is still held in memory.
+fn save_cursor(config: &RelayerConfig, block: u64) {
+    if let Some(path) = config.cursor_file.as_deref() {
+        if let Err(e) = write_cursor(path, block) {
+            eprintln!("EthToBud: cursor file could not be written: {e}");
+        }
     }
 }
 
@@ -1031,6 +1071,29 @@ mod tests {
         assert!(validate_relayer_address(&"g".repeat(64)).is_err());
         assert!(validate_relayer_address(&format!("0x{}", "ab".repeat(32))).is_ok());
         assert!(validate_relayer_address(&"AB".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn the_cursor_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("relayer-cursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cursor").to_string_lossy().into_owned();
+        assert_eq!(read_cursor(&path), None);
+        write_cursor(&path, 1234).unwrap();
+        assert_eq!(read_cursor(&path), Some(1234));
+        std::fs::write(&path, "not a number").unwrap();
+        assert_eq!(read_cursor(&path), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let args = vec![
+            "budlum-relayer".to_string(),
+            "--cursor-file".to_string(),
+            "/tmp/c".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap().cursor_file.as_deref(),
+            Some("/tmp/c")
+        );
     }
 
     #[test]
