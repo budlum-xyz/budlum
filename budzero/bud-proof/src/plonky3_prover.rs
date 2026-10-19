@@ -10577,9 +10577,33 @@ mod tests {
     // --- (security audit): public-input binding tests ---
 
     /// Helper: prove a trivial Add+Halt program and return the envelope + the
-    /// Public inputs. The caller mutates `pi` between prove/verify to assert
-    /// That the AIR rejects the forged public input.
+    /// public inputs.
+    ///
+    /// BLG-0232 (P14-F02): the old helper doc claimed the caller's
+    /// between-prove-and-verify mutation "asserts that the AIR rejects" -
+    /// it asserted nothing of the sort. The envelope pins
+    /// `public_inputs_hash`, so a mutated `pi` was always refused at the
+    /// envelope gate (`VerifyError::PublicInputsMismatch`) and the AIR never
+    /// ran. Each binding test now (a) asserts THAT variant by name - the
+    /// envelope gate is a real line of defense and it should stay green by
+    /// its own name, and (b) for roots, an extra test that bakes the forged
+    /// value in BEFORE proving (via `build_arith_proof_forged`), so the
+    /// envelope agrees and only the AIR's fold-vs-column constraint can
+    /// reject. Fields whose AIR binding is an equality to the public inputs
+    /// the prover itself copies (gas_limit, chain_id, exit_code, trace_len,
+    /// event digest limbs 1..7) would PASS such a test - that gap is the
+    /// AIR-side finding P12-F04/P13-F01, tracked there, not papered over
+    /// by a test that asserts acceptance.
     fn build_arith_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
+        build_arith_proof_forged(|_| {})
+    }
+
+    /// Prove with a FORGED public input baked in before proving: the envelope
+    /// hash matches the forged values, so a verification failure can only
+    /// come from the AIR constraints (BLG-0232/P14-F02).
+    fn build_arith_proof_forged(
+        forge: impl FnOnce(&mut ExecutionPublicInputs),
+    ) -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         let program = vec![
             inst(Opcode::Add, 1, 2, 3, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
@@ -10620,6 +10644,7 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
+        forge(&mut pi);
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
         (envelope, pi, program)
     }
@@ -10631,8 +10656,22 @@ mod tests {
         pi.final_state_root = [0xAB; 32];
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered final_state_root, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
+        );
+    }
+
+    /// The AIR-level version of the test above: the forgery is baked in
+    /// BEFORE proving, so the envelope agrees and only the constraint that
+    /// compares the committed final memory fold against `COL_FINAL_ROOT` can
+    /// reject (BLG-0232/P14-F02).
+    #[test]
+    fn air_rejects_a_forged_final_state_root_baked_in_before_proving() {
+        let (envelope, pi, program) = build_arith_proof_forged(|pi| pi.final_state_root = [0xAB; 32]);
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            matches!(res, Err(crate::adapter::VerifyError::InvalidProof)),
+            "the final-root fold constraint must refuse a trace that commits to a root the execution never produced, got {res:?}"
         );
     }
 
@@ -10642,8 +10681,22 @@ mod tests {
         pi.initial_state_root = [0xCD; 32];
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered initial_state_root, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
+        );
+    }
+
+    /// BLG-0232 (P14-F02): the initial image is bound through the
+    /// commitment of the read rows; baked in, the fold comparison still
+    /// refuses the forgery.
+    #[test]
+    fn air_rejects_a_forged_initial_state_root_baked_in_before_proving() {
+        let (envelope, pi, program) =
+            build_arith_proof_forged(|pi| pi.initial_state_root = [0xCD; 32]);
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            matches!(res, Err(crate::adapter::VerifyError::InvalidProof)),
+            "the initial-root fold constraint must refuse a forged starting image, got {res:?}"
         );
     }
 
@@ -10652,12 +10705,15 @@ mod tests {
         let (envelope, mut pi, program) = build_arith_proof();
         // Gas_limit differs from what the trace recorded.
         pi.gas_limit = pi.gas_limit.wrapping_add(1);
-        // The public-input-hash check will also fire here; either way
-        // The proof must be rejected.
+        // BLG-0232 (P14-F02): the rejection here is the envelope hash gate -
+        // pinned by variant, not by `is_err`. An AIR-level binding for
+        // gas_limit is P12-F04's job (the column's only reader is the compare
+        // to public inputs the prover copies), so baking this forgery in
+        // would prove the hole, not close it.
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered gas_limit, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
 
@@ -10669,8 +10725,8 @@ mod tests {
         pi.trace_len = pi.trace_len.wrapping_add(1);
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered trace_len, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
 
@@ -10683,8 +10739,8 @@ mod tests {
         pi.event_digest = [0xEF; 32];
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered event_digest, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
 
@@ -10695,8 +10751,8 @@ mod tests {
         pi.exit_code = 1;
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered exit_code, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
 
@@ -10707,8 +10763,8 @@ mod tests {
         pi.chain_id = 0xDEAD_BEEF;
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered chain_id, but it succeeded!"
+            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
 
