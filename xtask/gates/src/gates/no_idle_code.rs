@@ -166,15 +166,64 @@ fn strip_cfg_test(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
     while i < src.len() {
-        let Some(rel) = src[i..].find("#[cfg(test)]") else {
+        let Some((at, after)) = next_test_attr(src, i) else {
             out.push_str(&src[i..]);
             break;
         };
-        let at = i + rel;
         out.push_str(&src[i..at]);
-        i = cfg_test_end(src, at + "#[cfg(test)]".len());
+        i = cfg_test_end(src, after);
     }
     out
+}
+
+/// Attribute openers that mark an item as compiled only under test.
+const TEST_ATTRS: &[&str] = &["#[cfg(test)]", "#[cfg(all(test,"];
+
+/// The earliest test-only attribute at or after `from`: its start and the
+/// offset just past the marker text.
+fn next_test_attr(src: &str, from: usize) -> Option<(usize, usize)> {
+    TEST_ATTRS
+        .iter()
+        .filter_map(|m| src[from..].find(m).map(|r| (from + r, from + r + m.len())))
+        .min()
+}
+
+/// Paths (relative to the scan root) of the files that a test-only
+/// `mod name;` declaration in `rel` pulls in. A directory is returned with
+/// a trailing slash and covers everything below it.
+fn test_module_paths(rel: &str, src: &str) -> Vec<String> {
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    let base = if matches!(stem, "lib" | "main" | "mod") {
+        dir.to_string()
+    } else {
+        format!("{dir}/{stem}")
+    };
+    let mut found = Vec::new();
+    let mut i = 0usize;
+    while let Some((_, after)) = next_test_attr(src, i) {
+        i = after;
+        let rest = src[after..].trim_start();
+        let rest = rest.strip_prefix("pub ").unwrap_or(rest).trim_start();
+        let Some(rest) = rest.strip_prefix("mod ") else {
+            continue;
+        };
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty()
+            || !rest.trim_start()[name.len()..]
+                .trim_start()
+                .starts_with(';')
+        {
+            continue;
+        }
+        found.push(format!("{base}/{name}.rs"));
+        found.push(format!("{base}/{name}/"));
+    }
+    found
 }
 
 /// Byte offset just past the item, block or statement that a `#[cfg(test)]`
@@ -848,9 +897,7 @@ fn scan(root: &Path) -> Scan {
         }
     }
 
-    let mut scrubbed: BTreeMap<String, String> = BTreeMap::new();
-    let mut imports: BTreeMap<String, Imports> = BTreeMap::new();
-    let mut exemptions: BTreeMap<String, Exempt> = BTreeMap::new();
+    let mut sources: Vec<(String, String)> = Vec::new();
     for path in &files {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
@@ -860,6 +907,26 @@ fn scan(root: &Path) -> Scan {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        sources.push((rel, text));
+    }
+    let test_only: Vec<String> = sources
+        .iter()
+        .flat_map(|(rel, text)| test_module_paths(rel, text))
+        .collect();
+
+    let mut scrubbed: BTreeMap<String, String> = BTreeMap::new();
+    let mut imports: BTreeMap<String, Imports> = BTreeMap::new();
+    let mut exemptions: BTreeMap<String, Exempt> = BTreeMap::new();
+    for (rel, text) in sources {
+        if test_only.iter().any(|t| {
+            if t.ends_with('/') {
+                rel.starts_with(t.as_str())
+            } else {
+                rel == *t
+            }
+        }) {
+            continue;
+        }
         let prose_free = strip_comments_and_strings(&strip_cfg_test(&text));
         let s = strip_use_statements(&prose_free);
         imports.insert(rel.clone(), imports_in(&prose_free));
@@ -1159,6 +1226,39 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         return Err(String::from(
             "canary: an item called only from its own #[cfg(test)] block passed as reached",
         ));
+    }
+
+    // A file pulled in by `#[cfg(test)] mod x;` is test code, and so is a
+    // block under `#[cfg(all(test, ...))]`.
+    for (label, files) in [
+        (
+            "testfile",
+            vec![
+                ("src/idle.rs", "pub fn only_a_test_file_calls() -> u32 { 2 }\n"),
+                ("src/lib.rs", "#[cfg(test)]\nmod idle_tests;\n"),
+                (
+                    "src/idle_tests.rs",
+                    "fn t() -> u32 { crate::idle::only_a_test_file_calls() }\n",
+                ),
+            ],
+        ),
+        (
+            "cfgall",
+            vec![
+                ("src/idle.rs", "pub fn only_a_gated_test_calls() -> u32 { 2 }\n"),
+                (
+                    "src/lib.rs",
+                    "#[cfg(all(test, feature = \"x\"))]\nmod t {\n  fn t() -> u32 { crate::idle::only_a_gated_test_calls() }\n}\n",
+                ),
+            ],
+        ),
+    ] {
+        if accepts_with(clean, tmp, label, &files)? {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(String::from(
+                "canary: an item called only from test-gated code passed as reached",
+            ));
+        }
     }
 
     // An import inside a nested module, or one that follows an item body,
