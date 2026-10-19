@@ -85,6 +85,8 @@ pub struct BpqsSignature<P: BpqsParams> {
 /// Held by cold devices between ceremonies.
 pub struct BpqsSigner<P: BpqsParams, H: BpqsHash> {
     levels: merkle::Levels,
+    /// Zeroed on drop (F11): the root seed is the master secret of every
+    /// epoch key this device will ever mint.
     root_seed: [u8; 32],
     public: BpqsPublicKey<P>,
     /// Signatures minted per epoch (BLG-0041). The WOTS one-time property
@@ -380,6 +382,15 @@ mod sign_tests {
         sig.chains[0][ParamsL3::N] = 0;
         sig.path[0][31] = 1;
         assert!(check_canonical::<ParamsL3>(&sig).is_err());
+    }
+}
+
+/// F11: zero the root seed when the signer is dropped.
+impl<P: BpqsParams, H: BpqsHash> Drop for BpqsSigner<P, H> {
+    fn drop(&mut self) {
+        for b in &mut self.root_seed {
+            *b = 0;
+        }
     }
 }
 
