@@ -13,7 +13,7 @@ use crate::epoch::{prf_epoch_seed, EpochWindow};
 use crate::error::BpqsError;
 use crate::hash::{BpqsHash, Sha3_256Hash};
 use crate::params::{BpqsParams, ParamsL3, ParamsL5, ParamsTestFast};
-use crate::sign::{keygen_root, sign_at_height, verify_at_height, BpqsSigner};
+use crate::sign::{keygen_root, verify_at_height, BpqsSigner};
 use crate::wots;
 use sha3::{Digest, Sha3_256};
 
@@ -37,9 +37,9 @@ impl BpqsParams for ParamsFastL3 {
 
 #[test]
 fn l3_code_path_roundtrips() {
-    let signer = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([7u8; 32], EpochWindow(4))
+    let mut signer = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([7u8; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("l3 keygen: {e}"));
-    let sig = sign_at_height::<H, ParamsFastL3>(&signer, 9, 0, b"anchor")
+    let sig = signer.sign_at_height(9, b"anchor")
         .unwrap_or_else(|e| panic!("l3 sign: {e}"));
     verify_at_height::<H, ParamsFastL3>(signer.public(), 9, b"anchor", &sig)
         .unwrap_or_else(|e| panic!("l3 verify: {e}"));
@@ -57,17 +57,17 @@ fn signature_wire_size_matches_the_cost_model() {
 
 #[test]
 fn quota_violation_is_epoch_scoped_not_window_scoped() {
-    let signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen([1u8; 32], EpochWindow(2))
+    let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen([1u8; 32], EpochWindow(2))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     // One mint inside epoch 1 (heights 2,3 share it), then refusal there,
     // then epoch 2 (height 4) signs again: the quota binds the epoch,
     // not the call history (one-time posture since 2026-09-22).
-    sign_at_height::<H, ParamsTestFast>(&signer, 2, 0, b"x").unwrap_or_else(|e| panic!("{e}"));
+    signer.sign_at_height(2, b"x").unwrap_or_else(|e| panic!("{e}"));
     assert!(matches!(
-        sign_at_height::<H, ParamsTestFast>(&signer, 3, 1, b"x"),
+        signer.sign_at_height(3, b"x"),
         Err(BpqsError::QuotaExceeded { epoch: 1, .. })
     ));
-    sign_at_height::<H, ParamsTestFast>(&signer, 4, 0, b"x")
+    signer.sign_at_height(4, b"x")
         .unwrap_or_else(|e| panic!("epoch flip must reset the quota view: {e}"));
 }
 
@@ -102,9 +102,9 @@ fn epoch_chain_derivation_is_message_independent() {
 #[test]
 #[ignore = "ceremony-scale keygen; run in release on a machine lane"]
 fn full_size_ceremony_l5() {
-    let signer = BpqsSigner::<ParamsL5, H>::ceremonial_keygen([0xA5u8; 32], EpochWindow(4096))
+    let mut signer = BpqsSigner::<ParamsL5, H>::ceremonial_keygen([0xA5u8; 32], EpochWindow(4096))
         .unwrap_or_else(|e| panic!("l5 ceremony: {e}"));
-    let sig = sign_at_height::<H, ParamsL5>(&signer, 1_000_000, 0, b"anchor")
+    let sig = signer.sign_at_height(1_000_000, b"anchor")
         .unwrap_or_else(|e| panic!("l5 sign: {e}"));
     verify_at_height::<H, ParamsL5>(signer.public(), 1_000_000, b"anchor", &sig)
         .unwrap_or_else(|e| panic!("l5 verify: {e}"));
@@ -123,9 +123,9 @@ fn kat_freeze_digest_is_stable() {
         (0x04, 4, 12, b"delta"),
     ] {
         let seed = [seed_byte; 32];
-        let signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(seed, EpochWindow(window))
+        let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(seed, EpochWindow(window))
             .unwrap_or_else(|e| panic!("kat keygen: {e}"));
-        let sig = sign_at_height::<H, ParamsTestFast>(&signer, height, 0, msg)
+        let sig = signer.sign_at_height(height, msg)
             .unwrap_or_else(|e| panic!("kat sign: {e}"));
         verify_at_height::<H, ParamsTestFast>(signer.public(), height, msg, &sig)
             .unwrap_or_else(|e| panic!("kat verify: {e}"));
@@ -140,9 +140,9 @@ fn kat_freeze_digest_is_stable() {
         kat_hasher.update(signer.public().root);
         kat_hasher.update([window as u8, height as u8]);
     }
-    let l3 = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([9u8; 32], EpochWindow(4))
+    let mut l3 = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([9u8; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("kat l3 keygen: {e}"));
-    let sig3 = sign_at_height::<H, ParamsFastL3>(&l3, 10, 0, b"omega")
+    let sig3 = l3.sign_at_height(10, b"omega")
         .unwrap_or_else(|e| panic!("kat l3 sign: {e}"));
     verify_at_height::<H, ParamsFastL3>(l3.public(), 10, b"omega", &sig3)
         .unwrap_or_else(|e| panic!("kat l3 verify: {e}"));
