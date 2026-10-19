@@ -20,7 +20,7 @@ use crate::cross_domain::bridge::{BridgeError, BridgeState};
 use crate::cross_domain::event_tree::{DomainEvent, DomainEventTree, MerkleProof};
 use crate::cross_domain::message::{CrossDomainMessage, MessageId, MessageKind};
 use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
-use crate::cross_domain::relayer::{RelayerConfig, RelayerError, UniversalRelayer};
+use crate::cross_domain::relayer::{RelayerError, UniversalRelayer};
 use crate::domain::types::{DomainId, Hash32};
 
 /// Errors from the bridge-relayer integration pipeline.
@@ -351,12 +351,12 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
     /// Get the bridge state for inspection.
     pub fn bridge_state(&self) -> &BridgeState {
-        &self.bridge
+        self.bridge
     }
 
     /// Get the relayer for inspection.
     pub fn relayer(&self) -> &UniversalRelayer {
-        &self.relayer
+        self.relayer
     }
 
     /// Sweep expired bridge locks (DoS prevention).
@@ -556,7 +556,9 @@ mod tests {
         fn new() -> Self {
             Self {
                 bridge: BridgeState::new(),
-                relayer: UniversalRelayer::new(RelayerConfig::default()),
+                relayer: UniversalRelayer::new(
+                    crate::cross_domain::relayer::RelayerConfig::default(),
+                ),
                 messages: CrossDomainMessageRegistry::new(),
             }
         }
@@ -655,7 +657,7 @@ mod tests {
         // Pre-register the burn message the next burn will derive.
         let dry_burn = {
             let mut scratch_rig = pipeline();
-            let mut scratch = scratch_rig.pipeline();
+            let scratch = scratch_rig.pipeline();
             scratch
                 .bridge
                 .burn_with_event(lock_msg_id, 2, 200, 0, 1000, [7u8; 20])

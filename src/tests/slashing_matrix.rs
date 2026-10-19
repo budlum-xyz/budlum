@@ -8,7 +8,7 @@
 mod tests {
     use crate::core::address::Address;
 
-    use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
+    use crate::registry::evidence::{SlashingProof, SlashingReport};
     use crate::registry::params::RegistryParams;
     use crate::registry::permissionless::PermissionlessRegistry;
     use crate::registry::roles;
