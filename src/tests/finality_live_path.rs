@@ -183,7 +183,13 @@ fn live_path_double_sign_window_is_tight() {
 
     // 3rd vote (SAME voter, DIFFERENT hash) - hash mismatch + evidence.
     let pv_conflict = sign_prevote(&sks[0], 1, 10, "H2", snap.validators[0].address);
-    let _ = agg.add_prevote(pv_conflict); // refused, but it produces evidence
+    let conflict_err = agg
+        .add_prevote(pv_conflict)
+        .expect_err("a conflicting hash from the same voter has to be refused");
+    assert!(
+        conflict_err.contains("hash mismatch"),
+        "the conflicting vote must be refused for its hash: {conflict_err}"
+    );
     assert_eq!(agg.prevotes.len(), 1, "only the first vote may count");
     assert_eq!(
         agg.detected_equivocations.len(),
