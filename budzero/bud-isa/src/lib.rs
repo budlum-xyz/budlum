@@ -321,6 +321,17 @@ impl Instruction {
 mod tests {
     use super::*;
 
+    /// P12-F01: the one-round Poseidon path hash behind VerifyMerkle is
+    /// invertible, so the opcode must stay closed until a full permutation
+    /// replaces it. This pins the gate: opening it must be a deliberate edit
+    /// that also changes this test.
+    #[test]
+    fn verify_merkle_gate_stays_closed_until_full_poseidon() {
+        let default = MainnetActivation::default();
+        assert!(!default.verify_merkle_enabled);
+        assert!(!default.allows(Opcode::VerifyMerkle));
+    }
+
     #[test]
     fn verify_merkle_enabled_in_production() {
         let raw = Instruction {
