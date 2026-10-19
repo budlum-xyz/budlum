@@ -1408,7 +1408,14 @@ impl Storage {
         if let Some(val) = self.db.get(key.as_bytes())? {
             let s = from_utf8(&val)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(s.parse().ok())
+            // A value that is not a height is damage, not "no entry": reporting
+            // None would hide the corrupt row from every caller.
+            s.parse().map(Some).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("tx index row {tx_hash} is not a height: {e}"),
+                )
+            })
         } else {
             Ok(None)
         }
@@ -2070,6 +2077,18 @@ mod tests {
     use crate::core::address::Address;
     use crate::core::block::Block;
     use tempfile::tempdir;
+
+    #[test]
+    fn corrupt_tx_index_row_is_an_error_not_a_miss() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        storage.save_tx_index("abc", 7).unwrap();
+        assert_eq!(storage.get_tx_block_height("abc").unwrap(), Some(7));
+        assert_eq!(storage.get_tx_block_height("missing").unwrap(), None);
+        storage.db().insert(b"TX_IDX:bad", b"not-a-number").unwrap();
+        let err = storage.get_tx_block_height("bad").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn test_durable_commit_batch_and_recovery() {
