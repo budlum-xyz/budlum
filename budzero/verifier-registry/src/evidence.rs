@@ -137,6 +137,16 @@ impl std::fmt::Display for EvidenceError {
 
 impl std::error::Error for EvidenceError {}
 
+/// A block hash as text without its `0x` prefix, lower case.
+fn canonical_hash(hash: &str) -> String {
+    let trimmed = hash.trim();
+    let body = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    body.to_ascii_lowercase()
+}
+
 impl SlashingReport {
     pub fn new(
         offender: Address,
@@ -171,7 +181,9 @@ impl SlashingReport {
                 signature_2,
                 ..
             } => {
-                if block_hash_1 == block_hash_2 {
+                // P16-F09: the same hash in another spelling ("AA", "aa",
+                // "0xaa") is still the same block, not a conflict.
+                if canonical_hash(block_hash_1) == canonical_hash(block_hash_2) {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -286,6 +298,27 @@ mod tests {
 
     fn addr(b: u8) -> Address {
         Address::from([b; 32])
+    }
+
+    /// P16-F09: one hash in two spellings is not a double sign.
+    #[test]
+    fn spellings_of_one_hash_are_not_a_conflict() {
+        for (a, b) in [("aa", "AA"), ("aa", "0xaa"), ("0XAA", "aa")] {
+            let r = SlashingReport::new(
+                addr(1),
+                roles::MASTER_VERIFIER,
+                SlashingProof::DoubleSign {
+                    height: 10,
+                    block_hash_1: a.into(),
+                    block_hash_2: b.into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                ProofProvenance::ConsensusVerified,
+                None,
+            );
+            assert_eq!(r.validate_shape(), Err(EvidenceError::NonConflictingHashes));
+        }
     }
 
     #[test]
