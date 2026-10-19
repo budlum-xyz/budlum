@@ -79,7 +79,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Files that are allowed to contain Turkish, by file name.
+/// Files that are allowed to contain Turkish, by path relative to the root.
 const ALLOWED_FILES: &[&str] = &[
     // A deliberate Turkish translation of the README, linked from the English
     // one. This is the reason the gate exists in this shape rather than as a
@@ -87,13 +87,13 @@ const ALLOWED_FILES: &[&str] = &[
     "README.tr.md",
     // A typo dictionary: the entries are Turkish words precisely because it is
     // teaching the typo checker about them.
-    "typos.toml",
+    ".quality/typos.toml",
     // This gate itself. Its vocabulary list IS Turkish words, and its canaries
     // must write Turkish fixtures to prove they can still detect it. A gate
     // that cannot name what it is looking for cannot look for it. Exempting
     // the file is honest; the alternative is obfuscating the dictionary until
     // nobody can audit what the gate actually bans.
-    "tree_is_english.rs",
+    "xtask/gates/src/gates/tree_is_english.rs",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.
@@ -420,16 +420,14 @@ fn turkish_word(scrubbed: &str) -> Option<&'static str> {
     None
 }
 
-/// Is this path exempt by file name, or by living in a localisation directory?
-fn is_allowed(path: &Path) -> bool {
-    if path
-        .file_name()
-        .is_some_and(|n| ALLOWED_FILES.contains(&n.to_string_lossy().as_ref()))
-    {
-        return true;
-    }
-    let text = path.to_string_lossy().replace('\\', "/");
-    ALLOWED_DIRS.iter().any(|dir| text.contains(dir))
+/// Is this path exempt by its exact relative path, or by living in a localisation directory?
+fn is_allowed(root: &Path, path: &Path) -> bool {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    ALLOWED_FILES.contains(&rel.as_str()) || ALLOWED_DIRS.iter().any(|dir| rel.starts_with(dir))
 }
 
 /// Is this path skipped by extension?
@@ -511,7 +509,7 @@ fn scan(root: &Path) -> Scan {
     let mut scanned = 0usize;
 
     for path in sorted_walk(root) {
-        if is_allowed(&path) {
+        if is_allowed(root, &path) {
             continue;
         }
         let Ok(text) = fs::read_to_string(&path) else {
@@ -1149,4 +1147,18 @@ pub fn self_test() -> Result<String, String> {
          baseline exempts, going over the count FAILs, a stale count FAILs, empty tree FAILs).",
         CANARY_GROUPS.len()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_exemption_is_an_exact_relative_path() {
+        let root = Path::new("/repo");
+        assert!(is_allowed(root, Path::new("/repo/README.tr.md")));
+        assert!(!is_allowed(root, Path::new("/repo/docs/README.tr.md")));
+        assert!(!is_allowed(root, Path::new("/repo/other/typos.toml")));
+        assert!(is_allowed(root, Path::new("/repo/.quality/typos.toml")));
+    }
 }
