@@ -456,11 +456,15 @@ pub fn run(root: &Path) -> Result<String, String> {
         &binary_hash,
     )?;
 
-    let status_word = if live_status_ok { "ok" } else { "alarm" };
+    if !live_status_ok {
+        return Err(String::from(
+            "relay: the live proof-side report failed its signature, digest or status \
+             check (relay-status alarm); the status report was written with the alarm",
+        ));
+    }
     Ok(format!(
-        "relay OK: relay-token {} relay-status {} relay-canonical-set {} relay-program-hash {}",
+        "relay OK: relay-token {} relay-status ok relay-canonical-set {} relay-program-hash {}",
         &hex32(&sig)[..16],
-        status_word,
         proof_prefix,
         tokens.program_hash,
     ))
