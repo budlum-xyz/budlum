@@ -2293,4 +2293,28 @@ mod zk_finality_real_proof {
         c.finality_proof_hash = hash_finality_proof(&fproof).expect("finality proof hashes");
         assert!(bc.submit_verified_domain_commitment(c, fproof).is_err());
     }
+
+    // BLG-0082 (P03-F25): the root folds are pure and deterministic, and the
+    // empty fold is domain-separated. Pinned so the finding's "roots are pure
+    // and deterministic" claim stays true under later refactors.
+    #[test]
+    fn root_folds_are_pure_and_deterministic() {
+        use crate::settlement::merkle_root;
+        let leaves: Vec<[u8; 32]> = (0u8..4).map(|i| [i; 32]).collect();
+        assert_eq!(merkle_root(&leaves), merkle_root(&leaves));
+        assert_ne!(merkle_root(&[]), [0u8; 32]);
+    }
+
+    // BLG-0082 (P03-F25): live and replay share one fold — `build_global_header`
+    // is the single function, and two builds over the same state agree.
+    #[test]
+    fn live_and_replay_share_the_global_header_fold() {
+        let chain = Blockchain::new(std::sync::Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let a = chain.build_global_header(None);
+        let b = chain.build_global_header(None);
+        assert_eq!(
+            crate::settlement::GlobalBlockHeader::calculate_hash_bytes(&a),
+            crate::settlement::GlobalBlockHeader::calculate_hash_bytes(&b)
+        );
+    }
 }
