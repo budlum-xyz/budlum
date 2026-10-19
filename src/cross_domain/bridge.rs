@@ -798,13 +798,37 @@ impl BridgeState {
     }
 
     /// Undo the last `burn` of `message_id` (BLG-0117/P05-F10): restores the
-    /// pre-burn status and clears the declared Ethereum destination. Same
-    /// rollback contract as [`Self::unwind_lock`] - the balance debit, if
-    /// any, belongs to the caller's ledger and is untouched here.
-    pub fn unwind_burn(&mut self, message_id: &MessageId, previous_status: BridgeStatus) {
+    /// pre-burn status, the asset's location and the lock expiry the burn
+    /// overwrote, drops the burn's sweep entry and clears the declared
+    /// Ethereum destination, so the root is the one from before the burn.
+    /// Same rollback contract as [`Self::unwind_lock`] - the balance debit,
+    /// if any, belongs to the caller's ledger and is untouched here, and the
+    /// replay nonce stays advanced.
+    pub fn unwind_burn(
+        &mut self,
+        message_id: &MessageId,
+        previous_status: BridgeStatus,
+        previous_expiry_height: u64,
+    ) {
         if let Some(transfer) = self.transfers.get_mut(message_id) {
+            let burn_expiry = transfer.expiry_height;
             transfer.recipient_eth = None;
-            transfer.status = previous_status;
+            transfer.status = previous_status.clone();
+            transfer.expiry_height = previous_expiry_height;
+            self.asset_locations
+                .insert(transfer.asset_id, previous_status);
+            if burn_expiry > 0 {
+                if let Some(bucket) = self.expiry_queue.get_mut(&burn_expiry) {
+                    // One entry only: the lock's own entry may sit in the
+                    // same bucket and is not the burn's to remove.
+                    if let Some(at) = bucket.iter().rposition(|id| id == message_id) {
+                        bucket.remove(at);
+                    }
+                    if bucket.is_empty() {
+                        self.expiry_queue.remove(&burn_expiry);
+                    }
+                }
+            }
         }
     }
 
@@ -1468,10 +1492,11 @@ mod bridge_fee_split {
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
         bridge.register_asset(a, 1).unwrap();
-        let (transfer, _) = bridge
+        let (transfer, event) = bridge
             .lock(1, 2, 100, 0, a, owner, recipient, 10, 500)
             .unwrap();
         let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 101).unwrap();
         bridge
             .burn_with_event(id, 2, 200, 0, 500, [9u8; 20])
             .unwrap();
@@ -1521,12 +1546,16 @@ mod bridge_fee_split {
         let a = AssetId(hash_fields_bytes(&[b"NONCE-OOO"]));
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
+        // Two assets: one asset sits in one place, so the second lock of the
+        // same asset would be refused before any nonce is compared.
+        let b = AssetId(hash_fields_bytes(&[b"NONCE-OOO-2"]));
         bridge.register_asset(a, 1).unwrap();
+        bridge.register_asset(b, 1).unwrap();
         let (t0, e0) = bridge
             .lock(1, 2, 10, 0, a, owner, recipient, 10, 500)
             .unwrap();
         let (t1, e1) = bridge
-            .lock(1, 2, 11, 1, a, owner, recipient, 10, 500)
+            .lock(1, 2, 11, 1, b, owner, recipient, 10, 500)
             .unwrap();
         let m0 = e0.message.unwrap();
         let m1 = e1.message.unwrap();
@@ -1566,8 +1595,9 @@ mod bridge_fee_split {
             .burn_with_event(id, 2, 20, 0, 500, [9u8; 20])
             .unwrap();
         let burn_msg = burn_event.message.clone().unwrap();
+        // The unlock originates from the burn domain (2), not the lock source.
         bridge
-            .unlock(id, 1, 30)
+            .unlock(id, 2, 30)
             .expect("unlock after verified burn");
         // The single row holds the whole amount through every status.
         assert_eq!(bridge.get_transfer(&id).unwrap().amount.get(), 100);
@@ -1575,9 +1605,9 @@ mod bridge_fee_split {
             bridge.get_transfer(&id).unwrap().status,
             BridgeStatus::Unlocked { .. }
         ));
-        // The burn message is still the SAME identity - nothing minted a
-        // second row under a new id.
-        assert_eq!(burn_msg.message_id, id);
-        assert!(bridge.get_transfer(&burn_msg.message_id).is_some());
+        // The burn message is correlated to the SAME transfer - nothing
+        // minted a second row under a new id.
+        assert_eq!(burn_msg.correlation_id, Some(id));
+        assert!(bridge.get_transfer(&burn_msg.message_id).is_none());
     }
 }
