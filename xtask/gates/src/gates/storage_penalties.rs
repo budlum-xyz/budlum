@@ -112,7 +112,7 @@ fn check_cooldown(deal_code: &str, chain_code: &str, problems: &mut Vec<String>)
     checked += 1;
     if deal_code.contains("fn prune_expired_cooldowns(") {
         checked += 1;
-        if chain_code.contains("prune_expired_cooldowns") {
+        if without_test_modules(chain_code).contains("prune_expired_cooldowns") {
             checked += 1;
         } else {
             problems.push(
@@ -317,6 +317,53 @@ fn check_open_deal_primary_rule(deal_code: &str, problems: &mut Vec<String>) -> 
     }
 
     checked
+}
+
+/// The code with every `#[cfg(test)]` item removed: a `mod name;` line or a
+/// brace-balanced `mod name { .. }` block. Other `cfg(test)` items are left.
+fn without_test_modules(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(at) = rest.find("#[cfg(test)]") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + "#[cfg(test)]".len()..];
+        let trimmed = after.trim_start();
+        let Some(decl) = trimmed.strip_prefix("mod ") else {
+            out.push_str("#[cfg(test)]");
+            rest = after;
+            continue;
+        };
+        let semi = decl.find(';');
+        let open = decl.find('{');
+        match (semi, open) {
+            (Some(s), o) if o.is_none_or(|o| s < o) => {
+                rest = &decl[s + 1..];
+            }
+            (_, Some(o)) => {
+                let mut depth = 0usize;
+                let mut end = decl.len();
+                for (i, c) in decl[o..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = o + i + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                rest = &decl[end..];
+            }
+            _ => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Brace-balanced body of the first function matching `header` in `code`.
@@ -528,4 +575,20 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "storage-penalties canary OK (correct PASSes, a wrong cooldown FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calls_inside_test_modules_are_removed() {
+        let code = "#[cfg(test)]\nmod tests {\n    fn t() { x.prune_expired_cooldowns(1); }\n}\nfn live() {}\n";
+        let live = without_test_modules(code);
+        assert!(!live.contains("prune_expired_cooldowns"));
+        assert!(live.contains("fn live()"));
+        let kept =
+            "#[cfg(test)]\npub const E: u64 = 1;\nfn f() { x.prune_expired_cooldowns(1); }\n";
+        assert!(without_test_modules(kept).contains("prune_expired_cooldowns"));
+    }
 }
